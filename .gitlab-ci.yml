@@ -27,9 +27,15 @@ variables:
       - contracts/ethereum/cache/
     policy: pull-push
 
+# Default image for all jobs (can be overridden)
+default:
+  image: rust:latest
+
 # Base job for Rust
 .rust_base:
   image: rust:latest
+  tags:
+    - docker
   before_script:
     - rustc --version
     - cargo --version
@@ -37,10 +43,20 @@ variables:
 
 # Base job for Foundry
 .foundry_base:
-  image: ghcr.io/foundry-rs/foundry:latest
+  image: ubuntu:22.04
+  tags:
+    - docker
+  variables:
+    FOUNDRY_DIR: "/root/.foundry"
   before_script:
-    # Install Node.js and npm for poseidon-solidity dependency
-    - apt-get update && apt-get install -y nodejs npm
+    # Install dependencies
+    - apt-get update && apt-get install -y curl git nodejs npm
+    # Install Foundry
+    - curl -L https://foundry.paradigm.xyz | bash
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
+    - source /root/.bashrc || true
+    - foundryup || true
+    # Verify installations
     - node --version
     - npm --version
     - forge --version
@@ -62,8 +78,8 @@ setup:rust:
 setup:foundry:
   extends: .foundry_base
   stage: setup
-  <<: *foundry_cache
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -113,6 +129,7 @@ build:solidity:
   extends: .foundry_base
   stage: build
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -163,6 +180,7 @@ test:solidity:
   dependencies:
     - build:solidity
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -186,6 +204,7 @@ test:solidity:coverage:
   dependencies:
     - build:solidity
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -223,6 +242,7 @@ lint:solidity:fmt:
   extends: .foundry_base
   stage: test
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -249,6 +269,8 @@ security:rust:audit:
 
 security:solidity:slither:
   image: trailofbits/eth-security-toolbox:latest
+  tags:
+    - docker
   stage: security
   script:
     - cd contracts/ethereum
@@ -276,6 +298,7 @@ docs:solidity:
   extends: .foundry_base
   stage: deploy
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -298,6 +321,7 @@ deploy:testnet:
   extends: .foundry_base
   stage: deploy
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
@@ -319,6 +343,7 @@ deploy:mainnet:
   extends: .foundry_base
   stage: deploy
   script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install

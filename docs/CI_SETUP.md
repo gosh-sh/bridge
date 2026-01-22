@@ -22,40 +22,59 @@ The CI pipeline is configured in `.gitlab-ci.yml` and consists of 5 stages:
 
 ### Solidity Jobs
 
-- **Image**: `ghcr.io/foundry-rs/foundry:latest`
-- **Additional**: Node.js and npm (for poseidon-solidity dependency)
+- **Image**: `ubuntu:22.04`
+- **Additional**: Foundry (installed via foundryup), Node.js and npm (for poseidon-solidity dependency)
 - **Purpose**: Build and test Solidity contracts
+- **Note**: We use Ubuntu instead of the Foundry Docker image for better compatibility with GitLab Runner
 
 ## Key Configuration
 
-### Node.js Installation
+### Foundry and Node.js Installation
 
-The Foundry Docker image doesn't include Node.js by default, but we need it for the `poseidon-solidity` npm package. We install it in the `before_script`:
+We use Ubuntu 22.04 as the base image and install both Foundry and Node.js in the `before_script`:
 
 ```yaml
 .foundry_base:
-  image: ghcr.io/foundry-rs/foundry:latest
+  image: ubuntu:22.04
+  tags:
+    - docker
+  variables:
+    FOUNDRY_DIR: "/root/.foundry"
   before_script:
-    # Install Node.js and npm for poseidon-solidity dependency
-    - apt-get update && apt-get install -y nodejs npm
+    # Install dependencies
+    - apt-get update && apt-get install -y curl git nodejs npm
+    # Install Foundry
+    - curl -L https://foundry.paradigm.xyz | bash
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
+    - source /root/.bashrc || true
+    - foundryup || true
+    # Verify installations
     - node --version
     - npm --version
     - forge --version
     - cast --version
 ```
 
+**Why Ubuntu instead of Foundry Docker image?**
+- Better compatibility with various GitLab Runner configurations
+- More control over the installation process
+- Easier to debug when issues occur
+
 ### NPM Dependencies
 
-Every Solidity job installs npm dependencies before running:
+Every Solidity job sets up the PATH and installs npm dependencies before running:
 
 ```yaml
 script:
+  - export PATH="$FOUNDRY_DIR/bin:$PATH"
   - cd contracts/ethereum
   # Install npm dependencies (poseidon-solidity)
   - npm install
   # Run forge command
   - forge build
 ```
+
+**Important**: The `export PATH="$FOUNDRY_DIR/bin:$PATH"` line is required in every script section because environment variables from `before_script` don't persist to the `script` section in GitLab CI.
 
 ### Caching
 

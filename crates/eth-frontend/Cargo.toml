@@ -1,0 +1,31 @@
+[package]
+name = "eth-frontend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+crypto = { path = "../crypto" }
+merkle-tree = { path = "../merkle-tree" }
+zk-proofs = { path = "../zk-proofs" }
+acki-nacki-interface = { path = "../acki-nacki-interface" }
+
+tokio.workspace = true
+async-trait.workspace = true
+ethers.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex.workspace = true
+bytes.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+mockall.workspace = true
+proptest.workspace = true

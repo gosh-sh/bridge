@@ -1,0 +1,158 @@
+.PHONY: help setup build test clean format lint check install run-local deploy docs
+
+# Default target
+.DEFAULT_GOAL := help
+
+# Colors
+BLUE := \033[0;34m
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+NC := \033[0m # No Color
+
+help: ## Show this help message
+	@echo "$(BLUE)Acki Nacki Bridge - Available Commands$(NC)"
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2}'
+	@echo ""
+
+setup: ## Run initial setup (install dependencies and tools)
+	@echo "$(BLUE)Running setup...$(NC)"
+	@chmod +x setup.sh
+	@./setup.sh
+
+build: ## Build all components (Rust + Solidity)
+	@echo "$(BLUE)Building project...$(NC)"
+	@chmod +x build.sh
+	@./build.sh
+
+build-release: ## Build in release mode
+	@echo "$(BLUE)Building project (release mode)...$(NC)"
+	@chmod +x build.sh
+	@./build.sh --release
+
+build-rust: ## Build only Rust workspace
+	@echo "$(BLUE)Building Rust workspace...$(NC)"
+	@cargo build --workspace
+
+build-solidity: ## Build only Solidity contracts
+	@echo "$(BLUE)Building Solidity contracts...$(NC)"
+	@cd contracts/ethereum && forge build
+
+test: ## Run all tests
+	@echo "$(BLUE)Running tests...$(NC)"
+	@chmod +x test.sh
+	@./test.sh
+
+test-rust: ## Run only Rust tests
+	@echo "$(BLUE)Running Rust tests...$(NC)"
+	@chmod +x test.sh
+	@./test.sh --rust
+
+test-solidity: ## Run only Solidity tests
+	@echo "$(BLUE)Running Solidity tests...$(NC)"
+	@chmod +x test.sh
+	@./test.sh --solidity
+
+test-verbose: ## Run tests with verbose output
+	@echo "$(BLUE)Running tests (verbose)...$(NC)"
+	@chmod +x test.sh
+	@./test.sh --verbose
+
+test-coverage: ## Generate test coverage report
+	@echo "$(BLUE)Generating coverage report...$(NC)"
+	@chmod +x test.sh
+	@./test.sh --coverage
+
+format: ## Format all code (Rust + Solidity)
+	@echo "$(BLUE)Formatting code...$(NC)"
+	@cargo fmt --all
+	@cd contracts/ethereum && forge fmt
+
+format-check: ## Check code formatting without modifying
+	@echo "$(BLUE)Checking code formatting...$(NC)"
+	@cargo fmt --all -- --check
+	@cd contracts/ethereum && forge fmt --check
+
+lint: ## Run linters (clippy for Rust)
+	@echo "$(BLUE)Running linters...$(NC)"
+	@cargo clippy --all-targets --all-features -- -D warnings
+
+check: format-check lint test ## Run all checks (format, lint, test)
+
+clean: ## Clean build artifacts
+	@echo "$(BLUE)Cleaning build artifacts...$(NC)"
+	@cargo clean
+	@cd contracts/ethereum && forge clean
+	@rm -rf coverage/
+
+install: setup build ## Install dependencies and build project
+
+watch: ## Watch for changes and rebuild
+	@echo "$(BLUE)Watching for changes...$(NC)"
+	@cargo watch -x check -x test
+
+watch-test: ## Watch for changes and run tests
+	@echo "$(BLUE)Watching for changes and running tests...$(NC)"
+	@cargo watch -x test
+
+run-local: ## Start local Ethereum node (Anvil)
+	@echo "$(BLUE)Starting local Ethereum node...$(NC)"
+	@anvil
+
+deploy-local: ## Deploy contracts to local network
+	@echo "$(BLUE)Deploying to local network...$(NC)"
+	@cd contracts/ethereum && forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
+
+docs: ## Generate documentation
+	@echo "$(BLUE)Generating documentation...$(NC)"
+	@cargo doc --workspace --no-deps --open
+
+docs-solidity: ## Generate Solidity documentation
+	@echo "$(BLUE)Generating Solidity documentation...$(NC)"
+	@cd contracts/ethereum && forge doc
+
+audit: ## Run security audit
+	@echo "$(BLUE)Running security audit...$(NC)"
+	@cargo audit
+	@cd contracts/ethereum && forge audit
+
+update: ## Update dependencies
+	@echo "$(BLUE)Updating dependencies...$(NC)"
+	@cargo update
+	@cd contracts/ethereum && forge update
+
+# Development helpers
+dev-setup: setup ## Setup development environment
+	@echo "$(BLUE)Setting up development environment...$(NC)"
+	@cp .env.example .env || true
+	@echo "$(GREEN)Development environment ready!$(NC)"
+	@echo "$(YELLOW)Don't forget to configure .env file$(NC)"
+
+ci: format-check lint test ## Run CI checks locally
+
+# Quick commands
+q-build: ## Quick build (debug mode)
+	@cargo build --workspace
+
+q-test: ## Quick test (no verbose)
+	@cargo test --workspace
+
+q-check: ## Quick check (no build)
+	@cargo check --workspace
+
+# Utility commands
+tree: ## Show project structure
+	@tree -I 'target|node_modules|lib|out|coverage' -L 3
+
+size: ## Show build artifact sizes
+	@echo "$(BLUE)Build artifact sizes:$(NC)"
+	@du -sh target/debug target/release 2>/dev/null || echo "No build artifacts found"
+	@du -sh contracts/ethereum/out 2>/dev/null || echo "No Solidity artifacts found"
+
+info: ## Show project information
+	@echo "$(BLUE)Project Information$(NC)"
+	@echo "Rust version:     $$(rustc --version)"
+	@echo "Cargo version:    $$(cargo --version)"
+	@echo "Forge version:    $$(forge --version | head -n 1)"
+	@echo "Project root:     $$(pwd)"
+

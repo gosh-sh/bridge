@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+.gitlab-ci.yml
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+.cargo/
+
+# Foundry
+contracts/ethereum/out/
+contracts/ethereum/cache/
+contracts/ethereum/lib/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test artifacts
+coverage/
+test-results/
+
+# Temporary files
+tmp/
+temp/
+

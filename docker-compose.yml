@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Local Ethereum node (Anvil)
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    command: anvil --host 0.0.0.0 --chain-id 1337
+    ports:
+      - "8545:8545"
+    networks:
+      - bridge-network
+
+  # Ethereum frontend
+  eth-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - anvil
+    environment:
+      - ETH_RPC_URL=http://anvil:8545
+      - ETH_CHAIN_ID=1337
+      - RUST_LOG=info
+    networks:
+      - bridge-network
+    volumes:
+      - ./data:/app/data
+
+  # Development container with all tools
+  dev:
+    image: rust:1.94
+    working_dir: /workspace
+    command: sleep infinity
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/workspace/target
+    environment:
+      - RUST_LOG=debug
+    networks:
+      - bridge-network
+
+networks:
+  bridge-network:
+    driver: bridge
+
+volumes:
+  cargo-cache:
+  target-cache:
+

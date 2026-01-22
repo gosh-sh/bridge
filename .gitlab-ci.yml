@@ -1,0 +1,263 @@
+stages:
+  - setup
+  - build
+  - test
+  - security
+  - deploy
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  RUST_BACKTRACE: "1"
+  FOUNDRY_PROFILE: ci
+
+# Cache configuration
+.rust_cache: &rust_cache
+  cache:
+    key: rust-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - target/
+    policy: pull-push
+
+.foundry_cache: &foundry_cache
+  cache:
+    key: foundry-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+    policy: pull-push
+
+# Base job for Rust
+.rust_base:
+  image: rust:latest
+  before_script:
+    - rustc --version
+    - cargo --version
+    - rustup component add rustfmt clippy
+
+# Base job for Foundry
+.foundry_base:
+  image: ghcr.io/foundry-rs/foundry:latest
+  before_script:
+    - forge --version
+    - cast --version
+
+# Setup stage
+setup:rust:
+  extends: .rust_base
+  stage: setup
+  <<: *rust_cache
+  script:
+    - cargo fetch --locked
+  only:
+    changes:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**/Cargo.toml
+
+setup:foundry:
+  extends: .foundry_base
+  stage: setup
+  <<: *foundry_cache
+  script:
+    - cd contracts/ethereum
+    - forge install
+  only:
+    changes:
+      - contracts/ethereum/foundry.toml
+      - contracts/ethereum/remappings.txt
+
+# Build stage
+build:rust:debug:
+  extends: .rust_base
+  stage: build
+  <<: *rust_cache
+  script:
+    - cargo build --workspace --all-features
+  artifacts:
+    paths:
+      - target/debug/
+    expire_in: 1 day
+
+build:rust:release:
+  extends: .rust_base
+  stage: build
+  <<: *rust_cache
+  script:
+    - cargo build --workspace --all-features --release
+  artifacts:
+    paths:
+      - target/release/
+    expire_in: 1 week
+  only:
+    - main
+    - tags
+
+build:solidity:
+  extends: .foundry_base
+  stage: build
+  <<: *foundry_cache
+  script:
+    - cd contracts/ethereum
+    - forge build
+  artifacts:
+    paths:
+      - contracts/ethereum/out/
+    expire_in: 1 day
+
+# Test stage
+test:rust:unit:
+  extends: .rust_base
+  stage: test
+  <<: *rust_cache
+  dependencies:
+    - build:rust:debug
+  script:
+    - cargo test --workspace --lib
+  coverage: '/^\d+\.\d+% coverage/'
+
+test:rust:integration:
+  extends: .rust_base
+  stage: test
+  <<: *rust_cache
+  dependencies:
+    - build:rust:debug
+  script:
+    - cargo test --workspace --test '*'
+
+test:rust:doc:
+  extends: .rust_base
+  stage: test
+  <<: *rust_cache
+  script:
+    - cargo test --workspace --doc
+
+test:solidity:
+  extends: .foundry_base
+  stage: test
+  <<: *foundry_cache
+  dependencies:
+    - build:solidity
+  script:
+    - cd contracts/ethereum
+    - forge test -vvv
+  artifacts:
+    when: always
+    reports:
+      junit: contracts/ethereum/test-results.xml
+
+test:solidity:coverage:
+  extends: .foundry_base
+  stage: test
+  <<: *foundry_cache
+  dependencies:
+    - build:solidity
+  script:
+    - cd contracts/ethereum
+    - forge coverage --report summary
+  coverage: '/Total.*?(\d+\.\d+)%/'
+  only:
+    - main
+    - merge_requests
+
+# Code quality checks
+lint:rust:fmt:
+  extends: .rust_base
+  stage: test
+  script:
+    - cargo fmt --all -- --check
+  allow_failure: false
+
+lint:rust:clippy:
+  extends: .rust_base
+  stage: test
+  <<: *rust_cache
+  script:
+    - cargo clippy --all-targets --all-features -- -D warnings
+  allow_failure: false
+
+lint:solidity:fmt:
+  extends: .foundry_base
+  stage: test
+  script:
+    - cd contracts/ethereum
+    - forge fmt --check
+  allow_failure: false
+
+# Security stage
+security:rust:audit:
+  extends: .rust_base
+  stage: security
+  script:
+    - cargo install cargo-audit
+    - cargo audit
+  allow_failure: true
+  only:
+    - main
+    - merge_requests
+
+security:solidity:slither:
+  image: trailofbits/eth-security-toolbox:latest
+  stage: security
+  script:
+    - cd contracts/ethereum
+    - slither . --exclude-dependencies || true
+  allow_failure: true
+  only:
+    - main
+    - merge_requests
+
+# Documentation
+docs:rust:
+  extends: .rust_base
+  stage: deploy
+  <<: *rust_cache
+  script:
+    - cargo doc --workspace --no-deps
+  artifacts:
+    paths:
+      - target/doc/
+    expire_in: 1 week
+  only:
+    - main
+
+docs:solidity:
+  extends: .foundry_base
+  stage: deploy
+  script:
+    - cd contracts/ethereum
+    - forge doc
+  artifacts:
+    paths:
+      - contracts/ethereum/docs/
+    expire_in: 1 week
+  only:
+    - main
+
+# Deploy stage (placeholder)
+deploy:testnet:
+  extends: .foundry_base
+  stage: deploy
+  script:
+    - echo "Deploy to testnet would go here"
+    - cd contracts/ethereum
+    - forge script script/Deploy.s.sol --rpc-url $TESTNET_RPC_URL --broadcast --verify
+  only:
+    - main
+  when: manual
+  environment:
+    name: testnet
+
+deploy:mainnet:
+  extends: .foundry_base
+  stage: deploy
+  script:
+    - echo "Deploy to mainnet would go here"
+    - cd contracts/ethereum
+    - forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify
+  only:
+    - tags
+  when: manual
+  environment:
+    name: mainnet
+

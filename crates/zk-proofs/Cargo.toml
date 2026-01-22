@@ -1,0 +1,29 @@
+[package]
+name = "zk-proofs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+crypto = { path = "../crypto" }
+merkle-tree = { path = "../merkle-tree" }
+
+# Halo2-lib for simpler API
+halo2-base.workspace = true
+halo2-ecc.workspace = true
+
+# Field arithmetic - using halo2curves for compatibility with crypto crate
+halo2curves-axiom.workspace = true
+ff.workspace = true
+
+# Utilities
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion = "0.5"

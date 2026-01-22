@@ -88,6 +88,23 @@ done
 echo "=== Acki Nacki Bridge Build Script ==="
 echo ""
 
+# Check for Foundry installation
+print_step "Checking for Foundry installation..."
+if ! command -v forge &> /dev/null; then
+    print_warn "Foundry (forge) not found!"
+    echo ""
+    echo "Foundry is required to build Solidity contracts."
+    echo "To install Foundry, run:"
+    echo ""
+    echo "  curl -L https://foundry.paradigm.xyz | bash"
+    echo "  source ~/.bashrc"
+    echo "  foundryup"
+    echo ""
+    echo "After installation, run this build script again."
+    exit 1
+fi
+print_info "Foundry found: $(forge --version | head -n 1)"
+
 # Clean if requested
 if [ "$CLEAN" = true ]; then
     print_step "Cleaning build artifacts..."

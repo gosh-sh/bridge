@@ -3,6 +3,9 @@
 # Default target
 .DEFAULT_GOAL := help
 
+# Ensure Foundry is in PATH
+export PATH := $(HOME)/.foundry/bin:$(PATH)
+
 # Colors
 BLUE := \033[0;34m
 GREEN := \033[0;32m
@@ -62,6 +65,11 @@ test-coverage: ## Generate test coverage report
 	@echo "$(BLUE)Generating coverage report...$(NC)"
 	@chmod +x test.sh
 	@./test.sh --coverage
+
+test-integration: ## Run integration tests (requires Anvil to be running)
+	@echo "$(BLUE)Running integration tests...$(NC)"
+	@echo "$(YELLOW)Note: Make sure Anvil is running (run 'make run-local' in another terminal)$(NC)"
+	@cargo test --package eth-frontend --test integration_test -- --ignored
 
 format: ## Format all code (Rust + Solidity)
 	@echo "$(BLUE)Formatting code...$(NC)"
@@ -153,6 +161,11 @@ info: ## Show project information
 	@echo "$(BLUE)Project Information$(NC)"
 	@echo "Rust version:     $$(rustc --version)"
 	@echo "Cargo version:    $$(cargo --version)"
-	@echo "Forge version:    $$(forge --version | head -n 1)"
+	@if command -v forge >/dev/null 2>&1; then \
+		echo "Forge version:    $$(forge --version | head -n 1)"; \
+		echo "Anvil version:    $$(anvil --version)"; \
+	else \
+		echo "Forge:            $(YELLOW)Not installed (run 'make setup')$(NC)"; \
+	fi
 	@echo "Project root:     $$(pwd)"
 

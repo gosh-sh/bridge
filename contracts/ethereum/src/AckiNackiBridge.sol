@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/// @title AckiNackiBridge
+/// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
+/// @dev Uses incremental Merkle tree (Tornado Cash style) and ZK proofs
+contract AckiNackiBridge {
+    // Merkle tree parameters
+    uint256 public constant TREE_HEIGHT = 20;
+    uint256 public constant MAX_LEAVES = 2 ** TREE_HEIGHT;
+    
+    // Merkle tree state
+    uint256 public nextIndex;
+    mapping(uint256 => bytes32) public leaves;
+    bytes32[TREE_HEIGHT] public filledSubtrees;
+    bytes32[TREE_HEIGHT + 1] public zeroHashes;
+    
+    // Nullifier tracking (prevent double-spending)
+    mapping(bytes32 => bool) public nullifiers;
+    
+    // Treasury
+    uint256 public treasuryBalance;
+    
+    // Events
+    event Deposit(
+        bytes32 indexed commitment,
+        bytes32 indexed commitmentWithAmount,
+        uint256 leafIndex,
+        uint256 amount,
+        uint256 timestamp
+    );
+    
+    event Withdrawal(
+        bytes32 indexed nullifier,
+        address indexed recipient,
+        uint256 amount,
+        uint256 timestamp
+    );
+    
+    // Errors
+    error TreeFull();
+    error InvalidAmount();
+    error NullifierAlreadyUsed();
+    error InvalidProof();
+    error InsufficientTreasury();
+    
+    constructor() {
+        // Initialize zero hashes for the Merkle tree
+        // zero_hashes[0] = hash(0)
+        // zero_hashes[i] = hash(zero_hashes[i-1], zero_hashes[i-1])
+        zeroHashes[0] = bytes32(0);
+        for (uint256 i = 0; i < TREE_HEIGHT; i++) {
+            zeroHashes[i + 1] = hashPair(zeroHashes[i], zeroHashes[i]);
+            filledSubtrees[i] = zeroHashes[i];
+        }
+    }
+    
+    /// @notice Deposit tokens and add commitment to Merkle tree
+    /// @param commitment Hash of (withdrawalHash, nullifier)
+    /// @param amount Amount to deposit
+    function deposit(bytes32 commitment, uint256 amount) external payable {
+        if (msg.value != amount) revert InvalidAmount();
+        if (amount == 0) revert InvalidAmount();
+        if (nextIndex >= MAX_LEAVES) revert TreeFull();
+        
+        // Add to treasury
+        treasuryBalance += amount;
+        
+        // Store leaf
+        uint256 leafIndex = nextIndex;
+        leaves[leafIndex] = commitment;
+        
+        // Update Merkle tree using incremental algorithm
+        bytes32 currentHash = commitment;
+        uint256 currentIndex = leafIndex;
+        
+        for (uint256 level = 0; level < TREE_HEIGHT; level++) {
+            if (currentIndex % 2 == 0) {
+                // Left node - store and wait for right sibling
+                filledSubtrees[level] = currentHash;
+                break;
+            } else {
+                // Right node - hash with left sibling
+                bytes32 leftSibling = filledSubtrees[level];
+                currentHash = hashPair(leftSibling, currentHash);
+                currentIndex /= 2;
+            }
+        }
+        
+        // Compute commitment with amount
+        bytes32 commitmentWithAmount = hashPair(commitment, bytes32(amount));
+        
+        nextIndex++;
+        
+        emit Deposit(commitment, commitmentWithAmount, leafIndex, amount, block.timestamp);
+    }
+    
+    /// @notice Withdraw tokens using ZK proof
+    /// @param nullifier Nullifier to prevent double-spending
+    /// @param recipient Address to receive tokens
+    /// @param amount Amount to withdraw
+    /// @param root Merkle root
+    /// @param proof ZK proof (placeholder for now)
+    function withdraw(
+        bytes32 nullifier,
+        address payable recipient,
+        uint256 amount,
+        bytes32 root,
+        bytes calldata proof
+    ) external {
+        // Check nullifier hasn't been used
+        if (nullifiers[nullifier]) revert NullifierAlreadyUsed();
+        
+        // Verify the root matches current tree root
+        bytes32 currentRoot = getRoot();
+        if (root != currentRoot) revert InvalidProof();
+        
+        // TODO: Verify ZK proof
+        // For now, we just check that proof is not empty
+        if (proof.length == 0) revert InvalidProof();
+        
+        // Check treasury has enough balance
+        if (treasuryBalance < amount) revert InsufficientTreasury();
+        
+        // Mark nullifier as used
+        nullifiers[nullifier] = true;
+        
+        // Update treasury
+        treasuryBalance -= amount;
+        
+        // Transfer tokens
+        recipient.transfer(amount);
+        
+        emit Withdrawal(nullifier, recipient, amount, block.timestamp);
+    }
+    
+    /// @notice Get current Merkle root
+    /// @return Current root of the Merkle tree
+    function getRoot() public view returns (bytes32) {
+        if (nextIndex == 0) {
+            return zeroHashes[TREE_HEIGHT];
+        }
+        
+        // Start from the last inserted leaf
+        uint256 lastLeafIndex = nextIndex - 1;
+        bytes32 currentHash = leaves[lastLeafIndex];
+        uint256 index = lastLeafIndex;
+        
+        for (uint256 level = 0; level < TREE_HEIGHT; level++) {
+            bool isRight = index % 2 == 1;
+            
+            if (isRight) {
+                bytes32 leftSibling = filledSubtrees[level];
+                currentHash = hashPair(leftSibling, currentHash);
+            } else {
+                bytes32 rightZero = zeroHashes[level];
+                currentHash = hashPair(currentHash, rightZero);
+            }
+            
+            index /= 2;
+        }
+        
+        return currentHash;
+    }
+    
+    /// @notice Hash two values together (Poseidon hash placeholder)
+    /// @dev In production, this should use Poseidon hash for ZK compatibility
+    /// @param left Left value
+    /// @param right Right value
+    /// @return Hash of the pair
+    function hashPair(bytes32 left, bytes32 right) public pure returns (bytes32) {
+        // TODO: Replace with Poseidon hash for ZK compatibility
+        // For now, using keccak256 as placeholder
+        return keccak256(abi.encodePacked(left, right));
+    }
+    
+    /// @notice Check if a nullifier has been used
+    /// @param nullifier Nullifier to check
+    /// @return True if nullifier has been used
+    function isNullifierUsed(bytes32 nullifier) external view returns (bool) {
+        return nullifiers[nullifier];
+    }
+    
+    /// @notice Get the number of leaves in the tree
+    /// @return Number of leaves
+    function getLeafCount() external view returns (uint256) {
+        return nextIndex;
+    }
+    
+    /// @notice Get a leaf at a specific index
+    /// @param index Leaf index
+    /// @return Leaf value
+    function getLeaf(uint256 index) external view returns (bytes32) {
+        require(index < nextIndex, "Invalid index");
+        return leaves[index];
+    }
+}
+

@@ -35,6 +35,11 @@ impl SecureRng {
         use ff::Field;
         crate::types::FieldElement::random(&mut self.rng)
     }
+
+    /// Generate a random hash
+    pub fn random_hash(&mut self) -> crate::types::Hash {
+        crate::types::Hash::new(self.random_bytes::<32>())
+    }
 }
 
 impl Default for SecureRng {

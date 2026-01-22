@@ -158,6 +158,17 @@ Run linter:
 ./build.sh --clippy
 ```
 
+### Continuous Integration
+
+The project uses GitLab CI/CD for automated testing and deployment. See `docs/CI_SETUP.md` for details.
+
+Key features:
+- Automated Rust and Solidity builds
+- Comprehensive test suite (unit, integration, doc tests)
+- Code quality checks (rustfmt, clippy, forge fmt)
+- Security audits (cargo audit, slither)
+- Automatic npm dependency installation for Poseidon library
+
 ### Continuous Development
 
 Auto-rebuild on changes:

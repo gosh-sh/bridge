@@ -39,6 +39,10 @@ variables:
 .foundry_base:
   image: ghcr.io/foundry-rs/foundry:latest
   before_script:
+    # Install Node.js and npm for poseidon-solidity dependency
+    - apt-get update && apt-get install -y nodejs npm
+    - node --version
+    - npm --version
     - forge --version
     - cast --version
 
@@ -61,11 +65,23 @@ setup:foundry:
   <<: *foundry_cache
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Install forge dependencies
     - forge install
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/node_modules/
+    policy: pull-push
   only:
     changes:
       - contracts/ethereum/foundry.toml
       - contracts/ethereum/remappings.txt
+      - contracts/ethereum/package.json
+      - contracts/ethereum/package-lock.json
 
 # Build stage
 build:rust:debug:
@@ -96,10 +112,19 @@ build:rust:release:
 build:solidity:
   extends: .foundry_base
   stage: build
-  <<: *foundry_cache
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Build contracts
     - forge build
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/node_modules/
+    policy: pull
   artifacts:
     paths:
       - contracts/ethereum/out/
@@ -135,12 +160,21 @@ test:rust:doc:
 test:solidity:
   extends: .foundry_base
   stage: test
-  <<: *foundry_cache
   dependencies:
     - build:solidity
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Run tests
     - forge test -vvv
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/node_modules/
+    policy: pull
   artifacts:
     when: always
     reports:
@@ -149,12 +183,21 @@ test:solidity:
 test:solidity:coverage:
   extends: .foundry_base
   stage: test
-  <<: *foundry_cache
   dependencies:
     - build:solidity
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Run coverage
     - forge coverage --report summary
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/node_modules/
+    policy: pull
   coverage: '/Total.*?(\d+\.\d+)%/'
   only:
     - main
@@ -181,7 +224,15 @@ lint:solidity:fmt:
   stage: test
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Check formatting
     - forge fmt --check
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/node_modules/
+    policy: pull
   allow_failure: false
 
 # Security stage
@@ -226,7 +277,15 @@ docs:solidity:
   stage: deploy
   script:
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Generate documentation
     - forge doc
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/node_modules/
+    policy: pull
   artifacts:
     paths:
       - contracts/ethereum/docs/
@@ -239,9 +298,17 @@ deploy:testnet:
   extends: .foundry_base
   stage: deploy
   script:
-    - echo "Deploy to testnet would go here"
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Deploy to testnet
+    - echo "Deploy to testnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $TESTNET_RPC_URL --broadcast --verify
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/node_modules/
+    policy: pull
   only:
     - main
   when: manual
@@ -252,9 +319,17 @@ deploy:mainnet:
   extends: .foundry_base
   stage: deploy
   script:
-    - echo "Deploy to mainnet would go here"
     - cd contracts/ethereum
+    # Install npm dependencies (poseidon-solidity)
+    - npm install
+    # Deploy to mainnet
+    - echo "Deploy to mainnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/node_modules/
+    policy: pull
   only:
     - tags
   when: manual

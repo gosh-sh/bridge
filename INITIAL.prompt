@@ -1,0 +1,92 @@
+We need to create a bridge between Ethereum and another blockchain
+called Acki Nacki.
+
+The architecture is as follows:
+there are four modules:
+- Ethereum frontend (written in Rust)
+- Ethereum contract (written in Solidity)
+- Acki Nacki frontend (written in Rust)
+- Acki Nacki contract (written in Acki Nacki's version of Solidity)
+
+We are responsible for the first two modules.
+The Acki Nacki modules will be implemented by the Acki Nacki team.
+
+The bridge will be a simple 1-to-1 token bridge.
+
+Deposit:
+- Initiated by the user of Ethereum frontend
+- Frontend selects two random numbers
+(called withdrawal hash and nullifier), concatecates them and 
+calculates their hash (it's interesting to think about hash function to
+be used, probably ZK-friendly Poseidon is a proper choice)
+- Then these two numbers are sent to the contract together with the
+deposit itself
+- The contract adds this hash into incremental Merkle Tree
+(a la Tornado Cash), stores the deposit in so called treasury
+and emits the event with:
+    - hash been received
+    - concatenated hash of hash been received with deposit amount
+- Frontend:
+    - creates ZK proof (PLONK) that he knows:
+        - the preimage of the withdrawal hash
+        - amount in the concatenated hash
+        - public inputs are:
+            - amount
+    - sends this proof to the Acki Nacki contract:
+        - while Acki Nacki contratcs are not ready, interface
+        IAckiNacki must be implemented and used, for the testing
+        purposes some dummy implementation must be provided
+        - the sending process is async, so the user must be able to
+        check the status of his deposit, the event is emitted
+        when the deposit is added to the Merkle Tree, but the
+        transaction to the Acki Nacki contract may fail for some reason
+        and the user must be able to retry it.
+        - also some abstract trait for sending transaction to Acki Nacki
+        must be created and used, so the implementation can be swapped
+        for the testing purposes
+
+Withdrawal:
+- Initiated by the user of Acki Nacki frontend
+- Ethereum Frontend creates ZK proof that he knows:
+    - the preimage of the withdrawal hash
+    - the nullifier
+    - the Merkle proof of the inclusion of the hash in the Merkle Tree
+    - the Burn transaction indeed happened on Acki Nacki
+    - public inputs are:
+        - amount
+        - Merkle root
+    - while details of the Burn transaction proof are not yet known,
+    some placeholder must be used, so the trait/abstract class for it
+    must be created and used with some dummy implementation for the
+    testing purposes
+- Ethereum contract:
+    - receives the proof from the frontend
+    - verifies it
+    - if the proof is valid, sends the tokens to the user
+    - adds the nullifier to the list of used nullifiers to prevent double
+    spending
+
+    The system must be secure against the following attacks:
+    - the user tries to withdraw without burning the tokens on Acki Nacki
+    - the user tries to withdraw with the same nullifier twice
+    - the user tries to withdraw with the different nullifier but the same
+    preimage of the withdrawal hash
+
+    The system must be covered by the tests.
+    Use mocks for the Acki Nacki contract. Merkle tree must be tested
+    thoroughly. The security properties of the system must be tested
+    formally using the model checker. Merkle tree must be fully
+    implemented.
+
+    Regarding tests: do not try to be too smart, just use the standard
+    approach of the industry. If something is not clear, ask for
+    clarifications. Do not try to implement something that is not
+    explicitly required. Do not try to cheat the tests to make them
+    passed. Instead, put all the failing tests into three different
+    buckets:
+    - Definitely broken tests
+    - Unclear, bugs in tests or in the code
+    - Definetely bugs
+
+And, while write tests, consider youself as a separate agent from
+the code writer.

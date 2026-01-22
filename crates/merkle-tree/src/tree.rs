@@ -28,9 +28,6 @@ pub struct MerkleTree {
     filled_subtrees: Vec<Hash>,
     /// Optional: store all leaves for proof generation
     leaves: HashMap<usize, Hash>,
-    /// Cache of intermediate node hashes: (level, index) -> hash
-    /// This is used to speed up proof generation
-    nodes: HashMap<(usize, usize), Hash>,
 }
 
 impl MerkleTree {
@@ -50,7 +47,6 @@ impl MerkleTree {
             zero_hashes,
             filled_subtrees,
             leaves: HashMap::new(),
-            nodes: HashMap::new(),
         }
     }
 
@@ -75,15 +71,13 @@ impl MerkleTree {
     /// This implements the incremental Merkle tree algorithm from Tornado Cash.
     /// The filled_subtrees array stores the right-most hash at each level.
     pub fn insert(&mut self, leaf: Hash) -> Result<usize> {
-        if self.next_index >= MAX_LEAVES {
-            return Err(MerkleError::TreeFull(MAX_LEAVES));
+        let max_leaves = 1 << self.height;
+        if self.next_index >= max_leaves {
+            return Err(MerkleError::TreeFull(max_leaves));
         }
 
         let index = self.next_index;
         self.leaves.insert(index, leaf);
-
-        // Cache the leaf node
-        self.nodes.insert((0, index), leaf);
 
         // Update the tree using the incremental algorithm
         let mut current_hash = leaf;
@@ -99,9 +93,6 @@ impl MerkleTree {
                 let left_sibling = &self.filled_subtrees[level];
                 current_hash = hash_pair(left_sibling, &current_hash);
                 current_index /= 2;
-
-                // Cache the parent node
-                self.nodes.insert((level + 1, current_index), current_hash);
             }
         }
 
@@ -148,7 +139,7 @@ impl MerkleTree {
     /// Generate a Merkle proof for a leaf at the given index
     ///
     /// This implements proof generation for an incremental Merkle tree.
-    /// We reconstruct sibling hashes by traversing the actual leaf data.
+    /// For each level, we determine the sibling based on whether we're a left or right child.
     pub fn prove(&self, leaf_index: usize) -> Result<MerkleProof> {
         if self.next_index == 0 {
             return Err(MerkleError::InvalidIndex {
@@ -164,7 +155,7 @@ impl MerkleTree {
             });
         }
 
-        let leaf = self
+        let leaf = *self
             .leaves
             .get(&leaf_index)
             .ok_or(MerkleError::LeafNotFound(leaf_index))?;
@@ -172,33 +163,27 @@ impl MerkleTree {
         let mut siblings = Vec::new();
         let mut path = Vec::new();
         let mut index = leaf_index;
+        let mut cache = HashMap::new();
 
-        // For each level, we need to find the sibling hash
+        // For each level, compute the sibling
         for level in 0..self.height {
             let is_right = index % 2 == 1;
 
-            if is_right {
-                // We are right child, sibling is left
-                path.push(ProofPath::Right);
-                // Reconstruct the left sibling
-                let sibling_index = index - 1;
-                let sibling_hash = self.get_node_hash(sibling_index, level);
-                siblings.push(sibling_hash);
-            } else {
-                // We are left child, sibling is right
-                path.push(ProofPath::Left);
+            let sibling_index = if is_right { index - 1 } else { index + 1 };
+            let sibling_hash = self.compute_subtree_hash_cached(sibling_index, level, &mut cache);
 
-                // Compute the right sibling by reconstructing from leaves
-                let sibling_index = index + 1;
-                let sibling_hash = self.get_node_hash(sibling_index, level);
-                siblings.push(sibling_hash);
-            };
+            siblings.push(sibling_hash);
+            path.push(if is_right {
+                ProofPath::Right
+            } else {
+                ProofPath::Left
+            });
 
             index /= 2;
         }
 
         Ok(MerkleProof::new(
-            *leaf,
+            leaf,
             leaf_index,
             siblings,
             path,
@@ -206,41 +191,41 @@ impl MerkleTree {
         ))
     }
 
-    /// Get the hash of a node at a given index and level
-    ///
-    /// This reconstructs the hash by traversing down to the leaves.
-    /// If the node represents a range beyond next_index, returns zero hash.
-    fn get_node_hash(&self, node_index: usize, level: usize) -> Hash {
+    /// Compute the hash of a subtree rooted at (level, index) with caching
+    fn compute_subtree_hash_cached(
+        &self,
+        node_index: usize,
+        level: usize,
+        cache: &mut HashMap<(usize, usize), Hash>,
+    ) -> Hash {
         // Check cache first
-        if let Some(&hash) = self.nodes.get(&(level, node_index)) {
+        if let Some(&hash) = cache.get(&(level, node_index)) {
             return hash;
         }
 
-        // Calculate the range of leaf indices this node represents
+        // Base case: if this subtree is beyond our leaves, return zero hash
         let leaf_start = node_index << level;
-
-        // If this node is entirely beyond our inserted leaves, return zero hash
         if leaf_start >= self.next_index {
             return self.zero_hashes[level];
         }
 
-        // If we're at leaf level, return the leaf or zero hash
+        // Base case: if we're at leaf level
         if level == 0 {
-            return self
-                .leaves
-                .get(&node_index)
+            return self.leaves.get(&node_index)
                 .copied()
                 .unwrap_or(self.zero_hashes[0]);
         }
 
-        // Recursively compute the hash from children
+        // Recursive case: compute left and right children
         let left_child = node_index * 2;
         let right_child = node_index * 2 + 1;
 
-        let left_hash = self.get_node_hash(left_child, level - 1);
-        let right_hash = self.get_node_hash(right_child, level - 1);
+        let left_hash = self.compute_subtree_hash_cached(left_child, level - 1, cache);
+        let right_hash = self.compute_subtree_hash_cached(right_child, level - 1, cache);
 
-        hash_pair(&left_hash, &right_hash)
+        let hash = hash_pair(&left_hash, &right_hash);
+        cache.insert((level, node_index), hash);
+        hash
     }
 
     /// Verify a Merkle proof

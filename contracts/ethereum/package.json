@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "poseidon-solidity": "^0.0.5"
+  }
+}

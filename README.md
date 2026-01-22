@@ -36,6 +36,9 @@ The bridge consists of four main components:
 
 The bridge uses a modular verifier architecture where ZK proof verification is separated into its own contract. This allows for easy testing with a dummy verifier and future upgrades to the real Halo2 verifier. See `contracts/ethereum/VERIFIER.md` for details.
 
+**Poseidon Hash**: Both Rust and Solidity implementations use PoseidonT3 (width 3, rate 2)
+for ZK-friendly hashing. See `docs/POSEIDON_INTEGRATION.md` for compatibility details.
+
 ## Quick Start
 
 ### Prerequisites

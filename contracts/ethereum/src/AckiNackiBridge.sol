@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./IAckiNackiVerifier.sol";
+import "poseidon-solidity/PoseidonT3.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
@@ -180,15 +181,16 @@ contract AckiNackiBridge {
         return currentHash;
     }
     
-    /// @notice Hash two values together (Poseidon hash placeholder)
-    /// @dev In production, this should use Poseidon hash for ZK compatibility
+    /// @notice Hash two values together using Poseidon hash
+    /// @dev Uses PoseidonT3 (width 3, rate 2) for ZK compatibility
     /// @param left Left value
     /// @param right Right value
     /// @return Hash of the pair
     function hashPair(bytes32 left, bytes32 right) public pure returns (bytes32) {
-        // TODO: Replace with Poseidon hash for ZK compatibility
-        // For now, using keccak256 as placeholder
-        return keccak256(abi.encodePacked(left, right));
+        // Convert bytes32 to uint256 for Poseidon
+        uint256[2] memory inputs = [uint256(left), uint256(right)];
+        // PoseidonT3.hash returns uint256, convert back to bytes32
+        return bytes32(PoseidonT3.hash(inputs));
     }
     
     /// @notice Check if a nullifier has been used

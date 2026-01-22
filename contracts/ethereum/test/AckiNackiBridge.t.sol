@@ -3,13 +3,15 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../src/AckiNackiBridge.sol";
+import "../src/DummyVerifier.sol";
 
 contract AckiNackiBridgeTest is Test {
     AckiNackiBridge public bridge;
-    
+    DummyVerifier public verifier;
+
     address public user1 = address(0x1);
     address public user2 = address(0x2);
-    
+
     event Deposit(
         bytes32 indexed commitment,
         bytes32 indexed commitmentWithAmount,
@@ -17,17 +19,21 @@ contract AckiNackiBridgeTest is Test {
         uint256 amount,
         uint256 timestamp
     );
-    
+
     event Withdrawal(
         bytes32 indexed nullifier,
         address indexed recipient,
         uint256 amount,
         uint256 timestamp
     );
-    
+
     function setUp() public {
-        bridge = new AckiNackiBridge();
-        
+        // Deploy verifier first
+        verifier = new DummyVerifier();
+
+        // Deploy bridge with verifier address
+        bridge = new AckiNackiBridge(address(verifier));
+
         // Fund test users
         vm.deal(user1, 100 ether);
         vm.deal(user2, 100 ether);
@@ -246,10 +252,70 @@ contract AckiNackiBridgeTest is Test {
         // This test would take too long with TREE_HEIGHT=20
         // So we just verify the error exists
         // In practice, you'd deploy a test version with smaller height
-        
+
         // For now, just verify the contract has the error defined
         // by trying to trigger it (won't actually fill the tree)
         assertTrue(true);
+    }
+
+    function testInvalidVerifierAddress() public {
+        vm.expectRevert(AckiNackiBridge.InvalidVerifier.selector);
+        new AckiNackiBridge(address(0));
+    }
+
+    function testVerifierIntegration() public {
+        // Test that the verifier is properly integrated
+        assertEq(address(bridge.verifier()), address(verifier));
+        assertEq(verifier.getPublicInputsCount(), 4);
+    }
+
+    function testVerifierRejectsEmptyProof() public {
+        bytes memory emptyProof = "";
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = uint256(keccak256("nullifier"));
+        publicInputs[1] = uint256(uint160(user2));
+        publicInputs[2] = 1 ether;
+        publicInputs[3] = uint256(bridge.getRoot());
+
+        bool isValid = verifier.verifyWithdrawalProof(emptyProof, publicInputs);
+        assertFalse(isValid);
+    }
+
+    function testVerifierRejectsInvalidPublicInputs() public {
+        bytes memory proof = "dummy_proof";
+
+        // Test with wrong number of public inputs
+        uint256[] memory wrongInputs = new uint256[](3);
+        wrongInputs[0] = uint256(keccak256("nullifier"));
+        wrongInputs[1] = uint256(uint160(user2));
+        wrongInputs[2] = 1 ether;
+
+        bool isValid = verifier.verifyWithdrawalProof(proof, wrongInputs);
+        assertFalse(isValid);
+    }
+
+    function testVerifierRejectsZeroNullifier() public {
+        bytes memory proof = "dummy_proof";
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = 0; // Zero nullifier
+        publicInputs[1] = uint256(uint160(user2));
+        publicInputs[2] = 1 ether;
+        publicInputs[3] = uint256(bridge.getRoot());
+
+        bool isValid = verifier.verifyWithdrawalProof(proof, publicInputs);
+        assertFalse(isValid);
+    }
+
+    function testVerifierAcceptsValidProof() public {
+        bytes memory proof = "dummy_proof";
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = uint256(keccak256("nullifier"));
+        publicInputs[1] = uint256(uint160(user2));
+        publicInputs[2] = 1 ether;
+        publicInputs[3] = uint256(bridge.getRoot());
+
+        bool isValid = verifier.verifyWithdrawalProof(proof, publicInputs);
+        assertTrue(isValid);
     }
 }
 

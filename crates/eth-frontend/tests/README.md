@@ -28,18 +28,31 @@ anvil
 
 This will start a local Ethereum node at `http://localhost:8545` with pre-funded test accounts.
 
-### Step 2: Deploy the Contract
+### Step 2: Deploy the Contracts
 
-Deploy the AckiNackiBridge contract to the local node:
+First, deploy the DummyVerifier contract:
 
 ```bash
 cd contracts/ethereum
 forge create --rpc-url http://localhost:8545 \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  src/DummyVerifier.sol:DummyVerifier
+```
+
+Note the deployed verifier address from the output.
+
+Then, deploy the AckiNackiBridge contract with the verifier address:
+
+```bash
+forge create --rpc-url http://localhost:8545 \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --constructor-args <VERIFIER_ADDRESS> \
   src/AckiNackiBridge.sol:AckiNackiBridge
 ```
 
-Note the deployed contract address from the output.
+Replace `<VERIFIER_ADDRESS>` with the address from the previous step.
+
+Note the deployed bridge contract address from the output.
 
 ### Step 3: Update Test Configuration
 

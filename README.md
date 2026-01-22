@@ -28,6 +28,14 @@ The bridge consists of four main components:
 - **zk-proofs** (`crates/zk-proofs`): Halo2 circuits for deposit and withdrawal proofs
 - **acki-nacki-interface** (`crates/acki-nacki-interface`): Interface for Acki Nacki integration
 
+### Smart Contracts
+
+- **AckiNackiBridge** (`contracts/ethereum/src/AckiNackiBridge.sol`): Main bridge contract
+- **IAckiNackiVerifier** (`contracts/ethereum/src/IAckiNackiVerifier.sol`): Verifier interface
+- **DummyVerifier** (`contracts/ethereum/src/DummyVerifier.sol`): Testing verifier implementation
+
+The bridge uses a modular verifier architecture where ZK proof verification is separated into its own contract. This allows for easy testing with a dummy verifier and future upgrades to the real Halo2 verifier. See `contracts/ethereum/VERIFIER.md` for details.
+
 ## Quick Start
 
 ### Prerequisites
@@ -131,7 +139,7 @@ Integration tests require a local Ethereum node (Anvil).
 - **eth-frontend**: 9 unit tests + 7 integration tests
 
 ### Solidity Tests
-- **AckiNackiBridge**: 13 tests (deposits, withdrawals, Merkle tree, nullifiers)
+- **AckiNackiBridge**: 19 tests (deposits, withdrawals, Merkle tree, nullifiers, verifier integration)
 
 ## Development
 

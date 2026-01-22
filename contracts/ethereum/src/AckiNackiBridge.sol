@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "./IAckiNackiVerifier.sol";
+
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
 /// @dev Uses incremental Merkle tree (Tornado Cash style) and ZK proofs
@@ -8,18 +10,21 @@ contract AckiNackiBridge {
     // Merkle tree parameters
     uint256 public constant TREE_HEIGHT = 20;
     uint256 public constant MAX_LEAVES = 2 ** TREE_HEIGHT;
-    
+
     // Merkle tree state
     uint256 public nextIndex;
     mapping(uint256 => bytes32) public leaves;
     bytes32[TREE_HEIGHT] public filledSubtrees;
     bytes32[TREE_HEIGHT + 1] public zeroHashes;
-    
+
     // Nullifier tracking (prevent double-spending)
     mapping(bytes32 => bool) public nullifiers;
-    
+
     // Treasury
     uint256 public treasuryBalance;
+
+    // Verifier contract
+    IAckiNackiVerifier public verifier;
     
     // Events
     event Deposit(
@@ -43,8 +48,12 @@ contract AckiNackiBridge {
     error NullifierAlreadyUsed();
     error InvalidProof();
     error InsufficientTreasury();
-    
-    constructor() {
+    error InvalidVerifier();
+
+    constructor(address _verifier) {
+        if (_verifier == address(0)) revert InvalidVerifier();
+        verifier = IAckiNackiVerifier(_verifier);
+
         // Initialize zero hashes for the Merkle tree
         // zero_hashes[0] = hash(0)
         // zero_hashes[i] = hash(zero_hashes[i-1], zero_hashes[i-1])
@@ -100,7 +109,7 @@ contract AckiNackiBridge {
     /// @param recipient Address to receive tokens
     /// @param amount Amount to withdraw
     /// @param root Merkle root
-    /// @param proof ZK proof (placeholder for now)
+    /// @param proof ZK proof
     function withdraw(
         bytes32 nullifier,
         address payable recipient,
@@ -110,15 +119,23 @@ contract AckiNackiBridge {
     ) external {
         // Check nullifier hasn't been used
         if (nullifiers[nullifier]) revert NullifierAlreadyUsed();
-        
+
         // Verify the root matches current tree root
         bytes32 currentRoot = getRoot();
         if (root != currentRoot) revert InvalidProof();
-        
-        // TODO: Verify ZK proof
-        // For now, we just check that proof is not empty
-        if (proof.length == 0) revert InvalidProof();
-        
+
+        // Prepare public inputs for the verifier
+        // Public inputs: [nullifier, recipient, amount, root]
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = uint256(nullifier);
+        publicInputs[1] = uint256(uint160(address(recipient)));
+        publicInputs[2] = amount;
+        publicInputs[3] = uint256(root);
+
+        // Verify ZK proof
+        bool isValid = verifier.verifyWithdrawalProof(proof, publicInputs);
+        if (!isValid) revert InvalidProof();
+
         // Check treasury has enough balance
         if (treasuryBalance < amount) revert InsufficientTreasury();
         

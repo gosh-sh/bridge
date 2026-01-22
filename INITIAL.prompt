@@ -90,3 +90,12 @@ Withdrawal:
 
 And, while write tests, consider youself as a separate agent from
 the code writer.
+
+Also don't forget to use the latest tools and best practices of the
+industry. For example, use Rust 2021 edition, not 2018. Use the latest
+version of the language. Use the latest version of the compiler. Use
+the latest version of the standard library. Use the latest version of
+the ecosystem tools.
+
+Also don't forget to update README.md and add thoroughful
+documentation for the code.

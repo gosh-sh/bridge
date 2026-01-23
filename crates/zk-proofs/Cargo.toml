@@ -13,6 +13,9 @@ merkle-tree = { path = "../merkle-tree" }
 halo2-base.workspace = true
 halo2-ecc.workspace = true
 
+# Poseidon hash
+pse-poseidon.workspace = true
+
 # Field arithmetic - using halo2curves for compatibility with crypto crate
 halo2curves-axiom.workspace = true
 ff.workspace = true
@@ -23,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 hex.workspace = true
+
 
 [dev-dependencies]
 proptest.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "verifier-generator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "generate-verifier"
+path = "src/main.rs"
+
+[dependencies]
+# Use axiom-crypto halo2 (same as main project)
+halo2-base.workspace = true
+snark-verifier-sdk.workspace = true
+snark-verifier.workspace = true
+
+rand.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

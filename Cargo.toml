@@ -6,6 +6,7 @@ members = [
     "crates/merkle-tree",
     "crates/zk-proofs",
     "crates/acki-nacki-interface",
+    "crates/verifier-generator",
 ]
 
 [workspace.package]
@@ -51,6 +52,18 @@ halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.5
     "halo2-axiom",
     "display",
 ] }
+# SNARK verifier with Solidity verifier generation (production-ready, audited)
+snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.2.3", default-features = false, features = [
+    "halo2-axiom",
+    "loader_evm",
+    "loader_halo2",
+] }
+snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.2.3", default-features = false, features = [
+    "halo2-axiom",
+    "loader_evm",
+    "loader_halo2",
+] }
+
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

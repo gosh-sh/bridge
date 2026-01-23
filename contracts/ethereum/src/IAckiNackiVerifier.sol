@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 /**
  * @title IAckiNackiVerifier
@@ -9,18 +9,21 @@ pragma solidity ^0.8.20;
 interface IAckiNackiVerifier {
     /**
      * @notice Verify a withdrawal proof
-     * @param proof The ZK proof bytes
-     * @param publicInputs Array of public inputs for the proof
-     * @return bool True if the proof is valid, false otherwise
+     * @param proof The ZK proof bytes (cryptographic proof data)
+     * @param publicInputs Array of public inputs/outputs for the proof
+     *                     Expected format: [nullifier, recipient, amount, root]
+     *                     Note: nullifier is a public OUTPUT computed inside the circuit from private inputs
+     * @return isValid True if the proof is valid, false otherwise
+     * @return nullifier The nullifier (public output from the circuit)
      */
     function verifyWithdrawalProof(
         bytes calldata proof,
         uint256[] calldata publicInputs
-    ) external view returns (bool);
+    ) external returns (bool isValid, bytes32 nullifier);
 
     /**
      * @notice Get the expected number of public inputs
-     * @return uint256 The number of public inputs expected by the verifier
+     * @return uint256 The number of public inputs expected by the verifier (4: nullifier, recipient, amount, root)
      */
     function getPublicInputsCount() external pure returns (uint256);
 }

@@ -9,6 +9,9 @@ variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo
   RUST_BACKTRACE: "1"
   FOUNDRY_PROFILE: ci
+  # Use CI_JOB_TOKEN for git operations
+  GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
+  CI_SERVER_TLS_CA_FILE: ""
 
 # Cache configuration
 .rust_cache: &rust_cache
@@ -36,10 +39,14 @@ default:
   image: rust:latest
   tags:
     - docker
+  variables:
+    GIT_STRATEGY: clone
   before_script:
+    # Configure git to use CI_JOB_TOKEN for GitLab authentication
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
     - rustc --version
     - cargo --version
-    - rustup component add rustfmt clippy
+    - rustup component add rustfmt В /etc/gitlab-runner/config.toml:clippy
 
 # Base job for Foundry
 .foundry_base:
@@ -48,7 +55,10 @@ default:
     - docker
   variables:
     FOUNDRY_DIR: "/root/.foundry"
+    GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
   before_script:
+    # Configure git to use CI_JOB_TOKEN for GitLab authentication
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
     # Install dependencies
     - apt-get update && apt-get install -y curl git nodejs npm
     # Install Foundry

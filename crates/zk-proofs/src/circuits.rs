@@ -1,102 +1,60 @@
 //! Circuit utilities and common gadgets for Halo2
 
 use halo2_proofs::{
-    circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
-    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Fixed, Instance},
-    poly::Rotation,
+    circuit::{AssignedCell, Layouter},
+    halo2curves::bn256::Fr,
+    plonk::Error,
 };
 use ff::PrimeField;
 
-/// Configuration for a simple hash circuit
-#[derive(Debug, Clone)]
-pub struct HashConfig {
-    /// Advice columns for inputs
-    pub advice: [Column<Advice>; 2],
-    /// Instance column for public inputs
-    pub instance: Column<Instance>,
-    /// Fixed column for selectors
-    pub selector: Column<Fixed>,
-}
+// Re-export Poseidon types from poseidon-circuit (scroll-tech)
+pub use poseidon_circuit::poseidon::{Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig};
+use poseidon_circuit::poseidon::Hash;
+use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3, P128Pow5T3Compact};
 
-/// Chip for Poseidon hash operations
+/// Type alias for Poseidon spec with T=3, RATE=2
+pub type P128Pow5T3Fr = P128Pow5T3<Fr>;
+
+/// Hash two field elements using Poseidon in-circuit
 ///
-/// Note: This is a simplified placeholder. In production, use halo2_gadgets::poseidon
-pub struct PoseidonChip<F: PrimeField> {
-    config: HashConfig,
-    _marker: std::marker::PhantomData<F>,
+/// This is the production implementation using scroll-tech/poseidon-circuit
+pub fn poseidon_hash_two(
+    config: PoseidonConfig<Fr, 3, 2>,
+    mut layouter: impl Layouter<Fr>,
+    a: AssignedCell<Fr, Fr>,
+    b: AssignedCell<Fr, Fr>,
+) -> Result<AssignedCell<Fr, Fr>, Error> {
+    let chip = PoseidonChip::construct(config);
+    let hasher = Hash::<_, _, P128Pow5T3<Fr>, ConstantLength<2>, 3, 2>::init(
+        chip,
+        layouter.namespace(|| "init poseidon hasher"),
+    )?;
+
+    hasher.hash(layouter.namespace(|| "hash two"), [a, b])
 }
 
-impl<F: PrimeField> PoseidonChip<F> {
-    /// Construct a new chip
-    pub fn construct(config: HashConfig) -> Self {
-        Self {
-            config,
-            _marker: std::marker::PhantomData,
-        }
-    }
+/// Hash a variable number of field elements using Poseidon in-circuit
+///
+/// Generic over the number of inputs L
+pub fn poseidon_hash_gadget<const L: usize>(
+    config: PoseidonConfig<Fr, 3, 2>,
+    mut layouter: impl Layouter<Fr>,
+    messages: [AssignedCell<Fr, Fr>; L],
+) -> Result<AssignedCell<Fr, Fr>, Error> {
+    let chip = PoseidonChip::construct(config);
+    let hasher = Hash::<_, _, P128Pow5T3<Fr>, ConstantLength<L>, 3, 2>::init(
+        chip,
+        layouter.namespace(|| "init poseidon hasher"),
+    )?;
 
-    /// Configure the chip
-    pub fn configure(
-        meta: &mut ConstraintSystem<F>,
-        advice: [Column<Advice>; 2],
-        instance: Column<Instance>,
-    ) -> HashConfig {
-        let selector = meta.fixed_column();
+    hasher.hash(layouter.namespace(|| "hash"), messages)
+}
 
-        // Enable equality constraints
-        meta.enable_equality(advice[0]);
-        meta.enable_equality(advice[1]);
-        meta.enable_equality(instance);
-
-        // Create a simple gate (placeholder for actual Poseidon)
-        meta.create_gate("poseidon_hash", |meta| {
-            let s = meta.query_fixed(selector, Rotation::cur());
-            let a = meta.query_advice(advice[0], Rotation::cur());
-            let b = meta.query_advice(advice[1], Rotation::cur());
-            let c = meta.query_advice(advice[0], Rotation::next());
-
-            // Simplified constraint: c = a + b (placeholder)
-            // In production, this would be the actual Poseidon permutation
-            vec![s * (a + b - c)]
-        });
-
-        HashConfig {
-            advice,
-            instance,
-            selector,
-        }
-    }
-
-    /// Hash two field elements (simplified)
-    pub fn hash_two(
-        &self,
-        mut layouter: impl Layouter<F>,
-        a: AssignedCell<F, F>,
-        b: AssignedCell<F, F>,
-    ) -> Result<AssignedCell<F, F>, Error> {
-        layouter.assign_region(
-            || "hash_two",
-            |mut region| {
-                // Enable selector
-                self.config.selector.enable(&mut region, 0)?;
-
-                // Copy inputs
-                a.copy_advice(|| "a", &mut region, self.config.advice[0], 0)?;
-                b.copy_advice(|| "b", &mut region, self.config.advice[1], 0)?;
-
-                // Compute hash (simplified: just add them)
-                let hash_value = a.value().copied() + b.value().copied();
-
-                // Assign output
-                region.assign_advice(
-                    || "hash",
-                    self.config.advice[0],
-                    1,
-                    || hash_value,
-                )
-            },
-        )
-    }
+/// Hash field elements using Poseidon (native, outside circuit)
+///
+/// This is used for computing expected values in tests and for witness generation
+pub fn poseidon_hash<const L: usize>(message: [Fr; L]) -> Fr {
+    PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<L>, 3, 2>::init().hash(message)
 }
 
 /// Utility to convert bytes to field element
@@ -134,6 +92,25 @@ mod tests {
         let bytes = field_to_bytes(&original);
         let recovered: Fr = bytes_to_field(&bytes);
         assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_poseidon_hash_native() {
+        // Test the native (outside-circuit) Poseidon hash
+        let a = Fr::from(12345u64);
+        let b = Fr::from(67890u64);
+
+        let hash = poseidon_hash([a, b]);
+
+        // The hash should be deterministic
+        let hash2 = poseidon_hash([a, b]);
+        assert_eq!(hash, hash2);
+
+        // Different inputs should produce different hashes
+        let hash3 = poseidon_hash([b, a]);
+        assert_ne!(hash, hash3);
+
+        println!("Poseidon([{:?}, {:?}]) = {:?}", a, b, hash);
     }
 }
 

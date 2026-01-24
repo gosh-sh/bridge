@@ -178,6 +178,7 @@ impl DepositProver {
 impl Circuit<Fr> for DepositCircuit {
     type Config = ();
     type FloorPlanner = SimpleFloorPlanner;
+    #[cfg(feature = "circuit-params")]
     type Params = ();
 
     fn without_witnesses(&self) -> Self {

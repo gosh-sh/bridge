@@ -74,3 +74,12 @@ db/
 keystore/
 secrets/
 
+# Generated verifier files (can be regenerated with `make generate-verifier`)
+contracts/ethereum/Halo2Verifier.yul
+contracts/ethereum/verifier_bytecode.bin
+contracts/ethereum/verifier_bytecode.hex
+params/withdrawal_pk.bin
+contracts/ethereum/test/test_proof.json
+
+# Temporary proof files generated during testing
+contracts/ethereum/proof_temp*.txt

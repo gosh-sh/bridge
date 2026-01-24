@@ -6,12 +6,13 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# Field arithmetic - using halo2curves for ff::PrimeField compatibility
-halo2curves-axiom.workspace = true
+# Halo2 - scroll-tech ecosystem for field arithmetic
+halo2_proofs.workspace = true
 ff.workspace = true
 
 # Poseidon hash
-pse-poseidon.workspace = true
+poseidon.workspace = true
+poseidon-base.workspace = true
 
 # Other crypto
 sha3.workspace = true

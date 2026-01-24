@@ -18,6 +18,7 @@ pub mod withdrawal;
 pub mod burn_proof;
 pub mod error;
 pub mod types;
+pub mod circuits;
 
 pub use deposit::{DepositProof, DepositProver, DepositVerifier};
 pub use withdrawal::{WithdrawalProof, WithdrawalProver, WithdrawalVerifier};

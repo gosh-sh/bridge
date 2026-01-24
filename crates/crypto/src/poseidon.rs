@@ -3,17 +3,16 @@
 //! Poseidon is a ZK-friendly hash function designed for use in zero-knowledge proofs.
 //! It's particularly efficient in arithmetic circuits.
 //!
-//! This implementation uses poseidon-primitives (same library used by halo2-base)
-//! for native Poseidon operations. The circuit implementation will use halo2-base's
-//! Poseidon chip.
+//! This implementation uses scroll-tech/poseidon for Solidity compatibility.
+//! The circuit implementation will use the same library for consistency.
 
 use crate::types::{FieldElement, Hash};
-use pse_poseidon::Poseidon;
+use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3Compact};
 
 /// Poseidon hasher for BN254 curve
 ///
-/// Uses poseidon-primitives for native (non-circuit) Poseidon hashing.
-/// This is the same library used internally by halo2-base.
+/// Uses scroll-tech/poseidon for Solidity compatibility.
+/// This ensures the same hash outputs as poseidon-solidity library.
 ///
 /// Uses P128Pow5T3 spec (Poseidon-128 with x^5 S-box, width 3, rate 2)
 pub struct PoseidonHasher {
@@ -30,18 +29,16 @@ impl PoseidonHasher {
 
     /// Hash a single field element using Poseidon
     pub fn hash_one(&mut self, input: &FieldElement) -> FieldElement {
-        // pse-poseidon uses generic PrimeField, which ark_bn254::Fr implements
-        let mut poseidon = Poseidon::<FieldElement, 3, 2>::new(8, 57);
-        poseidon.update(&[*input]);
-        poseidon.squeeze()
+        // Use scroll-tech/poseidon-circuit primitives
+        PoseidonHash::<FieldElement, P128Pow5T3Compact<FieldElement>, ConstantLength<1>, 3, 2>::init()
+            .hash([*input])
     }
 
     /// Hash two field elements using Poseidon
     pub fn hash_two(&mut self, left: &FieldElement, right: &FieldElement) -> FieldElement {
-        // pse-poseidon uses generic PrimeField, which ark_bn254::Fr implements
-        let mut poseidon = Poseidon::<FieldElement, 3, 2>::new(8, 57);
-        poseidon.update(&[*left, *right]);
-        poseidon.squeeze()
+        // Use scroll-tech/poseidon-circuit primitives
+        PoseidonHash::<FieldElement, P128Pow5T3Compact<FieldElement>, ConstantLength<2>, 3, 2>::init()
+            .hash([*left, *right])
     }
 
     /// Hash multiple field elements using Poseidon

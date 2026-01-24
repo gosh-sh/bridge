@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "./IAckiNackiVerifier.sol";
 import "poseidon-solidity/PoseidonT3.sol";
@@ -106,27 +106,27 @@ contract AckiNackiBridge {
     }
     
     /// @notice Withdraw tokens using ZK proof
-    /// @param nullifier Nullifier to prevent double-spending
     /// @param recipient Address to receive tokens
     /// @param amount Amount to withdraw
     /// @param root Merkle root
-    /// @param proof ZK proof
+    /// @param nullifier Nullifier (public output computed in circuit from private inputs)
+    /// @param proof ZK proof (cryptographic proof data)
+    /// @dev The ZK proof proves that the user knows private inputs (withdrawal_hash, nullifier_preimage)
+    ///      such that Poseidon(withdrawal_hash, nullifier_preimage) = nullifier
     function withdraw(
-        bytes32 nullifier,
         address payable recipient,
         uint256 amount,
         bytes32 root,
+        bytes32 nullifier,
         bytes calldata proof
     ) external {
-        // Check nullifier hasn't been used
-        if (nullifiers[nullifier]) revert NullifierAlreadyUsed();
-
         // Verify the root matches current tree root
         bytes32 currentRoot = getRoot();
         if (root != currentRoot) revert InvalidProof();
 
         // Prepare public inputs for the verifier
-        // Public inputs: [nullifier, recipient, amount, root]
+        // Public inputs/outputs: [nullifier, recipient, amount, root]
+        // Note: nullifier is a public OUTPUT computed inside the circuit from private inputs
         uint256[] memory publicInputs = new uint256[](4);
         publicInputs[0] = uint256(nullifier);
         publicInputs[1] = uint256(uint160(address(recipient)));
@@ -134,8 +134,15 @@ contract AckiNackiBridge {
         publicInputs[3] = uint256(root);
 
         // Verify ZK proof
-        bool isValid = verifier.verifyWithdrawalProof(proof, publicInputs);
+        // The proof proves the user knows private inputs that produce this nullifier
+        (bool isValid, bytes32 verifiedNullifier) = verifier.verifyWithdrawalProof(proof, publicInputs);
         if (!isValid) revert InvalidProof();
+
+        // Sanity check: verifier should return the same nullifier
+        require(verifiedNullifier == nullifier, "Nullifier mismatch");
+
+        // Check nullifier hasn't been used
+        if (nullifiers[nullifier]) revert NullifierAlreadyUsed();
 
         // Check treasury has enough balance
         if (treasuryBalance < amount) revert InsufficientTreasury();

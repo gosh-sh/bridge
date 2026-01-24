@@ -1,0 +1,39 @@
+[package]
+name = "verifier-generator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "generate-verifier"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate-proof"
+path = "src/proof_gen.rs"
+
+[[bin]]
+name = "test-poseidon"
+path = "src/test_poseidon.rs"
+
+[dependencies]
+# Use scroll-tech halo2 (same as main project)
+halo2_proofs.workspace = true
+halo2_gadgets.workspace = true
+halo2-base.workspace = true
+halo2-ecc.workspace = true
+
+# SNARK verifier for Solidity generation
+snark-verifier.workspace = true
+snark-verifier-sdk.workspace = true
+
+# Poseidon hash
+poseidon.workspace = true
+poseidon-circuit.workspace = true
+poseidon-base.workspace = true
+
+rand.workspace = true
+rand_chacha.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+itertools.workspace = true

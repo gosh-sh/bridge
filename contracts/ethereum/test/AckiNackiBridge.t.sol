@@ -98,7 +98,10 @@ contract AckiNackiBridgeTest is Test {
     }
 
     // Generate a real ZK proof using FFI to call Rust proof generator
-    // The circuit computes: nullifier = Poseidon(withdrawal_hash, nullifier_preimage)
+    // The circuit computes: nullifier = Poseidon_scroll(withdrawal_hash, nullifier_preimage)
+    // NOTE: The nullifier is computed INSIDE the circuit using scroll-tech/poseidon.
+    // We cannot recompute it in Solidity because poseidon-solidity uses different parameters.
+    // Instead, we read the nullifier that the circuit computed from the JSON output.
     function generateProof(
         uint256 withdrawalHash,
         uint256 nullifierPreimage,
@@ -106,7 +109,12 @@ contract AckiNackiBridgeTest is Test {
         uint256 amount,
         uint256 root
     ) internal returns (bytes memory, uint256) {
-        string memory proofFile = "./proof_temp.txt";
+        // Use unique filename based on hash of inputs to avoid race conditions
+        bytes32 uniqueId = keccak256(abi.encodePacked(withdrawalHash, nullifierPreimage, recipient, amount, root, block.timestamp, gasleft()));
+        string memory uniqueStr = vm.toString(uint256(uniqueId));
+        string memory proofFile = string(abi.encodePacked("./proof_temp_", uniqueStr, ".txt"));
+        string memory nullifierFile = string(abi.encodePacked("./proof_temp_", uniqueStr, "_nullifier.txt"));
+        string memory outputPath = string(abi.encodePacked("contracts/ethereum/proof_temp_", uniqueStr, ".txt"));
 
         // Generate proof and save to file
         string[] memory inputs = new string[](8);
@@ -117,7 +125,7 @@ contract AckiNackiBridgeTest is Test {
         inputs[4] = vm.toString(recipient);
         inputs[5] = vm.toString(amount);
         inputs[6] = vm.toString(bytes32(root));
-        inputs[7] = "contracts/ethereum/proof_temp.txt";
+        inputs[7] = outputPath;
 
         vm.ffi(inputs);
 
@@ -140,11 +148,13 @@ contract AckiNackiBridgeTest is Test {
             hexString = hexStringWithPrefix;
         }
 
-        // Compute expected nullifier using Poseidon
-        uint[2] memory poseidonInputs;
-        poseidonInputs[0] = withdrawalHash;
-        poseidonInputs[1] = nullifierPreimage;
-        uint256 nullifier = PoseidonT3.hash(poseidonInputs);
+        // Read the nullifier from the file (computed by the circuit using scroll-tech/poseidon)
+        string memory nullifierHex = vm.readLine(nullifierFile);
+        // Handle empty file case
+        if (bytes(nullifierHex).length == 0) {
+            revert("Failed to read nullifier from file");
+        }
+        uint256 nullifier = vm.parseUint(nullifierHex);
 
         // Convert hex string to actual bytes
         return (fromHex(hexString), nullifier);
@@ -305,7 +315,7 @@ contract AckiNackiBridgeTest is Test {
     }
     
     function testWithdrawalInsufficientTreasury() public {
-        // Make a small deposit
+        // Make a deposit
         bytes32 commitment = hashString("test_commitment");
         uint256 depositAmount = 1 ether;
 
@@ -315,20 +325,37 @@ contract AckiNackiBridgeTest is Test {
         // Get the Merkle root after deposit
         bytes32 root = bridge.getRoot();
 
-        // Generate real proof with private inputs
+        // Generate a VALID proof for 1 ether withdrawal
         uint256 withdrawalHash = 55555;
         uint256 nullifierPreimage = 66666;
         (bytes memory proof, uint256 nullifier) = generateProof(
             withdrawalHash,
             nullifierPreimage,
             uint256(uint160(user2)),
-            2 ether, // Trying to withdraw more than deposited
+            1 ether, // Generate valid proof for 1 ether
             uint256(root)
         );
 
-        // Try to withdraw more than deposited
+        // First withdrawal succeeds and empties the treasury
+        bridge.withdraw(payable(user2), 1 ether, root, bytes32(nullifier), proof);
+
+        // Now treasury is empty (0 ether)
+        assertEq(bridge.treasuryBalance(), 0);
+
+        // Try to withdraw again with a different proof (but treasury is empty)
+        uint256 withdrawalHash2 = 77777;
+        uint256 nullifierPreimage2 = 88888;
+        (bytes memory proof2, uint256 nullifier2) = generateProof(
+            withdrawalHash2,
+            nullifierPreimage2,
+            uint256(uint160(user2)),
+            1 ether,
+            uint256(root)
+        );
+
+        // This should fail with InsufficientTreasury because treasury is empty
         vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
-        bridge.withdraw(payable(user2), 2 ether, root, bytes32(nullifier), proof);
+        bridge.withdraw(payable(user2), 1 ether, root, bytes32(nullifier2), proof2);
     }
 
     function testWithdrawalEmptyProof() public {

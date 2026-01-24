@@ -263,9 +263,16 @@ fn main() {
     // Create circuit for keygen
     let circuit = WithdrawalCircuit::default();
 
-    // Generate proving key
-    println!("Generating proving key...");
-    let pk = gen_pk(&params, &circuit, None);
+    // Load proving key from file (generated during verifier generation)
+    println!("Loading proving key from params/withdrawal_pk.bin...");
+    use std::path::Path;
+    let pk_path = Path::new("params/withdrawal_pk.bin");
+    if !pk_path.exists() {
+        eprintln!("ERROR: Proving key not found at params/withdrawal_pk.bin");
+        eprintln!("Please run `make generate-verifier` first to generate the proving key.");
+        std::process::exit(1);
+    }
+    let pk = gen_pk(&params, &circuit, Some(pk_path));
 
     // Create circuit with witness values
     println!("Creating circuit with witness values...");

@@ -236,9 +236,10 @@ fn main() {
     // Create circuit for keygen
     let circuit = WithdrawalCircuit::default();
 
-    // Generate proving key
+    // Generate proving key and save it for later use
     println!("Generating proving key...");
-    let pk = gen_pk(&params, &circuit, None);
+    let pk_path = Path::new("params/withdrawal_pk.bin");
+    let pk = gen_pk(&params, &circuit, Some(pk_path));
 
     // Test the circuit with sample values
     println!("Testing circuit with sample values...");

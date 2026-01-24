@@ -3,6 +3,8 @@
 # This script is called by Forge tests via FFI
 #
 # Usage: ./generate_proof_to_file.sh <withdrawal_hash> <nullifier_preimage> <recipient> <amount> <root> <output_file>
+#
+# Note: Cleanup of temporary proof files is handled by the caller (Solidity tests use vm.removeFile())
 
 set -e
 

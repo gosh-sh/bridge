@@ -129,6 +129,35 @@ contract AckiNackiBridgeTest is Test {
 
         vm.ffi(inputs);
 
+        // Variables to store results
+        bytes memory proofBytes;
+        uint256 nullifier;
+        bool success = false;
+
+        // Try to read and process files, ensuring cleanup happens even on error
+        try this.readAndProcessProofFiles(proofFile, nullifierFile) returns (bytes memory _proof, uint256 _nullifier) {
+            proofBytes = _proof;
+            nullifier = _nullifier;
+            success = true;
+        } catch {
+            // Even on error, we'll clean up files below
+        }
+
+        // Always clean up temporary files, even if reading failed
+        try vm.removeFile(proofFile) {} catch {}
+        try vm.removeFile(nullifierFile) {} catch {}
+
+        // If reading failed, revert now after cleanup
+        require(success, "Failed to read proof files");
+
+        return (proofBytes, nullifier);
+    }
+
+    // External helper function for try-catch pattern
+    function readAndProcessProofFiles(
+        string memory proofFile,
+        string memory nullifierFile
+    ) external view returns (bytes memory, uint256) {
         // Read the proof from file
         string memory hexStringWithPrefix = vm.readLine(proofFile);
 
@@ -151,13 +180,13 @@ contract AckiNackiBridgeTest is Test {
         // Read the nullifier from the file (computed by the circuit using scroll-tech/poseidon)
         string memory nullifierHex = vm.readLine(nullifierFile);
         // Handle empty file case
-        if (bytes(nullifierHex).length == 0) {
-            revert("Failed to read nullifier from file");
-        }
+        require(bytes(nullifierHex).length > 0, "Failed to read nullifier from file");
         uint256 nullifier = vm.parseUint(nullifierHex);
 
         // Convert hex string to actual bytes
-        return (fromHex(hexString), nullifier);
+        bytes memory proofBytes = fromHex(hexString);
+
+        return (proofBytes, nullifier);
     }
     
     function testDeposit() public {

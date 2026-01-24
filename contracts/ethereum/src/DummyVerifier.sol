@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "./IAckiNackiVerifier.sol";
-import "./Halo2Verifier.sol";
+// import "./Halo2Verifier.sol";  // Halo2Verifier is deployed as raw bytecode
 import "poseidon-solidity/PoseidonT3.sol";
 
 /**
@@ -33,16 +33,16 @@ import "poseidon-solidity/PoseidonT3.sol";
  *      The Halo2 verifier performs BN254 pairing checks to verify the proof.
  */
 contract DummyVerifier is IAckiNackiVerifier {
-    // The real Halo2 verifier contract
-    Halo2Verifier public immutable halo2Verifier;
+    // The real Halo2 verifier contract (deployed as raw bytecode)
+    address public immutable halo2Verifier;
 
     // Expected number of public inputs for withdrawal proof
     // Public inputs/outputs: [nullifier, recipient, amount, root]
     // Note: nullifier is a public OUTPUT computed inside the circuit from private inputs
     uint256 private constant PUBLIC_INPUTS_COUNT = 4;
 
-    constructor() {
-        halo2Verifier = new Halo2Verifier();
+    constructor(address _halo2Verifier) {
+        halo2Verifier = _halo2Verifier;
     }
 
     /**
@@ -105,7 +105,7 @@ contract DummyVerifier is IAckiNackiVerifier {
 
         // Call the Halo2 verifier
         // The verifier will check that the proof is valid for the given public inputs
-        (bool success, ) = address(halo2Verifier).call(verifierCalldata);
+        (bool success, ) = halo2Verifier.call(verifierCalldata);
 
         if (!success) {
             return (false, bytes32(0));

@@ -5,7 +5,7 @@
 
 use halo2_base::halo2_proofs::{
     circuit::{Layouter, SimpleFloorPlanner, Value},
-    halo2curves::bn256::Fr,
+    halo2curves::{bn256::Fr, ff::PrimeField},
     plonk::{
         Advice, Circuit, Column,
         ConstraintSystem, Error, Instance, Selector,
@@ -15,7 +15,7 @@ use halo2_base::utils::fs::gen_srs;
 use snark_verifier_sdk::{
     gen_pk,
     gen_evm_verifier_shplonk,
-    gen_snark_shplonk,
+    gen_evm_proof_shplonk,
     CircuitExt,
 };
 use std::path::Path;
@@ -227,15 +227,23 @@ fn main() {
         root: Value::known(Fr::from(0x1234)),
     };
 
-    // Generate a SNARK proof
+    // Generate an EVM-compatible proof
     println!("Creating test proof...");
     let mut rng = ChaCha20Rng::from_entropy();
-    let snark = gen_snark_shplonk(&params, &pk, test_circuit.clone(), &mut rng, None::<&str>)
-        .expect("Failed to generate SNARK proof");
-    println!("✓ Test proof generated successfully!");
 
-    // Extract proof bytes for Solidity tests
-    let proof_bytes = snark.proof;
+    // Get the public inputs (instances) from the circuit
+    let instances = test_circuit.instances();
+
+    // Extract the public inputs for JSON output
+    let public_inputs = &instances[0];
+    let nullifier_field = public_inputs[0];
+    let recipient_field = public_inputs[1];
+    let amount_field = public_inputs[2];
+    let root_field = public_inputs[3];
+
+    // Generate EVM proof (this formats the proof correctly for Solidity verification)
+    let proof_bytes = gen_evm_proof_shplonk(&params, &pk, test_circuit.clone(), instances, &mut rng);
+    println!("✓ Test proof generated successfully!");
     println!("Proof size: {} bytes", proof_bytes.len());
     println!("Proof hex: 0x{}", hex::encode(&proof_bytes));
 
@@ -267,13 +275,26 @@ fn main() {
     println!();
 
     // Save proof data for Solidity tests
+    // Convert field elements to hex strings (32 bytes each)
+    // BN254 field elements are little-endian in Rust, but Solidity expects big-endian
+    let mut nullifier_bytes = nullifier_field.to_repr();
+    let mut recipient_bytes = recipient_field.to_repr();
+    let mut amount_bytes = amount_field.to_repr();
+    let mut root_bytes = root_field.to_repr();
+
+    // Reverse to big-endian for Solidity
+    nullifier_bytes.as_mut().reverse();
+    recipient_bytes.as_mut().reverse();
+    amount_bytes.as_mut().reverse();
+    root_bytes.as_mut().reverse();
+
     let proof_data = serde_json::json!({
         "proof": hex::encode(&proof_bytes),
         "publicInputs": [
-            format!("0x{:064x}", 12345u64),  // nullifier
-            format!("0x{:064x}", 0xabcdu64),  // recipient
-            format!("0x{:064x}", 1000u64),    // amount
-            format!("0x{:064x}", 0x1234u64),  // root
+            format!("0x{}", hex::encode(nullifier_bytes.as_ref())),  // nullifier (computed in circuit)
+            format!("0x{}", hex::encode(recipient_bytes.as_ref())),  // recipient
+            format!("0x{}", hex::encode(amount_bytes.as_ref())),     // amount
+            format!("0x{}", hex::encode(root_bytes.as_ref())),       // root
         ]
     });
 

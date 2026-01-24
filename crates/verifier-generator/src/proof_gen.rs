@@ -15,7 +15,7 @@ use halo2_base::halo2_proofs::{
 use halo2_base::utils::fs::gen_srs;
 use snark_verifier_sdk::{
     gen_pk,
-    gen_snark_shplonk,
+    gen_evm_proof_shplonk,
     CircuitExt,
 };
 use std::env;
@@ -207,10 +207,12 @@ fn main() {
     // Generate proof
     println!("Generating proof...");
     let mut rng = ChaCha20Rng::from_entropy();
-    let snark = gen_snark_shplonk(&params, &pk, test_circuit, &mut rng, None::<&str>)
-        .expect("Failed to generate SNARK proof");
 
-    let proof_bytes = snark.proof;
+    // Get the public inputs (instances) from the circuit
+    let instances = test_circuit.instances();
+
+    // Generate EVM proof (this formats the proof correctly for Solidity verification)
+    let proof_bytes = gen_evm_proof_shplonk(&params, &pk, test_circuit, instances, &mut rng);
     println!("✓ Proof generated successfully!");
     println!();
     println!("Proof size: {} bytes", proof_bytes.len());

@@ -1,5 +1,5 @@
 // Test Poseidon compatibility between scroll-tech/poseidon and poseidon-solidity
-use poseidon_bn254::Poseidon;
+use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3Compact};
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
@@ -8,10 +8,9 @@ fn main() {
     let input1 = Fr::from(12345u64);
     let input2 = Fr::from(67890u64);
 
-    // Compute hash using scroll-tech/poseidon
-    let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
-    poseidon.update(&[input1, input2]);
-    let hash = poseidon.squeeze();
+    // Compute hash using scroll-tech/poseidon with T=3, RATE=2
+    let hash = PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
+        .hash([input1, input2]);
 
     // Convert to hex string for display
     let hash_bytes = hash.to_repr();

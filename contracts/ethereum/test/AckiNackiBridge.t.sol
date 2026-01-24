@@ -40,8 +40,8 @@ contract AckiNackiBridgeTest is Test {
     );
 
     function setUp() public {
-        // Deploy verifier first
-        verifier = new DummyVerifier();
+        // Deploy verifier first (with dummy address for now - real verifier needs bytecode deployment)
+        verifier = new DummyVerifier(address(0x1234));
 
         // Deploy bridge with verifier address
         bridge = new AckiNackiBridge(address(verifier));

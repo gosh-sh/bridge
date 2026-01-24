@@ -41,6 +41,15 @@ build-solidity: ## Build only Solidity contracts
 	@echo "$(BLUE)Building Solidity contracts...$(NC)"
 	@cd contracts/ethereum && forge build
 
+generate-verifier: ## Generate Halo2 Yul verifier and compile to bytecode
+	@echo "$(BLUE)Generating Halo2 verifier...$(NC)"
+	@chmod +x scripts/regenerate_verifier.sh
+	@./scripts/regenerate_verifier.sh
+
+generate-proof: ## Generate a test proof
+	@echo "$(BLUE)Generating test proof...$(NC)"
+	@cargo run --bin generate-proof -- 12345 67890 43981 1000 4660
+
 test: ## Run all tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	@chmod +x test.sh

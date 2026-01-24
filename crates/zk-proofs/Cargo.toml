@@ -36,3 +36,8 @@ itertools.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.5"
+
+[features]
+# Enable circuit-params feature for halo2_proofs when needed
+# This is automatically enabled when snark-verifier-sdk is in the dependency tree
+circuit-params = ["halo2_proofs/circuit-params"]

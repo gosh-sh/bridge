@@ -12,10 +12,6 @@ name = "generate-proof"
 path = "src/proof_gen.rs"
 
 [[bin]]
-name = "generate-proof-new"
-path = "src/proof_gen_new.rs"
-
-[[bin]]
 name = "test-poseidon"
 path = "src/test_poseidon.rs"
 

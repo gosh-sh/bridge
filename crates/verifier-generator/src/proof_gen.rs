@@ -4,7 +4,7 @@
 //! to be used in Solidity tests.
 
 use halo2_base::halo2_proofs::{
-    circuit::{Layouter, SimpleFloorPlanner, Value},
+    circuit::{Layouter, SimpleFloorPlanner, Value, AssignedCell},
     halo2curves::bn256::Fr,
     halo2curves::ff::PrimeField,
     plonk::{
@@ -19,27 +19,27 @@ use snark_verifier_sdk::{
     CircuitExt,
 };
 use std::env;
-use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3Compact};
+use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3, P128Pow5T3Compact};
+use poseidon_circuit::poseidon::{Hash, Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig};
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 
 /// Withdrawal circuit configuration
 #[derive(Clone, Debug)]
 struct WithdrawalCircuitConfig {
-    advice: [Column<Advice>; 3],
+    advice: [Column<Advice>; 4],
     instance: Column<Instance>,
     selector: Selector,
+    poseidon_config: PoseidonConfig<Fr, 3, 2>,
 }
 
-/// Withdrawal circuit (same as in main.rs)
+/// Withdrawal circuit
 #[derive(Clone, Debug, Default)]
 struct WithdrawalCircuit {
-    withdrawal_hash: Value<Fr>,
-    nullifier_preimage: Value<Fr>,
-    merkle_proof: Vec<Value<Fr>>,
-    merkle_path_indices: Vec<Value<Fr>>,
-    recipient: Value<Fr>,
-    amount: Value<Fr>,
-    root: Value<Fr>,
+    withdrawal_hash: Option<Fr>,
+    nullifier_preimage: Option<Fr>,
+    recipient: Option<Fr>,
+    amount: Option<Fr>,
+    root: Option<Fr>,
 }
 
 impl CircuitExt<Fr> for WithdrawalCircuit {
@@ -48,23 +48,15 @@ impl CircuitExt<Fr> for WithdrawalCircuit {
     }
 
     fn instances(&self) -> Vec<Vec<Fr>> {
-        let mut nullifier = Fr::zero();
-        let mut recipient_val = Fr::zero();
-        let mut amount_val = Fr::zero();
-        let mut root_val = Fr::zero();
+        let nullifier = if let (Some(wh), Some(np)) = (self.withdrawal_hash, self.nullifier_preimage) {
+            PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init().hash([wh, np])
+        } else {
+            Fr::zero()
+        };
 
-        let withdrawal_hash_opt = self.withdrawal_hash.clone();
-        let nullifier_preimage_opt = self.nullifier_preimage.clone();
-
-        withdrawal_hash_opt.zip(nullifier_preimage_opt).map(|(wh, np)| {
-            // Use scroll-tech/poseidon with T=3, RATE=2
-            nullifier = PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
-                .hash([wh, np]);
-        });
-
-        self.recipient.map(|v| { recipient_val = v; });
-        self.amount.map(|v| { amount_val = v; });
-        self.root.map(|v| { root_val = v; });
+        let recipient_val = self.recipient.unwrap_or(Fr::zero());
+        let amount_val = self.amount.unwrap_or(Fr::zero());
+        let root_val = self.root.unwrap_or(Fr::zero());
 
         vec![vec![nullifier, recipient_val, amount_val, root_val]]
     }
@@ -80,7 +72,13 @@ impl Circuit<Fr> for WithdrawalCircuit {
     }
 
     fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
-        let advice = [meta.advice_column(), meta.advice_column(), meta.advice_column()];
+        // Need 4 advice columns: one for partial_sbox and 3 for state
+        let advice = [
+            meta.advice_column(),
+            meta.advice_column(),
+            meta.advice_column(),
+            meta.advice_column(),
+        ];
         let instance = meta.instance_column();
         let selector = meta.selector();
 
@@ -89,18 +87,35 @@ impl Circuit<Fr> for WithdrawalCircuit {
             meta.enable_equality(*col);
         }
 
-        meta.create_gate("poseidon_hash", |meta| {
-            let s = meta.query_selector(selector);
-            let a = meta.query_advice(advice[0], halo2_base::halo2_proofs::poly::Rotation::cur());
-            let b = meta.query_advice(advice[1], halo2_base::halo2_proofs::poly::Rotation::cur());
-            let c = meta.query_advice(advice[2], halo2_base::halo2_proofs::poly::Rotation::cur());
-            vec![s * (a + b - c)]
-        });
+        // Configure Poseidon - need to provide lagrange coefficients
+        let lagrange_coeffs = [
+            meta.fixed_column(),
+            meta.fixed_column(),
+            meta.fixed_column(),
+            meta.fixed_column(),
+            meta.fixed_column(),
+            meta.fixed_column(),
+        ];
+
+        // Enable constant columns for the fixed columns
+        for col in &lagrange_coeffs {
+            meta.enable_constant(*col);
+        }
+
+        // Use advice[1..4] for state and advice[0] for partial_sbox
+        let poseidon_config = PoseidonChip::configure::<P128Pow5T3<Fr>>(
+            meta,
+            advice[1..4].try_into().unwrap(),
+            advice[0],
+            lagrange_coeffs[0..3].try_into().unwrap(),
+            lagrange_coeffs[3..6].try_into().unwrap(),
+        );
 
         WithdrawalCircuitConfig {
             advice,
             instance,
             selector,
+            poseidon_config,
         }
     }
 
@@ -109,39 +124,99 @@ impl Circuit<Fr> for WithdrawalCircuit {
         config: Self::Config,
         mut layouter: impl Layouter<Fr>,
     ) -> Result<(), Error> {
-        // Compute nullifier = Poseidon(withdrawal_hash, nullifier_preimage)
-        let nullifier_value = self.withdrawal_hash.zip(self.nullifier_preimage).map(|(wh, np)| {
-            // Use scroll-tech/poseidon with T=3, RATE=2
-            PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
-                .hash([wh, np])
-        });
-
-        // Assign witness values and constrain them
-        let (_wh_cell, _np_cell, nullifier_cell, recipient_cell, amount_cell, root_cell) = layouter.assign_region(
-            || "withdrawal circuit",
+        // Load private inputs
+        let withdrawal_hash = layouter.assign_region(
+            || "load withdrawal_hash",
             |mut region| {
-                // Row 0: Assign private inputs
-                let wh_cell = region.assign_advice(|| "withdrawal_hash", config.advice[0], 0, || self.withdrawal_hash)?;
-                let np_cell = region.assign_advice(|| "nullifier_preimage", config.advice[1], 0, || self.nullifier_preimage)?;
-                let nullifier_cell = region.assign_advice(|| "nullifier", config.advice[2], 0, || nullifier_value)?;
-
-                // Row 1: Assign public inputs
-                let recipient_cell = region.assign_advice(|| "recipient", config.advice[0], 1, || self.recipient)?;
-                let amount_cell = region.assign_advice(|| "amount", config.advice[1], 1, || self.amount)?;
-                let root_cell = region.assign_advice(|| "root", config.advice[2], 1, || self.root)?;
-
-                Ok((wh_cell, np_cell, nullifier_cell, recipient_cell, amount_cell, root_cell))
+                region.assign_advice(
+                    || "withdrawal_hash",
+                    config.advice[0],
+                    0,
+                    || Value::known(self.withdrawal_hash.unwrap_or(Fr::zero())),
+                )
             },
         )?;
 
-        // Constrain public inputs/outputs to instance column
-        layouter.constrain_instance(nullifier_cell.cell(), config.instance, 0)?;
-        layouter.constrain_instance(recipient_cell.cell(), config.instance, 1)?;
-        layouter.constrain_instance(amount_cell.cell(), config.instance, 2)?;
-        layouter.constrain_instance(root_cell.cell(), config.instance, 3)?;
+        let nullifier_preimage = layouter.assign_region(
+            || "load nullifier_preimage",
+            |mut region| {
+                region.assign_advice(
+                    || "nullifier_preimage",
+                    config.advice[0],
+                    0,
+                    || Value::known(self.nullifier_preimage.unwrap_or(Fr::zero())),
+                )
+            },
+        )?;
+
+        // Compute nullifier = Poseidon(withdrawal_hash, nullifier_preimage) IN-CIRCUIT
+        let nullifier = poseidon_hash_gadget(
+            config.poseidon_config.clone(),
+            layouter.namespace(|| "compute nullifier"),
+            [withdrawal_hash, nullifier_preimage],
+        )?;
+
+        // Expose nullifier as public output
+        layouter.constrain_instance(nullifier.cell(), config.instance, 0)?;
+
+        // Load and expose recipient
+        let recipient = layouter.assign_region(
+            || "load recipient",
+            |mut region| {
+                region.assign_advice(
+                    || "recipient",
+                    config.advice[0],
+                    0,
+                    || Value::known(self.recipient.unwrap_or(Fr::zero())),
+                )
+            },
+        )?;
+        layouter.constrain_instance(recipient.cell(), config.instance, 1)?;
+
+        // Load and expose amount
+        let amount = layouter.assign_region(
+            || "load amount",
+            |mut region| {
+                region.assign_advice(
+                    || "amount",
+                    config.advice[0],
+                    0,
+                    || Value::known(self.amount.unwrap_or(Fr::zero())),
+                )
+            },
+        )?;
+        layouter.constrain_instance(amount.cell(), config.instance, 2)?;
+
+        // Load and expose root
+        let root = layouter.assign_region(
+            || "load root",
+            |mut region| {
+                region.assign_advice(
+                    || "root",
+                    config.advice[0],
+                    0,
+                    || Value::known(self.root.unwrap_or(Fr::zero())),
+                )
+            },
+        )?;
+        layouter.constrain_instance(root.cell(), config.instance, 3)?;
 
         Ok(())
     }
+}
+
+/// Poseidon hash gadget - computes hash in-circuit with proper constraints
+fn poseidon_hash_gadget<const L: usize>(
+    config: PoseidonConfig<Fr, 3, 2>,
+    mut layouter: impl Layouter<Fr>,
+    messages: [AssignedCell<Fr, Fr>; L],
+) -> Result<AssignedCell<Fr, Fr>, Error> {
+    let chip = PoseidonChip::construct(config);
+    let hasher = Hash::<_, _, P128Pow5T3<Fr>, ConstantLength<L>, 3, 2>::init(
+        chip,
+        layouter.namespace(|| "init poseidon hasher"),
+    )?;
+    hasher.hash(layouter.namespace(|| "hash"), messages)
 }
 
 fn main() {
@@ -195,13 +270,11 @@ fn main() {
     // Create circuit with witness values
     println!("Creating circuit with witness values...");
     let test_circuit = WithdrawalCircuit {
-        withdrawal_hash: Value::known(withdrawal_hash),
-        nullifier_preimage: Value::known(nullifier_preimage),
-        merkle_proof: vec![],
-        merkle_path_indices: vec![],
-        recipient: Value::known(recipient),
-        amount: Value::known(amount),
-        root: Value::known(root),
+        withdrawal_hash: Some(withdrawal_hash),
+        nullifier_preimage: Some(nullifier_preimage),
+        recipient: Some(recipient),
+        amount: Some(amount),
+        root: Some(root),
     };
 
     // Generate proof
@@ -210,6 +283,15 @@ fn main() {
 
     // Get the public inputs (instances) from the circuit
     let instances = test_circuit.instances();
+
+    // First verify the circuit is satisfied using MockProver
+    println!("Running MockProver to verify circuit constraints...");
+    use halo2_proofs::dev::MockProver;
+    MockProver::run(k, &test_circuit, instances.clone())
+        .expect("MockProver::run failed")
+        .assert_satisfied_par();
+    println!("✓ Circuit constraints satisfied!");
+    println!();
 
     // Generate EVM proof (this formats the proof correctly for Solidity verification)
     let proof_bytes = gen_evm_proof_shplonk(&params, &pk, test_circuit, instances, &mut rng);

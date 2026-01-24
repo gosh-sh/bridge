@@ -1,39 +1,110 @@
 #!/bin/bash
-# Regenerate Halo2Verifier.sol with correct circuit
+# Regenerate Halo2 Yul verifier and compile to bytecode
 
 set -e
 
-echo "Removing old verifier..."
-rm -f contracts/ethereum/src/Halo2Verifier.sol
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-echo "Setting up fake solc..."
-# Backup real solc if it exists
-if [ -f "/usr/bin/solc" ]; then
-    sudo mv /usr/bin/solc /usr/bin/solc.bak
-fi
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
 
-# Install fake solc
-sudo cp scripts/fake_solc.sh /usr/bin/solc
-sudo chmod +x /usr/bin/solc
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-echo "Generating new verifier..."
-cargo run --bin generate-verifier
+print_step() {
+    echo -e "${BLUE}[STEP]${NC} $1"
+}
 
-# Restore real solc
-echo "Restoring real solc..."
-sudo rm /usr/bin/solc
-if [ -f "/usr/bin/solc.bak" ]; then
-    sudo mv /usr/bin/solc.bak /usr/bin/solc
-fi
+echo "=== Halo2 Verifier Generation ==="
+echo ""
 
-# Check if file was created
-if [ -f "contracts/ethereum/src/Halo2Verifier.sol" ]; then
-    echo "✓ Verifier generated successfully!"
-    # Fix pragma
-    sed -i 's/pragma solidity \^0\.8\.19;/pragma solidity 0.8.19;/g' contracts/ethereum/src/Halo2Verifier.sol
-    echo "✓ Pragma fixed to 0.8.19"
-else
-    echo "✗ Verifier generation failed"
+# Check for solc
+if ! command -v solc &> /dev/null; then
+    print_error "solc not found! Please install Solidity compiler."
+    echo "Install with: sudo apt-get install solc"
     exit 1
 fi
+
+print_info "Using solc version: $(solc --version | grep Version | head -n 1)"
+
+# Remove old verifier files
+print_step "Removing old verifier files..."
+rm -f contracts/ethereum/Halo2Verifier.yul
+rm -f contracts/ethereum/verifier_bytecode.bin
+rm -f contracts/ethereum/verifier_bytecode.hex
+print_info "Old files removed"
+
+# Generate new Yul verifier
+print_step "Generating Yul verifier..."
+cargo run --bin generate-verifier
+
+# Check if Yul file was created
+if [ ! -f "contracts/ethereum/Halo2Verifier.yul" ]; then
+    print_error "Verifier generation failed - Halo2Verifier.yul not found"
+    exit 1
+fi
+print_info "Yul verifier generated successfully"
+
+# Compile Yul to bytecode
+print_step "Compiling Yul to bytecode..."
+cd contracts/ethereum
+
+# Extract binary representation and save as hex
+solc --yul --bin Halo2Verifier.yul 2>&1 | grep "Binary representation" -A 1 | tail -1 > verifier_bytecode.hex
+
+# Check if hex file was created and has content
+if [ ! -s "verifier_bytecode.hex" ]; then
+    print_error "Bytecode compilation failed - verifier_bytecode.hex is empty or missing"
+    cd ../..
+    exit 1
+fi
+
+# Convert hex to binary
+cat verifier_bytecode.hex | xxd -r -p > verifier_bytecode.bin
+
+# Check if binary file was created
+if [ ! -s "verifier_bytecode.bin" ]; then
+    print_error "Binary conversion failed - verifier_bytecode.bin is empty or missing"
+    cd ../..
+    exit 1
+fi
+
+cd ../..
+
+# Get file sizes
+YUL_SIZE=$(wc -c < contracts/ethereum/Halo2Verifier.yul)
+BIN_SIZE=$(wc -c < contracts/ethereum/verifier_bytecode.bin)
+HEX_SIZE=$(wc -c < contracts/ethereum/verifier_bytecode.hex)
+
+# Ethereum contract size limit is 24576 bytes (24KB)
+MAX_SIZE=24576
+
+echo ""
+echo "========================================="
+print_info "Verifier generation completed successfully!"
+echo "========================================="
+echo ""
+echo "Generated files:"
+echo "  - contracts/ethereum/Halo2Verifier.yul"
+echo "  - contracts/ethereum/verifier_bytecode.hex (${HEX_SIZE} bytes)"
+echo "  - contracts/ethereum/verifier_bytecode.bin (${BIN_SIZE} bytes)"
+echo ""
+
+if [ $BIN_SIZE -gt $MAX_SIZE ]; then
+    print_error "WARNING: Bytecode size (${BIN_SIZE} bytes) exceeds Ethereum limit (${MAX_SIZE} bytes)!"
+    echo "The contract is too large to deploy on Ethereum."
+    exit 1
+else
+    REMAINING=$((MAX_SIZE - BIN_SIZE))
+    print_info "Bytecode size: ${BIN_SIZE} bytes (${REMAINING} bytes under Ethereum 24KB limit)"
+fi
+
+echo ""
 

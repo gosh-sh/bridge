@@ -81,6 +81,23 @@ Build with all checks (format, clippy, tests):
 ./build.sh --all
 ```
 
+### Generating the Verifier
+
+The Halo2 verifier is a generated Yul contract that must be regenerated whenever the circuit changes:
+
+```bash
+make generate-verifier
+```
+
+This generates:
+- `contracts/ethereum/Halo2Verifier.yul` - Yul verifier source
+- `contracts/ethereum/verifier_bytecode.bin` - Deployable bytecode
+- `contracts/ethereum/verifier_bytecode.hex` - Hex-encoded bytecode
+
+**Note**: These files are build artifacts (excluded from git) and can be regenerated at any time.
+
+For more details, see `docs/VERIFIER_GENERATION.md`.
+
 ### Testing
 
 #### Unit Tests

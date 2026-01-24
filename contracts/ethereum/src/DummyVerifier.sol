@@ -72,6 +72,13 @@ contract DummyVerifier is IAckiNackiVerifier {
         bytes calldata proof,
         uint256[] calldata publicInputs
     ) external override returns (bool isValid, bytes32 nullifier) {
+        // Validate proof is not empty
+        // Halo2 proofs are typically 2272 bytes, but we allow some flexibility
+        // Minimum reasonable proof size is at least 100 bytes
+        if (proof.length == 0 || proof.length < 100) {
+            return (false, bytes32(0));
+        }
+
         // Validate public inputs count
         if (publicInputs.length != PUBLIC_INPUTS_COUNT) {
             return (false, bytes32(0));

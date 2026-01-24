@@ -40,8 +40,16 @@ contract AckiNackiBridgeTest is Test {
     );
 
     function setUp() public {
-        // Deploy verifier first (with dummy address for now - real verifier needs bytecode deployment)
-        verifier = new DummyVerifier(address(0x1234));
+        // Deploy the real Halo2 verifier from bytecode
+        bytes memory bytecode = vm.readFileBinary("verifier_bytecode.bin");
+        address halo2VerifierAddr;
+        assembly {
+            halo2VerifierAddr := create(0, add(bytecode, 0x20), mload(bytecode))
+        }
+        require(halo2VerifierAddr != address(0), "Failed to deploy Halo2 verifier");
+
+        // Deploy DummyVerifier wrapper with the real Halo2 verifier
+        verifier = new DummyVerifier(halo2VerifierAddr);
 
         // Deploy bridge with verifier address
         bridge = new AckiNackiBridge(address(verifier));

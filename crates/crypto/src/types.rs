@@ -1,12 +1,12 @@
 //! Core cryptographic types for the bridge
 
-use halo2curves_axiom::bn256::Fr;
+use halo2_proofs::halo2curves::bn256::Fr;
 use ff::{FromUniformBytes, PrimeField};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Field element used throughout the system (BN254 scalar field)
-/// Using halo2curves-axiom which implements ff::PrimeField (required for Poseidon)
+/// Using scroll-tech/halo2 which implements ff::PrimeField (required for Poseidon)
 pub type FieldElement = Fr;
 
 /// Hash output (32 bytes)

@@ -9,15 +9,18 @@ license.workspace = true
 crypto = { path = "../crypto" }
 merkle-tree = { path = "../merkle-tree" }
 
-# Halo2-lib for simpler API
+# Halo2 - scroll-tech ecosystem
+halo2_proofs.workspace = true
+halo2_gadgets.workspace = true
 halo2-base.workspace = true
 halo2-ecc.workspace = true
 
 # Poseidon hash
-pse-poseidon.workspace = true
+poseidon.workspace = true
+poseidon-circuit.workspace = true
+poseidon-base.workspace = true
 
-# Field arithmetic - using halo2curves for compatibility with crypto crate
-halo2curves-axiom.workspace = true
+# Field arithmetic
 ff.workspace = true
 
 # Utilities
@@ -25,7 +28,9 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
+rand_chacha.workspace = true
 hex.workspace = true
+itertools.workspace = true
 
 
 [dev-dependencies]

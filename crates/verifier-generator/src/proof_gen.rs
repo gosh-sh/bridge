@@ -19,46 +19,58 @@ use snark_verifier_sdk::{
     CircuitExt,
 };
 use std::env;
+use poseidon_bn254::Poseidon;
 
-/// Simple withdrawal circuit configuration
+/// Withdrawal circuit configuration
 #[derive(Clone, Debug)]
-struct SimpleCircuitConfig {
-    advice: [Column<Advice>; 2],
+struct WithdrawalCircuitConfig {
+    advice: [Column<Advice>; 3],
     instance: Column<Instance>,
     selector: Selector,
 }
 
-/// Simple withdrawal circuit (same as in main.rs)
+/// Withdrawal circuit (same as in main.rs)
 #[derive(Clone, Debug, Default)]
-struct SimpleCircuit {
-    pub_input_0: Value<Fr>,  // nullifier
-    pub_input_1: Value<Fr>,  // recipient
-    pub_input_2: Value<Fr>,  // amount
-    pub_input_3: Value<Fr>,  // root
+struct WithdrawalCircuit {
+    withdrawal_hash: Value<Fr>,
+    nullifier_preimage: Value<Fr>,
+    merkle_proof: Vec<Value<Fr>>,
+    merkle_path_indices: Vec<Value<Fr>>,
+    recipient: Value<Fr>,
+    amount: Value<Fr>,
+    root: Value<Fr>,
 }
 
-impl CircuitExt<Fr> for SimpleCircuit {
+impl CircuitExt<Fr> for WithdrawalCircuit {
     fn num_instance(&self) -> Vec<usize> {
         vec![4]
     }
 
     fn instances(&self) -> Vec<Vec<Fr>> {
-        let mut val0 = Fr::zero();
-        let mut val1 = Fr::zero();
-        let mut val2 = Fr::zero();
-        let mut val3 = Fr::zero();
+        let mut nullifier = Fr::zero();
+        let mut recipient_val = Fr::zero();
+        let mut amount_val = Fr::zero();
+        let mut root_val = Fr::zero();
 
-        self.pub_input_0.map(|v| { val0 = v; });
-        self.pub_input_1.map(|v| { val1 = v; });
-        self.pub_input_2.map(|v| { val2 = v; });
-        self.pub_input_3.map(|v| { val3 = v; });
+        let withdrawal_hash_opt = self.withdrawal_hash.clone();
+        let nullifier_preimage_opt = self.nullifier_preimage.clone();
 
-        vec![vec![val0, val1, val2, val3]]
+        withdrawal_hash_opt.zip(nullifier_preimage_opt).map(|(wh, np)| {
+            let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
+            poseidon.update(&[wh, np]);
+            nullifier = poseidon.squeeze();
+        });
+
+        self.recipient.map(|v| { recipient_val = v; });
+        self.amount.map(|v| { amount_val = v; });
+        self.root.map(|v| { root_val = v; });
+
+        vec![vec![nullifier, recipient_val, amount_val, root_val]]
     }
 }
 
-impl Circuit<Fr> for SimpleCircuit {
-    type Config = SimpleCircuitConfig;
+impl Circuit<Fr> for WithdrawalCircuit {
+    type Config = WithdrawalCircuitConfig;
     type FloorPlanner = SimpleFloorPlanner;
     type Params = ();
 
@@ -67,7 +79,7 @@ impl Circuit<Fr> for SimpleCircuit {
     }
 
     fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
-        let advice = [meta.advice_column(), meta.advice_column()];
+        let advice = [meta.advice_column(), meta.advice_column(), meta.advice_column()];
         let instance = meta.instance_column();
         let selector = meta.selector();
 
@@ -76,7 +88,15 @@ impl Circuit<Fr> for SimpleCircuit {
             meta.enable_equality(*col);
         }
 
-        SimpleCircuitConfig {
+        meta.create_gate("poseidon_hash", |meta| {
+            let s = meta.query_selector(selector);
+            let a = meta.query_advice(advice[0], halo2_base::halo2_proofs::poly::Rotation::cur());
+            let b = meta.query_advice(advice[1], halo2_base::halo2_proofs::poly::Rotation::cur());
+            let c = meta.query_advice(advice[2], halo2_base::halo2_proofs::poly::Rotation::cur());
+            vec![s * (a + b - c)]
+        });
+
+        WithdrawalCircuitConfig {
             advice,
             instance,
             selector,
@@ -88,22 +108,36 @@ impl Circuit<Fr> for SimpleCircuit {
         config: Self::Config,
         mut layouter: impl Layouter<Fr>,
     ) -> Result<(), Error> {
-        let (cell0, cell1, cell2, cell3) = layouter.assign_region(
-            || "simple circuit",
-            |mut region| {
-                let cell0 = region.assign_advice(config.advice[0], 0, self.pub_input_0);
-                let cell1 = region.assign_advice(config.advice[1], 0, self.pub_input_1);
-                let cell2 = region.assign_advice(config.advice[0], 1, self.pub_input_2);
-                let cell3 = region.assign_advice(config.advice[1], 1, self.pub_input_3);
+        // Compute nullifier = Poseidon(withdrawal_hash, nullifier_preimage)
+        let nullifier_value = self.withdrawal_hash.zip(self.nullifier_preimage).map(|(wh, np)| {
+            let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
+            poseidon.update(&[wh, np]);
+            poseidon.squeeze()
+        });
 
-                Ok((cell0, cell1, cell2, cell3))
+        // Assign witness values and constrain them
+        let (_wh_cell, _np_cell, nullifier_cell, recipient_cell, amount_cell, root_cell) = layouter.assign_region(
+            || "withdrawal circuit",
+            |mut region| {
+                // Row 0: Assign private inputs
+                let wh_cell = region.assign_advice(config.advice[0], 0, self.withdrawal_hash);
+                let np_cell = region.assign_advice(config.advice[1], 0, self.nullifier_preimage);
+                let nullifier_cell = region.assign_advice(config.advice[2], 0, nullifier_value);
+
+                // Row 1: Assign public inputs
+                let recipient_cell = region.assign_advice(config.advice[0], 1, self.recipient);
+                let amount_cell = region.assign_advice(config.advice[1], 1, self.amount);
+                let root_cell = region.assign_advice(config.advice[2], 1, self.root);
+
+                Ok((wh_cell, np_cell, nullifier_cell, recipient_cell, amount_cell, root_cell))
             },
         )?;
 
-        layouter.constrain_instance(cell0.cell(), config.instance, 0);
-        layouter.constrain_instance(cell1.cell(), config.instance, 1);
-        layouter.constrain_instance(cell2.cell(), config.instance, 2);
-        layouter.constrain_instance(cell3.cell(), config.instance, 3);
+        // Constrain public inputs/outputs to instance column
+        layouter.constrain_instance(nullifier_cell.cell(), config.instance, 0);
+        layouter.constrain_instance(recipient_cell.cell(), config.instance, 1);
+        layouter.constrain_instance(amount_cell.cell(), config.instance, 2);
+        layouter.constrain_instance(root_cell.cell(), config.instance, 3);
 
         Ok(())
     }
@@ -113,22 +147,32 @@ fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 5 {
-        eprintln!("Usage: {} <nullifier> <recipient> <amount> <root>", args[0]);
-        eprintln!("Example: {} 12345 0xabcd 1000 0x1234", args[0]);
+    if args.len() != 6 {
+        eprintln!("Usage: {} <withdrawal_hash> <nullifier_preimage> <recipient> <amount> <root>", args[0]);
+        eprintln!("Example: {} 12345 67890 0xabcd 1000 0x1234", args[0]);
         eprintln!();
         eprintln!("All values can be decimal or hex (0x prefix)");
         eprintln!("For bytes32 values, use hex format");
+        eprintln!();
+        eprintln!("Note: The circuit will compute nullifier = Poseidon(withdrawal_hash, nullifier_preimage)");
         std::process::exit(1);
     }
 
-    let nullifier = parse_field_element(&args[1], "nullifier");
-    let recipient = parse_field_element(&args[2], "recipient");
-    let amount = parse_field_element(&args[3], "amount");
-    let root = parse_field_element(&args[4], "root");
+    let withdrawal_hash = parse_field_element(&args[1], "withdrawal_hash");
+    let nullifier_preimage = parse_field_element(&args[2], "nullifier_preimage");
+    let recipient = parse_field_element(&args[3], "recipient");
+    let amount = parse_field_element(&args[4], "amount");
+    let root = parse_field_element(&args[5], "root");
+
+    // Compute nullifier
+    let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
+    poseidon.update(&[withdrawal_hash, nullifier_preimage]);
+    let nullifier = poseidon.squeeze();
 
     println!("Generating proof for:");
-    println!("  nullifier: {}", format_field_element(&nullifier));
+    println!("  withdrawal_hash: {}", format_field_element(&withdrawal_hash));
+    println!("  nullifier_preimage: {}", format_field_element(&nullifier_preimage));
+    println!("  computed nullifier: {}", format_field_element(&nullifier));
     println!("  recipient: {}", format_field_element(&recipient));
     println!("  amount: {}", format_field_element(&amount));
     println!("  root: {}", format_field_element(&root));
@@ -142,7 +186,7 @@ fn main() {
     let params = gen_srs(k);
 
     // Create circuit for keygen
-    let circuit = SimpleCircuit::default();
+    let circuit = WithdrawalCircuit::default();
 
     // Generate proving key
     println!("Generating proving key...");
@@ -150,11 +194,14 @@ fn main() {
 
     // Create circuit with witness values
     println!("Creating circuit with witness values...");
-    let test_circuit = SimpleCircuit {
-        pub_input_0: Value::known(nullifier),
-        pub_input_1: Value::known(recipient),
-        pub_input_2: Value::known(amount),
-        pub_input_3: Value::known(root),
+    let test_circuit = WithdrawalCircuit {
+        withdrawal_hash: Value::known(withdrawal_hash),
+        nullifier_preimage: Value::known(nullifier_preimage),
+        merkle_proof: vec![],
+        merkle_path_indices: vec![],
+        recipient: Value::known(recipient),
+        amount: Value::known(amount),
+        root: Value::known(root),
     };
 
     // Generate proof

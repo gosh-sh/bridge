@@ -90,23 +90,26 @@ contract AckiNackiBridgeTest is Test {
     }
 
     // Generate a real ZK proof using FFI to call Rust proof generator
+    // The circuit computes: nullifier = Poseidon(withdrawal_hash, nullifier_preimage)
     function generateProof(
-        uint256 nullifier,
+        uint256 withdrawalHash,
+        uint256 nullifierPreimage,
         uint256 recipient,
         uint256 amount,
         uint256 root
-    ) internal returns (bytes memory) {
+    ) internal returns (bytes memory, uint256) {
         string memory proofFile = "./proof_temp.txt";
 
         // Generate proof and save to file
-        string[] memory inputs = new string[](7);
+        string[] memory inputs = new string[](8);
         inputs[0] = "bash";
         inputs[1] = "../../scripts/generate_proof_to_file.sh";
-        inputs[2] = vm.toString(nullifier);
-        inputs[3] = vm.toString(recipient);
-        inputs[4] = vm.toString(amount);
-        inputs[5] = vm.toString(bytes32(root));
-        inputs[6] = "contracts/ethereum/proof_temp.txt";
+        inputs[2] = vm.toString(withdrawalHash);
+        inputs[3] = vm.toString(nullifierPreimage);
+        inputs[4] = vm.toString(recipient);
+        inputs[5] = vm.toString(amount);
+        inputs[6] = vm.toString(bytes32(root));
+        inputs[7] = "contracts/ethereum/proof_temp.txt";
 
         vm.ffi(inputs);
 
@@ -129,8 +132,14 @@ contract AckiNackiBridgeTest is Test {
             hexString = hexStringWithPrefix;
         }
 
+        // Compute expected nullifier using Poseidon
+        uint[2] memory poseidonInputs;
+        poseidonInputs[0] = withdrawalHash;
+        poseidonInputs[1] = nullifierPreimage;
+        uint256 nullifier = PoseidonT3.hash(poseidonInputs);
+
         // Convert hex string to actual bytes
-        return fromHex(hexString);
+        return (fromHex(hexString), nullifier);
     }
     
     function testDeposit() public {
@@ -217,14 +226,24 @@ contract AckiNackiBridgeTest is Test {
         vm.prank(user1);
         bridge.deposit{value: depositAmount}(commitment, depositAmount);
 
-        // Create valid proof
-        (bytes memory proof, bytes32 nullifier) = createValidProof();
+        // Get the Merkle root after deposit
         bytes32 root = bridge.getRoot();
+
+        // Generate real proof with private inputs
+        uint256 withdrawalHash = 11111;
+        uint256 nullifierPreimage = 22222;
+        (bytes memory proof, uint256 nullifier) = generateProof(
+            withdrawalHash,
+            nullifierPreimage,
+            uint256(uint160(user2)),
+            depositAmount,
+            uint256(root)
+        );
 
         uint256 balanceBefore = user2.balance;
 
         // The nullifier is a public output computed from private inputs
-        bridge.withdraw(payable(user2), depositAmount, root, nullifier, proof);
+        bridge.withdraw(payable(user2), depositAmount, root, bytes32(nullifier), proof);
 
         // Verify state
         assertEq(user2.balance, balanceBefore + depositAmount);
@@ -239,15 +258,26 @@ contract AckiNackiBridgeTest is Test {
         vm.prank(user1);
         bridge.deposit{value: amount}(commitment, amount);
 
-        // First withdrawal
-        (bytes memory proof, bytes32 nullifier) = createValidProof();
+        // Get the Merkle root after deposit
         bytes32 root = bridge.getRoot();
 
-        bridge.withdraw(payable(user2), amount, root, nullifier, proof);
+        // Generate real proof with private inputs
+        uint256 withdrawalHash = 33333;
+        uint256 nullifierPreimage = 44444;
+        (bytes memory proof, uint256 nullifier) = generateProof(
+            withdrawalHash,
+            nullifierPreimage,
+            uint256(uint160(user2)),
+            amount,
+            uint256(root)
+        );
+
+        // First withdrawal
+        bridge.withdraw(payable(user2), amount, root, bytes32(nullifier), proof);
 
         // Try to use same proof again (same nullifier will be used)
         vm.expectRevert(AckiNackiBridge.NullifierAlreadyUsed.selector);
-        bridge.withdraw(payable(user2), amount, root, nullifier, proof);
+        bridge.withdraw(payable(user2), amount, root, bytes32(nullifier), proof);
     }
 
     function testWithdrawalInvalidRoot() public {
@@ -274,12 +304,23 @@ contract AckiNackiBridgeTest is Test {
         vm.prank(user1);
         bridge.deposit{value: depositAmount}(commitment, depositAmount);
 
-        // Try to withdraw more than deposited
-        (bytes memory proof, bytes32 nullifier) = createValidProof();
+        // Get the Merkle root after deposit
         bytes32 root = bridge.getRoot();
 
+        // Generate real proof with private inputs
+        uint256 withdrawalHash = 55555;
+        uint256 nullifierPreimage = 66666;
+        (bytes memory proof, uint256 nullifier) = generateProof(
+            withdrawalHash,
+            nullifierPreimage,
+            uint256(uint160(user2)),
+            2 ether, // Trying to withdraw more than deposited
+            uint256(root)
+        );
+
+        // Try to withdraw more than deposited
         vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
-        bridge.withdraw(payable(user2), 2 ether, root, nullifier, proof);
+        bridge.withdraw(payable(user2), 2 ether, root, bytes32(nullifier), proof);
     }
 
     function testWithdrawalEmptyProof() public {
@@ -406,71 +447,126 @@ contract AckiNackiBridgeTest is Test {
     }
 
     function testVerifierAcceptsValidProof() public {
+        // Make a deposit first to have a valid root
+        bytes32 commitment = hashString("test_commitment_verifier");
+        vm.prank(user1);
+        bridge.deposit{value: 1 ether}(commitment, 1 ether);
+
         // User knows private inputs (never revealed)
-        bytes32 withdrawal_hash = bytes32(uint256(0x1234));
-        bytes32 nullifier_preimage = bytes32(uint256(0x5678));
+        uint256 withdrawalHash = 0x1234;
+        uint256 nullifierPreimage = 0x5678;
 
-        // Compute nullifier (public output)
-        bytes32 nullifier = bridge.hashPair(withdrawal_hash, nullifier_preimage);
+        // Get current root
+        bytes32 root = bridge.getRoot();
 
-        // Build proof: cryptographic proof data (placeholder)
-        bytes memory proof = abi.encodePacked(
-            bytes32(uint256(0xaaaa)),
-            bytes32(uint256(0xbbbb))
+        // Generate real proof
+        (bytes memory proof, uint256 nullifier) = generateProof(
+            withdrawalHash,
+            nullifierPreimage,
+            uint256(uint160(user2)),
+            1 ether,
+            uint256(root)
         );
 
         // Public inputs/outputs: [nullifier, recipient, amount, root]
         uint256[] memory publicInputs = new uint256[](4);
-        publicInputs[0] = uint256(nullifier); // public output
+        publicInputs[0] = nullifier; // public output
         publicInputs[1] = uint256(uint160(user2)); // recipient
         publicInputs[2] = 1 ether; // amount
-        publicInputs[3] = uint256(bridge.getRoot()); // root
+        publicInputs[3] = uint256(root); // root
 
         // Verify proof
         (bool isValid, bytes32 returnedNullifier) = verifier.verifyWithdrawalProof(proof, publicInputs);
         assertTrue(isValid);
 
         // Verify nullifier is returned correctly
-        assertEq(returnedNullifier, nullifier);
+        assertEq(uint256(returnedNullifier), nullifier);
     }
 
     function testVerifierComputesNullifierCorrectly() public {
+        // Make a deposit first to have a valid root
+        bytes32 commitment = hashString("test_commitment_nullifier");
+        vm.prank(user1);
+        bridge.deposit{value: 1 ether}(commitment, 1 ether);
+
+        // Get current root
+        bytes32 root = bridge.getRoot();
+
         // User knows different private inputs
-        bytes32 withdrawal_hash1 = bytes32(uint256(0x1111));
-        bytes32 nullifier_preimage1 = bytes32(uint256(0x2222));
+        uint256 withdrawalHash1 = 0x1111;
+        uint256 nullifierPreimage1 = 0x2222;
 
-        bytes32 withdrawal_hash2 = bytes32(uint256(0x3333));
-        bytes32 nullifier_preimage2 = bytes32(uint256(0x4444));
+        uint256 withdrawalHash2 = 0x3333;
+        uint256 nullifierPreimage2 = 0x4444;
 
-        // Compute different nullifiers (public outputs)
-        bytes32 nullifier1 = bridge.hashPair(withdrawal_hash1, nullifier_preimage1);
-        bytes32 nullifier2 = bridge.hashPair(withdrawal_hash2, nullifier_preimage2);
+        // Generate real proofs
+        (bytes memory proof1, uint256 nullifier1) = generateProof(
+            withdrawalHash1,
+            nullifierPreimage1,
+            uint256(uint160(user2)),
+            1 ether,
+            uint256(root)
+        );
 
-        // Build proofs (placeholder)
-        bytes memory proof1 = abi.encodePacked(bytes32(uint256(0xcccc)));
-        bytes memory proof2 = abi.encodePacked(bytes32(uint256(0xdddd)));
+        (bytes memory proof2, uint256 nullifier2) = generateProof(
+            withdrawalHash2,
+            nullifierPreimage2,
+            uint256(uint160(user2)),
+            1 ether,
+            uint256(root)
+        );
 
         // Public inputs for proof1
         uint256[] memory publicInputs1 = new uint256[](4);
-        publicInputs1[0] = uint256(nullifier1); // public output
+        publicInputs1[0] = nullifier1; // public output
         publicInputs1[1] = uint256(uint160(user2)); // recipient
         publicInputs1[2] = 1 ether; // amount
-        publicInputs1[3] = uint256(bridge.getRoot()); // root
+        publicInputs1[3] = uint256(root); // root
 
         // Public inputs for proof2
         uint256[] memory publicInputs2 = new uint256[](4);
-        publicInputs2[0] = uint256(nullifier2); // public output
+        publicInputs2[0] = nullifier2; // public output
         publicInputs2[1] = uint256(uint160(user2)); // recipient
         publicInputs2[2] = 1 ether; // amount
-        publicInputs2[3] = uint256(bridge.getRoot()); // root
+        publicInputs2[3] = uint256(root); // root
 
         // Verify both proofs return different nullifiers
         (, bytes32 returned1) = verifier.verifyWithdrawalProof(proof1, publicInputs1);
         (, bytes32 returned2) = verifier.verifyWithdrawalProof(proof2, publicInputs2);
 
-        assertEq(returned1, nullifier1);
-        assertEq(returned2, nullifier2);
+        assertEq(uint256(returned1), nullifier1);
+        assertEq(uint256(returned2), nullifier2);
         assertTrue(nullifier1 != nullifier2, "Different preimages should produce different nullifiers");
+    }
+
+    // Test just the proof verification
+    function testProofVerificationOnly() public {
+        // Use fixed values that match what we generate the proof for
+        uint256 withdrawalHash = 12345;
+        uint256 nullifierPreimage = 67890;
+        uint256 recipient = 2;
+        uint256 amount = 1000000000000000000;
+        uint256 root = 0x05d8910571e1f1b616680718b431a71565180cfca4c89bb1a0fdc9740fc0349f;
+
+        console.log("Generating proof for fixed inputs...");
+        (bytes memory proof, uint256 nullifier) = generateProof(withdrawalHash, nullifierPreimage, recipient, amount, root);
+        console.log("Proof size:", proof.length);
+        console.log("Computed nullifier:", nullifier);
+
+        // Call verifier directly
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = nullifier;
+        publicInputs[1] = recipient;
+        publicInputs[2] = amount;
+        publicInputs[3] = root;
+
+        (bool isValid, bytes32 returnedNullifier) = bridge.verifier().verifyWithdrawalProof(proof, publicInputs);
+
+        console.log("Verification result:", isValid);
+        console.log("Returned nullifier:", uint256(returnedNullifier));
+
+        assertTrue(isValid, "Proof should be valid");
+        assertEq(uint256(returnedNullifier), nullifier, "Nullifier should match");
     }
 
     // End-to-end test: Deposit -> Generate Real Proof -> Withdraw
@@ -487,28 +583,40 @@ contract AckiNackiBridgeTest is Test {
         bytes32 root = bridge.getRoot();
 
         // Step 2: Prepare withdrawal parameters
-        uint256 nullifier = 12345; // Public output
+        uint256 withdrawalHash = 12345; // Private input
+        uint256 nullifierPreimage = 67890; // Private input
         address recipient = user2;
         uint256 withdrawAmount = depositAmount;
 
         console.log("Generating real ZK proof...");
-        console.log("  Nullifier:", nullifier);
+        console.log("  Withdrawal Hash:", withdrawalHash);
+        console.log("  Nullifier Preimage:", nullifierPreimage);
         console.log("  Recipient:", recipient);
         console.log("  Amount:", withdrawAmount);
         console.log("  Root:", uint256(root));
 
         // Step 3: Generate real ZK proof using FFI
-        bytes memory proof = generateProof(
-            nullifier,
+        (bytes memory proof, uint256 nullifier) = generateProof(
+            withdrawalHash,
+            nullifierPreimage,
             uint256(uint160(recipient)),
             withdrawAmount,
             uint256(root)
         );
 
         console.log("Proof generated, size:", proof.length);
+        console.log("Computed nullifier:", nullifier);
+        console.log("First 32 bytes of proof:");
+        console.logBytes32(bytes32(proof));
 
         // Step 4: Perform withdrawal with real proof
         uint256 recipientBalanceBefore = recipient.balance;
+
+        console.log("Calling withdraw with:");
+        console.log("  recipient:", recipient);
+        console.log("  amount:", withdrawAmount);
+        console.log("  root:", uint256(root));
+        console.log("  nullifier:", nullifier);
 
         vm.startPrank(user1);
         bridge.withdraw(

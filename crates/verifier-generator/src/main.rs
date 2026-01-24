@@ -154,29 +154,59 @@ fn main() {
 
     // Generate a SNARK proof
     println!("Creating test proof...");
-    let _snark = gen_snark_shplonk(&params, &pk, test_circuit.clone(), None::<&str>);
+    let snark = gen_snark_shplonk(&params, &pk, test_circuit.clone(), None::<&str>);
     println!("✓ Test proof generated successfully!");
 
-    // Generate Solidity verifier using snark-verifier-sdk
-    println!("Generating Solidity verifier contract...");
-    let num_instance = circuit.num_instance();
+    // Extract proof bytes for Solidity tests
+    let proof_bytes = snark.proof;
+    println!("Proof size: {} bytes", proof_bytes.len());
+    println!("Proof hex: 0x{}", hex::encode(&proof_bytes));
+
+    // Check if we should regenerate the verifier
     let output_path = Path::new("contracts/ethereum/src/Halo2Verifier.sol");
+    if !output_path.exists() {
+        // Generate Solidity verifier using snark-verifier-sdk
+        println!("Generating Solidity verifier contract...");
+        let num_instance = circuit.num_instance();
 
-    // Generate verifier (SOLC env var is set to /bin/true to skip compilation)
-    gen_evm_verifier_shplonk::<SimpleCircuit>(
-        &params,
-        pk.get_vk(),
-        num_instance,
-        Some(output_path),
-    );
+        // Generate verifier (SOLC env var is set to /bin/true to skip compilation)
+        gen_evm_verifier_shplonk::<SimpleCircuit>(
+            &params,
+            pk.get_vk(),
+            num_instance,
+            Some(output_path),
+        );
 
-    // Read and fix the pragma version
-    let mut content = std::fs::read_to_string(output_path)
-        .expect("Failed to read generated verifier");
-    content = content.replace("pragma solidity 0.8.19;", "pragma solidity ^0.8.19;");
-    std::fs::write(output_path, &content).expect("Failed to write verifier");
+        // Read and fix the pragma version to always use 0.8.19
+        let mut content = std::fs::read_to_string(output_path)
+            .expect("Failed to read generated verifier");
+        // Keep it as 0.8.19 (not ^0.8.19) to match foundry.toml
+        std::fs::write(output_path, &content).expect("Failed to write verifier");
 
-    println!("✓ Solidity verifier generated at: {}", output_path.display());
+        println!("✓ Solidity verifier generated at: {}", output_path.display());
+    } else {
+        println!("✓ Solidity verifier already exists at: {}", output_path.display());
+    }
+    println!();
+
+    // Save proof data for Solidity tests
+    let proof_data = serde_json::json!({
+        "proof": hex::encode(&proof_bytes),
+        "publicInputs": [
+            format!("0x{:064x}", 12345u64),  // nullifier
+            format!("0x{:064x}", 0xabcdu64),  // recipient
+            format!("0x{:064x}", 1000u64),    // amount
+            format!("0x{:064x}", 0x1234u64),  // root
+        ]
+    });
+
+    let proof_output_path = Path::new("contracts/ethereum/test/test_proof.json");
+    std::fs::write(
+        proof_output_path,
+        serde_json::to_string_pretty(&proof_data).unwrap()
+    ).expect("Failed to write proof data");
+
+    println!("✓ Test proof data saved at: {}", proof_output_path.display());
     println!();
     println!("The verifier expects 4 public inputs in this order:");
     println!("  0. nullifier (public output from circuit)");
@@ -185,7 +215,6 @@ fn main() {
     println!("  3. root");
     println!();
     println!("Next steps:");
-    println!("1. Update DummyVerifier.sol to import and use Halo2Verifier.sol");
-    println!("2. Update tests to generate real Halo2 proofs");
-    println!("3. Run: cd contracts/ethereum && forge test");
+    println!("1. Use the proof data from test_proof.json in Solidity tests");
+    println!("2. Run: cd contracts/ethereum && forge test");
 }

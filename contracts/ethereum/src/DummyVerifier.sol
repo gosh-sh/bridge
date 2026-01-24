@@ -41,9 +41,6 @@ contract DummyVerifier is IAckiNackiVerifier {
     // Note: nullifier is a public OUTPUT computed inside the circuit from private inputs
     uint256 private constant PUBLIC_INPUTS_COUNT = 4;
 
-    // Expected proof length: nullifier (32) + commitment (32) + proof_hash (32)
-    uint256 private constant EXPECTED_PROOF_LENGTH = 96;
-
     constructor() {
         halo2Verifier = new Halo2Verifier();
     }

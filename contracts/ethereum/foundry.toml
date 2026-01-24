@@ -6,6 +6,8 @@ solc_version = "0.8.19"
 optimizer = false
 via_ir = false
 remappings = ["poseidon-solidity/=node_modules/poseidon-solidity/"]
+ffi = true
+fs_permissions = [{ access = "read-write", path = "./" }]
 
 [profile.ci]
 fuzz = { runs = 5000 }

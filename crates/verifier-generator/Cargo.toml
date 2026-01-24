@@ -7,6 +7,10 @@ edition = "2021"
 name = "generate-verifier"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate-proof"
+path = "src/proof_gen.rs"
+
 [dependencies]
 # Use axiom-crypto halo2 (same as main project)
 halo2-base.workspace = true

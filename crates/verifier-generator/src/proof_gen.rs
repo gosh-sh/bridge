@@ -15,11 +15,12 @@ use halo2_base::halo2_proofs::{
 use halo2_base::utils::fs::gen_srs;
 use snark_verifier_sdk::{
     gen_pk,
-    halo2::gen_snark_shplonk,
+    gen_snark_shplonk,
     CircuitExt,
 };
 use std::env;
-use poseidon_bn254::Poseidon;
+use poseidon_base::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3Compact};
+use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 
 /// Withdrawal circuit configuration
 #[derive(Clone, Debug)]
@@ -56,9 +57,9 @@ impl CircuitExt<Fr> for WithdrawalCircuit {
         let nullifier_preimage_opt = self.nullifier_preimage.clone();
 
         withdrawal_hash_opt.zip(nullifier_preimage_opt).map(|(wh, np)| {
-            let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
-            poseidon.update(&[wh, np]);
-            nullifier = poseidon.squeeze();
+            // Use scroll-tech/poseidon with T=3, RATE=2
+            nullifier = PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
+                .hash([wh, np]);
         });
 
         self.recipient.map(|v| { recipient_val = v; });
@@ -110,9 +111,9 @@ impl Circuit<Fr> for WithdrawalCircuit {
     ) -> Result<(), Error> {
         // Compute nullifier = Poseidon(withdrawal_hash, nullifier_preimage)
         let nullifier_value = self.withdrawal_hash.zip(self.nullifier_preimage).map(|(wh, np)| {
-            let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
-            poseidon.update(&[wh, np]);
-            poseidon.squeeze()
+            // Use scroll-tech/poseidon with T=3, RATE=2
+            PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
+                .hash([wh, np])
         });
 
         // Assign witness values and constrain them
@@ -120,24 +121,24 @@ impl Circuit<Fr> for WithdrawalCircuit {
             || "withdrawal circuit",
             |mut region| {
                 // Row 0: Assign private inputs
-                let wh_cell = region.assign_advice(config.advice[0], 0, self.withdrawal_hash);
-                let np_cell = region.assign_advice(config.advice[1], 0, self.nullifier_preimage);
-                let nullifier_cell = region.assign_advice(config.advice[2], 0, nullifier_value);
+                let wh_cell = region.assign_advice(|| "withdrawal_hash", config.advice[0], 0, || self.withdrawal_hash)?;
+                let np_cell = region.assign_advice(|| "nullifier_preimage", config.advice[1], 0, || self.nullifier_preimage)?;
+                let nullifier_cell = region.assign_advice(|| "nullifier", config.advice[2], 0, || nullifier_value)?;
 
                 // Row 1: Assign public inputs
-                let recipient_cell = region.assign_advice(config.advice[0], 1, self.recipient);
-                let amount_cell = region.assign_advice(config.advice[1], 1, self.amount);
-                let root_cell = region.assign_advice(config.advice[2], 1, self.root);
+                let recipient_cell = region.assign_advice(|| "recipient", config.advice[0], 1, || self.recipient)?;
+                let amount_cell = region.assign_advice(|| "amount", config.advice[1], 1, || self.amount)?;
+                let root_cell = region.assign_advice(|| "root", config.advice[2], 1, || self.root)?;
 
                 Ok((wh_cell, np_cell, nullifier_cell, recipient_cell, amount_cell, root_cell))
             },
         )?;
 
         // Constrain public inputs/outputs to instance column
-        layouter.constrain_instance(nullifier_cell.cell(), config.instance, 0);
-        layouter.constrain_instance(recipient_cell.cell(), config.instance, 1);
-        layouter.constrain_instance(amount_cell.cell(), config.instance, 2);
-        layouter.constrain_instance(root_cell.cell(), config.instance, 3);
+        layouter.constrain_instance(nullifier_cell.cell(), config.instance, 0)?;
+        layouter.constrain_instance(recipient_cell.cell(), config.instance, 1)?;
+        layouter.constrain_instance(amount_cell.cell(), config.instance, 2)?;
+        layouter.constrain_instance(root_cell.cell(), config.instance, 3)?;
 
         Ok(())
     }
@@ -164,10 +165,9 @@ fn main() {
     let amount = parse_field_element(&args[4], "amount");
     let root = parse_field_element(&args[5], "root");
 
-    // Compute nullifier
-    let mut poseidon = Poseidon::<Fr, 3, 2>::new(8, 57);
-    poseidon.update(&[withdrawal_hash, nullifier_preimage]);
-    let nullifier = poseidon.squeeze();
+    // Compute nullifier using scroll-tech/poseidon
+    let nullifier = PoseidonHash::<Fr, P128Pow5T3Compact<Fr>, ConstantLength<2>, 3, 2>::init()
+        .hash([withdrawal_hash, nullifier_preimage]);
 
     println!("Generating proof for:");
     println!("  withdrawal_hash: {}", format_field_element(&withdrawal_hash));
@@ -206,7 +206,9 @@ fn main() {
 
     // Generate proof
     println!("Generating proof...");
-    let snark = gen_snark_shplonk(&params, &pk, test_circuit, None::<&str>);
+    let mut rng = ChaCha20Rng::from_entropy();
+    let snark = gen_snark_shplonk(&params, &pk, test_circuit, &mut rng, None::<&str>)
+        .expect("Failed to generate SNARK proof");
 
     let proof_bytes = snark.proof;
     println!("✓ Proof generated successfully!");

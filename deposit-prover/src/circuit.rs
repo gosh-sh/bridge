@@ -162,11 +162,14 @@ impl DepositEventCircuit {
 impl Circuit<Fr> for DepositEventCircuit {
     type Config = ();
     type FloorPlanner = SimpleFloorPlanner;
-    #[cfg(feature = "circuit-params")]
     type Params = ();
 
     fn without_witnesses(&self) -> Self {
         Self::without_witnesses(self.config.clone())
+    }
+
+    fn params(&self) -> Self::Params {
+        ()
     }
 
     fn configure(_meta: &mut ConstraintSystem<Fr>) -> Self::Config {

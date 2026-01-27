@@ -77,9 +77,7 @@ impl EthereumClient {
             block_number: receipt.block_number
                 .ok_or_else(|| anyhow!("Block number not found"))?
                 .as_u64(),
-            transaction_index: receipt.transaction_index
-                .ok_or_else(|| anyhow!("Transaction index not found"))?
-                .as_u64(),
+            transaction_index: receipt.transaction_index.as_u64(),
             log_index,
             deposit_hash,
             sender,
@@ -114,24 +112,37 @@ impl EthereumClient {
 
         let receipt_root: [u8; 32] = block.receipts_root.into();
 
-        // TODO: Generate actual MPT proof
-        // This requires:
-        // 1. Fetch all receipts in the block
-        // 2. Build the receipt trie
-        // 3. Generate proof for our receipt
-        // 4. RLP encode the receipt
+        // Generate MPT proof for receipt
         //
-        // For now, return placeholder data
-        // In production, we would use eth_getProof or build the trie ourselves
+        // Ethereum receipts are stored in a Merkle-Patricia Trie where:
+        // - Key: RLP(transaction_index)
+        // - Value: RLP(receipt)
+        // - Root: receipts_root in block header
+        //
+        // To prove a receipt exists, we need:
+        // 1. RLP-encoded receipt
+        // 2. MPT proof (list of trie nodes from root to leaf)
+        // 3. Block header (contains receipts_root)
+        //
+        // Options for generating the proof:
+        // A) Use eth_getProof (not available for receipts, only for storage)
+        // B) Fetch all receipts and build trie manually
+        // C) Use a third-party service (e.g., Axiom, Herodotus)
+        //
+        // For now, we'll implement option B (manual trie building)
+        // This is the most decentralized approach
 
-        // RLP encode receipt (simplified - actual implementation needs proper RLP encoding)
-        let receipt_rlp = vec![]; // TODO: Implement RLP encoding
+        println!("⚠️  MPT proof generation not yet implemented");
+        println!("    This requires:");
+        println!("    1. Fetching all receipts in block {}", block_number);
+        println!("    2. Building receipt trie from scratch");
+        println!("    3. Generating proof path for tx index {}", receipt.transaction_index);
+        println!("    4. RLP encoding receipt and block header");
 
-        // Generate MPT proof (placeholder)
-        let proof_nodes = vec![]; // TODO: Implement MPT proof generation
-
-        // Fetch block header RLP
-        let block_header_rlp = vec![]; // TODO: Implement block header RLP encoding
+        // Placeholder implementation
+        let receipt_rlp = vec![]; // TODO: RLP encode receipt
+        let proof_nodes = vec![]; // TODO: Build trie and extract proof
+        let block_header_rlp = vec![]; // TODO: RLP encode block header
 
         Ok(ReceiptProof {
             receipt_rlp,

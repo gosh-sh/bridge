@@ -45,8 +45,12 @@ zkevm-hashes = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v
     "halo2-pse",
 ] }
 
-# Ethereum
-ethers = { version = "2.0", features = ["abigen", "ws", "rustls"] }
+# Ethereum - using specific version to avoid DepositTransaction issue
+ethers = { git = "https://github.com/gakonst/ethers-rs", rev = "f0e5b194f09c533feb10d1a686ddb9e5946ec107", features = [
+    "abigen",
+    "ws",
+    "rustls",
+] }
 
 # Field arithmetic
 ff = "0.13"

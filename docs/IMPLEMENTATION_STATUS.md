@@ -74,11 +74,14 @@ We've implemented a **two-circuit architecture** due to incompatible halo2 libra
 ### 🚧 In Progress
 
 1. **Circuit Implementation**
-   - Integrate axiom-eth MPT verification
-   - Integrate axiom-eth RLP decoder
-   - Integrate axiom-eth keccak chip
-   - Integrate zkevm-hashes Poseidon
-   - Status: Structure defined, logic not implemented
+   - ✅ Circuit design documented (CIRCUIT_DESIGN.md)
+   - ✅ Identified axiom-eth components to use
+   - ✅ Defined circuit architecture (2-phase)
+   - ⏸️ Integrate axiom-eth MPT verification
+   - ⏸️ Integrate axiom-eth RLP decoder
+   - ⏸️ Integrate axiom-eth keccak chip
+   - ⏸️ Integrate zkevm-hashes Poseidon
+   - Status: Design complete, implementation pending
 
 2. **Proof Generation**
    - Generate proving key

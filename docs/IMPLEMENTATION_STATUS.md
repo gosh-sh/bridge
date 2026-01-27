@@ -55,28 +55,32 @@ We've implemented a **two-circuit architecture** due to incompatible halo2 libra
    - `docs/DEPOSIT_CIRCUIT_ARCHITECTURE.md`: Technical spec
    - Inline code documentation
 
-### 🚧 In Progress
+### ✅ Recently Completed
 
 1. **MPT Proof Generation**
-   - Need to fetch all receipts in block
-   - Build receipt trie from scratch
-   - Extract proof path for specific transaction
-   - Status: Placeholder implementation with detailed TODOs
+   - ✅ Fetch all receipts in block
+   - ✅ Build receipt trie from scratch using cita_trie
+   - ✅ Extract proof path for specific transaction
+   - ✅ Verify trie root matches block's receipts_root
+   - Status: **COMPLETE**
 
 2. **RLP Encoding/Decoding**
-   - Encode transaction receipts
-   - Encode block headers
-   - Decode event logs
-   - Status: Not started
+   - ✅ Encode transaction receipts (legacy and typed)
+   - ✅ Encode block headers (pre-London, post-London, post-Shanghai)
+   - ✅ Encode transaction index for trie keys
+   - ✅ Handle EIP-2718 typed transactions
+   - Status: **COMPLETE**
 
-3. **Circuit Implementation**
+### 🚧 In Progress
+
+1. **Circuit Implementation**
    - Integrate axiom-eth MPT verification
    - Integrate axiom-eth RLP decoder
    - Integrate axiom-eth keccak chip
    - Integrate zkevm-hashes Poseidon
    - Status: Structure defined, logic not implemented
 
-4. **Proof Generation**
+2. **Proof Generation**
    - Generate proving key
    - Generate verifying key
    - Create proof using snark-verifier-sdk

@@ -52,6 +52,14 @@ ethers = { git = "https://github.com/gakonst/ethers-rs", rev = "f0e5b194f09c533f
     "rustls",
 ] }
 
+# RLP encoding/decoding
+rlp = "0.5"
+ethereum-types = "0.14"
+
+# Merkle-Patricia Trie
+cita_trie = "5.0"
+hasher = "0.1"
+
 # Field arithmetic
 ff = "0.13"
 halo2curves = { package = "halo2curves", git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1" }

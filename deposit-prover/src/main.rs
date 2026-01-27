@@ -19,6 +19,8 @@ use std::path::PathBuf;
 
 mod circuit;
 mod ethereum;
+mod mpt;
+mod rlp_utils;
 mod types;
 
 use circuit::DepositEventCircuit;

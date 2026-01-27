@@ -3,18 +3,19 @@
 use anyhow::{anyhow, Context, Result};
 use ethers::prelude::*;
 use ethers::providers::{Http, Provider};
+use std::sync::Arc;
 
 use crate::types::{DepositEventData, ReceiptProof};
 
 /// Ethereum client for fetching deposit event data
 pub struct EthereumClient {
-    provider: Provider<Http>,
+    provider: Arc<Provider<Http>>,
 }
 
 impl EthereumClient {
     /// Create a new Ethereum client
     pub fn new(provider: Provider<Http>) -> Self {
-        Self { provider }
+        Self { provider: Arc::new(provider) }
     }
 
     /// Fetch deposit event from transaction receipt
@@ -93,63 +94,8 @@ impl EthereumClient {
         let tx_hash: H256 = tx_hash.parse()
             .context("Invalid transaction hash")?;
 
-        // Fetch transaction receipt
-        let receipt = self.provider
-            .get_transaction_receipt(tx_hash)
-            .await
-            .context("Failed to fetch transaction receipt")?
-            .ok_or_else(|| anyhow!("Transaction receipt not found"))?;
-
-        let block_number = receipt.block_number
-            .ok_or_else(|| anyhow!("Block number not found"))?;
-
-        // Fetch block header
-        let block = self.provider
-            .get_block(block_number)
-            .await
-            .context("Failed to fetch block")?
-            .ok_or_else(|| anyhow!("Block not found"))?;
-
-        let receipt_root: [u8; 32] = block.receipts_root.into();
-
-        // Generate MPT proof for receipt
-        //
-        // Ethereum receipts are stored in a Merkle-Patricia Trie where:
-        // - Key: RLP(transaction_index)
-        // - Value: RLP(receipt)
-        // - Root: receipts_root in block header
-        //
-        // To prove a receipt exists, we need:
-        // 1. RLP-encoded receipt
-        // 2. MPT proof (list of trie nodes from root to leaf)
-        // 3. Block header (contains receipts_root)
-        //
-        // Options for generating the proof:
-        // A) Use eth_getProof (not available for receipts, only for storage)
-        // B) Fetch all receipts and build trie manually
-        // C) Use a third-party service (e.g., Axiom, Herodotus)
-        //
-        // For now, we'll implement option B (manual trie building)
-        // This is the most decentralized approach
-
-        println!("⚠️  MPT proof generation not yet implemented");
-        println!("    This requires:");
-        println!("    1. Fetching all receipts in block {}", block_number);
-        println!("    2. Building receipt trie from scratch");
-        println!("    3. Generating proof path for tx index {}", receipt.transaction_index);
-        println!("    4. RLP encoding receipt and block header");
-
-        // Placeholder implementation
-        let receipt_rlp = vec![]; // TODO: RLP encode receipt
-        let proof_nodes = vec![]; // TODO: Build trie and extract proof
-        let block_header_rlp = vec![]; // TODO: RLP encode block header
-
-        Ok(ReceiptProof {
-            receipt_rlp,
-            proof_nodes,
-            receipt_root,
-            block_header_rlp,
-        })
+        // Use the MPT module to generate the proof
+        crate::mpt::generate_receipt_proof(Arc::clone(&self.provider), tx_hash).await
     }
 }
 

@@ -1,11 +1,16 @@
-//! Deposit Event Proof Circuit using axiom-eth
+//! Deposit Event Proof Circuit
 //!
-//! This circuit proves:
-//! 1. A receipt exists in Ethereum's receipt trie (using axiom-eth MPT verification)
-//! 2. The receipt contains a Deposit event log
-//! 3. The log was emitted by the correct contract address
-//! 4. The user knows secrets that hash to depositHash
-//! 5. Computes nullifier from secrets
+//! This circuit proves that a Deposit event was emitted on Ethereum.
+//!
+//! NOTE: This is a simplified placeholder implementation.
+//! The full axiom-eth integration requires:
+//! 1. MPTChip for receipt trie verification
+//! 2. RlpChip for RLP decoding
+//! 3. KeccakChip for event signature verification
+//! 4. PoseidonChip for secret proof and nullifier computation
+//!
+//! For now, this provides the basic structure and will be implemented
+//! in phases as we integrate each axiom-eth component.
 
 use anyhow::Result;
 use halo2_base::gates::circuit::CircuitBuilderStage;
@@ -20,6 +25,18 @@ use halo2_base::AssignedValue;
 use halo2_base::Context;
 
 use crate::types::{DepositProofInput, DepositProofOutput};
+
+/// Circuit implementation status
+///
+/// Phase 1: ✅ MPT proof generation (off-chain)
+/// Phase 2: ✅ RLP encoding (off-chain)
+/// Phase 3: 🚧 Circuit implementation (in progress)
+///   - TODO: Integrate MPTChip for receipt verification
+///   - TODO: Integrate RlpChip for log extraction
+///   - TODO: Integrate KeccakChip for event signature
+///   - TODO: Integrate PoseidonChip for secret proof
+/// Phase 4: ⏸️ Proof generation
+/// Phase 5: ⏸️ Solidity verifier generation
 
 /// Circuit configuration parameters
 #[derive(Clone, Debug)]

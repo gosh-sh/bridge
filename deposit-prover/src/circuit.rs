@@ -38,29 +38,36 @@ use crate::types::{DepositProofInput, DepositProofOutput};
 /// Phase 4: ⏸️ Proof generation
 /// Phase 5: ⏸️ Solidity verifier generation
 
+// Circuit constants
+const K: u32 = 18; // 2^18 = 262,144 rows
+const MAX_RECEIPT_LEN: usize = 2048; // Max receipt size in bytes
+const MAX_PROOF_DEPTH: usize = 10; // Max MPT proof depth
+const MAX_LOG_NUM: usize = 20; // Max number of logs in receipt
+const MAX_DATA_BYTE_LEN: usize = 256; // Max event data length
+
 /// Circuit configuration parameters
 #[derive(Clone, Debug)]
 pub struct CircuitConfig {
     /// Degree of the circuit (log2 of number of rows)
     pub k: u32,
-    /// Number of advice columns
-    pub num_advice: usize,
-    /// Number of lookup advice columns
-    pub num_lookup_advice: usize,
-    /// Number of fixed columns
-    pub num_fixed: usize,
-    /// Lookup bits
-    pub lookup_bits: usize,
+    /// Max receipt length
+    pub max_receipt_len: usize,
+    /// Max MPT proof depth
+    pub max_proof_depth: usize,
+    /// Max number of logs
+    pub max_log_num: usize,
+    /// Max event data length
+    pub max_data_byte_len: usize,
 }
 
 impl Default for CircuitConfig {
     fn default() -> Self {
         Self {
-            k: 18, // 2^18 = 262,144 rows
-            num_advice: 4,
-            num_lookup_advice: 2,
-            num_fixed: 2,
-            lookup_bits: 8,
+            k: K,
+            max_receipt_len: MAX_RECEIPT_LEN,
+            max_proof_depth: MAX_PROOF_DEPTH,
+            max_log_num: MAX_LOG_NUM,
+            max_data_byte_len: MAX_DATA_BYTE_LEN,
         }
     }
 }
@@ -221,3 +228,246 @@ mod tests {
     }
 }
 
+/* ============================================================================
+ * IMPLEMENTATION GUIDE
+ * ============================================================================
+ *
+ * This circuit is currently a placeholder. To complete the implementation,
+ * follow these steps:
+ *
+ * ## Step 1: Study axiom-eth Examples
+ *
+ * Before implementing, study these files in the axiom-eth repository:
+ * - axiom-eth/src/receipt/mod.rs - Receipt proof verification
+ * - axiom-eth/src/mpt/mod.rs - MPT proof verification
+ * - axiom-eth/src/rlp/mod.rs - RLP decoding in-circuit
+ * - axiom-eth/src/keccak/mod.rs - Keccak hash chip
+ *
+ * ## Step 2: Implement Circuit Structure
+ *
+ * Replace the current DepositEventCircuit with:
+ *
+ * ```rust
+ * use axiom_eth::rlc::circuit::builder::RlcCircuitBuilder;
+ * use axiom_eth::rlc::circuit::RlcCircuitParams;
+ * use axiom_eth::mpt::MPTChip;
+ * use axiom_eth::rlp::RlpChip;
+ * use axiom_eth::keccak::KeccakChip;
+ * use axiom_eth::receipt::EthReceiptChip;
+ * use zkevm_hashes::poseidon::PoseidonChip;
+ *
+ * pub struct DepositEventCircuit {
+ *     input: Option<DepositProofInput>,
+ *     params: RlcCircuitParams,
+ * }
+ * ```
+ *
+ * ## Step 3: Implement Phase 0 (MPT + RLP)
+ *
+ * Add a method to verify the receipt and extract event data:
+ *
+ * ```rust
+ * fn verify_receipt_phase0(
+ *     &self,
+ *     builder: &mut RlcCircuitBuilder<Fr>,
+ * ) -> Result<Phase0Output> {
+ *     let ctx = builder.base.main(0);
+ *     let range = builder.range_chip();
+ *
+ *     // 1. Create chips
+ *     let rlp_chip = RlpChip::new(range, MAX_RECEIPT_LEN);
+ *     let keccak_chip = KeccakChip::new(range);
+ *     let mpt_chip = MPTChip::new(&rlp_chip, &keccak_chip);
+ *
+ *     // 2. Load receipt proof data
+ *     let receipt_rlp = self.load_bytes(ctx, &self.input.receipt_proof.receipt_rlp);
+ *     let proof_nodes = self.load_proof_nodes(ctx, &self.input.receipt_proof.proof_nodes);
+ *     let receipt_root = self.load_bytes(ctx, &self.input.receipt_proof.receipt_root);
+ *
+ *     // 3. Verify MPT inclusion
+ *     let verified_receipt = mpt_chip.parse_mpt_inclusion_proof(
+ *         ctx,
+ *         proof_nodes,
+ *         receipt_root,
+ *         tx_index_rlp,
+ *     )?;
+ *
+ *     // 4. Decode receipt to extract logs
+ *     let receipt_fields = rlp_chip.decompose_rlp_array_phase0(
+ *         ctx,
+ *         verified_receipt,
+ *         &[STATUS_LEN, GAS_LEN, BLOOM_LEN, LOGS_LEN],
+ *         false,
+ *     )?;
+ *
+ *     // 5. Extract logs array (4th field)
+ *     let logs = receipt_fields[3];
+ *
+ *     // 6. Find Deposit event log at log_index
+ *     let log_ind = self.gate().idx_to_indicator(ctx, log_index, MAX_LOG_NUM);
+ *     let deposit_log = self.select_log(ctx, logs, log_ind)?;
+ *
+ *     // 7. Extract log fields: [address, topics, data]
+ *     let log_fields = rlp_chip.decompose_rlp_array_phase0(
+ *         ctx,
+ *         deposit_log,
+ *         &[ADDRESS_LEN, TOPICS_LEN, DATA_LEN],
+ *         false,
+ *     )?;
+ *
+ *     Ok(Phase0Output {
+ *         contract_address: log_fields[0],
+ *         topics: log_fields[1],
+ *         data: log_fields[2],
+ *     })
+ * }
+ * ```
+ *
+ * ## Step 4: Implement Phase 1 (Keccak + Poseidon)
+ *
+ * Add a method to verify event signature and prove secret knowledge:
+ *
+ * ```rust
+ * fn verify_event_phase1(
+ *     &self,
+ *     builder: &mut RlcCircuitBuilder<Fr>,
+ *     phase0_output: Phase0Output,
+ * ) -> Result<DepositProofOutput> {
+ *     let ctx = builder.base.main(1);
+ *     let range = builder.range_chip();
+ *
+ *     // 1. Verify event signature
+ *     let keccak_chip = KeccakChip::new(range);
+ *     let event_sig = keccak_chip.keccak_fixed_len(
+ *         ctx,
+ *         b"Deposit(bytes32,address,uint256,uint256)",
+ *     );
+ *
+ *     // Extract topics[0] and verify it matches event signature
+ *     let topics_0 = self.extract_topic(ctx, phase0_output.topics, 0)?;
+ *     ctx.constrain_equal(&topics_0, &event_sig);
+ *
+ *     // 2. Verify contract address
+ *     let expected_contract = self.load_contract_address(ctx);
+ *     ctx.constrain_equal(&phase0_output.contract_address, &expected_contract);
+ *
+ *     // 3. Extract event data
+ *     let deposit_hash = self.extract_topic(ctx, phase0_output.topics, 1)?;
+ *     let sender = self.extract_topic(ctx, phase0_output.topics, 2)?;
+ *     let amount = self.extract_data_field(ctx, phase0_output.data, 0)?;
+ *     let timestamp = self.extract_data_field(ctx, phase0_output.data, 1)?;
+ *
+ *     // 4. Prove secret knowledge using Poseidon
+ *     let poseidon_chip = PoseidonChip::new(ctx, POSEIDON_SPEC);
+ *     let withdrawal_hash = self.load_withdrawal_hash(ctx);
+ *     let nullifier_preimage = self.load_nullifier_preimage(ctx);
+ *
+ *     let commitment = poseidon_chip.hash_fix_len_array(
+ *         ctx,
+ *         &[withdrawal_hash, nullifier_preimage],
+ *     );
+ *
+ *     // Verify commitment == depositHash
+ *     ctx.constrain_equal(&commitment, &deposit_hash);
+ *
+ *     // 5. Compute nullifier (same as commitment)
+ *     let nullifier = commitment;
+ *
+ *     // 6. Make public outputs
+ *     builder.make_public(nullifier);
+ *     builder.make_public(sender);
+ *     builder.make_public(amount);
+ *     builder.make_public(expected_contract);
+ *
+ *     Ok(DepositProofOutput {
+ *         proof: vec![],
+ *         nullifier: nullifier.value().to_bytes(),
+ *         recipient: sender.value().to_bytes(),
+ *         amount: amount.value().as_u64(),
+ *         contract_address: expected_contract.value().to_bytes(),
+ *     })
+ * }
+ * ```
+ *
+ * ## Step 5: Implement Circuit Trait
+ *
+ * Implement the halo2 Circuit trait using RlcCircuitBuilder:
+ *
+ * ```rust
+ * impl Circuit<Fr> for DepositEventCircuit {
+ *     type Config = RlcCircuitBuilder<Fr>;
+ *     type FloorPlanner = SimpleFloorPlanner;
+ *     type Params = RlcCircuitParams;
+ *
+ *     fn without_witnesses(&self) -> Self {
+ *         Self {
+ *             input: None,
+ *             params: self.params.clone(),
+ *         }
+ *     }
+ *
+ *     fn params(&self) -> Self::Params {
+ *         self.params.clone()
+ *     }
+ *
+ *     fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+ *         RlcCircuitBuilder::configure(meta, self.params())
+ *     }
+ *
+ *     fn synthesize(
+ *         &self,
+ *         config: Self::Config,
+ *         mut layouter: impl Layouter<Fr>,
+ *     ) -> Result<(), Error> {
+ *         let mut builder = config;
+ *
+ *         // Phase 0: MPT verification and RLP decoding
+ *         let phase0_output = self.verify_receipt_phase0(&mut builder)?;
+ *
+ *         // Commit phase 0
+ *         builder.calculate_params();
+ *
+ *         // Phase 1: Event verification and secret proof
+ *         let _output = self.verify_event_phase1(&mut builder, phase0_output)?;
+ *
+ *         // Assign all cells
+ *         builder.synthesize(&mut layouter)?;
+ *
+ *         Ok(())
+ *     }
+ * }
+ * ```
+ *
+ * ## Step 6: Implement Proof Generation
+ *
+ * Add functions to generate and verify proofs:
+ *
+ * ```rust
+ * pub fn setup(params: RlcCircuitParams) -> Result<(ProvingKey, VerifyingKey)> {
+ *     let circuit = DepositEventCircuit::without_witnesses(params);
+ *     let kzg_params = gen_kzg_params(K)?;
+ *     let (pk, vk) = gen_keys(&kzg_params, &circuit)?;
+ *     Ok((pk, vk))
+ * }
+ *
+ * pub fn prove(
+ *     input: DepositProofInput,
+ *     params: RlcCircuitParams,
+ *     pk: &ProvingKey,
+ * ) -> Result<DepositProofOutput> {
+ *     let circuit = DepositEventCircuit::new(input, params);
+ *     let proof = gen_proof(&kzg_params, pk, circuit)?;
+ *     // Extract public outputs and return
+ * }
+ * ```
+ *
+ * ## Resources
+ *
+ * - axiom-eth GitHub: https://github.com/axiom-crypto/axiom-eth
+ * - halo2-lib docs: https://github.com/axiom-crypto/halo2-lib
+ * - Component Framework: https://github.com/axiom-crypto/axiom-eth/blob/main/axiom-eth/src/utils/README.md
+ * - See CIRCUIT_DESIGN.md for detailed architecture
+ * - See NEXT_STEPS.md for step-by-step implementation guide
+ *
+ * ============================================================================
+ */

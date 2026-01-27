@@ -1,0 +1,13 @@
+Looks like we need a major design changes in the deposit process.
+The deposit process must be as follows:
+- Initiated by the user of Ethereum frontend, as before
+- Frontend sends the deposit to the contract, as before
+- The contract emits the event with:
+    - hash been received
+    - deposit amount
+    - sender's address
+- No need for deposit to keep the Merkle Tree anymore
+- Upon receiving the event, the sender creates a ZKP proof the the event has been indeed
+emitted, using the information from the event and the contract's address as the second input
+- To do it, the whole Ethereum tree is examined using axiom-eth library
+- Then the proof is sent to the Acki Nacki contract as before

@@ -1,12 +1,16 @@
 //! Zero-Knowledge Proof System for the Bridge
 //!
 //! This crate implements Halo2-based ZK proofs for:
-//! - Deposit proofs: Prove knowledge of withdrawal hash preimage and amount
+//! - Deposit proofs: Prove knowledge of withdrawal hash preimage and amount (legacy)
 //! - Withdrawal proofs: Prove knowledge of nullifier, Merkle proof, and burn transaction
 //!
 //! # Architecture
 //!
 //! The proof system uses Halo2 (PLONK-based) for efficient proof generation and verification.
+//! This crate uses scroll-tech's halo2-lib for compatibility with Acki Nacki.
+//!
+//! For Ethereum deposit event proofs, see the separate `deposit-prover` binary which uses
+//! axiom-eth library (requires axiom-crypto's halo2-lib).
 //!
 //! # Note
 //!

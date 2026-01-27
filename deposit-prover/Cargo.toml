@@ -9,6 +9,14 @@ edition = "2021"
 authors = ["Acki Nacki Bridge Team"]
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "deposit_prover"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deposit-prover"
+path = "src/main.rs"
+
 [dependencies]
 # Axiom-eth for Ethereum state proofs
 axiom-eth = { git = "https://github.com/axiom-crypto/axiom-eth", default-features = false, features = [
@@ -75,7 +83,3 @@ clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
 rand = "0.8"
-
-[[bin]]
-name = "deposit-prover"
-path = "src/main.rs"

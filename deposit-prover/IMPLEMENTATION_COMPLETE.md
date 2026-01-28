@@ -1,5 +1,9 @@
 # 🎉 Simplified Bridge Design Complete!
 
+> **📌 Latest Update:** Axiom-eth integration in progress!
+> See `AXIOM_ETH_INTEGRATION.md` for the new circuit implementation using axiom-eth.
+> The circuit in `src/circuit_v2.rs` is the new implementation that will replace `src/circuit.rs`.
+
 ## Summary
 
 I've successfully **simplified the bridge design** and implemented a working ZK circuit! The bridge no longer uses privacy features (withdrawal_hash, nullifier) and instead uses a simple depositId system. All tests pass and the design is much cleaner.

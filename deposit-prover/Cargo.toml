@@ -59,6 +59,8 @@ ethers = { git = "https://github.com/gakonst/ethers-rs", rev = "f0e5b194f09c533f
     "ws",
     "rustls",
 ] }
+# ethers-core - must match axiom-eth's version exactly
+ethers-core = { version = "=2.0.14", features = ["optimism"] }
 
 # RLP encoding/decoding
 rlp = "0.5"

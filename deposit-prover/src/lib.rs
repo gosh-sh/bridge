@@ -5,6 +5,7 @@
 //! without revealing those secrets.
 
 pub mod circuit;
+pub mod circuit_v2;
 pub mod ethereum;
 pub mod mpt;
 pub mod rlp_utils;

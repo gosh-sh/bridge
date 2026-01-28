@@ -44,24 +44,26 @@ let log_witness = chip.extract_receipt_log(
 
 ### Phase 1: Event Verification 🚧 IN PROGRESS
 
-**Status:** Log extraction complete, RLP parsing TODO
+**Status:** RLP parsing complete, verification TODO
 
 **Completed:**
 - ✅ Receipt RLC verification
 - ✅ Log extraction by index
 - ✅ Access to raw log bytes
+- ✅ Parse log RLP structure [address, topics[], data]
+- ✅ Extract topics array
+- ✅ Extract event signature (topics[0])
+- ✅ Extract depositId (topics[1])
+- ✅ Extract sender (topics[2])
+- ✅ Extract amount and timestamp from data
 
 **TODO:**
-- ⏸️ Parse log RLP structure [address, topics[], data]
-- ⏸️ Extract topics array
-- ⏸️ Verify event signature (topics[0])
-- ⏸️ Extract depositId (topics[1])
-- ⏸️ Extract sender (topics[2])
-- ⏸️ Extract amount and timestamp from data
+- ⏸️ Verify event signature matches keccak256("Deposit(...)")
 - ⏸️ Verify contract address
+- ⏸️ Convert bytes to field elements
 - ⏸️ Expose public outputs
 
-**Code location:** `src/circuit_v2.rs` lines 101-170
+**Code location:** `src/circuit_v2.rs` lines 101-185
 
 ## 🔧 Technical Architecture
 
@@ -208,12 +210,12 @@ Once we can parse the log structure:
 ## 📈 Progress Metrics
 
 ```
-Overall Progress: ████████░░░░░░░░░░ 40%
+Overall Progress: ██████████████░░░░ 70%
 
 Phase 0 (MPT Verification):     ████████████████████ 100% ✅
-Phase 1 (Event Verification):   ████████░░░░░░░░░░░░  40% 🚧
+Phase 1 (Event Verification):   ████████████████░░░░  80% 🚧
   - Log Extraction:              ████████████████████ 100% ✅
-  - RLP Parsing:                 ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
+  - RLP Parsing:                 ████████████████████ 100% ✅
   - Event Verification:          ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
   - Public Outputs:              ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
 Proof Generation:                ░░░░░░░░░░░░░░░░░░░░   0% ⏸️

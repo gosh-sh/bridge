@@ -126,47 +126,62 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   Log length: {:?}", log_witness.log_len);
         println!("   Log bytes (first 16): {:?}", &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]);
 
-        // 3. Parse log structure to extract topics and data
-        // Log RLP structure: [address, topics[], data]
-        // We need to decompose this RLP array to get:
-        // - address (field 0)
-        // - topics array (field 1) - contains [event_sig, depositId, sender]
-        // - data (field 2) - contains [amount, timestamp]
+        // 3. Parse log RLP structure: [address, topics[], data]
+        let rlp_chip = chip.rlp();
 
-        // TODO: Use RlpChip to decompose log_bytes into [address, topics, data]
-        // let rlp_chip = chip.rlp();
-        // let log_array = rlp_chip.decompose_rlp_array_phase0(ctx_gate, log_witness.log_bytes, ...);
+        // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte hashes), data (variable)
+        // Max lengths: address=20, topics=4*32+overhead=150, data=64+overhead=70
+        let log_max_field_lens = [20, 150, 70];
 
-        // TODO: Extract topics array and decompose it
-        // let topics = log_array.field_witness[1]; // topics is field 1
-        // let topics_array = rlp_chip.decompose_rlp_array_phase0(ctx_gate, topics, ...);
+        let log_array = rlp_chip.decompose_rlp_array_phase0(
+            ctx_gate,
+            log_witness.log_bytes.clone(),
+            &log_max_field_lens,
+            false, // fixed length (always 3 fields)
+        );
+        println!("   ✓ Parsed log RLP structure");
 
-        // TODO: Verify event signature (topics[0])
-        // let event_sig = topics_array.field_witness[0];
-        // let expected_sig = keccak256("Deposit(uint256,address,uint256,uint256)");
-        // ctx_gate.constrain_equal(event_sig, expected_sig);
+        // 4. Extract address (field 0)
+        let address_bytes = &log_array.field_witness[0].field_cells;
+        println!("   Address bytes: {} bytes", address_bytes.len());
 
-        // TODO: Extract depositId (topics[1]), sender (topics[2])
-        // let deposit_id = topics_array.field_witness[1];
-        // let sender = topics_array.field_witness[2];
+        // 5. Parse topics array (field 1)
+        // Topics is an RLP array of 32-byte hashes
+        // For Deposit event: [event_sig, depositId, sender] = 3 topics
+        let topics_rlp = &log_array.field_witness[1].field_cells;
+        let topic_max_lens = [32, 32, 32, 32]; // max 4 topics, each 32 bytes
 
-        // TODO: Extract amount and timestamp from data field
-        // let data = log_array.field_witness[2];
-        // let amount = data[0..32];
-        // let timestamp = data[32..64];
+        let topics_array = rlp_chip.decompose_rlp_array_phase0(
+            ctx_gate,
+            topics_rlp.clone(),
+            &topic_max_lens,
+            true, // variable length (can have 0-4 topics)
+        );
+        println!("   ✓ Parsed topics array");
 
-        // TODO: Verify contract address
-        // let address = log_array.field_witness[0];
-        // let expected_address = self.inputs.event_data.contract_address;
-        // ctx_gate.constrain_equal(address, expected_address);
+        // 6. Extract event signature (topics[0])
+        let event_sig_bytes = &topics_array.field_witness[0].field_cells;
+        println!("   Event signature: {} bytes", event_sig_bytes.len());
 
-        // TODO: Expose public outputs
-        // builder.assigned_instances.push(deposit_id);
-        // builder.assigned_instances.push(sender);
-        // builder.assigned_instances.push(amount);
-        // builder.assigned_instances.push(contract_address);
+        // 7. Extract depositId (topics[1])
+        let deposit_id_bytes = &topics_array.field_witness[1].field_cells;
+        println!("   DepositId: {} bytes", deposit_id_bytes.len());
 
-        println!("   ✓ Phase 1 complete (log extraction done, parsing TODO)");
+        // 8. Extract sender (topics[2])
+        let sender_bytes = &topics_array.field_witness[2].field_cells;
+        println!("   Sender: {} bytes", sender_bytes.len());
+
+        // 9. Extract data field (field 2)
+        // Data contains: [amount (32 bytes), timestamp (32 bytes)]
+        let data_bytes = &log_array.field_witness[2].field_cells;
+        println!("   Data: {} bytes", data_bytes.len());
+
+        // TODO: Verify event signature matches keccak256("Deposit(uint256,address,uint256,uint256)")
+        // TODO: Verify contract address matches expected bridge contract
+        // TODO: Convert bytes to field elements for public outputs
+        // TODO: Expose public outputs: depositId, sender, amount, contract_address
+
+        println!("   ✓ Phase 1 complete (log parsing done, verification TODO)");
     }
 }
 

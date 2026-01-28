@@ -68,9 +68,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
 ### 🚧 In Progress / TODO
 
-#### Phase 1 RLP Parsing (Next Steps)
+#### Phase 1 RLP Parsing ✅ COMPLETE
 
-The phase1 implementation has extracted the log bytes, now needs to parse them:
+The phase1 implementation has successfully parsed the log structure:
 
 1. **✅ Extract logs from receipt** - DONE
    ```rust
@@ -79,60 +79,69 @@ The phase1 implementation has extracted the log bytes, now needs to parse them:
        &phase0_output.receipt_witness,
        phase0_output.log_index,
    );
-   // log_witness.log_bytes contains the RLP-encoded log
    ```
 
-2. **Parse log RLP structure** - TODO
+2. **✅ Parse log RLP structure** - DONE
    ```rust
-   // Log RLP: [address, topics[], data]
    let rlp_chip = chip.rlp();
+   let log_max_field_lens = [20, 150, 70]; // address, topics, data
    let log_array = rlp_chip.decompose_rlp_array_phase0(
        ctx_gate,
-       &log_witness.log_bytes,
-       &[20, 32*4, 64], // max lengths for [address, topics, data]
-       3, // 3 fields
+       log_witness.log_bytes.clone(),
+       &log_max_field_lens,
+       false, // fixed 3 fields
    );
    ```
 
-3. **Parse topics array** - TODO
+3. **✅ Parse topics array** - DONE
    ```rust
-   // Extract topics field (field 1 of log)
-   let topics_rlp = &log_array.field_witness[1];
+   let topics_rlp = &log_array.field_witness[1].field_cells;
+   let topic_max_lens = [32, 32, 32, 32]; // max 4 topics
    let topics_array = rlp_chip.decompose_rlp_array_phase0(
        ctx_gate,
-       &topics_rlp.field_cells,
-       &[32, 32, 32, 32], // 4 topics max, each 32 bytes
-       4, // max 4 topics
+       topics_rlp.clone(),
+       &topic_max_lens,
+       true, // variable length
    );
    ```
 
-4. **Verify event signature**
+4. **✅ Extract event parameters** - DONE
    ```rust
-   // topics[0] should be keccak256("Deposit(uint256,address,uint256,uint256)")
-   let expected_sig = keccak256("Deposit(uint256,address,uint256,uint256)");
-   ctx.constrain_equal(topics[0], expected_sig);
+   // Event signature (topics[0])
+   let event_sig_bytes = &topics_array.field_witness[0].field_cells;
+
+   // depositId (topics[1])
+   let deposit_id_bytes = &topics_array.field_witness[1].field_cells;
+
+   // sender (topics[2])
+   let sender_bytes = &topics_array.field_witness[2].field_cells;
+
+   // data contains [amount, timestamp]
+   let data_bytes = &log_array.field_witness[2].field_cells;
+
+   // address
+   let address_bytes = &log_array.field_witness[0].field_cells;
    ```
 
-5. **Extract event parameters**
+#### Next Steps: Event Verification
+
+5. **Verify event signature** - TODO
    ```rust
-   // topics[1] = depositId (indexed)
-   // topics[2] = sender (indexed)
-   // data[0..32] = amount (non-indexed)
-   // data[32..64] = timestamp (non-indexed)
-   
-   let deposit_id = topics[1];
-   let sender = topics[2];
-   let amount = data[0..32];
-   let timestamp = data[32..64];
+   // Compute keccak256("Deposit(uint256,address,uint256,uint256)")
+   // and constrain it equals event_sig_bytes
    ```
 
-6. **Verify contract address**
+6. **Verify contract address** - TODO
    ```rust
-   // Verify log.address matches expected bridge contract
-   ctx.constrain_equal(address, expected_contract_address);
+   // Constrain address_bytes equals expected bridge contract
    ```
 
-7. **Expose public outputs**
+7. **Convert bytes to field elements** - TODO
+   ```rust
+   // Convert 32-byte values to Fr field elements for public outputs
+   ```
+
+8. **Expose public outputs** - TODO
    ```rust
    // Make these values public inputs
    builder.assigned_instances.push(deposit_id);

@@ -50,12 +50,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 ### ✅ Completed
 
 1. **Circuit Structure** - `DepositEventCircuitV2` struct created
-2. **Phase 0 Skeleton** - MPT verification integrated
+2. **Phase 0 Implementation** - MPT verification fully integrated ✅
    - Transaction index loading
    - Receipt proof conversion to MPTInput
    - MPT proof verification using `EthReceiptChip`
-3. **Phase 1 Skeleton** - RLC verification integrated
+   - Log index loading for event selection
+3. **Phase 1 Partial Implementation** - RLC verification and log extraction ✅
    - Receipt parsing in phase1
+   - **Log extraction using `extract_receipt_log`** ✅
+   - Log witness contains the raw RLP bytes of the specific log
 4. **Helper Functions** - `ToMPTInput` trait for converting `ReceiptProof` to `MPTInput`
 5. **Tests** - Basic circuit creation test passing
 6. **Dependencies** - All axiom-eth dependencies configured correctly
@@ -65,29 +68,42 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
 ### 🚧 In Progress / TODO
 
-#### Phase 1 Implementation (Next Steps)
+#### Phase 1 RLP Parsing (Next Steps)
 
-The phase1 implementation needs to:
+The phase1 implementation has extracted the log bytes, now needs to parse them:
 
-1. **Extract logs from receipt**
+1. **✅ Extract logs from receipt** - DONE
    ```rust
-   // Parse receipt to get logs array
-   let logs = receipt_trace.value_trace[3]; // logs is field index 3 in receipt
+   let log_witness = chip.extract_receipt_log(
+       ctx_gate,
+       &phase0_output.receipt_witness,
+       phase0_output.log_index,
+   );
+   // log_witness.log_bytes contains the RLP-encoded log
    ```
 
-2. **Find the specific Deposit event log**
+2. **Parse log RLP structure** - TODO
    ```rust
-   // Use log_index to select the correct log
-   let deposit_log = logs[log_index];
+   // Log RLP: [address, topics[], data]
+   let rlp_chip = chip.rlp();
+   let log_array = rlp_chip.decompose_rlp_array_phase0(
+       ctx_gate,
+       &log_witness.log_bytes,
+       &[20, 32*4, 64], // max lengths for [address, topics, data]
+       3, // 3 fields
+   );
    ```
 
-3. **Parse log structure**
+3. **Parse topics array** - TODO
    ```rust
-   // Log structure: [address, topics[], data]
-   let log_witness = chip.parse_log_field(ctx, deposit_log);
-   let address = log_witness.address();
-   let topics = log_witness.topics_bytes();
-   let data = log_witness.data_bytes();
+   // Extract topics field (field 1 of log)
+   let topics_rlp = &log_array.field_witness[1];
+   let topics_array = rlp_chip.decompose_rlp_array_phase0(
+       ctx_gate,
+       &topics_rlp.field_cells,
+       &[32, 32, 32, 32], // 4 topics max, each 32 bytes
+       4, // max 4 topics
+   );
    ```
 
 4. **Verify event signature**

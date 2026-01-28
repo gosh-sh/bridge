@@ -112,17 +112,61 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // 1. Parse receipt in phase 1 (RLC verification)
         let _receipt_trace = chip.parse_receipt_proof_phase1(
             (ctx_gate, ctx_rlc),
-            phase0_output.receipt_witness,
+            phase0_output.receipt_witness.clone(),
         );
         println!("   ✓ Verified receipt RLC");
 
-        // 2. Extract event data from logs
-        // TODO: Extract specific log at log_index
-        // TODO: Verify event signature
-        // TODO: Extract depositId, sender, amount from topics/data
-        // TODO: Expose as public outputs
+        // 2. Extract the specific log at log_index
+        let log_witness = chip.extract_receipt_log(
+            ctx_gate,
+            &phase0_output.receipt_witness,
+            phase0_output.log_index,
+        );
+        println!("   ✓ Extracted log at index {}", self.inputs.event_data.log_index);
+        println!("   Log length: {:?}", log_witness.log_len);
+        println!("   Log bytes (first 16): {:?}", &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]);
 
-        println!("   ✓ Phase 1 complete");
+        // 3. Parse log structure to extract topics and data
+        // Log RLP structure: [address, topics[], data]
+        // We need to decompose this RLP array to get:
+        // - address (field 0)
+        // - topics array (field 1) - contains [event_sig, depositId, sender]
+        // - data (field 2) - contains [amount, timestamp]
+
+        // TODO: Use RlpChip to decompose log_bytes into [address, topics, data]
+        // let rlp_chip = chip.rlp();
+        // let log_array = rlp_chip.decompose_rlp_array_phase0(ctx_gate, log_witness.log_bytes, ...);
+
+        // TODO: Extract topics array and decompose it
+        // let topics = log_array.field_witness[1]; // topics is field 1
+        // let topics_array = rlp_chip.decompose_rlp_array_phase0(ctx_gate, topics, ...);
+
+        // TODO: Verify event signature (topics[0])
+        // let event_sig = topics_array.field_witness[0];
+        // let expected_sig = keccak256("Deposit(uint256,address,uint256,uint256)");
+        // ctx_gate.constrain_equal(event_sig, expected_sig);
+
+        // TODO: Extract depositId (topics[1]), sender (topics[2])
+        // let deposit_id = topics_array.field_witness[1];
+        // let sender = topics_array.field_witness[2];
+
+        // TODO: Extract amount and timestamp from data field
+        // let data = log_array.field_witness[2];
+        // let amount = data[0..32];
+        // let timestamp = data[32..64];
+
+        // TODO: Verify contract address
+        // let address = log_array.field_witness[0];
+        // let expected_address = self.inputs.event_data.contract_address;
+        // ctx_gate.constrain_equal(address, expected_address);
+
+        // TODO: Expose public outputs
+        // builder.assigned_instances.push(deposit_id);
+        // builder.assigned_instances.push(sender);
+        // builder.assigned_instances.push(amount);
+        // builder.assigned_instances.push(contract_address);
+
+        println!("   ✓ Phase 1 complete (log extraction done, parsing TODO)");
     }
 }
 

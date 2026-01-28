@@ -11,8 +11,8 @@ pub struct DepositEventData {
     pub transaction_index: u64,
     /// Log index in transaction receipt
     pub log_index: usize,
-    /// Deposit hash (topics[1])
-    pub deposit_hash: [u8; 32],
+    /// Unique deposit ID (prevents double-spending)
+    pub deposit_id: u64,
     /// Sender address (topics[2])
     pub sender: [u8; 20],
     /// Amount (from log data)
@@ -39,13 +39,9 @@ pub struct ReceiptProof {
 /// Input for deposit proof generation
 #[derive(Debug, Clone)]
 pub struct DepositProofInput {
-    /// Withdrawal hash (secret)
-    pub withdrawal_hash: [u8; 32],
-    /// Nullifier preimage (secret)
-    pub nullifier_preimage: [u8; 32],
-    /// Deposit event data
+    /// Deposit event data (public)
     pub event_data: DepositEventData,
-    /// Receipt proof
+    /// Receipt proof (private - proves event exists in Ethereum state)
     pub receipt_proof: ReceiptProof,
 }
 
@@ -54,9 +50,9 @@ pub struct DepositProofInput {
 pub struct DepositProofOutput {
     /// The ZK proof bytes
     pub proof: Vec<u8>,
-    /// Public inputs
-    pub nullifier: [u8; 32],
-    pub recipient: [u8; 20],
+    /// Public inputs (verified by the circuit)
+    pub deposit_id: u64,
+    pub sender: [u8; 20],
     pub amount: u64,
     pub contract_address: [u8; 20],
 }

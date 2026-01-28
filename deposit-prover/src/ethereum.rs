@@ -58,11 +58,14 @@ impl EthereumClient {
         let log = log.1;
 
         // Parse event data
+        // Event signature: Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp)
         if log.topics.len() < 3 {
             return Err(anyhow!("Invalid Deposit event: not enough topics"));
         }
 
-        let deposit_hash: [u8; 32] = log.topics[1].into();
+        let deposit_id_bytes: [u8; 32] = log.topics[1].into();
+        let deposit_id = U256::from_big_endian(&deposit_id_bytes).as_u64();
+
         let sender_bytes: [u8; 32] = log.topics[2].into();
         let sender: [u8; 20] = sender_bytes[12..32].try_into().unwrap();
 
@@ -80,7 +83,7 @@ impl EthereumClient {
                 .as_u64(),
             transaction_index: receipt.transaction_index.as_u64(),
             log_index,
-            deposit_hash,
+            deposit_id,
             sender,
             amount: amount.as_u64(),
             timestamp: timestamp.as_u64(),

@@ -5,8 +5,6 @@
 //!
 //! Usage:
 //!   deposit-prover prove \
-//!     --withdrawal-hash <hex> \
-//!     --nullifier-preimage <hex> \
 //!     --tx-hash <hex> \
 //!     --rpc-url <url> \
 //!     --contract-address <address> \
@@ -39,14 +37,6 @@ struct Cli {
 enum Commands {
     /// Generate a deposit event proof
     Prove {
-        /// Withdrawal hash (32 bytes hex)
-        #[arg(long)]
-        withdrawal_hash: String,
-
-        /// Nullifier preimage (32 bytes hex)
-        #[arg(long)]
-        nullifier_preimage: String,
-
         /// Transaction hash containing the Deposit event
         #[arg(long)]
         tx_hash: String,
@@ -89,16 +79,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Prove {
-            withdrawal_hash,
-            nullifier_preimage,
             tx_hash,
             rpc_url,
             contract_address,
             output,
         } => {
             prove(
-                &withdrawal_hash,
-                &nullifier_preimage,
                 &tx_hash,
                 &rpc_url,
                 &contract_address,
@@ -118,20 +104,12 @@ async fn main() -> Result<()> {
 }
 
 async fn prove(
-    withdrawal_hash: &str,
-    nullifier_preimage: &str,
     tx_hash: &str,
     rpc_url: &str,
     contract_address: &str,
     output: &PathBuf,
 ) -> Result<()> {
     println!("🔍 Fetching Ethereum data...");
-
-    // Parse inputs
-    let withdrawal_hash = hex::decode(withdrawal_hash.trim_start_matches("0x"))
-        .context("Invalid withdrawal hash")?;
-    let nullifier_preimage = hex::decode(nullifier_preimage.trim_start_matches("0x"))
-        .context("Invalid nullifier preimage")?;
 
     // Connect to Ethereum
     let provider = Provider::<Http>::try_from(rpc_url)
@@ -148,6 +126,8 @@ async fn prove(
     println!("   Block: {}", receipt_data.block_number);
     println!("   Tx Index: {}", receipt_data.transaction_index);
     println!("   Log Index: {}", receipt_data.log_index);
+    println!("   Deposit ID: {}", receipt_data.deposit_id);
+    println!("   Sender: 0x{}", hex::encode(&receipt_data.sender));
     println!("   Amount: {}", receipt_data.amount);
 
     // Generate MPT proof
@@ -162,8 +142,6 @@ async fn prove(
     // Generate ZK proof
     println!("⚡ Generating ZK proof...");
     let proof_input = DepositProofInput {
-        withdrawal_hash: withdrawal_hash.try_into().unwrap(),
-        nullifier_preimage: nullifier_preimage.try_into().unwrap(),
         event_data: receipt_data,
         receipt_proof,
     };
@@ -179,8 +157,8 @@ async fn prove(
 
     println!("✅ Proof saved to {}", output.display());
     println!("📊 Public inputs:");
-    println!("   Nullifier: 0x{}", hex::encode(&proof_output.nullifier));
-    println!("   Recipient: 0x{}", hex::encode(&proof_output.recipient));
+    println!("   Deposit ID: {}", proof_output.deposit_id);
+    println!("   Sender: 0x{}", hex::encode(&proof_output.sender));
     println!("   Amount: {}", proof_output.amount);
     println!("   Contract: 0x{}", hex::encode(&proof_output.contract_address));
 

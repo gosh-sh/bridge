@@ -19,30 +19,25 @@ fn test_circuit_with_witnesses() {
     println!("🧪 Testing circuit with witnesses...");
     
     // Create test input data
-    let withdrawal_hash = [1u8; 32];
-    let nullifier_preimage = [2u8; 32];
-    
     let event_data = DepositEventData {
         block_number: 12345,
         transaction_index: 0,
         log_index: 0,
-        deposit_hash: [3u8; 32], // This should match Poseidon(withdrawal_hash, nullifier_preimage)
+        deposit_id: 42, // Unique deposit ID
         sender: [4u8; 20],
         amount: 1000000000000000000, // 1 ETH in wei
         timestamp: 1234567890,
         contract_address: [5u8; 20],
     };
-    
+
     let receipt_proof = ReceiptProof {
         receipt_rlp: vec![],
         proof_nodes: vec![],
         receipt_root: [0u8; 32],
         block_header_rlp: vec![],
     };
-    
+
     let input = DepositProofInput {
-        withdrawal_hash,
-        nullifier_preimage,
         event_data,
         receipt_proof,
     };

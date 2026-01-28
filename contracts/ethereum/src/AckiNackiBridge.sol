@@ -7,8 +7,11 @@ import "./IAckiNackiVerifier.sol";
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
 /// @dev Uses event-based proofs verified by ZK circuits (no on-chain Merkle tree)
 contract AckiNackiBridge {
-    // Nullifier tracking (prevent double-spending)
-    mapping(bytes32 => bool) public nullifiers;
+    // Deposit tracking (prevent double-spending)
+    mapping(uint256 => bool) public processedDeposits;
+
+    // Deposit counter (unique ID for each deposit)
+    uint256 public depositCounter;
 
     // Treasury
     uint256 public treasuryBalance;
@@ -18,14 +21,14 @@ contract AckiNackiBridge {
 
     // Events
     event Deposit(
-        bytes32 indexed depositHash,
+        uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
         uint256 timestamp
     );
 
     event Withdrawal(
-        bytes32 indexed nullifier,
+        uint256 indexed depositId,
         address indexed recipient,
         uint256 amount,
         uint256 timestamp
@@ -33,7 +36,7 @@ contract AckiNackiBridge {
 
     // Errors
     error InvalidAmount();
-    error NullifierAlreadyUsed();
+    error DepositAlreadyProcessed();
     error InvalidProof();
     error InsufficientTreasury();
     error InvalidVerifier();
@@ -44,61 +47,62 @@ contract AckiNackiBridge {
     }
     
     /// @notice Deposit tokens to the bridge
-    /// @param depositHash Hash identifying this deposit (e.g., hash of withdrawal secrets)
     /// @param amount Amount to deposit
     /// @dev Emits Deposit event which will be proven by ZK circuit for withdrawal
-    function deposit(bytes32 depositHash, uint256 amount) external payable {
+    function deposit(uint256 amount) external payable {
         if (msg.value != amount) revert InvalidAmount();
         if (amount == 0) revert InvalidAmount();
+
+        // Get unique deposit ID
+        uint256 depositId = depositCounter++;
 
         // Add to treasury
         treasuryBalance += amount;
 
         // Emit event with all necessary data for ZK proof
         // The ZK circuit will prove this event was emitted by this contract
-        emit Deposit(depositHash, msg.sender, amount, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, block.timestamp);
     }
     
     /// @notice Withdraw tokens using ZK proof of deposit event
     /// @param recipient Address to receive tokens
     /// @param amount Amount to withdraw
-    /// @param nullifier Nullifier (prevents double-spending)
+    /// @param depositId Unique deposit ID (prevents double-spending)
     /// @param proof ZK proof proving:
     ///              1. A Deposit event was emitted by this contract
-    ///              2. The event contains the correct depositHash, amount, and sender
-    ///              3. The prover knows the secrets that hash to depositHash
-    ///              4. The nullifier is derived from those secrets
+    ///              2. The event contains the correct depositId, amount, and sender
+    ///              3. The sender matches the recipient
     /// @dev The ZK circuit verifies the Ethereum receipt trie to prove event emission
     function withdraw(
         address payable recipient,
         uint256 amount,
-        bytes32 nullifier,
+        uint256 depositId,
         bytes calldata proof
     ) external {
         // Prepare public inputs for the verifier
-        // Public inputs: [nullifier, recipient, amount, contractAddress]
+        // Public inputs: [depositId, sender, amount, contractAddress]
         uint256[] memory publicInputs = new uint256[](4);
-        publicInputs[0] = uint256(nullifier);
+        publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(address(recipient)));
         publicInputs[2] = amount;
         publicInputs[3] = uint256(uint160(address(this)));
 
         // Verify ZK proof
-        // The proof verifies that a Deposit event was emitted and the nullifier is correct
-        (bool isValid, bytes32 verifiedNullifier) = verifier.verifyWithdrawalProof(proof, publicInputs);
+        // The proof verifies that a Deposit event was emitted with these parameters
+        (bool isValid, bytes32 verifiedDepositId) = verifier.verifyWithdrawalProof(proof, publicInputs);
         if (!isValid) revert InvalidProof();
 
-        // Sanity check: verifier should return the same nullifier
-        require(verifiedNullifier == nullifier, "Nullifier mismatch");
+        // Sanity check: verifier should return the same depositId
+        require(uint256(verifiedDepositId) == depositId, "DepositId mismatch");
 
-        // Check nullifier hasn't been used
-        if (nullifiers[nullifier]) revert NullifierAlreadyUsed();
+        // Check deposit hasn't been processed
+        if (processedDeposits[depositId]) revert DepositAlreadyProcessed();
 
         // Check treasury has enough balance
         if (treasuryBalance < amount) revert InsufficientTreasury();
 
-        // Mark nullifier as used
-        nullifiers[nullifier] = true;
+        // Mark deposit as processed
+        processedDeposits[depositId] = true;
 
         // Update treasury
         treasuryBalance -= amount;
@@ -106,14 +110,14 @@ contract AckiNackiBridge {
         // Transfer tokens
         recipient.transfer(amount);
 
-        emit Withdrawal(nullifier, recipient, amount, block.timestamp);
+        emit Withdrawal(depositId, recipient, amount, block.timestamp);
     }
 
-    /// @notice Check if a nullifier has been used
-    /// @param nullifier Nullifier to check
-    /// @return True if nullifier has been used
-    function isNullifierUsed(bytes32 nullifier) external view returns (bool) {
-        return nullifiers[nullifier];
+    /// @notice Check if a deposit has been processed
+    /// @param depositId Deposit ID to check
+    /// @return True if deposit has been processed
+    function isDepositProcessed(uint256 depositId) external view returns (bool) {
+        return processedDeposits[depositId];
     }
 }
 

@@ -138,26 +138,57 @@ The phase1 implementation has successfully parsed the log structure:
    }
    ```
 
-#### Next Steps: Public Outputs
-
-6. **Verify contract address** - TODO
+6. **✅ Verify contract address** - DONE
    ```rust
-   // Constrain address_bytes equals expected bridge contract
+   // Load expected contract address from inputs
+   let expected_address = &self.inputs.event_data.contract_address;
+   let expected_address_bytes: Vec<AssignedValue<Fr>> = expected_address
+       .iter()
+       .map(|&byte| ctx_gate.load_witness(Fr::from(byte as u64)))
+       .collect();
+
+   // Constrain equality byte-by-byte
+   for (actual, expected) in address_bytes.iter().zip(expected_address_bytes.iter()) {
+       ctx_gate.constrain_equal(actual, expected);
+   }
    ```
 
-7. **Convert bytes to field elements** - TODO
+7. **✅ Convert bytes to field elements** - DONE
    ```rust
-   // Convert 32-byte values to Fr field elements for public outputs
+   // Helper function using Horner's method
+   let mut bytes_to_field = |bytes: &[AssignedValue<Fr>]| -> AssignedValue<Fr> {
+       let mut result = ctx_gate.load_zero();
+       let base = ctx_gate.load_constant(Fr::from(256));
+       for byte in bytes.iter() {
+           result = gate.mul_add(ctx_gate, result, base, *byte);
+       }
+       result
+   };
+
+   let deposit_id_field = bytes_to_field(deposit_id_bytes);
+   let sender_field = bytes_to_field(sender_bytes);
+   let amount_field = bytes_to_field(amount_bytes);
+   let contract_address_field = bytes_to_field(address_bytes);
    ```
 
-8. **Expose public outputs** - TODO
+8. **✅ Expose public outputs** - DONE
    ```rust
-   // Make these values public inputs
-   builder.assigned_instances.push(deposit_id);
-   builder.assigned_instances.push(sender);
-   builder.assigned_instances.push(amount);
-   builder.assigned_instances.push(contract_address);
+   // Expose public inputs in order: [depositId, sender, amount, contract_address]
+   let public_instances = builder.public_instances();
+   public_instances[0].push(deposit_id_field);
+   public_instances[0].push(sender_field);
+   public_instances[0].push(amount_field);
+   public_instances[0].push(contract_address_field);
    ```
+
+## ✅ Phase 1 Complete!
+
+All event verification and public outputs are now implemented. The circuit can:
+- ✅ Verify MPT inclusion of receipt
+- ✅ Extract and parse event logs
+- ✅ Verify event signature
+- ✅ Verify contract address
+- ✅ Expose public outputs for verification
 
 ## Axiom-eth API Reference
 

@@ -42,9 +42,9 @@ let log_witness = chip.extract_receipt_log(
 
 **Code location:** `src/circuit_v2.rs` lines 66-100
 
-### Phase 1: Event Verification 🚧 IN PROGRESS
+### Phase 1: Event Verification ✅ COMPLETE
 
-**Status:** Event signature verified, public outputs TODO
+**Status:** All event verification and public outputs implemented!
 
 **Completed:**
 - ✅ Receipt RLC verification
@@ -57,13 +57,11 @@ let log_witness = chip.extract_receipt_log(
 - ✅ Extract sender (topics[2])
 - ✅ Extract amount and timestamp from data
 - ✅ Verify event signature matches keccak256("Deposit(...)")
+- ✅ Verify contract address
+- ✅ Convert bytes to field elements
+- ✅ Expose public outputs (depositId, sender, amount, contract_address)
 
-**TODO:**
-- ⏸️ Verify contract address
-- ⏸️ Convert bytes to field elements
-- ⏸️ Expose public outputs
-
-**Code location:** `src/circuit_v2.rs` lines 101-208
+**Code location:** `src/circuit_v2.rs` lines 101-277
 
 ## 🔧 Technical Architecture
 
@@ -210,14 +208,14 @@ Once we can parse the log structure:
 ## 📈 Progress Metrics
 
 ```
-Overall Progress: ███████████████░░░ 75%
+Overall Progress: ████████████████░░ 80%
 
 Phase 0 (MPT Verification):     ████████████████████ 100% ✅
-Phase 1 (Event Verification):   ██████████████████░░  90% 🚧
+Phase 1 (Event Verification):   ████████████████████ 100% ✅
   - Log Extraction:              ████████████████████ 100% ✅
   - RLP Parsing:                 ████████████████████ 100% ✅
   - Event Verification:          ████████████████████ 100% ✅
-  - Public Outputs:              ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
+  - Public Outputs:              ████████████████████ 100% ✅
 Proof Generation:                ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
 Solidity Verifier:               ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
 ```

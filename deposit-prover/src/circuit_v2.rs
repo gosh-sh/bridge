@@ -200,11 +200,81 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Verified event signature");
 
-        // TODO: Verify contract address matches expected bridge contract
-        // TODO: Convert bytes to field elements for public outputs
-        // TODO: Expose public outputs: depositId, sender, amount, contract_address
+        // 11. Verify contract address
+        // Load expected contract address from inputs
+        let expected_address = &self.inputs.event_data.contract_address;
+        let expected_address_bytes: Vec<AssignedValue<Fr>> = expected_address
+            .iter()
+            .map(|&byte| ctx_gate.load_witness(Fr::from(byte as u64)))
+            .collect();
 
-        println!("   ✓ Phase 1 complete (event signature verified, public outputs TODO)");
+        // Constrain that address_bytes equals expected_address_bytes
+        // Address should be 20 bytes
+        assert_eq!(address_bytes.len(), 20, "Contract address should be 20 bytes");
+        assert_eq!(expected_address_bytes.len(), 20, "Expected address should be 20 bytes");
+
+        for (actual, expected) in address_bytes.iter().zip(expected_address_bytes.iter()) {
+            ctx_gate.constrain_equal(actual, expected);
+        }
+        println!("   ✓ Verified contract address");
+
+        // 12. Convert bytes to field elements for public outputs
+        // Topics are already 32 bytes each (uint256 in Solidity)
+        // We need to convert them from bytes to a single field element
+
+        // Get the gate chip for arithmetic operations
+        let gate = chip.gate();
+
+        // Helper function to convert bytes (big-endian) to field element
+        let mut bytes_to_field = |bytes: &[AssignedValue<Fr>]| -> AssignedValue<Fr> {
+            // Convert bytes to field element using Horner's method
+            // value = bytes[0] * 256^(n-1) + bytes[1] * 256^(n-2) + ... + bytes[n-1]
+            let mut result = ctx_gate.load_zero();
+            let base = ctx_gate.load_constant(Fr::from(256));
+
+            for byte in bytes.iter() {
+                // result = result * 256 + byte
+                result = gate.mul_add(ctx_gate, result, base, *byte);
+            }
+            result
+        };
+
+        // Convert depositId (32 bytes from topics[1])
+        let deposit_id_field = bytes_to_field(deposit_id_bytes);
+        println!("   ✓ Converted depositId to field element");
+
+        // Convert sender (32 bytes from topics[2], but only last 20 bytes are the address)
+        // Ethereum addresses are 20 bytes, but stored as uint256 (32 bytes) in topics
+        // The first 12 bytes should be zero, last 20 bytes are the address
+        let sender_field = bytes_to_field(sender_bytes);
+        println!("   ✓ Converted sender to field element");
+
+        // Convert amount (first 32 bytes of data)
+        // We need to extract the first 32 bytes from data_bytes
+        let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
+        let amount_field = bytes_to_field(amount_bytes);
+        println!("   ✓ Converted amount to field element");
+
+        // Convert contract address (20 bytes)
+        let contract_address_field = bytes_to_field(address_bytes);
+        println!("   ✓ Converted contract address to field element");
+
+        // 13. Expose public outputs
+        // The public inputs will be verified by the Solidity verifier
+        // Order: [depositId, sender, amount, contract_address]
+        let public_instances = builder.public_instances();
+        public_instances[0].push(deposit_id_field);
+        public_instances[0].push(sender_field);
+        public_instances[0].push(amount_field);
+        public_instances[0].push(contract_address_field);
+
+        println!("   ✓ Exposed public outputs:");
+        println!("     - depositId");
+        println!("     - sender");
+        println!("     - amount");
+        println!("     - contract_address");
+
+        println!("   ✓ Phase 1 complete!");
     }
 }
 

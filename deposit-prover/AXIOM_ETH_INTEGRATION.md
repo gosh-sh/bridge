@@ -123,13 +123,22 @@ The phase1 implementation has successfully parsed the log structure:
    let address_bytes = &log_array.field_witness[0].field_cells;
    ```
 
-#### Next Steps: Event Verification
-
-5. **Verify event signature** - TODO
+5. **✅ Verify event signature** - DONE
    ```rust
-   // Compute keccak256("Deposit(uint256,address,uint256,uint256)")
-   // and constrain it equals event_sig_bytes
+   // Load expected event signature as constant
+   let expected_sig = get_deposit_event_signature();
+   let expected_sig_bytes: Vec<AssignedValue<Fr>> = expected_sig
+       .iter()
+       .map(|&byte| ctx_gate.load_constant(Fr::from(byte as u64)))
+       .collect();
+
+   // Constrain equality byte-by-byte
+   for (actual, expected) in event_sig_bytes.iter().zip(expected_sig_bytes.iter()) {
+       ctx_gate.constrain_equal(actual, expected);
+   }
    ```
+
+#### Next Steps: Public Outputs
 
 6. **Verify contract address** - TODO
    ```rust

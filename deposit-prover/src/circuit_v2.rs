@@ -16,7 +16,7 @@ use axiom_eth::{
     rlp::RlpChip,
     utils::{assign_vec, eth_circuit::EthCircuitInstructions},
 };
-use ethers_core::types::Chain;
+use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
     gates::{GateChip, GateInstructions, RangeChip},
     halo2_proofs::halo2curves::bn256::Fr,
@@ -30,6 +30,12 @@ pub const MAX_DATA_BYTE_LEN: usize = 256; // Max event data length
 pub const MAX_LOG_NUM: usize = 20; // Max number of logs in receipt
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
+
+/// Expected event signature: keccak256("Deposit(uint256,address,uint256,uint256)")
+/// This is computed off-circuit and used as a constant
+pub fn get_deposit_event_signature() -> [u8; 32] {
+    keccak256("Deposit(uint256,address,uint256,uint256)")
+}
 
 /// Deposit event circuit using axiom-eth
 #[derive(Clone)]
@@ -176,12 +182,29 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let data_bytes = &log_array.field_witness[2].field_cells;
         println!("   Data: {} bytes", data_bytes.len());
 
-        // TODO: Verify event signature matches keccak256("Deposit(uint256,address,uint256,uint256)")
+        // 10. Verify event signature
+        // Load expected event signature as constant
+        let expected_sig = get_deposit_event_signature();
+        let expected_sig_bytes: Vec<AssignedValue<Fr>> = expected_sig
+            .iter()
+            .map(|&byte| ctx_gate.load_constant(Fr::from(byte as u64)))
+            .collect();
+
+        // Constrain that event_sig_bytes equals expected_sig_bytes
+        // Both should be 32 bytes
+        assert_eq!(event_sig_bytes.len(), 32, "Event signature should be 32 bytes");
+        assert_eq!(expected_sig_bytes.len(), 32, "Expected signature should be 32 bytes");
+
+        for (actual, expected) in event_sig_bytes.iter().zip(expected_sig_bytes.iter()) {
+            ctx_gate.constrain_equal(actual, expected);
+        }
+        println!("   ✓ Verified event signature");
+
         // TODO: Verify contract address matches expected bridge contract
         // TODO: Convert bytes to field elements for public outputs
         // TODO: Expose public outputs: depositId, sender, amount, contract_address
 
-        println!("   ✓ Phase 1 complete (log parsing done, verification TODO)");
+        println!("   ✓ Phase 1 complete (event signature verified, public outputs TODO)");
     }
 }
 

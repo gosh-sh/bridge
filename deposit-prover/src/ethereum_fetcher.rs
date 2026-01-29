@@ -6,11 +6,13 @@
 //! - MPT proofs for receipts
 //! - Parsing Deposit events from logs
 
+use crate::mpt::generate_receipt_proof;
 use crate::types::{DepositEventData, DepositProofInput, ReceiptProof};
 use anyhow::{anyhow, Result};
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::types::{BlockNumber, TransactionReceipt, H160, H256, U256};
 use ethers::utils::keccak256;
+use std::sync::Arc;
 
 /// Ethereum data fetcher for deposit proofs
 pub struct EthereumFetcher {
@@ -126,7 +128,7 @@ impl EthereumFetcher {
     /// This fetches:
     /// - The transaction receipt
     /// - The block header
-    /// - The MPT proof for the receipt
+    /// - The MPT proof for the receipt (by building the receipt trie)
     /// - Parses the Deposit event
     pub async fn fetch_deposit_proof(
         &self,
@@ -146,47 +148,12 @@ impl EthereumFetcher {
         let event_data = self.parse_deposit_event(&receipt, contract_address, log_index)?;
         println!("    ✓ Event parsed (depositId: {})", event_data.deposit_id);
 
-        // 3. Fetch the block header
-        println!("  - Fetching block header...");
-        let block_number = receipt
-            .block_number
-            .ok_or_else(|| anyhow!("Receipt missing block number"))?;
-        let block = self
-            .provider
-            .get_block(BlockNumber::Number(block_number))
-            .await?
-            .ok_or_else(|| anyhow!("Block not found"))?;
-        println!("    ✓ Block header fetched");
-
-        // 4. Get receipt RLP
-        println!("  - Encoding receipt as RLP...");
-        let receipt_rlp = encode_receipt_rlp(&receipt)?;
-        println!("    ✓ Receipt RLP encoded ({} bytes)", receipt_rlp.len());
-
-        // 5. Get block header RLP
-        println!("  - Encoding block header as RLP...");
-        let block_header_rlp = encode_block_header_rlp(&block)?;
-        println!(
-            "    ✓ Block header RLP encoded ({} bytes)",
-            block_header_rlp.len()
-        );
-
-        // 6. TODO: Fetch MPT proof
-        // This requires eth_getProof RPC call which is not standard
-        // For now, we'll use a placeholder
-        println!("  ⚠️  MPT proof fetching not implemented yet");
-        println!("     Using placeholder proof nodes");
-        let proof_nodes = vec![]; // TODO: Implement MPT proof fetching
-
-        // 7. Get receipt root from block header
-        let receipt_root = block.receipts_root.as_bytes().try_into().unwrap();
-
-        let receipt_proof = ReceiptProof {
-            receipt_rlp,
-            proof_nodes,
-            receipt_root,
-            block_header_rlp,
-        };
+        // 3. Generate MPT proof using the existing implementation
+        println!("  - Generating MPT proof...");
+        println!("    (This will fetch all receipts in the block and build the trie)");
+        let provider_arc = Arc::new(self.provider.clone());
+        let receipt_proof = generate_receipt_proof(provider_arc, tx_hash).await?;
+        println!("    ✓ MPT proof generated ({} proof nodes)", receipt_proof.proof_nodes.len());
 
         Ok(DepositProofInput {
             event_data,
@@ -199,71 +166,6 @@ impl EthereumFetcher {
 /// keccak256("Deposit(uint256,address,uint256,uint256)")
 pub fn get_deposit_event_signature() -> [u8; 32] {
     keccak256("Deposit(uint256,address,uint256,uint256)")
-}
-
-/// Encode a transaction receipt as RLP
-fn encode_receipt_rlp(receipt: &TransactionReceipt) -> Result<Vec<u8>> {
-    use ethers::utils::rlp::RlpStream;
-
-    let mut stream = RlpStream::new();
-
-    // Receipt format: [status, cumulativeGasUsed, logsBloom, logs]
-    stream.begin_list(4);
-
-    // Status (1 for success, 0 for failure)
-    stream.append(&receipt.status.unwrap_or(1u64.into()));
-
-    // Cumulative gas used
-    stream.append(&receipt.cumulative_gas_used);
-
-    // Logs bloom
-    stream.append(&receipt.logs_bloom);
-
-    // Logs array
-    stream.begin_list(receipt.logs.len());
-    for log in &receipt.logs {
-        stream.begin_list(3);
-        stream.append(&log.address);
-
-        // Topics
-        stream.begin_list(log.topics.len());
-        for topic in &log.topics {
-            stream.append(topic);
-        }
-
-        // Data
-        stream.append(&log.data.to_vec());
-    }
-
-    Ok(stream.out().to_vec())
-}
-
-/// Encode a block header as RLP
-fn encode_block_header_rlp(block: &ethers::types::Block<H256>) -> Result<Vec<u8>> {
-    use ethers::utils::rlp::RlpStream;
-
-    let mut stream = RlpStream::new();
-
-    // Block header format (15 fields for post-London blocks)
-    stream.begin_list(15);
-
-    stream.append(&block.parent_hash);
-    stream.append(&block.uncles_hash);
-    stream.append(&block.author.unwrap_or_default());
-    stream.append(&block.state_root);
-    stream.append(&block.transactions_root);
-    stream.append(&block.receipts_root);
-    stream.append(&block.logs_bloom.unwrap_or_default());
-    stream.append(&block.difficulty);
-    stream.append(&block.number.unwrap_or_default());
-    stream.append(&block.gas_limit);
-    stream.append(&block.gas_used);
-    stream.append(&block.timestamp);
-    stream.append(&block.extra_data.to_vec());
-    stream.append(&block.mix_hash.unwrap_or_default());
-    stream.append(&block.nonce.unwrap_or_default());
-
-    Ok(stream.out().to_vec())
 }
 
 #[cfg(test)]

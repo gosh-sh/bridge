@@ -13,5 +13,6 @@ pub mod rlp_utils;
 pub mod types;
 
 pub use circuit::{CircuitConfig, DepositEventCircuit};
+pub use prover::{generate_proof, generate_solidity_verifier, test_circuit_mock, verify_proof};
 pub use types::{DepositEventData, DepositProofInput, DepositProofOutput, ReceiptProof};
 

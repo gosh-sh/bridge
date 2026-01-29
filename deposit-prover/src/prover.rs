@@ -65,7 +65,9 @@ use halo2_base::{
     },
     utils::fs::gen_srs,
 };
-use snark_verifier_sdk::{gen_pk, halo2::gen_snark_shplonk, Snark};
+use snark_verifier_sdk::{
+    evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, CircuitExt, Snark,
+};
 use std::fs::{self, File};
 use std::path::Path;
 
@@ -325,6 +327,68 @@ pub fn verify_proof(
     );
 
     Ok(true)
+}
+
+/// Generate a Solidity verifier contract.
+///
+/// This function generates a Solidity smart contract that can verify proofs on-chain.
+/// The verifier is generated using the SHPLONK multi-open scheme.
+///
+/// # Arguments
+///
+/// * `config` - Circuit configuration (must match the one used for proof generation)
+/// * `output_path` - Path where to save the Solidity verifier contract
+///
+/// # Returns
+///
+/// `Ok(())` on success, `Err` with error message on failure
+///
+/// # Example
+///
+/// ```ignore
+/// let config = CircuitConfig::default();
+/// generate_solidity_verifier(&config, Path::new("contracts/DepositVerifier.sol"))?;
+/// ```
+pub fn generate_solidity_verifier(
+    config: &CircuitConfig,
+    output_path: &Path,
+) -> Result<(), String> {
+    println!("Generating Solidity verifier contract...");
+
+    let k = config.degree;
+
+    // 1. Get KZG parameters
+    println!("Loading KZG parameters...");
+    let params = get_or_create_kzg_params(k)?;
+
+    // 2. Get proving key (which contains the verifying key)
+    println!("Loading proving key...");
+    let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
+    let pk_path = Path::new(&pk_path_str);
+    let pk = get_or_create_proving_key(&params, config, pk_path)?;
+
+    // 3. Get verifying key from proving key
+    let vk = pk.get_vk();
+
+    // 4. Define number of public instances
+    // We have 4 public outputs: [depositId, sender, amount, contract_address]
+    let num_instance = vec![4];
+
+    // 5. Generate Solidity verifier using SHPLONK
+    println!("Generating Solidity code...");
+    use axiom_eth::utils::eth_circuit::EthCircuitImpl;
+
+    let _bytecode = gen_evm_verifier_shplonk::<EthCircuitImpl<Fr, DepositEventCircuitV2>>(
+        &params,
+        vk,
+        num_instance,
+        Some(output_path),
+    );
+
+    println!("✅ Solidity verifier generated at: {:?}", output_path);
+    println!("   Contract size: {} bytes", _bytecode.len());
+
+    Ok(())
 }
 
 /// Create a dummy input for key generation.

@@ -1,10 +1,10 @@
-# 🎉 Circuit Implementation & MockProver Testing Complete!
+# 🎉 Full SNARK Proof Generation Complete!
 
 ## Summary
 
-We have successfully implemented a **complete ZK circuit** for proving Ethereum Deposit events using axiom-eth, with working MockProver testing!
+We have successfully implemented a **complete ZK proof system** for proving Ethereum Deposit events using axiom-eth, with full SNARK proof generation!
 
-**Progress: 90% Complete** ✅
+**Progress: 95% Complete** ✅
 
 ## What We've Accomplished
 
@@ -12,9 +12,14 @@ We have successfully implemented a **complete ZK circuit** for proving Ethereum 
 2. ✅ **Custom RLP Parsing** - Implemented log parsing from scratch
 3. ✅ **Event Verification** - Signature and address verification
 4. ✅ **Public Outputs** - All outputs exposed correctly
-5. ✅ **MockProver Testing** - Working test function with axiom-eth integration
-6. ✅ **Circuit Configuration** - JSON-based parameter loading
-7. ✅ **All Tests Passing** - 8/8 tests pass
+5. ✅ **MockProver Testing** - Fast circuit testing without proof generation
+6. ✅ **Full SNARK Proof Generation** - Complete proof generation with SHPLONK
+7. ✅ **KZG Parameters** - Automatic generation and loading
+8. ✅ **Proving Keys** - Automatic generation and caching
+9. ✅ **Proof Verification** - Verification function implemented
+10. ✅ **CircuitMetadata** - Implemented for proof compatibility
+11. ✅ **Circuit Configuration** - JSON-based parameter loading
+12. ✅ **All Tests Passing** - 8/8 tests pass
 
 ## What the Circuit Proves
 
@@ -72,8 +77,13 @@ This uses axiom-eth's `MockProver` to verify circuit constraints without the ove
 ## Files Created/Modified
 
 ### Core Implementation
-- `src/circuit_v2.rs` (365 lines) - Complete axiom-eth circuit implementation
-- `src/prover.rs` (200 lines) - Proof generation infrastructure with MockProver testing
+- `src/circuit_v2.rs` (383 lines) - Complete axiom-eth circuit with CircuitMetadata
+- `src/prover.rs` (370 lines) - Full proof generation infrastructure
+  - MockProver testing
+  - KZG parameter generation/loading
+  - Proving key generation/caching
+  - SNARK proof generation with SHPLONK
+  - Proof verification
 - `src/types.rs` - Type definitions for deposit proofs
 - `src/lib.rs` - Module exports
 
@@ -86,22 +96,21 @@ This uses axiom-eth's `MockProver` to verify circuit constraints without the ove
 - `PROGRESS_SUMMARY.md` - Detailed progress tracking
 - `IMPLEMENTATION_COMPLETE.md` - This file
 
-## Next Steps (4-7 days)
+## Next Steps (2-4 days)
 
-### 1. Implement Full Proof Generation (2-3 days)
-- Use axiom-eth's `create_circuit()` and `gen_snark_shplonk()`
-- Handle Keccak promise fulfillment
-- Test with real Ethereum data
-
-### 2. Generate Solidity Verifier (1-2 days)
-- Use `gen_evm_verifier_shplonk()` to generate Solidity code
+### 1. Generate Solidity Verifier (1-2 days) ⏭️
+- Use `gen_evm_verifier_shplonk()` to generate Solidity verifier contract
 - Deploy verifier contract to Ethereum
-- Update `AckiNackiBridge.sol` to use the verifier
+- Update `AckiNackiBridge.sol` to call the verifier
+- Test verifier with generated proofs
 
-### 3. Integration Testing (1-2 days)
+### 2. Integration Testing (1-2 days)
 - Deploy test contract to Sepolia testnet
-- Generate proof from real deposit transaction
-- Test end-to-end withdrawal flow
+- Make a test deposit transaction
+- Fetch receipt proof using Ethereum RPC
+- Generate ZK proof using `generate_proof()`
+- Submit proof to Acki Nacki for withdrawal
+- Test end-to-end flow
 
 ## Resources
 

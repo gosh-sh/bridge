@@ -14,7 +14,11 @@ use axiom_eth::{
         FIRST_PHASE,
     },
     rlp::RlpChip,
-    utils::{assign_vec, eth_circuit::EthCircuitInstructions},
+    utils::{
+        assign_vec,
+        build_utils::aggregation::CircuitMetadata,
+        eth_circuit::EthCircuitInstructions,
+    },
 };
 use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
@@ -323,6 +327,18 @@ impl ToMPTInput for ReceiptProof {
             max_key_byte_len: 32,
             key_byte_len: Some(path_len),
         }
+    }
+}
+
+/// Implement CircuitMetadata for proof generation compatibility
+impl CircuitMetadata for DepositEventCircuitV2 {
+    /// This circuit does not use aggregation, so no accumulator
+    const HAS_ACCUMULATOR: bool = false;
+
+    /// Number of public instance columns
+    /// We expose: [depositId, sender, amount, contract_address]
+    fn num_instance(&self) -> Vec<usize> {
+        vec![4] // 4 public outputs in a single instance column
     }
 }
 

@@ -57,10 +57,10 @@ default:
     FOUNDRY_DIR: "/root/.foundry"
     GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
   before_script:
-    # Configure git to use CI_JOB_TOKEN for GitLab authentication
-    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
-    # Install dependencies
+    # Install dependencies first
     - apt-get update && apt-get install -y curl git nodejs npm
+    # Configure git to use CI_JOB_TOKEN for GitLab authentication (after git is installed)
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
     # Install Foundry
     - curl -L https://foundry.paradigm.xyz | bash
     - export PATH="$FOUNDRY_DIR/bin:$PATH"

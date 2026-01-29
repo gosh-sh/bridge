@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use cita_trie::{MemoryDB, PatriciaTrie, Trie};
 use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{BlockNumber, TransactionReceipt, H256};
+use ethers::types::{TransactionReceipt, H256};
 use hasher::HasherKeccak;
 use std::sync::Arc;
 
@@ -134,7 +134,7 @@ fn build_receipt_trie(receipts: &[TransactionReceipt]) -> Result<PatriciaTrie<Me
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ethers::types::{Address, Bloom, Bytes, Log, U256, U64};
+    use ethers::types::{Address, Bloom, U256, U64};
     
     #[test]
     fn test_build_receipt_trie() {

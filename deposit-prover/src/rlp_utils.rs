@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Context, Result};
-use ethers::types::{Block, Bloom, Bytes, Log, TransactionReceipt, H160, H256, U256, U64};
+use anyhow::{anyhow, Result};
+use ethers::types::{Block, Log, TransactionReceipt};
 use rlp::RlpStream;
 
 /// RLP encode a transaction receipt
@@ -158,7 +158,7 @@ pub fn encode_tx_index(index: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ethers::types::{Address, Bytes};
+    use ethers::types::{Address, Bytes, H256};
     
     #[test]
     fn test_encode_tx_index() {

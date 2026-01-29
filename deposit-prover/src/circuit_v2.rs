@@ -5,29 +5,23 @@
 
 use crate::types::{DepositProofInput, ReceiptProof};
 use axiom_eth::{
-    keccak::KeccakChip,
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{
-        chip::RlcChip,
-        circuit::builder::{RlcCircuitBuilder, RlcContextPair},
+        circuit::builder::RlcCircuitBuilder,
         FIRST_PHASE,
     },
-    rlp::RlpChip,
     utils::{
-        assign_vec,
         build_utils::aggregation::CircuitMetadata,
         eth_circuit::EthCircuitInstructions,
     },
 };
 use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
-    gates::{GateChip, GateInstructions, RangeChip},
+    gates::GateInstructions,
     halo2_proofs::halo2curves::bn256::Fr,
-    AssignedValue, Context,
-    QuantumCell::Constant,
+    AssignedValue,
 };
-use std::marker::PhantomData;
 
 /// Circuit parameters
 pub const MAX_DATA_BYTE_LEN: usize = 256; // Max event data length

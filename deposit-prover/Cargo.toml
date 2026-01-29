@@ -13,10 +13,6 @@ license = "MIT OR Apache-2.0"
 name = "deposit_prover"
 path = "src/lib.rs"
 
-[[bin]]
-name = "deposit-prover"
-path = "src/main.rs"
-
 [dependencies]
 # Axiom-eth for Ethereum state proofs
 axiom-eth = { git = "https://github.com/axiom-crypto/axiom-eth", default-features = false, features = [

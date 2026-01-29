@@ -60,13 +60,13 @@ use halo2_base::{
     halo2_proofs::{
         dev::MockProver,
         halo2curves::bn256::{Bn256, Fr, G1Affine},
-        plonk::{Circuit, ProvingKey, VerifyingKey},
+        plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
     utils::fs::gen_srs,
 };
 use snark_verifier_sdk::{
-    evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, CircuitExt, Snark,
+    evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark,
 };
 use std::fs::{self, File};
 use std::path::Path;
@@ -207,9 +207,10 @@ pub fn get_or_create_proving_key(
     config: &CircuitConfig,
     pk_path: &Path,
 ) -> Result<ProvingKey<G1Affine>, String> {
-    // Create a dummy circuit for key generation
-    let dummy_input = create_dummy_input();
-    let circuit_input = DepositEventCircuitV2::new(dummy_input, config);
+    // Create a placeholder circuit for key generation
+    // Note: Witness data doesn't matter for keygen, only circuit structure
+    let placeholder_input = create_keygen_placeholder_input();
+    let circuit_input = DepositEventCircuitV2::new(placeholder_input, config);
     let circuit_params = get_default_params();
     let circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
 
@@ -391,10 +392,12 @@ pub fn generate_solidity_verifier(
     Ok(())
 }
 
-/// Create a dummy input for key generation.
+/// Create a placeholder input for key generation.
 ///
 /// This creates a minimal valid input that can be used to generate proving/verifying keys.
-fn create_dummy_input() -> DepositProofInput {
+/// The actual witness data doesn't matter for keygen - only the circuit structure matters.
+/// This is a standard pattern in ZK-SNARK systems.
+fn create_keygen_placeholder_input() -> DepositProofInput {
     use crate::types::{DepositEventData, ReceiptProof};
 
     let event_data = DepositEventData {
@@ -424,7 +427,6 @@ fn create_dummy_input() -> DepositProofInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DepositEventData, ReceiptProof};
 
     #[test]
     fn test_config_default() {

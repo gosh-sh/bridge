@@ -7,10 +7,10 @@
 //! - Parsing Deposit events from logs
 
 use crate::mpt::generate_receipt_proof;
-use crate::types::{DepositEventData, DepositProofInput, ReceiptProof};
+use crate::types::{DepositEventData, DepositProofInput};
 use anyhow::{anyhow, Result};
 use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{BlockNumber, TransactionReceipt, H160, H256, U256};
+use ethers::types::{TransactionReceipt, H160, H256};
 use ethers::utils::keccak256;
 use std::sync::Arc;
 

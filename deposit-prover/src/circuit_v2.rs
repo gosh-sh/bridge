@@ -45,7 +45,24 @@ pub struct DepositEventCircuitV2 {
 }
 
 impl DepositEventCircuitV2 {
-    pub fn new(inputs: DepositProofInput, network: Chain) -> Self {
+    /// Create a new circuit with the given inputs and configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `inputs` - The deposit proof input containing event data and receipt proof
+    /// * `config` - Circuit configuration (from prover module)
+    pub fn new(inputs: DepositProofInput, config: &crate::prover::CircuitConfig) -> Self {
+        let params = EthReceiptChipParams {
+            max_data_byte_len: config.max_data_byte_len,
+            max_log_num: config.max_log_num,
+            topic_num_bounds: config.topic_num_bounds,
+            network: Some(Chain::Mainnet), // Default to mainnet
+        };
+        Self { inputs, params }
+    }
+
+    /// Create a new circuit with default parameters (for backward compatibility).
+    pub fn new_with_defaults(inputs: DepositProofInput, network: Chain) -> Self {
         let params = EthReceiptChipParams {
             max_data_byte_len: MAX_DATA_BYTE_LEN,
             max_log_num: MAX_LOG_NUM,
@@ -339,7 +356,7 @@ mod tests {
             receipt_proof,
         };
 
-        let circuit = DepositEventCircuitV2::new(input, Chain::Sepolia);
+        let circuit = DepositEventCircuitV2::new_with_defaults(input, Chain::Sepolia);
         assert_eq!(circuit.params.max_data_byte_len, MAX_DATA_BYTE_LEN);
         assert_eq!(circuit.params.max_log_num, MAX_LOG_NUM);
     }

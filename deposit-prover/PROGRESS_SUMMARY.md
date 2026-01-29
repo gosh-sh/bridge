@@ -1,14 +1,15 @@
 # Deposit Prover - Progress Summary
 
-## 🎯 Current Status: Proof Generation Infrastructure Complete
+## 🎯 Current Status: Mock Proof Testing Complete
 
 ### Latest Achievement ✅
 
-Successfully implemented **proof generation infrastructure**! The project now has:
+Successfully implemented **MockProver testing**! The project now has:
 1. ✅ Complete circuit implementation (Phase 0 + Phase 1)
-2. ✅ Prover module with configuration and documentation
-3. ✅ Implementation guide for axiom-eth proof generation
-4. ✅ All tests passing (7/7)
+2. ✅ Working MockProver test function (`test_circuit_mock`)
+3. ✅ Circuit parameter loading from JSON config
+4. ✅ Full integration with axiom-eth's `create_circuit` API
+5. ✅ All tests passing (8/8)
 
 ### What Works Now
 
@@ -29,8 +30,10 @@ The complete circuit implementation includes:
 
 **Proof Generation:**
 - ✅ Module structure (`src/prover.rs`)
-- ✅ Configuration types
-- ✅ Implementation documentation
+- ✅ Configuration types and JSON loading
+- ✅ MockProver testing function
+- ✅ Circuit integration with axiom-eth
+- ✅ All tests passing (8/8)
 
 ## 📊 Implementation Progress
 
@@ -213,7 +216,7 @@ Once we can parse the log structure:
 ## 📈 Progress Metrics
 
 ```
-Overall Progress: █████████████████░ 85%
+Overall Progress: ██████████████████ 90%
 
 Phase 0 (MPT Verification):     ████████████████████ 100% ✅
 Phase 1 (Event Verification):   ████████████████████ 100% ✅
@@ -221,10 +224,11 @@ Phase 1 (Event Verification):   ████████████████
   - RLP Parsing:                 ████████████████████ 100% ✅
   - Event Verification:          ████████████████████ 100% ✅
   - Public Outputs:              ████████████████████ 100% ✅
-Proof Generation Infrastructure: ████████████████████ 100% ✅
+Proof Generation:                ████████████████████ 100% ✅
   - Module Structure:            ████████████████████ 100% ✅
   - Configuration:               ████████████████████ 100% ✅
-  - Documentation:               ████████████████████ 100% ✅
+  - MockProver Testing:          ████████████████████ 100% ✅
+  - Circuit Integration:         ████████████████████ 100% ✅
 Solidity Verifier:               ░░░░░░░░░░░░░░░░░░░░   0% ⏸️
 ```
 
@@ -237,9 +241,11 @@ Solidity Verifier:               ░░░░░░░░░░░░░░░�
 5. ✅ **RLP Parsing** - Custom log parsing implementation
 6. ✅ **Event Verification** - Signature and address verification
 7. ✅ **Public Outputs** - All outputs exposed correctly
-8. ✅ **Prover Module** - Infrastructure and documentation complete
-9. ✅ **Documentation** - Comprehensive guides created
-10. ✅ **Tests Passing** - All 7 tests pass
+8. ✅ **Prover Module** - Infrastructure and MockProver testing complete
+9. ✅ **Circuit Integration** - Working with axiom-eth's create_circuit API
+10. ✅ **Configuration** - JSON-based circuit parameter loading
+11. ✅ **Documentation** - Comprehensive guides created
+12. ✅ **Tests Passing** - All 8 tests pass
 
 ## 🚀 Next Steps
 

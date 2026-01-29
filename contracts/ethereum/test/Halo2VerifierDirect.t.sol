@@ -32,21 +32,21 @@ contract Halo2VerifierDirectTest is Test {
         uint256 nullifier = uint256(vm.parseJsonUint(json, ".publicInputs[0]"));
         uint256 recipient = uint256(vm.parseJsonUint(json, ".publicInputs[1]"));
         uint256 amount = uint256(vm.parseJsonUint(json, ".publicInputs[2]"));
-        uint256 root_val = uint256(vm.parseJsonUint(json, ".publicInputs[3]"));
+        uint256 rootVal = uint256(vm.parseJsonUint(json, ".publicInputs[3]"));
 
         console.log("Testing proof verification...");
         console.log("Proof length:", proof.length);
         console.log("Nullifier:", nullifier);
         console.log("Recipient:", recipient);
         console.log("Amount:", amount);
-        console.log("Root:", root_val);
+        console.log("Root:", rootVal);
 
         // Call the verifier with public inputs + proof
         bytes memory calldata_ = abi.encodePacked(
             bytes32(nullifier),
             bytes32(recipient),
             bytes32(amount),
-            bytes32(root_val),
+            bytes32(rootVal),
             proof
         );
 
@@ -75,23 +75,23 @@ contract Halo2VerifierDirectTest is Test {
         uint256 nullifier = uint256(vm.parseJsonUint(json, ".publicInputs[0]"));
         uint256 recipient = uint256(vm.parseJsonUint(json, ".publicInputs[1]"));
         uint256 amount = uint256(vm.parseJsonUint(json, ".publicInputs[2]"));
-        uint256 root_val = uint256(vm.parseJsonUint(json, ".publicInputs[3]"));
+        uint256 rootVal = uint256(vm.parseJsonUint(json, ".publicInputs[3]"));
 
         console.log("Testing invalid proof rejection...");
 
         // Tamper with the nullifier to make the proof invalid
-        uint256 invalid_nullifier = nullifier + 1;
+        uint256 invalidNullifier = nullifier + 1;
 
         // Call the verifier with tampered public inputs + proof
         bytes memory calldata_ = abi.encodePacked(
-            bytes32(invalid_nullifier),
+            bytes32(invalidNullifier),
             bytes32(recipient),
             bytes32(amount),
-            bytes32(root_val),
+            bytes32(rootVal),
             proof
         );
 
-        (bool success, bytes memory result) = verifier.call{gas: 30000000}(calldata_);
+        (bool success, ) = verifier.call{gas: 30000000}(calldata_);
 
         console.log("Call success:", success);
 

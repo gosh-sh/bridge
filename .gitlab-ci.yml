@@ -93,8 +93,8 @@ setup:foundry:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
@@ -144,8 +144,8 @@ build:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Build contracts
     - forge build
   cache:
@@ -198,8 +198,8 @@ test:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Run tests
     - forge test -vvv
   cache:
@@ -225,8 +225,8 @@ test:solidity:coverage:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Run coverage
     - forge coverage --report summary
   cache:
@@ -266,8 +266,8 @@ lint:solidity:fmt:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Check formatting
     - forge fmt --check
   cache:
@@ -325,8 +325,8 @@ docs:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Generate documentation
     - forge doc
   cache:
@@ -351,8 +351,8 @@ deploy:testnet:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Deploy to testnet
     - echo "Deploy to testnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $TESTNET_RPC_URL --broadcast --verify
@@ -376,8 +376,8 @@ deploy:mainnet:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies (forge-std, etc.)
-    - forge install --no-commit
+    # Install forge dependencies (forge-std)
+    - forge install --no-git foundry-rs/forge-std
     # Deploy to mainnet
     - echo "Deploy to mainnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify

@@ -68,43 +68,43 @@ The CI jobs were not running `forge install` to install these dependencies befor
 
 ### Solution
 Updated **all Solidity CI jobs** to:
-1. Run `forge install --no-commit` to install dependencies
+1. Run `forge install --no-git foundry-rs/forge-std` to install dependencies
 2. Cache the `lib/` directory for faster subsequent builds
 3. Change cache policy from `pull` to `pull-push` where appropriate
 
 #### Jobs Updated
 
 1. **`setup:foundry`** (lines 88-111)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 2. **`build:solidity`** (lines 138-161)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
    - Changed cache policy: `pull` → `pull-push`
 
 3. **`test:solidity`** (lines 191-216)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 4. **`test:solidity:coverage`** (lines 218-243)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 5. **`lint:solidity:fmt`** (lines 261-279)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 6. **`docs:solidity`** (lines 320-343)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 7. **`deploy:testnet`** (lines 346-369)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 8. **`deploy:mainnet`** (lines 371-394)
-   - Added: `forge install --no-commit`
+   - Added: `forge install --no-git foundry-rs/forge-std`
    - Added to cache: `contracts/ethereum/lib/`
 
 **Status:** ✅ Fixed
@@ -153,7 +153,7 @@ cache:
 2. ✅ Configure git authentication
 3. ✅ Install Foundry
 4. ✅ Install NPM dependencies (`npm install`)
-5. ✅ Install Forge dependencies (`forge install --no-commit`)
+5. ✅ Install Forge dependencies (`forge install --no-git foundry-rs/forge-std`)
 6. ✅ Build/test contracts
 7. ✅ Save cache (out/, cache/, lib/, node_modules/)
 
@@ -179,7 +179,7 @@ rm -rf lib/ node_modules/ out/ cache/
 
 # Install dependencies (as CI does)
 npm install
-forge install --no-commit
+forge install --no-git foundry-rs/forge-std
 
 # Build (should succeed)
 forge build
@@ -211,11 +211,12 @@ forge test -vvv
 
 ## 🔍 Additional Notes
 
-### Why `forge install --no-commit`?
-The `--no-commit` flag prevents forge from creating git commits when installing dependencies. This is important in CI because:
-1. CI doesn't need to commit changes
-2. Avoids git configuration issues
+### Why `forge install --no-git`?
+The `--no-git` flag installs dependencies without adding them as git submodules. This is important in CI because:
+1. CI doesn't need to track dependencies as submodules
+2. Avoids git submodule complexity
 3. Faster installation
+4. Dependencies are cached instead of being tracked in git
 
 ### Why Cache `lib/` Directory?
 Caching the `lib/` directory significantly speeds up subsequent CI runs:

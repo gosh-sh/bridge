@@ -59,7 +59,10 @@ use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
         dev::MockProver,
-        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        halo2curves::{
+            bn256::{Bn256, Fr, G1Affine},
+            ff::PrimeField,
+        },
         plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
@@ -154,11 +157,42 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     Ok(())
 }
 
+/// Save KZG parameters to disk
+fn save_kzg_params(params: &ParamsKZG<Bn256>, path: &str) -> Result<(), String> {
+    use halo2_base::halo2_proofs::poly::commitment::Params;
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    let mut file = File::create(path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+
+    params.write(&mut file)
+        .map_err(|e| format!("Failed to write params: {}", e))?;
+
+    Ok(())
+}
+
+/// Load KZG parameters from disk
+fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
+    use halo2_base::halo2_proofs::poly::commitment::Params;
+
+    let mut file = File::open(path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    ParamsKZG::<Bn256>::read(&mut file)
+        .map_err(|e| format!("Failed to read params: {}", e))
+}
+
 /// Generate or load KZG parameters for the given circuit degree.
 ///
 /// This function will:
 /// - Try to load existing parameters from `data/kzg_params_{k}.srs`
 /// - If not found, generate new parameters (this can take several minutes)
+/// - Save newly generated parameters to disk for future reuse
 ///
 /// # Arguments
 ///
@@ -173,16 +207,26 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
     // Try to load existing parameters
     if Path::new(&params_path).exists() {
         println!("Loading KZG parameters from {}", params_path);
-        // Note: snark-verifier-sdk doesn't have a direct load function,
-        // so we generate fresh params for now
-        // TODO: Implement parameter serialization/deserialization
+        match load_kzg_params(&params_path) {
+            Ok(params) => {
+                println!("Successfully loaded KZG parameters from disk");
+                return Ok(params);
+            }
+            Err(e) => {
+                println!("Warning: Failed to load KZG params: {}. Regenerating...", e);
+            }
+        }
     }
 
     println!("Generating KZG parameters for k={} (this may take a few minutes)...", k);
     let params = gen_srs(k);
 
-    // TODO: Save parameters to disk for reuse
-    // This requires implementing serialization
+    // Save parameters to disk for reuse
+    if let Err(e) = save_kzg_params(&params, &params_path) {
+        println!("Warning: Failed to save KZG params: {}", e);
+    } else {
+        println!("KZG parameters saved to {}", params_path);
+    }
 
     Ok(params)
 }
@@ -190,8 +234,12 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// Generate or load proving key for the deposit circuit.
 ///
 /// This function will:
-/// - Try to load existing proving key from `pk_path`
+/// - Check if proving key exists at `pk_path`
+/// - If exists and valid, use it (gen_pk will load it automatically)
 /// - If not found, generate new proving key from the circuit
+/// - Save newly generated proving key to disk for future reuse
+///
+/// Note: gen_pk from snark-verifier-sdk handles loading automatically if the file exists
 ///
 /// # Arguments
 ///
@@ -214,17 +262,15 @@ pub fn get_or_create_proving_key(
     let circuit_params = get_default_params();
     let circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
 
-    // Try to load existing proving key
-    // Note: read_pk requires the circuit params, not the circuit itself
+    // gen_pk will automatically load from pk_path if it exists, or generate and save if not
     if pk_path.exists() {
-        // For now, we'll regenerate the key if it exists
-        // TODO: Implement proper key loading with params matching
-        println!("Found existing proving key at {:?}, regenerating to ensure compatibility", pk_path);
+        println!("Found existing proving key at {:?}, loading...", pk_path);
+    } else {
+        println!("Generating proving key (this may take a few minutes)...");
     }
 
-    println!("Generating proving key (this may take a few minutes)...");
     let pk = gen_pk(params, &circuit, Some(pk_path));
-    println!("Proving key generated and saved to {:?}", pk_path);
+    println!("Proving key ready");
 
     Ok(pk)
 }
@@ -306,26 +352,67 @@ pub fn verify_proof(
 ) -> Result<bool, String> {
     let k = config.degree;
 
-    // 1. Get KZG parameters (needed for full verification)
+    // 1. Get KZG parameters (needed for verification)
     let _params = get_or_create_kzg_params(k)
         .map_err(|e| format!("Failed to get KZG params: {}", e))?;
 
     // 2. Deserialize SNARK
-    let _snark: Snark = bincode::deserialize(&proof.proof)
+    let snark: Snark = bincode::deserialize(&proof.proof)
         .map_err(|e| format!("Failed to deserialize proof: {}", e))?;
 
-    // 3. Verify using snark-verifier
-    // Note: Full verification requires the verifying key and proper setup
-    // For now, we just check that the proof deserializes correctly
-    // TODO: Implement full verification using snark-verifier
+    // 3. Verify proof structure and public inputs
+    // Note: Full cryptographic verification happens on-chain via Solidity verifier
+    // Here we perform basic sanity checks on the proof structure
 
-    println!("Proof verification: proof deserialized successfully");
-    println!("Public outputs: depositId={}, sender={:?}, amount={}, contract={:?}",
-        proof.deposit_id,
-        hex::encode(proof.sender),
-        proof.amount,
-        hex::encode(proof.contract_address)
-    );
+    // Check that proof has instances (public inputs)
+    if snark.instances.is_empty() {
+        return Err("Proof has no public instances".to_string());
+    }
+
+    // Check that we have exactly 4 public inputs (depositId, sender, amount, contract)
+    if snark.instances[0].len() != 4 {
+        return Err(format!(
+            "Expected 4 public inputs, got {}",
+            snark.instances[0].len()
+        ));
+    }
+
+    // Verify public inputs match the claimed values
+    let deposit_id_field = Fr::from(proof.deposit_id);
+    let sender_field = Fr::from_u128(u128::from_be_bytes({
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&proof.sender[4..20]);
+        bytes
+    }));
+    let amount_field = Fr::from_u128(proof.amount as u128);
+    let contract_field = Fr::from_u128(u128::from_be_bytes({
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&proof.contract_address[4..20]);
+        bytes
+    }));
+
+    if snark.instances[0][0] != deposit_id_field {
+        return Err("Public input mismatch: depositId".to_string());
+    }
+    if snark.instances[0][1] != sender_field {
+        return Err("Public input mismatch: sender".to_string());
+    }
+    if snark.instances[0][2] != amount_field {
+        return Err("Public input mismatch: amount".to_string());
+    }
+    if snark.instances[0][3] != contract_field {
+        return Err("Public input mismatch: contract_address".to_string());
+    }
+
+    println!("✓ Proof structure valid");
+    println!("✓ Public inputs verified");
+    println!("  depositId: {}", proof.deposit_id);
+    println!("  sender: 0x{}", hex::encode(proof.sender));
+    println!("  amount: {}", proof.amount);
+    println!("  contract: 0x{}", hex::encode(proof.contract_address));
+    println!();
+    println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
+    println!("      This check only validates proof structure and public inputs");
 
     Ok(true)
 }
@@ -447,6 +534,63 @@ mod tests {
         assert_eq!(params.num_rlc_columns, 3);
     }
 
+    #[test]
+    fn test_kzg_params_save_load() {
+        use halo2_base::halo2_proofs::poly::commitment::Params;
+        use tempfile::tempdir;
+
+        // Create a temporary directory
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let params_path = temp_dir.path().join("test_params.srs");
+        let params_path_str = params_path.to_str().unwrap();
+
+        // Generate small params for testing (k=4 is very small and fast)
+        let k = 4;
+        let params = gen_srs(k);
+
+        // Save params
+        let save_result = save_kzg_params(&params, params_path_str);
+        assert!(save_result.is_ok(), "Failed to save params: {:?}", save_result.err());
+        assert!(params_path.exists(), "Params file was not created");
+
+        // Load params
+        let load_result = load_kzg_params(params_path_str);
+        assert!(load_result.is_ok(), "Failed to load params: {:?}", load_result.err());
+
+        let loaded_params = load_result.unwrap();
+
+        // Verify params match (check the degree)
+        assert_eq!(params.k(), loaded_params.k(), "Loaded params have different degree");
+
+        // Cleanup is automatic when temp_dir goes out of scope
+    }
+
+    #[test]
+    fn test_create_keygen_placeholder_input() {
+        let input = create_keygen_placeholder_input();
+
+        // Verify placeholder has expected zero values
+        assert_eq!(input.event_data.deposit_id, 0);
+        assert_eq!(input.event_data.sender, [0u8; 20]);
+        assert_eq!(input.event_data.amount, 0);
+        assert_eq!(input.event_data.timestamp, 0);
+        assert_eq!(input.event_data.contract_address, [0u8; 20]);
+
+        // Verify receipt proof has minimal structure
+        assert_eq!(input.receipt_proof.proof_nodes.len(), 0);
+        assert_eq!(input.receipt_proof.receipt_root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_get_default_params() {
+        let params = get_default_params();
+
+        // Verify default parameters
+        assert_eq!(params.base.k, 18);
+        assert_eq!(params.num_rlc_columns, 3);
+    }
+
     // Note: test_circuit_mock requires real Ethereum data and is tested in integration tests
+    // Note: Full proof generation tests are too slow for unit tests (5-10 minutes)
 }
 

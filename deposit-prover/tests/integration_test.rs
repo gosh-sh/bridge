@@ -13,6 +13,9 @@ use deposit_prover::{
     types::{DepositEventData, DepositProofInput, ReceiptProof},
 };
 
+#[cfg(feature = "real_ethereum_tests")]
+use deposit_prover::ethereum_fetcher::EthereumFetcher;
+
 /// Test with a minimal mock receipt
 ///
 /// NOTE: This test is expected to fail because we don't have a valid MPT proof.
@@ -195,14 +198,31 @@ mod real_ethereum_tests {
         let provider = Provider::<Http>::try_from(rpc_url)
             .expect("Failed to create provider");
 
-        // TODO: Replace with actual transaction hash of a Deposit event
-        let tx_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
-        
-        println!("Fetching transaction receipt: {}", tx_hash);
-        
+        // Get transaction hash and contract address from environment
+        let tx_hash_str = env::var("TEST_TX_HASH")
+            .unwrap_or_else(|_| {
+                println!("⚠️  TEST_TX_HASH not set, using example transaction");
+                println!("   Set TEST_TX_HASH to test with your own deposit transaction");
+                // Example Sepolia transaction (replace with actual deposit tx)
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+            });
+
+        let contract_address_str = env::var("TEST_CONTRACT_ADDRESS")
+            .unwrap_or_else(|_| {
+                println!("⚠️  TEST_CONTRACT_ADDRESS not set, using example address");
+                "0x0000000000000000000000000000000000000000".to_string()
+            });
+
+        let tx_hash: H256 = tx_hash_str.parse()
+            .expect("Invalid TEST_TX_HASH format");
+        let contract_address: H160 = contract_address_str.parse()
+            .expect("Invalid TEST_CONTRACT_ADDRESS format");
+
+        println!("Fetching transaction receipt: {}", tx_hash_str);
+
         // Fetch the receipt
         let receipt = provider
-            .get_transaction_receipt(tx_hash.parse().unwrap())
+            .get_transaction_receipt(tx_hash)
             .await
             .expect("Failed to fetch receipt")
             .expect("Receipt not found");
@@ -211,17 +231,42 @@ mod real_ethereum_tests {
         println!("  Block: {:?}", receipt.block_number);
         println!("  Logs: {}", receipt.logs.len());
 
-        // TODO: Parse the Deposit event from logs
-        // TODO: Fetch MPT proof for the receipt
-        // TODO: Create DepositProofInput
-        // TODO: Test with test_circuit_mock
+        // Use EthereumFetcher to get complete proof input
+        let fetcher = EthereumFetcher::new(&rpc_url)
+            .expect("Failed to create EthereumFetcher");
 
-        println!("\n⚠️  Real Ethereum test not fully implemented yet");
-        println!("   Need to:");
-        println!("   1. Deploy test contract and make a deposit");
-        println!("   2. Fetch the receipt and MPT proof");
-        println!("   3. Parse the Deposit event");
-        println!("   4. Test the circuit");
+        println!("\nFetching deposit proof data...");
+        let proof_input = fetcher
+            .fetch_deposit_proof(tx_hash, contract_address, 0)
+            .await
+            .expect("Failed to fetch deposit proof");
+
+        println!("✓ Deposit event parsed:");
+        println!("  depositId: {}", proof_input.event_data.deposit_id);
+        println!("  sender: 0x{}", hex::encode(proof_input.event_data.sender));
+        println!("  amount: {}", proof_input.event_data.amount);
+        println!("  timestamp: {}", proof_input.event_data.timestamp);
+
+        println!("\n✓ MPT proof fetched:");
+        println!("  Proof length: {} bytes", proof_input.receipt_proof.proof.len());
+        println!("  Receipt root: 0x{}", hex::encode(proof_input.receipt_proof.receipt_root));
+
+        // Test the circuit with real data
+        println!("\nTesting circuit with real Ethereum data...");
+        let config = CircuitConfig::default();
+
+        match test_circuit_mock(proof_input, &config) {
+            Ok(_) => {
+                println!("\n✅ Circuit test PASSED with real Ethereum data!");
+                println!("   All constraints satisfied");
+                println!("   MPT proof verified");
+                println!("   Event data extracted correctly");
+            }
+            Err(e) => {
+                println!("\n❌ Circuit test FAILED: {}", e);
+                panic!("Circuit test failed with real data");
+            }
+        }
     }
 }
 

@@ -8,6 +8,7 @@ pub mod circuit;
 pub mod circuit_v2;
 pub mod ethereum;
 pub mod mpt;
+pub mod prover;
 pub mod rlp_utils;
 pub mod types;
 

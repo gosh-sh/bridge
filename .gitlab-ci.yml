@@ -93,13 +93,14 @@ setup:foundry:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
-    # Install forge dependencies
-    - forge install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
       - contracts/ethereum/out/
       - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull-push
   only:
@@ -143,6 +144,8 @@ build:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Build contracts
     - forge build
   cache:
@@ -150,8 +153,9 @@ build:solidity:
     paths:
       - contracts/ethereum/out/
       - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
-    policy: pull
+    policy: pull-push
   artifacts:
     paths:
       - contracts/ethereum/out/
@@ -194,6 +198,8 @@ test:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Run tests
     - forge test -vvv
   cache:
@@ -201,6 +207,7 @@ test:solidity:
     paths:
       - contracts/ethereum/out/
       - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   artifacts:
@@ -218,6 +225,8 @@ test:solidity:coverage:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Run coverage
     - forge coverage --report summary
   cache:
@@ -225,6 +234,7 @@ test:solidity:coverage:
     paths:
       - contracts/ethereum/out/
       - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   coverage: '/Total.*?(\d+\.\d+)%/'
@@ -256,11 +266,14 @@ lint:solidity:fmt:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Check formatting
     - forge fmt --check
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   allow_failure: false
@@ -312,11 +325,14 @@ docs:solidity:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Generate documentation
     - forge doc
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   artifacts:
@@ -335,12 +351,15 @@ deploy:testnet:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Deploy to testnet
     - echo "Deploy to testnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $TESTNET_RPC_URL --broadcast --verify
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   only:
@@ -357,12 +376,15 @@ deploy:mainnet:
     - cd contracts/ethereum
     # Install npm dependencies (poseidon-solidity)
     - npm install
+    # Install forge dependencies (forge-std, etc.)
+    - forge install --no-commit
     # Deploy to mainnet
     - echo "Deploy to mainnet would go here"
     - forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify
   cache:
     key: foundry-npm-$CI_COMMIT_REF_SLUG
     paths:
+      - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
   only:

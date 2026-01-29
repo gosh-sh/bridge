@@ -37,7 +37,7 @@ pub struct ReceiptProof {
 }
 
 /// Input for deposit proof generation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositProofInput {
     /// Deposit event data (public)
     pub event_data: DepositEventData,

@@ -34,7 +34,7 @@ import "poseidon-solidity/PoseidonT3.sol";
  */
 contract DummyVerifier is IAckiNackiVerifier {
     // The real Halo2 verifier contract (deployed as raw bytecode)
-    address public immutable halo2Verifier;
+    address public immutable HALO2_VERIFIER;
 
     // Expected number of public inputs for withdrawal proof
     // Public inputs/outputs: [nullifier, recipient, amount, root]
@@ -42,7 +42,7 @@ contract DummyVerifier is IAckiNackiVerifier {
     uint256 private constant PUBLIC_INPUTS_COUNT = 4;
 
     constructor(address _halo2Verifier) {
-        halo2Verifier = _halo2Verifier;
+        HALO2_VERIFIER = _halo2Verifier;
     }
 
     /**
@@ -89,13 +89,13 @@ contract DummyVerifier is IAckiNackiVerifier {
         // publicInputs[1] = recipient (public INPUT)
         // publicInputs[2] = amount (public INPUT)
         // publicInputs[3] = root (public INPUT)
-        bytes32 nullifier_value = bytes32(publicInputs[0]);
+        bytes32 nullifierValue = bytes32(publicInputs[0]);
         uint256 recipient = publicInputs[1];
         uint256 amount = publicInputs[2];
         uint256 root = publicInputs[3];
 
         // Validate public inputs are non-zero
-        if (nullifier_value == bytes32(0) || recipient == 0 || amount == 0 || root == 0) {
+        if (nullifierValue == bytes32(0) || recipient == 0 || amount == 0 || root == 0) {
             return (false, bytes32(0));
         }
 
@@ -103,7 +103,7 @@ contract DummyVerifier is IAckiNackiVerifier {
         // The verifier expects: [public_input_0 || public_input_1 || public_input_2 || public_input_3 || proof_data]
         // Which is: [nullifier || recipient || amount || root || proof_data]
         bytes memory verifierCalldata = abi.encodePacked(
-            nullifier_value,      // public output from circuit
+            nullifierValue,       // public output from circuit
             bytes32(recipient),   // public input
             bytes32(amount),      // public input
             bytes32(root),        // public input
@@ -112,13 +112,13 @@ contract DummyVerifier is IAckiNackiVerifier {
 
         // Call the Halo2 verifier
         // The verifier will check that the proof is valid for the given public inputs
-        (bool success, ) = halo2Verifier.call(verifierCalldata);
+        (bool success, ) = HALO2_VERIFIER.call(verifierCalldata);
 
         if (!success) {
             return (false, bytes32(0));
         }
 
-        return (true, nullifier_value);
+        return (true, nullifierValue);
     }
 
     /**

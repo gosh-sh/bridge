@@ -168,9 +168,11 @@ echo ""
 echo -e "${YELLOW}[4/6] Testing Circuit with MockProver...${NC}"
 
 echo "Running MockProver test (fast, no proof generation)..."
+echo "Note: Using max-data-byte-len=256 (standard for event data)"
 cargo run --release --example test_with_real_data -- \
     --input "$DATA_DIR/deposit_proof_input.json" \
-    --mock-only
+    --mock-only \
+    --max-data-byte-len 256
 
 echo -e "${GREEN}✓ Circuit test passed!${NC}"
 
@@ -183,7 +185,8 @@ echo "Generating SNARK proof (this may take several minutes)..."
 cargo run --release --example test_with_real_data -- \
     --input "$DATA_DIR/deposit_proof_input.json" \
     --generate-proof \
-    --output "$DATA_DIR/deposit_proof_output.json"
+    --output "$DATA_DIR/deposit_proof_output.json" \
+    --max-data-byte-len 1024
 
 if [ ! -f "$DATA_DIR/deposit_proof_output.json" ]; then
     echo -e "${RED}Failed to generate proof${NC}"

@@ -99,7 +99,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Loaded tx_index: {}", self.inputs.event_data.transaction_index);
 
         // 2. Convert receipt proof to MPTInput and assign
-        let mpt_input = self.inputs.receipt_proof.to_mpt_input(self.inputs.event_data.transaction_index);
+        let mpt_input = self.inputs.receipt_proof.to_mpt_input(
+            self.inputs.event_data.transaction_index,
+            self.params.max_data_byte_len,
+        );
         let proof = mpt_input.assign(ctx);
 
         // 3. Create receipt input
@@ -295,11 +298,11 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
 /// Helper trait for converting ReceiptProof to MPTInput
 trait ToMPTInput {
-    fn to_mpt_input(&self, tx_index: u64) -> axiom_eth::mpt::MPTInput;
+    fn to_mpt_input(&self, tx_index: u64, max_data_byte_len: usize) -> axiom_eth::mpt::MPTInput;
 }
 
 impl ToMPTInput for ReceiptProof {
-    fn to_mpt_input(&self, tx_index: u64) -> axiom_eth::mpt::MPTInput {
+    fn to_mpt_input(&self, tx_index: u64, max_data_byte_len: usize) -> axiom_eth::mpt::MPTInput {
         use axiom_eth::mpt::MPTInput;
         use ethers_core::types::H256;
         use rlp::RlpStream;
@@ -310,13 +313,20 @@ impl ToMPTInput for ReceiptProof {
         let path_bytes = rlp_stream.out().to_vec();
         let path_len = path_bytes.len();
 
+        // Calculate value_max_byte_len using axiom-eth's formula
+        // This is the maximum size of the RLP-encoded receipt
+        // Formula from axiom-eth/src/receipt/mod.rs:calc_max_val_len
+        let max_topic_num = TOPIC_NUM_BOUNDS.1; // max topics = 4
+        let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
+        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + MAX_LOG_NUM * max_log_len;
+
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
             value: self.receipt_rlp.clone(),
             root_hash: H256::from_slice(&self.receipt_root),
             proof: self.proof_nodes.clone(),
             slot_is_empty: false,
-            value_max_byte_len: MAX_DATA_BYTE_LEN * 2, // Conservative estimate
+            value_max_byte_len,
             max_depth: RECEIPT_PF_MAX_DEPTH,
             max_key_byte_len: 32,
             key_byte_len: Some(path_len),

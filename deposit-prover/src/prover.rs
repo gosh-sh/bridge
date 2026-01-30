@@ -325,13 +325,13 @@ pub fn generate_proof(
     let proof_bytes = bincode::serialize(&snark)
         .map_err(|e| format!("Failed to serialize proof: {}", e))?;
 
-    Ok(DepositProofOutput {
-        proof: proof_bytes,
-        deposit_id: input.event_data.deposit_id,
-        sender: input.event_data.sender,
-        amount: input.event_data.amount,
-        contract_address: input.event_data.contract_address,
-    })
+    Ok(DepositProofOutput::new(
+        proof_bytes,
+        input.event_data.deposit_id,
+        input.event_data.sender,
+        input.event_data.amount,
+        input.event_data.contract_address,
+    ))
 }
 
 /// Verify a SNARK proof.

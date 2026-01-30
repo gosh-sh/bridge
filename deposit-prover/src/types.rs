@@ -48,12 +48,29 @@ pub struct DepositProofInput {
 /// Output of deposit proof generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositProofOutput {
-    /// The ZK proof bytes
+    /// The ZK proof bytes (binary)
     pub proof: Vec<u8>,
+    /// The ZK proof bytes (hex-encoded for easy use in scripts)
+    pub proof_bytes: String,
     /// Public inputs (verified by the circuit)
     pub deposit_id: u64,
     pub sender: [u8; 20],
     pub amount: u64,
     pub contract_address: [u8; 20],
+}
+
+impl DepositProofOutput {
+    /// Create a new proof output with hex-encoded proof bytes
+    pub fn new(proof: Vec<u8>, deposit_id: u64, sender: [u8; 20], amount: u64, contract_address: [u8; 20]) -> Self {
+        let proof_bytes = format!("0x{}", hex::encode(&proof));
+        Self {
+            proof,
+            proof_bytes,
+            deposit_id,
+            sender,
+            amount,
+            contract_address,
+        }
+    }
 }
 

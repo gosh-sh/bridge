@@ -8,6 +8,9 @@ members = [
     "crates/acki-nacki-interface",
     "crates/verifier-generator",
 ]
+# Exclude deposit-prover because it uses axiom-crypto's halo2-lib (incompatible with scroll-tech)
+# Exclude frontend because it's a separate WASM project with different dependencies
+exclude = ["deposit-prover", "frontend"]
 
 [patch."https://github.com/privacy-scaling-explorations/poseidon.git"]
 poseidon = { git = "https://github.com/scroll-tech/poseidon.git", branch = "main" }

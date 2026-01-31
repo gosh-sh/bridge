@@ -47,21 +47,19 @@ contract AckiNackiBridge {
     }
     
     /// @notice Deposit tokens to the bridge
-    /// @param amount Amount to deposit
     /// @dev Emits Deposit event which will be proven by ZK circuit for withdrawal
-    function deposit(uint256 amount) external payable {
-        if (msg.value != amount) revert InvalidAmount();
-        if (amount == 0) revert InvalidAmount();
+    function deposit() external payable {
+        if (msg.value == 0) revert InvalidAmount();
 
         // Get unique deposit ID
         uint256 depositId = depositCounter++;
 
         // Add to treasury
-        treasuryBalance += amount;
+        treasuryBalance += msg.value;
 
         // Emit event with all necessary data for ZK proof
         // The ZK circuit will prove this event was emitted by this contract
-        emit Deposit(depositId, msg.sender, amount, block.timestamp);
+        emit Deposit(depositId, msg.sender, msg.value, block.timestamp);
     }
     
     /// @notice Withdraw tokens using ZK proof of deposit event

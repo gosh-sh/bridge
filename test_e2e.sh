@@ -89,12 +89,11 @@ echo ""
 # Step 2: Make a deposit
 echo -e "${YELLOW}[2/6] Making Test Deposit...${NC}"
 
-DEPOSIT_AMOUNT="100000000000000000"  # 0.1 ETH in wei
-ACKI_ADDRESS="100000000000000000"    # Placeholder Acki Nacki address
+DEPOSIT_AMOUNT="10000000000000000"  # 0.01 ETH in wei
 
-echo "Depositing 0.1 ETH to bridge..."
+echo "Depositing 0.01 ETH to bridge..."
 DEPOSIT_TX=$(cast send "$BRIDGE_ADDRESS" \
-    "deposit(uint256)" "$ACKI_ADDRESS" \
+    "deposit()" \
     --value "$DEPOSIT_AMOUNT" \
     --rpc-url "$SEPOLIA_RPC_URL" \
     --private-key "$PRIVATE_KEY" \
@@ -210,7 +209,7 @@ cd "$CONTRACTS_DIR"
 SENDER_ADDRESS=$(cast wallet address "$PRIVATE_KEY")
 
 echo "Withdrawing to: $SENDER_ADDRESS"
-echo "Amount: 0.1 ETH"
+echo "Amount: 0.01 ETH"
 echo "Deposit ID: $DEPOSIT_ID"
 
 # Prepare public inputs array

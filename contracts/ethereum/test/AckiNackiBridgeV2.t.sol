@@ -60,11 +60,11 @@ contract AckiNackiBridgeV2Test is Test {
             amount,         // amount
             block.timestamp // timestamp
         );
-        
-        bridge.deposit{value: amount}(amount);
-        
+
+        bridge.deposit{value: amount}();
+
         vm.stopPrank();
-        
+
         // Verify state
         assertEq(bridge.depositCounter(), 1, "Deposit counter should be 1");
         assertEq(bridge.treasuryBalance(), amount, "Treasury should have deposit amount");
@@ -76,11 +76,11 @@ contract AckiNackiBridgeV2Test is Test {
 
         for (uint256 i = 0; i < 5; i++) {
             vm.prank(user1);
-            
+
             vm.expectEmit(true, true, false, true);
             emit Deposit(i, user1, amount, block.timestamp);
-            
-            bridge.deposit{value: amount}(amount);
+
+            bridge.deposit{value: amount}();
         }
 
         assertEq(bridge.depositCounter(), 5, "Should have 5 deposits");
@@ -89,15 +89,11 @@ contract AckiNackiBridgeV2Test is Test {
 
     function testDepositInvalidAmount() public {
         vm.startPrank(user1);
-        
-        // Send different amount than specified
-        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
-        bridge.deposit{value: 2 ether}(1 ether);
-        
+
         // Send zero amount
         vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
-        bridge.deposit{value: 0}(0);
-        
+        bridge.deposit{value: 0}();
+
         vm.stopPrank();
     }
 
@@ -105,11 +101,11 @@ contract AckiNackiBridgeV2Test is Test {
         assertEq(bridge.depositCounter(), 0, "Initial counter should be 0");
 
         vm.prank(user1);
-        bridge.deposit{value: 1 ether}(1 ether);
+        bridge.deposit{value: 1 ether}();
         assertEq(bridge.depositCounter(), 1, "Counter should be 1 after first deposit");
 
         vm.prank(user2);
-        bridge.deposit{value: 2 ether}(2 ether);
+        bridge.deposit{value: 2 ether}();
         assertEq(bridge.depositCounter(), 2, "Counter should be 2 after second deposit");
     }
 
@@ -121,13 +117,13 @@ contract AckiNackiBridgeV2Test is Test {
         vm.prank(user1);
         vm.expectEmit(true, true, false, true);
         emit Deposit(0, user1, amount1, block.timestamp);
-        bridge.deposit{value: amount1}(amount1);
+        bridge.deposit{value: amount1}();
 
         // User2 deposits
         vm.prank(user2);
         vm.expectEmit(true, true, false, true);
         emit Deposit(1, user2, amount2, block.timestamp);
-        bridge.deposit{value: amount2}(amount2);
+        bridge.deposit{value: amount2}();
 
         assertEq(bridge.depositCounter(), 2);
         assertEq(bridge.treasuryBalance(), amount1 + amount2);
@@ -141,7 +137,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // First, make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}(depositAmount);
+        bridge.deposit{value: depositAmount}();
 
         // Create a valid proof (test verifier accepts any non-empty proof)
         bytes memory proof = hex"0123456789abcdef"; // Dummy proof
@@ -174,7 +170,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}(depositAmount);
+        bridge.deposit{value: depositAmount}();
 
         // Create proof
         bytes memory proof = hex"0123456789abcdef";
@@ -198,7 +194,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}(depositAmount);
+        bridge.deposit{value: depositAmount}();
 
         // Create INVALID proof (empty)
         bytes memory proof = hex"";
@@ -220,7 +216,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}(depositAmount);
+        bridge.deposit{value: depositAmount}();
 
         // Try to withdraw more than treasury has
         bytes memory proof = hex"0123456789abcdef";
@@ -243,7 +239,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make deposit and withdraw
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}(depositAmount);
+        bridge.deposit{value: depositAmount}();
 
         bytes memory proof = hex"0123456789abcdef";
         uint256[] memory publicInputs = new uint256[](4);

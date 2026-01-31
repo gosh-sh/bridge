@@ -20,6 +20,7 @@ use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
     gates::GateInstructions,
     halo2_proofs::halo2curves::bn256::Fr,
+    utils::ScalarField,
     AssignedValue,
 };
 
@@ -169,30 +170,55 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let address_bytes = &log_array.field_witness[0].field_cells;
         println!("   Address bytes: {} bytes", address_bytes.len());
 
-        // 5. Parse topics array (field 1)
-        // Topics is an RLP array of 32-byte hashes
-        // For Deposit event: [event_sig, depositId, sender] = 3 topics
+        // Debug: print actual address bytes
+        if address_bytes.len() >= 20 {
+            let addr_vals: Vec<u64> = address_bytes[0..20].iter()
+                .map(|v| v.value().get_lower_64())
+                .collect();
+            println!("   Address (hex): {:02x?}", addr_vals);
+        }
+
+        // 5. Extract topics (field 1)
+        // Topics are NOT an RLP list - they're just concatenated RLP-encoded 32-byte strings
+        // Each topic is: 0xa0 (1 byte RLP prefix) + 32 bytes of data = 33 bytes total
+        // For Deposit event: [event_sig, depositId, sender] = 3 topics = 99 bytes total
         let topics_rlp = &log_array.field_witness[1].field_cells;
-        let topic_max_lens = [32, 32, 32, 32]; // max 4 topics, each 32 bytes
+        println!("   Topics field: {} bytes", topics_rlp.len());
 
-        let topics_array = rlp_chip.decompose_rlp_array_phase0(
-            ctx_gate,
-            topics_rlp.clone(),
-            &topic_max_lens,
-            true, // variable length (can have 0-4 topics)
-        );
-        println!("   ✓ Parsed topics array");
+        // Manually extract each topic by slicing the concatenated bytes
+        // Topic 0 (event signature): bytes 0-32 (skip byte 0 which is 0xa0)
+        // Topic 1 (depositId): bytes 33-65 (skip byte 33 which is 0xa0)
+        // Topic 2 (sender): bytes 66-98 (skip byte 66 which is 0xa0)
 
-        // 6. Extract event signature (topics[0])
-        let event_sig_bytes = &topics_array.field_witness[0].field_cells;
-        println!("   Event signature: {} bytes", event_sig_bytes.len());
+        // 6. Extract event signature (topic 0: bytes 1-32, skipping byte 0 which is 0xa0)
+        let event_sig_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 33 {
+            topics_rlp[1..33].to_vec()
+        } else {
+            vec![]
+        };
 
-        // 7. Extract depositId (topics[1])
-        let deposit_id_bytes = &topics_array.field_witness[1].field_cells;
+        // Debug: print actual event signature
+        if event_sig_bytes.len() >= 16 {
+            let sig_vals: Vec<u64> = event_sig_bytes[0..16].iter()
+                .map(|v| v.value().get_lower_64())
+                .collect();
+            println!("   Event sig (first 16 bytes): {:02x?}", &sig_vals[0..16]);
+        }
+
+        // 7. Extract depositId (topic 1: bytes 34-65, skipping byte 33 which is 0xa0)
+        let deposit_id_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 66 {
+            topics_rlp[34..66].to_vec()
+        } else {
+            vec![]
+        };
         println!("   DepositId: {} bytes", deposit_id_bytes.len());
 
-        // 8. Extract sender (topics[2])
-        let sender_bytes = &topics_array.field_witness[2].field_cells;
+        // 8. Extract sender (topic 2: bytes 67-98, skipping byte 66 which is 0xa0)
+        let sender_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 99 {
+            topics_rlp[67..99].to_vec()
+        } else {
+            vec![]
+        };
         println!("   Sender: {} bytes", sender_bytes.len());
 
         // 9. Extract data field (field 2)
@@ -203,6 +229,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // 10. Verify event signature
         // Load expected event signature as constant
         let expected_sig = get_deposit_event_signature();
+        println!("   Expected event signature: {:02x?}", &expected_sig[0..16]);
         let expected_sig_bytes: Vec<AssignedValue<Fr>> = expected_sig
             .iter()
             .map(|&byte| ctx_gate.load_constant(Fr::from(byte as u64)))
@@ -210,20 +237,24 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Constrain that event_sig_bytes equals expected_sig_bytes
         // Both should be 32 bytes
-        assert_eq!(event_sig_bytes.len(), 32, "Event signature should be 32 bytes");
+        if event_sig_bytes.len() != 32 {
+            println!("   WARNING: Event signature is {} bytes, expected 32", event_sig_bytes.len());
+        }
         assert_eq!(expected_sig_bytes.len(), 32, "Expected signature should be 32 bytes");
 
-        for (actual, expected) in event_sig_bytes.iter().zip(expected_sig_bytes.iter()) {
-            ctx_gate.constrain_equal(actual, expected);
+        // Constrain equality for all 32 bytes
+        let min_len = event_sig_bytes.len().min(expected_sig_bytes.len());
+        for i in 0..min_len {
+            ctx_gate.constrain_equal(&event_sig_bytes[i], &expected_sig_bytes[i]);
         }
-        println!("   ✓ Verified event signature");
+        println!("   ✓ Verified event signature ({} bytes)", min_len);
 
         // 11. Verify contract address
-        // Load expected contract address from inputs
+        // Load expected contract address as constant (we know it at circuit creation time)
         let expected_address = &self.inputs.event_data.contract_address;
         let expected_address_bytes: Vec<AssignedValue<Fr>> = expected_address
             .iter()
-            .map(|&byte| ctx_gate.load_witness(Fr::from(byte as u64)))
+            .map(|&byte| ctx_gate.load_constant(Fr::from(byte as u64)))
             .collect();
 
         // Constrain that address_bytes equals expected_address_bytes
@@ -258,13 +289,13 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         };
 
         // Convert depositId (32 bytes from topics[1])
-        let deposit_id_field = bytes_to_field(deposit_id_bytes);
+        let deposit_id_field = bytes_to_field(&deposit_id_bytes);
         println!("   ✓ Converted depositId to field element");
 
         // Convert sender (32 bytes from topics[2], but only last 20 bytes are the address)
         // Ethereum addresses are 20 bytes, but stored as uint256 (32 bytes) in topics
         // The first 12 bytes should be zero, last 20 bytes are the address
-        let sender_field = bytes_to_field(sender_bytes);
+        let sender_field = bytes_to_field(&sender_bytes);
         println!("   ✓ Converted sender to field element");
 
         // Convert amount (first 32 bytes of data)

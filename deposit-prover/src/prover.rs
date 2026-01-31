@@ -54,6 +54,7 @@
 use crate::circuit_v2::DepositEventCircuitV2;
 use crate::types::{DepositProofInput, DepositProofOutput};
 use axiom_eth::rlc::circuit::RlcCircuitParams;
+use axiom_eth::rlc::virtual_region::RlcThreadBreakPoints;
 use axiom_eth::utils::eth_circuit::create_circuit;
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
@@ -63,7 +64,7 @@ use halo2_base::{
             bn256::{Bn256, Fr, G1Affine},
             ff::PrimeField,
         },
-        plonk::ProvingKey,
+        plonk::{keygen_pk, keygen_vk, Circuit, ProvingKey},
         poly::kzg::commitment::ParamsKZG,
     },
     utils::fs::gen_srs,
@@ -256,25 +257,45 @@ pub fn get_or_create_proving_key(
     input: &DepositProofInput,
     config: &CircuitConfig,
     pk_path: &Path,
-) -> Result<ProvingKey<G1Affine>, String> {
+) -> Result<(ProvingKey<G1Affine>, RlcCircuitParams, RlcThreadBreakPoints), String> {
     // Create circuit for key generation using real input
     // Note: For axiom-eth circuits, we need real RLP data even for keygen
     // because the circuit structure depends on the data layout
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
-    let circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
+    let mut circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
 
-    // gen_pk will automatically load from pk_path if it exists, or generate and save if not
-    if pk_path.exists() {
+    // CRITICAL: Fulfill Keccak promises and calculate params BEFORE keygen
+    // This is required for axiom-eth circuits even in Keygen mode
+    // See: axiom-eth/src/storage/tests.rs for reference
+    circuit.mock_fulfill_keccak_promises(None);
+    circuit.calculate_params();
+
+    // Generate or load proving key
+    let pk = if pk_path.exists() {
         println!("Found existing proving key at {:?}, loading...", pk_path);
+        gen_pk(params, &circuit, Some(pk_path))
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-    }
-
-    let pk = gen_pk(params, &circuit, Some(pk_path));
+        let vk = keygen_vk(params, &circuit)
+            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
+        keygen_pk(params, vk, &circuit)
+            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
+    };
     println!("Proving key ready");
 
-    Ok(pk)
+    // Get the calculated circuit params from the keygen circuit
+    // These are needed to create the prover circuit with the same structure
+    let calculated_params = circuit.params().rlc;
+
+    // Get break points from the keygen circuit
+    // These are needed when creating the prover circuit
+    // NOTE: We always get break points from the keygen circuit we just created,
+    // even if the proving key was loaded from disk. This is because break points
+    // are deterministic and depend only on the circuit structure.
+    let break_points = circuit.break_points();
+
+    Ok((pk, calculated_params, break_points))
 }
 
 /// Generate a full SNARK proof for a deposit event.
@@ -303,18 +324,24 @@ pub fn generate_proof(
     let params = get_or_create_kzg_params(k)
         .map_err(|e| format!("Failed to get KZG params: {}", e))?;
 
-    // 2. Get proving key (using real input for keygen)
+    // 2. Get proving key, calculated params, and break points (using real input for keygen)
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
     fs::create_dir_all("data").map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-    let pk = get_or_create_proving_key(&params, &input, config, pk_path)
+    let (pk, circuit_params, break_points) = get_or_create_proving_key(&params, &input, config, pk_path)
         .map_err(|e| format!("Failed to get proving key: {}", e))?;
 
-    // 3. Create prover circuit with real input
-    let circuit_params = get_default_params();
+    // 3. Create prover circuit with real input, calculated params, and break points
+    // IMPORTANT: Use the circuit_params from keygen, not get_default_params()
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
-    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input);
+    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input)
+        .use_break_points(break_points);
+
+    // CRITICAL: Fulfill Keccak promises AFTER setting break points
+    // This is required for axiom-eth circuits in Prover mode
+    // See: axiom-eth/src/storage/tests.rs for reference
+    circuit.mock_fulfill_keccak_promises(None);
 
     // 4. Generate SNARK proof
     println!("Generating SNARK proof...");
@@ -458,7 +485,7 @@ pub fn generate_solidity_verifier(
 
     // Use placeholder input for verifier generation
     let placeholder_input = create_keygen_placeholder_input();
-    let pk = get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
+    let (pk, _circuit_params, _break_points) = get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
 
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();

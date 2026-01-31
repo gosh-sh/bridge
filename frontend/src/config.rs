@@ -4,7 +4,7 @@
 
 /// Bridge contract address on Sepolia
 /// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
-pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x0000000000000000000000000000000000000000"; // TODO: Update after deployment
+pub const BRIDGE_CONTRACT_ADDRESS: &str = "0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9";
 
 /// Sepolia Chain ID
 pub const SEPOLIA_CHAIN_ID: u32 = 11155111;
@@ -24,9 +24,9 @@ pub const BLOCK_EXPLORER_URL: &str = "https://sepolia.etherscan.io";
 /// Bridge contract ABI (minimal - just the functions we need)
 pub const BRIDGE_ABI: &str = r#"[
     {
-        "inputs": [{"internalType": "uint256", "name": "ackiNackiAddress", "type": "uint256"}],
+        "inputs": [],
         "name": "deposit",
-        "outputs": [{"internalType": "uint256", "name": "depositId", "type": "uint256"}],
+        "outputs": [],
         "stateMutability": "payable",
         "type": "function"
     },
@@ -74,7 +74,7 @@ pub const BRIDGE_ABI: &str = r#"[
             {"indexed": true, "internalType": "uint256", "name": "depositId", "type": "uint256"},
             {"indexed": true, "internalType": "address", "name": "sender", "type": "address"},
             {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"indexed": false, "internalType": "uint256", "name": "ackiNackiAddress", "type": "uint256"}
+            {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"}
         ],
         "name": "Deposit",
         "type": "event"

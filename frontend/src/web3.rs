@@ -152,17 +152,16 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
 }
 
 /// Make a deposit to the bridge contract
-pub async fn make_deposit(amount_wei: &str, acki_nacki_address: &str) -> Result<String, String> {
+pub async fn make_deposit(amount_wei: &str, _acki_nacki_address: &str) -> Result<String, String> {
     let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
     let account = get_current_account().ok_or("No account connected")?;
 
     // Ensure we're on Sepolia
     switch_to_sepolia().await?;
 
-    // Encode the function call: deposit(uint256)
-    // Function selector: keccak256("deposit(uint256)")[0:4] = 0xb214faa5
-    let acki_address_hex = format!("{:0>64}", acki_nacki_address.trim_start_matches("0x"));
-    let data = format!("0xb214faa5{}", acki_address_hex);
+    // Encode the function call: deposit()
+    // Function selector: keccak256("deposit()")[0:4] = 0xd0e30db0
+    let data = "0xd0e30db0";
 
     let tx_param = to_value(&serde_json::json!({
         "from": account,

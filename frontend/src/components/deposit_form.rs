@@ -13,7 +13,6 @@ pub struct DepositFormProps {
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
     let amount = use_state(|| String::new());
-    let acki_address = use_state(|| String::from("100000000000000000")); // Default Acki Nacki address
     let deposit_id = use_state(|| None::<u64>);
     let is_loading = use_state(|| false);
     let tx_hash = use_state(|| None::<String>);
@@ -27,17 +26,8 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         })
     };
 
-    let on_acki_address_change = {
-        let acki_address = acki_address.clone();
-        Callback::from(move |e: Event| {
-            let input: HtmlInputElement = e.target_unchecked_into();
-            acki_address.set(input.value());
-        })
-    };
-
     let on_submit = {
         let amount = amount.clone();
-        let acki_address = acki_address.clone();
         let is_loading = is_loading.clone();
         let deposit_id = deposit_id.clone();
         let tx_hash = tx_hash.clone();
@@ -67,7 +57,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             let deposit_id = deposit_id.clone();
             let tx_hash = tx_hash.clone();
             let error_msg = error_msg.clone();
-            let acki_addr = (*acki_address).clone();
 
             spawn_local(async move {
                 // Check if we're on Sepolia
@@ -95,8 +84,8 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 // Format Wei as hex
                 let wei_hex = format!("0x{:x}", wei.parse::<u128>().unwrap_or(0));
 
-                // Make deposit
-                match make_deposit(&wei_hex, &acki_addr).await {
+                // Make deposit (no acki address needed - withdrawal goes to msg.sender)
+                match make_deposit(&wei_hex, "").await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         // Note: In a real implementation, we'd wait for the transaction
@@ -141,22 +130,8 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         />
                         <span class="input-suffix">{"ETH"}</span>
                     </div>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">
-                        {"Acki Nacki Address"}
-                    </label>
-                    <input
-                        type="text"
-                        class="form-input"
-                        placeholder="100000000000000000"
-                        value={(*acki_address).clone()}
-                        onchange={on_acki_address_change}
-                        disabled={!props.wallet_connected || *is_loading}
-                    />
                     <div class="input-hint">
-                        {"Your Acki Nacki blockchain address (uint256)"}
+                        {"Funds will be withdrawable to your connected wallet address"}
                     </div>
                 </div>
 

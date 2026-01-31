@@ -244,6 +244,7 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// # Arguments
 ///
 /// * `params` - KZG parameters
+/// * `input` - Real deposit proof input (needed for keygen to determine circuit structure)
 /// * `config` - Circuit configuration
 /// * `pk_path` - Path to save/load proving key
 ///
@@ -252,13 +253,14 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// Proving key for the circuit
 pub fn get_or_create_proving_key(
     params: &ParamsKZG<Bn256>,
+    input: &DepositProofInput,
     config: &CircuitConfig,
     pk_path: &Path,
 ) -> Result<ProvingKey<G1Affine>, String> {
-    // Create a placeholder circuit for key generation
-    // Note: Witness data doesn't matter for keygen, only circuit structure
-    let placeholder_input = create_keygen_placeholder_input();
-    let circuit_input = DepositEventCircuitV2::new(placeholder_input, config);
+    // Create circuit for key generation using real input
+    // Note: For axiom-eth circuits, we need real RLP data even for keygen
+    // because the circuit structure depends on the data layout
+    let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
     let circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
 
@@ -301,12 +303,12 @@ pub fn generate_proof(
     let params = get_or_create_kzg_params(k)
         .map_err(|e| format!("Failed to get KZG params: {}", e))?;
 
-    // 2. Get proving key
+    // 2. Get proving key (using real input for keygen)
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
     fs::create_dir_all("data").map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-    let pk = get_or_create_proving_key(&params, config, pk_path)
+    let pk = get_or_create_proving_key(&params, &input, config, pk_path)
         .map_err(|e| format!("Failed to get proving key: {}", e))?;
 
     // 3. Create prover circuit with real input
@@ -453,7 +455,10 @@ pub fn generate_solidity_verifier(
     println!("Loading proving key...");
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
-    let pk = get_or_create_proving_key(&params, config, pk_path)?;
+
+    // Use placeholder input for verifier generation
+    let placeholder_input = create_keygen_placeholder_input();
+    let pk = get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
 
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
@@ -479,13 +484,16 @@ pub fn generate_solidity_verifier(
     Ok(())
 }
 
-/// Create a placeholder input for key generation.
+/// Create a minimal valid RLP input for key generation.
 ///
-/// This creates a minimal valid input that can be used to generate proving/verifying keys.
-/// The actual witness data doesn't matter for keygen - only the circuit structure matters.
-/// This is a standard pattern in ZK-SNARK systems.
+/// This creates a minimal valid RLP structure that can be used to generate proving/verifying keys.
+/// For axiom-eth circuits, we need valid RLP data even for keygen because the circuit structure
+/// depends on the RLP parsing logic.
+///
+/// This creates a minimal valid Ethereum receipt with a single log entry.
 fn create_keygen_placeholder_input() -> DepositProofInput {
     use crate::types::{DepositEventData, ReceiptProof};
+    use rlp::RlpStream;
 
     let event_data = DepositEventData {
         block_number: 0,
@@ -498,11 +506,41 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         contract_address: [0u8; 20],
     };
 
+    // Create a minimal valid receipt RLP with one log
+    // Receipt structure: [status, cumulative_gas, bloom, logs]
+    let mut receipt_stream = RlpStream::new_list(4);
+    receipt_stream.append(&1u8); // status = 1 (success)
+    receipt_stream.append(&21000u64); // cumulative_gas
+    receipt_stream.append(&vec![0u8; 256]); // bloom filter (256 bytes)
+
+    // Create a minimal log: [address, topics, data]
+    let mut log_stream = RlpStream::new_list(3);
+    log_stream.append(&vec![0u8; 20]); // contract address
+
+    // Topics: [event_sig, depositId, sender]
+    let mut topics_stream = RlpStream::new_list(3);
+    topics_stream.append(&vec![0u8; 32]); // event signature
+    topics_stream.append(&vec![0u8; 32]); // depositId
+    topics_stream.append(&vec![0u8; 32]); // sender
+    log_stream.append_raw(&topics_stream.out(), 1);
+
+    log_stream.append(&vec![0u8; 64]); // data (amount + timestamp)
+
+    // Wrap log in logs array
+    let mut logs_stream = RlpStream::new_list(1);
+    logs_stream.append_raw(&log_stream.out(), 1);
+    receipt_stream.append_raw(&logs_stream.out(), 1);
+
+    let receipt_rlp = receipt_stream.out().to_vec();
+
+    // Create a minimal MPT proof (single node)
+    let proof_nodes = vec![receipt_rlp.clone()];
+
     let receipt_proof = ReceiptProof {
-        receipt_rlp: vec![],
-        proof_nodes: vec![],
+        receipt_rlp,
+        proof_nodes,
         receipt_root: [0u8; 32],
-        block_header_rlp: vec![],
+        block_header_rlp: vec![0u8; 100], // minimal block header
     };
 
     DepositProofInput {

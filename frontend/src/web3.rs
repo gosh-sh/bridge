@@ -34,10 +34,10 @@ extern "C" {
 /// Check if MetaMask is installed
 pub fn is_metamask_installed() -> bool {
     if let Some(window) = window() {
+        // Check for window.ethereum
         let has_ethereum = js_sys::Reflect::has(&window, &JsValue::from_str("ethereum")).unwrap_or(false);
         web_sys::console::log_1(&format!("MetaMask detection: window.ethereum exists = {}", has_ethereum).into());
 
-        // Also check if it's actually MetaMask
         if has_ethereum {
             if let Ok(ethereum) = js_sys::Reflect::get(&window, &JsValue::from_str("ethereum")) {
                 let is_metamask = js_sys::Reflect::get(&ethereum, &JsValue::from_str("isMetaMask"))
@@ -45,10 +45,19 @@ pub fn is_metamask_installed() -> bool {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 web_sys::console::log_1(&format!("window.ethereum.isMetaMask = {}", is_metamask).into());
-                return has_ethereum; // Return true if ethereum exists, regardless of isMetaMask flag
+                return true;
             }
         }
-        has_ethereum
+
+        // Fallback: check for window.web3 (older MetaMask versions)
+        let has_web3 = js_sys::Reflect::has(&window, &JsValue::from_str("web3")).unwrap_or(false);
+        if has_web3 {
+            web_sys::console::log_1(&"Found window.web3 (legacy MetaMask)".into());
+            return true;
+        }
+
+        web_sys::console::log_1(&"MetaMask not detected".into());
+        false
     } else {
         web_sys::console::log_1(&"MetaMask detection: window is None".into());
         false
@@ -59,12 +68,39 @@ pub fn is_metamask_installed() -> bool {
 pub fn get_ethereum() -> Option<Ethereum> {
     let window = window()?;
     let ethereum = js_sys::Reflect::get(&window, &JsValue::from_str("ethereum")).ok()?;
-    ethereum.dyn_into::<Ethereum>().ok()
+
+    // Log the type of ethereum object for debugging
+    web_sys::console::log_1(&format!("ethereum object type: {:?}", ethereum.js_typeof()).into());
+
+    // Try to cast to Ethereum type
+    match ethereum.dyn_into::<Ethereum>() {
+        Ok(eth) => {
+            web_sys::console::log_1(&"Successfully cast to Ethereum type".into());
+            Some(eth)
+        }
+        Err(e) => {
+            web_sys::console::log_1(&format!("Failed to cast to Ethereum type: {:?}", e).into());
+            // Return the error value as Ethereum anyway - it should still work
+            e.dyn_into::<Ethereum>().ok()
+        }
+    }
 }
 
 /// Connect to MetaMask and request account access
 pub async fn connect_wallet() -> Result<String, String> {
-    let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
+    // Get ethereum provider directly from window
+    let window = window().ok_or("No window object")?;
+    let ethereum_val = js_sys::Reflect::get(&window, &JsValue::from_str("ethereum"))
+        .map_err(|_| "Failed to get window.ethereum")?;
+
+    if ethereum_val.is_undefined() || ethereum_val.is_null() {
+        return Err("MetaMask not installed. Please install MetaMask extension.".to_string());
+    }
+
+    web_sys::console::log_1(&"Got window.ethereum object".into());
+
+    // Cast to Ethereum type
+    let ethereum: Ethereum = ethereum_val.unchecked_into();
 
     // Build request object manually
     let request = js_sys::Object::new();

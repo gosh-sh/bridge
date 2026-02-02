@@ -11,6 +11,8 @@ variables:
   FOUNDRY_PROFILE: ci
   # Use CI_JOB_TOKEN for git operations
   GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
+  # Disable TLS verification for self-signed certificates
+  GIT_SSL_NO_VERIFY: "true"
   CI_SERVER_TLS_CA_FILE: ""
 
 # Cache configuration

@@ -32,11 +32,11 @@ variables:
 
 # Default image for all jobs (can be overridden)
 default:
-  image: rust:latest
+  image: rustlang/rust:nightly
 
 # Base job for Rust
 .rust_base:
-  image: rust:latest
+  image: rustlang/rust:nightly
   tags:
     - docker
   variables:
@@ -44,6 +44,8 @@ default:
   before_script:
     # Configure git to use CI_JOB_TOKEN for GitLab authentication
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
+    # Ensure we're using nightly toolchain
+    - rustup default nightly
     - rustc --version
     - cargo --version
     - rustup component add rustfmt clippy

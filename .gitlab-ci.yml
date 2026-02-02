@@ -46,7 +46,7 @@ default:
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
     - rustc --version
     - cargo --version
-    - rustup component add rustfmt В /etc/gitlab-runner/config.toml:clippy
+    - rustup component add rustfmt clippy
 
 # Base job for Foundry
 .foundry_base:

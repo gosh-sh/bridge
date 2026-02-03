@@ -1,7 +1,5 @@
 //! Withdrawal flow implementation
 
-use crate::error::Result;
-
 /// Withdrawal manager
 pub struct WithdrawalManager {}
 

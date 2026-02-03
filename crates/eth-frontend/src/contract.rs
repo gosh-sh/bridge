@@ -25,14 +25,14 @@ abigen!(
 /// Ethereum contract interface
 pub struct EthereumContract<M: Middleware> {
     contract: AckiNackiBridge<M>,
-    client: Arc<M>,
+    _client: Arc<M>,
 }
 
 impl<M: Middleware> EthereumContract<M> {
     /// Create a new contract interface
     pub fn new(contract_address: Address, client: Arc<M>) -> Self {
         let contract = AckiNackiBridge::new(contract_address, client.clone());
-        Self { contract, client }
+        Self { contract, _client: client }
     }
 
     /// Make a deposit to the bridge

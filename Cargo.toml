@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/eth-frontend",
     "crates/crypto",
-    "crates/merkle-tree",
     "crates/acki-nacki-interface",
 ]
 # Exclude deposit-prover because it uses axiom-crypto's halo2-lib (incompatible with scroll-tech)

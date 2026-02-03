@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 crypto = { path = "../crypto" }
-merkle-tree = { path = "../merkle-tree" }
 acki-nacki-interface = { path = "../acki-nacki-interface" }
 
 tokio.workspace = true

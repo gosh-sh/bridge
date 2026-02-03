@@ -1,21 +1,26 @@
 //! Mock implementations for testing
 
-use crate::error::{AckiNackiError, Result};
-use crate::traits::{IAckiNacki, TransactionSender};
-use crate::types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use async_trait::async_trait;
-use crypto::Hash;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
+
+use crate::{
+    error::{AckiNackiError, Result},
+    traits::{IAckiNacki, TransactionSender},
+    types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus, TxHash},
+};
 
 /// Mock Acki Nacki blockchain for testing
 #[derive(Debug, Clone)]
 pub struct MockAckiNacki {
     /// Stored transactions
-    transactions: Arc<Mutex<HashMap<Hash, AckiNackiTransaction>>>,
+    transactions: Arc<Mutex<HashMap<TxHash, AckiNackiTransaction>>>,
     /// Transaction receipts
-    receipts: Arc<Mutex<HashMap<Hash, TransactionReceipt>>>,
+    receipts: Arc<Mutex<HashMap<TxHash, TransactionReceipt>>>,
     /// Current block number
     block_number: Arc<Mutex<u64>>,
     /// Whether to simulate failures
@@ -63,7 +68,7 @@ impl Default for MockAckiNacki {
 
 #[async_trait]
 impl IAckiNacki for MockAckiNacki {
-    async fn send_transaction(&self, tx: AckiNackiTransaction) -> Result<Hash> {
+    async fn send_transaction(&self, tx: AckiNackiTransaction) -> Result<TxHash> {
         let fail_mode = *self.fail_mode.lock().unwrap();
         if fail_mode {
             return Err(AckiNackiError::TransactionFailed(
@@ -91,25 +96,25 @@ impl IAckiNacki for MockAckiNacki {
         Ok(tx_hash)
     }
 
-    async fn get_transaction_status(&self, tx_hash: &Hash) -> Result<TransactionStatus> {
+    async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus> {
         let receipts = self.receipts.lock().unwrap();
         receipts
             .get(tx_hash)
             .map(|r| r.status)
-            .ok_or_else(|| AckiNackiError::TransactionNotFound(hex::encode(tx_hash.as_bytes())))
+            .ok_or_else(|| AckiNackiError::TransactionNotFound(hex::encode(tx_hash)))
     }
 
-    async fn get_transaction_receipt(&self, tx_hash: &Hash) -> Result<TransactionReceipt> {
+    async fn get_transaction_receipt(&self, tx_hash: &TxHash) -> Result<TransactionReceipt> {
         let receipts = self.receipts.lock().unwrap();
         receipts
             .get(tx_hash)
             .cloned()
-            .ok_or_else(|| AckiNackiError::TransactionNotFound(hex::encode(tx_hash.as_bytes())))
+            .ok_or_else(|| AckiNackiError::TransactionNotFound(hex::encode(tx_hash)))
     }
 
     async fn wait_for_confirmation(
         &self,
-        tx_hash: &Hash,
+        tx_hash: &TxHash,
         timeout_secs: u64,
     ) -> Result<TransactionReceipt> {
         let start = std::time::Instant::now();
@@ -123,10 +128,10 @@ impl IAckiNacki for MockAckiNacki {
                 Ok(receipt) if receipt.status.is_finalized() => return Ok(receipt),
                 Ok(_) => {
                     sleep(Duration::from_millis(100)).await;
-                }
+                },
                 Err(_) => {
                     sleep(Duration::from_millis(100)).await;
-                }
+                },
             }
         }
     }
@@ -149,17 +154,15 @@ pub struct MockTransactionSender {
 impl MockTransactionSender {
     /// Create a new mock transaction sender
     pub fn new(client: MockAckiNacki) -> Self {
-        Self { client }
+        Self {
+            client,
+        }
     }
 }
 
 #[async_trait]
 impl TransactionSender for MockTransactionSender {
-    async fn send_with_retry(
-        &self,
-        tx: AckiNackiTransaction,
-        max_retries: u32,
-    ) -> Result<Hash> {
+    async fn send_with_retry(&self, tx: AckiNackiTransaction, max_retries: u32) -> Result<TxHash> {
         let mut last_error = None;
 
         for attempt in 0..=max_retries {
@@ -170,7 +173,7 @@ impl TransactionSender for MockTransactionSender {
                     if attempt < max_retries {
                         sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
                     }
-                }
+                },
             }
         }
 
@@ -185,7 +188,9 @@ impl TransactionSender for MockTransactionSender {
         timeout_secs: u64,
     ) -> Result<TransactionReceipt> {
         let tx_hash = self.client.send_transaction(tx).await?;
-        self.client.wait_for_confirmation(&tx_hash, timeout_secs).await
+        self.client
+            .wait_for_confirmation(&tx_hash, timeout_secs)
+            .await
     }
 
     async fn send_with_retry_and_wait(
@@ -195,7 +200,9 @@ impl TransactionSender for MockTransactionSender {
         timeout_secs: u64,
     ) -> Result<TransactionReceipt> {
         let tx_hash = self.send_with_retry(tx, max_retries).await?;
-        self.client.wait_for_confirmation(&tx_hash, timeout_secs).await
+        self.client
+            .wait_for_confirmation(&tx_hash, timeout_secs)
+            .await
     }
 }
 
@@ -207,7 +214,7 @@ mod tests {
     async fn test_mock_send_transaction() {
         let mock = MockAckiNacki::new();
         let tx = AckiNackiTransaction::new(
-            Hash::new([1u8; 32]),
+            [1u8; 32],
             "sender".to_string(),
             "recipient".to_string(),
             vec![],
@@ -225,7 +232,7 @@ mod tests {
         mock.enable_fail_mode();
 
         let tx = AckiNackiTransaction::new(
-            Hash::new([1u8; 32]),
+            [1u8; 32],
             "sender".to_string(),
             "recipient".to_string(),
             vec![],
@@ -246,7 +253,7 @@ mod tests {
         mock.enable_fail_mode();
 
         let tx = AckiNackiTransaction::new(
-            Hash::new([1u8; 32]),
+            [1u8; 32],
             "sender".to_string(),
             "recipient".to_string(),
             vec![],
@@ -266,4 +273,3 @@ mod tests {
         assert!(result.is_ok());
     }
 }
-

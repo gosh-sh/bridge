@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/eth-frontend",
-    "crates/crypto",
-    "crates/acki-nacki-interface",
-]
+members = ["crates/eth-frontend", "crates/acki-nacki-interface"]
 # Exclude deposit-prover because it uses axiom-crypto's halo2-lib (incompatible with scroll-tech)
 # Exclude frontend because it's a separate WASM project with different dependencies
 exclude = ["deposit-prover", "frontend"]

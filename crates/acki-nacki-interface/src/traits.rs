@@ -1,26 +1,28 @@
 //! Traits for Acki Nacki blockchain interaction
 
-use crate::error::Result;
-use crate::types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus};
 use async_trait::async_trait;
-use crypto::Hash;
+
+use crate::{
+    error::Result,
+    types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus, TxHash},
+};
 
 /// Main interface for interacting with Acki Nacki blockchain
 #[async_trait]
 pub trait IAckiNacki: Send + Sync {
     /// Send a transaction to the blockchain
-    async fn send_transaction(&self, tx: AckiNackiTransaction) -> Result<Hash>;
+    async fn send_transaction(&self, tx: AckiNackiTransaction) -> Result<TxHash>;
 
     /// Get transaction status
-    async fn get_transaction_status(&self, tx_hash: &Hash) -> Result<TransactionStatus>;
+    async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus>;
 
     /// Get transaction receipt
-    async fn get_transaction_receipt(&self, tx_hash: &Hash) -> Result<TransactionReceipt>;
+    async fn get_transaction_receipt(&self, tx_hash: &TxHash) -> Result<TransactionReceipt>;
 
     /// Wait for transaction confirmation
     async fn wait_for_confirmation(
         &self,
-        tx_hash: &Hash,
+        tx_hash: &TxHash,
         timeout_secs: u64,
     ) -> Result<TransactionReceipt>;
 
@@ -35,11 +37,7 @@ pub trait IAckiNacki: Send + Sync {
 #[async_trait]
 pub trait TransactionSender: Send + Sync {
     /// Send transaction with automatic retry
-    async fn send_with_retry(
-        &self,
-        tx: AckiNackiTransaction,
-        max_retries: u32,
-    ) -> Result<Hash>;
+    async fn send_with_retry(&self, tx: AckiNackiTransaction, max_retries: u32) -> Result<TxHash>;
 
     /// Send transaction and wait for confirmation
     async fn send_and_wait(
@@ -56,4 +54,3 @@ pub trait TransactionSender: Send + Sync {
         timeout_secs: u64,
     ) -> Result<TransactionReceipt>;
 }
-

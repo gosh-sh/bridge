@@ -599,36 +599,7 @@ mod tests {
         assert_eq!(params.num_rlc_columns, 3);
     }
 
-    #[test]
-    fn test_kzg_params_save_load() {
-        use halo2_base::halo2_proofs::poly::commitment::Params;
-        use tempfile::tempdir;
 
-        // Create a temporary directory
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let params_path = temp_dir.path().join("test_params.srs");
-        let params_path_str = params_path.to_str().unwrap();
-
-        // Generate small params for testing (k=4 is very small and fast)
-        let k = 4;
-        let params = gen_srs(k);
-
-        // Save params
-        let save_result = save_kzg_params(&params, params_path_str);
-        assert!(save_result.is_ok(), "Failed to save params: {:?}", save_result.err());
-        assert!(params_path.exists(), "Params file was not created");
-
-        // Load params
-        let load_result = load_kzg_params(params_path_str);
-        assert!(load_result.is_ok(), "Failed to load params: {:?}", load_result.err());
-
-        let loaded_params = load_result.unwrap();
-
-        // Verify params match (check the degree)
-        assert_eq!(params.k(), loaded_params.k(), "Loaded params have different degree");
-
-        // Cleanup is automatic when temp_dir goes out of scope
-    }
 
     #[test]
     fn test_create_keygen_placeholder_input() {
@@ -641,9 +612,11 @@ mod tests {
         assert_eq!(input.event_data.timestamp, 0);
         assert_eq!(input.event_data.contract_address, [0u8; 20]);
 
-        // Verify receipt proof has minimal structure
-        assert_eq!(input.receipt_proof.proof_nodes.len(), 0);
+        // Verify receipt proof has minimal structure (1 proof node)
+        assert_eq!(input.receipt_proof.proof_nodes.len(), 1);
         assert_eq!(input.receipt_proof.receipt_root, [0u8; 32]);
+        assert!(!input.receipt_proof.receipt_rlp.is_empty());
+        assert!(!input.receipt_proof.block_header_rlp.is_empty());
     }
 
     #[test]

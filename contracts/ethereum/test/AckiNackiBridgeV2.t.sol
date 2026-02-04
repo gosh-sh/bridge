@@ -19,19 +19,9 @@ contract AckiNackiBridgeV2Test is Test {
     address public user2 = address(0x5678);
 
     // Events (must match contract)
-    event Deposit(
-        uint256 indexed depositId,
-        address indexed sender,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
 
-    event Withdrawal(
-        uint256 indexed depositId,
-        address indexed recipient,
-        uint256 amount,
-        uint256 timestamp
-    );
+    event Withdrawal(uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp);
 
     function setUp() public {
         // Deploy test verifier (accepts any valid proof format)
@@ -49,15 +39,15 @@ contract AckiNackiBridgeV2Test is Test {
 
     function testDeposit() public {
         uint256 amount = 1 ether;
-        
+
         vm.startPrank(user1);
-        
+
         // Expect the Deposit event
         vm.expectEmit(true, true, false, true);
         emit Deposit(
-            0,              // depositId (first deposit)
-            user1,          // sender
-            amount,         // amount
+            0, // depositId (first deposit)
+            user1, // sender
+            amount, // amount
             block.timestamp // timestamp
         );
 
@@ -70,7 +60,7 @@ contract AckiNackiBridgeV2Test is Test {
         assertEq(bridge.treasuryBalance(), amount, "Treasury should have deposit amount");
         assertEq(address(bridge).balance, amount, "Bridge should hold the ETH");
     }
-    
+
     function testDepositMultiple() public {
         uint256 amount = 1 ether;
 
@@ -93,6 +83,17 @@ contract AckiNackiBridgeV2Test is Test {
         // Send zero amount
         vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
         bridge.deposit{value: 0}();
+
+        vm.stopPrank();
+    }
+
+    function testDepositTooLarge() public {
+        vm.startPrank(user1);
+        vm.deal(user1, 200 ether);
+
+        // Send more than MAX_DEPOSIT_AMOUNT (100 ether)
+        vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
+        bridge.deposit{value: 101 ether}();
 
         vm.stopPrank();
     }
@@ -155,7 +156,7 @@ contract AckiNackiBridgeV2Test is Test {
         // Withdraw
         vm.expectEmit(true, true, false, true);
         emit Withdrawal(depositId, user1, depositAmount, block.timestamp);
-        
+
         bridge.withdraw(payable(user1), depositAmount, depositId, proof);
 
         // Verify state
@@ -230,6 +231,26 @@ contract AckiNackiBridgeV2Test is Test {
         bridge.withdraw(payable(user1), withdrawAmount, depositId, proof);
     }
 
+    function testWithdrawalInvalidRecipient() public {
+        uint256 depositAmount = 1 ether;
+        uint256 depositId = 0;
+
+        // Make a deposit
+        vm.prank(user1);
+        bridge.deposit{value: depositAmount}();
+
+        // Try to withdraw to zero address
+        bytes memory proof = hex"0123456789abcdef";
+        uint256[] memory publicInputs = new uint256[](4);
+        publicInputs[0] = depositId;
+        publicInputs[1] = uint256(uint160(user1));
+        publicInputs[2] = depositAmount;
+        publicInputs[3] = uint256(uint160(address(bridge)));
+
+        vm.expectRevert(AckiNackiBridge.InvalidRecipient.selector);
+        bridge.withdraw(payable(address(0)), depositAmount, depositId, proof);
+    }
+
     function testIsDepositProcessed() public {
         uint256 depositAmount = 1 ether;
         uint256 depositId = 0;
@@ -270,10 +291,12 @@ contract AckiNackiBridgeV2Test is Test {
 contract TestDepositVerifier is IAckiNackiVerifier {
     uint256 private constant PUBLIC_INPUTS_COUNT = 4;
 
-    function verifyWithdrawalProof(
-        bytes calldata proof,
-        uint256[] calldata publicInputs
-    ) external pure override returns (bool isValid, bytes32 depositId) {
+    function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
+        external
+        pure
+        override
+        returns (bool isValid, bytes32 depositId)
+    {
         // Validate proof is not empty
         if (proof.length == 0) {
             return (false, bytes32(0));

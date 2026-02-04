@@ -22,14 +22,14 @@ contract Halo2VerifierWrapper {
     /**
      * @notice Verify a withdrawal proof
      * @param proof The ZK proof bytes
-     * @param publicInputs Array of public inputs: [nullifier, recipient, amount, root]
+     * @param publicInputs Array of public inputs: [depositId, sender, amount, contractAddress]
      * @return isValid Whether the proof is valid
-     * @return nullifier The nullifier from the proof (first public input)
+     * @return depositId The deposit ID from the proof (first public input)
      */
-    function verifyWithdrawalProof(
-        bytes memory proof,
-        uint256[] memory publicInputs
-    ) external returns (bool isValid, bytes32 nullifier) {
+    function verifyWithdrawalProof(bytes memory proof, uint256[] memory publicInputs)
+        external
+        returns (bool isValid, bytes32 depositId)
+    {
         // Validate public inputs count
         if (publicInputs.length != 4) {
             return (false, bytes32(0));
@@ -49,10 +49,10 @@ contract Halo2VerifierWrapper {
         // [public_input_0, public_input_1, ..., public_input_n, proof_bytes...]
         // We need to encode the public inputs followed by the proof
         bytes memory verifierCalldata = abi.encodePacked(
-            bytes32(publicInputs[0]), // nullifier
-            bytes32(publicInputs[1]), // recipient
+            bytes32(publicInputs[0]), // depositId
+            bytes32(publicInputs[1]), // sender
             bytes32(publicInputs[2]), // amount
-            bytes32(publicInputs[3]), // root
+            bytes32(publicInputs[3]), // contractAddress
             proof
         );
 
@@ -66,13 +66,13 @@ contract Halo2VerifierWrapper {
             isValid = false;
         }
 
-        nullifier = bytes32(publicInputs[0]);
-        return (isValid, nullifier);
+        depositId = bytes32(publicInputs[0]);
+        return (isValid, depositId);
     }
 
     /**
      * @notice Get the number of public inputs expected by the verifier
-     * @return count The number of public inputs (always 4 for withdrawal circuit)
+     * @return count The number of public inputs (always 4 for deposit proof circuit)
      */
     function getPublicInputsCount() external pure returns (uint256) {
         return 4;

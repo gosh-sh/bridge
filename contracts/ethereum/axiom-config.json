@@ -1,0 +1,21 @@
+{
+  "description": "Axiom V2 Core contract addresses for different networks",
+  "source": "https://docs.axiom.xyz/docs/developer-resources/contract-addresses",
+  "networks": {
+    "mainnet": {
+      "chainId": 1,
+      "axiomV2Core": "0x...",
+      "note": "TODO: Update with official Axiom V2 Core address from docs"
+    },
+    "sepolia": {
+      "chainId": 11155111,
+      "axiomV2Core": "0x...",
+      "note": "TODO: Update with official Axiom V2 Core address from docs"
+    }
+  },
+  "usage": {
+    "description": "Use these addresses when deploying AxiomBlockHeaderOracle",
+    "example": "forge script script/DeployAxiomOracle.s.sol --rpc-url $RPC_URL --broadcast"
+  }
+}
+

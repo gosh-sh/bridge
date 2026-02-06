@@ -1,14 +1,17 @@
 //! Proof Generation Module
 //!
-//! This module provides the infrastructure for generating and verifying ZK proofs
-//! for deposit events using the axiom-eth circuit.
+//! This module provides the infrastructure for generating and verifying ZK
+//! proofs for deposit events using the axiom-eth circuit.
 //!
 //! ## Architecture
 //!
 //! The proof generation follows axiom-eth's pattern:
-//! 1. **Circuit Creation**: Use `create_circuit` to wrap `DepositEventCircuitV2` in `EthCircuitImpl`
-//! 2. **Mock Testing**: Use `MockProver` to test circuit logic without generating proofs
-//! 3. **Proof Generation**: Create SNARK proofs (key generation happens automatically)
+//! 1. **Circuit Creation**: Use `create_circuit` to wrap
+//!    `DepositEventCircuitV2` in `EthCircuitImpl`
+//! 2. **Mock Testing**: Use `MockProver` to test circuit logic without
+//!    generating proofs
+//! 3. **Proof Generation**: Create SNARK proofs (key generation happens
+//!    automatically)
 //!
 //! ## Usage
 //!
@@ -51,11 +54,15 @@
 //! let verifier_sol = gen_evm_verifier_shplonk(&params, &vk, &circuit, None::<&str>);
 //! ```
 
-use crate::circuit_v2::DepositEventCircuitV2;
-use crate::types::{DepositProofInput, DepositProofOutput};
-use axiom_eth::rlc::circuit::RlcCircuitParams;
-use axiom_eth::rlc::virtual_region::RlcThreadBreakPoints;
-use axiom_eth::utils::eth_circuit::create_circuit;
+use std::{
+    fs::{self, File},
+    path::Path,
+};
+
+use axiom_eth::{
+    rlc::{circuit::RlcCircuitParams, virtual_region::RlcThreadBreakPoints},
+    utils::eth_circuit::create_circuit,
+};
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
@@ -69,11 +76,12 @@ use halo2_base::{
     },
     utils::fs::gen_srs,
 };
-use snark_verifier_sdk::{
-    evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark,
+use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark};
+
+use crate::{
+    circuit_v2::DepositEventCircuitV2,
+    types::{DepositProofInput, DepositProofOutput},
 };
-use std::fs::{self, File};
-use std::path::Path;
 
 /// Configuration for the deposit proof circuit
 #[derive(Debug, Clone)]
@@ -95,10 +103,10 @@ pub struct CircuitConfig {
 impl Default for CircuitConfig {
     fn default() -> Self {
         Self {
-            degree: 18,                    // 2^18 = ~256K rows
-            max_data_byte_len: 256,        // Max event data size
-            max_log_num: 20,               // Max logs per receipt
-            topic_num_bounds: (0, 4),      // 0-4 topics per log
+            degree: 18,               // 2^18 = ~256K rows
+            max_data_byte_len: 256,   // Max event data size
+            max_log_num: 20,          // Max logs per receipt
+            topic_num_bounds: (0, 4), // 0-4 topics per log
         }
     }
 }
@@ -122,7 +130,8 @@ pub fn get_default_params() -> RlcCircuitParams {
 
 /// Test the circuit with MockProver (fast, no proof generation).
 ///
-/// This is useful for testing circuit logic without the overhead of generating proofs.
+/// This is useful for testing circuit logic without the overhead of generating
+/// proofs.
 ///
 /// # Arguments
 ///
@@ -164,14 +173,13 @@ fn save_kzg_params(params: &ParamsKZG<Bn256>, path: &str) -> Result<(), String> 
 
     // Create parent directory if it doesn't exist
     if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
-    let mut file = File::create(path)
-        .map_err(|e| format!("Failed to create file: {}", e))?;
+    let mut file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
 
-    params.write(&mut file)
+    params
+        .write(&mut file)
         .map_err(|e| format!("Failed to write params: {}", e))?;
 
     Ok(())
@@ -181,11 +189,9 @@ fn save_kzg_params(params: &ParamsKZG<Bn256>, path: &str) -> Result<(), String> 
 fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
     use halo2_base::halo2_proofs::poly::commitment::Params;
 
-    let mut file = File::open(path)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
-    ParamsKZG::<Bn256>::read(&mut file)
-        .map_err(|e| format!("Failed to read params: {}", e))
+    ParamsKZG::<Bn256>::read(&mut file).map_err(|e| format!("Failed to read params: {}", e))
 }
 
 /// Generate or load KZG parameters for the given circuit degree.
@@ -212,14 +218,17 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
             Ok(params) => {
                 println!("Successfully loaded KZG parameters from disk");
                 return Ok(params);
-            }
+            },
             Err(e) => {
                 println!("Warning: Failed to load KZG params: {}. Regenerating...", e);
-            }
+            },
         }
     }
 
-    println!("Generating KZG parameters for k={} (this may take a few minutes)...", k);
+    println!(
+        "Generating KZG parameters for k={} (this may take a few minutes)...",
+        k
+    );
     let params = gen_srs(k);
 
     // Save parameters to disk for reuse
@@ -240,12 +249,14 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// - If not found, generate new proving key from the circuit
 /// - Save newly generated proving key to disk for future reuse
 ///
-/// Note: gen_pk from snark-verifier-sdk handles loading automatically if the file exists
+/// Note: gen_pk from snark-verifier-sdk handles loading automatically if the
+/// file exists
 ///
 /// # Arguments
 ///
 /// * `params` - KZG parameters
-/// * `input` - Real deposit proof input (needed for keygen to determine circuit structure)
+/// * `input` - Real deposit proof input (needed for keygen to determine circuit
+///   structure)
 /// * `config` - Circuit configuration
 /// * `pk_path` - Path to save/load proving key
 ///
@@ -263,7 +274,11 @@ pub fn get_or_create_proving_key(
     // because the circuit structure depends on the data layout
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
-    let mut circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
+    let mut circuit = create_circuit(
+        CircuitBuilderStage::Keygen,
+        circuit_params.clone(),
+        circuit_input,
+    );
 
     // CRITICAL: Fulfill Keccak promises and calculate params BEFORE keygen
     // This is required for axiom-eth circuits even in Keygen mode
@@ -321,16 +336,18 @@ pub fn generate_proof(
     let k = config.degree;
 
     // 1. Get KZG parameters
-    let params = get_or_create_kzg_params(k)
-        .map_err(|e| format!("Failed to get KZG params: {}", e))?;
+    let params =
+        get_or_create_kzg_params(k).map_err(|e| format!("Failed to get KZG params: {}", e))?;
 
-    // 2. Get proving key, calculated params, and break points (using real input for keygen)
+    // 2. Get proving key, calculated params, and break points (using real input for
+    //    keygen)
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
     fs::create_dir_all("data").map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-    let (pk, circuit_params, break_points) = get_or_create_proving_key(&params, &input, config, pk_path)
-        .map_err(|e| format!("Failed to get proving key: {}", e))?;
+    let (pk, circuit_params, break_points) =
+        get_or_create_proving_key(&params, &input, config, pk_path)
+            .map_err(|e| format!("Failed to get proving key: {}", e))?;
 
     // 3. Create prover circuit with real input, calculated params, and break points
     // IMPORTANT: Use the circuit_params from keygen, not get_default_params()
@@ -351,8 +368,12 @@ pub fn generate_proof(
     println!("Proof generated successfully!");
 
     // 5. Extract public outputs and serialize proof
-    let proof_bytes = bincode::serialize(&snark)
-        .map_err(|e| format!("Failed to serialize proof: {}", e))?;
+    let proof_bytes =
+        bincode::serialize(&snark).map_err(|e| format!("Failed to serialize proof: {}", e))?;
+
+    // 6. Compute block hash from block header RLP
+    use ethers::utils::keccak256;
+    let block_hash: [u8; 32] = keccak256(&input.receipt_proof.block_header_rlp);
 
     Ok(DepositProofOutput::new(
         proof_bytes,
@@ -360,6 +381,7 @@ pub fn generate_proof(
         input.event_data.sender,
         input.event_data.amount,
         input.event_data.contract_address,
+        block_hash,
     ))
 }
 
@@ -370,20 +392,18 @@ pub fn generate_proof(
 /// # Arguments
 ///
 /// * `proof` - The proof output to verify
-/// * `config` - Circuit configuration (must match the one used for proof generation)
+/// * `config` - Circuit configuration (must match the one used for proof
+///   generation)
 ///
 /// # Returns
 ///
 /// `Ok(true)` if the proof is valid, `Ok(false)` if invalid, `Err` on error
-pub fn verify_proof(
-    proof: &DepositProofOutput,
-    config: &CircuitConfig,
-) -> Result<bool, String> {
+pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Result<bool, String> {
     let k = config.degree;
 
     // 1. Get KZG parameters (needed for verification)
-    let _params = get_or_create_kzg_params(k)
-        .map_err(|e| format!("Failed to get KZG params: {}", e))?;
+    let _params =
+        get_or_create_kzg_params(k).map_err(|e| format!("Failed to get KZG params: {}", e))?;
 
     // 2. Deserialize SNARK
     let snark: Snark = bincode::deserialize(&proof.proof)
@@ -398,7 +418,8 @@ pub fn verify_proof(
         return Err("Proof has no public instances".to_string());
     }
 
-    // Check that we have exactly 4 public inputs (depositId, sender, amount, contract)
+    // Check that we have exactly 4 public inputs (depositId, sender, amount,
+    // contract)
     if snark.instances[0].len() != 4 {
         return Err(format!(
             "Expected 4 public inputs, got {}",
@@ -448,12 +469,13 @@ pub fn verify_proof(
 
 /// Generate a Solidity verifier contract.
 ///
-/// This function generates a Solidity smart contract that can verify proofs on-chain.
-/// The verifier is generated using the SHPLONK multi-open scheme.
+/// This function generates a Solidity smart contract that can verify proofs
+/// on-chain. The verifier is generated using the SHPLONK multi-open scheme.
 ///
 /// # Arguments
 ///
-/// * `config` - Circuit configuration (must match the one used for proof generation)
+/// * `config` - Circuit configuration (must match the one used for proof
+///   generation)
 /// * `output_path` - Path where to save the Solidity verifier contract
 ///
 /// # Returns
@@ -485,7 +507,8 @@ pub fn generate_solidity_verifier(
 
     // Use placeholder input for verifier generation
     let placeholder_input = create_keygen_placeholder_input();
-    let (pk, _circuit_params, _break_points) = get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
+    let (pk, _circuit_params, _break_points) =
+        get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
 
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
@@ -513,14 +536,15 @@ pub fn generate_solidity_verifier(
 
 /// Create a minimal valid RLP input for key generation.
 ///
-/// This creates a minimal valid RLP structure that can be used to generate proving/verifying keys.
-/// For axiom-eth circuits, we need valid RLP data even for keygen because the circuit structure
-/// depends on the RLP parsing logic.
+/// This creates a minimal valid RLP structure that can be used to generate
+/// proving/verifying keys. For axiom-eth circuits, we need valid RLP data even
+/// for keygen because the circuit structure depends on the RLP parsing logic.
 ///
 /// This creates a minimal valid Ethereum receipt with a single log entry.
 fn create_keygen_placeholder_input() -> DepositProofInput {
-    use crate::types::{DepositEventData, ReceiptProof};
     use rlp::RlpStream;
+
+    use crate::types::{DepositEventData, ReceiptProof};
 
     let event_data = DepositEventData {
         block_number: 0,
@@ -592,14 +616,16 @@ mod tests {
     #[test]
     fn test_load_circuit_params() {
         let params = load_circuit_params("configs/circuit_params.json");
-        assert!(params.is_ok(), "Failed to load circuit params: {:?}", params.err());
+        assert!(
+            params.is_ok(),
+            "Failed to load circuit params: {:?}",
+            params.err()
+        );
 
         let params = params.unwrap();
         assert_eq!(params.base.k, 18);
         assert_eq!(params.num_rlc_columns, 3);
     }
-
-
 
     #[test]
     fn test_create_keygen_placeholder_input() {
@@ -628,7 +654,7 @@ mod tests {
         assert_eq!(params.num_rlc_columns, 3);
     }
 
-    // Note: test_circuit_mock requires real Ethereum data and is tested in integration tests
-    // Note: Full proof generation tests are too slow for unit tests (5-10 minutes)
+    // Note: test_circuit_mock requires real Ethereum data and is tested in
+    // integration tests Note: Full proof generation tests are too slow for
+    // unit tests (5-10 minutes)
 }
-

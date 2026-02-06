@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/IAckiNackiVerifier.sol";
+import "../src/MockBlockHeaderOracle.sol";
 
 /**
  * @title AckiNackiBridgeV2Test
@@ -19,16 +20,23 @@ contract AckiNackiBridgeV2Test is Test {
     address public user2 = address(0x5678);
 
     // Events (must match contract)
-    event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
+    event Deposit(
+        uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp
+    );
 
-    event Withdrawal(uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp);
+    event Withdrawal(
+        uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp
+    );
 
     function setUp() public {
         // Deploy test verifier (accepts any valid proof format)
         verifier = new TestDepositVerifier();
 
-        // Deploy bridge with verifier address
-        bridge = new AckiNackiBridge(address(verifier));
+        // Deploy mock block header oracle
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+
+        // Deploy bridge with verifier and oracle addresses
+        bridge = new AckiNackiBridge(address(verifier), address(oracle));
 
         // Fund test users
         vm.deal(user1, 100 ether);
@@ -51,7 +59,7 @@ contract AckiNackiBridgeV2Test is Test {
             block.timestamp // timestamp
         );
 
-        bridge.deposit{value: amount}();
+        bridge.deposit{ value: amount }();
 
         vm.stopPrank();
 
@@ -70,7 +78,7 @@ contract AckiNackiBridgeV2Test is Test {
             vm.expectEmit(true, true, false, true);
             emit Deposit(i, user1, amount, block.timestamp);
 
-            bridge.deposit{value: amount}();
+            bridge.deposit{ value: amount }();
         }
 
         assertEq(bridge.depositCounter(), 5, "Should have 5 deposits");
@@ -82,7 +90,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Send zero amount
         vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
-        bridge.deposit{value: 0}();
+        bridge.deposit{ value: 0 }();
 
         vm.stopPrank();
     }
@@ -93,7 +101,7 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Send more than MAX_DEPOSIT_AMOUNT (100 ether)
         vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
-        bridge.deposit{value: 101 ether}();
+        bridge.deposit{ value: 101 ether }();
 
         vm.stopPrank();
     }
@@ -102,11 +110,11 @@ contract AckiNackiBridgeV2Test is Test {
         assertEq(bridge.depositCounter(), 0, "Initial counter should be 0");
 
         vm.prank(user1);
-        bridge.deposit{value: 1 ether}();
+        bridge.deposit{ value: 1 ether }();
         assertEq(bridge.depositCounter(), 1, "Counter should be 1 after first deposit");
 
         vm.prank(user2);
-        bridge.deposit{value: 2 ether}();
+        bridge.deposit{ value: 2 ether }();
         assertEq(bridge.depositCounter(), 2, "Counter should be 2 after second deposit");
     }
 
@@ -118,13 +126,13 @@ contract AckiNackiBridgeV2Test is Test {
         vm.prank(user1);
         vm.expectEmit(true, true, false, true);
         emit Deposit(0, user1, amount1, block.timestamp);
-        bridge.deposit{value: amount1}();
+        bridge.deposit{ value: amount1 }();
 
         // User2 deposits
         vm.prank(user2);
         vm.expectEmit(true, true, false, true);
         emit Deposit(1, user2, amount2, block.timestamp);
-        bridge.deposit{value: amount2}();
+        bridge.deposit{ value: amount2 }();
 
         assertEq(bridge.depositCounter(), 2);
         assertEq(bridge.treasuryBalance(), amount1 + amount2);
@@ -138,17 +146,22 @@ contract AckiNackiBridgeV2Test is Test {
 
         // First, make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         // Create a valid proof (test verifier accepts any non-empty proof)
         bytes memory proof = hex"0123456789abcdef"; // Dummy proof
 
-        // Prepare public inputs: [depositId, sender, amount, contractAddress]
-        uint256[] memory publicInputs = new uint256[](4);
+        // Prepare public inputs: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = depositAmount;
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128); // High 128 bits
+        publicInputs[5] = uint256(uint128(uint256(blockHash))); // Low 128 bits
 
         // Record user1 balance before withdrawal
         uint256 balanceBefore = user1.balance;
@@ -157,7 +170,7 @@ contract AckiNackiBridgeV2Test is Test {
         vm.expectEmit(true, true, false, true);
         emit Withdrawal(depositId, user1, depositAmount, block.timestamp);
 
-        bridge.withdraw(payable(user1), depositAmount, depositId, proof);
+        bridge.withdraw(payable(user1), depositAmount, depositId, blockNumber, proof);
 
         // Verify state
         assertEq(user1.balance, balanceBefore + depositAmount, "User should receive deposit amount");
@@ -171,22 +184,27 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         // Create proof
         bytes memory proof = hex"0123456789abcdef";
-        uint256[] memory publicInputs = new uint256[](4);
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = depositAmount;
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128);
+        publicInputs[5] = uint256(uint128(uint256(blockHash)));
 
         // First withdrawal succeeds
-        bridge.withdraw(payable(user1), depositAmount, depositId, proof);
+        bridge.withdraw(payable(user1), depositAmount, depositId, blockNumber, proof);
 
         // Second withdrawal with same depositId should fail
         vm.expectRevert(AckiNackiBridge.DepositAlreadyProcessed.selector);
-        bridge.withdraw(payable(user1), depositAmount, depositId, proof);
+        bridge.withdraw(payable(user1), depositAmount, depositId, blockNumber, proof);
     }
 
     function testWithdrawalInvalidProof() public {
@@ -195,19 +213,24 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         // Create INVALID proof (empty)
         bytes memory proof = hex"";
-        uint256[] memory publicInputs = new uint256[](4);
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = depositAmount;
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128);
+        publicInputs[5] = uint256(uint128(uint256(blockHash)));
 
         // Withdrawal should fail
         vm.expectRevert(AckiNackiBridge.InvalidProof.selector);
-        bridge.withdraw(payable(user1), depositAmount, depositId, proof);
+        bridge.withdraw(payable(user1), depositAmount, depositId, blockNumber, proof);
     }
 
     function testWithdrawalInsufficientTreasury() public {
@@ -217,18 +240,23 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         // Try to withdraw more than treasury has
         bytes memory proof = hex"0123456789abcdef";
-        uint256[] memory publicInputs = new uint256[](4);
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = withdrawAmount; // More than deposited!
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128);
+        publicInputs[5] = uint256(uint128(uint256(blockHash)));
 
         vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
-        bridge.withdraw(payable(user1), withdrawAmount, depositId, proof);
+        bridge.withdraw(payable(user1), withdrawAmount, depositId, blockNumber, proof);
     }
 
     function testWithdrawalInvalidRecipient() public {
@@ -237,18 +265,23 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make a deposit
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         // Try to withdraw to zero address
         bytes memory proof = hex"0123456789abcdef";
-        uint256[] memory publicInputs = new uint256[](4);
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = depositAmount;
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128);
+        publicInputs[5] = uint256(uint128(uint256(blockHash)));
 
         vm.expectRevert(AckiNackiBridge.InvalidRecipient.selector);
-        bridge.withdraw(payable(address(0)), depositAmount, depositId, proof);
+        bridge.withdraw(payable(address(0)), depositAmount, depositId, blockNumber, proof);
     }
 
     function testIsDepositProcessed() public {
@@ -260,16 +293,21 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Make deposit and withdraw
         vm.prank(user1);
-        bridge.deposit{value: depositAmount}();
+        bridge.deposit{ value: depositAmount }();
 
         bytes memory proof = hex"0123456789abcdef";
-        uint256[] memory publicInputs = new uint256[](4);
+        uint256 blockNumber = block.number - 1;
+        bytes32 blockHash = blockhash(blockNumber);
+
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(user1));
         publicInputs[2] = depositAmount;
         publicInputs[3] = uint256(uint160(address(bridge)));
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128);
+        publicInputs[5] = uint256(uint128(uint256(blockHash)));
 
-        bridge.withdraw(payable(user1), depositAmount, depositId, proof);
+        bridge.withdraw(payable(user1), depositAmount, depositId, blockNumber, proof);
 
         // Now should be processed
         assertTrue(bridge.isDepositProcessed(depositId));
@@ -278,8 +316,14 @@ contract AckiNackiBridgeV2Test is Test {
     // ============ Constructor Tests ============
 
     function testConstructorInvalidVerifier() public {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         vm.expectRevert(AckiNackiBridge.InvalidVerifier.selector);
-        new AckiNackiBridge(address(0));
+        new AckiNackiBridge(address(0), address(oracle));
+    }
+
+    function testConstructorInvalidOracle() public {
+        vm.expectRevert(AckiNackiBridge.InvalidOracle.selector);
+        new AckiNackiBridge(address(verifier), address(0));
     }
 }
 
@@ -289,7 +333,7 @@ contract AckiNackiBridgeV2Test is Test {
  * @dev Accepts any proof with valid format for testing purposes
  */
 contract TestDepositVerifier is IAckiNackiVerifier {
-    uint256 private constant PUBLIC_INPUTS_COUNT = 4;
+    uint256 private constant PUBLIC_INPUTS_COUNT = 6; // depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow
 
     function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
         external

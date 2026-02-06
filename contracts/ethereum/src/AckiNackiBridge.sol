@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "./IAckiNackiVerifier.sol";
+import "./IBlockHeaderOracle.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
@@ -24,6 +25,9 @@ contract AckiNackiBridge {
     // Verifier contract
     IAckiNackiVerifier public verifier;
 
+    // Block header oracle (verifies block hashes from Ethereum)
+    IBlockHeaderOracle public blockHeaderOracle;
+
     // Events
     event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
 
@@ -37,10 +41,14 @@ contract AckiNackiBridge {
     error InsufficientTreasury();
     error InvalidVerifier();
     error InvalidRecipient();
+    error InvalidBlockHash();
+    error InvalidOracle();
 
-    constructor(address _verifier) {
+    constructor(address _verifier, address _blockHeaderOracle) {
         if (_verifier == address(0)) revert InvalidVerifier();
+        if (_blockHeaderOracle == address(0)) revert InvalidOracle();
         verifier = IAckiNackiVerifier(_verifier);
+        blockHeaderOracle = IBlockHeaderOracle(_blockHeaderOracle);
     }
 
     /// @notice Deposit tokens to the bridge
@@ -64,25 +72,44 @@ contract AckiNackiBridge {
     /// @param recipient Address to receive tokens
     /// @param amount Amount to withdraw
     /// @param depositId Unique deposit ID (prevents double-spending)
+    /// @param blockNumber Block number where the deposit event was emitted
     /// @param proof ZK proof proving:
     ///              1. A Deposit event was emitted by this contract
     ///              2. The event contains the correct depositId, amount, and sender
     ///              3. The sender matches the recipient
+    ///              4. The event is in a real Ethereum block (verified via block hash)
     /// @dev The ZK circuit verifies the Ethereum receipt trie to prove event emission
-    function withdraw(address payable recipient, uint256 amount, uint256 depositId, bytes calldata proof) external {
+    function withdraw(
+        address payable recipient,
+        uint256 amount,
+        uint256 depositId,
+        uint256 blockNumber,
+        bytes calldata proof
+    ) external {
         // Validate recipient address
         if (recipient == address(0)) revert InvalidRecipient();
 
+        // Verify block hash is from real Ethereum using oracle
+        // The oracle provides verified block hashes (via ZK proofs, light client, etc.)
+        bytes32 blockHash = blockHeaderOracle.getBlockHash(blockNumber);
+        if (blockHash == bytes32(0)) revert InvalidBlockHash();
+
         // Prepare public inputs for the verifier
-        // Public inputs: [depositId, sender, amount, contractAddress]
-        uint256[] memory publicInputs = new uint256[](4);
+        // Public inputs: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
+        // Block hash is split into two 128-bit chunks because field elements are ~254 bits
+        uint256[] memory publicInputs = new uint256[](6);
         publicInputs[0] = depositId;
         publicInputs[1] = uint256(uint160(address(recipient)));
         publicInputs[2] = amount;
         publicInputs[3] = uint256(uint160(address(this)));
 
+        // Split block hash into high and low 128-bit chunks
+        publicInputs[4] = uint256(bytes32(blockHash) >> 128); // High 128 bits
+        publicInputs[5] = uint256(uint128(uint256(blockHash))); // Low 128 bits
+
         // Verify ZK proof
         // The proof verifies that a Deposit event was emitted with these parameters
+        // AND that the event is in the specified Ethereum block
         (bool isValid, bytes32 verifiedDepositId) = verifier.verifyWithdrawalProof(proof, publicInputs);
         if (!isValid) revert InvalidProof();
 

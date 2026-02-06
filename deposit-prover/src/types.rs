@@ -57,11 +57,20 @@ pub struct DepositProofOutput {
     pub sender: [u8; 20],
     pub amount: u64,
     pub contract_address: [u8; 20],
+    /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
+    pub block_hash: [u8; 32],
 }
 
 impl DepositProofOutput {
     /// Create a new proof output with hex-encoded proof bytes
-    pub fn new(proof: Vec<u8>, deposit_id: u64, sender: [u8; 20], amount: u64, contract_address: [u8; 20]) -> Self {
+    pub fn new(
+        proof: Vec<u8>,
+        deposit_id: u64,
+        sender: [u8; 20],
+        amount: u64,
+        contract_address: [u8; 20],
+        block_hash: [u8; 32],
+    ) -> Self {
         let proof_bytes = format!("0x{}", hex::encode(&proof));
         Self {
             proof,
@@ -70,7 +79,7 @@ impl DepositProofOutput {
             sender,
             amount,
             contract_address,
+            block_hash,
         }
     }
 }
-

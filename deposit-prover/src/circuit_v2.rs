@@ -1,28 +1,21 @@
 //! Deposit Event Proof Circuit - Axiom-eth Integration
 //!
-//! This circuit uses axiom-eth to prove that a Deposit event was emitted on Ethereum.
-//! It follows the EthCircuitInstructions pattern from axiom-eth.
+//! This circuit uses axiom-eth to prove that a Deposit event was emitted on
+//! Ethereum. It follows the EthCircuitInstructions pattern from axiom-eth.
 
-use crate::types::{DepositProofInput, ReceiptProof};
 use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
-    rlc::{
-        circuit::builder::RlcCircuitBuilder,
-        FIRST_PHASE,
-    },
-    utils::{
-        build_utils::aggregation::CircuitMetadata,
-        eth_circuit::EthCircuitInstructions,
-    },
+    rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
+    utils::{build_utils::aggregation::CircuitMetadata, eth_circuit::EthCircuitInstructions},
 };
 use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
-    gates::GateInstructions,
-    halo2_proofs::halo2curves::bn256::Fr,
-    utils::ScalarField,
-    AssignedValue,
+    gates::GateInstructions, halo2_proofs::halo2curves::bn256::Fr, utils::ScalarField,
+    AssignedValue, Context,
 };
+
+use crate::types::{DepositProofInput, ReceiptProof};
 
 /// Circuit parameters
 pub const MAX_DATA_BYTE_LEN: usize = 256; // Max event data length
@@ -30,8 +23,9 @@ pub const MAX_LOG_NUM: usize = 20; // Max number of logs in receipt
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
-/// Expected event signature: keccak256("Deposit(uint256,address,uint256,uint256)")
-/// This is computed off-circuit and used as a constant
+/// Expected event signature:
+/// keccak256("Deposit(uint256,address,uint256,uint256)") This is computed
+/// off-circuit and used as a constant
 pub fn get_deposit_event_signature() -> [u8; 32] {
     keccak256("Deposit(uint256,address,uint256,uint256)")
 }
@@ -48,7 +42,8 @@ impl DepositEventCircuitV2 {
     ///
     /// # Arguments
     ///
-    /// * `inputs` - The deposit proof input containing event data and receipt proof
+    /// * `inputs` - The deposit proof input containing event data and receipt
+    ///   proof
     /// * `config` - Circuit configuration (from prover module)
     pub fn new(inputs: DepositProofInput, config: &crate::prover::CircuitConfig) -> Self {
         let params = EthReceiptChipParams {
@@ -57,10 +52,14 @@ impl DepositEventCircuitV2 {
             topic_num_bounds: config.topic_num_bounds,
             network: Some(Chain::Mainnet), // Default to mainnet
         };
-        Self { inputs, params }
+        Self {
+            inputs,
+            params,
+        }
     }
 
-    /// Create a new circuit with default parameters (for backward compatibility).
+    /// Create a new circuit with default parameters (for backward
+    /// compatibility).
     pub fn new_with_defaults(inputs: DepositProofInput, network: Chain) -> Self {
         let params = EthReceiptChipParams {
             max_data_byte_len: MAX_DATA_BYTE_LEN,
@@ -75,11 +74,14 @@ impl DepositEventCircuitV2 {
     }
 }
 
-/// Output from Phase 0 (MPT verification + RLP decoding)
+/// Output from Phase 0 (MPT verification + RLP decoding + block hash)
 #[derive(Clone)]
 pub struct Phase0Output {
     pub receipt_witness: EthReceiptWitness<Fr>,
     pub log_index: AssignedValue<Fr>,
+    pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
+    pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
+    pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
 }
 
 impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
@@ -97,7 +99,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // 1. Load transaction index
         let tx_idx = ctx.load_witness(Fr::from(self.inputs.event_data.transaction_index));
-        println!("   ✓ Loaded tx_index: {}", self.inputs.event_data.transaction_index);
+        println!(
+            "   ✓ Loaded tx_index: {}",
+            self.inputs.event_data.transaction_index
+        );
 
         // 2. Convert receipt proof to MPTInput and assign
         let mpt_input = self.inputs.receipt_proof.to_mpt_input(
@@ -107,7 +112,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let proof = mpt_input.assign(ctx);
 
         // 3. Create receipt input
-        let rc_input = EthReceiptInputAssigned { tx_idx, proof };
+        let rc_input = EthReceiptInputAssigned {
+            tx_idx,
+            proof,
+        };
 
         // 4. Parse receipt proof (verifies MPT inclusion)
         let receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
@@ -115,11 +123,86 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // 5. Load log index
         let log_index = ctx.load_witness(Fr::from(self.inputs.event_data.log_index as u64));
-        println!("   ✓ Loaded log_index: {}", self.inputs.event_data.log_index);
+        println!(
+            "   ✓ Loaded log_index: {}",
+            self.inputs.event_data.log_index
+        );
+
+        // 6. Parse block header RLP and compute block hash (MUST be in Phase 0 for
+        //    Keccak)
+        println!("🔧 Parsing block header and computing block hash...");
+
+        // Load block header RLP bytes
+        let block_header_rlp_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .receipt_proof
+            .block_header_rlp
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
+
+        // Compute block hash using Keccak (MUST be in Phase 0)
+        let keccak_chip = chip.keccak();
+        let block_header_len = ctx.load_witness(Fr::from(
+            self.inputs.receipt_proof.block_header_rlp.len() as u64,
+        ));
+        let block_hash_query = keccak_chip.keccak_var_len(
+            ctx,
+            block_header_rlp_bytes.clone(),
+            block_header_len,
+            0, // No minimum length
+        );
+        let block_hash_bytes = block_hash_query.output_bytes.as_ref().to_vec();
+        println!("   ✓ Computed block hash (32 bytes)");
+
+        // Parse block header RLP to extract receiptsRoot (field index 5)
+        let rlp_chip = chip.rlp();
+        let block_header_max_field_lens = vec![
+            32,  // 0: parentHash
+            32,  // 1: ommersHash
+            32,  // 2: beneficiary
+            32,  // 3: stateRoot
+            32,  // 4: transactionsRoot
+            32,  // 5: receiptsRoot ← WE NEED THIS
+            256, // 6: logsBloom
+            32,  // 7: difficulty
+            32,  // 8: number
+            32,  // 9: gasLimit
+            32,  // 10: gasUsed
+            32,  // 11: timestamp
+            32,  // 12: extraData
+            32,  // 13: mixHash
+            8,   // 14: nonce
+            32,  // 15: baseFeePerGas (post-London)
+            32,  // 16: withdrawalsRoot (post-Shanghai, optional)
+        ];
+
+        let block_header_array = rlp_chip.decompose_rlp_array_phase0(
+            ctx,
+            block_header_rlp_bytes,
+            &block_header_max_field_lens,
+            true, // variable length (15-17 fields)
+        );
+
+        // Extract receiptsRoot (field 5)
+        let receipts_root_bytes = block_header_array.field_witness[5].field_cells.to_vec();
+        println!("   ✓ Extracted receiptsRoot from block header (32 bytes)");
+
+        // Get MPT root from receipt proof
+        let mpt_root_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .receipt_proof
+            .receipt_root
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
 
         Phase0Output {
             receipt_witness,
             log_index,
+            block_hash_bytes,
+            receipts_root_bytes,
+            mpt_root_bytes,
         }
     }
 
@@ -135,10 +218,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("🔧 Phase 1: Event Verification");
 
         // 1. Parse receipt in phase 1 (RLC verification)
-        let _receipt_trace = chip.parse_receipt_proof_phase1(
-            (ctx_gate, ctx_rlc),
-            phase0_output.receipt_witness.clone(),
-        );
+        let _receipt_trace = chip
+            .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
         println!("   ✓ Verified receipt RLC");
 
         // 2. Extract the specific log at log_index
@@ -147,15 +228,22 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             &phase0_output.receipt_witness,
             phase0_output.log_index,
         );
-        println!("   ✓ Extracted log at index {}", self.inputs.event_data.log_index);
+        println!(
+            "   ✓ Extracted log at index {}",
+            self.inputs.event_data.log_index
+        );
         println!("   Log length: {:?}", log_witness.log_len);
-        println!("   Log bytes (first 16): {:?}", &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]);
+        println!(
+            "   Log bytes (first 16): {:?}",
+            &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]
+        );
 
         // 3. Parse log RLP structure: [address, topics[], data]
         let rlp_chip = chip.rlp();
 
-        // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte hashes), data (variable)
-        // Max lengths: address=20, topics=4*32+overhead=150, data=64+overhead=70
+        // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte
+        // hashes), data (variable) Max lengths: address=20,
+        // topics=4*32+overhead=150, data=64+overhead=70
         let log_max_field_lens = [20, 150, 70];
 
         let log_array = rlp_chip.decompose_rlp_array_phase0(
@@ -172,16 +260,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Debug: print actual address bytes
         if address_bytes.len() >= 20 {
-            let addr_vals: Vec<u64> = address_bytes[0..20].iter()
+            let addr_vals: Vec<u64> = address_bytes[0..20]
+                .iter()
                 .map(|v| v.value().get_lower_64())
                 .collect();
             println!("   Address (hex): {:02x?}", addr_vals);
         }
 
         // 5. Extract topics (field 1)
-        // Topics are NOT an RLP list - they're just concatenated RLP-encoded 32-byte strings
-        // Each topic is: 0xa0 (1 byte RLP prefix) + 32 bytes of data = 33 bytes total
-        // For Deposit event: [event_sig, depositId, sender] = 3 topics = 99 bytes total
+        // Topics are NOT an RLP list - they're just concatenated RLP-encoded 32-byte
+        // strings Each topic is: 0xa0 (1 byte RLP prefix) + 32 bytes of data =
+        // 33 bytes total For Deposit event: [event_sig, depositId, sender] = 3
+        // topics = 99 bytes total
         let topics_rlp = &log_array.field_witness[1].field_cells;
         println!("   Topics field: {} bytes", topics_rlp.len());
 
@@ -190,7 +280,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Topic 1 (depositId): bytes 33-65 (skip byte 33 which is 0xa0)
         // Topic 2 (sender): bytes 66-98 (skip byte 66 which is 0xa0)
 
-        // 6. Extract event signature (topic 0: bytes 1-32, skipping byte 0 which is 0xa0)
+        // 6. Extract event signature (topic 0: bytes 1-32, skipping byte 0 which is
+        //    0xa0)
         let event_sig_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 33 {
             topics_rlp[1..33].to_vec()
         } else {
@@ -199,7 +290,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Debug: print actual event signature
         if event_sig_bytes.len() >= 16 {
-            let sig_vals: Vec<u64> = event_sig_bytes[0..16].iter()
+            let sig_vals: Vec<u64> = event_sig_bytes[0..16]
+                .iter()
                 .map(|v| v.value().get_lower_64())
                 .collect();
             println!("   Event sig (first 16 bytes): {:02x?}", &sig_vals[0..16]);
@@ -238,9 +330,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Constrain that event_sig_bytes equals expected_sig_bytes
         // Both should be 32 bytes
         if event_sig_bytes.len() != 32 {
-            println!("   WARNING: Event signature is {} bytes, expected 32", event_sig_bytes.len());
+            println!(
+                "   WARNING: Event signature is {} bytes, expected 32",
+                event_sig_bytes.len()
+            );
         }
-        assert_eq!(expected_sig_bytes.len(), 32, "Expected signature should be 32 bytes");
+        assert_eq!(
+            expected_sig_bytes.len(),
+            32,
+            "Expected signature should be 32 bytes"
+        );
 
         // Constrain equality for all 32 bytes
         let min_len = event_sig_bytes.len().min(expected_sig_bytes.len());
@@ -250,7 +349,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Verified event signature ({} bytes)", min_len);
 
         // 11. Verify contract address
-        // Load expected contract address as constant (we know it at circuit creation time)
+        // Load expected contract address as constant (we know it at circuit creation
+        // time)
         let expected_address = &self.inputs.event_data.contract_address;
         let expected_address_bytes: Vec<AssignedValue<Fr>> = expected_address
             .iter()
@@ -259,8 +359,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Constrain that address_bytes equals expected_address_bytes
         // Address should be 20 bytes
-        assert_eq!(address_bytes.len(), 20, "Contract address should be 20 bytes");
-        assert_eq!(expected_address_bytes.len(), 20, "Expected address should be 20 bytes");
+        assert_eq!(
+            address_bytes.len(),
+            20,
+            "Contract address should be 20 bytes"
+        );
+        assert_eq!(
+            expected_address_bytes.len(),
+            20,
+            "Expected address should be 20 bytes"
+        );
 
         for (actual, expected) in address_bytes.iter().zip(expected_address_bytes.iter()) {
             ctx_gate.constrain_equal(actual, expected);
@@ -275,53 +383,91 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let gate = chip.gate();
 
         // Helper function to convert bytes (big-endian) to field element
-        let mut bytes_to_field = |bytes: &[AssignedValue<Fr>]| -> AssignedValue<Fr> {
+        // Using a regular function instead of closure to avoid borrow checker issues
+        fn bytes_to_field<F: ScalarField>(
+            ctx: &mut Context<F>,
+            gate: &impl GateInstructions<F>,
+            bytes: &[AssignedValue<F>],
+        ) -> AssignedValue<F> {
             // Convert bytes to field element using Horner's method
             // value = bytes[0] * 256^(n-1) + bytes[1] * 256^(n-2) + ... + bytes[n-1]
-            let mut result = ctx_gate.load_zero();
-            let base = ctx_gate.load_constant(Fr::from(256));
+            let mut result = ctx.load_zero();
+            let base = ctx.load_constant(F::from(256));
 
             for byte in bytes.iter() {
                 // result = result * 256 + byte
-                result = gate.mul_add(ctx_gate, result, base, *byte);
+                result = gate.mul_add(ctx, result, base, *byte);
             }
             result
-        };
+        }
 
         // Convert depositId (32 bytes from topics[1])
-        let deposit_id_field = bytes_to_field(&deposit_id_bytes);
+        let deposit_id_field = bytes_to_field(ctx_gate, gate, &deposit_id_bytes);
         println!("   ✓ Converted depositId to field element");
 
-        // Convert sender (32 bytes from topics[2], but only last 20 bytes are the address)
-        // Ethereum addresses are 20 bytes, but stored as uint256 (32 bytes) in topics
-        // The first 12 bytes should be zero, last 20 bytes are the address
-        let sender_field = bytes_to_field(&sender_bytes);
+        // Convert sender (32 bytes from topics[2], but only last 20 bytes are the
+        // address) Ethereum addresses are 20 bytes, but stored as uint256 (32
+        // bytes) in topics The first 12 bytes should be zero, last 20 bytes are
+        // the address
+        let sender_field = bytes_to_field(ctx_gate, gate, &sender_bytes);
         println!("   ✓ Converted sender to field element");
 
         // Convert amount (first 32 bytes of data)
         // We need to extract the first 32 bytes from data_bytes
         let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
-        let amount_field = bytes_to_field(amount_bytes);
+        let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
         println!("   ✓ Converted amount to field element");
 
         // Convert contract address (20 bytes)
-        let contract_address_field = bytes_to_field(address_bytes);
+        let contract_address_field = bytes_to_field(ctx_gate, gate, address_bytes);
         println!("   ✓ Converted contract address to field element");
 
-        // 13. Expose public outputs
+        // 13. Verify block header receiptsRoot matches MPT root
+        // (Block hash and receiptsRoot were already computed in Phase 0)
+        println!("🔧 Verifying block header...");
+
+        // Convert receiptsRoot from Phase 0 to field element
+        let receipts_root_field =
+            bytes_to_field(ctx_gate, gate, &phase0_output.receipts_root_bytes);
+
+        // Convert MPT root from Phase 0 to field element
+        let mpt_root_field = bytes_to_field(ctx_gate, gate, &phase0_output.mpt_root_bytes);
+
+        // CRITICAL: Constrain that receiptsRoot from block header equals MPT root
+        ctx_gate.constrain_equal(&receipts_root_field, &mpt_root_field);
+        println!("   ✓ Verified receiptsRoot matches MPT root");
+
+        // 14. Use block hash from Phase 0
+        println!("🔧 Using block hash from Phase 0...");
+        let block_hash_bytes = &phase0_output.block_hash_bytes;
+
+        // Convert block hash to field elements (split into two 128-bit chunks)
+        // Block hash is 32 bytes = 256 bits, but field elements are ~254 bits
+        // So we split it into two 128-bit (16-byte) chunks
+        let block_hash_high = bytes_to_field(ctx_gate, gate, &block_hash_bytes[0..16]);
+        let block_hash_low = bytes_to_field(ctx_gate, gate, &block_hash_bytes[16..32]);
+
+        println!("   ✓ Converted block hash to field elements");
+
+        // 15. Expose public outputs
         // The public inputs will be verified by the Solidity verifier
-        // Order: [depositId, sender, amount, contract_address]
+        // Order: [depositId, sender, amount, contract_address, block_hash_high,
+        // block_hash_low]
         let public_instances = builder.public_instances();
         public_instances[0].push(deposit_id_field);
         public_instances[0].push(sender_field);
         public_instances[0].push(amount_field);
         public_instances[0].push(contract_address_field);
+        public_instances[0].push(block_hash_high);
+        public_instances[0].push(block_hash_low);
 
         println!("   ✓ Exposed public outputs:");
         println!("     - depositId");
         println!("     - sender");
         println!("     - amount");
         println!("     - contract_address");
+        println!("     - block_hash_high");
+        println!("     - block_hash_low");
 
         println!("   ✓ Phase 1 complete!");
     }
@@ -412,4 +558,3 @@ mod tests {
         assert_eq!(circuit.params.max_log_num, MAX_LOG_NUM);
     }
 }
-

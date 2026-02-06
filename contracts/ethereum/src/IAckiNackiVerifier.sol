@@ -11,11 +11,13 @@ interface IAckiNackiVerifier {
      * @notice Verify a withdrawal proof
      * @param proof The ZK proof bytes (cryptographic proof data)
      * @param publicInputs Array of public inputs for deposit proof verification
-     *                     Format: [depositId, sender, amount, contractAddress]
+     *                     Format: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
      *                     - depositId: Unique deposit identifier (uint256)
      *                     - sender: Original depositor address (uint160 → uint256)
      *                     - amount: Deposit amount in wei (uint256)
      *                     - contractAddress: Bridge contract address (uint160 → uint256)
+     *                     - blockHashHigh: High 128 bits of block hash (uint256)
+     *                     - blockHashLow: Low 128 bits of block hash (uint256)
      * @return isValid True if the proof is valid, false otherwise
      * @return depositId The deposit ID from the proof (first public input)
      */
@@ -25,7 +27,7 @@ interface IAckiNackiVerifier {
 
     /**
      * @notice Get the expected number of public inputs
-     * @return uint256 The number of public inputs expected by the verifier (4: depositId, sender, amount, contractAddress)
+     * @return uint256 The number of public inputs expected by the verifier (6: depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow)
      */
     function getPublicInputsCount() external pure returns (uint256);
 }

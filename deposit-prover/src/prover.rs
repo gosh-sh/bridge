@@ -71,7 +71,7 @@ use halo2_base::{
             bn256::{Bn256, Fr, G1Affine},
             ff::PrimeField,
         },
-        plonk::{keygen_pk, keygen_vk, Circuit, ProvingKey},
+        plonk::{Circuit, ProvingKey},
         poly::kzg::commitment::ParamsKZG,
     },
     utils::fs::gen_srs,
@@ -287,15 +287,17 @@ pub fn get_or_create_proving_key(
     circuit.calculate_params();
 
     // Generate or load proving key
+    // FIX BC-PROVER-001: Use gen_pk() for both cases to ensure PK is saved to disk
+    // gen_pk() automatically:
+    // - Loads PK from disk if file exists
+    // - Generates and saves PK to disk if file doesn't exist
     let pk = if pk_path.exists() {
         println!("Found existing proving key at {:?}, loading...", pk_path);
         gen_pk(params, &circuit, Some(pk_path))
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-        let vk = keygen_vk(params, &circuit)
-            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
-        keygen_pk(params, vk, &circuit)
-            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
+        println!("Proving key will be saved to {:?}", pk_path);
+        gen_pk(params, &circuit, Some(pk_path))
     };
     println!("Proving key ready");
 
@@ -514,8 +516,10 @@ pub fn generate_solidity_verifier(
     let vk = pk.get_vk();
 
     // 4. Define number of public instances
-    // We have 4 public outputs: [depositId, sender, amount, contract_address]
-    let num_instance = vec![4];
+    // FIX BC-PROVER-003: Updated from 4 to 6 to match circuit's actual public
+    // outputs We have 6 public outputs: [depositId, sender, amount,
+    // contract_address, block_hash_high, block_hash_low]
+    let num_instance = vec![6];
 
     // 5. Generate Solidity verifier using SHPLONK
     println!("Generating Solidity code...");

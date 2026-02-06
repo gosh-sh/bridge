@@ -517,9 +517,11 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     const HAS_ACCUMULATOR: bool = false;
 
     /// Number of public instance columns
-    /// We expose: [depositId, sender, amount, contract_address]
+    /// FIX BC-PROVER-003: Updated from 4 to 6 to match actual public outputs
+    /// We expose: [depositId, sender, amount, contract_address,
+    /// block_hash_high, block_hash_low]
     fn num_instance(&self) -> Vec<usize> {
-        vec![4] // 4 public outputs in a single instance column
+        vec![6] // 6 public outputs in a single instance column
     }
 }
 

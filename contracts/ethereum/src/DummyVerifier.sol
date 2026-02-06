@@ -21,6 +21,8 @@ import "poseidon-solidity/PoseidonT3.sol";
  *        - sender: Original depositor address from the event
  *        - amount: Deposit amount in wei from the event
  *        - contractAddress: Bridge contract address that emitted the event
+ *        - blockHashHigh: High 128 bits of the block hash
+ *        - blockHashLow: Low 128 bits of the block hash
  *
  *      Circuit constraints:
  *        1. Verify receipt exists in Ethereum's receipt trie (MPT proof)
@@ -35,8 +37,9 @@ contract DummyVerifier is IAckiNackiVerifier {
     address public immutable HALO2_VERIFIER;
 
     // Expected number of public inputs for deposit proof
-    // Public inputs: [depositId, sender, amount, contractAddress]
-    uint256 private constant PUBLIC_INPUTS_COUNT = 4;
+    // FIX BC-PROVER-003: Updated from 4 to 6 to match circuit's actual public outputs
+    // Public inputs: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
+    uint256 private constant PUBLIC_INPUTS_COUNT = 6;
 
     constructor(address _halo2Verifier) {
         HALO2_VERIFIER = _halo2Verifier;
@@ -51,7 +54,9 @@ contract DummyVerifier is IAckiNackiVerifier {
      *      - Bytes 32-63:  public input 1 (sender)
      *      - Bytes 64-95:  public input 2 (amount)
      *      - Bytes 96-127: public input 3 (contractAddress)
-     *      - Bytes 128+:   proof data (elliptic curve points, scalars, etc.)
+     *      - Bytes 128-159: public input 4 (blockHashHigh)
+     *      - Bytes 160-191: public input 5 (blockHashLow)
+     *      - Bytes 192+:   proof data (elliptic curve points, scalars, etc.)
      *
      *      The verifier performs pairing checks to verify that:
      *      - The prover knows the Ethereum receipt containing the Deposit event
@@ -60,7 +65,7 @@ contract DummyVerifier is IAckiNackiVerifier {
      *      - The event parameters match the public inputs
      *
      * @param proof The Halo2 proof bytes (cryptographic proof data only)
-     * @param publicInputs Array of public inputs [depositId, sender, amount, contractAddress]
+     * @param publicInputs Array of public inputs [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
      * @return isValid True if the proof passes pairing checks
      * @return depositId The deposit ID from public inputs
      */
@@ -82,29 +87,22 @@ contract DummyVerifier is IAckiNackiVerifier {
             return (false, bytes32(0));
         }
 
-        // Extract public inputs
-        // publicInputs[0] = depositId (unique deposit identifier)
-        // publicInputs[1] = sender (original depositor address)
-        // publicInputs[2] = amount (deposit amount in wei)
-        // publicInputs[3] = contractAddress (bridge contract address)
+        // Extract and validate depositId
         bytes32 depositIdValue = bytes32(publicInputs[0]);
-        uint256 sender = publicInputs[1];
-        uint256 amount = publicInputs[2];
-        uint256 contractAddress = publicInputs[3];
-
-        // Validate public inputs are non-zero
-        if (depositIdValue == bytes32(0) || sender == 0 || amount == 0 || contractAddress == 0) {
+        if (depositIdValue == bytes32(0) || publicInputs[1] == 0 || publicInputs[2] == 0 || publicInputs[3] == 0) {
             return (false, bytes32(0));
         }
 
         // Format calldata for Halo2Verifier:
-        // The verifier expects: [public_input_0 || public_input_1 || public_input_2 || public_input_3 || proof_data]
-        // Which is: [depositId || sender || amount || contractAddress || proof_data]
+        // The verifier expects: [public_input_0 || ... || public_input_5 || proof_data]
+        // Which is: [depositId || sender || amount || contractAddress || blockHashHigh || blockHashLow || proof_data]
         bytes memory verifierCalldata = abi.encodePacked(
-            depositIdValue, // deposit ID
-            bytes32(sender), // sender address
-            bytes32(amount), // deposit amount
-            bytes32(contractAddress), // contract address
+            depositIdValue, // publicInputs[0]: deposit ID
+            bytes32(publicInputs[1]), // publicInputs[1]: sender address
+            bytes32(publicInputs[2]), // publicInputs[2]: deposit amount
+            bytes32(publicInputs[3]), // publicInputs[3]: contract address
+            bytes32(publicInputs[4]), // publicInputs[4]: block hash high 128 bits
+            bytes32(publicInputs[5]), // publicInputs[5]: block hash low 128 bits
             proof // cryptographic proof data (elliptic curve points, etc.)
         );
 

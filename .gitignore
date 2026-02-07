@@ -95,3 +95,7 @@ deposit-prover/params/
 *.srs
 *.snark
 *.bkp
+
+# Trusted setup files (large files, download separately)
+deposit-prover/trusted_setup/*.ptau
+deposit-prover/trusted_setup/*.srs

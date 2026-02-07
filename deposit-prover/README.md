@@ -49,11 +49,31 @@ pub struct PrivateInputs {
     // User secrets
     pub withdrawal_hash: [u8; 32],
     pub nullifier_preimage: [u8; 32],
-    
+
     // Ethereum proof data
     pub event_data: DepositEventData,
     pub receipt_proof: ReceiptProof,
 }
+```
+
+## Setup
+
+### 1. Download Trusted Setup
+
+⚠️ **Required**: Before using the prover, download the trusted setup parameters:
+
+```bash
+./download_trusted_setup.sh
+```
+
+This downloads the KZG parameters from the Perpetual Powers of Tau ceremony (~288 MB).
+
+**Why this matters**: Using `gen_srs()` to generate random parameters is **insecure** and allows anyone to forge proofs. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
+
+### 2. Verify the Download (Optional)
+
+```bash
+cargo run --release --example verify_trusted_setup
 ```
 
 ## Usage
@@ -115,12 +135,14 @@ The deposit prover is called by the Ethereum frontend when a user wants to withd
 ## Development
 
 Build:
+
 ```bash
 cd deposit-prover
 cargo build --release
 ```
 
 Test:
+
 ```bash
 cargo test
 ```
@@ -130,4 +152,3 @@ cargo test
 - [axiom-eth](https://github.com/axiom-crypto/axiom-eth) - Ethereum state proof library
 - [Ethereum Light Client Protocol](https://github.com/ethereum/annotated-spec/blob/master/altair/sync-protocol.md)
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
-

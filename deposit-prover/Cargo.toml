@@ -80,3 +80,16 @@ thiserror = "2.0"
 anyhow = "1.0"
 tokio = { version = "1.42", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
+ppot-rs = { version = "0.1.1", optional = true }
+sha2 = "0.10.9"
+
+[features]
+# Default features for development/testing
+default = ["insecure-testing"]
+
+# Allow insecure parameter generation for testing only
+# DO NOT enable this in production builds!
+insecure-testing = []
+
+# Optional: .ptau file conversion support
+ppot-rs = ["dep:ppot-rs"]

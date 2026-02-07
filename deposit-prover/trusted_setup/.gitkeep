@@ -1,0 +1,4 @@
+# This directory contains trusted setup files
+# The actual .ptau files are not tracked in git due to their large size
+# Run ../download_trusted_setup.sh to download them
+

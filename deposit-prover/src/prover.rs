@@ -196,10 +196,30 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 
 /// Generate or load KZG parameters for the given circuit degree.
 ///
-/// This function will:
-/// - Try to load existing parameters from `data/kzg_params_{k}.srs`
-/// - If not found, generate new parameters (this can take several minutes)
-/// - Save newly generated parameters to disk for future reuse
+/// ⚠️ **CRITICAL SECURITY WARNING** ⚠️
+///
+/// This function currently generates RANDOM, UNTRUSTED KZG parameters using
+/// `gen_srs()`. This is **ONLY SAFE FOR TESTING AND DEVELOPMENT**.
+///
+/// **DO NOT USE IN PRODUCTION!**
+///
+/// For production, you MUST use parameters from a trusted setup ceremony.
+/// See `TRUSTED_SETUP.md` for instructions on downloading and using trusted
+/// parameters.
+///
+/// # Security Issue
+///
+/// - `gen_srs()` generates random parameters where the "toxic waste" (secret τ)
+///   is known
+/// - Anyone who runs this code can forge proofs
+/// - This makes the entire bridge INSECURE
+///
+/// # What to do
+///
+/// 1. Download trusted setup from Perpetual Powers of Tau ceremony
+/// 2. Convert to Halo2 format (or use pre-converted)
+/// 3. Place in `data/kzg_params_{k}.srs`
+/// 4. This function will then load the trusted parameters
 ///
 /// # Arguments
 ///
@@ -216,7 +236,8 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
         println!("Loading KZG parameters from {}", params_path);
         match load_kzg_params(&params_path) {
             Ok(params) => {
-                println!("Successfully loaded KZG parameters from disk");
+                println!("✅ Successfully loaded KZG parameters from disk");
+                println!("   (Ensure these are from a trusted setup ceremony!)");
                 return Ok(params);
             },
             Err(e) => {
@@ -225,20 +246,66 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
         }
     }
 
-    println!(
-        "Generating KZG parameters for k={} (this may take a few minutes)...",
-        k
-    );
-    let params = gen_srs(k);
-
-    // Save parameters to disk for reuse
-    if let Err(e) = save_kzg_params(&params, &params_path) {
-        println!("Warning: Failed to save KZG params: {}", e);
-    } else {
-        println!("KZG parameters saved to {}", params_path);
+    // ⚠️ CRITICAL: In production, NEVER generate params - always fail if not found
+    #[cfg(not(feature = "insecure-testing"))]
+    {
+        return Err(format!(
+            "\n╔══════════════════════════════════════════════════════════════╗\n\
+             ║  ❌ PRODUCTION MODE: KZG parameters not found!               ║\n\
+             ╠══════════════════════════════════════════════════════════════╣\n\
+             ║  File not found: {}                                          \n\
+             ║                                                              ║\n\
+             ║  For production, you MUST use trusted setup parameters.     ║\n\
+             ║                                                              ║\n\
+             ║  Steps to fix:                                              ║\n\
+             ║  1. Download trusted setup from Perpetual Powers of Tau     ║\n\
+             ║  2. Convert to Halo2 format (or use pre-converted)          ║\n\
+             ║  3. Place at: {}                                            \n\
+             ║                                                              ║\n\
+             ║  See TRUSTED_SETUP.md for detailed instructions.            ║\n\
+             ║                                                              ║\n\
+             ║  DO NOT use 'insecure-testing' feature in production!       ║\n\
+             ╚══════════════════════════════════════════════════════════════╝",
+            params_path, params_path
+        ));
     }
 
-    Ok(params)
+    // Only allow generation in testing mode
+    #[cfg(feature = "insecure-testing")]
+    {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  ⚠️  CRITICAL SECURITY WARNING  ⚠️                           ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║  Generating RANDOM, UNTRUSTED KZG parameters!                ║");
+        println!("║                                                              ║");
+        println!("║  This is ONLY SAFE for TESTING and DEVELOPMENT.             ║");
+        println!("║  DO NOT USE IN PRODUCTION!                                  ║");
+        println!("║                                                              ║");
+        println!("║  Anyone who runs this code knows the 'toxic waste' and      ║");
+        println!("║  can FORGE PROOFS to STEAL ALL BRIDGE FUNDS!                ║");
+        println!("║                                                              ║");
+        println!("║  For production, download trusted setup parameters from:    ║");
+        println!("║  https://github.com/privacy-scaling-explorations/...        ║");
+        println!("║                                                              ║");
+        println!("║  See TRUSTED_SETUP.md for detailed instructions.            ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        println!(
+            "Generating INSECURE KZG parameters for k={} (this may take a few minutes)...",
+            k
+        );
+        let params = gen_srs(k);
+
+        // Save parameters to disk for reuse
+        if let Err(e) = save_kzg_params(&params, &params_path) {
+            println!("Warning: Failed to save KZG params: {}", e);
+        } else {
+            println!("KZG parameters saved to {}", params_path);
+            println!("⚠️  These parameters are INSECURE - for testing only!");
+        }
+
+        Ok(params)
+    }
 }
 
 /// Generate or load proving key for the deposit circuit.

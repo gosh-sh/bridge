@@ -1,6 +1,50 @@
+use alloy_rlp::{Encodable, RlpEncodable};
 use anyhow::{anyhow, Result};
-use ethers::types::{Block, Log, TransactionReceipt};
-use rlp::RlpStream;
+use ethers::types::{Block, Log, TransactionReceipt, U256, U64};
+
+/// Wrapper for U256 that implements Encodable
+struct RlpU256<'a>(&'a U256);
+
+impl Encodable for RlpU256<'_> {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let mut bytes = [0u8; 32];
+        self.0.to_big_endian(&mut bytes);
+        // Remove leading zeros
+        let start = bytes.iter().position(|&b| b != 0).unwrap_or(32);
+        bytes[start..].encode(out);
+    }
+}
+
+/// Wrapper for U64 that implements Encodable
+struct RlpU64<'a>(&'a U64);
+
+impl Encodable for RlpU64<'_> {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let mut bytes = [0u8; 8];
+        self.0.to_big_endian(&mut bytes);
+        // Remove leading zeros
+        let start = bytes.iter().position(|&b| b != 0).unwrap_or(8);
+        bytes[start..].encode(out);
+    }
+}
+
+/// Wrapper for ethers Log that implements RlpEncodable
+#[derive(RlpEncodable)]
+struct RlpLog<'a> {
+    address: &'a [u8; 20],
+    topics: Vec<&'a [u8; 32]>,
+    data: &'a [u8],
+}
+
+impl<'a> From<&'a Log> for RlpLog<'a> {
+    fn from(log: &'a Log) -> Self {
+        RlpLog {
+            address: log.address.as_fixed_bytes(),
+            topics: log.topics.iter().map(|t| t.as_fixed_bytes()).collect(),
+            data: log.data.as_ref(),
+        }
+    }
+}
 
 /// RLP encode a transaction receipt
 ///
@@ -10,27 +54,33 @@ use rlp::RlpStream;
 /// - For typed transactions: type || RLP([status, cumulativeGasUsed, logsBloom,
 ///   logs])
 pub fn encode_receipt(receipt: &TransactionReceipt) -> Result<Vec<u8>> {
-    let mut stream = RlpStream::new_list(4);
-
     // Status (1 for success, 0 for failure)
     let status = receipt
         .status
         .ok_or_else(|| anyhow!("Receipt status not found"))?;
-    stream.append(&status);
 
-    // Cumulative gas used
-    stream.append(&receipt.cumulative_gas_used);
+    // Convert logs to RlpLog wrappers
+    let rlp_logs: Vec<RlpLog> = receipt.logs.iter().map(|log| log.into()).collect();
 
-    // Logs bloom
-    stream.append(&receipt.logs_bloom.0.as_ref());
-
-    // Logs array
-    stream.begin_list(receipt.logs.len());
-    for log in &receipt.logs {
-        encode_log_into_stream(&mut stream, log)?;
+    // Create a struct that represents the receipt for RLP encoding
+    #[derive(RlpEncodable)]
+    struct RlpReceipt<'a> {
+        status: RlpU64<'a>,
+        cumulative_gas_used: RlpU256<'a>,
+        logs_bloom: &'a [u8],
+        logs: Vec<RlpLog<'a>>,
     }
 
-    let encoded = stream.out().to_vec();
+    let rlp_receipt = RlpReceipt {
+        status: RlpU64(&status),
+        cumulative_gas_used: RlpU256(&receipt.cumulative_gas_used),
+        logs_bloom: receipt.logs_bloom.0.as_ref(),
+        logs: rlp_logs,
+    };
+
+    // Encode using the derive macro
+    let mut buf = Vec::new();
+    rlp_receipt.encode(&mut buf);
 
     // Check if this is a typed transaction (EIP-2718)
     // Type 0 (legacy) = no prefix
@@ -40,31 +90,12 @@ pub fn encode_receipt(receipt: &TransactionReceipt) -> Result<Vec<u8>> {
         if tx_type.as_u64() > 0 {
             // Prepend transaction type byte
             let mut typed_receipt = vec![tx_type.as_u64() as u8];
-            typed_receipt.extend_from_slice(&encoded);
+            typed_receipt.extend_from_slice(&buf);
             return Ok(typed_receipt);
         }
     }
 
-    Ok(encoded)
-}
-
-/// Encode a log into an RLP stream
-fn encode_log_into_stream(stream: &mut RlpStream, log: &Log) -> Result<()> {
-    stream.begin_list(3);
-
-    // Address
-    stream.append(&log.address.as_bytes());
-
-    // Topics
-    stream.begin_list(log.topics.len());
-    for topic in &log.topics {
-        stream.append(&topic.as_bytes());
-    }
-
-    // Data
-    stream.append(&log.data.to_vec());
-
-    Ok(())
+    Ok(buf)
 }
 
 /// RLP encode a block header
@@ -75,96 +106,74 @@ fn encode_log_into_stream(stream: &mut RlpStream, log: &Log) -> Result<()> {
 /// extraData,  mixHash, nonce, baseFeePerGas (EIP-1559), withdrawalsRoot
 /// (EIP-4895)]
 pub fn encode_block_header<T>(block: &Block<T>) -> Result<Vec<u8>> {
-    let mut stream = RlpStream::new();
+    let number = block
+        .number
+        .ok_or_else(|| anyhow!("Block number not found"))?;
 
-    // Determine list length based on block type
-    let has_base_fee = block.base_fee_per_gas.is_some();
-    let has_withdrawals_root = block.withdrawals_root.is_some();
-
-    let list_len = if has_withdrawals_root {
-        17 // Post-Shanghai (EIP-4895)
-    } else if has_base_fee {
-        16 // Post-London (EIP-1559)
-    } else {
-        15 // Pre-London
-    };
-
-    stream.begin_list(list_len);
-
-    // 1. Parent hash
-    stream.append(&block.parent_hash.as_bytes());
-
-    // 2. Ommers hash (uncles hash)
-    stream.append(&block.uncles_hash.as_bytes());
-
-    // 3. Beneficiary (miner/author)
-    stream.append(&block.author.unwrap_or_default().as_bytes());
-
-    // 4. State root
-    stream.append(&block.state_root.as_bytes());
-
-    // 5. Transactions root
-    stream.append(&block.transactions_root.as_bytes());
-
-    // 6. Receipts root
-    stream.append(&block.receipts_root.as_bytes());
-
-    // 7. Logs bloom
-    stream.append(&block.logs_bloom.unwrap_or_default().0.as_ref());
-
-    // 8. Difficulty
-    stream.append(&block.difficulty);
-
-    // 9. Number
-    stream.append(
-        &block
-            .number
-            .ok_or_else(|| anyhow!("Block number not found"))?,
-    );
-
-    // 10. Gas limit
-    stream.append(&block.gas_limit);
-
-    // 11. Gas used
-    stream.append(&block.gas_used);
-
-    // 12. Timestamp
-    stream.append(&block.timestamp);
-
-    // 13. Extra data
-    stream.append(&block.extra_data.to_vec());
-
-    // 14. Mix hash
-    stream.append(&block.mix_hash.unwrap_or_default().as_bytes());
-
-    // 15. Nonce
     let nonce_bytes = block
         .nonce
         .unwrap_or_default()
         .to_low_u64_be()
         .to_be_bytes();
-    stream.append(&nonce_bytes.as_ref());
 
-    // 16. Base fee per gas (EIP-1559, post-London)
-    if has_base_fee {
-        stream.append(&block.base_fee_per_gas.unwrap());
+    // For block headers with optional fields, we need to manually encode
+    // because the derive macro doesn't handle optional fields well
+    let mut buf = Vec::new();
+
+    // Encode all fields in order
+    block.parent_hash.as_bytes().encode(&mut buf);
+    block.uncles_hash.as_bytes().encode(&mut buf);
+    block.author.unwrap_or_default().as_bytes().encode(&mut buf);
+    block.state_root.as_bytes().encode(&mut buf);
+    block.transactions_root.as_bytes().encode(&mut buf);
+    block.receipts_root.as_bytes().encode(&mut buf);
+    block
+        .logs_bloom
+        .unwrap_or_default()
+        .0
+        .as_ref()
+        .encode(&mut buf);
+    RlpU256(&block.difficulty).encode(&mut buf);
+    RlpU64(&number).encode(&mut buf);
+    RlpU256(&block.gas_limit).encode(&mut buf);
+    RlpU256(&block.gas_used).encode(&mut buf);
+    RlpU256(&block.timestamp).encode(&mut buf);
+    block.extra_data.as_ref().encode(&mut buf);
+    block
+        .mix_hash
+        .unwrap_or_default()
+        .as_bytes()
+        .encode(&mut buf);
+    nonce_bytes.as_ref().encode(&mut buf);
+
+    // Optional fields
+    if let Some(ref base_fee) = block.base_fee_per_gas {
+        RlpU256(base_fee).encode(&mut buf);
+    }
+    if let Some(ref withdrawals_root) = block.withdrawals_root {
+        withdrawals_root.as_bytes().encode(&mut buf);
     }
 
-    // 17. Withdrawals root (EIP-4895, post-Shanghai)
-    if has_withdrawals_root {
-        stream.append(&block.withdrawals_root.unwrap().as_bytes());
+    // Wrap in list header
+    let payload_len = buf.len();
+    let mut result = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: payload_len,
     }
+    .encode(&mut result);
+    result.extend_from_slice(&buf);
 
-    Ok(stream.out().to_vec())
+    Ok(result)
 }
 
 /// Encode transaction index for use as trie key
 ///
 /// In Ethereum's receipt trie, the key is RLP(transaction_index)
 pub fn encode_tx_index(index: u64) -> Vec<u8> {
-    let mut stream = RlpStream::new();
-    stream.append(&index);
-    stream.out().to_vec()
+    let mut buf = Vec::new();
+    index.encode(&mut buf);
+    buf
 }
 
 #[cfg(test)]
@@ -232,12 +241,12 @@ mod tests {
             removed: None,
         };
 
-        let mut stream = RlpStream::new();
-        encode_log_into_stream(&mut stream, &log).unwrap();
-        let encoded = stream.out().to_vec();
+        let rlp_log: RlpLog = (&log).into();
+        let mut buf = Vec::new();
+        rlp_log.encode(&mut buf);
 
         // Should be a list of 3 items: [address, topics, data]
-        assert!(encoded.len() > 0);
-        assert_eq!(encoded[0] & 0xc0, 0xc0); // List marker
+        assert!(buf.len() > 0);
+        assert_eq!(buf[0] & 0xc0, 0xc0); // List marker
     }
 }

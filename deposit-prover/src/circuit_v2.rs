@@ -482,12 +482,9 @@ impl ToMPTInput for ReceiptProof {
     fn to_mpt_input(&self, tx_index: u64, max_data_byte_len: usize) -> axiom_eth::mpt::MPTInput {
         use axiom_eth::mpt::MPTInput;
         use ethers_core::types::H256;
-        use rlp::RlpStream;
 
         // Encode transaction index as RLP (this is the key in the receipt trie)
-        let mut rlp_stream = RlpStream::new();
-        rlp_stream.append(&tx_index);
-        let path_bytes = rlp_stream.out().to_vec();
+        let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
 
         // Calculate value_max_byte_len using axiom-eth's formula

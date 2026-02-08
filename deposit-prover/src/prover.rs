@@ -71,7 +71,7 @@ use halo2_base::{
             bn256::{Bn256, Fr, G1Affine},
             ff::PrimeField,
         },
-        plonk::{Circuit, ProvingKey},
+        plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
 };
@@ -322,22 +322,22 @@ pub fn get_or_create_proving_key(
     circuit.calculate_params();
 
     // Generate or load proving key
-    // FIX BC-PROVER-001: Use gen_pk() for both cases to ensure PK is saved to disk
-    // gen_pk() automatically:
-    // - Loads PK from disk if file exists
-    // - Generates and saves PK to disk if file doesn't exist
     let pk = if pk_path.exists() {
         println!("Found existing proving key at {:?}, loading...", pk_path);
         gen_pk(params, &circuit, Some(pk_path))
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-        println!("Proving key will be saved to {:?}", pk_path);
-        gen_pk(params, &circuit, Some(pk_path))
+        use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
+        let vk = keygen_vk(params, &circuit)
+            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
+        keygen_pk(params, vk, &circuit)
+            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
     };
     println!("Proving key ready");
 
     // Get the calculated circuit params from the keygen circuit
     // These are needed to create the prover circuit with the same structure
+    use halo2_base::halo2_proofs::plonk::Circuit;
     let calculated_params = circuit.params().rlc;
 
     // Get break points from the keygen circuit
@@ -581,7 +581,7 @@ pub fn generate_solidity_verifier(
 ///
 /// This creates a minimal valid Ethereum receipt with a single log entry.
 fn create_keygen_placeholder_input() -> DepositProofInput {
-    use rlp::RlpStream;
+    use alloy_rlp::Encodable;
 
     use crate::types::{DepositEventData, ReceiptProof};
 
@@ -598,30 +598,56 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
 
     // Create a minimal valid receipt RLP with one log
     // Receipt structure: [status, cumulative_gas, bloom, logs]
-    let mut receipt_stream = RlpStream::new_list(4);
-    receipt_stream.append(&1u8); // status = 1 (success)
-    receipt_stream.append(&21000u64); // cumulative_gas
-    receipt_stream.append(&vec![0u8; 256]); // bloom filter (256 bytes)
 
-    // Create a minimal log: [address, topics, data]
-    let mut log_stream = RlpStream::new_list(3);
-    log_stream.append(&vec![0u8; 20]); // contract address
+    // Build topics list: [event_sig, depositId, sender]
+    let mut topics_buf = Vec::new();
+    vec![0u8; 32].encode(&mut topics_buf); // event signature
+    vec![0u8; 32].encode(&mut topics_buf); // depositId
+    vec![0u8; 32].encode(&mut topics_buf); // sender
+    let mut topics_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: topics_buf.len(),
+    }
+    .encode(&mut topics_list);
+    topics_list.extend_from_slice(&topics_buf);
 
-    // Topics: [event_sig, depositId, sender]
-    let mut topics_stream = RlpStream::new_list(3);
-    topics_stream.append(&vec![0u8; 32]); // event signature
-    topics_stream.append(&vec![0u8; 32]); // depositId
-    topics_stream.append(&vec![0u8; 32]); // sender
-    log_stream.append_raw(&topics_stream.out(), 1);
+    // Build log: [address, topics, data]
+    let mut log_buf = Vec::new();
+    vec![0u8; 20].encode(&mut log_buf); // contract address
+    log_buf.extend_from_slice(&topics_list); // topics (already has list header)
+    vec![0u8; 64].encode(&mut log_buf); // data (amount + timestamp)
+    let mut log_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: log_buf.len(),
+    }
+    .encode(&mut log_list);
+    log_list.extend_from_slice(&log_buf);
 
-    log_stream.append(&vec![0u8; 64]); // data (amount + timestamp)
+    // Build logs array containing one log
+    let mut logs_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: log_list.len(),
+    }
+    .encode(&mut logs_list);
+    logs_list.extend_from_slice(&log_list);
 
-    // Wrap log in logs array
-    let mut logs_stream = RlpStream::new_list(1);
-    logs_stream.append_raw(&log_stream.out(), 1);
-    receipt_stream.append_raw(&logs_stream.out(), 1);
+    // Build receipt: [status, cumulative_gas, bloom, logs]
+    let mut receipt_buf = Vec::new();
+    1u8.encode(&mut receipt_buf); // status = 1 (success)
+    21000u64.encode(&mut receipt_buf); // cumulative_gas
+    vec![0u8; 256].encode(&mut receipt_buf); // bloom filter (256 bytes)
+    receipt_buf.extend_from_slice(&logs_list); // logs (already has list header)
 
-    let receipt_rlp = receipt_stream.out().to_vec();
+    let mut receipt_rlp = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: receipt_buf.len(),
+    }
+    .encode(&mut receipt_rlp);
+    receipt_rlp.extend_from_slice(&receipt_buf);
 
     // Create a minimal MPT proof (single node)
     let proof_nodes = vec![receipt_rlp.clone()];

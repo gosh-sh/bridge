@@ -505,7 +505,21 @@ impl ToMPTInput for ReceiptProof {
             slot_is_empty: false,
             value_max_byte_len,
             max_depth: RECEIPT_PF_MAX_DEPTH,
-            max_key_byte_len: 32,
+            // Receipt trie keys are RLP(tx_index):
+            // RLP encoding for integers:
+            // - tx_index 0-127: 1 byte (the value itself, no prefix)
+            // - tx_index 128-255: 2 bytes (0x81 prefix + 1 value byte)
+            // - tx_index 256-65535: 3 bytes (0x82 prefix + 2 value bytes)
+            // - tx_index 65536-16777215: 4 bytes (0x83 prefix + 3 value bytes)
+            //
+            // axiom-eth uses TRANSACTION_IDX_MAX_LEN = 2 (supports up to 65535 txs)
+            // Formula: max_key_byte_len = 1 + max_rlp_len_len(2) + 2
+            //                           = 1 + 0 + 2 = 3
+            // where max_rlp_len_len(2) = 0 because 2 <= 55 (no length-of-length bytes)
+            //
+            // We use 4 instead of 3 to support edge cases with >65535 transactions.
+            // (Note: 32 is for storage tries which use keccak256 keys)
+            max_key_byte_len: 4,
             key_byte_len: Some(path_len),
         }
     }

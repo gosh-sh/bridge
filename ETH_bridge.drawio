@@ -241,24 +241,48 @@
     </mxGraphModel>
   </diagram>
   <diagram id="L8Q3Xvxpxk5hzMcQh1Sl" name="ETH Prover">
-    <mxGraphModel dx="1000" dy="803" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="1" shadow="0">
+    <mxGraphModel dx="842" dy="696" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="1" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="Mutyj-29bmcQ5vA2R03C-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="xVCdtxxxy8_NInsVv105-1" target="Mutyj-29bmcQ5vA2R03C-1">
+        <mxCell id="Mutyj-29bmcQ5vA2R03C-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="xVCdtxxxy8_NInsVv105-1" target="Mutyj-29bmcQ5vA2R03C-1" edge="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="xVCdtxxxy8_NInsVv105-1" value="Deposit" style="triangle;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="xVCdtxxxy8_NInsVv105-1" value="Deposit" style="triangle;whiteSpace=wrap;html=1;" parent="1" vertex="1">
           <mxGeometry x="100" y="300" width="60" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="Mutyj-29bmcQ5vA2R03C-1" value="MPT Prover" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="Mutyj-29bmcQ5vA2R03C-1" target="NlsHPBhb6EE6xjZiatv8-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Mutyj-29bmcQ5vA2R03C-1" value="Load KZG" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
           <mxGeometry x="340" y="310" width="120" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="kb1X_aJ9BlLpSIXM5MhS-1" value="$$a,r$$" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=3;" vertex="1" parent="1">
+        <mxCell id="kb1X_aJ9BlLpSIXM5MhS-1" value="$$a,r$$" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=3;" parent="1" vertex="1">
           <mxGeometry x="220" y="310" width="40" height="20" as="geometry" />
         </mxCell>
-        <mxCell id="kb1X_aJ9BlLpSIXM5MhS-2" value="$$a\in\mathbb{N}$$&lt;div&gt;$$r\in\mathbb{A_a}$$&lt;/div&gt;" style="shape=callout;whiteSpace=wrap;html=1;perimeter=calloutPerimeter;position2=1;" vertex="1" parent="1">
+        <mxCell id="kb1X_aJ9BlLpSIXM5MhS-2" value="$$a\in\mathbb{N}$$&lt;div&gt;$$r\in\mathbb{A_a}$$&lt;/div&gt;" style="shape=callout;whiteSpace=wrap;html=1;perimeter=calloutPerimeter;position2=1;" parent="1" vertex="1">
           <mxGeometry x="120" y="220" width="120" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="NlsHPBhb6EE6xjZiatv8-1" target="NlsHPBhb6EE6xjZiatv8-5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-1" value="Proving key generaton" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="585" y="310" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-3" value="$$a,r,\Omega$$" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=3;" vertex="1" parent="1">
+          <mxGeometry x="510" y="310" width="50" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-4" value="$$\Omega\in[\mathbb{N}]$$" style="shape=callout;whiteSpace=wrap;html=1;perimeter=calloutPerimeter;" vertex="1" parent="1">
+          <mxGeometry x="480" y="230" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-5" value="Create circuit" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="585" y="520" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-7" value="$$a,r,\Omega,P$$" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=3;" vertex="1" parent="1">
+          <mxGeometry x="660" y="450" width="70" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="NlsHPBhb6EE6xjZiatv8-8" value="$$P\in{CircuitParams}$$" style="shape=callout;whiteSpace=wrap;html=1;perimeter=calloutPerimeter;position2=0;" vertex="1" parent="1">
+          <mxGeometry x="720" y="370" width="140" height="80" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

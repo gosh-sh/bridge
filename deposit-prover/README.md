@@ -66,15 +66,11 @@ pub struct PrivateInputs {
 ./download_trusted_setup.sh
 ```
 
-This downloads the KZG parameters from the Perpetual Powers of Tau ceremony (~288 MB).
+This downloads pre-converted KZG parameters in Halo2 format (~33 MB) from the [halo2-kzg-srs](https://github.com/han0110/halo2-kzg-srs) project. The parameters are from the Hermez/Polygon Powers of Tau ceremony with 100+ participants.
 
-**Why this matters**: Using `gen_srs()` to generate random parameters is **insecure** and allows anyone to forge proofs. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
+**That's it!** The prover is now ready to use with the trusted setup.
 
-### 2. Verify the Download (Optional)
-
-```bash
-cargo run --release --example verify_trusted_setup
-```
+**Why this matters**: The prover will ONLY use trusted setup parameters. Random parameter generation has been disabled for security. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
 
 ## Usage
 

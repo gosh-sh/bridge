@@ -92,10 +92,8 @@ e2e_test_data/
 data/
 deposit-prover/params/
 *.pk
-*.srs
 *.snark
 *.bkp
 
-# Trusted setup files (large files, download separately)
-deposit-prover/trusted_setup/*.ptau
-deposit-prover/trusted_setup/*.srs
+# KZG parameters (downloaded from trusted setup, not stored in git)
+deposit-prover/data/*.srs

@@ -93,11 +93,12 @@ forge script script/Deploy.s.sol --rpc-url <RPC_URL> --broadcast
 
 ### Security
 
-⚠️ **DO NOT use in production without proper trusted setup!**
+✅ **Production-safe by default**
 
-- The code uses a feature flag `insecure-testing` (enabled by default)
-- In development mode, it generates random KZG parameters (INSECURE)
-- For production, build with `--no-default-features` and use trusted setup
+- The prover **requires** trusted setup parameters
+- Random parameter generation has been **permanently disabled**
+- The prover will fail with clear instructions if parameters are not found
+- No feature flags needed - secure by default
 
 See [TRUSTED_SETUP.md](deposit-prover/TRUSTED_SETUP.md) for details.
 
@@ -168,4 +169,3 @@ If you encounter issues:
 4. Explore the Solidity contracts in `contracts/ethereum/src/`
 
 Happy hacking! 🚀
-

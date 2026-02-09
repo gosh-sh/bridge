@@ -86,6 +86,7 @@ contracts/ethereum/proof_temp*.txt
 
 # E2E test data (generated during test runs)
 e2e_test_data/
+e2e_attack_test_data/
 *.e2e.json
 
 # ZK proof generation artifacts

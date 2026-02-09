@@ -7,6 +7,7 @@ use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
+    rlp::types::RlpArrayWitness,
     utils::{build_utils::aggregation::CircuitMetadata, eth_circuit::EthCircuitInstructions},
 };
 use ethers_core::{types::Chain, utils::keccak256};
@@ -82,6 +83,8 @@ pub struct Phase0Output {
     pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
     pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
+    pub block_header_witness: RlpArrayWitness<Fr>, /* Block header RLP witness for Phase 1
+                                                   * verification */
 }
 
 impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
@@ -203,6 +206,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             block_hash_bytes,
             receipts_root_bytes,
             mpt_root_bytes,
+            block_header_witness: block_header_array,
         }
     }
 
@@ -217,12 +221,22 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         println!("🔧 Phase 1: Event Verification");
 
-        // 1. Parse receipt in phase 1 (RLC verification)
+        // 1. Verify block header RLP in Phase 1 (RLC verification)
+        // This ensures the block header RLP encoding is cryptographically sound
+        let rlp_chip = chip.rlp();
+        let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
+            (ctx_gate, ctx_rlc),
+            phase0_output.block_header_witness,
+            true, // variable length (15-17 fields)
+        );
+        println!("   ✓ Verified block header RLC");
+
+        // 2. Parse receipt in phase 1 (RLC verification)
         let _receipt_trace = chip
             .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
         println!("   ✓ Verified receipt RLC");
 
-        // 2. Extract the specific log at log_index
+        // 3. Extract the specific log at log_index
         let log_witness = chip.extract_receipt_log(
             ctx_gate,
             &phase0_output.receipt_witness,
@@ -238,8 +252,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]
         );
 
-        // 3. Parse log RLP structure: [address, topics[], data]
-        let rlp_chip = chip.rlp();
+        // 4. Parse log RLP structure: [address, topics[], data]
 
         // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte
         // hashes), data (variable) Max lengths: address=20,
@@ -254,7 +267,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         println!("   ✓ Parsed log RLP structure");
 
-        // 4. Extract address (field 0)
+        // 5. Extract address (field 0)
         let address_bytes = &log_array.field_witness[0].field_cells;
         println!("   Address bytes: {} bytes", address_bytes.len());
 
@@ -267,7 +280,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             println!("   Address (hex): {:02x?}", addr_vals);
         }
 
-        // 5. Extract topics (field 1)
+        // 6. Extract topics (field 1)
         // Topics are NOT an RLP list - they're just concatenated RLP-encoded 32-byte
         // strings Each topic is: 0xa0 (1 byte RLP prefix) + 32 bytes of data =
         // 33 bytes total For Deposit event: [event_sig, depositId, sender] = 3
@@ -280,7 +293,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Topic 1 (depositId): bytes 33-65 (skip byte 33 which is 0xa0)
         // Topic 2 (sender): bytes 66-98 (skip byte 66 which is 0xa0)
 
-        // 6. Extract event signature (topic 0: bytes 1-32, skipping byte 0 which is
+        // 7. Extract event signature (topic 0: bytes 1-32, skipping byte 0 which is
         //    0xa0)
         let event_sig_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 33 {
             topics_rlp[1..33].to_vec()
@@ -297,7 +310,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             println!("   Event sig (first 16 bytes): {:02x?}", &sig_vals[0..16]);
         }
 
-        // 7. Extract depositId (topic 1: bytes 34-65, skipping byte 33 which is 0xa0)
+        // 8. Extract depositId (topic 1: bytes 34-65, skipping byte 33 which is 0xa0)
         let deposit_id_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 66 {
             topics_rlp[34..66].to_vec()
         } else {
@@ -305,7 +318,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         };
         println!("   DepositId: {} bytes", deposit_id_bytes.len());
 
-        // 8. Extract sender (topic 2: bytes 67-98, skipping byte 66 which is 0xa0)
+        // 9. Extract sender (topic 2: bytes 67-98, skipping byte 66 which is 0xa0)
         let sender_bytes: Vec<AssignedValue<Fr>> = if topics_rlp.len() >= 99 {
             topics_rlp[67..99].to_vec()
         } else {
@@ -313,12 +326,12 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         };
         println!("   Sender: {} bytes", sender_bytes.len());
 
-        // 9. Extract data field (field 2)
+        // 10. Extract data field (field 2)
         // Data contains: [amount (32 bytes), timestamp (32 bytes)]
         let data_bytes = &log_array.field_witness[2].field_cells;
         println!("   Data: {} bytes", data_bytes.len());
 
-        // 10. Verify event signature
+        // 11. Verify event signature
         // Load expected event signature as constant
         let expected_sig = get_deposit_event_signature();
         println!("   Expected event signature: {:02x?}", &expected_sig[0..16]);
@@ -348,7 +361,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Verified event signature ({} bytes)", min_len);
 
-        // 11. Verify contract address
+        // 12. Verify contract address
         // Load expected contract address as constant (we know it at circuit creation
         // time)
         let expected_address = &self.inputs.event_data.contract_address;
@@ -375,7 +388,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Verified contract address");
 
-        // 12. Convert bytes to field elements for public outputs
+        // 13. Convert bytes to field elements for public outputs
         // Topics are already 32 bytes each (uint256 in Solidity)
         // We need to convert them from bytes to a single field element
 
@@ -422,7 +435,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let contract_address_field = bytes_to_field(ctx_gate, gate, address_bytes);
         println!("   ✓ Converted contract address to field element");
 
-        // 13. Verify block header receiptsRoot matches MPT root
+        // 14. Verify block header receiptsRoot matches MPT root
         // (Block hash and receiptsRoot were already computed in Phase 0)
         println!("🔧 Verifying block header...");
 
@@ -437,7 +450,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         ctx_gate.constrain_equal(&receipts_root_field, &mpt_root_field);
         println!("   ✓ Verified receiptsRoot matches MPT root");
 
-        // 14. Use block hash from Phase 0
+        // 15. Use block hash from Phase 0
         println!("🔧 Using block hash from Phase 0...");
         let block_hash_bytes = &phase0_output.block_hash_bytes;
 
@@ -449,7 +462,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         println!("   ✓ Converted block hash to field elements");
 
-        // 15. Expose public outputs
+        // 16. Expose public outputs
         // The public inputs will be verified by the Solidity verifier
         // Order: [depositId, sender, amount, contract_address, block_hash_high,
         // block_hash_low]

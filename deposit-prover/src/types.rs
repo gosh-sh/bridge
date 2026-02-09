@@ -15,8 +15,10 @@ pub struct DepositEventData {
     pub deposit_id: u64,
     /// Sender address (topics[2])
     pub sender: [u8; 20],
-    /// Amount (from log data)
-    pub amount: u64,
+    /// Amount (from log data) - full uint256 (32 bytes big-endian)
+    /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
+    /// 18.44 ETH
+    pub amount: [u8; 32],
     /// Timestamp (from log data)
     pub timestamp: u64,
     /// Contract address that emitted the event
@@ -55,7 +57,10 @@ pub struct DepositProofOutput {
     /// Public inputs (verified by the circuit)
     pub deposit_id: u64,
     pub sender: [u8; 20],
-    pub amount: u64,
+    /// Amount - full uint256 (32 bytes big-endian)
+    /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
+    /// 18.44 ETH
+    pub amount: [u8; 32],
     pub contract_address: [u8; 20],
     /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
     pub block_hash: [u8; 32],
@@ -67,7 +72,7 @@ impl DepositProofOutput {
         proof: Vec<u8>,
         deposit_id: u64,
         sender: [u8; 20],
-        amount: u64,
+        amount: [u8; 32],
         contract_address: [u8; 20],
         block_hash: [u8; 32],
     ) -> Self {

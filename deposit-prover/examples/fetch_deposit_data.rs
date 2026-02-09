@@ -9,10 +9,11 @@
 //!     --contract 0x... \
 //!     --log-index 0
 
+use std::str::FromStr;
+
 use clap::Parser;
 use deposit_prover::ethereum_fetcher::EthereumFetcher;
 use ethers::types::{H160, H256};
-use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 #[command(name = "fetch-deposit-data")]
@@ -44,7 +45,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Get RPC URL from args or environment
-    let rpc_url = args.rpc_url.or_else(|| std::env::var("ETH_RPC_URL").ok())
+    let rpc_url = args
+        .rpc_url
+        .or_else(|| std::env::var("ETH_RPC_URL").ok())
         .expect("RPC URL must be provided via --rpc-url or ETH_RPC_URL environment variable");
 
     println!("=== Deposit Data Fetcher ===\n");
@@ -74,11 +77,15 @@ async fn main() -> anyhow::Result<()> {
     println!("\n✅ Deposit proof fetched successfully!\n");
     println!("Event Data:");
     println!("  Block Number: {}", proof_input.event_data.block_number);
-    println!("  Transaction Index: {}", proof_input.event_data.transaction_index);
+    println!(
+        "  Transaction Index: {}",
+        proof_input.event_data.transaction_index
+    );
     println!("  Log Index: {}", proof_input.event_data.log_index);
     println!("  Deposit ID: {}", proof_input.event_data.deposit_id);
     println!("  Sender: 0x{}", hex::encode(proof_input.event_data.sender));
-    println!("  Amount: {} wei", proof_input.event_data.amount);
+    // FIX BC-TYPES-001: amount is now [u8; 32]
+    println!("  Amount: 0x{}", hex::encode(proof_input.event_data.amount));
     println!("  Timestamp: {}", proof_input.event_data.timestamp);
     println!(
         "  Contract: 0x{}",
@@ -87,8 +94,14 @@ async fn main() -> anyhow::Result<()> {
     println!();
 
     println!("Receipt Proof:");
-    println!("  Receipt RLP: {} bytes", proof_input.receipt_proof.receipt_rlp.len());
-    println!("  Proof Nodes: {}", proof_input.receipt_proof.proof_nodes.len());
+    println!(
+        "  Receipt RLP: {} bytes",
+        proof_input.receipt_proof.receipt_rlp.len()
+    );
+    println!(
+        "  Proof Nodes: {}",
+        proof_input.receipt_proof.proof_nodes.len()
+    );
     println!(
         "  Receipt Root: 0x{}",
         hex::encode(proof_input.receipt_proof.receipt_root)
@@ -108,10 +121,15 @@ async fn main() -> anyhow::Result<()> {
     println!("Next steps:");
     println!("1. Review the saved data in {}", args.output);
     println!("2. Use this data to test the circuit:");
-    println!("   cargo run --example test_with_real_data -- --input {}", args.output);
+    println!(
+        "   cargo run --example test_with_real_data -- --input {}",
+        args.output
+    );
     println!("3. Generate a proof:");
-    println!("   cargo run --example generate_proof -- --input {}", args.output);
+    println!(
+        "   cargo run --example generate_proof -- --input {}",
+        args.output
+    );
 
     Ok(())
 }
-

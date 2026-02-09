@@ -4,17 +4,20 @@
 //!
 //! Usage:
 //!   # Test with MockProver only (fast)
-//!   cargo run --example test_with_real_data -- --input deposit_proof_input.json --mock-only
+//!   cargo run --example test_with_real_data -- --input
+//! deposit_proof_input.json --mock-only
 //!
 //!   # Generate full SNARK proof
-//!   cargo run --example test_with_real_data -- --input deposit_proof_input.json --generate-proof --output proof_output.json
+//!   cargo run --example test_with_real_data -- --input
+//! deposit_proof_input.json --generate-proof --output proof_output.json
+
+use std::fs;
 
 use clap::Parser;
 use deposit_prover::{
-    prover::{test_circuit_mock, generate_proof, CircuitConfig},
+    prover::{generate_proof, test_circuit_mock, CircuitConfig},
     types::DepositProofInput,
 };
-use std::fs;
 
 #[derive(Parser, Debug)]
 #[command(name = "test-with-real-data")]
@@ -64,7 +67,8 @@ fn main() -> anyhow::Result<()> {
     println!("  Block Number: {}", input.event_data.block_number);
     println!("  Deposit ID: {}", input.event_data.deposit_id);
     println!("  Sender: 0x{}", hex::encode(input.event_data.sender));
-    println!("  Amount: {} wei", input.event_data.amount);
+    // FIX BC-TYPES-001: amount is now [u8; 32]
+    println!("  Amount: 0x{}", hex::encode(input.event_data.amount));
     println!();
 
     // Create circuit config
@@ -90,7 +94,7 @@ fn main() -> anyhow::Result<()> {
             println!("\n✅ MockProver test PASSED!");
             println!("Circuit is satisfied with real Ethereum data!");
             println!();
-        }
+        },
         Err(e) => {
             eprintln!("\n❌ MockProver test FAILED!");
             eprintln!("Circuit test failed: {}", e);
@@ -101,7 +105,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("3. Event data doesn't match the receipt");
             eprintln!("4. Circuit parameters are too small");
             std::process::exit(1);
-        }
+        },
     }
 
     // If mock-only flag is set, stop here
@@ -109,7 +113,10 @@ fn main() -> anyhow::Result<()> {
         println!("Mock-only mode: Skipping proof generation");
         println!();
         println!("To generate a full SNARK proof, run:");
-        println!("  cargo run --example test_with_real_data -- --input {} --generate-proof", args.input);
+        println!(
+            "  cargo run --example test_with_real_data -- --input {} --generate-proof",
+            args.input
+        );
         return Ok(());
     }
 
@@ -126,8 +133,12 @@ fn main() -> anyhow::Result<()> {
                 println!("Public Outputs:");
                 println!("  Deposit ID: {}", proof_output.deposit_id);
                 println!("  Sender: 0x{}", hex::encode(&proof_output.sender));
-                println!("  Amount: {} wei", proof_output.amount);
-                println!("  Contract: 0x{}", hex::encode(&proof_output.contract_address));
+                // FIX BC-TYPES-001: amount is now [u8; 32]
+                println!("  Amount: 0x{}", hex::encode(proof_output.amount));
+                println!(
+                    "  Contract: 0x{}",
+                    hex::encode(&proof_output.contract_address)
+                );
                 println!();
 
                 // Save proof to file
@@ -140,7 +151,7 @@ fn main() -> anyhow::Result<()> {
                 println!("Next steps:");
                 println!("1. Submit withdrawal transaction with this proof");
                 println!("2. Use the proof_bytes field for the withdraw() function");
-            }
+            },
             Err(e) => {
                 eprintln!("\n❌ Proof generation FAILED!");
                 eprintln!("Error: {}", e);
@@ -150,7 +161,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("2. KZG parameters not found or corrupted");
                 eprintln!("3. Circuit configuration mismatch");
                 std::process::exit(1);
-            }
+            },
         }
     } else {
         println!("To generate a full SNARK proof, add --generate-proof flag");
@@ -158,4 +169,3 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

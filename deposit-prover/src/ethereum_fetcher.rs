@@ -6,13 +6,19 @@
 //! - MPT proofs for receipts
 //! - Parsing Deposit events from logs
 
-use crate::mpt::generate_receipt_proof;
-use crate::types::{DepositEventData, DepositProofInput};
-use anyhow::{anyhow, Result};
-use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{TransactionReceipt, H160, H256};
-use ethers::utils::keccak256;
 use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use ethers::{
+    providers::{Http, Middleware, Provider},
+    types::{TransactionReceipt, H160, H256},
+    utils::keccak256,
+};
+
+use crate::{
+    mpt::generate_receipt_proof,
+    types::{DepositEventData, DepositProofInput},
+};
 
 /// Ethereum data fetcher for deposit proofs
 pub struct EthereumFetcher {
@@ -23,7 +29,9 @@ impl EthereumFetcher {
     /// Create a new Ethereum fetcher with the given RPC URL
     pub fn new(rpc_url: &str) -> Result<Self> {
         let provider = Provider::<Http>::try_from(rpc_url)?;
-        Ok(Self { provider })
+        Ok(Self {
+            provider,
+        })
     }
 
     /// Fetch a transaction receipt by hash
@@ -36,7 +44,8 @@ impl EthereumFetcher {
 
     /// Parse a Deposit event from a transaction receipt
     ///
-    /// Expected event signature: Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp)
+    /// Expected event signature: Deposit(uint256 indexed depositId, address
+    /// indexed sender, uint256 amount, uint256 timestamp)
     pub fn parse_deposit_event(
         &self,
         receipt: &TransactionReceipt,
@@ -95,10 +104,11 @@ impl EthereumFetcher {
         }
 
         // amount (first 32 bytes of data)
+        // FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts > 18.44 ETH
         let amount = {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&log.data[24..32]);
-            u64::from_be_bytes(bytes)
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&log.data[0..32]);
+            bytes
         };
 
         // timestamp (second 32 bytes of data)
@@ -153,7 +163,10 @@ impl EthereumFetcher {
         println!("    (This will fetch all receipts in the block and build the trie)");
         let provider_arc = Arc::new(self.provider.clone());
         let receipt_proof = generate_receipt_proof(provider_arc, tx_hash).await?;
-        println!("    ✓ MPT proof generated ({} proof nodes)", receipt_proof.proof_nodes.len());
+        println!(
+            "    ✓ MPT proof generated ({} proof nodes)",
+            receipt_proof.proof_nodes.len()
+        );
 
         Ok(DepositProofInput {
             event_data,
@@ -189,4 +202,3 @@ mod tests {
         assert_eq!(sig1, sig2);
     }
 }
-

@@ -12,6 +12,8 @@ After thorough investigation of the audit findings, including deep analysis of a
 
 - **BC-CIRCUIT-004 (CRITICAL)**: ❌ **FALSE POSITIVE** ✅ **PROVEN BY NEGATIVE E2E TEST** - Public instances ARE properly constrained
 - **BC-CIRCUIT-002 (CRITICAL)**: ✅ **FIXED** - Added Phase 1 RLC verification for block header
+- **BC-TYPES-001 (HIGH)**: ✅ **FIXED** - Changed `amount` from `u64` to `[u8; 32]` to support amounts > 18.44 ETH
+- **BC-PROVER-003 (HIGH)**: ✅ **FIXED** - Fixed all 4 issues in `verify_proof()` function
 - **Other findings**: Not yet investigated
 
 ---
@@ -383,18 +385,212 @@ let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
 
 ---
 
+## BC-TYPES-001: "Amount u64 Overflow"
+
+### Audit Claim (HIGH)
+
+> "The `amount` field uses `u64`, which can hold at most 18.44 ETH. Deposits between ~18.44 ETH and 100 ETH silently overflow, resulting in truncated amount values."
+
+### My Analysis: ✅ **FIXED**
+
+This finding was **VALID** and represented a **CRITICAL** bug that could lead to loss of funds.
+
+**Fix implemented**: Changed `amount` from `u64` to `[u8; 32]` in all type definitions and updated all dependent code.
+
+#### The Problem
+
+**Type Definition** (`deposit-prover/src/types.rs:19, 58`):
+
+```rust
+pub struct DepositEventData {
+    pub amount: u64,  // ❌ MAX 18.44 ETH
+}
+
+pub struct DepositProofOutput {
+    pub amount: u64,  // ❌ MAX 18.44 ETH
+}
+```
+
+**Numeric Limits**:
+
+- `u64::MAX` = 18,446,744,073,709,551,615 wei ≈ **18.44 ETH**
+- Contract allows up to **100 ETH** deposits
+- **Overflow range**: 18.44 ETH < amount ≤ 100 ETH
+
+#### Impact Analysis
+
+| Component              | Uses u64? | Impact                                       |
+| ---------------------- | --------- | -------------------------------------------- |
+| **ZK Circuit**         | ❌ NO     | ✅ Circuit processes full 32 bytes correctly |
+| **Solidity Contract**  | ❌ NO     | ✅ Uses `uint256` correctly                  |
+| **DepositEventData**   | ✅ YES    | ❌ Off-chain metadata truncated              |
+| **DepositProofOutput** | ✅ YES    | ❌ Proof output truncated                    |
+| **verify_proof()**     | ✅ YES    | ❌ Verification uses truncated value         |
+
+**Critical Issue**: The ZK circuit correctly handles the full 32-byte amount, but the off-chain types truncate it to u64. This means:
+
+1. A user deposits 50 ETH (50,000,000,000,000,000,000 wei)
+2. The circuit proof is generated correctly with the full amount
+3. But `DepositProofOutput.amount` is truncated to fit in u64
+4. The Acki Nacki blockchain receives the truncated amount
+5. **User loses funds** (receives less than deposited)
+
+#### Why the Circuit is NOT Affected
+
+The circuit (`circuit_v2.rs:429-431`) processes the FULL 32 bytes:
+
+```rust
+let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
+let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
+```
+
+`bytes_to_field()` uses Horner's method over ALL 32 bytes — no truncation.
+
+#### Recommended Fix
+
+Change `amount` from `u64` to `[u8; 32]`:
+
+```rust
+// types.rs
+pub struct DepositEventData {
+    pub amount: [u8; 32],  // Full uint256
+}
+
+pub struct DepositProofOutput {
+    pub amount: [u8; 32],  // Full uint256
+}
+```
+
+This requires updates in:
+
+1. `deposit-prover/src/types.rs` - Type definitions
+2. `deposit-prover/src/prover.rs` - Proof generation and verification
+3. `deposit-prover/examples/*.rs` - All examples that use amount
+4. `test_e2e.sh` - E2E test script
+
+---
+
+## BC-PROVER-003: "`verify_proof()` Issues"
+
+### Audit Claim (HIGH)
+
+> "Multiple issues in `verify_proof()` function: wrong instance count check, address truncation, missing block_hash verification"
+
+### My Analysis: ✅ **FIXED**
+
+This finding was **VALID** and contained **FOUR separate issues** (A, B, C, D).
+
+**Fix implemented**: All four issues have been fixed in `deposit-prover/src/prover.rs`.
+
+#### Issue A: Instance Count Check (HIGH)
+
+**Location**: `deposit-prover/src/prover.rs:458-465`
+
+**Current Code**:
+
+```rust
+// Check that we have exactly 4 public inputs (depositId, sender, amount, contract)
+if snark.instances[0].len() != 4 {
+    return Err(format!(
+        "Expected 4 public inputs, got {}",
+        snark.instances[0].len()
+    ));
+}
+```
+
+**Problem**: The circuit actually produces **6 public outputs**, not 4:
+
+1. depositId
+2. sender
+3. amount
+4. contract_address
+5. block_hash_high
+6. block_hash_low
+
+**Impact**: ALL valid proofs are rejected by `verify_proof()`.
+
+**Fix**: Change `!= 4` to `!= 6`.
+
+#### Issue B: Address Truncation (HIGH)
+
+**Location**: `deposit-prover/src/prover.rs:469-479`
+
+**Current Code**:
+
+```rust
+let sender_field = Fr::from_u128(u128::from_be_bytes({
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&proof.sender[4..20]);  // ❌ Only 16 of 20 bytes!
+    bytes
+}));
+
+let contract_field = Fr::from_u128(u128::from_be_bytes({
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&proof.contract_address[4..20]);  // ❌ Same truncation!
+    bytes
+}));
+```
+
+**Problem**: Ethereum addresses are 20 bytes, but the code only uses bytes `[4..20]` (16 bytes), truncating the first 4 bytes.
+
+**Circuit Comparison**: The circuit uses `bytes_to_field()` which processes ALL bytes correctly.
+
+**Impact**: Any address where the first 4 bytes are non-zero will cause verification to fail.
+
+**Example**:
+
+- Address: `0xdEaD000000000000000000000000000000bEEF42`
+- Circuit produces: `Fr(0xdEaD000000000000000000000000000000bEEF42)` — full 160-bit value
+- `verify_proof()` produces: `Fr(0x00000000000000000000000000bEEF42)` — only lower 128 bits
+- Result: Verification FAILS
+
+**Fix**: Use `bytes_to_field()` logic or convert all 20 bytes properly.
+
+#### Issue C: Missing block_hash Verification (MEDIUM)
+
+**Location**: `deposit-prover/src/prover.rs:481-492`
+
+**Current Code**:
+
+```rust
+if snark.instances[0][0] != deposit_id_field { ... }
+if snark.instances[0][1] != sender_field { ... }
+if snark.instances[0][2] != amount_field { ... }
+if snark.instances[0][3] != contract_field { ... }
+// ❌ No check for snark.instances[0][4] (block_hash_high)
+// ❌ No check for snark.instances[0][5] (block_hash_low)
+```
+
+**Problem**: The function checks instances[0..3] but never checks instances[4] and [5] (block_hash_high and block_hash_low).
+
+**Impact**: Client-side verification does not detect if the proof claims a different block hash. However, on-chain verification does check this, so this is a **client-side only** vulnerability.
+
+**Fix**: Add verification for block_hash_high and block_hash_low.
+
+#### Issue D: No Cryptographic Verification (QC)
+
+**Location**: `deposit-prover/src/prover.rs:442`
+
+**Observation**: The function loads KZG params but performs **no cryptographic verification** (no `halo2_proofs::plonk::verify_proof()` call).
+
+**Classification**: QC (Quality Concern) — This is a design choice, not necessarily a bug. The comment states: "Full cryptographic verification happens on-chain via Solidity verifier".
+
+**Recommendation**: Rename to `validate_proof_structure()` or add native Halo2 verification.
+
+#### Summary of verify_proof() Issues
+
+| Issue | Severity  | Line    | Description                             | Impact                              |
+| ----- | --------- | ------- | --------------------------------------- | ----------------------------------- |
+| **A** | 🟠 HIGH   | 460     | Instance count `!= 4` instead of `!= 6` | All valid proofs rejected           |
+| **B** | 🟠 HIGH   | 469-479 | Address truncation: 16 of 20 bytes      | Most address comparisons fail       |
+| **C** | 🟡 MEDIUM | 481-492 | Missing block_hash check                | Wrong block hash passes client-side |
+| **D** | 🔵 QC     | 442     | No crypto verification, misleading name | Design concern                      |
+
+**Cascading Failure**: Issue A blocks all proofs. If A is fixed, Issue B blocks most proofs. Only after both A and B are fixed would the remaining checks work correctly.
+
+---
+
 ## Other Audit Findings (Not Yet Investigated)
-
-### BC-PROVER-003 (HIGH): `verify_proof()` issues
-
-- **Status**: Not investigated
-- **Priority**: High
-
-### BC-TYPES-001 (HIGH): `amount: u64` overflow
-
-- **Status**: Not investigated
-- **Priority**: High
-- **Note**: Ethereum uses `uint256` for amounts, but we use `u64` which could overflow
 
 ### BC-SOL-002 (MEDIUM): DummyVerifier rejects depositId=0
 
@@ -425,20 +621,31 @@ let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
 
 1. ✅ **BC-CIRCUIT-004**: No action required - FALSE POSITIVE (proven by negative E2E test)
 2. ✅ **BC-CIRCUIT-002**: FIXED - Added Phase 1 RLC verification for block header
+3. ✅ **BC-TYPES-001**: FIXED - Changed `amount` from `u64` to `[u8; 32]` in all type definitions
+   - Updated `DepositEventData.amount` and `DepositProofOutput.amount`
+   - Updated `ethereum_fetcher.rs` to extract full 32 bytes
+   - Updated all examples and tests
+   - All tests passing (11/11 unit tests + E2E test)
+4. ✅ **BC-PROVER-003**: FIXED - Fixed all 4 issues in `verify_proof()`
+   - **Issue A**: Changed instance count check from 4 to 6
+   - **Issue B**: Implemented `bytes_to_field()` helper to convert ALL 20 bytes of addresses
+   - **Issue C**: Added block_hash_high and block_hash_low verification
+   - **Issue D**: Added clarifying comment about structural validation vs cryptographic verification
+   - All tests passing (11/11 unit tests + E2E test)
 
 ### Remaining Actions
 
-3. 🔍 **BC-PROVER-003**: Investigate verification issues
-4. 🔍 **BC-TYPES-001**: Investigate amount overflow risk
 5. 🔍 **BC-SOL-002, BC-SOL-003**: Investigate Solidity verifier issues
 6. 🔍 **QC-PROVER-001, QC-COMPAT-001**: Investigate quality/compatibility issues
 
-### Investigation Priority
+### Fix Priority (Updated)
 
-1. **BC-TYPES-001** (HIGH - potential fund loss)
-2. **BC-PROVER-003** (HIGH - verification correctness)
-3. **BC-SOL-002, BC-SOL-003** (MEDIUM/LOW)
-4. **QC-PROVER-001, QC-COMPAT-001** (Quality/Future)
+1. ✅ **BC-TYPES-001** (CRITICAL - fund loss risk) - FIXED
+2. ✅ **BC-PROVER-003 Issue A** (HIGH - blocks all proofs) - FIXED
+3. ✅ **BC-PROVER-003 Issue B** (HIGH - blocks most proofs) - FIXED
+4. ✅ **BC-PROVER-003 Issue C** (MEDIUM - client-side only) - FIXED
+5. 🔍 **BC-SOL-002, BC-SOL-003** (MEDIUM/LOW) - Investigate
+6. 🔍 **QC-PROVER-001, QC-COMPAT-001** (Quality/Future) - Low priority
 
 ### Testing Strategy
 

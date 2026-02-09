@@ -556,13 +556,18 @@ mod tests {
 
     #[test]
     fn test_circuit_creation() {
+        // FIX BC-TYPES-001: amount is now [u8; 32] instead of u64
+        let mut amount = [0u8; 32];
+        // 1 ETH = 1000000000000000000 wei = 0x0DE0B6B3A7640000
+        amount[24..32].copy_from_slice(&1000000000000000000u64.to_be_bytes());
+
         let event_data = DepositEventData {
             block_number: 12345,
             transaction_index: 0,
             log_index: 0,
             deposit_id: 42,
             sender: [1u8; 20],
-            amount: 1000000000000000000,
+            amount,
             timestamp: 1234567890,
             contract_address: [2u8; 20],
         };

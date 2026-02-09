@@ -67,10 +67,7 @@ use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
         dev::MockProver,
-        halo2curves::{
-            bn256::{Bn256, Fr, G1Affine},
-            ff::PrimeField,
-        },
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
         plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
@@ -455,28 +452,43 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         return Err("Proof has no public instances".to_string());
     }
 
-    // Check that we have exactly 4 public inputs (depositId, sender, amount,
-    // contract)
-    if snark.instances[0].len() != 4 {
+    // FIX BC-PROVER-003 Issue A: Check that we have exactly 6 public inputs
+    // (depositId, sender, amount, contract_address, block_hash_high,
+    // block_hash_low)
+    if snark.instances[0].len() != 6 {
         return Err(format!(
-            "Expected 4 public inputs, got {}",
+            "Expected 6 public inputs, got {}",
             snark.instances[0].len()
         ));
     }
 
+    // Helper function to convert bytes to field element using Horner's method
+    // This matches the circuit's bytes_to_field() logic
+    fn bytes_to_field(bytes: &[u8]) -> Fr {
+        let mut result = Fr::zero();
+        let base = Fr::from(256);
+        for &byte in bytes.iter() {
+            result = result * base + Fr::from(byte as u64);
+        }
+        result
+    }
+
     // Verify public inputs match the claimed values
     let deposit_id_field = Fr::from(proof.deposit_id);
-    let sender_field = Fr::from_u128(u128::from_be_bytes({
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&proof.sender[4..20]);
-        bytes
-    }));
-    let amount_field = Fr::from_u128(proof.amount as u128);
-    let contract_field = Fr::from_u128(u128::from_be_bytes({
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&proof.contract_address[4..20]);
-        bytes
-    }));
+
+    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of sender address
+    let sender_field = bytes_to_field(&proof.sender);
+
+    // FIX BC-TYPES-001: Convert ALL 32 bytes of amount
+    let amount_field = bytes_to_field(&proof.amount);
+
+    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of contract address
+    let contract_field = bytes_to_field(&proof.contract_address);
+
+    // FIX BC-PROVER-003 Issue C: Convert block_hash to high/low field elements
+    // Block hash is split into two 128-bit (16-byte) field elements
+    let block_hash_high = bytes_to_field(&proof.block_hash[0..16]);
+    let block_hash_low = bytes_to_field(&proof.block_hash[16..32]);
 
     if snark.instances[0][0] != deposit_id_field {
         return Err("Public input mismatch: depositId".to_string());
@@ -490,13 +502,21 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     if snark.instances[0][3] != contract_field {
         return Err("Public input mismatch: contract_address".to_string());
     }
+    // FIX BC-PROVER-003 Issue C: Verify block_hash_high and block_hash_low
+    if snark.instances[0][4] != block_hash_high {
+        return Err("Public input mismatch: block_hash_high".to_string());
+    }
+    if snark.instances[0][5] != block_hash_low {
+        return Err("Public input mismatch: block_hash_low".to_string());
+    }
 
     println!("✓ Proof structure valid");
-    println!("✓ Public inputs verified");
+    println!("✓ Public inputs verified (6 instances)");
     println!("  depositId: {}", proof.deposit_id);
     println!("  sender: 0x{}", hex::encode(proof.sender));
-    println!("  amount: {}", proof.amount);
+    println!("  amount: 0x{}", hex::encode(proof.amount));
     println!("  contract: 0x{}", hex::encode(proof.contract_address));
+    println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
     println!("      This check only validates proof structure and public inputs");
@@ -591,7 +611,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         log_index: 0,
         deposit_id: 0,
         sender: [0u8; 20],
-        amount: 0,
+        amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
         timestamp: 0,
         contract_address: [0u8; 20],
     };
@@ -699,7 +719,7 @@ mod tests {
         // Verify placeholder has expected zero values
         assert_eq!(input.event_data.deposit_id, 0);
         assert_eq!(input.event_data.sender, [0u8; 20]);
-        assert_eq!(input.event_data.amount, 0);
+        assert_eq!(input.event_data.amount, [0u8; 32]); // FIX BC-TYPES-001
         assert_eq!(input.event_data.timestamp, 0);
         assert_eq!(input.event_data.contract_address, [0u8; 20]);
 

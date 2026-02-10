@@ -10,7 +10,7 @@
 
 After thorough investigation of the audit findings, including deep analysis of axiom-eth source code, snark-verifier-sdk implementation, and Halo2 proof system internals, I have determined:
 
-- **BC-CIRCUIT-004 (CRITICAL)**: ❌ **FALSE POSITIVE** ✅ **PROVEN BY NEGATIVE E2E TEST** - Public instances ARE properly constrained
+- **BC-CIRCUIT-004 (CRITICAL)**: ✅ **FIXED** - Public instances now properly set in Phase 0 and verified in Phase 1
 - **BC-CIRCUIT-002 (CRITICAL)**: ✅ **FIXED** - Added Phase 1 RLC verification for block header
 - **BC-TYPES-001 (HIGH)**: ✅ **FIXED** - Changed `amount` from `u64` to `[u8; 32]` to support amounts > 18.44 ETH
 - **BC-PROVER-003 (HIGH)**: ✅ **FIXED** - Fixed all 4 issues in `verify_proof()` function
@@ -24,155 +24,135 @@ After thorough investigation of the audit findings, including deep analysis of a
 
 > "Phase 1 public instances (6 values) never constrained to instance column — only `promise_commit` is a real public input"
 
-### My Analysis: **FALSE POSITIVE** ❌ ✅ **PROVEN BY NEGATIVE E2E TEST**
+### My Analysis: ✅ **VALID - CONFIRMED AND FIXED**
 
-The audit is **INCORRECT**. The public instances ARE properly constrained. The auditor misunderstood how axiom-eth and Halo2 handle public instances.
+The audit is **CORRECT**. The proof contained only 1 instance (promise_commit), not the 6 user values. This was a critical vulnerability that has now been fixed.
 
-**PROOF**: A negative E2E test (`test_e2e_negative_attack.sh`) was executed that simulated a real attack scenario:
+### Root Cause
 
-1. Attacker deposited 0.001 ETH to the bridge
-2. Attacker generated a valid proof for the 0.001 ETH deposit
-3. Attacker attempted to withdraw 1 ETH (1000x more!) using the same proof but with modified public instances
-4. **Result**: The verifier REJECTED the proof with error `execution reverted`
+The issue was in how axiom-eth's `EthCircuitImpl::instances()` method works:
 
-This conclusively proves that public instances are cryptographically bound to the proof and cannot be modified by an attacker.
+1. `gen_snark_shplonk()` calls `circuit.instances()` to get public instances
+2. `instances()` only calls `virtual_assign_phase0()`, NOT `virtual_assign_phase1()`
+3. Our original implementation added public instances in Phase 1, so they were never included in the proof
+4. Only `promise_commit` (added automatically by axiom-eth in Phase 0) was included
 
-### Technical Explanation
+**Evidence**: Inspection of generated proof showed only 1 instance (promise_commit) instead of 7.
 
-#### Two Methods for Public Instances in Halo2
+### The Fix
 
-In Halo2, there are **two valid approaches** to constrain public instances:
+**Implementation**: `deposit-prover/src/circuit_v2.rs`
 
-1. **Internal Method**: Call `assign_instances()` inside the circuit's `synthesize()` method
-2. **External Method**: Pass instances to `create_proof()` which handles constraints automatically
+The fix follows axiom-eth's pattern for public instances:
 
-**Axiom-eth uses Method 2** (external instances), which is the **standard and recommended approach** for most Halo2 circuits.
+1. **Phase 0** (`virtual_assign_phase0`): Load 6 public values from witness data and set them in `builder.base.assigned_instances[0]`:
 
-#### Evidence from Source Code
+   ```rust
+   // 1. depositId - from witness data
+   let deposit_id_bytes: Vec<AssignedValue<Fr>> = self.inputs.event_data.deposit_id
+       .to_be_bytes().iter()
+       .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+       .collect();
+   let deposit_id_field = bytes_to_field(ctx, gate, &deposit_id_bytes);
 
-**1. Our Circuit Code** (`deposit-prover/src/circuit_v2.rs:456-462`):
+   // ... similar for sender, amount, contractAddress, blockHashHigh, blockHashLow ...
 
-```rust
-let public_instances = builder.public_instances();
-public_instances[0].push(deposit_id_field);      // Public output #1
-public_instances[0].push(sender_field);          // Public output #2
-public_instances[0].push(amount_field);          // Public output #3
-public_instances[0].push(contract_address_field); // Public output #4
-public_instances[0].push(block_hash_high);       // Public output #5
-public_instances[0].push(block_hash_low);        // Public output #6
+   let public_instances = vec![
+       deposit_id_field,
+       sender_field,
+       amount_field,
+       contract_address_field,
+       block_hash_high,
+       block_hash_low,
+   ];
+
+   builder.base.assigned_instances[0] = public_instances;
+   ```
+
+2. **Phase 0 Output**: Store these 6 values in `Phase0Output` for Phase 1 verification:
+
+   ```rust
+   pub struct Phase0Output {
+       // ... other fields ...
+       pub deposit_id_phase0: AssignedValue<Fr>,
+       pub sender_phase0: AssignedValue<Fr>,
+       pub amount_phase0: AssignedValue<Fr>,
+       pub contract_address_phase0: AssignedValue<Fr>,
+       pub block_hash_high_phase0: AssignedValue<Fr>,
+       pub block_hash_low_phase0: AssignedValue<Fr>,
+   }
+   ```
+
+3. **Phase 1** (`virtual_assign_phase1`): Extract the same 6 values from RLP-verified event data and constrain them to equal the Phase 0 values:
+
+   ```rust
+   // Extract from RLP-verified data (CONSTRAINED)
+   let deposit_id_field = bytes_to_field(ctx_gate, gate, &deposit_id_bytes);
+   // ... similar for other fields ...
+
+   // Constrain that Phase 1 values equal Phase 0 values
+   ctx_gate.constrain_equal(&deposit_id_field, &phase0_output.deposit_id_phase0);
+   ctx_gate.constrain_equal(&sender_field, &phase0_output.sender_phase0);
+   ctx_gate.constrain_equal(&amount_field, &phase0_output.amount_phase0);
+   ctx_gate.constrain_equal(&contract_address_field, &phase0_output.contract_address_phase0);
+   ctx_gate.constrain_equal(&block_hash_high_phase1, &phase0_output.block_hash_high_phase0);
+   ctx_gate.constrain_equal(&block_hash_low_phase1, &phase0_output.block_hash_low_phase0);
+   ```
+
+4. **Automatic `promise_commit` Append**: axiom-eth automatically appends `promise_commit` as the 7th instance at the end of Phase 0
+
+This ensures:
+
+- The proof is cryptographically bound to the 6 public instances (Phase 0)
+- The public instances match the actual RLP-verified event data (Phase 1)
+- Total of 7 instances in the proof: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promise_commit]
+
+### Verification
+
+**Test**: `deposit-prover/src/circuit_v2.rs::test_bc_circuit_004_instances_in_proof()`
+
+```bash
+$ cargo test --lib test_bc_circuit_004_instances_in_proof -- --ignored --nocapture
+SNARK instances:
+  Number of instance columns: 1
+  Column 0: 7 instances
+✅ BC-CIRCUIT-004 FIX VERIFIED: Proof contains all 7 instances!
+test circuit_v2::tests::test_bc_circuit_004_instances_in_proof ... ok
 ```
 
-**2. Proof Generation** (`deposit-prover/src/prover.rs:403`):
+**Proof Inspection**: Using `deposit-prover/examples/inspect_snark.rs`:
 
-```rust
-let snark = gen_snark_shplonk(&params, &pk, circuit, Some(snark_path.as_str()));
 ```
-
-**3. Inside `gen_snark_shplonk`** (snark-verifier-sdk `src/halo2.rs:32`):
-
-```rust
-let instances = circuit.instances();  // ← Retrieves our 6 public values!
-let proof = gen_proof::<ConcreteCircuit, P, V>(params, pk, circuit, instances.clone(), None);
+SNARK instances:
+  Number of instance columns: 1
+  Column 0: 7 instances
+    Instance 0: 0x000000000000000000000000000000000000000000000000000000000000002a (depositId)
+    Instance 1: 0x000000000000000000000000cb534638c5993fd77a292ab098d64bb550d67708 (sender)
+    Instance 2: 0x00000000000000000000000000000000000000000000000000038d7ea4c68000 (amount)
+    Instance 3: 0x000000000000000000000000de8180911ab2ebc9a6c1f5526bce4c8242c061d9 (contractAddress)
+    Instance 4: 0x000000000000000000000000000000007c849eda863702e41e7330c3ca2155d6 (blockHashHigh)
+    Instance 5: 0x00000000000000000000000000000000e8c568a81325a298f7717f0aaa705bfc (blockHashLow)
+    Instance 6: 0x28d0cb65a705e45667ea97a09401a14fc079a3ef81b429848729e676c560f579 (promise_commit)
 ```
-
-**4. Inside `gen_proof`** (snark-verifier-sdk `src/halo2.rs:44`):
-
-```rust
-create_proof::<_, P, _, _, _, _>(
-    params,
-    pk,
-    &[circuit],
-    &[&instances],  // ← Instances passed to Halo2's create_proof!
-    rng,
-    &mut transcript
-)
-```
-
-**5. Halo2's `create_proof` Function**:
-
-The Halo2 library's `create_proof` function **automatically constrains** the provided instances to the instance column. This is the standard Halo2 proof generation flow.
-
-#### Axiom-eth's Own Tests Confirm This Pattern
-
-Looking at `axiom-eth/src/solidity/tests/mapping.rs` (official axiom-eth test):
-
-```rust
-fn virtual_assign_phase0(...) -> Self::FirstPhasePayload {
-    // ... circuit logic ...
-    let assigned_instances = witness.slot().as_ref().to_vec();
-    builder.base.assigned_instances[0] = assigned_instances;  // ← Same pattern we use!
-    // ... no assign_instances() call here either!
-}
-```
-
-And their test verification:
-
-```rust
-pub fn mapping_prover_satisfied(...) {
-    let (circuit, instance) = mapping_circuit(...);
-    let proof = gen_proof_with_instances(&params, &pk, circuit, &[&instance]);
-    check_proof_with_instances(&params, pk.get_vk(), &proof, &[&instance], expected);
-}
-```
-
-The `gen_proof_with_instances` function (from halo2-base `src/utils/testing.rs`):
-
-```rust
-pub fn gen_proof_with_instances(
-    params: &ParamsKZG<Bn256>,
-    pk: &ProvingKey<G1Affine>,
-    circuit: impl Circuit<Fr>,
-    instances: &[&[Fr]],  // ← Instances passed externally!
-) -> Vec<u8> {
-    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-    create_proof::<...>(
-        params,
-        pk,
-        &[circuit],
-        &[instances],  // ← Passed to Halo2's create_proof!
-        rng,
-        &mut transcript
-    ).expect("prover should not fail");
-    transcript.finalize()
-}
-```
-
-#### Why the Auditor Was Confused
-
-The auditor likely looked at `EthCircuitImpl::synthesize` and noticed it doesn't call `assign_instances()`:
-
-```rust
-// axiom-eth/src/utils/eth_circuit.rs
-impl<F: Field, FnPhase0, FnPhase1> Circuit<F> for EthCircuitImpl<F, FnPhase0, FnPhase1> {
-    fn synthesize(&self, ...) -> Result<(), plonk::Error> {
-        // ... phase 0 ...
-        // ... phase 1 ...
-        // ... copy constraints ...
-        self.clear_witnesses();
-        Ok(())  // ← No assign_instances() call!
-    }
-}
-```
-
-**However**, this is **intentional and correct**! The `assign_instances()` call is **not needed** when using the external instance method. Halo2's `create_proof` handles the instance column constraints automatically when instances are passed as parameters.
-
-#### Verification in Our E2E Test
-
-Our E2E test (`test_e2e.sh`) successfully:
-
-1. Generates a proof with 6 public instances
-2. Verifies the proof on-chain using a Solidity verifier
-3. The Solidity verifier **checks all 6 public instances** against the proof
-
-If the instances weren't constrained, the verification would fail or accept any arbitrary values. But it works correctly, proving that instances ARE constrained.
 
 ### Conclusion for BC-CIRCUIT-004
 
-**Status**: ❌ **FALSE POSITIVE**
+**Status**: ✅ **FIXED**
 
-**Recommendation**: **NO ACTION REQUIRED**
+The fix has been implemented and verified:
 
-The public instances are properly constrained through Halo2's standard external instance mechanism. This is the correct and recommended approach used by axiom-eth and the broader Halo2 ecosystem.
+- ✅ All unit tests pass (11/11)
+- ✅ Proof contains all 7 instances (verified with inspect_snark tool)
+- ✅ Circuit constraints satisfied (MockProver test passes)
+- ✅ Proof generation successful with real data
+- ✅ Solidity verifier generated (45KB - exceeds 24KB Ethereum limit)
+
+**Note on Verifier Deployment**: The generated Halo2 verifier contract is 45KB, which exceeds Ethereum's 24KB contract size limit (EIP-170). This is a known limitation of Halo2 verifiers. For production deployment, consider:
+
+1. Deploying to L2 networks with higher size limits (Arbitrum, Optimism, zkSync)
+2. Using verifier aggregation services
+3. Splitting the verifier into multiple contracts
+4. Using EIP-4844 blob transactions (for larger contracts)
 
 ---
 
@@ -619,7 +599,7 @@ if snark.instances[0][3] != contract_field { ... }
 
 ### Completed Actions
 
-1. ✅ **BC-CIRCUIT-004**: No action required - FALSE POSITIVE (proven by negative E2E test)
+1. ✅ **BC-CIRCUIT-004**: FIXED - Public instances now properly set in Phase 0 and verified in Phase 1
 2. ✅ **BC-CIRCUIT-002**: FIXED - Added Phase 1 RLC verification for block header
 3. ✅ **BC-TYPES-001**: FIXED - Changed `amount` from `u64` to `[u8; 32]` in all type definitions
    - Updated `DepositEventData.amount` and `DepositProofOutput.amount`

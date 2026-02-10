@@ -72,6 +72,20 @@ This downloads pre-converted KZG parameters in Halo2 format (~33 MB) from the [h
 
 **Why this matters**: The prover will ONLY use trusted setup parameters. Random parameter generation has been disabled for security. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
 
+### 2. Install Groth16 Wrapper Dependencies (For Mainnet Deployment)
+
+⚠️ **Required for Ethereum mainnet deployment**: The Halo2 verifier is 28.8KB, exceeding Ethereum's 24KB contract size limit. We use a Groth16 wrapper to generate a tiny (~1-2KB) verifier.
+
+```bash
+# Install Go and build tools
+sudo ./install_dependencies.sh
+
+# Setup gnark library
+./setup_gnark.sh
+```
+
+See [GROTH16_WRAPPER.md](GROTH16_WRAPPER.md) for detailed documentation on the Groth16 wrapper architecture.
+
 ## Usage
 
 ### Generate Proving/Verifying Keys

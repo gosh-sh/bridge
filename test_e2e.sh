@@ -57,18 +57,18 @@ else
         --broadcast \
         --private-key "$PRIVATE_KEY" \
         2>&1)
-    
+
     echo "$DEPLOY_OUTPUT"
-    
+
     # Extract addresses from deployment output
     VERIFIER_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep "TestDepositVerifier deployed at:" | awk '{print $NF}')
     BRIDGE_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep "AckiNackiBridge deployed at:" | awk '{print $NF}')
-    
+
     if [ -z "$BRIDGE_ADDRESS" ] || [ -z "$VERIFIER_ADDRESS" ]; then
         echo -e "${RED}Failed to extract contract addresses from deployment${NC}"
         exit 1
     fi
-    
+
     # Save deployment info
     cat > "$DATA_DIR/deployment.json" <<EOF
 {
@@ -78,7 +78,7 @@ else
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
-    
+
     echo -e "${GREEN}✓ Contracts deployed successfully!${NC}"
     echo "  Bridge: $BRIDGE_ADDRESS"
     echo "  Verifier: $VERIFIER_ADDRESS"
@@ -89,9 +89,9 @@ echo ""
 # Step 2: Make a deposit
 echo -e "${YELLOW}[2/6] Making Test Deposit...${NC}"
 
-DEPOSIT_AMOUNT="10000000000000000"  # 0.01 ETH in wei
+DEPOSIT_AMOUNT="100000000000000"  # 0.0001 ETH in wei (0.01 ETH / 100)
 
-echo "Depositing 0.01 ETH to bridge..."
+echo "Depositing 0.0001 ETH to bridge..."
 DEPOSIT_TX=$(cast send "$BRIDGE_ADDRESS" \
     "deposit()" \
     --value "$DEPOSIT_AMOUNT" \
@@ -209,7 +209,7 @@ cd "$CONTRACTS_DIR"
 SENDER_ADDRESS=$(cast wallet address "$PRIVATE_KEY")
 
 echo "Withdrawing to: $SENDER_ADDRESS"
-echo "Amount: 0.01 ETH"
+echo "Amount: 0.0001 ETH"
 echo "Deposit ID: $DEPOSIT_ID"
 
 # Prepare public inputs array
@@ -218,10 +218,11 @@ PUBLIC_INPUTS="[$DEPOSIT_ID,$(cast --to-uint256 $SENDER_ADDRESS),$DEPOSIT_AMOUNT
 
 echo "Submitting withdrawal transaction..."
 WITHDRAW_TX=$(cast send "$BRIDGE_ADDRESS" \
-    "withdraw(address,uint256,uint256,bytes)" \
+    "withdraw(address,uint256,uint256,uint256,bytes)" \
     "$SENDER_ADDRESS" \
     "$DEPOSIT_AMOUNT" \
     "$DEPOSIT_ID" \
+    "$BLOCK_NUMBER" \
     "$PROOF_BYTES" \
     --rpc-url "$SEPOLIA_RPC_URL" \
     --private-key "$PRIVATE_KEY" \

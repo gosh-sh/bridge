@@ -18,9 +18,10 @@ use halo2_base::{
 
 use crate::types::{DepositProofInput, ReceiptProof};
 
-/// Circuit parameters
-pub const MAX_DATA_BYTE_LEN: usize = 256; // Max event data length
-pub const MAX_LOG_NUM: usize = 20; // Max number of logs in receipt
+/// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
+/// verifier size)
+pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from 256)
+pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: ultra-aggressive)
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
@@ -29,6 +30,23 @@ pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 /// off-circuit and used as a constant
 pub fn get_deposit_event_signature() -> [u8; 32] {
     keccak256("Deposit(uint256,address,uint256,uint256)")
+}
+
+/// Helper function to convert bytes (big-endian) to field element using
+/// Horner's method This matches the circuit's bytes_to_field() logic
+fn bytes_to_field<F: ScalarField>(
+    ctx: &mut Context<F>,
+    gate: &impl GateInstructions<F>,
+    bytes: &[AssignedValue<F>],
+) -> AssignedValue<F> {
+    let mut result = ctx.load_constant(F::ZERO);
+    let base = ctx.load_constant(F::from(256));
+
+    for &byte in bytes.iter() {
+        result = gate.mul_add(ctx, result, base, byte);
+    }
+
+    result
 }
 
 /// Deposit event circuit using axiom-eth
@@ -85,6 +103,13 @@ pub struct Phase0Output {
     pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
     pub block_header_witness: RlpArrayWitness<Fr>, /* Block header RLP witness for Phase 1
                                                    * verification */
+    // FIX BC-CIRCUIT-004: Store public instance values for Phase 1 verification
+    pub deposit_id_phase0: AssignedValue<Fr>,
+    pub sender_phase0: AssignedValue<Fr>,
+    pub amount_phase0: AssignedValue<Fr>,
+    pub contract_address_phase0: AssignedValue<Fr>,
+    pub block_hash_high_phase0: AssignedValue<Fr>,
+    pub block_hash_low_phase0: AssignedValue<Fr>,
 }
 
 impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
@@ -200,6 +225,83 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
             .collect();
 
+        // ============================================================================
+        // FIX BC-CIRCUIT-004: Compute public instances in Phase 0
+        // ============================================================================
+        // We set public instances from witness data in Phase 0, then verify in Phase 1
+        // that the RLP-parsed event data matches these values.
+        //
+        // This ensures the proof is cryptographically bound to all 6 public values.
+
+        println!("🔧 Computing public instances in Phase 0...");
+
+        let gate = chip.gate();
+
+        // 1. depositId - from witness data
+        let deposit_id_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .event_data
+            .deposit_id
+            .to_be_bytes()
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
+        let deposit_id_field = bytes_to_field(ctx, gate, &deposit_id_bytes);
+
+        // 2. sender - from witness data (20 bytes, left-padded to 32 bytes)
+        let mut sender_bytes_32 = vec![ctx.load_constant(Fr::zero()); 12]; // 12 zero bytes
+        sender_bytes_32.extend(
+            self.inputs
+                .event_data
+                .sender
+                .iter()
+                .map(|&byte| ctx.load_witness(Fr::from(byte as u64))),
+        );
+        let sender_field = bytes_to_field(ctx, gate, &sender_bytes_32);
+
+        // 3. amount - from witness data (32 bytes)
+        let amount_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .event_data
+            .amount
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
+        let amount_field = bytes_to_field(ctx, gate, &amount_bytes);
+
+        // 4. contractAddress - from witness data (20 bytes, left-padded to 32 bytes)
+        let mut contract_address_bytes_32 = vec![ctx.load_constant(Fr::zero()); 12]; // 12 zero bytes
+        contract_address_bytes_32.extend(
+            self.inputs
+                .event_data
+                .contract_address
+                .iter()
+                .map(|&byte| ctx.load_witness(Fr::from(byte as u64))),
+        );
+        let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
+
+        // 5. blockHashHigh - from block hash (first 16 bytes)
+        let block_hash_high = bytes_to_field(ctx, gate, &block_hash_bytes[0..16]);
+
+        // 6. blockHashLow - from block hash (last 16 bytes)
+        let block_hash_low = bytes_to_field(ctx, gate, &block_hash_bytes[16..32]);
+
+        // Set public instances BEFORE promise_commit is added
+        let public_instances = vec![
+            deposit_id_field,
+            sender_field,
+            amount_field,
+            contract_address_field,
+            block_hash_high,
+            block_hash_low,
+        ];
+
+        builder.base.assigned_instances[0] = public_instances;
+
+        println!("   ✓ Set 6 public instances in Phase 0");
+        println!("   (promise_commit will be appended automatically)");
+        println!("   (Phase 1 will verify these match the RLP-parsed event data)");
+
         Phase0Output {
             receipt_witness,
             log_index,
@@ -207,6 +309,13 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             receipts_root_bytes,
             mpt_root_bytes,
             block_header_witness: block_header_array,
+            // Store Phase 0 values for verification in Phase 1
+            deposit_id_phase0: deposit_id_field,
+            sender_phase0: sender_field,
+            amount_phase0: amount_field,
+            contract_address_phase0: contract_address_field,
+            block_hash_high_phase0: block_hash_high,
+            block_hash_low_phase0: block_hash_low,
         }
     }
 
@@ -395,25 +504,6 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Get the gate chip for arithmetic operations
         let gate = chip.gate();
 
-        // Helper function to convert bytes (big-endian) to field element
-        // Using a regular function instead of closure to avoid borrow checker issues
-        fn bytes_to_field<F: ScalarField>(
-            ctx: &mut Context<F>,
-            gate: &impl GateInstructions<F>,
-            bytes: &[AssignedValue<F>],
-        ) -> AssignedValue<F> {
-            // Convert bytes to field element using Horner's method
-            // value = bytes[0] * 256^(n-1) + bytes[1] * 256^(n-2) + ... + bytes[n-1]
-            let mut result = ctx.load_zero();
-            let base = ctx.load_constant(F::from(256));
-
-            for byte in bytes.iter() {
-                // result = result * 256 + byte
-                result = gate.mul_add(ctx, result, base, *byte);
-            }
-            result
-        }
-
         // Convert depositId (32 bytes from topics[1])
         let deposit_id_field = bytes_to_field(ctx_gate, gate, &deposit_id_bytes);
         println!("   ✓ Converted depositId to field element");
@@ -457,31 +547,38 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Convert block hash to field elements (split into two 128-bit chunks)
         // Block hash is 32 bytes = 256 bits, but field elements are ~254 bits
         // So we split it into two 128-bit (16-byte) chunks
-        let block_hash_high = bytes_to_field(ctx_gate, gate, &block_hash_bytes[0..16]);
-        let block_hash_low = bytes_to_field(ctx_gate, gate, &block_hash_bytes[16..32]);
+        let block_hash_high_phase1 = bytes_to_field(ctx_gate, gate, &block_hash_bytes[0..16]);
+        let block_hash_low_phase1 = bytes_to_field(ctx_gate, gate, &block_hash_bytes[16..32]);
 
         println!("   ✓ Converted block hash to field elements");
 
-        // 16. Expose public outputs
-        // The public inputs will be verified by the Solidity verifier
-        // Order: [depositId, sender, amount, contract_address, block_hash_high,
-        // block_hash_low]
-        let public_instances = builder.public_instances();
-        public_instances[0].push(deposit_id_field);
-        public_instances[0].push(sender_field);
-        public_instances[0].push(amount_field);
-        public_instances[0].push(contract_address_field);
-        public_instances[0].push(block_hash_high);
-        public_instances[0].push(block_hash_low);
+        // ============================================================================
+        // FIX BC-CIRCUIT-004: Verify Phase 1 values match Phase 0 public instances
+        // ============================================================================
+        // The public instances were set in Phase 0 from witness data.
+        // Now we verify that the RLP-parsed event data matches those public instances.
+        //
+        // This ensures:
+        // 1. The proof is cryptographically bound to the public instances (Phase 0)
+        // 2. The public instances match the actual RLP-verified event data (Phase 1)
 
-        println!("   ✓ Exposed public outputs:");
-        println!("     - depositId");
-        println!("     - sender");
-        println!("     - amount");
-        println!("     - contract_address");
-        println!("     - block_hash_high");
-        println!("     - block_hash_low");
+        println!("🔧 Verifying Phase 1 extracted values match Phase 0 public instances...");
 
+        // Constrain that Phase 1 values equal Phase 0 values
+        ctx_gate.constrain_equal(&deposit_id_field, &phase0_output.deposit_id_phase0);
+        ctx_gate.constrain_equal(&sender_field, &phase0_output.sender_phase0);
+        ctx_gate.constrain_equal(&amount_field, &phase0_output.amount_phase0);
+        ctx_gate.constrain_equal(
+            &contract_address_field,
+            &phase0_output.contract_address_phase0,
+        );
+        ctx_gate.constrain_equal(
+            &block_hash_high_phase1,
+            &phase0_output.block_hash_high_phase0,
+        );
+        ctx_gate.constrain_equal(&block_hash_low_phase1, &phase0_output.block_hash_low_phase0);
+
+        println!("   ✓ Verified all 6 public instances match RLP-verified event data");
         println!("   ✓ Phase 1 complete!");
     }
 }
@@ -541,11 +638,14 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     const HAS_ACCUMULATOR: bool = false;
 
     /// Number of public instance columns
-    /// FIX BC-PROVER-003: Updated from 4 to 6 to match actual public outputs
+    /// FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
     /// We expose: [depositId, sender, amount, contract_address,
-    /// block_hash_high, block_hash_low]
+    /// block_hash_high, block_hash_low, promise_commit]
+    ///
+    /// Note: The 6 user values are set in Phase 0, then promise_commit is
+    /// automatically appended by EthCircuitImpl at the end of Phase 0.
     fn num_instance(&self) -> Vec<usize> {
-        vec![6] // 6 public outputs in a single instance column
+        vec![7] // 6 user values + 1 promise_commit
     }
 }
 
@@ -587,5 +687,73 @@ mod tests {
         let circuit = DepositEventCircuitV2::new_with_defaults(input, Chain::Sepolia);
         assert_eq!(circuit.params.max_data_byte_len, MAX_DATA_BYTE_LEN);
         assert_eq!(circuit.params.max_log_num, MAX_LOG_NUM);
+    }
+
+    #[test]
+    fn test_deposit_event_signature() {
+        let sig = get_deposit_event_signature();
+        assert_eq!(sig.len(), 32);
+        // Verify it matches keccak256("Deposit(uint256,address,uint256,uint256)")
+        let expected = [
+            0xd3, 0x6a, 0x2f, 0x67, 0xd0, 0x6d, 0x28, 0x57, 0x86, 0xf6, 0x1a, 0x32, 0xb0, 0x52,
+            0xb9, 0xac, 0x6b, 0xce, 0x4c, 0x82, 0x42, 0xc0, 0x61, 0xd9, 0x91, 0x1a, 0xb2, 0xeb,
+            0xc9, 0xa6, 0xc1, 0xf5,
+        ];
+        assert_eq!(sig, expected);
+    }
+
+    /// BC-CIRCUIT-004 Test: Verify that public instances are properly included
+    /// in the proof
+    ///
+    /// This test verifies the fix for BC-CIRCUIT-004 where public instances
+    /// were not being constrained. The fix ensures that:
+    /// 1. All 6 user values are set as public instances in Phase 0
+    /// 2. promise_commit is automatically appended (7th instance)
+    /// 3. Phase 1 constrains the public instances to equal RLP-verified data
+    ///
+    /// Expected behavior:
+    /// - instances[0] should contain 7 values: [depositId, sender, amount,
+    ///   contractAddress, blockHashHigh, blockHashLow, promise_commit]
+    #[test]
+    #[ignore] // Requires real proof data
+    fn test_bc_circuit_004_instances_in_proof() {
+        use std::fs;
+
+        use snark_verifier_sdk::Snark;
+
+        use crate::types::DepositProofOutput;
+
+        // Load a real proof from e2e test data
+        let proof_path = "../e2e_attack_test_data/valid_proof.json";
+        if !std::path::Path::new(proof_path).exists() {
+            println!("Skipping test: proof file not found");
+            return;
+        }
+
+        let json_str = fs::read_to_string(proof_path).expect("Failed to read proof file");
+        let proof_output: DepositProofOutput =
+            serde_json::from_str(&json_str).expect("Failed to parse proof JSON");
+
+        // Deserialize SNARK
+        let snark: Snark =
+            bincode::deserialize(&proof_output.proof).expect("Failed to deserialize SNARK");
+
+        println!("SNARK instances:");
+        println!("  Number of instance columns: {}", snark.instances.len());
+        assert_eq!(snark.instances.len(), 1, "Should have 1 instance column");
+
+        println!("  Column 0: {} instances", snark.instances[0].len());
+
+        // FIXED BC-CIRCUIT-004: Now we have 7 instances
+        // [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow,
+        // promise_commit]
+        assert_eq!(
+            snark.instances[0].len(),
+            7,
+            "Should have 7 instances: [depositId, sender, amount, contractAddress, blockHashHigh, \
+             blockHashLow, promise_commit]"
+        );
+
+        println!("✅ BC-CIRCUIT-004 FIX VERIFIED: Proof contains all 7 instances!");
     }
 }

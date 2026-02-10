@@ -99,9 +99,12 @@ pub struct CircuitConfig {
 impl Default for CircuitConfig {
     fn default() -> Self {
         Self {
-            degree: 18,               // 2^18 = ~256K rows
-            max_data_byte_len: 256,   // Max event data size
-            max_log_num: 20,          // Max logs per receipt
+            degree: 15, /* 2^15 = ~32K rows (OPTION B+: Ultra-aggressive optimization - last
+                         * attempt before aggregation) */
+            max_data_byte_len: 128, /* Max event data size (reduced from 256 - Deposit event
+                                     * needs ~128 bytes) */
+            max_log_num: 3, /* Max logs per receipt (OPTION B+: Ultra-aggressive - most deposit
+                             * txs have 1-3 logs) */
             topic_num_bounds: (0, 4), // 0-4 topics per log
         }
     }
@@ -245,6 +248,29 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
                     params_path, e, params_path
                 ));
             },
+        }
+    }
+
+    // Parameters not found - try to use degree 18 parameters (downward compatible)
+    if k < 18 {
+        let fallback_path = "data/kzg_params_18.srs";
+        if Path::new(fallback_path).exists() {
+            println!(
+                "⚠️  KZG parameters for degree {} not found, using degree 18 (downward compatible)",
+                k
+            );
+            match load_kzg_params(fallback_path) {
+                Ok(params) => {
+                    println!("✅ Successfully loaded KZG parameters from trusted setup");
+                    return Ok(params);
+                },
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to load fallback KZG parameters from {}: {}",
+                        fallback_path, e
+                    ));
+                },
+            }
         }
     }
 
@@ -452,12 +478,12 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         return Err("Proof has no public instances".to_string());
     }
 
-    // FIX BC-PROVER-003 Issue A: Check that we have exactly 6 public inputs
+    // FIX BC-CIRCUIT-004: Check that we have exactly 7 public inputs
     // (depositId, sender, amount, contract_address, block_hash_high,
-    // block_hash_low)
-    if snark.instances[0].len() != 6 {
+    // block_hash_low, promise_commit)
+    if snark.instances[0].len() != 7 {
         return Err(format!(
-            "Expected 6 public inputs, got {}",
+            "Expected 7 public inputs (6 user values + promise_commit), got {}",
             snark.instances[0].len()
         ));
     }
@@ -511,12 +537,16 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     }
 
     println!("✓ Proof structure valid");
-    println!("✓ Public inputs verified (6 instances)");
+    println!("✓ Public inputs verified (7 instances: 6 user values + promise_commit)");
     println!("  depositId: {}", proof.deposit_id);
     println!("  sender: 0x{}", hex::encode(proof.sender));
     println!("  amount: 0x{}", hex::encode(proof.amount));
     println!("  contract: 0x{}", hex::encode(proof.contract_address));
     println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
+    println!(
+        "  promise_commit: 0x{}",
+        hex::encode(snark.instances[0][6].to_bytes())
+    );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
     println!("      This check only validates proof structure and public inputs");
@@ -571,16 +601,16 @@ pub fn generate_solidity_verifier(
     let vk = pk.get_vk();
 
     // 4. Define number of public instances
-    // FIX BC-PROVER-003: Updated from 4 to 6 to match circuit's actual public
-    // outputs We have 6 public outputs: [depositId, sender, amount,
-    // contract_address, block_hash_high, block_hash_low]
-    let num_instance = vec![6];
+    // FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
+    // We have 7 public outputs: [depositId, sender, amount,
+    // contract_address, block_hash_high, block_hash_low, promise_commit]
+    let num_instance = vec![7];
 
     // 5. Generate Solidity verifier using SHPLONK
     println!("Generating Solidity code...");
     use axiom_eth::utils::eth_circuit::EthCircuitImpl;
 
-    let _bytecode = gen_evm_verifier_shplonk::<EthCircuitImpl<Fr, DepositEventCircuitV2>>(
+    let bytecode = gen_evm_verifier_shplonk::<EthCircuitImpl<Fr, DepositEventCircuitV2>>(
         &params,
         vk,
         num_instance,
@@ -588,7 +618,42 @@ pub fn generate_solidity_verifier(
     );
 
     println!("✅ Solidity verifier generated at: {:?}", output_path);
-    println!("   Contract size: {} bytes", _bytecode.len());
+    println!("   Contract size: {} bytes", bytecode.len());
+
+    // 6. Also save the deployment bytecode for direct deployment
+    let bytecode_path = output_path.with_extension("bytecode");
+    let bytecode_hex_path = output_path.with_extension("bytecode.hex");
+
+    fs::write(&bytecode_path, &bytecode)
+        .map_err(|e| format!("Failed to write bytecode file: {}", e))?;
+
+    let hex_string = format!("0x{}", hex::encode(&bytecode));
+    fs::write(&bytecode_hex_path, &hex_string)
+        .map_err(|e| format!("Failed to write hex bytecode file: {}", e))?;
+
+    println!("✅ Deployment bytecode saved:");
+    println!("   Raw:  {:?} ({} bytes)", bytecode_path, bytecode.len());
+    println!(
+        "   Hex:  {:?} ({} chars)",
+        bytecode_hex_path,
+        hex_string.len()
+    );
+
+    if bytecode.len() > 24576 {
+        println!("\n⚠️  WARNING: Bytecode exceeds 24KB Ethereum contract size limit!");
+        println!(
+            "   Size: {:.1} KB (limit: 24 KB)",
+            bytecode.len() as f64 / 1024.0
+        );
+        println!("   This verifier can only be deployed on:");
+        println!("   - Testnets (no size limit enforcement)");
+        println!("   - L2 networks with higher limits (Arbitrum, Optimism, zkSync)");
+    } else {
+        println!(
+            "\n✅ Bytecode is within 24KB limit ({:.1} KB)",
+            bytecode.len() as f64 / 1024.0
+        );
+    }
 
     Ok(())
 }
@@ -692,9 +757,9 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = CircuitConfig::default();
-        assert_eq!(config.degree, 18);
-        assert_eq!(config.max_data_byte_len, 256);
-        assert_eq!(config.max_log_num, 20);
+        assert_eq!(config.degree, 15); // Updated for Option B+ ultra-aggressive optimization
+        assert_eq!(config.max_data_byte_len, 128); // Updated for Option B+ optimization
+        assert_eq!(config.max_log_num, 3); // Updated for Option B+ ultra-aggressive optimization
         assert_eq!(config.topic_num_bounds, (0, 4));
     }
 

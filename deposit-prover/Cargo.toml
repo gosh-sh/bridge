@@ -44,6 +44,7 @@ snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git
   "halo2-pse",
 ] }
 
+
 # Poseidon hash - for commitment computation
 # Use axiom-eth's poseidon implementation
 zkevm-hashes = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
@@ -82,6 +83,7 @@ tokio = { version = "1.42", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
 ppot-rs = { version = "0.1.1", optional = true }
 sha2 = "0.10.9"
+num-bigint = "0.4"
 
 [features]
 # Optional: .ptau file conversion support

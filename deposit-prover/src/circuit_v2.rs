@@ -136,6 +136,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let mpt_input = self.inputs.receipt_proof.to_mpt_input(
             self.inputs.event_data.transaction_index,
             self.params.max_data_byte_len,
+            self.params.max_log_num,
         );
         let proof = mpt_input.assign(ctx);
 
@@ -585,11 +586,21 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
 /// Helper trait for converting ReceiptProof to MPTInput
 trait ToMPTInput {
-    fn to_mpt_input(&self, tx_index: u64, max_data_byte_len: usize) -> axiom_eth::mpt::MPTInput;
+    fn to_mpt_input(
+        &self,
+        tx_index: u64,
+        max_data_byte_len: usize,
+        max_log_num: usize,
+    ) -> axiom_eth::mpt::MPTInput;
 }
 
 impl ToMPTInput for ReceiptProof {
-    fn to_mpt_input(&self, tx_index: u64, max_data_byte_len: usize) -> axiom_eth::mpt::MPTInput {
+    fn to_mpt_input(
+        &self,
+        tx_index: u64,
+        max_data_byte_len: usize,
+        max_log_num: usize,
+    ) -> axiom_eth::mpt::MPTInput {
         use axiom_eth::mpt::MPTInput;
         use ethers_core::types::H256;
 
@@ -602,7 +613,7 @@ impl ToMPTInput for ReceiptProof {
         // Formula from axiom-eth/src/receipt/mod.rs:calc_max_val_len
         let max_topic_num = TOPIC_NUM_BOUNDS.1; // max topics = 4
         let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
-        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + MAX_LOG_NUM * max_log_len;
+        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len;
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),

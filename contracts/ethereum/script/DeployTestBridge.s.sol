@@ -18,8 +18,8 @@ contract DeployTestBridge is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         // Deploy a simple test verifier
-        // For now, we'll use a minimal verifier that just checks proof format
-        // Later we'll replace this with the real Halo2 verifier
+        // For testing, we use a minimal verifier that just checks proof format
+        // For production, use Groth16DepositVerifier via DeployRealBridge.s.sol
         TestDepositVerifier verifier = new TestDepositVerifier();
         console.log("TestDepositVerifier deployed at:", address(verifier));
 
@@ -52,7 +52,7 @@ contract DeployTestBridge is Script {
  * @title TestDepositVerifier
  * @notice Simple test verifier for deposit proofs (TESTING ONLY - NOT SECURE!)
  * @dev This verifier accepts any proof with correct format for testing purposes
- *      In production, this will be replaced with the real Halo2 verifier
+ *      In production, use Groth16DepositVerifier
  */
 contract TestDepositVerifier is IAckiNackiVerifier {
     // Expected public inputs: [depositId, sender, amount, contractAddress]
@@ -93,7 +93,6 @@ contract TestDepositVerifier is IAckiNackiVerifier {
         }
 
         // TEST MODE: Accept any proof with valid format
-        // In production, this will call the real Halo2 verifier
         return (true, bytes32(depositIdValue));
     }
 

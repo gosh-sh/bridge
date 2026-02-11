@@ -3,14 +3,14 @@ pragma solidity ^0.8.19;
 
 import "forge-std/Script.sol";
 import "../src/AckiNackiBridge.sol";
-import "../src/RealDepositVerifier.sol";
+import "../src/Groth16DepositVerifier.sol";
+import "../src/Groth16Verifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
-import "../src/Halo2Verifier.sol";
 
 /**
  * @title DeployRealBridge
- * @notice Deployment script for production bridge with real Halo2 verifier
- * @dev Deploys the real Halo2 verifier and bridge contract
+ * @notice Deployment script for production bridge with Groth16 verifier
+ * @dev Deploys the Groth16 verifier (gnark-generated) and bridge contract
  */
 contract DeployRealBridge is Script {
     function run() external {
@@ -18,18 +18,16 @@ contract DeployRealBridge is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // Step 1: Deploy the Halo2Verifier contract
-        console.log("Deploying Halo2Verifier...");
+        // Step 1: Deploy the Groth16Verifier contract (gnark-generated)
+        console.log("Deploying Groth16Verifier...");
+        Groth16Verifier groth16VerifierContract = new Groth16Verifier();
+        address groth16VerifierAddr = address(groth16VerifierContract);
+        console.log("Groth16Verifier deployed at:", groth16VerifierAddr);
 
-        Halo2Verifier halo2VerifierContract = new Halo2Verifier();
-        address halo2Verifier = address(halo2VerifierContract);
-
-        console.log("Halo2Verifier deployed at:", halo2Verifier);
-
-        // Step 2: Deploy the RealDepositVerifier wrapper
-        console.log("Deploying RealDepositVerifier wrapper...");
-        RealDepositVerifier verifier = new RealDepositVerifier(halo2Verifier);
-        console.log("RealDepositVerifier deployed at:", address(verifier));
+        // Step 2: Deploy the Groth16DepositVerifier wrapper
+        console.log("Deploying Groth16DepositVerifier wrapper...");
+        Groth16DepositVerifier verifier = new Groth16DepositVerifier(groth16VerifierAddr);
+        console.log("Groth16DepositVerifier deployed at:", address(verifier));
 
         // Step 3: Deploy mock block header oracle
         console.log("Deploying MockBlockHeaderOracle...");
@@ -46,8 +44,8 @@ contract DeployRealBridge is Script {
         // Print deployment summary
         console.log("\n=== Deployment Complete ===");
         console.log("Network: Sepolia");
-        console.log("Halo2Verifier:", halo2Verifier);
-        console.log("RealDepositVerifier:", address(verifier));
+        console.log("Groth16Verifier:", groth16VerifierAddr);
+        console.log("Groth16DepositVerifier:", address(verifier));
         console.log("MockBlockHeaderOracle:", address(oracle));
         console.log("AckiNackiBridge:", address(bridge));
         console.log("\nTo make a deposit:");
@@ -62,10 +60,10 @@ contract DeployRealBridge is Script {
         string memory deploymentJson = string(
             abi.encodePacked(
                 "{\n",
-                '  "halo2_verifier": "',
-                vm.toString(halo2Verifier),
+                '  "groth16_verifier": "',
+                vm.toString(groth16VerifierAddr),
                 '",\n',
-                '  "verifier_wrapper": "',
+                '  "deposit_verifier": "',
                 vm.toString(address(verifier)),
                 '",\n',
                 '  "oracle": "',

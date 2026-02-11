@@ -1,73 +1,220 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
+	groth16bn254 "github.com/consensys/gnark/backend/groth16/bn254"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 )
 
 func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "setup":
+		runSetup()
+	case "prove":
+		proofFile := "halo2_proof.json"
+		if len(os.Args) >= 3 {
+			proofFile = os.Args[2]
+		}
+		runProve(proofFile)
+	default:
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage: gnark-wrapper <command> [args]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  setup                  Compile circuit, generate keys, export Solidity verifier")
+	fmt.Println("  prove [proof.json]     Generate Groth16 proof (default: halo2_proof.json)")
+}
+
+// runSetup compiles the circuit, generates proving/verification keys,
+// saves them to disk, and exports the Solidity verifier.
+func runSetup() {
 	fmt.Println("========================================")
-	fmt.Println("Groth16 Wrapper for Halo2 Proofs")
+	fmt.Println("Groth16 Setup")
 	fmt.Println("========================================")
 	fmt.Println()
 
-	// Step 1: Load Halo2 proof data
-	fmt.Println("Step 1: Loading Halo2 proof data...")
+	// Load a sample proof to determine circuit shape
+	fmt.Println("Loading sample Halo2 proof for circuit shape...")
 	proofData, err := LoadHalo2Proof("halo2_proof.json")
 	if err != nil {
 		log.Fatalf("Failed to load proof: %v", err)
 	}
 	fmt.Printf("✓ Loaded proof with %d public inputs\n", len(proofData.PublicInputs))
-	fmt.Printf("  - Domain k: %d\n", proofData.Protocol.K)
-	fmt.Printf("  - Proof size: %d bytes\n", len(proofData.ProofBytes))
 	fmt.Println()
 
-	// Step 2: Create circuit
-	fmt.Println("Step 2: Creating Groth16 verifier circuit...")
+	// Create circuit
+	fmt.Println("Creating circuit...")
 	circuit, err := NewHalo2VerifierCircuit(proofData)
 	if err != nil {
 		log.Fatalf("Failed to create circuit: %v", err)
 	}
-	fmt.Println("✓ Circuit created")
-	fmt.Println()
 
-	// Step 3: Compile circuit to R1CS
-	fmt.Println("Step 3: Compiling circuit to R1CS...")
+	// Compile to R1CS
+	fmt.Println("Compiling circuit to R1CS...")
 	startCompile := time.Now()
 	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, circuit)
 	if err != nil {
 		log.Fatalf("Failed to compile circuit: %v", err)
 	}
-	compileTime := time.Since(startCompile)
-	fmt.Printf("✓ Circuit compiled in %v\n", compileTime)
-	fmt.Printf("  - Constraints: %d\n", ccs.GetNbConstraints())
+	fmt.Printf("✓ Compiled in %v (%d constraints)\n", time.Since(startCompile), ccs.GetNbConstraints())
 	fmt.Println()
 
-	// Step 4: Generate Groth16 proving and verification keys
-	fmt.Println("Step 4: Generating Groth16 keys (this may take a while)...")
+	// Generate keys
+	fmt.Println("Generating Groth16 keys...")
 	startSetup := time.Now()
 	pk, vk, err := groth16.Setup(ccs)
 	if err != nil {
 		log.Fatalf("Failed to setup: %v", err)
 	}
-	setupTime := time.Since(startSetup)
-	fmt.Printf("✓ Keys generated in %v\n", setupTime)
+	fmt.Printf("✓ Keys generated in %v\n", time.Since(startSetup))
 	fmt.Println()
 
-	// Step 5: Create witness (proof data)
-	fmt.Println("Step 5: Creating witness...")
+	// Save R1CS
+	fmt.Println("Saving R1CS...")
+	ccsFile, err := os.Create("circuit.r1cs")
+	if err != nil {
+		log.Fatalf("Failed to create R1CS file: %v", err)
+	}
+	_, err = ccs.WriteTo(ccsFile)
+	ccsFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to write R1CS: %v", err)
+	}
+	fmt.Println("✓ Saved to circuit.r1cs")
+
+	// Save proving key
+	fmt.Println("Saving proving key...")
+	pkFile, err := os.Create("proving.key")
+	if err != nil {
+		log.Fatalf("Failed to create pk file: %v", err)
+	}
+	_, err = pk.WriteTo(pkFile)
+	pkFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to write pk: %v", err)
+	}
+	fmt.Println("✓ Saved to proving.key")
+
+	// Save verification key
+	fmt.Println("Saving verification key...")
+	vkFile, err := os.Create("verification.key")
+	if err != nil {
+		log.Fatalf("Failed to create vk file: %v", err)
+	}
+	_, err = vk.WriteTo(vkFile)
+	vkFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to write vk: %v", err)
+	}
+	fmt.Println("✓ Saved to verification.key")
+	fmt.Println()
+
+	// Export Solidity verifier
+	fmt.Println("Exporting Solidity verifier...")
+	solidityFile, err := os.Create("Groth16Verifier.sol")
+	if err != nil {
+		log.Fatalf("Failed to create Solidity file: %v", err)
+	}
+	err = vk.ExportSolidity(solidityFile)
+	solidityFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to export Solidity verifier: %v", err)
+	}
+	fmt.Println("✓ Exported to Groth16Verifier.sol")
+
+	fmt.Println()
+	fmt.Println("Setup complete! Files created:")
+	fmt.Println("  circuit.r1cs      - Compiled circuit")
+	fmt.Println("  proving.key       - Proving key")
+	fmt.Println("  verification.key  - Verification key")
+	fmt.Println("  Groth16Verifier.sol - Solidity verifier")
+}
+
+// runProve loads saved keys, generates a Groth16 proof, and exports
+// the proof bytes in the format expected by the Solidity verifier.
+func runProve(proofFile string) {
+	fmt.Println("========================================")
+	fmt.Println("Groth16 Prove")
+	fmt.Println("========================================")
+	fmt.Println()
+
+	// Load Halo2 proof data
+	fmt.Printf("Loading Halo2 proof from %s...\n", proofFile)
+	proofData, err := LoadHalo2Proof(proofFile)
+	if err != nil {
+		log.Fatalf("Failed to load proof: %v", err)
+	}
+	fmt.Printf("✓ Loaded proof with %d public inputs\n", len(proofData.PublicInputs))
+	fmt.Println()
+
+	// Load R1CS
+	fmt.Println("Loading R1CS...")
+	ccs := groth16.NewCS(ecc.BN254)
+	ccsFile, err := os.Open("circuit.r1cs")
+	if err != nil {
+		log.Fatalf("Failed to open R1CS file (run 'setup' first): %v", err)
+	}
+	_, err = ccs.ReadFrom(ccsFile)
+	ccsFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to read R1CS: %v", err)
+	}
+	fmt.Println("✓ R1CS loaded")
+
+	// Load proving key
+	fmt.Println("Loading proving key...")
+	pk := groth16.NewProvingKey(ecc.BN254)
+	pkFile, err := os.Open("proving.key")
+	if err != nil {
+		log.Fatalf("Failed to open proving key (run 'setup' first): %v", err)
+	}
+	_, err = pk.ReadFrom(pkFile)
+	pkFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to read proving key: %v", err)
+	}
+	fmt.Println("✓ Proving key loaded")
+
+	// Load verification key
+	fmt.Println("Loading verification key...")
+	vk := groth16.NewVerifyingKey(ecc.BN254)
+	vkFile, err := os.Open("verification.key")
+	if err != nil {
+		log.Fatalf("Failed to open verification key (run 'setup' first): %v", err)
+	}
+	_, err = vk.ReadFrom(vkFile)
+	vkFile.Close()
+	if err != nil {
+		log.Fatalf("Failed to read verification key: %v", err)
+	}
+	fmt.Println("✓ Verification key loaded")
+	fmt.Println()
+
+	// Create witness
+	fmt.Println("Creating witness...")
 	witnessCircuit, err := NewHalo2VerifierCircuit(proofData)
 	if err != nil {
 		log.Fatalf("Failed to create witness circuit: %v", err)
 	}
-
 	witness, err := frontend.NewWitness(witnessCircuit, ecc.BN254.ScalarField())
 	if err != nil {
 		log.Fatalf("Failed to create witness: %v", err)
@@ -75,102 +222,61 @@ func main() {
 	fmt.Println("✓ Witness created")
 	fmt.Println()
 
-	// Step 6: Generate Groth16 proof
-	fmt.Println("Step 6: Generating Groth16 proof...")
+	// Generate proof
+	fmt.Println("Generating Groth16 proof...")
 	startProve := time.Now()
 	proof, err := groth16.Prove(ccs, pk, witness)
 	if err != nil {
 		log.Fatalf("Failed to prove: %v", err)
 	}
-	proveTime := time.Since(startProve)
-	fmt.Printf("✓ Groth16 proof generated in %v\n", proveTime)
+	fmt.Printf("✓ Proof generated in %v\n", time.Since(startProve))
 	fmt.Println()
 
-	// Step 7: Verify Groth16 proof
-	fmt.Println("Step 7: Verifying Groth16 proof...")
-	startVerify := time.Now()
+	// Verify proof
+	fmt.Println("Verifying proof...")
 	publicWitness, err := witness.Public()
 	if err != nil {
 		log.Fatalf("Failed to get public witness: %v", err)
 	}
 	err = groth16.Verify(proof, vk, publicWitness)
-	verifyTime := time.Since(startVerify)
 	if err != nil {
 		log.Fatalf("Verification failed: %v", err)
 	}
-	fmt.Printf("✓ Proof verified in %v\n", verifyTime)
+	fmt.Println("✓ Proof verified")
 	fmt.Println()
 
-	// Step 8: Export Solidity verifier
-	fmt.Println("Step 8: Exporting Solidity verifier...")
-	solidityFile, err := os.Create("Groth16Verifier.sol")
+	// Export proof bytes for Solidity
+	fmt.Println("Exporting proof bytes for Solidity...")
+	bn254Proof, ok := proof.(*groth16bn254.Proof)
+	if !ok {
+		log.Fatalf("Failed to cast proof to bn254.Proof")
+	}
+
+	// MarshalSolidity returns the proof as raw bytes in EIP-197 format:
+	// [Ar.X, Ar.Y, Bs.X.A1, Bs.X.A0, Bs.Y.A1, Bs.Y.A0, Krs.X, Krs.Y]
+	// = 8 * 32 = 256 bytes
+	proofBytes := bn254Proof.MarshalSolidity()
+	fmt.Printf("  Groth16 proof: %d bytes\n", len(proofBytes))
+
+	// Get promise_commit (7th public input, index 6)
+	promiseCommitStr := proofData.PublicInputs[6]
+	promiseCommit := new(big.Int)
+	promiseCommit.SetString(promiseCommitStr, 10)
+	promiseCommitBytes := make([]byte, 32)
+	promiseCommit.FillBytes(promiseCommitBytes)
+
+	// Concatenate: proof (256 bytes) + promise_commit (32 bytes) = 288 bytes
+	fullProofBytes := append(proofBytes, promiseCommitBytes...)
+	fmt.Printf("  Full proof (with promise_commit): %d bytes\n", len(fullProofBytes))
+
+	// Write as 0x-prefixed hex
+	hexStr := "0x" + hex.EncodeToString(fullProofBytes)
+	err = os.WriteFile("groth16_proof_bytes.hex", []byte(hexStr), 0644)
 	if err != nil {
-		log.Fatalf("Failed to create Solidity file: %v", err)
+		log.Fatalf("Failed to write proof bytes: %v", err)
 	}
-	defer solidityFile.Close()
-
-	err = vk.ExportSolidity(solidityFile)
-	if err != nil {
-		log.Fatalf("Failed to export Solidity verifier: %v", err)
-	}
-	fmt.Println("✓ Solidity verifier exported to Groth16Verifier.sol")
+	fmt.Println("✓ Proof bytes saved to groth16_proof_bytes.hex")
 	fmt.Println()
 
-	// Step 9: Check verifier size
-	fileInfo, err := os.Stat("Groth16Verifier.sol")
-	if err == nil {
-		fmt.Printf("  - Verifier size: %d bytes\n", fileInfo.Size())
-		if fileInfo.Size() < 24576 {
-			fmt.Println("  ✓ Verifier is under 24KB limit!")
-		} else {
-			fmt.Println("  ✗ Warning: Verifier exceeds 24KB limit")
-		}
-	}
-	fmt.Println()
-
-	// Step 10: Export proof data for on-chain testing
-	fmt.Println("Step 10: Exporting proof data for on-chain testing...")
-
-	// Create test data file
-	testFile, err := os.Create("groth16_test_data.txt")
-	if err != nil {
-		log.Fatalf("Failed to create test file: %v", err)
-	}
-	defer testFile.Close()
-
-	// Write public inputs (these are what we need for on-chain testing)
-	fmt.Fprintf(testFile, "PUBLIC_INPUTS=[")
-	for i, input := range proofData.PublicInputs {
-		if i > 0 {
-			fmt.Fprintf(testFile, ",")
-		}
-		fmt.Fprintf(testFile, "%s", input)
-	}
-	fmt.Fprintf(testFile, "]\n\n")
-
-	// Write note about proof format
-	fmt.Fprintf(testFile, "# Note: Groth16 proof is generated and verified off-chain\n")
-	fmt.Fprintf(testFile, "# For on-chain testing, use the Solidity verifier contract\n")
-	fmt.Fprintf(testFile, "# Public inputs count: %d\n", len(proofData.PublicInputs))
-
-	fmt.Println("✓ Test data exported to groth16_test_data.txt")
-	fmt.Println()
-
-	// Summary
-	fmt.Println("========================================")
-	fmt.Println("Summary")
-	fmt.Println("========================================")
-	fmt.Printf("Compile time:  %v\n", compileTime)
-	fmt.Printf("Setup time:    %v\n", setupTime)
-	fmt.Printf("Prove time:    %v\n", proveTime)
-	fmt.Printf("Verify time:   %v\n", verifyTime)
-	fmt.Printf("Total time:    %v\n", compileTime+setupTime+proveTime+verifyTime)
-	fmt.Println()
-	fmt.Println("Next steps:")
-	fmt.Println("1. Deploy Groth16Verifier.sol to Ethereum mainnet")
-	fmt.Println("2. Verify proofs on-chain using the tiny verifier")
-	fmt.Println()
-	fmt.Println("NOTE: This is a simplified demonstration.")
-	fmt.Println("A full implementation requires implementing complete PLONK verification logic.")
-	fmt.Println("See circuit.go for details on what needs to be implemented.")
+	fmt.Println("Done! Use groth16_proof_bytes.hex for on-chain withdrawal.")
 }

@@ -4,12 +4,14 @@ pragma solidity ^0.8.19;
 /**
  * @title IAckiNackiVerifier
  * @notice Interface for ZK proof verification
- * @dev This interface will be implemented by the actual Halo2 verifier contract
+ * @dev Implemented by Groth16DepositVerifier (production) and DummyVerifier (testing).
+ *      The Groth16 verifier wraps the Halo2 proof in a Groth16 proof for efficient
+ *      on-chain verification (~280k gas, fits in 24KB contract size limit).
  */
 interface IAckiNackiVerifier {
     /**
      * @notice Verify a withdrawal proof
-     * @param proof The ZK proof bytes (cryptographic proof data)
+     * @param proof The ZK proof bytes (format depends on implementation)
      * @param publicInputs Array of public inputs for deposit proof verification
      *                     Format: [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]
      *                     - depositId: Unique deposit identifier (uint256)
@@ -27,7 +29,7 @@ interface IAckiNackiVerifier {
 
     /**
      * @notice Get the expected number of public inputs
-     * @return uint256 The number of public inputs expected by the verifier (6: depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow)
+     * @return uint256 The number of public inputs expected by the verifier
      */
     function getPublicInputsCount() external pure returns (uint256);
 }

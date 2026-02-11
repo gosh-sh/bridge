@@ -74,6 +74,17 @@ else
     ((ERRORS++))
 fi
 
+# Check Go (needed for gnark-wrapper)
+echo -n "Checking Go... "
+if command -v go &> /dev/null; then
+    GO_VERSION=$(go version | awk '{print $3}')
+    echo -e "${GREEN}✓${NC} ($GO_VERSION)"
+else
+    echo -e "${RED}✗ Not found${NC}"
+    echo "  Install from: https://go.dev/dl/"
+    ((ERRORS++))
+fi
+
 # Check curl
 echo -n "Checking curl... "
 if command -v curl &> /dev/null; then
@@ -89,10 +100,10 @@ echo ""
 echo -n "Checking .env file... "
 if [ -f "$CONTRACTS_DIR/.env" ]; then
     echo -e "${GREEN}✓${NC} Found"
-    
+
     # Check required variables
     source "$CONTRACTS_DIR/.env"
-    
+
     echo -n "  SEPOLIA_RPC_URL... "
     if [ -z "$SEPOLIA_RPC_URL" ]; then
         echo -e "${RED}✗ Not set${NC}"
@@ -100,21 +111,21 @@ if [ -f "$CONTRACTS_DIR/.env" ]; then
     else
         echo -e "${GREEN}✓${NC}"
     fi
-    
+
     echo -n "  PRIVATE_KEY... "
     if [ -z "$PRIVATE_KEY" ]; then
         echo -e "${RED}✗ Not set${NC}"
         ((ERRORS++))
     else
         echo -e "${GREEN}✓${NC}"
-        
+
         # Check if private key has 0x prefix
         if [[ ! "$PRIVATE_KEY" =~ ^0x ]]; then
             echo -e "    ${YELLOW}⚠${NC} Private key should start with 0x"
             ((WARNINGS++))
         fi
     fi
-    
+
     echo -n "  ETHERSCAN_API_KEY... "
     if [ -z "$ETHERSCAN_API_KEY" ]; then
         echo -e "${YELLOW}⚠${NC} Not set (optional for testing)"
@@ -153,10 +164,10 @@ if [ ! -z "$PRIVATE_KEY" ] && [ ! -z "$SEPOLIA_RPC_URL" ]; then
     if [ ! -z "$WALLET_ADDRESS" ]; then
         BALANCE=$(cast balance "$WALLET_ADDRESS" --rpc-url "$SEPOLIA_RPC_URL" 2>/dev/null || echo "0")
         BALANCE_ETH=$(cast --from-wei "$BALANCE" 2>/dev/null || echo "0")
-        
+
         echo -e "${GREEN}✓${NC} $BALANCE_ETH ETH"
         echo "  Address: $WALLET_ADDRESS"
-        
+
         # Check if balance is sufficient
         BALANCE_FLOAT=$(echo "$BALANCE_ETH" | awk '{print $1}')
         if (( $(echo "$BALANCE_FLOAT < 0.15" | bc -l) )); then

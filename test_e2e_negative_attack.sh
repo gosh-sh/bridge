@@ -55,6 +55,18 @@ echo ""
 echo -e "${YELLOW}⚠️  This test simulates a real attack to prove the system is secure${NC}"
 echo ""
 
+GNARK_DIR="$DEPOSIT_PROVER_DIR/gnark-wrapper"
+
+# Step 0: Ensure Groth16 keys exist (must match deployed verifier from positive test)
+echo -e "${YELLOW}[0/7] Checking Groth16 setup...${NC}"
+if [ ! -f "$GNARK_DIR/proving.key" ] || [ ! -f "$GNARK_DIR/verification.key" ] || [ ! -f "$GNARK_DIR/circuit.r1cs" ]; then
+    echo -e "${RED}Groth16 keys not found. Run test_e2e.sh first to generate keys and deploy contracts.${NC}"
+    exit 1
+else
+    echo -e "${GREEN}✓ Groth16 keys found (using keys from positive test)${NC}"
+fi
+echo ""
+
 # Use existing deployment or deploy new contracts
 echo -e "${YELLOW}[1/7] Loading Bridge Contract...${NC}"
 cd "$CONTRACTS_DIR"
@@ -63,6 +75,7 @@ if [ -f "$SCRIPT_DIR/e2e_test_data/deployment.json" ]; then
     echo -e "${GREEN}Using existing deployment from e2e_test_data...${NC}"
     BRIDGE_ADDRESS=$(jq -r '.bridge_address' "$SCRIPT_DIR/e2e_test_data/deployment.json")
     VERIFIER_ADDRESS=$(jq -r '.verifier_address' "$SCRIPT_DIR/e2e_test_data/deployment.json")
+    ORACLE_ADDRESS=$(jq -r '.oracle_address' "$SCRIPT_DIR/e2e_test_data/deployment.json")
 else
     echo -e "${RED}Error: No deployment found. Run test_e2e.sh first to deploy contracts.${NC}"
     exit 1
@@ -70,6 +83,7 @@ fi
 
 echo "  Bridge: $BRIDGE_ADDRESS"
 echo "  Verifier: $VERIFIER_ADDRESS"
+echo "  Oracle: $ORACLE_ADDRESS"
 echo ""
 
 # Step 2: Make a SMALL deposit (0.00001 ETH)
@@ -131,22 +145,83 @@ echo ""
 # Step 4: Generate VALID proof for 0.00001 ETH deposit
 echo -e "${YELLOW}[4/7] Generating Valid Proof for 0.00001 ETH Deposit...${NC}"
 
+# Delete any existing snark file for this deposit ID to force regeneration
+# (gen_snark_shplonk loads existing files instead of regenerating)
+OLD_SNARK="$DEPOSIT_PROVER_DIR/data/deposit_proof_${DEPOSIT_ID}.snark"
+if [ -f "$OLD_SNARK" ]; then
+    echo "Removing stale snark file: $OLD_SNARK"
+    rm -f "$OLD_SNARK"
+fi
+
 echo "Generating SNARK proof (this may take several minutes)..."
 cargo run --release --example test_with_real_data -- \
     --input "$DATA_DIR/deposit_proof_input.json" \
     --generate-proof \
     --output "$DATA_DIR/valid_proof.json" \
-    --max-data-byte-len 1024
+    --max-data-byte-len 2048
 
-echo -e "${GREEN}✓ Valid proof generated!${NC}"
+echo -e "${GREEN}✓ Valid Halo2 proof generated!${NC}"
 echo "  Proof proves: 0.00001 ETH deposit"
 echo ""
 
-# Step 5: ATTACK - Modify public instances to claim 1 ETH
-echo -e "${MAGENTA}[5/7] 🎭 ATTACK: Modifying Public Instances...${NC}"
+# Step 5: Wrap Halo2 proof in Groth16
+echo -e "${YELLOW}[5/7] Wrapping Halo2 Proof in Groth16...${NC}"
 
-# Extract the valid proof bytes
-VALID_PROOF_BYTES=$(jq -r '.proof_bytes' "$DATA_DIR/valid_proof.json")
+# Extract deposit ID for snark file path
+SNARK_FILE="data/deposit_proof_${DEPOSIT_ID}.snark"
+
+if [ ! -f "$SNARK_FILE" ]; then
+    echo -e "${RED}Snark file not found: $SNARK_FILE${NC}"
+    exit 1
+fi
+
+# Export Halo2 proof to JSON format for gnark
+echo "Exporting Halo2 proof for gnark..."
+cargo run --release --example export_proof_for_gnark -- \
+    --input "$SNARK_FILE" \
+    --output "$GNARK_DIR/halo2_proof.json"
+
+# Generate Groth16 proof
+echo "Generating Groth16 proof..."
+cd "$GNARK_DIR"
+go run . prove halo2_proof.json
+
+if [ ! -f "groth16_proof_bytes.hex" ]; then
+    echo -e "${RED}Failed to generate Groth16 proof${NC}"
+    exit 1
+fi
+
+VALID_PROOF_BYTES=$(cat groth16_proof_bytes.hex)
+echo -e "${GREEN}✓ Groth16 proof generated (288 bytes)${NC}"
+echo ""
+
+# Step 5b: Set execution layer block hash on oracle
+# On post-merge Ethereum, blockhash() returns the beacon block root, not the execution
+# layer block hash. The Halo2 circuit proves the execution layer hash.
+echo -e "${YELLOW}[5b] Setting execution layer block hash on oracle...${NC}"
+
+EXEC_BLOCK_HASH=$(python3 -c "
+import json
+with open('$DATA_DIR/valid_proof.json') as f:
+    d = json.load(f)
+print('0x' + bytes(d['block_hash']).hex())
+")
+
+BLOCK_NUMBER_DEC=$(python3 -c "print(int('$BLOCK_NUMBER', 16))")
+
+cast send "$ORACLE_ADDRESS" \
+    "setBlockHash(uint256,bytes32)" \
+    "$BLOCK_NUMBER_DEC" \
+    "$EXEC_BLOCK_HASH" \
+    --rpc-url "$SEPOLIA_RPC_URL" \
+    --private-key "$PRIVATE_KEY" \
+    2>&1
+
+echo -e "${GREEN}✓ Block hash set on oracle${NC}"
+echo ""
+
+# Step 6: ATTACK - Attempt withdrawal with MODIFIED amount
+echo -e "${MAGENTA}[6/7] 🎭 ATTACK: Attempting Withdrawal with Modified Amount...${NC}"
 
 # Get sender address
 SENDER_ADDRESS=$(cast wallet address "$PRIVATE_KEY")
@@ -157,23 +232,11 @@ echo "  Original deposit: 0.00001 ETH ($ORIGINAL_AMOUNT wei)"
 echo "  Attacker claims:  0.00002 ETH ($STOLEN_AMOUNT wei)"
 echo "  Theft multiplier: 2x"
 echo ""
-echo -e "${YELLOW}Creating malicious public inputs with modified amount...${NC}"
-
-# Create MALICIOUS public inputs with STOLEN amount
-# [depositId, sender, STOLEN_AMOUNT, contractAddress, blockHashHigh, blockHashLow]
-# Note: We're using the SAME proof but DIFFERENT amount!
-
-echo ""
-
-# Step 6: Attempt withdrawal with MODIFIED public instances
-echo -e "${MAGENTA}[6/7] 🚨 Attempting Withdrawal with Modified Amount...${NC}"
-
-cd "$CONTRACTS_DIR"
-
-echo "Submitting withdrawal transaction with STOLEN amount..."
-echo "  Using valid proof for 0.00001 ETH"
+echo "  Using valid Groth16 proof for 0.00001 ETH"
 echo "  But claiming 0.00002 ETH in public inputs"
 echo ""
+
+cd "$CONTRACTS_DIR"
 
 # This should FAIL if public instances are properly constrained
 set +e  # Don't exit on error - we expect this to fail
@@ -241,10 +304,10 @@ if [ "$ATTACK_BLOCKED" = true ]; then
     echo "amount or any other public instance value."
     echo ""
     echo "Technical explanation:"
-    echo "  • The proof was generated for amount = 0.00001 ETH"
+    echo "  • The Groth16 proof was generated for amount = 0.00001 ETH"
     echo "  • Attacker tried to claim amount = 0.00002 ETH"
-    echo "  • Halo2's verification checked that proof.instances == provided.instances"
-    echo "  • Verification FAILED because instances don't match"
+    echo "  • Groth16 verification checked that proof matches provided public inputs"
+    echo "  • Verification FAILED because public inputs don't match the proof"
     echo "  • The bridge is SECURE against this attack vector"
     echo ""
     EXIT_CODE=0

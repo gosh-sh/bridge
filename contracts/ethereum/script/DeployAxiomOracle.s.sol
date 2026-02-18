@@ -9,13 +9,13 @@ import "../src/AxiomBlockHeaderOracle.sol";
 /// @dev Run with: forge script script/DeployAxiomOracle.s.sol --rpc-url $RPC_URL --broadcast
 contract DeployAxiomOracle is Script {
     // Axiom V2 Core addresses (official deployments)
-    // Source: https://docs.axiom.xyz/docs/developer-resources/contract-addresses
+    // Source: https://github.com/axiom-crypto/axiom-v2-contracts/blob/main/script/config/deployed.json
 
-    // Mainnet
-    address constant AXIOM_V2_CORE_MAINNET = address(0); // TODO: Update with official address
+    // Mainnet (1-prod core_address)
+    address constant AXIOM_V2_CORE_MAINNET = 0x69963768F8407dE501029680dE46945F838Fc98B;
 
-    // Sepolia
-    address constant AXIOM_V2_CORE_SEPOLIA = address(0); // TODO: Update with official address
+    // Sepolia (11155111-prod core_mock_address — same address via CREATE3, mock skips ZK verification)
+    address constant AXIOM_V2_CORE_SEPOLIA = 0x69963768F8407dE501029680dE46945F838Fc98B;
 
     function run() external {
         // Get deployer private key from environment

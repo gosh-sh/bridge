@@ -97,7 +97,7 @@ contract Groth16DepositVerifier is IAckiNackiVerifier {
         circuitInputs[3] = publicInputs[3]; // contractAddress
         circuitInputs[4] = publicInputs[4]; // blockHashHigh
         circuitInputs[5] = publicInputs[5]; // blockHashLow
-        circuitInputs[6] = promiseCommit;   // promise_commit
+        circuitInputs[6] = promiseCommit; // promise_commit
 
         // Call the Groth16 verifier — it reverts on invalid proof
         try groth16Verifier.verifyProof(groth16Proof, circuitInputs) {

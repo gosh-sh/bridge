@@ -49,7 +49,9 @@ contract Halo2PoseidonVerifierTest is Test {
         // Load proof calldata from file
         validCalldata = vm.readFileBinary("test/halo2_proof_calldata.bin");
         assertEq(
-            validCalldata.length, EXPECTED_CALLDATA_SIZE, "Calldata should be 2752 bytes (96 instance + 2656 proof)"
+            validCalldata.length,
+            EXPECTED_CALLDATA_SIZE,
+            "Calldata should be 2752 bytes (96 instance + 2656 proof)"
         );
     }
 
@@ -97,7 +99,8 @@ contract Halo2PoseidonVerifierTest is Test {
     function test_CorruptedProofReverts() public {
         bytes memory corruptedCalldata = _copyCalldata();
         // Corrupt a proof byte (after the 96-byte instance section)
-        corruptedCalldata[INSTANCE_SIZE + 10] = bytes1(uint8(corruptedCalldata[INSTANCE_SIZE + 10]) ^ 0xFF);
+        corruptedCalldata[INSTANCE_SIZE + 10] =
+            bytes1(uint8(corruptedCalldata[INSTANCE_SIZE + 10]) ^ 0xFF);
 
         (bool success,) = verifier.call(corruptedCalldata);
         assertFalse(success, "Corrupted proof should be rejected");

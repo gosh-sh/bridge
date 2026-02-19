@@ -29,9 +29,13 @@ contract AckiNackiBridge {
     IBlockHeaderOracle public blockHeaderOracle;
 
     // Events
-    event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
+    event Deposit(
+        uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp
+    );
 
-    event Withdrawal(uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp);
+    event Withdrawal(
+        uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp
+    );
 
     // Errors
     error InvalidAmount();
@@ -110,7 +114,8 @@ contract AckiNackiBridge {
         // Verify ZK proof
         // The proof verifies that a Deposit event was emitted with these parameters
         // AND that the event is in the specified Ethereum block
-        (bool isValid, bytes32 verifiedDepositId) = verifier.verifyWithdrawalProof(proof, publicInputs);
+        (bool isValid, bytes32 verifiedDepositId) =
+            verifier.verifyWithdrawalProof(proof, publicInputs);
         if (!isValid) revert InvalidProof();
 
         // Sanity check: verifier should return the same depositId

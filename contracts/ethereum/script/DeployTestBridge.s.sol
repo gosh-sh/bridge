@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/DummyVerifier.sol";
+import "../src/MockBlockHeaderOracle.sol";
 
 /**
  * @title DeployTestBridge
@@ -13,17 +14,21 @@ import "../src/DummyVerifier.sol";
 contract DeployTestBridge is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        
+
         vm.startBroadcast(deployerPrivateKey);
 
         // Deploy a simple test verifier
-        // For now, we'll use a minimal verifier that just checks proof format
-        // Later we'll replace this with the real Halo2 verifier
+        // For testing, we use a minimal verifier that just checks proof format
+        // For production, use Groth16DepositVerifier via DeployRealBridge.s.sol
         TestDepositVerifier verifier = new TestDepositVerifier();
         console.log("TestDepositVerifier deployed at:", address(verifier));
 
+        // Deploy mock block header oracle
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        console.log("MockBlockHeaderOracle deployed at:", address(oracle));
+
         // Deploy the bridge contract
-        AckiNackiBridge bridge = new AckiNackiBridge(address(verifier));
+        AckiNackiBridge bridge = new AckiNackiBridge(address(verifier), address(oracle));
         console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();
@@ -34,7 +39,11 @@ contract DeployTestBridge is Script {
         console.log("Verifier:", address(verifier));
         console.log("Bridge:", address(bridge));
         console.log("\nTo make a test deposit:");
-        console.log("cast send", address(bridge), "\"deposit(uint256)\" 100000000000000000 --value 0.1ether --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY");
+        console.log(
+            "cast send",
+            address(bridge),
+            "\"deposit(uint256)\" 100000000000000000 --value 0.1ether --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY"
+        );
         console.log("\nSave these addresses for testing!");
     }
 }
@@ -43,7 +52,7 @@ contract DeployTestBridge is Script {
  * @title TestDepositVerifier
  * @notice Simple test verifier for deposit proofs (TESTING ONLY - NOT SECURE!)
  * @dev This verifier accepts any proof with correct format for testing purposes
- *      In production, this will be replaced with the real Halo2 verifier
+ *      In production, use Groth16DepositVerifier
  */
 contract TestDepositVerifier is IAckiNackiVerifier {
     // Expected public inputs: [depositId, sender, amount, contractAddress]
@@ -56,10 +65,12 @@ contract TestDepositVerifier is IAckiNackiVerifier {
      * @return isValid Always true if inputs are valid format
      * @return depositId The deposit ID from public inputs
      */
-    function verifyWithdrawalProof(
-        bytes calldata proof,
-        uint256[] calldata publicInputs
-    ) external pure override returns (bool isValid, bytes32 depositId) {
+    function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
+        external
+        pure
+        override
+        returns (bool isValid, bytes32 depositId)
+    {
         // Validate proof is not empty (minimum check)
         if (proof.length == 0) {
             return (false, bytes32(0));
@@ -82,7 +93,6 @@ contract TestDepositVerifier is IAckiNackiVerifier {
         }
 
         // TEST MODE: Accept any proof with valid format
-        // In production, this will call the real Halo2 verifier
         return (true, bytes32(depositIdValue));
     }
 

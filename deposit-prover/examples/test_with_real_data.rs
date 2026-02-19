@@ -3,14 +3,21 @@
 //! This tool tests the deposit prover circuit with real Ethereum data.
 //!
 //! Usage:
-//!   cargo run --example test_with_real_data -- --input deposit_proof_input.json
+//!   # Test with MockProver only (fast)
+//!   cargo run --example test_with_real_data -- --input
+//! deposit_proof_input.json --mock-only
+//!
+//!   # Generate full SNARK proof
+//!   cargo run --example test_with_real_data -- --input
+//! deposit_proof_input.json --generate-proof --output proof_output.json
+
+use std::fs;
 
 use clap::Parser;
 use deposit_prover::{
-    prover::{test_circuit_mock, CircuitConfig},
+    prover::{generate_proof, test_circuit_mock, CircuitConfig},
     types::DepositProofInput,
 };
-use std::fs;
 
 #[derive(Parser, Debug)]
 #[command(name = "test-with-real-data")]
@@ -19,6 +26,18 @@ struct Args {
     /// Input file containing DepositProofInput (JSON)
     #[arg(long)]
     input: String,
+
+    /// Only run MockProver test (skip proof generation)
+    #[arg(long)]
+    mock_only: bool,
+
+    /// Generate full SNARK proof
+    #[arg(long)]
+    generate_proof: bool,
+
+    /// Output file for proof (JSON)
+    #[arg(long, default_value = "deposit_proof_output.json")]
+    output: String,
 
     /// Circuit degree (default: 18)
     #[arg(long, default_value = "18")]
@@ -48,7 +67,8 @@ fn main() -> anyhow::Result<()> {
     println!("  Block Number: {}", input.event_data.block_number);
     println!("  Deposit ID: {}", input.event_data.deposit_id);
     println!("  Sender: 0x{}", hex::encode(input.event_data.sender));
-    println!("  Amount: {} wei", input.event_data.amount);
+    // FIX BC-TYPES-001: amount is now [u8; 32]
+    println!("  Amount: 0x{}", hex::encode(input.event_data.amount));
     println!();
 
     // Create circuit config
@@ -69,19 +89,14 @@ fn main() -> anyhow::Result<()> {
     println!("Testing circuit with MockProver...");
     println!("This may take a few minutes...\n");
 
-    match test_circuit_mock(input, &config) {
+    match test_circuit_mock(input.clone(), &config) {
         Ok(()) => {
-            println!("\n✅ SUCCESS!");
-            println!("Circuit test passed with real Ethereum data!");
+            println!("\n✅ MockProver test PASSED!");
+            println!("Circuit is satisfied with real Ethereum data!");
             println!();
-            println!("Next steps:");
-            println!("1. Generate a full SNARK proof:");
-            println!("   cargo run --example generate_proof -- --input {}", args.input);
-            println!("2. Verify the proof:");
-            println!("   cargo run --example verify_proof -- --proof deposit_proof.bin");
-        }
+        },
         Err(e) => {
-            eprintln!("\n❌ FAILED!");
+            eprintln!("\n❌ MockProver test FAILED!");
             eprintln!("Circuit test failed: {}", e);
             eprintln!();
             eprintln!("Possible issues:");
@@ -90,9 +105,67 @@ fn main() -> anyhow::Result<()> {
             eprintln!("3. Event data doesn't match the receipt");
             eprintln!("4. Circuit parameters are too small");
             std::process::exit(1);
+        },
+    }
+
+    // If mock-only flag is set, stop here
+    if args.mock_only {
+        println!("Mock-only mode: Skipping proof generation");
+        println!();
+        println!("To generate a full SNARK proof, run:");
+        println!(
+            "  cargo run --example test_with_real_data -- --input {} --generate-proof",
+            args.input
+        );
+        return Ok(());
+    }
+
+    // Generate proof if requested
+    if args.generate_proof {
+        println!("\n=== Generating SNARK Proof ===\n");
+        println!("⚠️  This may take 5-10 minutes depending on your hardware...");
+        println!();
+
+        match generate_proof(input, &config) {
+            Ok(proof_output) => {
+                println!("\n✅ Proof generated successfully!");
+                println!();
+                println!("Public Outputs:");
+                println!("  Deposit ID: {}", proof_output.deposit_id);
+                println!("  Sender: 0x{}", hex::encode(&proof_output.sender));
+                // FIX BC-TYPES-001: amount is now [u8; 32]
+                println!("  Amount: 0x{}", hex::encode(proof_output.amount));
+                println!(
+                    "  Contract: 0x{}",
+                    hex::encode(&proof_output.contract_address)
+                );
+                println!();
+
+                // Save proof to file
+                println!("Saving proof to {}...", args.output);
+                let proof_json = serde_json::to_string_pretty(&proof_output)?;
+                fs::write(&args.output, proof_json)?;
+                println!("✓ Proof saved");
+                println!();
+
+                println!("Next steps:");
+                println!("1. Submit withdrawal transaction with this proof");
+                println!("2. Use the proof_bytes field for the withdraw() function");
+            },
+            Err(e) => {
+                eprintln!("\n❌ Proof generation FAILED!");
+                eprintln!("Error: {}", e);
+                eprintln!();
+                eprintln!("Possible issues:");
+                eprintln!("1. Insufficient memory (16GB+ recommended)");
+                eprintln!("2. KZG parameters not found or corrupted");
+                eprintln!("3. Circuit configuration mismatch");
+                std::process::exit(1);
+            },
         }
+    } else {
+        println!("To generate a full SNARK proof, add --generate-proof flag");
     }
 
     Ok(())
 }
-

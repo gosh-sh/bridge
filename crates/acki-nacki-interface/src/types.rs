@@ -1,13 +1,15 @@
 //! Types for Acki Nacki transactions and data structures
 
-use crypto::Hash;
 use serde::{Deserialize, Serialize};
+
+/// Transaction hash type (32 bytes)
+pub type TxHash = [u8; 32];
 
 /// Transaction on Acki Nacki blockchain
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AckiNackiTransaction {
     /// Transaction hash
-    pub tx_hash: Hash,
+    pub tx_hash: TxHash,
     /// Sender address
     pub from: String,
     /// Recipient address (contract)
@@ -23,7 +25,7 @@ pub struct AckiNackiTransaction {
 impl AckiNackiTransaction {
     /// Create a new transaction
     pub fn new(
-        tx_hash: Hash,
+        tx_hash: TxHash,
         from: String,
         to: String,
         data: Vec<u8>,
@@ -41,7 +43,7 @@ impl AckiNackiTransaction {
     }
 
     /// Get transaction hash
-    pub fn hash(&self) -> &Hash {
+    pub fn hash(&self) -> &TxHash {
         &self.tx_hash
     }
 }
@@ -66,9 +68,7 @@ impl TransactionStatus {
     pub fn is_finalized(&self) -> bool {
         matches!(
             self,
-            TransactionStatus::Confirmed
-                | TransactionStatus::Failed
-                | TransactionStatus::Reverted
+            TransactionStatus::Confirmed | TransactionStatus::Failed | TransactionStatus::Reverted
         )
     }
 
@@ -82,7 +82,7 @@ impl TransactionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionReceipt {
     /// Transaction hash
-    pub tx_hash: Hash,
+    pub tx_hash: TxHash,
     /// Status
     pub status: TransactionStatus,
     /// Block number
@@ -96,7 +96,7 @@ pub struct TransactionReceipt {
 impl TransactionReceipt {
     /// Create a new receipt
     pub fn new(
-        tx_hash: Hash,
+        tx_hash: TxHash,
         status: TransactionStatus,
         block_number: Option<u64>,
         gas_used: u64,
@@ -123,14 +123,14 @@ pub struct Log {
     /// Contract address that emitted the log
     pub address: String,
     /// Topics (indexed parameters)
-    pub topics: Vec<Hash>,
+    pub topics: Vec<TxHash>,
     /// Data (non-indexed parameters)
     pub data: Vec<u8>,
 }
 
 impl Log {
     /// Create a new log
-    pub fn new(address: String, topics: Vec<Hash>, data: Vec<u8>) -> Self {
+    pub fn new(address: String, topics: Vec<TxHash>, data: Vec<u8>) -> Self {
         Self {
             address,
             topics,
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn test_transaction_creation() {
         let tx = AckiNackiTransaction::new(
-            Hash::new([1u8; 32]),
+            [1u8; 32],
             "sender".to_string(),
             "recipient".to_string(),
             vec![1, 2, 3],
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_receipt_creation() {
         let receipt = TransactionReceipt::new(
-            Hash::new([1u8; 32]),
+            [1u8; 32],
             TransactionStatus::Confirmed,
             Some(12345),
             50000,
@@ -183,4 +183,3 @@ mod tests {
         assert_eq!(receipt.block_number, Some(12345));
     }
 }
-

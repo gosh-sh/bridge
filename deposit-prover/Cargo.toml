@@ -16,51 +16,52 @@ path = "src/lib.rs"
 [dependencies]
 # Axiom-eth for Ethereum state proofs
 axiom-eth = { git = "https://github.com/axiom-crypto/axiom-eth", default-features = false, features = [
-    "providers",
-    "display",
-    "aggregation",
+  "providers",
+  "display",
+  "aggregation",
 ] }
 
 # Halo2 - axiom-crypto ecosystem (required by axiom-eth)
 halo2-base = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-    "halo2-pse",
-    "display",
+  "halo2-pse",
+  "display",
 ] }
 halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-    "halo2-pse",
-    "display",
+  "halo2-pse",
+  "display",
 ] }
 halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2", tag = "v2023_04_20" }
 
 # SNARK verifier - axiom-crypto
 snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
-    "loader_evm",
-    "loader_halo2",
-    "halo2-pse",
+  "loader_evm",
+  "loader_halo2",
+  "halo2-pse",
 ] }
 snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
-    "loader_evm",
-    "loader_halo2",
-    "halo2-pse",
+  "loader_evm",
+  "loader_halo2",
+  "halo2-pse",
 ] }
+
 
 # Poseidon hash - for commitment computation
 # Use axiom-eth's poseidon implementation
 zkevm-hashes = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-    "halo2-pse",
+  "halo2-pse",
 ] }
 
 # Ethereum - using specific version to avoid DepositTransaction issue
 ethers = { git = "https://github.com/gakonst/ethers-rs", rev = "f0e5b194f09c533feb10d1a686ddb9e5946ec107", features = [
-    "abigen",
-    "ws",
-    "rustls",
+  "abigen",
+  "ws",
+  "rustls",
 ] }
 # ethers-core - must match axiom-eth's version exactly
 ethers-core = { version = "=2.0.14", features = ["optimism"] }
 
 # RLP encoding/decoding
-rlp = "0.5"
+alloy-rlp = { version = "0.3", features = ["derive"] }
 ethereum-types = "0.14"
 
 # Merkle-Patricia Trie
@@ -80,7 +81,10 @@ thiserror = "2.0"
 anyhow = "1.0"
 tokio = { version = "1.42", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
+ppot-rs = { version = "0.1.1", optional = true }
+sha2 = "0.10.9"
+num-bigint = "0.4"
 
-[dev-dependencies]
-rand = "0.8"
-tempfile = "3.8"
+[features]
+# Optional: .ptau file conversion support
+ppot-rs = ["dep:ppot-rs"]

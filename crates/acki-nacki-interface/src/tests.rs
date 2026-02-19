@@ -1,14 +1,13 @@
 //! Integration tests for Acki Nacki interface
 
 use super::*;
-use crypto::Hash;
 
 #[tokio::test]
 async fn test_mock_acki_nacki_basic_flow() {
     let mock = MockAckiNacki::new();
 
     let tx = AckiNackiTransaction::new(
-        Hash::new([1u8; 32]),
+        [1u8; 32],
         "sender".to_string(),
         "contract".to_string(),
         vec![1, 2, 3],
@@ -34,7 +33,7 @@ async fn test_transaction_sender_with_retry() {
     let sender = MockTransactionSender::new(mock.clone());
 
     let tx = AckiNackiTransaction::new(
-        Hash::new([2u8; 32]),
+        [2u8; 32],
         "sender".to_string(),
         "contract".to_string(),
         vec![],
@@ -56,7 +55,7 @@ async fn test_send_and_wait() {
     let sender = MockTransactionSender::new(mock);
 
     let tx = AckiNackiTransaction::new(
-        Hash::new([3u8; 32]),
+        [3u8; 32],
         "sender".to_string(),
         "contract".to_string(),
         vec![],
@@ -68,4 +67,3 @@ async fn test_send_and_wait() {
     let receipt = sender.send_and_wait(tx, 10).await.unwrap();
     assert!(receipt.is_success());
 }
-

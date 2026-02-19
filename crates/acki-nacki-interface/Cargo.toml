@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-crypto = { path = "../crypto" }
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true

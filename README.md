@@ -2,6 +2,21 @@
 
 A secure, privacy-preserving bridge between Ethereum and Acki Nacki blockchain using zero-knowledge proofs.
 
+## 🎨 Beautiful Web Interface
+
+We now have a **stunning, production-ready frontend** built with Rust + Yew + WebAssembly!
+
+👉 **[See Frontend Documentation](./FRONTEND_SUMMARY.md)**
+
+### Quick Start Frontend
+```bash
+cd frontend
+./setup.sh
+trunk serve
+```
+
+Open http://localhost:8080 to see the beautiful UI!
+
 ## Overview
 
 This project implements a 1-to-1 token bridge between Ethereum and Acki Nacki blockchain with the following features:

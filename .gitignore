@@ -83,3 +83,18 @@ contracts/ethereum/test/test_proof.json
 
 # Temporary proof files generated during testing
 contracts/ethereum/proof_temp*.txt
+
+# E2E test data (generated during test runs)
+e2e_test_data/
+e2e_attack_test_data/
+*.e2e.json
+
+# ZK proof generation artifacts
+data/
+deposit-prover/params/
+*.pk
+*.snark
+*.bkp
+
+# KZG parameters (downloaded from trusted setup, not stored in git)
+deposit-prover/data/*.srs

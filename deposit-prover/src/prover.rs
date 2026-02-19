@@ -1,14 +1,17 @@
 //! Proof Generation Module
 //!
-//! This module provides the infrastructure for generating and verifying ZK proofs
-//! for deposit events using the axiom-eth circuit.
+//! This module provides the infrastructure for generating and verifying ZK
+//! proofs for deposit events using the axiom-eth circuit.
 //!
 //! ## Architecture
 //!
 //! The proof generation follows axiom-eth's pattern:
-//! 1. **Circuit Creation**: Use `create_circuit` to wrap `DepositEventCircuitV2` in `EthCircuitImpl`
-//! 2. **Mock Testing**: Use `MockProver` to test circuit logic without generating proofs
-//! 3. **Proof Generation**: Create SNARK proofs (key generation happens automatically)
+//! 1. **Circuit Creation**: Use `create_circuit` to wrap
+//!    `DepositEventCircuitV2` in `EthCircuitImpl`
+//! 2. **Mock Testing**: Use `MockProver` to test circuit logic without
+//!    generating proofs
+//! 3. **Proof Generation**: Create SNARK proofs (key generation happens
+//!    automatically)
 //!
 //! ## Usage
 //!
@@ -51,28 +54,30 @@
 //! let verifier_sol = gen_evm_verifier_shplonk(&params, &vk, &circuit, None::<&str>);
 //! ```
 
-use crate::circuit_v2::DepositEventCircuitV2;
-use crate::types::{DepositProofInput, DepositProofOutput};
-use axiom_eth::rlc::circuit::RlcCircuitParams;
-use axiom_eth::utils::eth_circuit::create_circuit;
+use std::{
+    fs::{self, File},
+    path::Path,
+};
+
+use axiom_eth::{
+    rlc::{circuit::RlcCircuitParams, virtual_region::RlcThreadBreakPoints},
+    utils::eth_circuit::create_circuit,
+};
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
         dev::MockProver,
-        halo2curves::{
-            bn256::{Bn256, Fr, G1Affine},
-            ff::PrimeField,
-        },
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
         plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
-    utils::fs::gen_srs,
 };
-use snark_verifier_sdk::{
-    evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark,
+use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark};
+
+use crate::{
+    circuit_v2::DepositEventCircuitV2,
+    types::{DepositProofInput, DepositProofOutput},
 };
-use std::fs::{self, File};
-use std::path::Path;
 
 /// Configuration for the deposit proof circuit
 #[derive(Debug, Clone)]
@@ -94,10 +99,13 @@ pub struct CircuitConfig {
 impl Default for CircuitConfig {
     fn default() -> Self {
         Self {
-            degree: 18,                    // 2^18 = ~256K rows
-            max_data_byte_len: 256,        // Max event data size
-            max_log_num: 20,               // Max logs per receipt
-            topic_num_bounds: (0, 4),      // 0-4 topics per log
+            degree: 15, /* 2^15 = ~32K rows (OPTION B+: Ultra-aggressive optimization - last
+                         * attempt before aggregation) */
+            max_data_byte_len: 128, /* Max event data size (reduced from 256 - Deposit event
+                                     * needs ~128 bytes) */
+            max_log_num: 3, /* Max logs per receipt (OPTION B+: Ultra-aggressive - most deposit
+                             * txs have 1-3 logs) */
+            topic_num_bounds: (0, 4), // 0-4 topics per log
         }
     }
 }
@@ -121,7 +129,8 @@ pub fn get_default_params() -> RlcCircuitParams {
 
 /// Test the circuit with MockProver (fast, no proof generation).
 ///
-/// This is useful for testing circuit logic without the overhead of generating proofs.
+/// This is useful for testing circuit logic without the overhead of generating
+/// proofs.
 ///
 /// # Arguments
 ///
@@ -157,42 +166,40 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     Ok(())
 }
 
-/// Save KZG parameters to disk
-fn save_kzg_params(params: &ParamsKZG<Bn256>, path: &str) -> Result<(), String> {
-    use halo2_base::halo2_proofs::poly::commitment::Params;
-
-    // Create parent directory if it doesn't exist
-    if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
-    }
-
-    let mut file = File::create(path)
-        .map_err(|e| format!("Failed to create file: {}", e))?;
-
-    params.write(&mut file)
-        .map_err(|e| format!("Failed to write params: {}", e))?;
-
-    Ok(())
-}
-
 /// Load KZG parameters from disk
 fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
     use halo2_base::halo2_proofs::poly::commitment::Params;
 
-    let mut file = File::open(path)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
-    ParamsKZG::<Bn256>::read(&mut file)
-        .map_err(|e| format!("Failed to read params: {}", e))
+    ParamsKZG::<Bn256>::read(&mut file).map_err(|e| format!("Failed to read params: {}", e))
 }
 
-/// Generate or load KZG parameters for the given circuit degree.
+/// Load KZG parameters from trusted setup.
 ///
-/// This function will:
-/// - Try to load existing parameters from `data/kzg_params_{k}.srs`
-/// - If not found, generate new parameters (this can take several minutes)
-/// - Save newly generated parameters to disk for future reuse
+/// This function loads KZG parameters from a trusted setup ceremony.
+/// It will NEVER generate random parameters - this ensures production safety.
+///
+/// # Security
+///
+/// The parameters MUST come from a trusted setup ceremony where:
+/// - Multiple independent participants contributed randomness
+/// - The "toxic waste" (secret τ) was destroyed
+/// - The ceremony is publicly verifiable
+///
+/// # Setup Instructions
+///
+/// Download pre-converted KZG parameters from the halo2-kzg-srs project:
+///
+/// ```bash
+/// cd deposit-prover
+/// ./download_trusted_setup.sh
+/// ```
+///
+/// This downloads the pre-converted `.srs` file (33 MB) from the Hermez/Polygon
+/// Powers of Tau ceremony, already in Halo2 format.
+///
+/// See `TRUSTED_SETUP.md` for detailed instructions.
 ///
 /// # Arguments
 ///
@@ -200,8 +207,15 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 ///
 /// # Returns
 ///
-/// KZG parameters for the given degree
-pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
+/// KZG parameters for the given degree, or an error if not found
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The parameters file doesn't exist
+/// - The file is corrupted or invalid
+/// - The file format is incorrect
+pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, String> {
     let params_path = format!("data/kzg_params_{}.srs", k);
 
     // Try to load existing parameters
@@ -209,26 +223,80 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
         println!("Loading KZG parameters from {}", params_path);
         match load_kzg_params(&params_path) {
             Ok(params) => {
-                println!("Successfully loaded KZG parameters from disk");
+                println!("✅ Successfully loaded KZG parameters from trusted setup");
                 return Ok(params);
-            }
+            },
             Err(e) => {
-                println!("Warning: Failed to load KZG params: {}. Regenerating...", e);
+                return Err(format!(
+                    "\n╔══════════════════════════════════════════════════════════════╗\n\
+                     ║  ❌ Failed to load KZG parameters!                           ║\n\
+                     ╠══════════════════════════════════════════════════════════════╣\n\
+                     ║  File exists but is corrupted or invalid: {}                 \n\
+                     ║                                                              ║\n\
+                     ║  Error: {}                                                   \n\
+                     ║                                                              ║\n\
+                     ║  Steps to fix:                                              ║\n\
+                     ║  1. Delete the corrupted file:                              ║\n\
+                     ║     rm {}                                                    \n\
+                     ║                                                              ║\n\
+                     ║  2. Re-download trusted setup:                              ║\n\
+                     ║     cd deposit-prover                                       ║\n\
+                     ║     ./download_trusted_setup.sh                             ║\n\
+                     ║                                                              ║\n\
+                     ║  See TRUSTED_SETUP.md for detailed instructions.            ║\n\
+                     ╚══════════════════════════════════════════════════════════════╝\n",
+                    params_path, e, params_path
+                ));
+            },
+        }
+    }
+
+    // Parameters not found - try to use degree 18 parameters (downward compatible)
+    if k < 18 {
+        let fallback_path = "data/kzg_params_18.srs";
+        if Path::new(fallback_path).exists() {
+            println!(
+                "⚠️  KZG parameters for degree {} not found, using degree 18 (downward compatible)",
+                k
+            );
+            match load_kzg_params(fallback_path) {
+                Ok(params) => {
+                    println!("✅ Successfully loaded KZG parameters from trusted setup");
+                    return Ok(params);
+                },
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to load fallback KZG parameters from {}: {}",
+                        fallback_path, e
+                    ));
+                },
             }
         }
     }
 
-    println!("Generating KZG parameters for k={} (this may take a few minutes)...", k);
-    let params = gen_srs(k);
-
-    // Save parameters to disk for reuse
-    if let Err(e) = save_kzg_params(&params, &params_path) {
-        println!("Warning: Failed to save KZG params: {}", e);
-    } else {
-        println!("KZG parameters saved to {}", params_path);
-    }
-
-    Ok(params)
+    // Parameters not found - provide clear instructions
+    Err(format!(
+        "\n╔══════════════════════════════════════════════════════════════╗\n\
+         ║  ❌ KZG parameters not found!                                ║\n\
+         ╠══════════════════════════════════════════════════════════════╣\n\
+         ║  File not found: {}                                          \n\
+         ║                                                              ║\n\
+         ║  You MUST use trusted setup parameters from a ceremony.     ║\n\
+         ║  Random parameter generation has been DISABLED for security. ║\n\
+         ║                                                              ║\n\
+         ║  Steps to fix:                                              ║\n\
+         ║                                                              ║\n\
+         ║  Download pre-converted KZG parameters:                     ║\n\
+         ║     cd deposit-prover                                       ║\n\
+         ║     ./download_trusted_setup.sh                             ║\n\
+         ║                                                              ║\n\
+         ║  This downloads the pre-converted .srs file (33 MB) from    ║\n\
+         ║  the Hermez/Polygon Powers of Tau ceremony.                 ║\n\
+         ║                                                              ║\n\
+         ║  See TRUSTED_SETUP.md for detailed instructions.            ║\n\
+         ╚══════════════════════════════════════════════════════════════╝\n",
+        params_path
+    ))
 }
 
 /// Generate or load proving key for the deposit circuit.
@@ -239,11 +307,14 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// - If not found, generate new proving key from the circuit
 /// - Save newly generated proving key to disk for future reuse
 ///
-/// Note: gen_pk from snark-verifier-sdk handles loading automatically if the file exists
+/// Note: gen_pk from snark-verifier-sdk handles loading automatically if the
+/// file exists
 ///
 /// # Arguments
 ///
 /// * `params` - KZG parameters
+/// * `input` - Real deposit proof input (needed for keygen to determine circuit
+///   structure)
 /// * `config` - Circuit configuration
 /// * `pk_path` - Path to save/load proving key
 ///
@@ -252,27 +323,54 @@ pub fn get_or_create_kzg_params(k: u32) -> Result<ParamsKZG<Bn256>, String> {
 /// Proving key for the circuit
 pub fn get_or_create_proving_key(
     params: &ParamsKZG<Bn256>,
+    input: &DepositProofInput,
     config: &CircuitConfig,
     pk_path: &Path,
-) -> Result<ProvingKey<G1Affine>, String> {
-    // Create a placeholder circuit for key generation
-    // Note: Witness data doesn't matter for keygen, only circuit structure
-    let placeholder_input = create_keygen_placeholder_input();
-    let circuit_input = DepositEventCircuitV2::new(placeholder_input, config);
+) -> Result<(ProvingKey<G1Affine>, RlcCircuitParams, RlcThreadBreakPoints), String> {
+    // Create circuit for key generation using real input
+    // Note: For axiom-eth circuits, we need real RLP data even for keygen
+    // because the circuit structure depends on the data layout
+    let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
-    let circuit = create_circuit(CircuitBuilderStage::Keygen, circuit_params.clone(), circuit_input);
+    let mut circuit = create_circuit(
+        CircuitBuilderStage::Keygen,
+        circuit_params.clone(),
+        circuit_input,
+    );
 
-    // gen_pk will automatically load from pk_path if it exists, or generate and save if not
-    if pk_path.exists() {
+    // CRITICAL: Fulfill Keccak promises and calculate params BEFORE keygen
+    // This is required for axiom-eth circuits even in Keygen mode
+    // See: axiom-eth/src/storage/tests.rs for reference
+    circuit.mock_fulfill_keccak_promises(None);
+    circuit.calculate_params();
+
+    // Generate or load proving key
+    let pk = if pk_path.exists() {
         println!("Found existing proving key at {:?}, loading...", pk_path);
+        gen_pk(params, &circuit, Some(pk_path))
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-    }
-
-    let pk = gen_pk(params, &circuit, Some(pk_path));
+        use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
+        let vk = keygen_vk(params, &circuit)
+            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
+        keygen_pk(params, vk, &circuit)
+            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
+    };
     println!("Proving key ready");
 
-    Ok(pk)
+    // Get the calculated circuit params from the keygen circuit
+    // These are needed to create the prover circuit with the same structure
+    use halo2_base::halo2_proofs::plonk::Circuit;
+    let calculated_params = circuit.params().rlc;
+
+    // Get break points from the keygen circuit
+    // These are needed when creating the prover circuit
+    // NOTE: We always get break points from the keygen circuit we just created,
+    // even if the proving key was loaded from disk. This is because break points
+    // are deterministic and depend only on the circuit structure.
+    let break_points = circuit.break_points();
+
+    Ok((pk, calculated_params, break_points))
 }
 
 /// Generate a full SNARK proof for a deposit event.
@@ -298,21 +396,29 @@ pub fn generate_proof(
     let k = config.degree;
 
     // 1. Get KZG parameters
-    let params = get_or_create_kzg_params(k)
-        .map_err(|e| format!("Failed to get KZG params: {}", e))?;
+    let params = load_kzg_params_from_trusted_setup(k)
+        .map_err(|e| format!("Failed to load KZG params: {}", e))?;
 
-    // 2. Get proving key
+    // 2. Get proving key, calculated params, and break points (using real input for
+    //    keygen)
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
     fs::create_dir_all("data").map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-    let pk = get_or_create_proving_key(&params, config, pk_path)
-        .map_err(|e| format!("Failed to get proving key: {}", e))?;
+    let (pk, circuit_params, break_points) =
+        get_or_create_proving_key(&params, &input, config, pk_path)
+            .map_err(|e| format!("Failed to get proving key: {}", e))?;
 
-    // 3. Create prover circuit with real input
-    let circuit_params = get_default_params();
+    // 3. Create prover circuit with real input, calculated params, and break points
+    // IMPORTANT: Use the circuit_params from keygen, not get_default_params()
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
-    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input);
+    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input)
+        .use_break_points(break_points);
+
+    // CRITICAL: Fulfill Keccak promises AFTER setting break points
+    // This is required for axiom-eth circuits in Prover mode
+    // See: axiom-eth/src/storage/tests.rs for reference
+    circuit.mock_fulfill_keccak_promises(None);
 
     // 4. Generate SNARK proof
     println!("Generating SNARK proof...");
@@ -322,16 +428,21 @@ pub fn generate_proof(
     println!("Proof generated successfully!");
 
     // 5. Extract public outputs and serialize proof
-    let proof_bytes = bincode::serialize(&snark)
-        .map_err(|e| format!("Failed to serialize proof: {}", e))?;
+    let proof_bytes =
+        bincode::serialize(&snark).map_err(|e| format!("Failed to serialize proof: {}", e))?;
 
-    Ok(DepositProofOutput {
-        proof: proof_bytes,
-        deposit_id: input.event_data.deposit_id,
-        sender: input.event_data.sender,
-        amount: input.event_data.amount,
-        contract_address: input.event_data.contract_address,
-    })
+    // 6. Compute block hash from block header RLP
+    use ethers::utils::keccak256;
+    let block_hash: [u8; 32] = keccak256(&input.receipt_proof.block_header_rlp);
+
+    Ok(DepositProofOutput::new(
+        proof_bytes,
+        input.event_data.deposit_id,
+        input.event_data.sender,
+        input.event_data.amount,
+        input.event_data.contract_address,
+        block_hash,
+    ))
 }
 
 /// Verify a SNARK proof.
@@ -341,20 +452,18 @@ pub fn generate_proof(
 /// # Arguments
 ///
 /// * `proof` - The proof output to verify
-/// * `config` - Circuit configuration (must match the one used for proof generation)
+/// * `config` - Circuit configuration (must match the one used for proof
+///   generation)
 ///
 /// # Returns
 ///
 /// `Ok(true)` if the proof is valid, `Ok(false)` if invalid, `Err` on error
-pub fn verify_proof(
-    proof: &DepositProofOutput,
-    config: &CircuitConfig,
-) -> Result<bool, String> {
+pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Result<bool, String> {
     let k = config.degree;
 
     // 1. Get KZG parameters (needed for verification)
-    let _params = get_or_create_kzg_params(k)
-        .map_err(|e| format!("Failed to get KZG params: {}", e))?;
+    let _params = load_kzg_params_from_trusted_setup(k)
+        .map_err(|e| format!("Failed to load KZG params: {}", e))?;
 
     // 2. Deserialize SNARK
     let snark: Snark = bincode::deserialize(&proof.proof)
@@ -369,27 +478,43 @@ pub fn verify_proof(
         return Err("Proof has no public instances".to_string());
     }
 
-    // Check that we have exactly 4 public inputs (depositId, sender, amount, contract)
-    if snark.instances[0].len() != 4 {
+    // FIX BC-CIRCUIT-004: Check that we have exactly 7 public inputs
+    // (depositId, sender, amount, contract_address, block_hash_high,
+    // block_hash_low, promise_commit)
+    if snark.instances[0].len() != 7 {
         return Err(format!(
-            "Expected 4 public inputs, got {}",
+            "Expected 7 public inputs (6 user values + promise_commit), got {}",
             snark.instances[0].len()
         ));
     }
 
+    // Helper function to convert bytes to field element using Horner's method
+    // This matches the circuit's bytes_to_field() logic
+    fn bytes_to_field(bytes: &[u8]) -> Fr {
+        let mut result = Fr::zero();
+        let base = Fr::from(256);
+        for &byte in bytes.iter() {
+            result = result * base + Fr::from(byte as u64);
+        }
+        result
+    }
+
     // Verify public inputs match the claimed values
     let deposit_id_field = Fr::from(proof.deposit_id);
-    let sender_field = Fr::from_u128(u128::from_be_bytes({
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&proof.sender[4..20]);
-        bytes
-    }));
-    let amount_field = Fr::from_u128(proof.amount as u128);
-    let contract_field = Fr::from_u128(u128::from_be_bytes({
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&proof.contract_address[4..20]);
-        bytes
-    }));
+
+    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of sender address
+    let sender_field = bytes_to_field(&proof.sender);
+
+    // FIX BC-TYPES-001: Convert ALL 32 bytes of amount
+    let amount_field = bytes_to_field(&proof.amount);
+
+    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of contract address
+    let contract_field = bytes_to_field(&proof.contract_address);
+
+    // FIX BC-PROVER-003 Issue C: Convert block_hash to high/low field elements
+    // Block hash is split into two 128-bit (16-byte) field elements
+    let block_hash_high = bytes_to_field(&proof.block_hash[0..16]);
+    let block_hash_low = bytes_to_field(&proof.block_hash[16..32]);
 
     if snark.instances[0][0] != deposit_id_field {
         return Err("Public input mismatch: depositId".to_string());
@@ -403,13 +528,25 @@ pub fn verify_proof(
     if snark.instances[0][3] != contract_field {
         return Err("Public input mismatch: contract_address".to_string());
     }
+    // FIX BC-PROVER-003 Issue C: Verify block_hash_high and block_hash_low
+    if snark.instances[0][4] != block_hash_high {
+        return Err("Public input mismatch: block_hash_high".to_string());
+    }
+    if snark.instances[0][5] != block_hash_low {
+        return Err("Public input mismatch: block_hash_low".to_string());
+    }
 
     println!("✓ Proof structure valid");
-    println!("✓ Public inputs verified");
+    println!("✓ Public inputs verified (7 instances: 6 user values + promise_commit)");
     println!("  depositId: {}", proof.deposit_id);
     println!("  sender: 0x{}", hex::encode(proof.sender));
-    println!("  amount: {}", proof.amount);
+    println!("  amount: 0x{}", hex::encode(proof.amount));
     println!("  contract: 0x{}", hex::encode(proof.contract_address));
+    println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
+    println!(
+        "  promise_commit: 0x{}",
+        hex::encode(snark.instances[0][6].to_bytes())
+    );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
     println!("      This check only validates proof structure and public inputs");
@@ -419,12 +556,13 @@ pub fn verify_proof(
 
 /// Generate a Solidity verifier contract.
 ///
-/// This function generates a Solidity smart contract that can verify proofs on-chain.
-/// The verifier is generated using the SHPLONK multi-open scheme.
+/// This function generates a Solidity smart contract that can verify proofs
+/// on-chain. The verifier is generated using the SHPLONK multi-open scheme.
 ///
 /// # Arguments
 ///
-/// * `config` - Circuit configuration (must match the one used for proof generation)
+/// * `config` - Circuit configuration (must match the one used for proof
+///   generation)
 /// * `output_path` - Path where to save the Solidity verifier contract
 ///
 /// # Returns
@@ -447,26 +585,32 @@ pub fn generate_solidity_verifier(
 
     // 1. Get KZG parameters
     println!("Loading KZG parameters...");
-    let params = get_or_create_kzg_params(k)?;
+    let params = load_kzg_params_from_trusted_setup(k)?;
 
     // 2. Get proving key (which contains the verifying key)
     println!("Loading proving key...");
     let pk_path_str = format!("data/deposit_prover_k{}.pk", k);
     let pk_path = Path::new(&pk_path_str);
-    let pk = get_or_create_proving_key(&params, config, pk_path)?;
+
+    // Use placeholder input for verifier generation
+    let placeholder_input = create_keygen_placeholder_input();
+    let (pk, _circuit_params, _break_points) =
+        get_or_create_proving_key(&params, &placeholder_input, config, pk_path)?;
 
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
 
     // 4. Define number of public instances
-    // We have 4 public outputs: [depositId, sender, amount, contract_address]
-    let num_instance = vec![4];
+    // FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
+    // We have 7 public outputs: [depositId, sender, amount,
+    // contract_address, block_hash_high, block_hash_low, promise_commit]
+    let num_instance = vec![7];
 
     // 5. Generate Solidity verifier using SHPLONK
     println!("Generating Solidity code...");
     use axiom_eth::utils::eth_circuit::EthCircuitImpl;
 
-    let _bytecode = gen_evm_verifier_shplonk::<EthCircuitImpl<Fr, DepositEventCircuitV2>>(
+    let bytecode = gen_evm_verifier_shplonk::<EthCircuitImpl<Fr, DepositEventCircuitV2>>(
         &params,
         vk,
         num_instance,
@@ -474,17 +618,56 @@ pub fn generate_solidity_verifier(
     );
 
     println!("✅ Solidity verifier generated at: {:?}", output_path);
-    println!("   Contract size: {} bytes", _bytecode.len());
+    println!("   Contract size: {} bytes", bytecode.len());
+
+    // 6. Also save the deployment bytecode for direct deployment
+    let bytecode_path = output_path.with_extension("bytecode");
+    let bytecode_hex_path = output_path.with_extension("bytecode.hex");
+
+    fs::write(&bytecode_path, &bytecode)
+        .map_err(|e| format!("Failed to write bytecode file: {}", e))?;
+
+    let hex_string = format!("0x{}", hex::encode(&bytecode));
+    fs::write(&bytecode_hex_path, &hex_string)
+        .map_err(|e| format!("Failed to write hex bytecode file: {}", e))?;
+
+    println!("✅ Deployment bytecode saved:");
+    println!("   Raw:  {:?} ({} bytes)", bytecode_path, bytecode.len());
+    println!(
+        "   Hex:  {:?} ({} chars)",
+        bytecode_hex_path,
+        hex_string.len()
+    );
+
+    if bytecode.len() > 24576 {
+        println!("\n⚠️  WARNING: Bytecode exceeds 24KB Ethereum contract size limit!");
+        println!(
+            "   Size: {:.1} KB (limit: 24 KB)",
+            bytecode.len() as f64 / 1024.0
+        );
+        println!("   This verifier can only be deployed on:");
+        println!("   - Testnets (no size limit enforcement)");
+        println!("   - L2 networks with higher limits (Arbitrum, Optimism, zkSync)");
+    } else {
+        println!(
+            "\n✅ Bytecode is within 24KB limit ({:.1} KB)",
+            bytecode.len() as f64 / 1024.0
+        );
+    }
 
     Ok(())
 }
 
-/// Create a placeholder input for key generation.
+/// Create a minimal valid RLP input for key generation.
 ///
-/// This creates a minimal valid input that can be used to generate proving/verifying keys.
-/// The actual witness data doesn't matter for keygen - only the circuit structure matters.
-/// This is a standard pattern in ZK-SNARK systems.
+/// This creates a minimal valid RLP structure that can be used to generate
+/// proving/verifying keys. For axiom-eth circuits, we need valid RLP data even
+/// for keygen because the circuit structure depends on the RLP parsing logic.
+///
+/// This creates a minimal valid Ethereum receipt with a single log entry.
 fn create_keygen_placeholder_input() -> DepositProofInput {
+    use alloy_rlp::Encodable;
+
     use crate::types::{DepositEventData, ReceiptProof};
 
     let event_data = DepositEventData {
@@ -493,16 +676,72 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         log_index: 0,
         deposit_id: 0,
         sender: [0u8; 20],
-        amount: 0,
+        amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
         timestamp: 0,
         contract_address: [0u8; 20],
     };
 
+    // Create a minimal valid receipt RLP with one log
+    // Receipt structure: [status, cumulative_gas, bloom, logs]
+
+    // Build topics list: [event_sig, depositId, sender]
+    let mut topics_buf = Vec::new();
+    vec![0u8; 32].encode(&mut topics_buf); // event signature
+    vec![0u8; 32].encode(&mut topics_buf); // depositId
+    vec![0u8; 32].encode(&mut topics_buf); // sender
+    let mut topics_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: topics_buf.len(),
+    }
+    .encode(&mut topics_list);
+    topics_list.extend_from_slice(&topics_buf);
+
+    // Build log: [address, topics, data]
+    let mut log_buf = Vec::new();
+    vec![0u8; 20].encode(&mut log_buf); // contract address
+    log_buf.extend_from_slice(&topics_list); // topics (already has list header)
+    vec![0u8; 64].encode(&mut log_buf); // data (amount + timestamp)
+    let mut log_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: log_buf.len(),
+    }
+    .encode(&mut log_list);
+    log_list.extend_from_slice(&log_buf);
+
+    // Build logs array containing one log
+    let mut logs_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: log_list.len(),
+    }
+    .encode(&mut logs_list);
+    logs_list.extend_from_slice(&log_list);
+
+    // Build receipt: [status, cumulative_gas, bloom, logs]
+    let mut receipt_buf = Vec::new();
+    1u8.encode(&mut receipt_buf); // status = 1 (success)
+    21000u64.encode(&mut receipt_buf); // cumulative_gas
+    vec![0u8; 256].encode(&mut receipt_buf); // bloom filter (256 bytes)
+    receipt_buf.extend_from_slice(&logs_list); // logs (already has list header)
+
+    let mut receipt_rlp = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: receipt_buf.len(),
+    }
+    .encode(&mut receipt_rlp);
+    receipt_rlp.extend_from_slice(&receipt_buf);
+
+    // Create a minimal MPT proof (single node)
+    let proof_nodes = vec![receipt_rlp.clone()];
+
     let receipt_proof = ReceiptProof {
-        receipt_rlp: vec![],
-        proof_nodes: vec![],
+        receipt_rlp,
+        proof_nodes,
         receipt_root: [0u8; 32],
-        block_header_rlp: vec![],
+        block_header_rlp: vec![0u8; 100], // minimal block header
     };
 
     DepositProofInput {
@@ -518,51 +757,24 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = CircuitConfig::default();
-        assert_eq!(config.degree, 18);
-        assert_eq!(config.max_data_byte_len, 256);
-        assert_eq!(config.max_log_num, 20);
+        assert_eq!(config.degree, 15); // Updated for Option B+ ultra-aggressive optimization
+        assert_eq!(config.max_data_byte_len, 128); // Updated for Option B+ optimization
+        assert_eq!(config.max_log_num, 3); // Updated for Option B+ ultra-aggressive optimization
         assert_eq!(config.topic_num_bounds, (0, 4));
     }
 
     #[test]
     fn test_load_circuit_params() {
         let params = load_circuit_params("configs/circuit_params.json");
-        assert!(params.is_ok(), "Failed to load circuit params: {:?}", params.err());
+        assert!(
+            params.is_ok(),
+            "Failed to load circuit params: {:?}",
+            params.err()
+        );
 
         let params = params.unwrap();
         assert_eq!(params.base.k, 18);
         assert_eq!(params.num_rlc_columns, 3);
-    }
-
-    #[test]
-    fn test_kzg_params_save_load() {
-        use halo2_base::halo2_proofs::poly::commitment::Params;
-        use tempfile::tempdir;
-
-        // Create a temporary directory
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let params_path = temp_dir.path().join("test_params.srs");
-        let params_path_str = params_path.to_str().unwrap();
-
-        // Generate small params for testing (k=4 is very small and fast)
-        let k = 4;
-        let params = gen_srs(k);
-
-        // Save params
-        let save_result = save_kzg_params(&params, params_path_str);
-        assert!(save_result.is_ok(), "Failed to save params: {:?}", save_result.err());
-        assert!(params_path.exists(), "Params file was not created");
-
-        // Load params
-        let load_result = load_kzg_params(params_path_str);
-        assert!(load_result.is_ok(), "Failed to load params: {:?}", load_result.err());
-
-        let loaded_params = load_result.unwrap();
-
-        // Verify params match (check the degree)
-        assert_eq!(params.k(), loaded_params.k(), "Loaded params have different degree");
-
-        // Cleanup is automatic when temp_dir goes out of scope
     }
 
     #[test]
@@ -572,13 +784,15 @@ mod tests {
         // Verify placeholder has expected zero values
         assert_eq!(input.event_data.deposit_id, 0);
         assert_eq!(input.event_data.sender, [0u8; 20]);
-        assert_eq!(input.event_data.amount, 0);
+        assert_eq!(input.event_data.amount, [0u8; 32]); // FIX BC-TYPES-001
         assert_eq!(input.event_data.timestamp, 0);
         assert_eq!(input.event_data.contract_address, [0u8; 20]);
 
-        // Verify receipt proof has minimal structure
-        assert_eq!(input.receipt_proof.proof_nodes.len(), 0);
+        // Verify receipt proof has minimal structure (1 proof node)
+        assert_eq!(input.receipt_proof.proof_nodes.len(), 1);
         assert_eq!(input.receipt_proof.receipt_root, [0u8; 32]);
+        assert!(!input.receipt_proof.receipt_rlp.is_empty());
+        assert!(!input.receipt_proof.block_header_rlp.is_empty());
     }
 
     #[test]
@@ -590,7 +804,7 @@ mod tests {
         assert_eq!(params.num_rlc_columns, 3);
     }
 
-    // Note: test_circuit_mock requires real Ethereum data and is tested in integration tests
-    // Note: Full proof generation tests are too slow for unit tests (5-10 minutes)
+    // Note: test_circuit_mock requires real Ethereum data and is tested in
+    // integration tests Note: Full proof generation tests are too slow for
+    // unit tests (5-10 minutes)
 }
-

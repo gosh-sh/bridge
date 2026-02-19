@@ -1,19 +1,12 @@
 //! Deposit flow implementation
 
-use crate::error::Result;
-use crypto::{Hash, SecureRng};
-
 /// Deposit manager
-pub struct DepositManager {
-    rng: SecureRng,
-}
+pub struct DepositManager {}
 
 impl DepositManager {
     /// Create a new deposit manager
     pub fn new() -> Self {
-        Self {
-            rng: SecureRng::new(),
-        }
+        Self {}
     }
 }
 
@@ -22,4 +15,3 @@ impl Default for DepositManager {
         Self::new()
     }
 }
-

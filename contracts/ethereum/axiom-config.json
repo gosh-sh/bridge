@@ -1,0 +1,20 @@
+{
+  "description": "Axiom V2 Core contract addresses for different networks",
+  "source": "https://github.com/axiom-crypto/axiom-v2-contracts/blob/main/script/config/deployed.json",
+  "networks": {
+    "mainnet": {
+      "chainId": 1,
+      "axiomV2Core": "0x69963768F8407dE501029680dE46945F838Fc98B",
+      "note": "Official AxiomV2Core address from axiom-v2-contracts deployed.json (1-prod core_address)"
+    },
+    "sepolia": {
+      "chainId": 11155111,
+      "axiomV2Core": "0x69963768F8407dE501029680dE46945F838Fc98B",
+      "note": "Official AxiomV2CoreMock address from axiom-v2-contracts deployed.json (11155111-prod core_mock_address). Same address as mainnet via CREATE3. Mock skips ZK proof verification but implements the same interface."
+    }
+  },
+  "usage": {
+    "description": "Use these addresses when deploying AxiomBlockHeaderOracle",
+    "example": "forge script script/DeployAxiomOracle.s.sol --rpc-url $RPC_URL --broadcast"
+  }
+}

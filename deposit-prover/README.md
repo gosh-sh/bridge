@@ -49,12 +49,42 @@ pub struct PrivateInputs {
     // User secrets
     pub withdrawal_hash: [u8; 32],
     pub nullifier_preimage: [u8; 32],
-    
+
     // Ethereum proof data
     pub event_data: DepositEventData,
     pub receipt_proof: ReceiptProof,
 }
 ```
+
+## Setup
+
+### 1. Download Trusted Setup
+
+⚠️ **Required**: Before using the prover, download the trusted setup parameters:
+
+```bash
+./download_trusted_setup.sh
+```
+
+This downloads pre-converted KZG parameters in Halo2 format (~33 MB) from the [halo2-kzg-srs](https://github.com/han0110/halo2-kzg-srs) project. The parameters are from the Hermez/Polygon Powers of Tau ceremony with 100+ participants.
+
+**That's it!** The prover is now ready to use with the trusted setup.
+
+**Why this matters**: The prover will ONLY use trusted setup parameters. Random parameter generation has been disabled for security. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
+
+### 2. Install Groth16 Wrapper Dependencies (For Mainnet Deployment)
+
+⚠️ **Required for Ethereum mainnet deployment**: The Halo2 verifier is 28.8KB, exceeding Ethereum's 24KB contract size limit. We use a Groth16 wrapper to generate a tiny (~1-2KB) verifier.
+
+```bash
+# Install Go and build tools
+sudo ./install_dependencies.sh
+
+# Setup gnark library
+./setup_gnark.sh
+```
+
+See [GROTH16_WRAPPER.md](GROTH16_WRAPPER.md) for detailed documentation on the Groth16 wrapper architecture.
 
 ## Usage
 
@@ -115,12 +145,14 @@ The deposit prover is called by the Ethereum frontend when a user wants to withd
 ## Development
 
 Build:
+
 ```bash
 cd deposit-prover
 cargo build --release
 ```
 
 Test:
+
 ```bash
 cargo test
 ```
@@ -130,4 +162,3 @@ cargo test
 - [axiom-eth](https://github.com/axiom-crypto/axiom-eth) - Ethereum state proof library
 - [Ethereum Light Client Protocol](https://github.com/ethereum/annotated-spec/blob/master/altair/sync-protocol.md)
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
-

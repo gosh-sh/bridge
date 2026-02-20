@@ -1,256 +1,421 @@
 # Acki Nacki Bridge
 
-A secure, privacy-preserving bridge between Ethereum and Acki Nacki blockchain using zero-knowledge proofs.
-
-## 🎨 Beautiful Web Interface
-
-We now have a **stunning, production-ready frontend** built with Rust + Yew + WebAssembly!
-
-👉 **[See Frontend Documentation](./FRONTEND_SUMMARY.md)**
-
-### Quick Start Frontend
-```bash
-cd frontend
-./setup.sh
-trunk serve
-```
-
-Open http://localhost:8080 to see the beautiful UI!
+A cross-chain bridge between Ethereum and [Acki Nacki](https://ackinacki.com/) blockchain, using zero-knowledge proofs for trustless withdrawal verification.
 
 ## Overview
 
-This project implements a 1-to-1 token bridge between Ethereum and Acki Nacki blockchain with the following features:
+The bridge enables bidirectional token transfers between Ethereum and Acki Nacki:
 
-- **Privacy-preserving deposits**: Uses commitments and Merkle trees (Tornado Cash style)
-- **Zero-knowledge proofs**: Halo2/PLONK proofs for withdrawal authorization
-- **Poseidon hash**: ZK-friendly hash function for efficient proof generation
-- **Incremental Merkle tree**: Efficient on-chain storage and proof generation
-- **Nullifier system**: Prevents double-spending
+- **Ethereum → Acki Nacki** (deposits): Users deposit ETH on Ethereum, a `Deposit` event is emitted, and a ZK proof of that event is generated off-chain and verified on the destination chain.
+- **Acki Nacki → Ethereum** (withdrawals): Proofs generated on Acki Nacki (using Blake2b transcript) are verified on Ethereum via a Solidity verifier using the EIP-152 Blake2f precompile.
+
+The ZK proof pipeline ensures that withdrawals can only be executed with a valid proof tied to a real deposit event in a real Ethereum block.
 
 ## Architecture
 
-The bridge consists of four main components:
+```
+                        Ethereum → Acki Nacki (Deposits)
+┌─────────────────┐     ┌──────────────────────┐     ┌──────────────────┐
+│ AckiNackiBridge  │────▶│ Groth16DepositVerifier│────▶│ Groth16Verifier  │
+│   deposit()      │     │ (IAckiNackiVerifier)  │     │ (gnark-generated)│
+│   withdraw()     │     └──────────────────────┘     └──────────────────┘
+└─────────────────┘              │
+        │                        ├── DummyVerifier (testing)
+        │                        └── Halo2Verifier (Keccak256 transcript, fallback)
+        │
+        └── IBlockHeaderOracle
+              ├── MockBlockHeaderOracle (testing / E2E on Sepolia)
+              └── AxiomBlockHeaderOracle (production — Axiom V2)
 
-1. **Ethereum Frontend** (`crates/eth-frontend`): Rust client for interacting with Ethereum
-2. **Ethereum Contract** (`contracts/ethereum`): Solidity smart contract managing deposits/withdrawals
-3. **Acki Nacki Frontend**: Rust client for Acki Nacki (interface provided)
-4. **Acki Nacki Contract**: Smart contract on Acki Nacki side (to be implemented by Acki Nacki team)
 
-### Core Crates
-
-- **crypto** (`crates/crypto`): Cryptographic primitives (Poseidon hash, commitments, field elements)
-- **merkle-tree** (`crates/merkle-tree`): Incremental Merkle tree implementation
-- **zk-proofs** (`crates/zk-proofs`): Halo2 circuits for deposit and withdrawal proofs
-- **acki-nacki-interface** (`crates/acki-nacki-interface`): Interface for Acki Nacki integration
-
-### Smart Contracts
-
-- **AckiNackiBridge** (`contracts/ethereum/src/AckiNackiBridge.sol`): Main bridge contract
-- **IAckiNackiVerifier** (`contracts/ethereum/src/IAckiNackiVerifier.sol`): Verifier interface
-- **DummyVerifier** (`contracts/ethereum/src/DummyVerifier.sol`): Testing verifier implementation
-
-The bridge uses a modular verifier architecture where ZK proof verification is separated into its own contract. This allows for easy testing with a dummy verifier and future upgrades to the real Halo2 verifier. See `contracts/ethereum/VERIFIER.md` for details.
-
-**Poseidon Hash**: Both Rust and Solidity implementations use PoseidonT3 (width 3, rate 2)
-for ZK-friendly hashing. See `docs/POSEIDON_INTEGRATION.md` for compatibility details.
-
-## Quick Start
-
-### Prerequisites
-
-- Rust (latest stable or nightly)
-- Foundry (for Solidity development and testing)
-
-### Installation
-
-Run the setup script to install all dependencies:
-
-```bash
-./setup.sh
+                        Acki Nacki → Ethereum (Cross-chain verification)
+┌─────────────────────┐     ┌──────────────────────────┐
+│ poseidon-proof (Rust)│────▶│ Blake2bHalo2Verifier.sol │
+│ - Poseidon circuit   │     │ - EIP-152 Blake2b        │
+│ - Blake2b transcript │     │ - Blake2bTranscript.sol  │
+│ - Proof generation   │     │ - Blake2bChallengeComputer│
+└─────────────────────┘     └──────────────────────────┘
 ```
 
-This will install:
-- Rust toolchain with rustfmt and clippy
-- Foundry (forge, cast, anvil, chisel)
-- Additional Rust tools (cargo-nextest, cargo-watch, cargo-audit)
-- OpenZeppelin contracts
-- Git hooks for pre-commit checks
+### ZK Proof Pipeline (Ethereum → Acki Nacki)
 
-### Building
+1. User deposits ETH → `Deposit(depositId, sender, amount, timestamp)` event emitted
+2. **deposit-prover** (Rust + axiom-eth): Fetches the deposit receipt + MPT proof from Ethereum, builds a Halo2 circuit proving the event was emitted by the bridge contract in a valid block
+3. **gnark-wrapper** (Go): Wraps the Halo2 SNARK proof in a Groth16 proof — the Halo2 verifier alone exceeds Ethereum's 24KB contract size limit; the Groth16 verifier is ~2KB
+4. On-chain: `AckiNackiBridge.withdraw()` calls `Groth16DepositVerifier`, which calls the gnark-generated `Groth16Verifier`, and verifies the block hash via `IBlockHeaderOracle`
 
-Build the entire project (Rust + Solidity):
+### ZK Proof Pipeline (Acki Nacki → Ethereum)
 
-```bash
-./build.sh
-```
-
-Build with tests:
-
-```bash
-./build.sh --test
-```
-
-Build with all checks (format, clippy, tests):
-
-```bash
-./build.sh --all
-```
-
-### Generating the Verifier
-
-The Halo2 verifier is a generated Yul contract that must be regenerated whenever the circuit changes:
-
-```bash
-make generate-verifier
-```
-
-This generates:
-- `contracts/ethereum/Halo2Verifier.yul` - Yul verifier source
-- `contracts/ethereum/verifier_bytecode.bin` - Deployable bytecode
-- `contracts/ethereum/verifier_bytecode.hex` - Hex-encoded bytecode
-
-**Note**: These files are build artifacts (excluded from git) and can be regenerated at any time.
-
-For more details, see `docs/VERIFIER_GENERATION.md`.
-
-### Testing
-
-#### Unit Tests
-
-Run all Rust unit tests:
-
-```bash
-cargo test --workspace
-```
-
-Run Solidity tests:
-
-```bash
-cd contracts/ethereum
-forge test
-```
-
-#### Integration Tests
-
-Integration tests require a local Ethereum node (Anvil).
-
-1. Start Anvil in a separate terminal:
-   ```bash
-   anvil
-   ```
-
-2. Deploy the contract (see `crates/eth-frontend/tests/README.md` for details)
-
-3. Run integration tests:
-   ```bash
-   cargo test --package eth-frontend --test integration_test -- --ignored
-   ```
-
-## Deposit Flow
-
-1. User generates two random secrets: `withdrawal_hash` and `nullifier`
-2. Compute commitment: `commitment = Poseidon(withdrawal_hash, nullifier)`
-3. Send deposit transaction to Ethereum contract with commitment and ETH amount
-4. Contract adds commitment to Merkle tree and emits event
-5. Frontend generates ZK proof of knowledge and sends to Acki Nacki contract
-6. User receives equivalent tokens on Acki Nacki
-
-## Withdrawal Flow
-
-1. User initiates withdrawal on Acki Nacki frontend
-2. Frontend generates ZK proof that proves:
-   - Knowledge of `withdrawal_hash` and `nullifier`
-   - The commitment exists in the Merkle tree
-   - The nullifier hasn't been used before
-3. Submit proof to Ethereum contract
-4. Contract verifies proof, marks nullifier as used, and transfers ETH to recipient
-
-## Test Coverage
-
-### Rust Tests
-- **crypto**: 16 tests (Poseidon hash, commitments, field elements)
-- **merkle-tree**: 29 tests (incremental tree, proofs, serialization)
-- **zk-proofs**: 14 tests (deposit/withdrawal circuits, proof generation)
-- **eth-frontend**: 9 unit tests + 7 integration tests
-
-### Solidity Tests
-- **AckiNackiBridge**: 19 tests (deposits, withdrawals, Merkle tree, nullifiers, verifier integration)
-
-## Development
-
-### Code Quality
-
-Format code:
-```bash
-./build.sh --format
-```
-
-Run linter:
-```bash
-./build.sh --clippy
-```
-
-### Continuous Integration
-
-The project uses GitLab CI/CD for automated testing and deployment. See `docs/CI_SETUP.md` for details.
-
-Key features:
-- Automated Rust and Solidity builds
-- Comprehensive test suite (unit, integration, doc tests)
-- Code quality checks (rustfmt, clippy, forge fmt)
-- Security audits (cargo audit, slither)
-- Automatic npm dependency installation for Poseidon library
-
-### Continuous Development
-
-Auto-rebuild on changes:
-```bash
-cargo watch -x check
-```
-
-### Security
-
-Run security audit:
-```bash
-cargo audit
-```
+1. **poseidon-proof** (Rust): Generates Halo2 proofs with Blake2b transcript (native to Acki Nacki) proving knowledge of a Poseidon hash preimage
+2. On-chain: `Blake2bHalo2Verifier.sol` verifies the proof using EIP-152 for Blake2b compression, with a separate `Blake2bChallengeComputer` contract for Fiat-Shamir challenges
 
 ## Project Structure
 
 ```
 acki-nacki-bridge/
-├── crates/
-│   ├── crypto/              # Cryptographic primitives
-│   ├── merkle-tree/         # Incremental Merkle tree
-│   ├── zk-proofs/           # Halo2 circuits
-│   ├── eth-frontend/        # Ethereum client
-│   └── acki-nacki-interface/# Acki Nacki interface
-├── contracts/
-│   └── ethereum/            # Solidity contracts
-│       ├── src/             # Contract source
-│       └── test/            # Contract tests
-├── build.sh                 # Build script
-├── setup.sh                 # Setup script
-└── README.md
+├── contracts/ethereum/          # Solidity smart contracts (Foundry)
+│   ├── src/
+│   │   ├── AckiNackiBridge.sol          # Main bridge: deposit() + withdraw()
+│   │   ├── IAckiNackiVerifier.sol       # Verifier interface
+│   │   ├── Groth16DepositVerifier.sol   # Production verifier (wraps gnark Groth16Verifier)
+│   │   ├── Groth16Verifier.sol          # Auto-generated by gnark
+│   │   ├── DummyVerifier.sol            # Test verifier (accepts any valid format)
+│   │   ├── Halo2Verifier.sol            # Keccak256-transcript Halo2 verifier
+│   │   ├── Blake2bHalo2Verifier.sol     # Blake2b-transcript Halo2 verifier (EIP-152)
+│   │   ├── Blake2bTranscript.sol        # Blake2b transcript Fiat-Shamir protocol
+│   │   ├── Blake2bChallengeComputer.sol # Separate contract for challenge computation
+│   │   ├── IBlockHeaderOracle.sol       # Block hash oracle interface
+│   │   ├── MockBlockHeaderOracle.sol    # Test oracle (setBlockHash / blockhash() fallback)
+│   │   └── AxiomBlockHeaderOracle.sol   # Production oracle (Axiom V2)
+│   ├── test/                            # Foundry tests (62 tests)
+│   ├── script/                          # Deployment scripts
+│   └── foundry.toml                     # Foundry config (solc 0.8.19, via_ir)
+│
+├── deposit-prover/              # Standalone Rust crate (axiom-eth ecosystem)
+│   ├── src/
+│   │   ├── circuit_v2.rs                # Halo2 circuit: proves Deposit event via MPT
+│   │   ├── ethereum_fetcher.rs          # Fetches receipts + MPT proofs from Ethereum
+│   │   ├── mpt.rs                       # Merkle-Patricia Trie proof construction
+│   │   ├── rlp_utils.rs                # RLP encoding/decoding utilities
+│   │   ├── prover.rs                    # Proof generation and verification
+│   │   ├── aggregation.rs              # Proof aggregation support
+│   │   ├── groth16_wrapper/             # Rust-side Groth16 proof parsing
+│   │   └── types.rs                     # DepositEventData, ReceiptProof, etc.
+│   ├── gnark-wrapper/                   # Go project: Halo2 → Groth16 wrapper
+│   │   ├── main.go                      # CLI: setup / prove commands
+│   │   ├── circuit.go                   # Gnark circuit definition
+│   │   ├── transcript.go               # Keccak256 transcript in Go
+│   │   ├── kzg.go                       # KZG commitment verification
+│   │   └── proof_parser.go             # Halo2 proof parsing
+│   ├── examples/                        # Utility binaries
+│   └── configs/                         # Circuit configuration files
+│
+├── poseidon-proof/              # Standalone Rust crate (halo2-axiom 0.5.x)
+│   ├── src/
+│   │   ├── circuit.rs                   # Poseidon preimage circuit (Blake2b transcript)
+│   │   ├── poseidon.rs                  # Native Poseidon hash (outside circuit)
+│   │   └── bin/
+│   │       ├── generate_proof.rs        # Generate proof + export artifacts
+│   │       ├── generate_verifier.rs     # Generate Solidity verifier bytecode
+│   │       ├── generate_calldata.rs     # Generate calldata for on-chain verification
+│   │       └── test_keccak_evm.rs       # EVM verification test (Keccak transcript)
+│   └── data/                            # Generated artifacts (vk, proof, params)
+│
+├── crates/                      # Main Cargo workspace
+│   ├── acki-nacki-interface/            # Acki Nacki blockchain interface traits + types
+│   └── eth-frontend/                    # Ethereum client (deposit, withdrawal, status)
+│
+├── frontend/                    # WASM web frontend (Yew + Rust)
+│   ├── src/
+│   │   ├── lib.rs                       # Main Yew app component
+│   │   ├── web3.rs                      # MetaMask / web3 integration
+│   │   ├── components/                  # UI components (header, deposit, withdraw, etc.)
+│   │   └── hooks/                       # Custom Yew hooks
+│   └── index.html
+│
+├── test_e2e.sh                  # Positive E2E test (Sepolia)
+├── test_e2e_negative.sh         # Negative E2E test (13 rejection paths)
+├── test_e2e_negative_attack.sh  # Attack simulation test
+├── test_fuzz_e2e.sh             # Fuzz E2E test (random amounts)
+├── test_poseidon.sh             # Poseidon proof pipeline test
+├── Makefile                     # Build/test/deploy shortcuts
+├── setup.sh                     # Install all dependencies
+├── build.sh                     # Build Rust + Solidity
+└── test.sh                      # Run all unit tests
 ```
+
+### Workspace Layout
+
+The project has **three separate Cargo workspaces** due to dependency incompatibilities:
+
+| Workspace           | Crates                                 | Halo2 ecosystem                   | Reason                             |
+| ------------------- | -------------------------------------- | --------------------------------- | ---------------------------------- |
+| Root (`Cargo.toml`) | `eth-frontend`, `acki-nacki-interface` | —                                 | Main workspace, no ZK dependencies |
+| `deposit-prover/`   | `deposit-prover`                       | axiom-eth + halo2-pse v2023_04_20 | Axiom-crypto's halo2 fork          |
+| `poseidon-proof/`   | `poseidon-proof`                       | halo2-axiom 0.5.x                 | Axiom's native halo2 fork          |
+
+The `frontend/` crate is also excluded (WASM target with Yew web framework).
+
+## Smart Contracts
+
+All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19 via Foundry.
+
+### Core
+
+| Contract                 | Description                                                                                                                                                                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AckiNackiBridge.sol`    | Main bridge contract. `deposit()` accepts ETH and emits a `Deposit` event. `withdraw()` verifies a ZK proof (via `IAckiNackiVerifier`) and the block hash (via `IBlockHeaderOracle`), then transfers ETH to the recipient.        |
+| `IAckiNackiVerifier.sol` | Interface for ZK verifiers. `verifyWithdrawalProof(bytes proof, uint256[] publicInputs)` returns `(bool isValid, bytes32 depositId)`. Public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]`. |
+| `IBlockHeaderOracle.sol` | Interface for block hash oracles. `getBlockHash(uint256 blockNumber)`, `isBlockHashAvailable(uint256)`, `getLatestVerifiedBlock()`.                                                                                               |
+
+### Verifiers
+
+| Contract                       | Description                                                                                                                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Groth16DepositVerifier.sol`   | **Production verifier.** Implements `IAckiNackiVerifier`. Decodes 288-byte proof (256-byte Groth16 proof + 32-byte `promise_commit`), assembles 7 circuit public inputs, and calls the gnark-generated `Groth16Verifier`. |
+| `Groth16Verifier.sol`          | Auto-generated by gnark (`go run . setup` in `deposit-prover/gnark-wrapper/`). Verifies Groth16 proofs on BN254. **Do not edit manually** — regenerated on each setup.                                                    |
+| `Halo2Verifier.sol`            | Halo2 verifier using Keccak256 transcript. Generated by `snark-verifier-sdk`. Used as fallback / reference.                                                                                                               |
+| `Blake2bHalo2Verifier.sol`     | Halo2 verifier using Blake2b transcript via EIP-152 precompile. For Acki Nacki → Ethereum cross-chain proofs.                                                                                                             |
+| `Blake2bTranscript.sol`        | Solidity implementation of the Blake2b Fiat-Shamir transcript protocol (matching `halo2_proofs::Blake2bWrite`).                                                                                                           |
+| `Blake2bChallengeComputer.sol` | Separate contract for Blake2b challenge computation (split out to stay under 24KB contract size limit).                                                                                                                   |
+| `DummyVerifier.sol`            | **Test-only verifier.** Accepts any proof with valid format. For unit/integration testing without real proof generation.                                                                                                  |
+
+### Oracles
+
+| Contract                     | Description                                                                                                                                                                               |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MockBlockHeaderOracle.sol`  | Test oracle. Owner can `setBlockHash()` manually; falls back to `blockhash()` for recent blocks. Used in E2E tests on Sepolia.                                                            |
+| `AxiomBlockHeaderOracle.sol` | Production oracle. Integrates with [Axiom V2](https://www.axiom.xyz/) for trustless block hash verification (recent blocks via `blockhash()`, historical blocks via Axiom Merkle proofs). |
+
+## Deposit & Withdrawal Flow
+
+### Deposit (Ethereum → Acki Nacki)
+
+1. User calls `AckiNackiBridge.deposit()` with ETH (max 100 ETH per deposit)
+2. Contract increments `depositCounter`, adds to `treasuryBalance`, emits `Deposit(depositId, sender, amount, timestamp)`
+3. Off-chain: `deposit-prover` fetches the transaction receipt and MPT proof from Ethereum
+4. Halo2 circuit proves:
+   - Receipt exists in Ethereum's receipt trie (MPT proof)
+   - Event log has correct `Deposit` signature
+   - Event was emitted by the correct bridge contract
+   - Event data matches (depositId, sender, amount)
+   - Block hash is from a real Ethereum block
+5. Groth16 wrapper compresses the Halo2 proof for on-chain verification
+
+### Withdrawal (Using ZK Proof)
+
+1. User calls `AckiNackiBridge.withdraw(recipient, amount, depositId, blockNumber, proof)`
+2. Contract queries `blockHeaderOracle.getBlockHash(blockNumber)` to get the verified block hash
+3. Contract assembles public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow]`
+4. Contract calls `verifier.verifyWithdrawalProof(proof, publicInputs)` — Groth16 proof verification (~280k gas)
+5. If valid: marks deposit as processed, deducts from treasury, transfers ETH to recipient
+
+## ZK Proof Details
+
+### Halo2 Circuit (deposit-prover)
+
+- **Proof system**: Halo2 with KZG polynomial commitments + SHPLONK batching on BN254
+- **Transcript**: Keccak256 (EVM-compatible)
+- **Circuit**: `DepositEventCircuitV2` — proves a `Deposit` event was emitted by verifying:
+  - Receipt RLP decoding
+  - Receipt trie inclusion (MPT proof)
+  - Event log signature matching
+  - Event data extraction (depositId, sender, amount, contractAddress)
+  - Block hash binding
+- **Public inputs** (7 field elements): `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`
+- **Circuit parameters**: `MAX_DATA_BYTE_LEN=128`, `MAX_LOG_NUM=3`, `RECEIPT_PF_MAX_DEPTH=10`
+
+### Groth16 Wrapper (gnark-wrapper)
+
+The Halo2 verifier contract exceeds Ethereum's 24KB contract size limit. The gnark wrapper solves this:
+
+1. `go run . setup` — generates `circuit.r1cs`, `proving.key`, `verification.key`, and `Groth16Verifier.sol`
+2. `go run . prove` — takes a Halo2 proof and generates a Groth16 proof wrapping it
+3. The Groth16 verifier is ~2KB (vs ~20KB+ for the Halo2 verifier)
+4. Proof format: 256 bytes (Groth16 proof: 2×G1 + 1×G2 point) + 32 bytes (promise_commit)
+
+### Blake2b Transcript (poseidon-proof)
+
+For Acki Nacki → Ethereum proofs, the native Blake2b transcript is used:
+
+- **Poseidon hash**: T=3, RATE=2, R_F=8, R_P=57 (BN254 field)
+- **Circuit**: k=12, proves knowledge of preimage `x` such that `Poseidon(x) = h`
+- **Transcript protocol**: Incremental state machine with prefix bytes (`0x00`=challenge, `0x01`=point, `0x02`=scalar), little-endian encoding, 64-byte Blake2b output
+- **On-chain verification**: `Blake2bHalo2Verifier.sol` uses EIP-152 precompile (address `0x09`) for Blake2b compression
+
+See `docs/BLAKE2B_HALO2_VERIFIER.md` for detailed transcript protocol documentation.
+
+## Testing
+
+### Test Coverage Summary
+
+| Suite                  | Count              | Command                               |
+| ---------------------- | ------------------ | ------------------------------------- |
+| Solidity unit tests    | 62                 | `cd contracts/ethereum && forge test` |
+| Rust workspace tests   | 12                 | `cargo test --workspace`              |
+| deposit-prover tests   | 19                 | `cd deposit-prover && cargo test`     |
+| E2E positive (Sepolia) | 1 pipeline         | `./test_e2e.sh`                       |
+| E2E negative           | 13 rejection paths | `./test_e2e_negative.sh`              |
+| E2E fuzz               | configurable       | `./test_fuzz_e2e.sh`                  |
+| E2E attack simulation  | 1 scenario         | `./test_e2e_negative_attack.sh`       |
+
+### Solidity Tests (62 tests)
+
+```bash
+cd contracts/ethereum && forge test -vv
+```
+
+Tests are organized across 5 test files:
+
+- **AckiNackiBridgeV2.t.sol** (14 tests): Bridge deposit/withdrawal logic, double-spend prevention, invalid inputs
+- **AxiomBlockHeaderOracle.t.sol** (16 tests): Oracle constructor, recent/historical block hash retrieval, verification
+- **Blake2bHalo2Verifier.t.sol** (8 tests): Blake2b transcript verification, corrupted proofs, Keccak fallback
+- **FuzzVerifiers.t.sol** (17 tests): Fuzz tests for bridge, Groth16, Halo2, and deposit verifiers
+- **Halo2PoseidonVerifier.t.sol** (7 tests): Poseidon proof verification, wrong digest/token/sum
+
+### Rust Tests
+
+```bash
+# Main workspace (eth-frontend + acki-nacki-interface)
+cargo test --workspace
+
+# deposit-prover (separate workspace)
+cd deposit-prover && cargo test
+```
+
+### E2E Tests (Sepolia)
+
+E2E tests run against Sepolia testnet and require:
+
+- `SEPOLIA_RPC_URL` — Ethereum Sepolia RPC endpoint
+- `PRIVATE_KEY` — Funded Sepolia account private key
+
+```bash
+# Full pipeline: deploy → deposit → prove → wrap → withdraw
+./test_e2e.sh
+
+# Skip gnark setup (reuse existing keys)
+SKIP_SETUP=true ./test_e2e.sh
+
+# Negative tests: 13 rejection paths
+./test_e2e_negative.sh
+
+# Fuzz test: multiple deposits with random amounts
+NUM_ITERATIONS=5 ./test_fuzz_e2e.sh
+
+# Attack simulation: attempt to steal funds with modified proof
+./test_e2e_negative_attack.sh
+```
+
+The E2E test pipeline:
+
+1. Groth16 setup (generates keys + Solidity verifier)
+2. Deploy contracts to Sepolia (or reuse existing `e2e_test_data/deployment.json`)
+3. Deposit ETH to bridge
+4. Fetch deposit event data + MPT proof from Ethereum
+5. Run MockProver (fast circuit validation)
+6. Generate Halo2 SNARK proof
+7. Generate Groth16 wrapper proof
+8. Set block hash on oracle
+9. Withdraw and verify on-chain
+
+## Prerequisites
+
+- **Rust** (stable, 1.70+) — main language for all crates
+- **Go** (1.21+) — for gnark-wrapper (Groth16 proof wrapping)
+- **Foundry** (forge, cast, anvil) — Solidity development and testing
+- **Node.js** (optional) — only needed for frontend development
+- **Trunk** (optional) — WASM build tool for frontend (`cargo install trunk`)
+
+### Quick Install
+
+```bash
+# Install all dependencies automatically
+./setup.sh
+```
+
+Or manually:
+
+```bash
+# Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Foundry
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# Go (for gnark-wrapper)
+# See https://go.dev/doc/install
+```
+
+## Building
+
+```bash
+# Build everything (Rust + Solidity)
+./build.sh
+
+# Build with tests
+./build.sh --test
+
+# Build with all checks (format, clippy, tests)
+./build.sh --all
+
+# Build individual components
+cargo build --workspace                          # Main workspace
+cd deposit-prover && cargo build                 # Deposit prover
+cd poseidon-proof && cargo build                 # Poseidon proof
+cd contracts/ethereum && forge build             # Solidity contracts
+```
+
+### Groth16 Setup (One-time)
+
+Before running E2E tests or deploying, generate the Groth16 proving/verification keys:
+
+```bash
+cd deposit-prover/gnark-wrapper
+go run . setup
+```
+
+This generates:
+
+- `circuit.r1cs` — R1CS constraint system
+- `proving.key` — Groth16 proving key
+- `verification.key` — Groth16 verification key
+- `Groth16Verifier.sol` — Solidity verifier (auto-copied to `contracts/ethereum/src/`)
+
+**Note**: These are build artifacts (gitignored). Regenerate after any circuit changes.
+
+## Development
+
+### Code Quality
+
+```bash
+# Format all Rust code
+cargo fmt --all
+
+# Run clippy linter
+cargo clippy --workspace
+
+# Format Solidity
+cd contracts/ethereum && forge fmt
+
+# Run all Solidity tests with verbosity
+cd contracts/ethereum && forge test -vvv
+```
+
+### Docker
+
+```bash
+# Start local Anvil node + development environment
+docker-compose up -d
+
+# Run in development container
+docker-compose exec dev bash
+```
+
+### Foundry Configuration
+
+Key settings in `contracts/ethereum/foundry.toml`:
+
+- `solc_version = "0.8.19"` — Solidity compiler version
+- `optimizer_runs = 1` — Optimized for deployment size (not runtime gas)
+- `via_ir = true` — Required for large contracts (Blake2bHalo2Verifier, Halo2Verifier)
 
 ## Technology Stack
 
-- **Rust**: Core implementation language
-- **Solidity**: Ethereum smart contracts
-- **Halo2**: Zero-knowledge proof system
-- **Poseidon**: ZK-friendly hash function
-- **Foundry**: Solidity development framework
-- **Ethers-rs**: Ethereum library for Rust
+| Component          | Technology                                              |
+| ------------------ | ------------------------------------------------------- |
+| Smart contracts    | Solidity 0.8.19, Foundry                                |
+| ZK proof system    | Halo2 (KZG + SHPLONK on BN254)                          |
+| Groth16 wrapper    | gnark (Go)                                              |
+| Deposit prover     | axiom-eth (Rust)                                        |
+| Poseidon hash      | T=3, RATE=2, R_F=8, R_P=57                              |
+| Blake2b transcript | EIP-152 precompile                                      |
+| Block hash oracle  | Axiom V2 (production), blockhash() (recent)             |
+| Ethereum client    | ethers-rs                                               |
+| Frontend           | Yew + WebAssembly                                       |
+| Testing            | Foundry (Solidity), cargo test (Rust), bash E2E scripts |
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-- All tests pass (`./build.sh --test`)
-- Code is formatted (`./build.sh --format`)
-- Clippy checks pass (`./build.sh --clippy`)
-- New features include tests

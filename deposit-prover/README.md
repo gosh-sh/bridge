@@ -1,164 +1,102 @@
 # Deposit Event Prover
 
-A standalone ZK proof generator for Ethereum Deposit events using axiom-eth.
-
-## Overview
-
-This binary generates zero-knowledge proofs that a `Deposit` event was emitted by the AckiNackiBridge contract on Ethereum. It uses:
-
-- **axiom-eth**: For Ethereum state proofs (receipt trie verification, RLP decoding)
-- **halo2-base**: For circuit building (axiom-crypto's version)
-- **Poseidon hash**: For commitment and nullifier computation
+Standalone ZK proof generator for Ethereum Deposit events using axiom-eth. Proves that a `Deposit` event was emitted by the AckiNackiBridge contract on Ethereum, then wraps the Halo2 proof in Groth16 for efficient on-chain verification.
 
 ## Why Separate from Main Workspace?
 
-The deposit prover uses **axiom-crypto's halo2-lib v0.4.1**, while the main workspace (withdrawal circuit) uses **scroll-tech's halo2-lib** for Acki Nacki compatibility. These two versions are incompatible and cannot coexist in the same Cargo workspace.
+This crate uses **axiom-crypto's halo2-lib v0.4.1** (via axiom-eth), which is incompatible with the halo2-axiom 0.5.x used by `poseidon-proof`. They cannot coexist in the same Cargo workspace.
 
-## Architecture
+## Circuit: `DepositEventCircuitV2`
 
-### Circuit Logic
+The Halo2 circuit (`src/circuit_v2.rs`) proves:
 
-The circuit proves:
+1. **Receipt Trie Inclusion** — Transaction receipt exists in Ethereum's receipt trie (MPT proof)
+2. **Event Log Extraction** — RLP-encoded receipt is parsed, Deposit event log is extracted
+3. **Event Signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,uint256)")`
+4. **Contract Address** — Event was emitted by the correct bridge contract
+5. **Event Data** — depositId, sender, amount extracted and exposed as public inputs
+6. **Block Hash Binding** — Proof is tied to a specific Ethereum block hash
 
-1. **Receipt Trie Inclusion**: Verify the transaction receipt exists in Ethereum's receipt trie using MPT proof
-2. **Event Log Extraction**: Parse RLP-encoded receipt and extract the Deposit event log
-3. **Event Signature Verification**: Verify `log.topics[0] == keccak256("Deposit(bytes32,address,uint256,uint256)")`
-4. **Contract Address Verification**: Verify the event was emitted by the correct bridge contract
-5. **Event Data Extraction**: Extract `depositHash`, `sender`, `amount`, `timestamp` from the event
-6. **Secret Knowledge Proof**: Prove knowledge of secrets that hash to `depositHash`:
-   - `commitment = Poseidon(withdrawal_hash, nullifier_preimage)`
-   - Verify `commitment == depositHash`
-7. **Nullifier Computation**: Compute `nullifier = Poseidon(withdrawal_hash, nullifier_preimage)`
-8. **Public Outputs**: Expose `nullifier`, `recipient`, `amount`, `contract_address`
+### Public Inputs (7 field elements)
 
-### Public Inputs
+| Index | Field             | Description                        |
+| ----- | ----------------- | ---------------------------------- |
+| 0     | `depositId`       | Unique deposit identifier          |
+| 1     | `sender`          | Depositor's Ethereum address       |
+| 2     | `amount`          | Deposit amount in wei              |
+| 3     | `contractAddress` | Bridge contract address            |
+| 4     | `blockHashHigh`   | Upper 128 bits of block hash       |
+| 5     | `blockHashLow`    | Lower 128 bits of block hash       |
+| 6     | `promiseCommit`   | Commitment for cross-chain promise |
 
-```rust
-pub struct PublicInputs {
-    pub nullifier: [u8; 32],           // Prevents double-spending
-    pub recipient: [u8; 20],           // Withdrawal recipient
-    pub amount: u64,                   // Withdrawal amount
-    pub contract_address: [u8; 20],    // Bridge contract address
-}
-```
-
-### Private Inputs (Witnesses)
+### Circuit Parameters
 
 ```rust
-pub struct PrivateInputs {
-    // User secrets
-    pub withdrawal_hash: [u8; 32],
-    pub nullifier_preimage: [u8; 32],
-
-    // Ethereum proof data
-    pub event_data: DepositEventData,
-    pub receipt_proof: ReceiptProof,
-}
+MAX_DATA_BYTE_LEN: 128    // Max event data length
+MAX_LOG_NUM: 3             // Max logs per receipt
+TOPIC_NUM_BOUNDS: (0, 4)   // Min/max topics per log
+RECEIPT_PF_MAX_DEPTH: 10   // Max MPT proof depth
 ```
 
-## Setup
+## Groth16 Wrapper (`gnark-wrapper/`)
 
-### 1. Download Trusted Setup
+The Halo2 verifier exceeds Ethereum's 24KB contract size limit. The gnark wrapper (Go) solves this by wrapping the Halo2 SNARK in a Groth16 proof with a ~2KB verifier.
 
-⚠️ **Required**: Before using the prover, download the trusted setup parameters:
+### Setup (one-time)
 
 ```bash
-./download_trusted_setup.sh
+cd gnark-wrapper
+go run . setup
 ```
 
-This downloads pre-converted KZG parameters in Halo2 format (~33 MB) from the [halo2-kzg-srs](https://github.com/han0110/halo2-kzg-srs) project. The parameters are from the Hermez/Polygon Powers of Tau ceremony with 100+ participants.
+Generates: `circuit.r1cs`, `proving.key`, `verification.key`, `Groth16Verifier.sol`
 
-**That's it!** The prover is now ready to use with the trusted setup.
-
-**Why this matters**: The prover will ONLY use trusted setup parameters. Random parameter generation has been disabled for security. See [TRUSTED_SETUP.md](TRUSTED_SETUP.md) for details.
-
-### 2. Install Groth16 Wrapper Dependencies (For Mainnet Deployment)
-
-⚠️ **Required for Ethereum mainnet deployment**: The Halo2 verifier is 28.8KB, exceeding Ethereum's 24KB contract size limit. We use a Groth16 wrapper to generate a tiny (~1-2KB) verifier.
+### Prove
 
 ```bash
-# Install Go and build tools
-sudo ./install_dependencies.sh
-
-# Setup gnark library
-./setup_gnark.sh
+go run . prove \
+  --snark-proof ../path/to/halo2_proof.bin \
+  --snark-vk ../path/to/vk.bin \
+  --snark-instances ../path/to/instances.json
 ```
 
-See [GROTH16_WRAPPER.md](GROTH16_WRAPPER.md) for detailed documentation on the Groth16 wrapper architecture.
+Output: 288 bytes = 256-byte Groth16 proof + 32-byte promise_commit
 
-## Usage
+## Example Binaries
 
-### Generate Proving/Verifying Keys
-
-```bash
-cargo run --release -- setup --output-dir ./keys
-```
-
-### Generate a Deposit Proof
-
-```bash
-cargo run --release -- prove \
-  --withdrawal-hash 0x1234... \
-  --nullifier-preimage 0x5678... \
-  --tx-hash 0xabcd... \
-  --rpc-url https://sepolia.infura.io/v3/YOUR_KEY \
-  --contract-address 0x... \
-  --output proof.json
-```
-
-### Verify a Proof
-
-```bash
-cargo run --release -- verify \
-  --proof proof.json \
-  --vkey keys/vkey.bin
-```
-
-## Integration with Main Bridge
-
-The deposit prover is called by the Ethereum frontend when a user wants to withdraw:
-
-1. User deposits on Ethereum → `Deposit` event emitted
-2. User runs deposit-prover to generate ZK proof of the event
-3. User submits proof to Acki Nacki withdrawal contract
-4. Withdrawal contract verifies the proof and releases funds
-
-## Implementation Status
-
-- [x] Project structure and CLI
-- [x] Ethereum client for fetching events
-- [ ] MPT proof generation (requires eth_getProof or manual trie building)
-- [ ] RLP encoding/decoding
-- [ ] Circuit implementation using axiom-eth
-- [ ] Poseidon hash integration
-- [ ] Proof generation and verification
-- [ ] Key generation
-
-## Dependencies
-
-- `axiom-eth`: Ethereum state proof primitives
-- `halo2-base` (axiom-crypto v0.4.1): Circuit builder
-- `snark-verifier-sdk`: Proof generation
-- `ethers`: Ethereum RPC client
-- `zkevm-hashes`: Poseidon hash implementation
+| Binary                          | Description                                       |
+| ------------------------------- | ------------------------------------------------- |
+| `fetch_deposit_data`            | Fetch deposit event + MPT proof from Ethereum RPC |
+| `export_proof_for_gnark`        | Export Halo2 proof artifacts for gnark wrapper    |
+| `generate_verifier`             | Generate Solidity verifier bytecode               |
+| `generate_aggregation_verifier` | Generate aggregation verifier                     |
+| `test_with_real_data`           | Test circuit with real Ethereum data              |
+| `inspect_snark`                 | Inspect SNARK proof structure                     |
+| `parse_proof_detailed`          | Parse and display proof components                |
+| `analyze_proof_structure`       | Analyze proof structure for debugging             |
 
 ## Development
 
-Build:
-
 ```bash
-cd deposit-prover
+# Build
 cargo build --release
-```
 
-Test:
-
-```bash
+# Run tests (19 tests)
 cargo test
+
+# Run specific example
+cargo run --release --example fetch_deposit_data -- --help
 ```
+
+## Dependencies
+
+- **axiom-eth**: Ethereum state proof primitives (receipt trie, MPT, RLP)
+- **halo2-base** (axiom-crypto v0.4.1): Circuit builder
+- **snark-verifier-sdk**: SNARK proof generation and verification
+- **ethers**: Ethereum RPC client
 
 ## References
 
-- [axiom-eth](https://github.com/axiom-crypto/axiom-eth) - Ethereum state proof library
-- [Ethereum Light Client Protocol](https://github.com/ethereum/annotated-spec/blob/master/altair/sync-protocol.md)
+- [axiom-eth](https://github.com/axiom-crypto/axiom-eth) — Ethereum state proof library
+- [gnark](https://github.com/ConsenSys/gnark) — Go ZK proof library
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)

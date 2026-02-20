@@ -98,3 +98,27 @@ deposit-prover/params/
 
 # KZG parameters (downloaded from trusted setup, not stored in git)
 deposit-prover/data/*.srs
+
+# Gnark wrapper build artifacts and generated files
+deposit-prover/gnark-wrapper/gnark-wrapper
+deposit-prover/gnark-wrapper/circuit.r1cs
+deposit-prover/gnark-wrapper/groth16_proof_bytes.hex
+deposit-prover/gnark-wrapper/groth16_test_data.txt
+deposit-prover/gnark-wrapper/halo2_proof.json
+deposit-prover/gnark-wrapper/halo2_proof_test.json
+deposit-prover/gnark-wrapper/proving.key
+deposit-prover/gnark-wrapper/verification.key
+deposit-prover/gnark-wrapper/Groth16Verifier_sepolia.address
+
+# Prompt files
+*.prompt
+
+# Build artifacts
+cache/
+out/
+
+# Generated verifier and deployment artifacts
+contracts/DepositVerifier.*
+deployment_addresses.json
+contracts/ethereum/deployment_real.json
+deposit-prover/deposit_proof_output.json

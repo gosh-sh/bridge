@@ -1,9 +1,9 @@
+// serde traits used by serde_json::json! macro via serde_wasm_bindgen
+use serde_wasm_bindgen::{from_value, to_value};
 /// Web3 and MetaMask integration for the Acki Nacki Bridge
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
-use serde::{Deserialize, Serialize};
-use serde_wasm_bindgen::{from_value, to_value};
 
 use crate::config::*;
 
@@ -35,8 +35,15 @@ extern "C" {
 pub fn is_metamask_installed() -> bool {
     if let Some(window) = window() {
         // Check for window.ethereum
-        let has_ethereum = js_sys::Reflect::has(&window, &JsValue::from_str("ethereum")).unwrap_or(false);
-        web_sys::console::log_1(&format!("MetaMask detection: window.ethereum exists = {}", has_ethereum).into());
+        let has_ethereum =
+            js_sys::Reflect::has(&window, &JsValue::from_str("ethereum")).unwrap_or(false);
+        web_sys::console::log_1(
+            &format!(
+                "MetaMask detection: window.ethereum exists = {}",
+                has_ethereum
+            )
+            .into(),
+        );
 
         if has_ethereum {
             if let Ok(ethereum) = js_sys::Reflect::get(&window, &JsValue::from_str("ethereum")) {
@@ -44,7 +51,9 @@ pub fn is_metamask_installed() -> bool {
                     .ok()
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                web_sys::console::log_1(&format!("window.ethereum.isMetaMask = {}", is_metamask).into());
+                web_sys::console::log_1(
+                    &format!("window.ethereum.isMetaMask = {}", is_metamask).into(),
+                );
                 return true;
             }
         }
@@ -77,12 +86,12 @@ pub fn get_ethereum() -> Option<Ethereum> {
         Ok(eth) => {
             web_sys::console::log_1(&"Successfully cast to Ethereum type".into());
             Some(eth)
-        }
+        },
         Err(e) => {
             web_sys::console::log_1(&format!("Failed to cast to Ethereum type: {:?}", e).into());
             // Return the error value as Ethereum anyway - it should still work
             e.dyn_into::<Ethereum>().ok()
-        }
+        },
     }
 }
 
@@ -112,8 +121,8 @@ pub async fn connect_wallet() -> Result<String, String> {
         .await
         .map_err(|e| format!("MetaMask error: {:?}", e))?;
 
-    let accounts: Vec<String> = from_value(result)
-        .map_err(|e| format!("Failed to parse accounts: {:?}", e))?;
+    let accounts: Vec<String> =
+        from_value(result).map_err(|e| format!("Failed to parse accounts: {:?}", e))?;
 
     accounts
         .first()
@@ -139,21 +148,27 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
 
     // Try to switch to Sepolia
     let chain_param = js_sys::Object::new();
-    js_sys::Reflect::set(&chain_param, &"chainId".into(), &SEPOLIA_CHAIN_ID_HEX.into())
-        .map_err(|_| "Failed to build chain param")?;
+    js_sys::Reflect::set(
+        &chain_param,
+        &"chainId".into(),
+        &SEPOLIA_CHAIN_ID_HEX.into(),
+    )
+    .map_err(|_| "Failed to build chain param")?;
 
     let params = js_sys::Array::new();
     params.push(&chain_param);
 
     let switch_request = js_sys::Object::new();
-    js_sys::Reflect::set(&switch_request, &"method".into(), &"wallet_switchEthereumChain".into())
-        .map_err(|_| "Failed to build request")?;
+    js_sys::Reflect::set(
+        &switch_request,
+        &"method".into(),
+        &"wallet_switchEthereumChain".into(),
+    )
+    .map_err(|_| "Failed to build request")?;
     js_sys::Reflect::set(&switch_request, &"params".into(), &params)
         .map_err(|_| "Failed to build request")?;
 
-    let switch_result = ethereum
-        .request(switch_request.into())
-        .await;
+    let switch_result = ethereum.request(switch_request.into()).await;
 
     // If switching failed, try to add the network
     if switch_result.is_err() {
@@ -167,14 +182,19 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
             },
             "rpcUrls": [SEPOLIA_RPC_URL],
             "blockExplorerUrls": [BLOCK_EXPLORER_URL]
-        })).map_err(|e| format!("Serialization error: {:?}", e))?;
+        }))
+        .map_err(|e| format!("Serialization error: {:?}", e))?;
 
         let add_params = js_sys::Array::new();
         add_params.push(&network_param);
 
         let add_request = js_sys::Object::new();
-        js_sys::Reflect::set(&add_request, &"method".into(), &"wallet_addEthereumChain".into())
-            .map_err(|_| "Failed to build request")?;
+        js_sys::Reflect::set(
+            &add_request,
+            &"method".into(),
+            &"wallet_addEthereumChain".into(),
+        )
+        .map_err(|_| "Failed to build request")?;
         js_sys::Reflect::set(&add_request, &"params".into(), &add_params)
             .map_err(|_| "Failed to build request")?;
 
@@ -204,7 +224,8 @@ pub async fn make_deposit(amount_wei: &str, _acki_nacki_address: &str) -> Result
         "to": BRIDGE_CONTRACT_ADDRESS,
         "value": amount_wei,
         "data": data,
-    })).map_err(|e| format!("Serialization error: {:?}", e))?;
+    }))
+    .map_err(|e| format!("Serialization error: {:?}", e))?;
 
     let params = js_sys::Array::new();
     params.push(&tx_param);
@@ -220,8 +241,8 @@ pub async fn make_deposit(amount_wei: &str, _acki_nacki_address: &str) -> Result
         .await
         .map_err(|e| format!("Transaction failed: {:?}", e))?;
 
-    let tx_hash: String = from_value(result)
-        .map_err(|e| format!("Failed to parse transaction hash: {:?}", e))?;
+    let tx_hash: String =
+        from_value(result).map_err(|e| format!("Failed to parse transaction hash: {:?}", e))?;
 
     Ok(tx_hash)
 }
@@ -254,7 +275,8 @@ async fn call_contract(data: &str) -> Result<String, String> {
     let call_param = to_value(&serde_json::json!({
         "to": BRIDGE_CONTRACT_ADDRESS,
         "data": data,
-    })).map_err(|e| format!("Serialization error: {:?}", e))?;
+    }))
+    .map_err(|e| format!("Serialization error: {:?}", e))?;
 
     let params = js_sys::Array::new();
     params.push(&call_param);
@@ -271,8 +293,8 @@ async fn call_contract(data: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Contract call failed: {:?}", e))?;
 
-    let result_str: String = from_value(result)
-        .map_err(|e| format!("Failed to parse result: {:?}", e))?;
+    let result_str: String =
+        from_value(result).map_err(|e| format!("Failed to parse result: {:?}", e))?;
 
     Ok(result_str)
 }
@@ -280,8 +302,8 @@ async fn call_contract(data: &str) -> Result<String, String> {
 /// Parse a uint256 from hex string
 fn parse_uint256(hex: &str) -> Result<String, String> {
     let hex = hex.trim_start_matches("0x");
-    let value = u128::from_str_radix(hex, 16)
-        .map_err(|e| format!("Failed to parse uint256: {:?}", e))?;
+    let value =
+        u128::from_str_radix(hex, 16).map_err(|e| format!("Failed to parse uint256: {:?}", e))?;
     Ok(value.to_string())
 }
 
@@ -301,9 +323,7 @@ pub fn wei_to_eth(wei: &str) -> String {
 
 /// Format ETH to Wei string
 pub fn eth_to_wei(eth: &str) -> Result<String, String> {
-    let eth_value: f64 = eth.parse()
-        .map_err(|_| "Invalid ETH amount")?;
+    let eth_value: f64 = eth.parse().map_err(|_| "Invalid ETH amount")?;
     let wei_value = (eth_value * 1_000_000_000_000_000_000.0) as u128;
     Ok(wei_value.to_string())
 }
-

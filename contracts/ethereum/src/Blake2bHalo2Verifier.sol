@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.19;
-
-import {Blake2bChallengeComputer} from "./Blake2bChallengeComputer.sol";
+pragma solidity ^0.8.19;
 
 /// @title Blake2bHalo2Verifier
 /// @notice Halo2 proof verifier using Blake2b transcript (EIP-152).
@@ -34,23 +32,46 @@ contract Blake2bHalo2Verifier {
             let f_q := 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
             function validate_ec_point(x, y) -> valid {
                 {
-                    let x_lt_p := lt(x, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
-                    let y_lt_p := lt(y, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
+                    let x_lt_p :=
+                        lt(x, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
+                    let y_lt_p :=
+                        lt(y, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
                     valid := and(x_lt_p, y_lt_p)
                 }
                 {
-                    let y_square := mulmod(y, y, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
-                    let x_square := mulmod(x, x, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
+                    let y_square :=
+                        mulmod(
+                            y,
+                            y,
+                            0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+                        )
+                    let x_square :=
+                        mulmod(
+                            x,
+                            x,
+                            0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+                        )
                     let x_cube :=
-                        mulmod(x_square, x, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
+                        mulmod(
+                            x_square,
+                            x,
+                            0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+                        )
                     let x_cube_plus_3 :=
-                        addmod(x_cube, 3, 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47)
+                        addmod(
+                            x_cube,
+                            3,
+                            0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+                        )
                     let is_affine := eq(x_cube_plus_3, y_square)
                     valid := and(valid, is_affine)
                 }
             }
             mstore(0x1000a0, mod(calldataload(0x0), f_q))
-            mstore(0x100080, 66080863397757689057462260550644432681803854999226369649442382355899108282)
+            mstore(
+                0x100080,
+                66080863397757689057462260550644432681803854999226369649442382355899108282
+            )
 
             {
                 let x := calldataload(0x20)
@@ -432,8 +453,14 @@ contract Blake2bHalo2Verifier {
             mstore(0x101080, 32)
             mstore(0x1010a0, 32)
             mstore(0x1010c0, mload(0x101020))
-            mstore(0x1010e0, 21888242871839275222246405745257275088548364400416034343698204186575808495615)
-            mstore(0x101100, 21888242871839275222246405745257275088548364400416034343698204186575808495617)
+            mstore(
+                0x1010e0,
+                21888242871839275222246405745257275088548364400416034343698204186575808495615
+            )
+            mstore(
+                0x101100,
+                21888242871839275222246405745257275088548364400416034343698204186575808495617
+            )
             success := and(eq(staticcall(gas(), 0x5, 0x101060, 0xc0, 0x101040, 0x20), 1), success)
             {
                 let inv := mload(0x101040)
@@ -698,7 +725,11 @@ contract Blake2bHalo2Verifier {
             mstore(0x1023e0, mulmod(mload(0x1023c0), 1, f_q))
             {
                 let result := mulmod(mload(0x100b00), mload(0x1023c0), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x1023e0)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x1023e0)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102400, result)
             }
             mstore(
@@ -719,7 +750,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x102420), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102440)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102440)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102460, result)
             }
             mstore(
@@ -740,7 +775,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x102480), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x1024a0)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x1024a0)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x1024c0, result)
             }
             mstore(
@@ -761,7 +800,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x1024e0), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102500)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102500)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102520, result)
             }
             mstore(0x102540, mulmod(1, mload(0x1022e0), f_q))
@@ -792,7 +835,11 @@ contract Blake2bHalo2Verifier {
             mstore(0x102600, mulmod(mload(0x1025e0), 1, f_q))
             {
                 let result := mulmod(mload(0x100b00), mload(0x1025e0), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102600)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102600)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102620, result)
             }
             mstore(
@@ -813,7 +860,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x102640), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102660)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102660)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102680, result)
             }
             mstore(
@@ -834,7 +885,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x1026a0), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x1026c0)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x1026c0)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x1026e0, result)
             }
             mstore(0x102700, mulmod(mload(0x102560), mload(0x102260), f_q))
@@ -849,7 +904,11 @@ contract Blake2bHalo2Verifier {
             mstore(0x102740, mulmod(mload(0x102720), 1, f_q))
             {
                 let result := mulmod(mload(0x100b00), mload(0x102720), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102740)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102740)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102760, result)
             }
             mstore(
@@ -870,7 +929,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x102780), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x1027a0)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x1027a0)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x1027c0, result)
             }
             mstore(
@@ -884,7 +947,11 @@ contract Blake2bHalo2Verifier {
             mstore(0x102800, mulmod(mload(0x1027e0), 1, f_q))
             {
                 let result := mulmod(mload(0x100b00), mload(0x1027e0), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102800)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102800)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102820, result)
             }
             mstore(
@@ -905,7 +972,11 @@ contract Blake2bHalo2Verifier {
             )
             {
                 let result := mulmod(mload(0x100b00), mload(0x102840), f_q)
-                result := addmod(mulmod(mload(0x1005a0), sub(f_q, mload(0x102860)), f_q), result, f_q)
+                result := addmod(
+                    mulmod(mload(0x1005a0), sub(f_q, mload(0x102860)), f_q),
+                    result,
+                    f_q
+                )
                 mstore(0x102880, result)
             }
             mstore(0x1028a0, mulmod(mload(0x102540), mload(0x1022a0), f_q))
@@ -961,8 +1032,14 @@ contract Blake2bHalo2Verifier {
             mstore(0x102ae0, 32)
             mstore(0x102b00, 32)
             mstore(0x102b20, mload(0x102a80))
-            mstore(0x102b40, 21888242871839275222246405745257275088548364400416034343698204186575808495615)
-            mstore(0x102b60, 21888242871839275222246405745257275088548364400416034343698204186575808495617)
+            mstore(
+                0x102b40,
+                21888242871839275222246405745257275088548364400416034343698204186575808495615
+            )
+            mstore(
+                0x102b60,
+                21888242871839275222246405745257275088548364400416034343698204186575808495617
+            )
             success := and(eq(staticcall(gas(), 0x5, 0x102ac0, 0xc0, 0x102aa0, 0x20), 1), success)
             {
                 let inv := mload(0x102aa0)
@@ -1079,8 +1156,14 @@ contract Blake2bHalo2Verifier {
             mstore(0x102d60, 32)
             mstore(0x102d80, 32)
             mstore(0x102da0, mload(0x102d00))
-            mstore(0x102dc0, 21888242871839275222246405745257275088548364400416034343698204186575808495615)
-            mstore(0x102de0, 21888242871839275222246405745257275088548364400416034343698204186575808495617)
+            mstore(
+                0x102dc0,
+                21888242871839275222246405745257275088548364400416034343698204186575808495615
+            )
+            mstore(
+                0x102de0,
+                21888242871839275222246405745257275088548364400416034343698204186575808495617
+            )
             success := and(eq(staticcall(gas(), 0x5, 0x102d40, 0xc0, 0x102d20, 0x20), 1), success)
             {
                 let inv := mload(0x102d20)

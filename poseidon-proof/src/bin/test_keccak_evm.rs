@@ -152,6 +152,6 @@ fn main() {
 
     // --- Verify with revm ---
     println!("[4/4] Verifying with revm...");
-    evm_verify(deployment_code, vec![pub_inputs], proof);
+    evm_verify(deployment_code, vec![pub_inputs], proof).expect("EVM verification failed");
     println!("  ✓ Keccak proof verified successfully!");
 }

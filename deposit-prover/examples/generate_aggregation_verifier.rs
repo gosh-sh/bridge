@@ -1,8 +1,8 @@
 //! Generate Aggregation Verifier Contract
 //!
 //! This example generates a Solidity verifier contract for aggregated proofs.
-//! The aggregation verifier is much smaller (~10-15KB) than the direct verifier (~30KB)
-//! and fits under the 24KB Ethereum contract size limit.
+//! The aggregation verifier is much smaller (~10-15KB) than the direct verifier
+//! (~30KB) and fits under the 24KB Ethereum contract size limit.
 //!
 //! ## Workflow
 //!
@@ -24,7 +24,8 @@
 //!   --deposit-proof deposit_proof_output.json
 //! ```
 //!
-//! The aggregation verifier will be saved to: ../contracts/AggregationVerifier.sol
+//! The aggregation verifier will be saved to:
+//! ../contracts/AggregationVerifier.sol
 
 use std::fs;
 
@@ -75,7 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading deposit proof from {}...", args.deposit_proof);
     let deposit_proof_json = fs::read_to_string(&args.deposit_proof)?;
     let deposit_proof: DepositProofOutput = serde_json::from_str(&deposit_proof_json)?;
-    println!("✓ Loaded deposit proof for depositId: {}", deposit_proof.deposit_id);
+    println!(
+        "✓ Loaded deposit proof for depositId: {}",
+        deposit_proof.deposit_id
+    );
     println!();
 
     // Aggregate the proof
@@ -86,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  3. Generate an aggregated proof");
     println!();
 
-    let aggregated_proof = aggregate_proof(&deposit_proof, &config)?;
+    let _aggregated_proof = aggregate_proof(&deposit_proof, &config)?;
     println!("✓ Aggregation complete!");
     println!();
 
@@ -104,8 +108,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("Verifier Details:");
     println!("  - Path: {}", args.output);
-    println!("  - Size: {} bytes ({:.1} KB)", verifier_size, verifier_size as f64 / 1024.0);
-    println!("  - Fits under 24KB: {}", if verifier_size <= 24576 { "✅ YES" } else { "❌ NO" });
+    println!(
+        "  - Size: {} bytes ({:.1} KB)",
+        verifier_size,
+        verifier_size as f64 / 1024.0
+    );
+    println!(
+        "  - Fits under 24KB: {}",
+        if verifier_size <= 24576 {
+            "✅ YES"
+        } else {
+            "❌ NO"
+        }
+    );
     println!();
 
     if verifier_size > 24576 {
@@ -128,4 +143,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

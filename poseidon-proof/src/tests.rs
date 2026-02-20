@@ -1,15 +1,21 @@
-use crate::circuit::PoseidonPreimageCircuit;
-use crate::poseidon::poseidon_hash;
-
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::dev::MockProver;
-use halo2_base::utils::fs::gen_srs;
-use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
-use halo2_base::gates::circuit::builder::RangeCircuitBuilder;
-use halo2_base::gates::circuit::{CircuitBuilderStage, BaseCircuitParams};
-use halo2_base::gates::RangeChip;
-use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
+use halo2_base::{
+    gates::{
+        circuit::{builder::RangeCircuitBuilder, CircuitBuilderStage},
+        RangeChip,
+    },
+    halo2_proofs::{
+        dev::MockProver,
+        halo2curves::bn256::Fr,
+        plonk::{keygen_pk, keygen_vk},
+    },
+    utils::{
+        fs::gen_srs,
+        testing::{check_proof_with_instances, gen_proof_with_instances},
+    },
+};
 use rand::random;
+
+use crate::{circuit::PoseidonPreimageCircuit, poseidon::poseidon_hash};
 
 const K: u32 = 12;
 const UNUSABLE_ROWS: usize = 9;
@@ -128,4 +134,3 @@ fn test_real_proof_blake2b() {
 
     println!("Blake2b proof generation and verification: SUCCESS");
 }
-

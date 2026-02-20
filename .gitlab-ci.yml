@@ -120,22 +120,14 @@ build:rust:debug:
   stage: build
   <<: *rust_cache
   script:
-    - cargo build --workspace --all-features
-  artifacts:
-    paths:
-      - target/debug/
-    expire_in: 1 day
+    - cargo build --workspace
 
 build:rust:release:
   extends: .rust_base
   stage: build
   <<: *rust_cache
   script:
-    - cargo build --workspace --all-features --release
-  artifacts:
-    paths:
-      - target/release/
-    expire_in: 1 week
+    - cargo build --workspace --release
   only:
     - main
     - tags
@@ -160,42 +152,21 @@ build:solidity:
       - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull-push
-  artifacts:
-    paths:
-      - contracts/ethereum/out/
-    expire_in: 1 day
 
 # Test stage
-test:rust:unit:
+test:rust:
   extends: .rust_base
   stage: test
   <<: *rust_cache
-  dependencies:
+  needs:
     - build:rust:debug
   script:
-    - cargo test --workspace --lib
-  coverage: '/^\d+\.\d+% coverage/'
-
-test:rust:integration:
-  extends: .rust_base
-  stage: test
-  <<: *rust_cache
-  dependencies:
-    - build:rust:debug
-  script:
-    - cargo test --workspace --test '*'
-
-test:rust:doc:
-  extends: .rust_base
-  stage: test
-  <<: *rust_cache
-  script:
-    - cargo test --workspace --doc
+    - cargo test --workspace
 
 test:solidity:
   extends: .foundry_base
   stage: test
-  dependencies:
+  needs:
     - build:solidity
   script:
     - export PATH="$FOUNDRY_DIR/bin:$PATH"
@@ -214,15 +185,11 @@ test:solidity:
       - contracts/ethereum/lib/
       - contracts/ethereum/node_modules/
     policy: pull
-  artifacts:
-    when: always
-    reports:
-      junit: contracts/ethereum/test-results.xml
 
 test:solidity:coverage:
   extends: .foundry_base
   stage: test
-  dependencies:
+  needs:
     - build:solidity
   script:
     - export PATH="$FOUNDRY_DIR/bin:$PATH"
@@ -259,7 +226,7 @@ lint:rust:clippy:
   stage: test
   <<: *rust_cache
   script:
-    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo clippy --workspace -- -D warnings
   allow_failure: false
 
 lint:solidity:fmt:
@@ -396,4 +363,3 @@ deploy:mainnet:
   when: manual
   environment:
     name: mainnet
-

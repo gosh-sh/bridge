@@ -40,4 +40,3 @@ pub enum BridgeError {
     #[error("Not found: {0}")]
     NotFound(String),
 }
-

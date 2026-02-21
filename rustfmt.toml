@@ -35,11 +35,10 @@ use_try_shorthand = true
 force_multiline_blocks = false
 overflow_delimited_expr = true
 struct_lit_single_line = false
-fn_args_layout = "Tall"
+fn_params_layout = "Tall"
 brace_style = "SameLineWhere"
 control_brace_style = "AlwaysSameLine"
 trailing_comma = "Vertical"
 match_block_trailing_comma = true
 blank_lines_upper_bound = 1
 blank_lines_lower_bound = 0
-

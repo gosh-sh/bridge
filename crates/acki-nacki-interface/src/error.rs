@@ -44,4 +44,3 @@ pub enum AckiNackiError {
     #[error("Not implemented (placeholder for Acki Nacki team)")]
     NotImplemented,
 }
-

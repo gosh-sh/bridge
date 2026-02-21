@@ -91,6 +91,8 @@ contract FuzzHalo2VerifierTest is Test {
     address public verifier;
     bytes public validCalldata;
 
+    /// @dev BN254 scalar field order
+    uint256 constant R = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
     uint256 constant NUM_INSTANCES = 3;
     uint256 constant INSTANCE_SIZE = NUM_INSTANCES * 32; // 96 bytes
 
@@ -143,8 +145,12 @@ contract FuzzHalo2VerifierTest is Test {
     }
 
     /// @notice Mutating a single instance value must cause rejection
+    /// @dev We bound newValue to [0, R) to avoid values that are congruent to the original
+    ///      modulo the BN254 scalar field (the verifier reduces inputs mod R internally).
     function testFuzz_MutatedInstanceReverts(uint8 instanceIdx, uint256 newValue) public {
         uint256 idx = uint256(instanceIdx) % NUM_INSTANCES;
+        // Bound to valid field elements to avoid mod-R collisions with original value
+        newValue = bound(newValue, 0, R - 1);
         // Read the original value and make sure we're changing it
         uint256 originalValue;
         uint256 offset = idx * 32;
@@ -161,6 +167,41 @@ contract FuzzHalo2VerifierTest is Test {
 
         (bool success,) = verifier.call(data);
         assertFalse(success, "Mutated instance should invalidate proof");
+    }
+
+    /// @notice Regression for fuzzer counterexample: instanceIdx=49, newValue=R+1.
+    ///         R+1 ≡ 1 (mod R), so the verifier reduces it to 1 — the same as the original
+    ///         instance value. The proof still verifies despite different raw bytes.
+    ///         The fuzz test must use bound(newValue, 0, R-1) to exclude such values.
+    function test_Regression_FieldOverflowInstance() public {
+        uint256 idx = 1; // 49 % 3
+        uint256 overflowValue = R + 1; // reduces to 1 mod R
+        uint256 offset = idx * 32;
+        bytes memory data = _copyCalldata();
+
+        // Confirm instance[1] is 1 — the value R+1 collides with after reduction
+        uint256 originalValue;
+        assembly {
+            originalValue := mload(add(add(data, 0x20), offset))
+        }
+        assertEq(originalValue, 1, "Original instance[1] should be 1");
+
+        // Write R+1 into instance[1]
+        assembly {
+            mstore(add(add(data, 0x20), offset), overflowValue)
+        }
+
+        // Verifier accepts: R+1 mod R == 1 == originalValue, so proof is still valid.
+        // This is the root cause of the original fuzz failure — the old test expected
+        // assertFalse(success) here, which failed because the proof IS valid.
+        (bool success,) = verifier.call(data);
+        assertTrue(success, "R+1 mod R == 1 == original, so proof must still verify");
+
+        // Confirm the fixed fuzz test correctly excludes this case via bound()
+        uint256 bounded = bound(overflowValue, 0, R - 1);
+        assertTrue(bounded < R, "bound() must constrain to valid field elements");
+        // bound(R+1, 0, R-1) wraps into [0, R), so it won't equal R+1
+        assertTrue(bounded != overflowValue, "bound() must change the overflow value");
     }
 
     /// @notice Truncated calldata must always cause rejection

@@ -1,0 +1,8 @@
+# Known advisories that cannot be fixed without replacing ethers-rs with alloy.
+# All are transitive dependencies of ethers 2.0.14.
+[advisories]
+ignore = [
+    # ring 0.16.20: AES panic with overflow checking (via ethers → jsonwebtoken → ring)
+    "RUSTSEC-2025-0009",
+]
+

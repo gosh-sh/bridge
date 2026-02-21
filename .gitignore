@@ -3,7 +3,8 @@ target/
 **/*.rs.bk
 *.pdb
 Cargo.lock
-.cargo/
+.cargo/*
+!.cargo/audit.toml
 
 # Foundry / Solidity
 contracts/ethereum/out/

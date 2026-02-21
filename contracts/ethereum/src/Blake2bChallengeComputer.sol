@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Blake2bTranscript} from "./Blake2bTranscript.sol";
+import { Blake2bTranscript } from "./Blake2bTranscript.sol";
 
 /**
  * @title Blake2bChallengeComputer

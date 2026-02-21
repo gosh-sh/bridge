@@ -64,8 +64,8 @@ yarn.lock
 *.a
 *.lib
 
-# Data directories
-data/
+# Data directories (deposit-prover/data/ contains large generated artifacts)
+deposit-prover/data/
 db/
 
 # Keys and secrets (NEVER commit these!)
@@ -90,7 +90,11 @@ e2e_attack_test_data/
 *.e2e.json
 
 # ZK proof generation artifacts
-data/
+poseidon-proof/data/*
+# Exception: test fixture files needed by Solidity tests in CI
+!poseidon-proof/data/evm_calldata.bin
+!poseidon-proof/data/keccak_evm_calldata.bin
+!poseidon-proof/data/keccak_verifier_deployment.bin
 deposit-prover/params/
 *.pk
 *.snark

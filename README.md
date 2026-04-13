@@ -203,6 +203,7 @@ All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19
   - Event data extraction (depositId, sender, amount, contractAddress)
   - Block hash binding
 - **Public inputs** (7 field elements): `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`
+- **Keccak coprocessor**: The main circuit delegates expensive keccak256 computations to a separate coprocessor circuit via Poseidon-based promise commitments (~500× constraint savings per hash). See [Keccak Coprocessor Flowchart](docs/keccak_coprocessor_flowchart.mmd) for the detailed architecture.
 - **Circuit parameters**: `MAX_DATA_BYTE_LEN=128`, `MAX_LOG_NUM=3`, `RECEIPT_PF_MAX_DEPTH=10`
 
 ### Groth16 Wrapper (gnark-wrapper)

@@ -1,0 +1,48 @@
+flowchart TD
+    subgraph MAIN["Main Circuit (DepositEventCircuitV2)"]
+        A["Phase 0: Need keccak256(block_header_rlp)"]
+        A -->|"~0 keccak constraints"| B["keccak_chip.keccak_var_len(ctx, input, len)"]
+        B --> C["Creates Promise:\n(input_bytes, expected_output)"]
+        C --> D["Compute Poseidon(repack(input_bytes))\n~200-300 constraints"]
+        D --> E["Store in Promise Table:\nkey = Poseidon(input)\nvalue = expected_output"]
+        E --> F["Continue circuit logic using\nexpected_output as if keccak was computed"]
+        F --> G["Phase 0 end: Collect all promises"]
+        G --> H["promise_commit = Poseidon(all promise entries)\n= Public Input #7"]
+    end
+
+    subgraph COPROCESSOR["Keccak Coprocessor Circuit (separate proof)"]
+        K["Receive same (input, output) pairs"]
+        K --> L["For each pair:\n1. Run real keccak256 constraints\n   (~150,000 constraints per hash)"]
+        L --> M["2. Verify keccak256(input) == output"]
+        M --> N["3. Compute Poseidon(repack(input))\n   (same repacking as main circuit)"]
+        N --> O["coprocessor_commit = Poseidon(all entries)"]
+    end
+
+    subgraph VERIFY["Verification (on-chain or aggregation)"]
+        H --> P{"promise_commit\n==\ncoprocessor_commit?"}
+        O --> P
+        P -->|"Yes"| Q["✅ All keccak hashes in main circuit\nare cryptographically correct"]
+        P -->|"No"| R["❌ Reject proof"]
+    end
+
+    subgraph MOCK["In Tests / Mock Mode"]
+        S["mock_fulfill_keccak_promises(None)"]
+        S --> T["Compute keccak natively (not in circuit)\nSubstitute results directly"]
+        T --> U["Skip coprocessor proof generation\n(trusted environment)"]
+    end
+
+    subgraph COSTS["Constraint Cost Comparison"]
+        direction LR
+        V["Keccak256 in-circuit:\n~150,000 constraints/hash"]
+        W["Poseidon in-circuit:\n~200-300 constraints/hash"]
+        X["Savings: ~500x per hash call\nin the main circuit"]
+    end
+
+    style MAIN fill:#1a1a2e,stroke:#e94560,color:#eee
+    style COPROCESSOR fill:#1a1a2e,stroke:#0f3460,color:#eee
+    style VERIFY fill:#1a1a2e,stroke:#16c79a,color:#eee
+    style MOCK fill:#1a1a2e,stroke:#f5a623,color:#eee
+    style COSTS fill:#1a1a2e,stroke:#888,color:#eee
+    style Q fill:#16c79a,color:#000
+    style R fill:#e94560,color:#000
+

@@ -117,6 +117,7 @@ deposit-prover/gnark-wrapper/Groth16Verifier_sepolia.address
 
 # Prompt files
 *.prompt
+!intergation.prompt
 
 # Build artifacts
 cache/

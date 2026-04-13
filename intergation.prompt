@@ -1,0 +1,22 @@
+Our partners have created an other part of the bridge
+on Acki Nacki blockchain.
+
+- You may read the generic information about Acki
+Nacki at https://docs.ackinacki.com/
+- The generic repositories for Acki Nacki are
+located at ../acki-nacki and at ../tvm-sdk
+- Our partners created two repositories for
+an other part, located at ../layer-hashes-update-halo2-circuit and
+../gosh-zk-snark-halo2-utils
+- Also there is a set of messages from Discord, see
+    - Three latest images from ~/Downloads and ~/Documents/Alina.txt
+
+We need to understand:
+- The current project (our side of the bridge)
+- Acki Nacki project (using the links provided)
+- What our partners were done with the other side of the bridge
+    (and provide a detailed explanation in the special document)
+- Learn the best practices of the circuit audit
+- Make a very detailed audit of the work of our partners
+- Make a very detailed plan of the integration
+- Stop after this, the implementation will be done later

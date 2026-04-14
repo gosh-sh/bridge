@@ -4,7 +4,7 @@ members = ["crates/eth-frontend", "crates/acki-nacki-interface"]
 # Exclude deposit-prover because it uses axiom-crypto's halo2-lib (incompatible with scroll-tech)
 # Exclude frontend because it's a separate WASM project with different dependencies
 # Exclude poseidon-proof because it uses halo2-base/axiom (incompatible with workspace deps)
-exclude = ["deposit-prover", "frontend", "poseidon-proof"]
+exclude = ["deposit-prover", "frontend", "poseidon-proof", "layer-hashes-prover"]
 
 [workspace.package]
 version = "0.1.0"

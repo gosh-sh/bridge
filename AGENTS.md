@@ -14,6 +14,9 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 │   └── eth-frontend/          ← Rust Ethereum client (ethers-rs)
 ├── deposit-prover/         ← Rust Halo2 circuit: proves Ethereum deposit events
 │   └── gnark-wrapper/      ← Go: wraps Halo2 SHPLONK proof into Groth16 for on-chain verification
+├── layer-hashes-prover/    ← Rust: proof export + Go gnark-wrapper for layer-hash circuit
+│   ├── src/                ← export_proof.rs (fixture→Halo2 proof→JSON), proof_export.rs (types)
+│   └── gnark-wrapper/      ← Go: wraps layer-hash Halo2 proof into Groth16 (13 public inputs)
 ├── poseidon-proof/         ← Rust Halo2 circuit with Blake2b transcript (Poseidon commitments)
 ├── frontend/               ← WASM frontend (excluded from workspace)
 ├── scripts/                ← Shell scripts for verifier generation, deployment
@@ -77,6 +80,11 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 | `Blake2bTranscript.sol` / `Blake2bChallengeComputer.sol` | On-chain Blake2b transcript replay |
 | `DummyVerifier.sol` | Always-true verifier for testing |
 | `MockBlockHeaderOracle.sol` | Mock oracle for testing |
+| `LayerHashBridge.sol` | **NEW** — Stores AN layer hashes, verifies ZK proofs for updates |
+| `LayerHashVerifier.sol` | **NEW** — Adapter: assembles 13 public inputs, calls Groth16 verifier |
+| `ILayerHashVerifier.sol` | **NEW** — Interface for layer hash verification |
+| `LayerHashGroth16Verifier.sol` | **NEW** — Interface for gnark-generated 13-input Groth16 verifier |
+| `LayerHashGroth16VerifierGenerated.sol` | **NEW** — Auto-generated Groth16 verifier from gnark (13 inputs) |
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -160,13 +168,27 @@ These are tightly coupled to the AN node's serialization and will break if the n
 ## Build & Test Commands
 
 ```bash
-# This repo
+# This repo — main workspace
 make setup          # One-time: install Foundry, Go, Rust toolchain
 make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 make test-rust      # Rust workspace only
-make generate-verifier  # Regenerate Halo2 Yul verifier
+
+# Solidity contracts
+cd contracts/ethereum && forge build
+cd contracts/ethereum && forge test --match-contract "LayerHash" -vv  # Layer hash tests (24 tests)
+
+# Layer-hashes prover (standalone workspace, excluded from main)
+cd layer-hashes-prover
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build  # Needs SSH for GitHub
+cargo run --bin export-proof -- --fixture <path/to/fixture.json> --output halo2_proof.json
+
+# Gnark wrapper for layer hashes
+cd layer-hashes-prover/gnark-wrapper
+go build .
+./gnark-wrapper setup halo2_proof.json  # Generates Groth16Verifier.sol + keys
+./gnark-wrapper prove halo2_proof.json  # Generates groth16_proof.hex + groth16_output.json
 
 # Partner's circuit (from ../layer-hashes-update-halo2-circuit)
 cargo build --features small-window
@@ -175,18 +197,23 @@ cargo test --features small-window -- "test_fixture_mock_prover"  # Real data (~
 cargo test --features small-window -- "test_prev_chain_real_prover"  # Full prove (~26 min)
 ```
 
-## Integration Status (What's Next)
+## Integration Status
 
-Completed: audit of all partner code, all dependencies, build verification, test verification.
+**Completed (M0–M6)**:
+- Audit of all partner code and dependencies
+- `layer-hashes-prover/` Rust crate: exports Halo2 proof as JSON for gnark
+- `layer-hashes-prover/gnark-wrapper/` Go module: Groth16 wrapper for 13 public inputs
+- Gnark setup + prove pipeline verified end-to-end
+- `LayerHashVerifier.sol`, `LayerHashBridge.sol`, `LayerHashGroth16VerifierGenerated.sol`
+- 17 unit tests + 7 E2E tests (real proof verified on-chain, ~287k gas)
+- Negative tests: wrong commitment, wrong layers, wrong hash, corrupted proof — all rejected
 
-Remaining work for integration:
-- Gnark wrapper adaptation for layer-hashes circuit (13 public inputs)
-- `LayerHashVerifier.sol` Solidity adapter contract
-- `LayerHashBridge.sol` state storage + update contract
+**Remaining (M7–M9)**:
+- Live node testing (local AN node + Sepolia)
 - Relayer service: watch AN node → prove → wrap → submit to Ethereum
 - BK set rotation mechanism on Ethereum side
 - Real `acki-nacki-interface` implementation (currently mock only)
-- Production depth=8 testing
+- Production LAYER_TREE_DEPTH=8 testing
 
 See `docs/integration_plan.md` for the full plan with milestones.
 See `docs/layer_hashes_circuit_audit.md` for the complete audit report.

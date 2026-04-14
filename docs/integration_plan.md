@@ -435,15 +435,15 @@ Our deposit verification (7 inputs) costs ~280k gas. With 13 inputs, expect ~320
 - [x] Build partner circuit (requires `state_to_bytes` pub fix in sha256-chip)
 - [x] Run mock prover tests (all pass: k0, k1, fixture L5/S11, fixture L6/S11)
 - [x] Run real prover test (keygen + prove + verify, consistent VK, ~26 min)
-- [ ] Rust binary: export Halo2 proof as JSON for gnark
-- [ ] Go module: gnark-wrapper for layer-hashes circuit (13 inputs)
-- [ ] gnark setup: generate Groth16Verifier.sol for layer-hashes
-- [ ] Solidity: `LayerHashVerifier.sol` (adapter)
-- [ ] Solidity: `LayerHashBridge.sol` (state storage + update)
-- [ ] Foundry tests: unit tests for new contracts
-- [ ] E2E test: fixture-based (4 fixtures on Anvil)
-- [ ] E2E test: sequential updates
-- [ ] E2E test: negative test suite
+- [x] Rust binary: `layer-hashes-prover/src/export_proof.rs` — exports Halo2 proof as JSON for gnark
+- [x] Go module: `layer-hashes-prover/gnark-wrapper/` — Groth16 wrapper for 13 public inputs
+- [x] gnark setup: `LayerHashGroth16VerifierGenerated.sol` generated (14 constraints, 13 public inputs)
+- [x] Solidity: `LayerHashVerifier.sol` (adapter) + `ILayerHashVerifier.sol` + `LayerHashGroth16Verifier.sol` (interface)
+- [x] Solidity: `LayerHashBridge.sol` (state storage + update with chain anchoring)
+- [x] Foundry tests: 17 unit tests for LayerHashVerifier + LayerHashBridge (all pass)
+- [x] E2E test: fixture-based proof on Foundry (real Groth16 proof verified on-chain, ~287k gas)
+- [x] E2E test: bridge state update (proof → updateLayerHashes → verify stored state)
+- [x] E2E test: negative test suite (wrong commitment, wrong layers, wrong hash, wrong prevHash, corrupted proof — all rejected)
 - [ ] E2E test: live node + Sepolia
 - [ ] Relayer service: basic implementation
 - [ ] Documentation: update main README with layer-hash pipeline

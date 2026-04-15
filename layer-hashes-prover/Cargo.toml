@@ -37,3 +37,7 @@ opt-level = 3
 [[bin]]
 name = "export-proof"
 path = "src/export_proof.rs"
+
+[[bin]]
+name = "convert-proof"
+path = "src/bin/convert_proof.rs"

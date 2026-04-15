@@ -40,6 +40,42 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 | `halo2-lib-zkevm-sha256-and-bls12-381` | Gosh fork of axiom-crypto/halo2-lib adding BLS12-381 support to halo2-ecc |
 | `acki-nacki` | Acki Nacki node implementation |
 | `tvm-sdk` | TVM SDK (account queries, message sending) |
+| `bk-set-stub` | Minimal stub for `bk-set-change-verifier-halo2-circuit-with-better-sha256` (enables halo2-utils build without access to that private repo) |
+
+### `circuit-data-exporter` (on `bridge_halo2_tests` branch of `acki-nacki`)
+
+Lives at `acki-nacki/helpers/circuit_data_exporter` on the **`bridge_halo2_tests`** branch (not on `main`).
+Queries a live AN node via GraphQL, fetches a key block, extracts layer hashes, generates a synthetic BLS attestation, and writes a JSON fixture for the circuit tests.
+
+```bash
+# Fetch the branch locally
+cd ../acki-nacki && git fetch origin bridge_halo2_tests
+
+# Build (needs to be in workspace or built standalone with node deps)
+cargo build -p circuit-data-exporter
+
+# Usage
+cargo run -p circuit-data-exporter -- \
+    --network http://127.0.0.1:8080 \
+    --height 32 \
+    --bk-set-size 5 \
+    --num-prev-chain-steps 1 \
+    --output circuit_test_data.json
+```
+
+Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — the same format consumed by `test_real_data.rs` and `test_layer_hashes_d3.rs`.
+
+**Requirements**: `--height` must be a layer-N key block (H % W^N == 0 for N≥1). For `small-window` (W=2): heights 2, 4, 8, 16, 32, …
+
+### Acki Nacki Testnet
+
+- **Node API**: `http://94.156.178.19:8600` (port 8600; HTTPS/443 is firewalled)
+- **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
+- **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
+- **Testnet status**: Not ready for E2E testing (as of Apr 2026)
+- **Local 5-node cluster**: `cd ../acki-nacki/nock && docker-compose build && docker-compose up -d`
+  - Node0 API: `http://127.0.0.1:11000`
+  - Requires building with `history_proofs` feature for layer hash data
 
 ## ZK Proof Pipeline
 
@@ -131,6 +167,13 @@ Gosh fork of axiom-crypto/halo2-lib. Single commit. Adds `bls12_381` module to h
 - `proof.rs`: `Proof::create_for_circuit` / `verify_with_vk` — Blake2bWrite + ProverSHPLONK
 - `io.rs`: Universal PK/VK deserialization using BaseCircuitBuilder
 
+**Test flow for layer-hashes (depth=3, small-window)**:
+1. `test_layer_hashes_keygen_d3` — generates PK (~5.3GB), VK (11KB), config in `keys/` (~11 min)
+2. `test_layer_hashes_prove_and_verify_all_fixtures_d3` — proves all 4 fixtures with same key, verifies each (~22 min total)
+3. Keys are reusable for any fixture from a W=4 node with blocks ≤ 4096 bytes
+
+**Patching**: `Cargo.toml` needs `[patch]` sections pointing to local sibling repos (halo2-lib, layer-hashes-circuit, crypto-lib, bk-set-stub) to build without network access to private GitHub repos.
+
 ## Key Technical Concepts
 
 ### Proof Systems
@@ -173,43 +216,83 @@ make setup          # One-time: install Foundry, Go, Rust toolchain
 make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
-make test-rust      # Rust workspace only
 
-# Solidity contracts
+# Solidity contracts (31 tests: 17 unit + 14 E2E with real proofs)
 cd contracts/ethereum && forge build
-cd contracts/ethereum && forge test --match-contract "LayerHash" -vv  # Layer hash tests (24 tests)
+cd contracts/ethereum && forge test --match-contract "LayerHash" -vv
 
 # Layer-hashes prover (standalone workspace, excluded from main)
 cd layer-hashes-prover
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build  # Needs SSH for GitHub
-cargo run --bin export-proof -- --fixture <path/to/fixture.json> --output halo2_proof.json
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build
+# Convert binary proof+instances to gnark JSON:
+cargo run --bin convert-proof -- \
+    --proof <path/to/proof.bin> --instances <path/to/instances.bin> \
+    --output halo2_proof.json --k 19
 
 # Gnark wrapper for layer hashes
 cd layer-hashes-prover/gnark-wrapper
 go build .
-./gnark-wrapper setup halo2_proof.json  # Generates Groth16Verifier.sol + keys
-./gnark-wrapper prove halo2_proof.json  # Generates groth16_proof.hex + groth16_output.json
+./gnark-wrapper setup halo2_proof.json   # Generates Groth16Verifier.sol + keys (once)
+./gnark-wrapper prove halo2_proof.json   # Generates groth16_proof.hex + groth16_output.json
+
+# Full pipeline: keygen → prove all fixtures → gnark → Solidity
+cd ../gosh-zk-snark-halo2-utils
+cargo test --test test_layer_hashes_d3 -- test_layer_hashes_keygen_d3 --exact --nocapture          # ~11 min
+cargo test --test test_layer_hashes_d3 -- test_layer_hashes_prove_and_verify_all_fixtures_d3 --exact --nocapture  # ~22 min
+# Then convert each proof:
+for f in L2_H16_prevH0_S1 L2_H32_prevH16_S1 L5_H12288_prevH1024_S11 L6_H45056_prevH0_S11; do
+  cd ../acki-nacki-bridge/layer-hashes-prover
+  cargo run --bin convert-proof -- \
+    --proof ../../gosh-zk-snark-halo2-utils/keys/layer_hashes_all_circuit_test_data_${f}_proof.bin \
+    --instances ../../gosh-zk-snark-halo2-utils/keys/layer_hashes_all_circuit_test_data_${f}_instances.bin \
+    --output proofs/halo2_proof_${f}.json
+done
+# Gnark wrap:
+cd gnark-wrapper && ./gnark-wrapper setup ../proofs/halo2_proof_L2_H32_prevH16_S1.json
+for f in L2_H16_prevH0_S1 L2_H32_prevH16_S1 L5_H12288_prevH1024_S11 L6_H45056_prevH0_S11; do
+  ./gnark-wrapper prove ../proofs/halo2_proof_${f}.json
+  mv groth16_output.json ../proofs/groth16/groth16_output_${f}.json
+done
+# Update Solidity verifier:
+cp Groth16Verifier.sol ../../contracts/ethereum/src/LayerHashGroth16VerifierGenerated.sol
 
 # Partner's circuit (from ../layer-hashes-update-halo2-circuit)
 cargo build --features small-window
 cargo test --features small-window -- "test_prev_chain_k0_mock"  # Quick (~2 min)
 cargo test --features small-window -- "test_fixture_mock_prover"  # Real data (~5 min)
-cargo test --features small-window -- "test_prev_chain_real_prover"  # Full prove (~26 min)
 ```
+
+## Test Fixtures (4 real-data fixtures from AN node)
+
+| Fixture | num_layers | prev_chain_steps | prev_hash | block_data |
+|---------|-----------|------------------|-----------|------------|
+| `L2_H16_prevH0_S1` | 2 | 1 | zero (genesis) | 2012 B |
+| `L2_H32_prevH16_S1` | 2 | 1 | from H16 block | 2012 B |
+| `L5_H12288_prevH1024_S11` | 5 | 11 | from H1024 | 2512 B |
+| `L6_H45056_prevH0_S11` | 6 | 11 | zero (genesis) | 2504 B |
+
+All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in `layer-hashes-prover/proofs/`.
+
+**Public inputs per fixture** (13 Fr elements):
+`[bk_set_commitment, num_layers, layer_hash[0..9], prev_max_level_layer_hash]`
 
 ## Integration Status
 
-**Completed (M0–M6)**:
+**Completed (M0–M6 + full fixture E2E)**:
 - Audit of all partner code and dependencies
 - `layer-hashes-prover/` Rust crate: exports Halo2 proof as JSON for gnark
 - `layer-hashes-prover/gnark-wrapper/` Go module: Groth16 wrapper for 13 public inputs
 - Gnark setup + prove pipeline verified end-to-end
 - `LayerHashVerifier.sol`, `LayerHashBridge.sol`, `LayerHashGroth16VerifierGenerated.sol`
-- 17 unit tests + 7 E2E tests (real proof verified on-chain, ~287k gas)
-- Negative tests: wrong commitment, wrong layers, wrong hash, corrupted proof — all rejected
+- Real keygen (PK 5.3GB, VK 11KB, ~11 min) via `gosh-zk-snark-halo2-utils`
+- Real proof generation for all 4 fixtures (~22 min total)
+- Groth16 wrapping for all 4 fixtures (instant)
+- **31 Foundry tests**: 17 unit + 14 E2E with real proofs (~287k gas verify, ~457k gas bridge update)
+- Sequential bridge update tested (L2_H16 → L2_H32 with chain anchoring)
+- Negative tests: wrong commitment, layers, hash, prev_hash, corrupted proof — all rejected
 
 **Remaining (M7–M9)**:
-- Live node testing (local AN node + Sepolia)
+- Live node testing (testnet not ready; `circuit-data-exporter` on `bridge_halo2_tests` branch)
 - Relayer service: watch AN node → prove → wrap → submit to Ethereum
 - BK set rotation mechanism on Ethereum side
 - Real `acki-nacki-interface` implementation (currently mock only)

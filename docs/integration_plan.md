@@ -444,6 +444,11 @@ Our deposit verification (7 inputs) costs ~280k gas. With 13 inputs, expect ~320
 - [x] E2E test: fixture-based proof on Foundry (real Groth16 proof verified on-chain, ~287k gas)
 - [x] E2E test: bridge state update (proof → updateLayerHashes → verify stored state)
 - [x] E2E test: negative test suite (wrong commitment, wrong layers, wrong hash, wrong prevHash, corrupted proof — all rejected)
-- [ ] E2E test: live node + Sepolia
+- [x] Real keygen via `gosh-zk-snark-halo2-utils` (PK 5.3GB, VK 11KB, ~11 min)
+- [x] Real proof generation for all 4 fixtures via `test_layer_hashes_prove_and_verify_all_fixtures_d3` (~22 min)
+- [x] Groth16 wrapping for all 4 fixtures (convert-proof → gnark setup → gnark prove)
+- [x] E2E Foundry: all 4 real Groth16 proofs verified on-chain (14 E2E tests, ~287k gas verify, ~457k gas bridge update)
+- [x] Sequential bridge update: L2_H16 → L2_H32 with BK set rotation and chain anchoring
+- [ ] E2E test: live node + Sepolia (testnet not ready; circuit-data-exporter on `bridge_halo2_tests` branch)
 - [ ] Relayer service: basic implementation
 - [ ] Documentation: update main README with layer-hash pipeline

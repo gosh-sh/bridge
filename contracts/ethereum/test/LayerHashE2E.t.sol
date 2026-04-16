@@ -14,6 +14,13 @@ contract LayerHashE2ETest is Test {
     LayerHashVerifier public verifier;
     LayerHashBridge public bridge;
 
+    /// @dev Helper: switch BK set commitment via the timelock (propose + warp + execute).
+    function _timelockSetCommitment(uint256 newCommitment) internal {
+        bridge.proposeBkSetCommitment(newCommitment);
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK());
+        bridge.executeBkSetCommitment();
+    }
+
     // ─── Fixture 1: L2_H16_prevH0_S1 ────────────────────────────────────
     bytes constant PROOF_L2_H16 = hex"0035c2d9238de57ab0f251bf4a19a11c8948bce8254381a50068cefcfede693e1712444ef07afb717e4714bc0540e0598bae4c5e8d6ffab2f422d058df59066c00c2fad4ddaea8cb5353546c3ec2d340e022dd29395a583d801569f82d0f394008d5d84bc55c123180cf090684f3791b763c27c3675aa359cf166d2778c4a3bc28b4ca864fa44aee64d2ad663b83371e52db36ed79c846a766df739dda4ea3cd0608b5cbbc5521f2da6ddb95d39d4565a8b25707b8bebc8dd4c16812df9a10520b0fece8f6cd0fb12726dd60cd651f0a42ec1c8f27f94adb25aa5daddd6413562991941ba9268a6b65541ce2865e5657787d2968819f087006ad5e66ec7eb68f";
     uint256 constant BK_COMMIT_L2_H16 = 4890018956593449954263527844362646346361583961851737482130404971273334394070;
@@ -120,7 +127,7 @@ contract LayerHashE2ETest is Test {
         assertEq(bridge.updateCount(), 1);
 
         // Step 2: update BK set for next fixture (different commitment)
-        bridge.setBkSetCommitment(BK_COMMIT_L2_H32);
+        _timelockSetCommitment(BK_COMMIT_L2_H32);
 
         // Step 3: apply L2_H32 (prevH = fixture1's top layer hash)
         bridge.updateLayerHashes(
@@ -150,7 +157,7 @@ contract LayerHashE2ETest is Test {
     }
 
     function testE2E_L5_bridgeUpdate() public {
-        bridge.setBkSetCommitment(BK_COMMIT_L5);
+        _timelockSetCommitment(BK_COMMIT_L5);
         bridge.updateLayerHashes(
             PROOF_L5, NUM_LAYERS_L5,
             _layerHashes_L5(), PREV_HASH_L5
@@ -172,7 +179,7 @@ contract LayerHashE2ETest is Test {
     }
 
     function testE2E_L6_bridgeUpdate() public {
-        bridge.setBkSetCommitment(BK_COMMIT_L6);
+        _timelockSetCommitment(BK_COMMIT_L6);
         bridge.updateLayerHashes(
             PROOF_L6, NUM_LAYERS_L6,
             _layerHashes_L6(), PREV_HASH_L6
@@ -237,7 +244,7 @@ contract LayerHashE2ETest is Test {
     // =====================================================================
 
     function testE2E_gasReport() public {
-        bridge.setBkSetCommitment(BK_COMMIT_L5);
+        _timelockSetCommitment(BK_COMMIT_L5);
         uint256 gasBefore = gasleft();
         bridge.updateLayerHashes(
             PROOF_L5, NUM_LAYERS_L5,

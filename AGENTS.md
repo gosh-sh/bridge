@@ -17,6 +17,9 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── layer-hashes-prover/    ← Rust: proof export + Go gnark-wrapper for layer-hash circuit
 │   ├── src/                ← export_proof.rs (fixture→Halo2 proof→JSON), proof_export.rs (types)
 │   └── gnark-wrapper/      ← Go: wraps layer-hash Halo2 proof into Groth16 (13 public inputs)
+├── bk-set-rotation-prover/ ← ZK-proven BK set rotation (circuit spec + gnark-wrapper)
+│   ├── CIRCUIT_SPEC.md     ← Circuit specification: what the rotation proof proves
+│   └── gnark-wrapper/      ← Go: wraps rotation Halo2 proof into Groth16 (2 public inputs)
 ├── poseidon-proof/         ← Rust Halo2 circuit with Blake2b transcript (Poseidon commitments)
 ├── frontend/               ← WASM frontend (excluded from workspace)
 ├── scripts/                ← Shell scripts for verifier generation, deployment
@@ -116,11 +119,14 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `Blake2bTranscript.sol` / `Blake2bChallengeComputer.sol` | On-chain Blake2b transcript replay |
 | `DummyVerifier.sol` | Always-true verifier for testing |
 | `MockBlockHeaderOracle.sol` | Mock oracle for testing |
-| `LayerHashBridge.sol` | **NEW** — Stores AN layer hashes, verifies ZK proofs for updates |
-| `LayerHashVerifier.sol` | **NEW** — Adapter: assembles 13 public inputs, calls Groth16 verifier |
-| `ILayerHashVerifier.sol` | **NEW** — Interface for layer hash verification |
-| `LayerHashGroth16Verifier.sol` | **NEW** — Interface for gnark-generated 13-input Groth16 verifier |
-| `LayerHashGroth16VerifierGenerated.sol` | **NEW** — Auto-generated Groth16 verifier from gnark (13 inputs) |
+| `LayerHashBridge.sol` | Stores AN layer hashes + BK set commitment; verifies ZK proofs for layer updates and BK rotation; timelock for emergency BK set changes |
+| `LayerHashVerifier.sol` | Adapter: assembles 13 public inputs, calls Groth16 verifier |
+| `ILayerHashVerifier.sol` | Interface for layer hash verification |
+| `LayerHashGroth16Verifier.sol` | Interface for gnark-generated 13-input Groth16 verifier |
+| `LayerHashGroth16VerifierGenerated.sol` | Auto-generated Groth16 verifier from gnark (13 inputs) |
+| `IBkSetRotationVerifier.sol` | Interface for ZK-proven BK set rotation verification |
+| `BkSetRotationVerifier.sol` | Adapter: assembles 2 public inputs (old/new commitment), calls Groth16 verifier |
+| `BkSetRotationGroth16Verifier.sol` | Interface for gnark-generated 2-input Groth16 verifier |
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -291,10 +297,18 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Sequential bridge update tested (L2_H16 → L2_H32 with chain anchoring)
 - Negative tests: wrong commitment, layers, hash, prev_hash, corrupted proof — all rejected
 
+**BK Set Rotation (completed: Ethereum side)**:
+- `IBkSetRotationVerifier.sol`, `BkSetRotationVerifier.sol`, `BkSetRotationGroth16Verifier.sol`
+- `LayerHashBridge.rotateBkSet()` — permissionless ZK-proven BK set rotation
+- `LayerHashBridge.proposeBkSetCommitment()` / `executeBkSetCommitment()` / `cancelBkSetCommitment()` — 7-day timelocked emergency fallback
+- `bk-set-rotation-prover/gnark-wrapper/` — Go gnark wrapper for 2 public inputs (builds, ready for circuit output)
+- `bk-set-rotation-prover/CIRCUIT_SPEC.md` — full specification for the Halo2 rotation circuit
+- 49 Foundry tests pass (27 unit incl. timelock + ZK rotation, 4 rotation verifier, 4 layer hash verifier, 14 E2E)
+
 **Remaining (M7–M9)**:
+- BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)
 - Live node testing (testnet not ready; `circuit-data-exporter` on `bridge_halo2_tests` branch)
 - Relayer service: watch AN node → prove → wrap → submit to Ethereum
-- BK set rotation mechanism on Ethereum side
 - Real `acki-nacki-interface` implementation (currently mock only)
 - Production LAYER_TREE_DEPTH=8 testing
 

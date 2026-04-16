@@ -5,6 +5,9 @@ import "forge-std/Test.sol";
 import "../src/LayerHashBridge.sol";
 import "../src/LayerHashVerifier.sol";
 import "../src/ILayerHashVerifier.sol";
+import "../src/IBkSetRotationVerifier.sol";
+import "../src/BkSetRotationVerifier.sol";
+import "../src/BkSetRotationGroth16Verifier.sol";
 import "../src/LayerHashGroth16Verifier.sol";
 
 /// @dev Mock Groth16 verifier that always succeeds (for unit testing).
@@ -35,6 +38,23 @@ contract MockLayerHashVerifier is ILayerHashVerifier {
         uint256,
         uint256,
         uint256[10] calldata,
+        uint256
+    ) external view override returns (bool) {
+        return nextResult;
+    }
+}
+
+/// @dev Mock BK set rotation verifier for unit testing.
+contract MockBkSetRotationVerifier is IBkSetRotationVerifier {
+    bool public nextResult = true;
+
+    function setNextResult(bool _result) external {
+        nextResult = _result;
+    }
+
+    function verifyRotation(
+        bytes calldata,
+        uint256,
         uint256
     ) external view override returns (bool) {
         return nextResult;
@@ -88,9 +108,58 @@ contract LayerHashVerifierTest is Test {
     }
 }
 
+contract BkSetRotationVerifierTest is Test {
+    BkSetRotationVerifier public rotVerifier;
+    MockBkSetRotationGroth16 public groth16;
+
+    function setUp() public {
+        groth16 = new MockBkSetRotationGroth16();
+        rotVerifier = new BkSetRotationVerifier(address(groth16));
+    }
+
+    function testConstructorRejectsZeroAddress() public {
+        vm.expectRevert(BkSetRotationVerifier.InvalidVerifierAddress.selector);
+        new BkSetRotationVerifier(address(0));
+    }
+
+    function testVerifyValidRotation() public view {
+        bytes memory proof = new bytes(256);
+        bool result = rotVerifier.verifyRotation(proof, 111, 222);
+        assertTrue(result);
+    }
+
+    function testVerifyInvalidProofLength() public view {
+        bytes memory proof = new bytes(128);
+        bool result = rotVerifier.verifyRotation(proof, 111, 222);
+        assertFalse(result);
+    }
+
+    function testVerifyRevertingGroth16() public {
+        groth16.setShouldRevert(true);
+        bytes memory proof = new bytes(256);
+        bool result = rotVerifier.verifyRotation(proof, 111, 222);
+        assertFalse(result);
+    }
+}
+
+contract MockBkSetRotationGroth16 is IBkSetRotationGroth16Verifier {
+    bool public shouldRevert;
+
+    function setShouldRevert(bool _val) external {
+        shouldRevert = _val;
+    }
+
+    function verifyProof(uint256[8] calldata, uint256[2] calldata) external view override {
+        if (shouldRevert) {
+            revert("invalid proof");
+        }
+    }
+}
+
 contract LayerHashBridgeTest is Test {
     LayerHashBridge public bridge;
     MockLayerHashVerifier public verifier;
+    MockBkSetRotationVerifier public rotVerifier;
 
     uint256 constant BK_COMMITMENT = 0xdeadbeef;
 
@@ -102,10 +171,25 @@ contract LayerHashBridgeTest is Test {
     );
 
     event BkSetCommitmentUpdated(uint256 oldCommitment, uint256 newCommitment);
+    event BkSetCommitmentProposed(
+        uint256 indexed currentCommitment,
+        uint256 indexed proposedCommitment,
+        uint256 activationTime
+    );
+    event BkSetCommitmentProposalCancelled(uint256 indexed cancelledCommitment);
 
     function setUp() public {
         verifier = new MockLayerHashVerifier();
+        rotVerifier = new MockBkSetRotationVerifier();
         bridge = new LayerHashBridge(address(verifier), BK_COMMITMENT);
+        bridge.setBkRotationVerifier(address(rotVerifier));
+    }
+
+    /// @dev Helper: propose + warp + execute a BK set commitment change via timelock.
+    function _timelockSetCommitment(uint256 newCommitment) internal {
+        bridge.proposeBkSetCommitment(newCommitment);
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK());
+        bridge.executeBkSetCommitment();
     }
 
     function testInitialState() public view {
@@ -140,7 +224,6 @@ contract LayerHashBridgeTest is Test {
         hashes1[1] = 200;
         bridge.updateLayerHashes(proof, 2, hashes1, 0);
 
-        // Second update: prevHash must match hashes1[1] (top-level of 2 layers)
         uint256[10] memory hashes2;
         hashes2[0] = 300;
         hashes2[1] = 400;
@@ -193,18 +276,142 @@ contract LayerHashBridgeTest is Test {
         bridge.updateLayerHashes(proof, 11, hashes, 0);
     }
 
-    function testSetBkSetCommitment() public {
+    // ─── Timelock BK set commitment tests ─────────────────────────────
+
+    function testTimelockProposeThenExecute() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+        assertEq(bridge.pendingBkSetCommitment(), 0xcafe);
+        assertGt(bridge.commitmentActivationTime(), block.timestamp);
+
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK());
+
         vm.expectEmit(false, false, false, true);
         emit BkSetCommitmentUpdated(BK_COMMITMENT, 0xcafe);
 
-        bridge.setBkSetCommitment(0xcafe);
+        bridge.executeBkSetCommitment();
+        assertEq(bridge.currentBkSetCommitment(), 0xcafe);
+        assertEq(bridge.pendingBkSetCommitment(), 0);
+        assertEq(bridge.commitmentActivationTime(), 0);
+    }
+
+    function testTimelockExecuteBeforeExpiry() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK() - 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LayerHashBridge.TimelockNotExpired.selector,
+                bridge.commitmentActivationTime(),
+                block.timestamp
+            )
+        );
+        bridge.executeBkSetCommitment();
+    }
+
+    function testTimelockExecuteWithNoPending() public {
+        vm.expectRevert(LayerHashBridge.NoPendingCommitment.selector);
+        bridge.executeBkSetCommitment();
+    }
+
+    function testTimelockCancel() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+
+        vm.expectEmit(true, false, false, false);
+        emit BkSetCommitmentProposalCancelled(0xcafe);
+
+        bridge.cancelBkSetCommitment();
+        assertEq(bridge.pendingBkSetCommitment(), 0);
+        assertEq(bridge.commitmentActivationTime(), 0);
+    }
+
+    function testTimelockCancelWithNoPending() public {
+        vm.expectRevert(LayerHashBridge.NoPendingCommitment.selector);
+        bridge.cancelBkSetCommitment();
+    }
+
+    function testTimelockProposeOnlyOwner() public {
+        vm.prank(address(0xbad));
+        vm.expectRevert(LayerHashBridge.Unauthorized.selector);
+        bridge.proposeBkSetCommitment(0xcafe);
+    }
+
+    function testTimelockCancelOnlyOwner() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+
+        vm.prank(address(0xbad));
+        vm.expectRevert(LayerHashBridge.Unauthorized.selector);
+        bridge.cancelBkSetCommitment();
+    }
+
+    function testTimelockExecuteCallableByAnyone() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK());
+
+        vm.prank(address(0xbad));
+        bridge.executeBkSetCommitment();
         assertEq(bridge.currentBkSetCommitment(), 0xcafe);
     }
 
-    function testSetBkSetCommitmentOnlyOwner() public {
+    function testTimelockOverwritesPrevious() public {
+        bridge.proposeBkSetCommitment(0xcafe);
+        bridge.proposeBkSetCommitment(0xbeef);
+        assertEq(bridge.pendingBkSetCommitment(), 0xbeef);
+
+        vm.warp(block.timestamp + bridge.COMMITMENT_TIMELOCK());
+        bridge.executeBkSetCommitment();
+        assertEq(bridge.currentBkSetCommitment(), 0xbeef);
+    }
+
+    // ─── ZK rotation tests ────────────────────────────────────────────
+
+    function testZkRotation() public {
+        bytes memory proof = new bytes(256);
+        uint256 newCommitment = 0xcafe;
+
+        vm.expectEmit(false, false, false, true);
+        emit BkSetCommitmentUpdated(BK_COMMITMENT, newCommitment);
+
+        bridge.rotateBkSet(proof, newCommitment);
+        assertEq(bridge.currentBkSetCommitment(), newCommitment);
+    }
+
+    function testZkRotationInvalidProof() public {
+        rotVerifier.setNextResult(false);
+        bytes memory proof = new bytes(256);
+
+        vm.expectRevert(LayerHashBridge.InvalidProof.selector);
+        bridge.rotateBkSet(proof, 0xcafe);
+    }
+
+    function testZkRotationNoVerifierSet() public {
+        LayerHashBridge freshBridge = new LayerHashBridge(address(verifier), BK_COMMITMENT);
+        bytes memory proof = new bytes(256);
+
+        vm.expectRevert(LayerHashBridge.InvalidVerifier.selector);
+        freshBridge.rotateBkSet(proof, 0xcafe);
+    }
+
+    function testZkRotationCallableByAnyone() public {
+        bytes memory proof = new bytes(256);
+
+        vm.prank(address(0xbad));
+        bridge.rotateBkSet(proof, 0xcafe);
+        assertEq(bridge.currentBkSetCommitment(), 0xcafe);
+    }
+
+    // ─── Admin tests ──────────────────────────────────────────────────
+
+    function testSetBkRotationVerifier() public {
+        MockBkSetRotationVerifier newRot = new MockBkSetRotationVerifier();
+        bridge.setBkRotationVerifier(address(newRot));
+        assertEq(address(bridge.bkRotationVerifier()), address(newRot));
+    }
+
+    function testSetBkRotationVerifierOnlyOwner() public {
         vm.prank(address(0xbad));
         vm.expectRevert(LayerHashBridge.Unauthorized.selector);
-        bridge.setBkSetCommitment(0xcafe);
+        bridge.setBkRotationVerifier(address(0x1));
     }
 
     function testSetVerifier() public {
@@ -223,7 +430,7 @@ contract LayerHashBridgeTest is Test {
         assertEq(bridge.owner(), address(0x42));
 
         vm.expectRevert(LayerHashBridge.Unauthorized.selector);
-        bridge.setBkSetCommitment(0);
+        bridge.proposeBkSetCommitment(0);
     }
 
     function testGetAllLayerHashes() public {
@@ -238,5 +445,28 @@ contract LayerHashBridgeTest is Test {
         for (uint256 i = 0; i < 10; i++) {
             assertEq(stored[i], (i + 1) * 100);
         }
+    }
+
+    // ─── Integration: layer update + BK rotation + layer update ──────
+
+    function testLayerUpdateThenRotationThenLayerUpdate() public {
+        bytes memory proof = new bytes(256);
+
+        uint256[10] memory hashes1;
+        hashes1[0] = 100;
+        hashes1[1] = 200;
+        bridge.updateLayerHashes(proof, 2, hashes1, 0);
+        assertEq(bridge.currentBkSetCommitment(), BK_COMMITMENT);
+
+        uint256 newBkCommitment = 0xfeedface;
+        bridge.rotateBkSet(proof, newBkCommitment);
+        assertEq(bridge.currentBkSetCommitment(), newBkCommitment);
+
+        uint256[10] memory hashes2;
+        hashes2[0] = 300;
+        hashes2[1] = 400;
+        bridge.updateLayerHashes(proof, 2, hashes2, 200);
+        assertEq(bridge.updateCount(), 2);
+        assertEq(bridge.getLayerHash(0), 300);
     }
 }

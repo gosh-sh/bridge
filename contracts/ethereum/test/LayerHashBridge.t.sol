@@ -33,13 +33,12 @@ contract MockLayerHashVerifier is ILayerHashVerifier {
         nextResult = _result;
     }
 
-    function verifyLayerHashUpdate(
-        bytes calldata,
-        uint256,
-        uint256,
-        uint256[10] calldata,
-        uint256
-    ) external view override returns (bool) {
+    function verifyLayerHashUpdate(bytes calldata, uint256, uint256, uint256[10] calldata, uint256)
+        external
+        view
+        override
+        returns (bool)
+    {
         return nextResult;
     }
 }
@@ -52,11 +51,12 @@ contract MockBkSetRotationVerifier is IBkSetRotationVerifier {
         nextResult = _result;
     }
 
-    function verifyRotation(
-        bytes calldata,
-        uint256,
-        uint256
-    ) external view override returns (bool) {
+    function verifyRotation(bytes calldata, uint256, uint256)
+        external
+        view
+        override
+        returns (bool)
+    {
         return nextResult;
     }
 }
@@ -80,9 +80,7 @@ contract LayerHashVerifierTest is Test {
         uint256[10] memory layerHashes;
         layerHashes[0] = 42;
 
-        bool result = verifier.verifyLayerHashUpdate(
-            proof, 123, 1, layerHashes, 0
-        );
+        bool result = verifier.verifyLayerHashUpdate(proof, 123, 1, layerHashes, 0);
         assertTrue(result);
     }
 
@@ -90,9 +88,7 @@ contract LayerHashVerifierTest is Test {
         bytes memory proof = new bytes(128);
         uint256[10] memory layerHashes;
 
-        bool result = verifier.verifyLayerHashUpdate(
-            proof, 123, 1, layerHashes, 0
-        );
+        bool result = verifier.verifyLayerHashUpdate(proof, 123, 1, layerHashes, 0);
         assertFalse(result);
     }
 
@@ -101,9 +97,7 @@ contract LayerHashVerifierTest is Test {
         bytes memory proof = new bytes(256);
         uint256[10] memory layerHashes;
 
-        bool result = verifier.verifyLayerHashUpdate(
-            proof, 123, 1, layerHashes, 0
-        );
+        bool result = verifier.verifyLayerHashUpdate(proof, 123, 1, layerHashes, 0);
         assertFalse(result);
     }
 }
@@ -164,10 +158,7 @@ contract LayerHashBridgeTest is Test {
     uint256 constant BK_COMMITMENT = 0xdeadbeef;
 
     event LayerHashesUpdated(
-        uint256 indexed updateIndex,
-        uint256 numLayers,
-        uint256 prevHash,
-        uint256 timestamp
+        uint256 indexed updateIndex, uint256 numLayers, uint256 prevHash, uint256 timestamp
     );
 
     event BkSetCommitmentUpdated(uint256 oldCommitment, uint256 newCommitment);
@@ -244,9 +235,7 @@ contract LayerHashBridgeTest is Test {
         bridge.updateLayerHashes(proof, 1, hashes1, 0);
 
         uint256[10] memory hashes2;
-        vm.expectRevert(
-            abi.encodeWithSelector(LayerHashBridge.PrevHashMismatch.selector, 100, 999)
-        );
+        vm.expectRevert(abi.encodeWithSelector(LayerHashBridge.PrevHashMismatch.selector, 100, 999));
         bridge.updateLayerHashes(proof, 1, hashes2, 999);
     }
 

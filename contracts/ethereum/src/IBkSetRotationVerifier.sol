@@ -12,9 +12,8 @@ interface IBkSetRotationVerifier {
     /// @param oldCommitment Poseidon commitment to the current (old) BK set
     /// @param newCommitment Poseidon commitment to the new BK set
     /// @return isValid Whether the proof is valid
-    function verifyRotation(
-        bytes calldata proof,
-        uint256 oldCommitment,
-        uint256 newCommitment
-    ) external view returns (bool isValid);
+    function verifyRotation(bytes calldata proof, uint256 oldCommitment, uint256 newCommitment)
+        external
+        view
+        returns (bool isValid);
 }

@@ -25,11 +25,12 @@ contract BkSetRotationVerifier is IBkSetRotationVerifier {
     }
 
     /// @inheritdoc IBkSetRotationVerifier
-    function verifyRotation(
-        bytes calldata proof,
-        uint256 oldCommitment,
-        uint256 newCommitment
-    ) external view override returns (bool isValid) {
+    function verifyRotation(bytes calldata proof, uint256 oldCommitment, uint256 newCommitment)
+        external
+        view
+        override
+        returns (bool isValid)
+    {
         if (proof.length != GROTH16_PROOF_SIZE) {
             return false;
         }

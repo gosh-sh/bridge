@@ -32,16 +32,10 @@ contract LayerHashBridge {
     uint256 public commitmentActivationTime;
 
     event LayerHashesUpdated(
-        uint256 indexed updateIndex,
-        uint256 numLayers,
-        uint256 prevHash,
-        uint256 timestamp
+        uint256 indexed updateIndex, uint256 numLayers, uint256 prevHash, uint256 timestamp
     );
 
-    event BkSetCommitmentUpdated(
-        uint256 oldCommitment,
-        uint256 newCommitment
-    );
+    event BkSetCommitmentUpdated(uint256 oldCommitment, uint256 newCommitment);
 
     event BkSetCommitmentProposed(
         uint256 indexed currentCommitment,
@@ -103,11 +97,7 @@ contract LayerHashBridge {
         }
 
         bool valid = verifier.verifyLayerHashUpdate(
-            proof,
-            currentBkSetCommitment,
-            numLayers,
-            newLayerHashes,
-            prevMaxLevelLayerHash
+            proof, currentBkSetCommitment, numLayers, newLayerHashes, prevMaxLevelLayerHash
         );
         if (!valid) revert InvalidProof();
 
@@ -129,9 +119,7 @@ contract LayerHashBridge {
     function rotateBkSet(bytes calldata proof, uint256 newCommitment) external {
         if (address(bkRotationVerifier) == address(0)) revert InvalidVerifier();
 
-        bool valid = bkRotationVerifier.verifyRotation(
-            proof, currentBkSetCommitment, newCommitment
-        );
+        bool valid = bkRotationVerifier.verifyRotation(proof, currentBkSetCommitment, newCommitment);
         if (!valid) revert InvalidProof();
 
         uint256 old = currentBkSetCommitment;

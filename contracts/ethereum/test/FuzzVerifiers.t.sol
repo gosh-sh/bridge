@@ -315,7 +315,9 @@ contract FuzzAckiNackiBridgeTest is Test {
     function setUp() public {
         verifier = new DummyVerifier();
         oracle = new MockBlockHeaderOracle();
-        bridge = new AckiNackiBridge(address(verifier), address(oracle));
+        bridge = new AckiNackiBridge(
+            address(verifier), address(oracle), address(0), address(0), address(0)
+        );
     }
 
     /// @notice Any valid deposit amount should succeed and update state correctly

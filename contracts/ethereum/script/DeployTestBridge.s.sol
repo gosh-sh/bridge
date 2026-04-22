@@ -27,8 +27,10 @@ contract DeployTestBridge is Script {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         console.log("MockBlockHeaderOracle deployed at:", address(oracle));
 
-        // Deploy the bridge contract
-        AckiNackiBridge bridge = new AckiNackiBridge(address(verifier), address(oracle));
+        // Deploy the bridge contract (AAVE integration disabled in test deployment)
+        AckiNackiBridge bridge = new AckiNackiBridge(
+            address(verifier), address(oracle), address(0), address(0), address(0)
+        );
         console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();

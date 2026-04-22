@@ -35,8 +35,10 @@ contract AckiNackiBridgeV2Test is Test {
         // Deploy mock block header oracle
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
 
-        // Deploy bridge with verifier and oracle addresses
-        bridge = new AckiNackiBridge(address(verifier), address(oracle));
+        // Deploy bridge with verifier and oracle addresses (AAVE disabled)
+        bridge = new AckiNackiBridge(
+            address(verifier), address(oracle), address(0), address(0), address(0)
+        );
 
         // Fund test users
         vm.deal(user1, 100 ether);
@@ -318,12 +320,12 @@ contract AckiNackiBridgeV2Test is Test {
     function testConstructorInvalidVerifier() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         vm.expectRevert(AckiNackiBridge.InvalidVerifier.selector);
-        new AckiNackiBridge(address(0), address(oracle));
+        new AckiNackiBridge(address(0), address(oracle), address(0), address(0), address(0));
     }
 
     function testConstructorInvalidOracle() public {
         vm.expectRevert(AckiNackiBridge.InvalidOracle.selector);
-        new AckiNackiBridge(address(verifier), address(0));
+        new AckiNackiBridge(address(verifier), address(0), address(0), address(0), address(0));
     }
 }
 

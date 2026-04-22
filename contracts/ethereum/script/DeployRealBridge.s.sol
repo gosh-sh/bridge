@@ -26,9 +26,15 @@ contract DeployRealBridge is Script {
     address constant AXIOM_V2_CORE_MAINNET = 0x69963768F8407dE501029680dE46945F838Fc98B;
     address constant AXIOM_V2_CORE_SEPOLIA = 0x69963768F8407dE501029680dE46945F838Fc98B;
 
+    // AAVE V3 Ethereum mainnet addresses (https://github.com/bgd-labs/aave-address-book)
+    address constant AAVE_V3_POOL_MAINNET = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    address constant AAVE_V3_WETH_GATEWAY_MAINNET = 0xD322A49006FC828F9B5B37Ab215F99B4E5caB19C;
+    address constant AAVE_V3_aWETH_MAINNET = 0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8;
+
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         bool useAxiomOracle = vm.envOr("USE_AXIOM_ORACLE", false);
+        bool useAave = vm.envOr("USE_AAVE", false);
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -78,9 +84,27 @@ contract DeployRealBridge is Script {
         }
         console.log(string(abi.encodePacked(oracleType, " deployed at:")), oracleAddr);
 
-        // Step 4: Deploy the bridge contract
+        // Step 4: Pick AAVE addresses (only supported on mainnet, optional).
+        address aavePool;
+        address wethGateway;
+        address aWETH;
+        if (useAave) {
+            require(block.chainid == 1, "AAVE wiring only supported on mainnet (chainid=1)");
+            aavePool = AAVE_V3_POOL_MAINNET;
+            wethGateway = AAVE_V3_WETH_GATEWAY_MAINNET;
+            aWETH = AAVE_V3_aWETH_MAINNET;
+            console.log("AAVE integration: ENABLED");
+            console.log("  Pool:", aavePool);
+            console.log("  WETH Gateway:", wethGateway);
+            console.log("  aWETH:", aWETH);
+        } else {
+            console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on mainnet)");
+        }
+
+        // Step 5: Deploy the bridge contract
         console.log("Deploying AckiNackiBridge...");
-        AckiNackiBridge bridge = new AckiNackiBridge(address(verifier), oracleAddr);
+        AckiNackiBridge bridge =
+            new AckiNackiBridge(address(verifier), oracleAddr, aavePool, wethGateway, aWETH);
         console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();

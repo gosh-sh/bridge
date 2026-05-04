@@ -449,6 +449,8 @@ Our deposit verification (7 inputs) costs ~280k gas. With 13 inputs, expect ~320
 - [x] Groth16 wrapping for all 4 fixtures (convert-proof → gnark setup → gnark prove)
 - [x] E2E Foundry: all 4 real Groth16 proofs verified on-chain (14 E2E tests, ~287k gas verify, ~457k gas bridge update)
 - [x] Sequential bridge update: L2_H16 → L2_H32 with BK set rotation and chain anchoring
+- [x] AAVE V3 yield integration: `AckiNackiBridge` extended with `supplyToAave` / `withdrawFromAave` / `emergencyWithdrawAll` / `harvestYield`; principal-segregated yield accounting; 23 unit + fuzz tests with mock AAVE; `USE_AAVE=true` opt-in deployment flag (see `docs/aave_integration.md`)
+- [ ] AAVE: mainnet fork tests against real `WrappedTokenGatewayV3` + `Pool`
 - [ ] E2E test: live node + Sepolia (testnet not ready; circuit-data-exporter on `bridge_halo2_tests` branch)
 - [ ] Relayer service: basic implementation
 - [ ] Documentation: update main README with layer-hash pipeline

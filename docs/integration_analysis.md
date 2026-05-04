@@ -30,12 +30,17 @@ All contracts are in `contracts/ethereum/src/`, compiled with Solidity 0.8.19 vi
 
 #### AckiNackiBridge.sol
 
-Main bridge contract with two entry points:
+Main bridge contract with two user-facing entry points plus an optional AAVE V3 yield path:
 
-- **`deposit()`** — accepts ETH (max 100 ETH), increments `depositCounter`, emits `Deposit(depositId, sender, amount, timestamp)`
-- **`withdraw(recipient, amount, depositId, blockNumber, proof)`** — queries block hash from oracle, builds 6 public inputs, calls verifier, transfers ETH on success
+- **`deposit()`** — accepts ETH (max 100 ETH), increments `depositCounter`, emits `Deposit(depositId, sender, amount, timestamp)`. Funds accumulate in the contract; `deposit()` itself never calls AAVE (kept cheap).
+- **`withdraw(recipient, amount, depositId, blockNumber, proof)`** — queries block hash from oracle, builds 6 public inputs, calls verifier, transfers ETH on success. If the bridge's liquid ETH balance is short of `amount`, the shortfall is transparently pulled from AAVE.
 
-State: `processedDeposits` mapping for double-spend prevention, `treasuryBalance`, pluggable `verifier` and `blockHeaderOracle`.
+Constructor (5 args): `(verifier, blockHeaderOracle, aavePool, wethGateway, aWETH)`. Pass `address(0)` for the last three to disable AAVE; this keeps the bridge in plain-ETH custody mode.
+
+Storage:
+- Core: `processedDeposits` (double-spend prevention), `depositCounter`, `treasuryBalance`, pluggable `verifier`, `blockHeaderOracle`.
+- AAVE: immutable `aavePool` / `wethGateway` / `aWETH`; `aaveEnabled`, `suppliedPrincipal` (book value of supplied ETH), `liquidReserveBps` (default 1000 = 10 %, capped at 5000).
+- Access: `owner` (administers AAVE routing), `yieldRecipient` (gets harvested yield).
 
 Public input layout assembled by the bridge for verification:
 
@@ -48,7 +53,9 @@ Public input layout assembled by the bridge for verification:
 | 4 | blockHashHigh | Upper 128 bits of block hash |
 | 5 | blockHashLow | Lower 128 bits of block hash |
 
-No access control — anyone can deposit or withdraw with a valid proof.
+User-facing entry points (`deposit`, `withdraw`) are permissionless — anyone with a valid ZK proof can withdraw. The `owner` role only governs AAVE routing (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `setAaveEnabled`, `setLiquidReserveBps`, `harvestYield`, `setYieldRecipient`, `transferOwnership`). The owner **cannot** withdraw user principal: `harvestYield` is bounded by `aWETH.balanceOf(bridge) - suppliedPrincipal`, and there is no admin path that bypasses the ZK-verified `withdraw()`.
+
+See `docs/aave_integration.md` for the full design, invariants, and verification protocol.
 
 #### IAckiNackiVerifier.sol
 

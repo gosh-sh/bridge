@@ -108,7 +108,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 | Contract | Purpose |
 |----------|---------|
-| `AckiNackiBridge.sol` | Main bridge: deposits, withdrawals, layer hash state |
+| `AckiNackiBridge.sol` | Main bridge: deposits, withdrawals, **AAVE V3 yield integration** (owner-managed, principal-segregated) |
 | `Groth16Verifier.sol` | Auto-generated Groth16 verifier (gnark output) |
 | `Groth16DepositVerifier.sol` | Adapter: decodes deposit proof public inputs, calls Groth16Verifier |
 | `IAckiNackiVerifier.sol` | Interface for AN-side proof verification |
@@ -127,6 +127,11 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IBkSetRotationVerifier.sol` | Interface for ZK-proven BK set rotation verification |
 | `BkSetRotationVerifier.sol` | Adapter: assembles 2 public inputs (old/new commitment), calls Groth16 verifier |
 | `BkSetRotationGroth16Verifier.sol` | Interface for gnark-generated 2-input Groth16 verifier |
+| `IAavePool.sol` | Minimal AAVE V3 Pool interface (`supply` / `withdraw` / `getReserveData`) |
+| `IWrappedTokenGatewayV3.sol` | AAVE V3 ETH⇄WETH gateway interface (`depositETH` / `withdrawETH`) |
+| `IERC20.sol` | Trimmed ERC-20 interface for aWETH custody |
+
+Test mocks (under `test/mocks/`): `MockAave.sol` provides `MockAWETH`, `MockAavePool`, `MockWETHGateway` for unit testing the AAVE path without forking mainnet.
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -223,9 +228,11 @@ make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 
-# Solidity contracts (31 tests: 17 unit + 14 E2E with real proofs)
+# Solidity contracts (135 tests across 14 suites, all green)
 cd contracts/ethereum && forge build
-cd contracts/ethereum && forge test --match-contract "LayerHash" -vv
+cd contracts/ethereum && forge test                                      # full suite
+cd contracts/ethereum && forge test --match-contract "LayerHash" -vv     # layer-hash subset
+cd contracts/ethereum && forge test --match-contract "AaveTest" -vv      # AAVE subset (23 tests)
 
 # Layer-hashes prover (standalone workspace, excluded from main)
 cd layer-hashes-prover
@@ -303,7 +310,36 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - `LayerHashBridge.proposeBkSetCommitment()` / `executeBkSetCommitment()` / `cancelBkSetCommitment()` — 7-day timelocked emergency fallback
 - `bk-set-rotation-prover/gnark-wrapper/` — Go gnark wrapper for 2 public inputs (builds, ready for circuit output)
 - `bk-set-rotation-prover/CIRCUIT_SPEC.md` — full specification for the Halo2 rotation circuit
-- 49 Foundry tests pass (27 unit incl. timelock + ZK rotation, 4 rotation verifier, 4 layer hash verifier, 14 E2E)
+
+**AAVE V3 Yield Integration (completed)**:
+- `AckiNackiBridge` extended with optional AAVE V3 wiring (pool + WETH gateway + aWETH).
+- New owner role manages routing only — **cannot touch user principal**.
+- `supplyToAave(amount)` routes idle ETH to AAVE; `withdrawFromAave` and `emergencyWithdrawAll` pull funds back.
+- `withdraw()` auto-pulls shortfall from AAVE if liquid buffer is insufficient — transparent to users.
+- Configurable `liquidReserveBps` (default 10%, capped at 50%) keeps a buffer for cheap small withdrawals.
+- Yield isolated from principal: `accruedYield() = aWETH.balanceOf(bridge) - suppliedPrincipal`. `harvestYield(amount)` forwards to a separate `yieldRecipient`.
+- Reentrancy guard on all mutating functions; CEI preserved in `withdraw()`.
+- Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
+- See `docs/aave_integration.md` for design + correctness verification protocol.
+
+**Test counts (Foundry, 14 suites, all green)**:
+
+| Suite | Count |
+|------|------|
+| `AckiNackiBridgeAaveTest` (AAVE) | 23 |
+| `AckiNackiBridgeV2Test` (deposit/withdraw) | 14 |
+| `AxiomBlockHeaderOracleTest` | 16 |
+| `Blake2b/KeccakHalo2VerifierTest` | 8 |
+| `Halo2PoseidonVerifierTest` | 7 |
+| `FuzzAckiNackiBridgeTest` | 5 |
+| `FuzzGroth16DepositVerifierTest` | 3 |
+| `FuzzGroth16VerifierTest` | 4 |
+| `FuzzHalo2VerifierTest` | 6 |
+| `LayerHashBridgeTest` | 27 |
+| `LayerHashVerifierTest` | 4 |
+| `BkSetRotationVerifierTest` | 4 |
+| `LayerHashE2ETest` (real proofs) | 14 |
+| **Total** | **135** |
 
 **Remaining (M7–M9)**:
 - BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)
@@ -311,7 +347,11 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Relayer service: watch AN node → prove → wrap → submit to Ethereum
 - Real `acki-nacki-interface` implementation (currently mock only)
 - Production LAYER_TREE_DEPTH=8 testing
+- AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based)
 
+See `docs/manual_verification_runbook.md` for the hands-on, copy-pasteable plan a human reviewer follows to verify the bridge end-to-end (~2 hours).
+See `docs/bridge_verification.md` for the property-driven verification reference (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-# invariants).
 See `docs/integration_plan.md` for the full plan with milestones.
 See `docs/layer_hashes_circuit_audit.md` for the complete audit report.
 See `docs/integration_analysis.md` for the architecture analysis.
+See `docs/aave_integration.md` for the AAVE yield integration design and correctness checks.

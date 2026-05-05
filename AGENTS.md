@@ -349,8 +349,10 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Production LAYER_TREE_DEPTH=8 testing
 - AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based)
 
-See `docs/manual_verification_runbook.md` for the hands-on, copy-pasteable plan a human reviewer follows to verify the bridge end-to-end (~2 hours).
+See `docs/manual_verification_runbook.md` for the hands-on, copy-pasteable plan a human reviewer follows to verify the bridge end-to-end (~2.5 hours, includes 32 attack scenarios).
 See `docs/bridge_verification.md` for the property-driven verification reference (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-# invariants).
+See `docs/verifying_an_proof.md` for the end-to-end verification of a layer-hash proof produced from the Acki Nacki side (5 stages: ground-truth cross-check, Halo2, gnark JSON instances, gnark native, on-chain).
+See `docs/verifying_eth_proof_on_an.md` for the mirror flow — how the Acki Nacki side verifies a deposit proof produced on Ethereum (7 stages incl. RPC quorum, event cross-check, Halo2/gnark, nullifier, on-chain TVM verifier [planned]).
 See `docs/integration_plan.md` for the full plan with milestones.
 See `docs/layer_hashes_circuit_audit.md` for the complete audit report.
 See `docs/integration_analysis.md` for the architecture analysis.

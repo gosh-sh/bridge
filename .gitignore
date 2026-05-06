@@ -53,6 +53,7 @@ crates/bridge-prover-orchestrator/proofs/
 # Phase 3: per-circuit gnark-wrapper outputs. Only the .go / go.mod / go.sum
 # source code is checked in; the trusted-setup keys, R1CS, and built binaries
 # are regenerated locally by `gnark-wrappers/circuit-1b/circuit-1b setup`.
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1a
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1b
 crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key

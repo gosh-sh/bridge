@@ -35,6 +35,10 @@ bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/pars
 name = "export-fallback-proof"
 path = "src/bin/export_fallback_proof.rs"
 
+[[bin]]
+name = "export-primary-proof"
+path = "src/bin/export_primary_proof.rs"
+
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.
 # The partner crates declare these via git URLs in their Cargo.toml; without

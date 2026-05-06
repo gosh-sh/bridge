@@ -127,6 +127,10 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IBkSetRotationVerifier.sol` | Interface for ZK-proven BK set rotation verification |
 | `BkSetRotationVerifier.sol` | Adapter: assembles 2 public inputs (old/new commitment), calls Groth16 verifier |
 | `BkSetRotationGroth16Verifier.sol` | Interface for gnark-generated 2-input Groth16 verifier |
+| `IFallbackVerifier.sol` / `FallbackVerifier.sol` | Bridge-side adapter for Circuit 1B (Fallback attestation) — assembles 4 public inputs, calls Groth16 |
+| `IFallbackGroth16Verifier.sol` / `FallbackGroth16VerifierGenerated.sol` | gnark-generated Groth16 verifier (4 inputs) for Circuit 1B |
+| `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` | Bridge-side adapter for Circuit 1A (Primary attestation) — same 4-input shape as Fallback |
+| `IPrimaryGroth16Verifier.sol` / `PrimaryGroth16VerifierGenerated.sol` | gnark-generated Groth16 verifier (4 inputs) for Circuit 1A |
 | `IAavePool.sol` | Minimal AAVE V3 Pool interface (`supply` / `withdraw` / `getReserveData`) |
 | `IWrappedTokenGatewayV3.sol` | AAVE V3 ETH⇄WETH gateway interface (`depositETH` / `withdrawETH`) |
 | `IERC20.sol` | Trimmed ERC-20 interface for aWETH custody |
@@ -322,7 +326,7 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
 - See `docs/aave_integration.md` for design + correctness verification protocol.
 
-**Test counts (Foundry, 14 suites, all green)**:
+**Test counts (Foundry, 16 suites, all green)**:
 
 | Suite | Count |
 |------|------|
@@ -339,7 +343,9 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 | `LayerHashVerifierTest` | 4 |
 | `BkSetRotationVerifierTest` | 4 |
 | `LayerHashE2ETest` (real proofs) | 14 |
-| **Total** | **135** |
+| `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
+| `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
+| **Total** | **151** |
 
 **Remaining (M7–M9)**:
 - BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)

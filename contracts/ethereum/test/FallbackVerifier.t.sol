@@ -24,7 +24,8 @@ contract FallbackVerifierTest is Test {
     FallbackVerifier public verifier;
 
     // ─── Phase 1.A 10-signer synthetic proof + public inputs ──────────────
-    bytes constant PROOF_10_SIGNERS = hex"1cb89d6fa285c4f67c2290d7449ddfa84fb33deeeecec28db43264e88afdac49075d4c00e39326ffafc68f4c76f00201c838c2b00c99a22ae2478f89cddf668d21fabb2601bf26caf2b5f71ce45d2ba6ee90f7881441117ac1e542f41e5e56dd1771f7c5713dbfdcccc384884120905a105ec4dc7371c786e740b009975840fa28767f00cb90b1ba0aab04192b0b3cb2427609f21cc3e697ab206a5d375de05e085cc291503760eb7f3b77ed60091a1a1398edabfb7bdec26eb723fb5f8fa579145547ee74bdab6132f87d76033e616c8c8a51657b5c836c68b3c9efd0bd82ca13dc83ebb0498c6eca909b4d80c867b5d57120ce918ae90f5f98d9474d9d100a";
+    bytes constant PROOF_10_SIGNERS =
+        hex"1cb89d6fa285c4f67c2290d7449ddfa84fb33deeeecec28db43264e88afdac49075d4c00e39326ffafc68f4c76f00201c838c2b00c99a22ae2478f89cddf668d21fabb2601bf26caf2b5f71ce45d2ba6ee90f7881441117ac1e542f41e5e56dd1771f7c5713dbfdcccc384884120905a105ec4dc7371c786e740b009975840fa28767f00cb90b1ba0aab04192b0b3cb2427609f21cc3e697ab206a5d375de05e085cc291503760eb7f3b77ed60091a1a1398edabfb7bdec26eb723fb5f8fa579145547ee74bdab6132f87d76033e616c8c8a51657b5c836c68b3c9efd0bd82ca13dc83ebb0498c6eca909b4d80c867b5d57120ce918ae90f5f98d9474d9d100a";
 
     uint256 constant ENVELOPE_HASH =
         20202806359575240131428837967779228818217543621557080492235371780190089760303;
@@ -42,11 +43,7 @@ contract FallbackVerifierTest is Test {
 
     function testVerify_realProof_succeeds() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertTrue(ok, "real fallback proof should verify");
     }
@@ -58,11 +55,7 @@ contract FallbackVerifierTest is Test {
         tampered[100] = bytes1(uint8(tampered[100]) ^ 0xff);
 
         bool ok = verifier.verifyFallbackAttestation(
-            tampered,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            tampered, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "tampered fallback proof must NOT verify");
     }
@@ -124,11 +117,7 @@ contract FallbackVerifierTest is Test {
     function testVerify_wrongProofLength_fails() public view {
         bytes memory tooShort = abi.encodePacked(PROOF_10_SIGNERS, hex"00");
         bool ok = verifier.verifyFallbackAttestation(
-            tooShort,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            tooShort, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "non-256-byte proofs must NOT verify");
     }

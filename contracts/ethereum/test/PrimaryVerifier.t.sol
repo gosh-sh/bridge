@@ -24,7 +24,8 @@ contract PrimaryVerifierTest is Test {
     PrimaryVerifier public verifier;
 
     // ─── 10-signer synthetic Primary proof + public inputs ────────────────
-    bytes constant PROOF_10_SIGNERS = hex"06def497052d80a1cea44b5e54c6e732cf45113942698c33a5bd23931418d2f60e85ecc488a67b6f89c7866094d4e59c0ddabe2de43b630b968d1e6947f0ba0c2e0f7a6149e8931b84fc1f5360e4686a503e1d5b6c930b465d036f807af46dad2d25a588123f857b582a4a3781648452e3ac982fcfd79307f8afd842c11f841f257e32dc80cf78fd615a563ec4331d2311388f50b90aad9294e47d3b866aa00a2cec3b53cf3b3420c6cab0a378c14df16acf021a7855ba515ab7312d66b04b582da755c8097fffeec88191e7a0ded9a93c420ef6c24dc76d48a70641612c3e2606c20efe2cb2bab6a7d7fa60b3a69ce25485d52d00a540bb8464495fa6c0a393";
+    bytes constant PROOF_10_SIGNERS =
+        hex"06def497052d80a1cea44b5e54c6e732cf45113942698c33a5bd23931418d2f60e85ecc488a67b6f89c7866094d4e59c0ddabe2de43b630b968d1e6947f0ba0c2e0f7a6149e8931b84fc1f5360e4686a503e1d5b6c930b465d036f807af46dad2d25a588123f857b582a4a3781648452e3ac982fcfd79307f8afd842c11f841f257e32dc80cf78fd615a563ec4331d2311388f50b90aad9294e47d3b866aa00a2cec3b53cf3b3420c6cab0a378c14df16acf021a7855ba515ab7312d66b04b582da755c8097fffeec88191e7a0ded9a93c420ef6c24dc76d48a70641612c3e2606c20efe2cb2bab6a7d7fa60b3a69ce25485d52d00a540bb8464495fa6c0a393";
 
     uint256 constant ENVELOPE_HASH =
         8798063818110817011738334898030988624623503880890323629448651362520823232112;
@@ -42,11 +43,7 @@ contract PrimaryVerifierTest is Test {
 
     function testVerify_realProof_succeeds() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertTrue(ok, "real primary proof should verify");
     }
@@ -58,11 +55,7 @@ contract PrimaryVerifierTest is Test {
         tampered[100] = bytes1(uint8(tampered[100]) ^ 0xff);
 
         bool ok = verifier.verifyPrimaryAttestation(
-            tampered,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            tampered, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "tampered primary proof must NOT verify");
     }
@@ -124,11 +117,7 @@ contract PrimaryVerifierTest is Test {
     function testVerify_wrongProofLength_fails() public view {
         bytes memory tooShort = abi.encodePacked(PROOF_10_SIGNERS, hex"00");
         bool ok = verifier.verifyPrimaryAttestation(
-            tooShort,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            tooShort, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "non-256-byte proofs must NOT verify");
     }

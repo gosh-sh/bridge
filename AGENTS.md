@@ -353,7 +353,8 @@ See `docs/manual_verification_runbook.md` for the hands-on, copy-pasteable plan 
 See `docs/bridge_verification.md` for the property-driven verification reference (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-# invariants).
 See `docs/verifying_an_proof.md` for the end-to-end verification of a layer-hash proof produced from the Acki Nacki side (5 stages: ground-truth cross-check, Halo2, gnark JSON instances, gnark native, on-chain).
 See `docs/verifying_eth_proof_on_an.md` for the mirror flow — how the Acki Nacki side verifies a deposit proof produced on Ethereum (7 stages incl. RPC quorum, event cross-check, Halo2/gnark, nullifier, on-chain TVM verifier [planned]).
-See `docs/integration_plan.md` for the full plan with milestones.
+See `docs/integration_plan.md` for the full plan with milestones (M0–M9; legacy single-circuit architecture).
+See `docs/an_partner_integration_plan.md` for the **active** integration plan against the partner's new four-circuit architecture (`acki-nacki-to-eth-bridge-halo2-circuits` + `acki-nacki-to-eth-bridge-halo2-prover` sibling repos). This supersedes M7–M9 of `integration_plan.md`.
 See `docs/layer_hashes_circuit_audit.md` for the complete audit report.
 See `docs/integration_analysis.md` for the architecture analysis.
 See `docs/aave_integration.md` for the AAVE yield integration design and correctness checks.

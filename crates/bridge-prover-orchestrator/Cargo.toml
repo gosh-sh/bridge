@@ -18,6 +18,8 @@ halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base"
 halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc", default-features = false, features = ["halo2-axiom"] }
 
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+num-bigint = "0.4"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -28,6 +30,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Already available via [dependencies] above; integration tests need them re-listed.
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
 bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+
+[[bin]]
+name = "export-fallback-proof"
+path = "src/bin/export_fallback_proof.rs"
 
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.

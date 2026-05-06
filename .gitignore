@@ -45,6 +45,22 @@ crates/bridge-prover-orchestrator/params/*_pk.bin
 crates/bridge-prover-orchestrator/params/*_vk.bin
 crates/bridge-prover-orchestrator/params/*_config_params.json
 crates/bridge-prover-orchestrator/target/
+
+# Phase 3: per-circuit proof artefacts (regenerated on demand by
+# `cargo run --bin export-fallback-proof`).
+crates/bridge-prover-orchestrator/proofs/
+
+# Phase 3: per-circuit gnark-wrapper outputs. Only the .go / go.mod / go.sum
+# source code is checked in; the trusted-setup keys, R1CS, and built binaries
+# are regenerated locally by `gnark-wrappers/circuit-1b/circuit-1b setup`.
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1b
+crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
+crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit.r1cs
+crates/bridge-prover-orchestrator/gnark-wrappers/*/Groth16Verifier.sol
+crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_proof.hex
+crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_public_inputs.hex
+crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_output.json
 logs/
 
 # Coverage

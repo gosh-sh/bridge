@@ -10,6 +10,7 @@
 //! consumer can drive both Circuit 1A and 1B with one set of types.
 
 pub mod keys;
+pub mod proof_export;
 pub mod prover;
 pub mod verifier;
 
@@ -21,5 +22,9 @@ pub use bridge_prover_lib::keys::{
 pub use bridge_prover_lib::poseidon::compute_bk_set_poseidon;
 
 pub use keys::FallbackKeyManager;
+pub use proof_export::{
+    build_proof_data, format_field_element, load_instances_binary, save_instances_binary,
+    save_proof_data_json, Halo2ProofData, ProtocolData,
+};
 pub use prover::{generate_fallback_proof, FallbackProofOutput};
 pub use verifier::verify_fallback_proof;

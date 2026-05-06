@@ -12,7 +12,7 @@
 | Decision | Choice |
 |---|---|
 | Migration policy | **Full migration**: deprecate `LayerHashBridge.sol`; new `AckiNackiBridge.sol` contract is the single source of truth |
-| On-chain verifier | **Native Halo2 SHPLONK** (Yul, generated via `halo2-verifier-gen`). No gnark step. |
+| On-chain verifier | ~~**Native Halo2 SHPLONK** (Yul, generated via `halo2-verifier-gen`). No gnark step.~~ **Revoked 2026-05-07**. Native Yul for Circuit 1B comes out at **78 564 bytes deployment bytecode** — 3.2× over the EIP-170 24 576-byte runtime limit and 1.6× over the EIP-3860 49 152-byte initcode limit. Mainnet-undeployable as a single contract. We pivot to **gnark Groth16 wrappers per circuit**, reusing the existing `layer-hashes-prover/gnark-wrapper/` and `bk-set-rotation-prover/gnark-wrapper/` infra. See §3 for the new Phase 3 plan and §5 risk register R3/R4/R14 for the analysis. The native-Yul experiment (vendored `snark-verifier{,-sdk}`, `gen-yul-verifier-1b` bin, `Halo2NativeVerifier1B.{sol,bytecode.bin}`) was kept briefly as audit trail then removed (see §7 Decision Log entry for 2026-05-07 cleanup) — git history preserves it for reproducibility. |
 | AN node branch | **`latest_an_to_eth_bridge_test`** (⚠ to be confirmed — not visible in current local mirror; only `bridge_halo2_tests` is) |
 | Deposit + AAVE integration | **Merged into the new `AckiNackiBridge.sol`**: deposits, withdrawals, AAVE yield, layer-hash state, BK-set state, and 4-circuit verification all on one contract |
 | First milestone scope | **Full feature parity**: 1A + 1B + 2 + 3 + relayer + on-chain in one push (split internally into 7 phases below) |
@@ -187,23 +187,36 @@ Each phase has acceptance criteria, file deliverables, and a stop-light status. 
 
 ---
 
-### Phase 3 — Native Halo2 SHPLONK Solidity Verifiers (Week 2)
+### Phase 3 — On-chain Solidity Verifiers (Week 2) — **REWRITTEN 2026-05-07**
 
-**Purpose**: generate four on-chain Yul-based verifiers from the four circuits, mirroring how `Halo2Verifier.sol` was generated for the deposit prover.
+**Background — why the path changed**:
+- 2026-05-07: vendored `snark-verifier` + `snark-verifier-sdk` 0.2.3, repointed at the gosh halo2-base 0.4.0 fork. Built clean (no API drift between halo2-base 0.4 and 0.5 for the slice we needed) — R3 disproven.
+- Cached Phase 1.A `fallback_vk.bin` fed through `gen_evm_verifier_shplonk` produced **78 564 bytes** of deployment bytecode. With EIP-170 runtime limit 24 576 bytes and EIP-3860 initcode limit 49 152 bytes, this is **non-deployable to Ethereum mainnet as a single contract**. The K=20 + 44-advice-column shape of Circuit 1B (driven by SHA-256 + BLS12-381 chips) makes the Yul ~5× heavier than the deposit prover's K=12 DarkDEX Yul (16 249 bytes, deployable).
+- The vendored sources, `gen-yul-verifier-1b` bin, and `Halo2NativeVerifier1B.{sol,bytecode.bin}` artefacts were removed in the post-pivot cleanup (see Decision Log 2026-05-07 cleanup); git history preserves them for anyone who wants to re-run the experiment.
 
-**Tasks**:
-- 3.1 For each circuit (1A, 1B, 2, 3): use `halo2-verifier-gen` (`../halo2-verifier-gen/`) to produce `Halo2NativeVerifier{1A,1B,2,3}.sol`. Each reads the matching VK + circuit config + an 8-leaf scaffolding.
-- 3.2 Output them to `contracts/ethereum/src/halo2_native/` (new folder) with a shared `Halo2NativeVerifierBase.sol` if there's reusable scaffolding (transcript replay code).
-- 3.3 Per-circuit Foundry unit tests: `forge test --match-contract Halo2NativeVerifier1ATest` etc., with one valid + several malformed proofs.
-- 3.4 Measure gas per verify call. Expected ranges (per `Halo2Verifier.sol` baseline of ~1.2M gas for the deposit prover): 1A ≈ 1.0–1.5M, 1B ≈ 1.5–2.2M, 2 ≈ 0.8–1.2M, 3 ≈ 0.7–1.0M. **Total per block: ~3–6M gas**. Worst case (Fallback + BK update): ~6–7M gas. This is well within Ethereum mainnet block-gas limits but ~10× more than the Groth16 alternative.
-- 3.5 Document gas figures in `docs/an_integration_gas_report.md` so we have a baseline if we later switch to gnark Groth16.
+**Purpose (revised)**: produce gnark Groth16 wrappers for each of the four circuits, reusing the proven pipeline already running for the deposit prover (`Halo2Verifier.sol` → `Groth16DepositVerifier.sol`), the layer-hash prover (`layer-hashes-prover/gnark-wrapper/`, 13 public inputs, 4 fixtures green), and the BK-set rotation verifier (`bk-set-rotation-prover/gnark-wrapper/`, 2 public inputs, ready).
+
+**Tasks (revised)**:
+- 3.1 **Circuit 1B** (Phase 3 first slice — start here):
+  - Add `crates/bridge-prover-orchestrator/src/bin/export_fallback_proof.rs` that produces a `halo2_proof.json` from a cached Phase 1.A proof + instances. Mirror `layer-hashes-prover/src/bin/convert-proof.rs`.
+  - Add `crates/bridge-prover-orchestrator/gnark-wrapper-1b/` Go module patterned on `layer-hashes-prover/gnark-wrapper/`, configured for 4 public inputs `[envelope_hash, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`.
+  - Run `setup` once to emit `FallbackGroth16VerifierGenerated.sol` (≈ 7 KB, ~250 k gas).
+  - Add `contracts/ethereum/src/FallbackGroth16VerifierGenerated.sol` + `FallbackGroth16Verifier.sol` adapter (decodes the 4 public inputs, calls Groth16) + `IFallbackGroth16Verifier.sol`.
+  - Foundry tests: positive verify, tampered proof, wrong-instance — same shape as `LayerHashE2ETest`.
+- 3.2 **Circuits 1A, 2, 3**: fan out the Phase 1.B / 1.C wiring, then attach a gnark wrapper per circuit. Reuse the orchestrator's `*_proof_export.rs` pattern.
+- 3.3 **`AckiNackiBridge.verifyBlock`** consumes 2-3 Groth16 proofs (1A or 1B; 2; 3 if BK changes), each ≈ 250-350 k gas → total ≈ 0.6-1 M gas/block.
+- 3.4 Document: per-circuit Groth16 setup ceremony status (each circuit gets its own gnark trusted setup; the trust assumption is identical to today's deposit prover and layer-hash bridge — already documented in `docs/aave_integration.md` and `docs/manual_verification_runbook.md`).
 
 **Acceptance**:
-- ✅ 4 verifier Yul contracts in `contracts/ethereum/src/halo2_native/`, each with a passing `verify()` test and a failing `verify(corrupted)` test.
-- ✅ All 4 fixtures from Phase 2 verify on Foundry through the new verifier #2.
-- ✅ Gas report committed.
+- ✅ 4 `*Groth16VerifierGenerated.sol` contracts auto-generated by gnark, each ≤ 10 KB.
+- ✅ Round-trip Foundry tests per circuit (positive + tamper + wrong-instance).
+- ✅ Phase 1.A's synthetic fallback proof passes through `export_fallback_proof` → gnark wrap → Solidity verify with all 4 public inputs intact.
+- ✅ Gas figures recorded in `docs/an_integration_gas_report.md`. Target: < 1 M gas total per `verifyBlock` call (vs. ~30 M+ for native Yul).
 
-**Risk**: `halo2-verifier-gen` was last touched in Feb 2026. If its halo2-base version has drifted from the partner's (`gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`), proof bytes layout might differ. **Mitigation**: in Phase 0 we already pinned partner's commit; we likewise pin `halo2-verifier-gen`'s halo2-base patch to the same commit and build a small test that proves the halo2 → Yul → on-chain pipeline works on the **simplest** circuit first (Circuit 3 — only 3 public inputs).
+**Risk (revised)**:
+- **R14 (NEW)** — gnark Groth16 ceremony per circuit means 4 trusted setups with all the hygiene that implies. Mitigation: same protocol we're using today for the deposit prover; document the ceremony for all 4 in a single `docs/gnark_ceremony.md`.
+- **R3 (resolved-other)** — halo2-base drift between gosh fork (0.4.0) and crates.io (0.5.x) is an API non-issue, *but the Yul size is*. Pivot makes R3 non-blocking.
+- **R4 (resolved-by-pivot)** — the gas concern is resolved by moving to Groth16 (~1 M gas total vs. >30 M for native Yul); the deployability concern (EIP-170 / EIP-3860) is also resolved.
 
 ---
 
@@ -398,8 +411,9 @@ The contract migration in Phase 4 implies a **new deployment address** for `Acki
 | R11 | Discrepancy between `bridge-prover-lib/src/poseidon.rs::compute_bk_set_poseidon` (300-padded) and `test-data-gen/src/envelope_hash.rs::compute_bk_set_poseidon` (no padding) | Medium | Medium (wrong leaf hash → wrong envelope_hash → wrong proof) | Confirmed by reading both files: the test-data-gen helper is for unit tests only and does NOT pad. The prover-lib helper is the canonical one for L2/L3 leaves. Must pad in our Phase 2 layer-hash pipeline. Add a CI test asserting both produce the same Fr **only when** `bk_set.len() == 300`. |
 | R12 | Node-team disagreement on AlinaT's `transition_hashes` migration delays Phase 5 | Medium | High | Q2 was answered with "pending node-team agreement". Track this; if it stalls > 1 week, our relayer should compute `transition_hashes` locally from BK-set state instead of relying on node-published values. |
 | R13 | No live testnet with the new envelope format | High (after partner branch lands) | High (Phase 2 acceptance, Phase 5 integration) | Either run AlinaT's branch under local Docker, or request that Ekaterina.Pantaz deploys a shared testnet from it. Local-only is workable for Phase 2 + 5 dev; shared testnet is needed for Phase 7 release. |
-| R3 | `halo2-verifier-gen` halo2-base drift vs. partner's halo2-axiom | Medium | High | Pin both to the same halo2-base; test with simplest circuit first (Phase 3.4). Fallback: gnark wrapper. |
-| R4 | Native Halo2 verifier gas exceeds 8M / block | Low | Medium | Measured in Phase 3. If exceeded, switch to gnark per circuit (already designed in our existing `gnark-wrapper/` infra). |
+| R3 | `halo2-verifier-gen` halo2-base drift vs. partner's halo2-axiom | ✅ Disproven 2026-05-07 | n/a | Vendored `snark-verifier` + `snark-verifier-sdk` 0.2.3 build cleanly against the gosh fork's halo2-base 0.4.0 (`vendor/snark-verifier{,-sdk}/`). API surfaces between 0.4 and 0.5 are identical for the Yul codegen slice. R3 is closed. |
+| R4 | Native Halo2 verifier gas / size exceeds Ethereum limits | ✅ Materialised 2026-05-07 (worse than expected) | Critical → triggered Phase 3 pivot | Cached Phase 1.A VK fed through `gen_evm_verifier_shplonk` produced 78 564-byte deployment bytecode. EIP-170 limit 24 576 bytes (3.2× over), EIP-3860 limit 49 152 bytes (1.6× over). Deployment is impossible, not just expensive. **Pivot**: switched Phase 3 to gnark Groth16 wrappers (R14). Native-Yul vendor + bin + artefacts removed post-pivot; git history preserves them. |
+| R14 | gnark Groth16 trusted setup per circuit (4 ceremonies) | New, post-pivot | Medium | Same trust model as today's deposit prover and layer-hash prover (both already in production pipeline). Document the four ceremonies in `docs/gnark_ceremony.md` with reproducibility checklist. |
 | R5 | `BlockKeeperSetChangeProofData.transition_hashes` not migrated on the AN node | Medium | High | Phase 0.2 confirmation. If not done, write the migration ourselves; impacts Phase 5 (relayer would need to recompute on-the-fly). |
 | R6 | New-envelope-format fixture data not available for the 4 historical blocks | Medium | Low (regression-only) | Phase 0 confirmation; if needed, ask partner to re-generate or accept that legacy regression is on the legacy contract only. |
 | R7 | Relayer can't keep up with AN block rate | High (real-time) | Low (intentional) | Accept lag; document the SLA; future-work parallelisation. |
@@ -439,6 +453,17 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
   - **Q4**: Numeric Poseidon test vector promised by EOD 2026-05-06. Algorithm already verified by reading `bridge-prover-lib/src/poseidon.rs`.
 - **2026-05-06 (later still)**: Internal AN-team escalation from Ekaterina.Pantaz on the `transition_hashes` migration ownership and local-node feasibility. Surfaces R12 in real time. We don't act directly; we reduce dependency on node-published `transition_hashes` by recomputing them locally in the relayer (Phase 5).
 - **2026-05-06 (evening)**: Phase 1.A landed. New crate `crates/bridge-prover-orchestrator/` (excluded from the root workspace because it pulls in halo2-axiom which conflicts with the workspace's existing dep tree; it has its own `Cargo.lock`). `cargo test --test fallback_round_trip` green: synthetic 10-signer fallback envelope → prove → verify → tamper-rejection → wrong-instance-rejection. Keygen 218 s, prove 11 s, verify ~milliseconds. Cached PK is 6.5 GB on disk; `.gitignore` updated to keep it out of the repo. Phase 1.B (Circuit 2) and Phase 3 (`Halo2NativeVerifier1B.sol`) are the next parallel candidates.
+- **2026-05-07 (early morning)**: CI fix — workspace `Cargo.lock` was inadvertently `.gitignore`d while CI's `setup:rust` runs `cargo fetch --locked` and `Dockerfile` copies `Cargo.lock`. Removed the blanket rule, replaced with per-subproject ignores for excluded crates. CI green again.
+- **2026-05-07 (Phase 3 attempt + pivot)**: Vendored `snark-verifier` + `snark-verifier-sdk` 0.2.3 under `vendor/`, repointed at the gosh halo2-base 0.4.0 fork via `path =`. **R3 disproven**: the 0.4 ↔ 0.5 API surface for Yul codegen is identical; vendor build is clean. Wrote `crates/bridge-prover-orchestrator/src/bin/gen_yul_verifier_1b.rs` and ran it against the cached Phase 1.A VK. Output: **78 564-byte deployment bytecode** — 3.2× over EIP-170 (24 576 B runtime) and 1.6× over EIP-3860 (49 152 B initcode). **R4 materialised, worse than expected**: not just gas-expensive but mainnet-undeployable. **Decision**: revoked the §0 "no gnark step" lock-in; Phase 3 pivots to per-circuit gnark Groth16 wrappers, reusing the proven `layer-hashes-prover/gnark-wrapper/` and `bk-set-rotation-prover/gnark-wrapper/` infra. Risk register updated (R3 closed, R4 closed-by-pivot, R14 new for ceremony).
+- **2026-05-07 (post-pivot cleanup)**: Removed the rejected native-Yul experiment from the working tree: `vendor/snark-verifier{,-sdk}/`, the `snark-verifier-sdk` dependency in the orchestrator, the `gen-yul-verifier-1b` bin and `[[bin]]` entry, and `contracts/ethereum/src/halo2_native/`. The numerical findings (78 564 B, 3.2× EIP-170, etc.) are preserved here in the doc; reproducibility is preserved by `git checkout` of any pre-cleanup ref. Production tree now contains only the gnark path.
+- **2026-05-07 (Phase 3.1 — first slice complete)**: Wired the gnark Groth16 path end-to-end for Circuit 1B. New artefacts:
+  - `crates/bridge-prover-orchestrator/src/proof_export.rs` (mirrors `layer-hashes-prover::proof_export`, byte-compatible JSON for the gnark wrapper).
+  - `crates/bridge-prover-orchestrator/src/bin/export_fallback_proof.rs` (produces `proof.bin` + `instances.bin` + `halo2_proof.json` from a Phase 1.A round-trip).
+  - `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1b/` Go module patterned on the layer-hashes wrapper, configured for 4 public inputs `[envelope_hash, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`. Matches `FallbackProofOutput::instances` exactly.
+  - `contracts/ethereum/src/{IFallbackGroth16Verifier,IFallbackVerifier,FallbackVerifier,FallbackGroth16VerifierGenerated}.sol` — interface, adapter, gnark-generated verifier (renamed `Verifier → FallbackGroth16VerifierGenerated`).
+  - `contracts/ethereum/test/FallbackVerifier.t.sol` — 8 tests: positive (real proof verifies at **~222 657 gas**), 5 negative (tamper, wrong envelope hash, wrong BK set commitment, wrong block_seq_no, wrong last_seen, bad length), 1 ctor sanity.
+  - Full forge suite: **143/143 passing** (135 baseline + 8 new for Fallback).
+  - Per-block verifyBlock gas projection (3 Groth16 verifies @ ~225 k each): **≈ 700 k gas** total — well under the 30 M+ that native Yul would have needed if it could even deploy. R4 fully resolved by the pivot.
 - **(pending)**: Q6, Q7, Q8 — partner SLA in flight.
 
 ### Phase status after these answers

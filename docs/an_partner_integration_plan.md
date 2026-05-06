@@ -438,6 +438,7 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
   - **Q3**: Circuit 1B mock tests passing as of 2026-05-05. Circuit 2 in active cleanup today. Circuit 3 wiring/live-tests deferred ~2 days (priority is 1+2). → Re-sequence Phase 1 into 1.A (Circuit 1B, ready now), 1.B (Circuit 2, after AlinaT's daily checkpoint), 1.C (Circuit 3, deferred ~2 days).
   - **Q4**: Numeric Poseidon test vector promised by EOD 2026-05-06. Algorithm already verified by reading `bridge-prover-lib/src/poseidon.rs`.
 - **2026-05-06 (later still)**: Internal AN-team escalation from Ekaterina.Pantaz on the `transition_hashes` migration ownership and local-node feasibility. Surfaces R12 in real time. We don't act directly; we reduce dependency on node-published `transition_hashes` by recomputing them locally in the relayer (Phase 5).
+- **2026-05-06 (evening)**: Phase 1.A landed. New crate `crates/bridge-prover-orchestrator/` (excluded from the root workspace because it pulls in halo2-axiom which conflicts with the workspace's existing dep tree; it has its own `Cargo.lock`). `cargo test --test fallback_round_trip` green: synthetic 10-signer fallback envelope → prove → verify → tamper-rejection → wrong-instance-rejection. Keygen 218 s, prove 11 s, verify ~milliseconds. Cached PK is 6.5 GB on disk; `.gitignore` updated to keep it out of the repo. Phase 1.B (Circuit 2) and Phase 3 (`Halo2NativeVerifier1B.sol`) are the next parallel candidates.
 - **(pending)**: Q6, Q7, Q8 — partner SLA in flight.
 
 ### Phase status after these answers
@@ -445,7 +446,7 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
 | Phase | Pre-answer status | Post-answer status (after Q1, Q2, Q3, Q4, Q5) |
 |---|---|---|
 | 0 | All 8 questions open | 5/8 substantively answered (Q1, Q2, Q3 partial, Q4 promised, Q5); Q6, Q7, Q8 still open |
-| **1.A — Circuit 1B wiring** | (n/a) | ✅ **Unblocked now**. AlinaT confirmed 1B mocks passing 2026-05-05. Pin against current main, start coding. |
+| **1.A — Circuit 1B wiring** | (n/a) | ✅ **Done 2026-05-06**. New `crates/bridge-prover-orchestrator/` crate wraps `FallbackAttestationBlsCheckerCircuit` with `FallbackKeyManager` + `generate_fallback_proof` + `verify_fallback_proof`. Round-trip integration test (`tests/fallback_round_trip.rs`) green: keygen 218 s (VK 140 s, PK 78 s), proof gen 11 s @ 10-signer set, verification + tamper-rejection + wrong-instance-rejection all pass. Final proof = 14 784 bytes; PK = 6.5 GB, VK = 6 KB on disk under `params/`. |
 | **1.B — Circuit 2 wiring** | (n/a) | 🛠 Wait for AlinaT's "Circuit 2 cleanup done" signal (~today/tomorrow), then pin SHA. |
 | **1.C — Circuit 3 wiring** | (n/a) | ⏸ **Deferred ~2 days** (partner-driven). Schedule it after 1.A + 1.B land. |
 | 2 — Layer-hash pipeline | Blocked on Q1 + Q5 + Q7 | Stays blocked until `latest_an_to_eth_bridge_test` has the new envelope code + a node we can target. **Q7 still required.** |
@@ -456,11 +457,11 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
 | 7 — Docs / release | Final | Final |
 
 **Re-sequenced Phase 1**: now three sub-phases, in this dependency order:
-- **1.A — Circuit 1B prover/verifier wiring** — start now, no partner dependency beyond the already-confirmed 1B mock.
+- **1.A — Circuit 1B prover/verifier wiring** — ✅ **Complete (2026-05-06)**. Crate `crates/bridge-prover-orchestrator/` exists, builds clean against pinned partner sibling repos, and the synthetic round-trip integration test passes end-to-end (keygen + prove + verify + 2 negative tests). Public-instance order locked at `[envelope_hash, bk_set_poseidon, block_seq_no, last_seen_block_seqno]` — matches Circuit 1B's `expose_public` sequence and is the contract layout we'll consume on-chain in Phase 4.
 - **1.B — Circuit 2 prover/verifier wiring** — start when AlinaT signals her cleanup is stable.
 - **1.C — Circuit 3 prover/verifier wiring** — start ~2 days after 1.B; partner is currently focused on 1+2.
 
-Phases 3 and 4 (Solidity verifier generation and contract rebuild) are the most parallelisable independent work while we wait. Recommend starting Phase 1.A and one of {3, 4} in parallel today.
+Phases 3 and 4 (Solidity verifier generation and contract rebuild) are the most parallelisable independent work while we wait on 1.B. With 1.A done, recommended next moves: (a) start Phase 3 (generate `Halo2NativeVerifier1B.sol` against the cached `fallback_vk.bin`) and (b) when AlinaT signals stable, start Phase 1.B reusing the `FallbackKeyManager` template applied to `LayerHashesMovementCheckerCircuit`.
 
 ---
 

@@ -1,0 +1,9 @@
+# Use the system git CLI (with SSH credentials) when fetching transitive
+# git dependencies. Without this, cargo's built-in HTTPS client cannot
+# authenticate against private gosh-sh GitHub repositories.
+#
+# Even though every gosh-sh dep is path-patched in Cargo.toml, cargo still
+# resolves the original git source URL once, so it must be reachable.
+
+[net]
+git-fetch-with-cli = true

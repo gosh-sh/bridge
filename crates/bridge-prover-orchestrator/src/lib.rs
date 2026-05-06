@@ -1,0 +1,25 @@
+//! Bridge Prover Orchestrator — Phase 1.A
+//!
+//! This crate wraps the partner's halo2 circuits with key/prover/verifier helpers
+//! that the orchestrator and the relayer (planned) will consume.
+//!
+//! Phase 1.A scope: **Circuit 1B (Fallback attestation verifier)** only.
+//! Phases 1.B and 1.C will add Circuit 2 (Layer hashes) and Circuit 3 (BK set update).
+//!
+//! Re-exports the partner's primary key management for convenience so a single
+//! consumer can drive both Circuit 1A and 1B with one set of types.
+
+pub mod keys;
+pub mod prover;
+pub mod verifier;
+
+pub use bridge_prover_lib::Fr;
+pub use bridge_prover_lib::keys::{
+    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers,
+    circuit_num_limbs, circuit_num_unusable_rows,
+};
+pub use bridge_prover_lib::poseidon::compute_bk_set_poseidon;
+
+pub use keys::FallbackKeyManager;
+pub use prover::{generate_fallback_proof, FallbackProofOutput};
+pub use verifier::verify_fallback_proof;

@@ -1,0 +1,62 @@
+[package]
+name = "bridge-prover-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Wraps the partner's halo2 circuits with key/prover/verifier helpers for the AN→ETH bridge. Phase 1.A: Circuit 1B (Fallback attestation)."
+
+[dependencies]
+# Partner circuits / parsers / test-data-gen — direct local paths (private repos use SSH).
+attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
+bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+
+# Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
+bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
+
+# Halo2 backend — must match the partner's fork; direct path.
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base", default-features = false, features = ["halo2-axiom"] }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc", default-features = false, features = ["halo2-axiom"] }
+
+anyhow = "1"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Already available via [dependencies] above; integration tests need them re-listed.
+bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+
+# ---------------------------------------------------------------------------
+# Patches: redirect every TRANSITIVE git dependency to a local sibling path.
+# The partner crates declare these via git URLs in their Cargo.toml; without
+# these patches Cargo would try to fetch from private GitHub repos.
+# ---------------------------------------------------------------------------
+
+[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
+attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
+bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
+bk-set-update-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bk-set-update-checker-circuit" }
+
+[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-prover"]
+bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
+
+[patch."https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381"]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+
+[patch."https://github.com/gosh-sh/gosh-halo2-crypto-lib"]
+gosh-sha256-chip = { path = "../../../gosh-halo2-crypto-lib/sha256-chip" }
+gosh-bls-verification = { path = "../../../gosh-halo2-crypto-lib/bls-verification" }
+gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
+
+[patch.crates-io]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+
+# Performance: keygen & proof gen require optimized debug builds.
+[profile.dev]
+opt-level = 3

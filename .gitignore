@@ -28,6 +28,15 @@ contracts/ethereum/lib/
 
 # Logs
 *.log
+
+# Bridge prover orchestrator generated artifacts (Phase 1.A+):
+# - SRS, VKs, PKs, and per-circuit base-circuit configs are produced by
+#   `cargo test` runs. PKs are multi-GB. Do not commit.
+crates/bridge-prover-orchestrator/params/*.srs
+crates/bridge-prover-orchestrator/params/*_pk.bin
+crates/bridge-prover-orchestrator/params/*_vk.bin
+crates/bridge-prover-orchestrator/params/*_config_params.json
+crates/bridge-prover-orchestrator/target/
 logs/
 
 # Coverage

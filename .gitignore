@@ -2,9 +2,17 @@
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 .cargo/*
 !.cargo/audit.toml
+
+# Cargo lock files: track the workspace-root Cargo.lock (CI's setup:rust runs
+# `cargo fetch --locked` and `Dockerfile` copies it), but ignore lock files
+# inside the workspace-excluded sub-projects, which each have their own
+# independent dep tree.
+deposit-prover/Cargo.lock
+poseidon-proof/Cargo.lock
+layer-hashes-prover/Cargo.lock
+crates/bridge-prover-orchestrator/Cargo.lock
 
 # Foundry / Solidity
 contracts/ethereum/out/

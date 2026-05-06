@@ -148,13 +148,115 @@ Thanks!
 
 | # | Question | Blocks phase | Owner | Status |
 |---|---|---|---|---|
-| Q1 | AN-node branch | Phase 0, all live testing | Partner | Open |
-| Q2 | `transition_hashes` migration | Phase 5 (relayer needs the right hash) | Partner / TBD | Open |
-| Q3 | Circuit MockProver status | Phase 1 (we patch against pinned SHA) | Partner | Open |
-| Q4 | Poseidon test vector | Phase 0 acceptance criterion | Partner | Open |
-| Q5 | shellnet envelope format | Phase 5 (relayer target) | Partner | Open |
+| Q1 | AN-node branch | Phase 0, all live testing | Partner (AlinaT) | **Answered 2026-05-06** — see below |
+| Q2 | `transition_hashes` migration | Phase 5 (relayer needs the right hash) | Partner (AlinaT) | **Answered 2026-05-06** — see below |
+| Q3 | Circuit MockProver status | Phase 1 (we patch against pinned SHA) | Partner (AlinaT) | **Partially answered 2026-05-06** — see below; SHA pin still needed |
+| Q4 | Poseidon test vector | Phase 0 acceptance criterion | Partner (AlinaT) | **Promised today (2026-05-06)** — see below; canonical algorithm already verified by reading `bridge-prover-lib/src/poseidon.rs` |
+| Q5 | shellnet envelope format | Phase 5 (relayer target) | Partner | **Answered 2026-05-06** — see below |
 | Q6 | Historical fixtures | Phase 2 acceptance, Phase 4 regression | Partner / us | Open |
 | Q7 | GraphQL chain proofs | Phase 2.2 implementation strategy | Partner | Open |
 | Q8 | gnark duplication / risk | Phase 3 risk mitigation | Partner | Open |
+
+## Answers Received
+
+### Q1 — AN-node branch (AlinaT, 2026-05-06)
+
+> "[New envelope hash is] in **no branch yet**. For testing Circuit 1 (which verifies attestations) it doesn't matter how `envelope_hash` is computed. It will matter once Circuit 2 (layer-hash movement) enters processing. The unit-test sketch of the algorithm lives in [`acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen/src/envelope_hash.rs`](https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits/blob/main/test-data-gen/src/envelope_hash.rs). I'm working today on cleanup + live tests for the [layer-hashes-movement circuit](https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits/tree/main/historical-layer-hashes-movement-checker-circuit), wiring it into the prover, and **bringing this envelope-hash algorithm into the `latest_an_to_eth_bridge_test` branch of the node** mentioned in the prover README."
+
+**Implications**:
+- The new envelope-hash format is **not yet** in any AN-node branch (only in test-data-gen / circuit unit tests).
+- AlinaT is actively landing it on `latest_an_to_eth_bridge_test` along with the layer-hashes-movement circuit live tests.
+- Branch will exist soon but does not exist *as of this answer*.
+- For Phase 1 (Circuit 1A wiring) this is non-blocking — Circuit 1A doesn't open the envelope tree.
+- For Phase 2 (layer-hashes pipeline) we wait for that branch to appear, then pin its SHA.
+
+### Q2 — `transition_hashes` migration (AlinaT, 2026-05-06)
+
+> "For Circuit 1 I got away with essentially not touching the node — when the prover gathers BK-set info, it computes Poseidon commitments itself in the right format. The transition hashes implemented by Sasha Silkov long ago I haven't touched and haven't used: they have lots of unnecessary data for the circuit and the public-input format is unsuitable. I told Andrey Kurochkin that I plan to change the transition-hashes format, since they were added only for me — so I get to dictate the format. Today I'll be lifting an adaptation of the [`bridge-prover-lib/src/poseidon.rs`](https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-prover/blob/main/bridge-prover-lib/src/poseidon.rs) algorithm into my `latest_an_to_eth_bridge_test` branch on the node. But this still needs to be agreed with the node team."
+
+**Implications**:
+- AlinaT **owns** the node-side migration.
+- The canonical reference implementation is `bridge-prover-lib/src/poseidon.rs` — exactly what we'd patched into our plan as the spec source.
+- Old `transition_hashes` (Sasha Silkov's) are **untouched and unused** — we can safely ignore them. We do not need a backwards-compatibility path.
+- **Pending**: agreement with the node team. If the node team objects, the migration could be delayed; AlinaT may need our support.
+- For our Phase 5 (relayer) — we don't need the node-side `transition_hashes` if the prover recomputes them from BK-set state itself. Confirm with AlinaT whether the relayer should rely on node-published `transition_hashes` (once migrated) or recompute locally (more robust to node-side delays).
+
+### Q5 — shellnet envelope format (AlinaT, 2026-05-06)
+
+> "Shellnet is deployed from Sergey Gorelyshev's `contracts dex halo2` branch — so of course old envelope-hash algorithm. Today I'll consolidate everything I described above into my `latest_an_to_eth_bridge_test` branch. Once the layer-hash-movement work is in, **testing all of it on current shellnet will no longer be possible**. We can raise a node locally; alternatively @Ekaterina.Pantaz might suggest raising a separate test network from my branch."
+
+**Implications**:
+- Current shellnet = old format. Useful only for Circuit 1A (envelope-hash agnostic).
+- For Circuits 2+3 we need a local Docker node from `latest_an_to_eth_bridge_test` once that branch is ready.
+- Optional upgrade path: Ekaterina.Pantaz spinning up a separate testnet from AlinaT's branch (better for shared E2E testing across teams; we should request this).
+
+### Q3 — MockProver status (partial; AlinaT, 2026-05-06)
+
+> "Circuit 1B I was debugging yesterday, mock tests were working then. Or did something fail for you? Circuit 2 — today I'll continue cleaning it up and fixing it, including the mock tests. As for Circuit 3 (BK set update) — let's defer that discussion by a couple of days for sure. We need 1 and 2 to fly together first."
+
+**Implications**:
+- **Circuit 1B**: ✅ MockProver passing as of 2026-05-05 per AlinaT. We can pin against current main. Treat as ready for Phase 1.A.
+- **Circuit 2**: 🛠 In active cleanup + live-test wiring **today**. The current `main` may shift under us; pin only after AlinaT signals "done".
+- **Circuit 3**: ⏸ Deferred by ~2 days. Live tests / wiring not yet started. Don't depend on it for our first parallel slice.
+- **Action**: when AlinaT reports Circuit 2 stable, get a pinned commit SHA covering 1A + 1B + 2 (Circuit 3 SHA can come later — its wiring is independent).
+- **Sequencing fix**: in our plan, Phase 1 had 1.A (Circuit 1B) + 1.B (Circuit 2). Add **Phase 1.C (Circuit 3) deferred** to mirror the partner's ordering.
+
+### Q4 — Poseidon test vector (promised; AlinaT, 2026-05-06)
+
+> "Yes — today, when I'm folding this into the node, I'll produce a test vector."
+
+**Implications**:
+- The numeric vector arrives today (2026-05-06). When it does, drop it into `crates/bridge-prover-orchestrator/tests/fixtures/bk_set_poseidon_vector.json` and add a CI test that recomputes both via `bridge_prover_lib::poseidon::compute_bk_set_poseidon` and our own re-implementation; both must match the partner's bytes exactly.
+- **No blocker** for starting Phase 1.A — algorithm is already unambiguous from `bridge-prover-lib/src/poseidon.rs`.
+
+### Test Node Provided (2026-05-06)
+
+Partner deployed a private AN test network and shared SSH access:
+
+```bash
+# Add provided SSH key, then forward port 80 (GraphQL) → local 8080
+ssh -fnN -L 127.0.0.1:8080:127.0.0.1:80 -p 22488 gosh@94.156.178.14
+
+# Verify
+curl http://127.0.0.1:8080/graphql -H "Content-Type: application/json" \
+  -d '{"query":"{ blockchain { blocks(last: 1) { edges { node { seq_no } } } } }"}'
+```
+
+**Repository state**: cloned to `/mnt/data/philip/test-pruvendo/acki-nacki` on the test host.
+**Branch**: `contracts/dex_dev_halo` (Sergey Gorelyshev's branch — same as current shellnet).
+
+**Verified working**:
+- ✅ HTTP 200 on `/`
+- ✅ Partner's `query_latest_blocks` returns valid data (latest seq_no=53533+, advancing ~2 blocks per query → block time ≈ 1.5s)
+- ✅ Partner's `query_bk_set_updates` is **schema-valid** (no errors) but returns `[]`. This is the documented "BK set established at genesis isn't captured in bkSetUpdates" case — partner's README troubleshooting prescribes a `bk_set.json` fallback file for this exact scenario.
+- ✅ `info { version time }` → version 0.7.0
+- ✅ Latency: 400-650ms per query, stable
+- ✅ Tunnel survives backgrounded for 26+ minutes
+
+**What we can do with this network**:
+- ✅ **Phase 1.A — Circuit 1B live testing** (envelope-hash-agnostic, so the old format is fine)
+- ✅ All `bridge-prover-lib` integration tests that hit `live_attestation_test.rs` and `shellnet_bk_set_test.rs` (just point them at `http://127.0.0.1:8080/graphql` instead of shellnet)
+- ✅ Smoke tests of our GraphQL plumbing in `crates/acki-nacki-interface` real impl
+
+**What we cannot do here**:
+- ❌ Phase 2 (layer-hashes pipeline) — needs the new 8-leaf envelope format → still waiting on AlinaT's `latest_an_to_eth_bridge_test`
+- ❌ Phase 5 (full relayer) — same reason
+- ❌ Circuit 2 / 3 live tests
+
+**Action**: prepare a `bk_set.json` fallback (we can extract it directly from the GraphQL `block_keeper_set` field of any block) and start Phase 1.A against this endpoint as the live target.
+
+---
+
+### Ekaterina.Pantaz pushback (2026-05-06, 13:52)
+
+Quoting the gist: *"how will you make this network work locally if [`transition_hashes` migration] needs to change, and who will change it? Where is the task for the new hash-calculation algorithm and who owns it? All these questions were asked yesterday on the call (Pruvendo asked if there are any rubber-bands / blockers) — why only now is this surfacing?"*
+
+**Implications**:
+- This is internal to the AN team; not directly our blocker, but a **process signal**. R12 in the integration plan (node-team disagreement on the `transition_hashes` migration) is materialising in real time.
+- AlinaT's "I get to dictate the format because they were added only for me" framing in Q2 may not be unanimous — Ekaterina is asking for an explicit task owner and timeline before committing to a local-node setup.
+- **We should not act on this directly.** But we should:
+  1. Avoid presupposing in our plan that `transition_hashes` will land on AlinaT's branch on the timeline she described.
+  2. Flag in a follow-up question whether we should consume `transition_hashes` from the node (current plan) or always recompute them locally in the relayer (more robust to node-side delays).
+  3. Note for our own scheduling: if the node-team conversation drags, Phase 5 (relayer) may need to take the local-recompute path. Cost: small — we already have the canonical Rust impl.
 
 When responses arrive, update this row plus the corresponding §8 row in `docs/an_partner_integration_plan.md`, and produce `docs/an_integration_phase0.md` (the readiness report).

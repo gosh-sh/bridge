@@ -393,8 +393,11 @@ The contract migration in Phase 4 implies a **new deployment address** for `Acki
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| R1 | `latest_an_to_eth_bridge_test` branch missing or stale | Medium | High (Phase 0 blocker) | Phase 0.1 — confirm with partner first. Fall back to `bridge_halo2_tests` + legacy envelope if needed (then Phase 4 must support both formats temporarily). |
-| R2 | Poseidon spec mismatch between partner's daemon and our reference | Medium | High (silent verification failures) | Phase 0.4 test vector. |
+| R1 | `latest_an_to_eth_bridge_test` branch missing or stale | **Confirmed: missing as of 2026-05-06**, partner is creating it now | High (Phase 2 + 5 blocker) | Resequence: do Phase 1.A (Circuit 1B), Phase 3, Phase 4 in parallel while waiting. Pin partner's commit SHA the moment her branch lands. |
+| R2 | Poseidon spec mismatch between partner's daemon and our reference | **Mostly mitigated** — canonical Rust impl is `bridge-prover-lib/src/poseidon.rs`, read & confirmed to match spec §3.1 (`T=3, RATE=2, R_F=8, R_P=57`, `LIMB_BITS=104`, `NUM_LIMBS=5`, `MAX_SIGNERS=300`, `PADDING_SIGNER_INDEX=0xFFFF`) | High (silent verification failures) | Still want one numeric test vector (Q4) for byte-level CI guard. |
+| R11 | Discrepancy between `bridge-prover-lib/src/poseidon.rs::compute_bk_set_poseidon` (300-padded) and `test-data-gen/src/envelope_hash.rs::compute_bk_set_poseidon` (no padding) | Medium | Medium (wrong leaf hash → wrong envelope_hash → wrong proof) | Confirmed by reading both files: the test-data-gen helper is for unit tests only and does NOT pad. The prover-lib helper is the canonical one for L2/L3 leaves. Must pad in our Phase 2 layer-hash pipeline. Add a CI test asserting both produce the same Fr **only when** `bk_set.len() == 300`. |
+| R12 | Node-team disagreement on AlinaT's `transition_hashes` migration delays Phase 5 | Medium | High | Q2 was answered with "pending node-team agreement". Track this; if it stalls > 1 week, our relayer should compute `transition_hashes` locally from BK-set state instead of relying on node-published values. |
+| R13 | No live testnet with the new envelope format | High (after partner branch lands) | High (Phase 2 acceptance, Phase 5 integration) | Either run AlinaT's branch under local Docker, or request that Ekaterina.Pantaz deploys a shared testnet from it. Local-only is workable for Phase 2 + 5 dev; shared testnet is needed for Phase 7 release. |
 | R3 | `halo2-verifier-gen` halo2-base drift vs. partner's halo2-axiom | Medium | High | Pin both to the same halo2-base; test with simplest circuit first (Phase 3.4). Fallback: gnark wrapper. |
 | R4 | Native Halo2 verifier gas exceeds 8M / block | Low | Medium | Measured in Phase 3. If exceeded, switch to gnark per circuit (already designed in our existing `gnark-wrapper/` infra). |
 | R5 | `BlockKeeperSetChangeProofData.transition_hashes` not migrated on the AN node | Medium | High | Phase 0.2 confirmation. If not done, write the migration ourselves; impacts Phase 5 (relayer would need to recompute on-the-fly). |
@@ -427,7 +430,37 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
 ## 7. Decision Log
 
 - **2026-05-06**: User locked in the choices in §0. This document supersedes M7–M9 of `integration_plan.md`.
-- **(pending)**: Partner sign-off on Phase 0 (§3 Phase 0 acceptance criteria) — required before any Phase 1 work begins.
+- **2026-05-06**: AlinaT (partner) answered Q1, Q2, Q5 of `docs/an_partner_phase0_questions.md`:
+  - **Q1**: New 8-leaf envelope hash is **not yet** in any AN-node branch. AlinaT is landing it today in `latest_an_to_eth_bridge_test` together with Circuit 2 live tests.
+  - **Q2**: AlinaT owns the `transition_hashes` migration. Reference impl: `bridge-prover-lib/src/poseidon.rs` (canonical). Old Silkov transition hashes are unused → no compatibility path needed. Pending: node-team agreement.
+  - **Q5**: Current shellnet runs the old envelope format (Sergey Gorelyshev's `contracts dex halo2` branch). Circuit 2+3 testing on shellnet will not work until AlinaT's branch is deployed. Local node from her branch or a new testnet (Ekaterina.Pantaz to advise) needed.
+- **2026-05-06 (later)**: AlinaT answered Q3 (partial) and Q4 (promised):
+  - **Q3**: Circuit 1B mock tests passing as of 2026-05-05. Circuit 2 in active cleanup today. Circuit 3 wiring/live-tests deferred ~2 days (priority is 1+2). → Re-sequence Phase 1 into 1.A (Circuit 1B, ready now), 1.B (Circuit 2, after AlinaT's daily checkpoint), 1.C (Circuit 3, deferred ~2 days).
+  - **Q4**: Numeric Poseidon test vector promised by EOD 2026-05-06. Algorithm already verified by reading `bridge-prover-lib/src/poseidon.rs`.
+- **2026-05-06 (later still)**: Internal AN-team escalation from Ekaterina.Pantaz on the `transition_hashes` migration ownership and local-node feasibility. Surfaces R12 in real time. We don't act directly; we reduce dependency on node-published `transition_hashes` by recomputing them locally in the relayer (Phase 5).
+- **(pending)**: Q6, Q7, Q8 — partner SLA in flight.
+
+### Phase status after these answers
+
+| Phase | Pre-answer status | Post-answer status (after Q1, Q2, Q3, Q4, Q5) |
+|---|---|---|
+| 0 | All 8 questions open | 5/8 substantively answered (Q1, Q2, Q3 partial, Q4 promised, Q5); Q6, Q7, Q8 still open |
+| **1.A — Circuit 1B wiring** | (n/a) | ✅ **Unblocked now**. AlinaT confirmed 1B mocks passing 2026-05-05. Pin against current main, start coding. |
+| **1.B — Circuit 2 wiring** | (n/a) | 🛠 Wait for AlinaT's "Circuit 2 cleanup done" signal (~today/tomorrow), then pin SHA. |
+| **1.C — Circuit 3 wiring** | (n/a) | ⏸ **Deferred ~2 days** (partner-driven). Schedule it after 1.A + 1.B land. |
+| 2 — Layer-hash pipeline | Blocked on Q1 + Q5 + Q7 | Stays blocked until `latest_an_to_eth_bridge_test` has the new envelope code + a node we can target. **Q7 still required.** |
+| 3 — Solidity verifiers | Independent of partner | ✅ Can start in parallel — VKs only depend on circuit code, already in our local mirror |
+| 4 — Contract rebuild | Independent of partner | ✅ Can start in parallel |
+| 5 — Relayer | Blocked on Q1 + Q2 | Blocked. Plan adjustment: relayer should **recompute `transition_hashes` locally** rather than reading them from node-published values, to insulate us from the node-team friction surfaced by Ekaterina. |
+| 6 — Real interface | Blocked on Phase 5 | Blocked |
+| 7 — Docs / release | Final | Final |
+
+**Re-sequenced Phase 1**: now three sub-phases, in this dependency order:
+- **1.A — Circuit 1B prover/verifier wiring** — start now, no partner dependency beyond the already-confirmed 1B mock.
+- **1.B — Circuit 2 prover/verifier wiring** — start when AlinaT signals her cleanup is stable.
+- **1.C — Circuit 3 prover/verifier wiring** — start ~2 days after 1.B; partner is currently focused on 1+2.
+
+Phases 3 and 4 (Solidity verifier generation and contract rebuild) are the most parallelisable independent work while we wait. Recommend starting Phase 1.A and one of {3, 4} in parallel today.
 
 ---
 

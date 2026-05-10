@@ -19,7 +19,7 @@ use crate::keys::FallbackKeyManager;
 
 /// Verify a Circuit 1B (fallback) proof against `instances`.
 ///
-/// `instances` must be `[envelope_hash, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`
+/// `instances` must be `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`
 /// in that order — same layout the prover emits via `FallbackProofOutput::instances`.
 pub fn verify_fallback_proof(
     key_manager: &FallbackKeyManager,

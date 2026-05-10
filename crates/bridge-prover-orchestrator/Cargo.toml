@@ -8,7 +8,11 @@ description = "Wraps the partner's halo2 circuits with key/prover/verifier helpe
 # Partner circuits / parsers / test-data-gen — direct local paths (private repos use SSH).
 attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
 bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
+gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
+sha2 = "0.10"
 
 # Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
 bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
@@ -39,6 +43,10 @@ path = "src/bin/export_fallback_proof.rs"
 name = "export-primary-proof"
 path = "src/bin/export_primary_proof.rs"
 
+[[bin]]
+name = "export-layer-hashes-proof"
+path = "src/bin/export_layer_hashes_proof.rs"
+
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.
 # The partner crates declare these via git URLs in their Cargo.toml; without
@@ -48,6 +56,7 @@ path = "src/bin/export_primary_proof.rs"
 [patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
 attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
 bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
 historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
 bk-set-update-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bk-set-update-checker-circuit" }

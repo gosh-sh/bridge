@@ -25,12 +25,12 @@ contract FallbackVerifierTest is Test {
 
     // ─── Phase 1.A 10-signer synthetic proof + public inputs ──────────────
     bytes constant PROOF_10_SIGNERS =
-        hex"1cb89d6fa285c4f67c2290d7449ddfa84fb33deeeecec28db43264e88afdac49075d4c00e39326ffafc68f4c76f00201c838c2b00c99a22ae2478f89cddf668d21fabb2601bf26caf2b5f71ce45d2ba6ee90f7881441117ac1e542f41e5e56dd1771f7c5713dbfdcccc384884120905a105ec4dc7371c786e740b009975840fa28767f00cb90b1ba0aab04192b0b3cb2427609f21cc3e697ab206a5d375de05e085cc291503760eb7f3b77ed60091a1a1398edabfb7bdec26eb723fb5f8fa579145547ee74bdab6132f87d76033e616c8c8a51657b5c836c68b3c9efd0bd82ca13dc83ebb0498c6eca909b4d80c867b5d57120ce918ae90f5f98d9474d9d100a";
+        hex"2b48b1b65f065da8974022442b567190a8c755b8488d86195e785a0507db39b42c400affa093a2489a1aae5da1299a14f87b7a8836aefd77ee1728d6c0999af32ff42369d7f39f55ce7603fb0f4ca680c67a29c7e904872117c7f6ec7618276f1c5924e793e6bb3e6797e8c8bda07efa346c97f9a020a095bb93899effaa25911963d3ccb788c8c796a29d94206b60f912d208f23a8ab801f5797867226deefc0fd155ee6fa6e129262d7a477f49dfb1fc6016e2cdf21b12de8909c9b8eda1ab0f4f5bf8ab41fdcadae48cb033507c712e03baa161de9febe0cfcea586086a2606b7d0b3bbfa72652ff290f4f3d0e05b3d1b418cb7f05c98f72ffaedc848f214";
 
-    uint256 constant ENVELOPE_HASH =
-        20202806359575240131428837967779228818217543621557080492235371780190089760303;
+    uint256 constant BLOCK_ID =
+        6172998380117772144178244320174097278732891977751035358440025816556290812809;
     uint256 constant BK_SET_COMMITMENT =
-        14809724215823772589831973348579836204559371810832509842002213641396869426146;
+        8860947598963949231848474266167828716328059409075539559674326459702914164685;
     uint256 constant BLOCK_SEQ_NO = 1;
     uint256 constant LAST_SEEN_BLOCK_SEQNO = 0;
 
@@ -43,7 +43,7 @@ contract FallbackVerifierTest is Test {
 
     function testVerify_realProof_succeeds() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertTrue(ok, "real fallback proof should verify");
     }
@@ -55,33 +55,25 @@ contract FallbackVerifierTest is Test {
         tampered[100] = bytes1(uint8(tampered[100]) ^ 0xff);
 
         bool ok = verifier.verifyFallbackAttestation(
-            tampered, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            tampered, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "tampered fallback proof must NOT verify");
     }
 
-    // ─── Negative: wrong envelope hash rejected ──────────────────────────
+    // ─── Negative: wrong block_id rejected ──────────────────────────
 
-    function testVerify_wrongEnvelopeHash_fails() public view {
+    function testVerify_wrongBlockId_fails() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH ^ 1,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID ^ 1, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
-        assertFalse(ok, "wrong envelope hash must NOT verify");
+        assertFalse(ok, "wrong block_id must NOT verify");
     }
 
     // ─── Negative: wrong BK set commitment rejected ──────────────────────
 
     function testVerify_wrongBkSetCommitment_fails() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT ^ 1,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT ^ 1, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "wrong BK set commitment must NOT verify");
     }
@@ -90,11 +82,7 @@ contract FallbackVerifierTest is Test {
 
     function testVerify_wrongBlockSeqNo_fails() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO + 1,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO + 1, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "wrong block_seq_no must NOT verify");
     }
@@ -103,11 +91,7 @@ contract FallbackVerifierTest is Test {
 
     function testVerify_wrongLastSeen_fails() public view {
         bool ok = verifier.verifyFallbackAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO + 1
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO + 1
         );
         assertFalse(ok, "wrong last_seen must NOT verify");
     }
@@ -117,7 +101,7 @@ contract FallbackVerifierTest is Test {
     function testVerify_wrongProofLength_fails() public view {
         bytes memory tooShort = abi.encodePacked(PROOF_10_SIGNERS, hex"00");
         bool ok = verifier.verifyFallbackAttestation(
-            tooShort, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            tooShort, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "non-256-byte proofs must NOT verify");
     }

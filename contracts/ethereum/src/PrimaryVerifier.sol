@@ -31,7 +31,7 @@ contract PrimaryVerifier is IPrimaryVerifier {
     /// @inheritdoc IPrimaryVerifier
     function verifyPrimaryAttestation(
         bytes calldata proof,
-        uint256 envelopeHash,
+        uint256 blockId,
         uint256 bkSetCommitment,
         uint256 blockSeqNo,
         uint256 lastSeenBlockSeqNo
@@ -46,7 +46,7 @@ contract PrimaryVerifier is IPrimaryVerifier {
         }
 
         uint256[4] memory circuitInputs;
-        circuitInputs[0] = envelopeHash;
+        circuitInputs[0] = blockId;
         circuitInputs[1] = bkSetCommitment;
         circuitInputs[2] = blockSeqNo;
         circuitInputs[3] = lastSeenBlockSeqNo;

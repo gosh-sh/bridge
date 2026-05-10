@@ -25,12 +25,12 @@ contract PrimaryVerifierTest is Test {
 
     // ─── 10-signer synthetic Primary proof + public inputs ────────────────
     bytes constant PROOF_10_SIGNERS =
-        hex"06def497052d80a1cea44b5e54c6e732cf45113942698c33a5bd23931418d2f60e85ecc488a67b6f89c7866094d4e59c0ddabe2de43b630b968d1e6947f0ba0c2e0f7a6149e8931b84fc1f5360e4686a503e1d5b6c930b465d036f807af46dad2d25a588123f857b582a4a3781648452e3ac982fcfd79307f8afd842c11f841f257e32dc80cf78fd615a563ec4331d2311388f50b90aad9294e47d3b866aa00a2cec3b53cf3b3420c6cab0a378c14df16acf021a7855ba515ab7312d66b04b582da755c8097fffeec88191e7a0ded9a93c420ef6c24dc76d48a70641612c3e2606c20efe2cb2bab6a7d7fa60b3a69ce25485d52d00a540bb8464495fa6c0a393";
+        hex"2e45f9cda73e886945679f87aaceeb03181d880b166452164be60aad9fc5359f2449b4ad98a7917def01f91ee3cfa5f97ad76080646ffa2f2cf33dfcbfb220b625e4a5bd3d655509cae8b0265d0b0f968c354a1408de14621deeb9fcb939aa180be75ff6abc357bb75dcc4e14beef6d123f387514135365f3920c831a7acdb51156963eba046d4b0de5db2718a61bdc4ece17499a9aafac41c95fd850f8f47c91ab69bcd35f99179e724809382ceb21c1381057997b9eb1978dc5d0485be05171a2ae4d448ab63f5390c0bd8f85d00d1859231bc47b81cd340d4dee1fed8578109ee11a73067a3c1d47541135016f8a79deb767c0544f748d6006c6416fd2b58";
 
-    uint256 constant ENVELOPE_HASH =
-        8798063818110817011738334898030988624623503880890323629448651362520823232112;
+    uint256 constant BLOCK_ID =
+        2295081588717412148903967965347875954507319393035888555548715704890198866893;
     uint256 constant BK_SET_COMMITMENT =
-        12068713943170546064912791389409969875327728946929544601470440427472424489498;
+        5349273502482377494644800549912459928379936904267841894924361069880658904157;
     uint256 constant BLOCK_SEQ_NO = 1;
     uint256 constant LAST_SEEN_BLOCK_SEQNO = 0;
 
@@ -43,7 +43,7 @@ contract PrimaryVerifierTest is Test {
 
     function testVerify_realProof_succeeds() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertTrue(ok, "real primary proof should verify");
     }
@@ -55,33 +55,25 @@ contract PrimaryVerifierTest is Test {
         tampered[100] = bytes1(uint8(tampered[100]) ^ 0xff);
 
         bool ok = verifier.verifyPrimaryAttestation(
-            tampered, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            tampered, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "tampered primary proof must NOT verify");
     }
 
-    // ─── Negative: wrong envelope hash rejected ──────────────────────────
+    // ─── Negative: wrong block_id rejected ──────────────────────────
 
-    function testVerify_wrongEnvelopeHash_fails() public view {
+    function testVerify_wrongBlockId_fails() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH ^ 1,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID ^ 1, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
-        assertFalse(ok, "wrong envelope hash must NOT verify");
+        assertFalse(ok, "wrong block_id must NOT verify");
     }
 
     // ─── Negative: wrong BK set commitment rejected ──────────────────────
 
     function testVerify_wrongBkSetCommitment_fails() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT ^ 1,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT ^ 1, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "wrong BK set commitment must NOT verify");
     }
@@ -90,11 +82,7 @@ contract PrimaryVerifierTest is Test {
 
     function testVerify_wrongBlockSeqNo_fails() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO + 1,
-            LAST_SEEN_BLOCK_SEQNO
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO + 1, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "wrong block_seq_no must NOT verify");
     }
@@ -103,11 +91,7 @@ contract PrimaryVerifierTest is Test {
 
     function testVerify_wrongLastSeen_fails() public view {
         bool ok = verifier.verifyPrimaryAttestation(
-            PROOF_10_SIGNERS,
-            ENVELOPE_HASH,
-            BK_SET_COMMITMENT,
-            BLOCK_SEQ_NO,
-            LAST_SEEN_BLOCK_SEQNO + 1
+            PROOF_10_SIGNERS, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO + 1
         );
         assertFalse(ok, "wrong last_seen must NOT verify");
     }
@@ -117,7 +101,7 @@ contract PrimaryVerifierTest is Test {
     function testVerify_wrongProofLength_fails() public view {
         bytes memory tooShort = abi.encodePacked(PROOF_10_SIGNERS, hex"00");
         bool ok = verifier.verifyPrimaryAttestation(
-            tooShort, ENVELOPE_HASH, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
+            tooShort, BLOCK_ID, BK_SET_COMMITMENT, BLOCK_SEQ_NO, LAST_SEEN_BLOCK_SEQNO
         );
         assertFalse(ok, "non-256-byte proofs must NOT verify");
     }

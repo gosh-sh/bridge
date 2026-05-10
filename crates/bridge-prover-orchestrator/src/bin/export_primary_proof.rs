@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
         .context("primary proof generation failed")?;
 
     let instances: [Fr; 4] = [
-        proof.envelope_hash_fr,
+        proof.block_id_fr,
         proof.bk_set_commitment_fr,
         Fr::from(proof.block_seq_no as u64),
         Fr::from(proof.last_seen_block_seqno as u64),

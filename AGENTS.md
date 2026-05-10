@@ -127,6 +127,12 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IBkSetRotationVerifier.sol` | Interface for ZK-proven BK set rotation verification |
 | `BkSetRotationVerifier.sol` | Adapter: assembles 2 public inputs (old/new commitment), calls Groth16 verifier |
 | `BkSetRotationGroth16Verifier.sol` | Interface for gnark-generated 2-input Groth16 verifier |
+| `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` | Bridge-side adapter for Circuit 1A (Primary attestation) — 4 public inputs `[blockId, bkSetCommitment, blockSeqNo, lastSeenBlockSeqNo]` (renamed from `envelopeHash → blockId` 2026-05-10 per partner offset shift) |
+| `IPrimaryGroth16Verifier.sol` / `PrimaryGroth16VerifierGenerated.sol` | Gnark-generated 4-input Groth16 verifier interface + impl |
+| `IFallbackVerifier.sol` / `FallbackVerifier.sol` | Bridge-side adapter for Circuit 1B (Fallback attestation) — same 4-input shape as 1A |
+| `IFallbackGroth16Verifier.sol` / `FallbackGroth16VerifierGenerated.sol` | Gnark-generated 4-input Groth16 verifier for Fallback (separate VK from 1A) |
+| `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` | Bridge-side adapter for Circuit 2 (Layer Hashes Movement) — 14 public inputs `[blockId, bkSetCommitment, numLayers, layerHashes[0..10], prevMaxLevelLayerHash]` |
+| `ILayerHashesGroth16Verifier.sol` / `LayerHashesGroth16VerifierGenerated.sol` | Gnark-generated 14-input Groth16 verifier for Circuit 2 |
 | `IFallbackVerifier.sol` / `FallbackVerifier.sol` | Bridge-side adapter for Circuit 1B (Fallback attestation) — assembles 4 public inputs, calls Groth16 |
 | `IFallbackGroth16Verifier.sol` / `FallbackGroth16VerifierGenerated.sol` | gnark-generated Groth16 verifier (4 inputs) for Circuit 1B |
 | `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` | Bridge-side adapter for Circuit 1A (Primary attestation) — same 4-input shape as Fallback |
@@ -326,7 +332,7 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
 - See `docs/aave_integration.md` for design + correctness verification protocol.
 
-**Test counts (Foundry, 16 suites, all green)**:
+**Test counts (Foundry, 17 suites, all green)**:
 
 | Suite | Count |
 |------|------|
@@ -345,7 +351,8 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 | `LayerHashE2ETest` (real proofs) | 14 |
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
-| **Total** | **151** |
+| `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
+| **Total** | **161** |
 
 **Remaining (M7–M9)**:
 - BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)

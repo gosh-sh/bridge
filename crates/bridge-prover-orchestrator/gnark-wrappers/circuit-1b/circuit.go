@@ -27,7 +27,7 @@ const NumPublicInputs = 4
 // verifier a compact proof that those specific values were attested. The
 // off-chain relayer is responsible for having held a verified Halo2 proof
 // before generating the Groth16 wrap. Same trust model as
-// `Groth16DepositVerifier.sol` and `LayerHashGroth16VerifierGenerated.sol`.
+// `Groth16DepositVerifier.sol` and the per-circuit verifiers under contracts/ethereum/src/.
 type FallbackVerifierCircuit struct {
 	PublicInputs [NumPublicInputs]frontend.Variable `gnark:",public"`
 	DomainSize   frontend.Variable

@@ -1,8 +1,9 @@
 // Phase 3 — gnark Groth16 wrapper for Circuit 1B (Fallback attestation).
 //
-// Mirrors `layer-hashes-prover/gnark-wrapper/main.go` but for the 4 public
-// inputs emitted by Circuit 1B (`envelope_hash, bk_set_poseidon, block_seq_no,
-// last_seen_block_seqno`).
+// Per-circuit gnark wrapper for the 4 public inputs emitted by Circuit 1B
+// (`envelope_hash, bk_set_poseidon, block_seq_no, last_seen_block_seqno`).
+// Sibling wrappers under ../circuit-1a/ and ../circuit-2/ follow the same
+// shape with their own VK shapes (4-input for 1A, 14-input for 2).
 //
 // Two subcommands:
 //

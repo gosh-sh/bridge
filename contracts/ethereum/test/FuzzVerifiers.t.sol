@@ -8,6 +8,7 @@ import "../src/Groth16DepositVerifier.sol";
 import "../src/IAckiNackiVerifier.sol";
 import "../src/DummyVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
+import "./helpers/VerifyBlockConfigLib.sol";
 
 /**
  * @title FuzzVerifiers
@@ -316,7 +317,12 @@ contract FuzzAckiNackiBridgeTest is Test {
         verifier = new DummyVerifier();
         oracle = new MockBlockHeaderOracle();
         bridge = new AckiNackiBridge(
-            address(verifier), address(oracle), address(0), address(0), address(0)
+            address(verifier),
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled()
         );
     }
 

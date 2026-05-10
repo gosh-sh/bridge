@@ -108,7 +108,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 | Contract | Purpose |
 |----------|---------|
-| `AckiNackiBridge.sol` | Main bridge: deposits, withdrawals, **AAVE V3 yield integration** (owner-managed, principal-segregated) |
+| `AckiNackiBridge.sol` | Main bridge: deposits, withdrawals, **AAVE V3 yield integration**, AN→ETH state with `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1) |
 | `Groth16Verifier.sol` | Auto-generated Groth16 verifier (gnark output) |
 | `Groth16DepositVerifier.sol` | Adapter: decodes deposit proof public inputs, calls Groth16Verifier |
 | `IAckiNackiVerifier.sol` | Interface for AN-side proof verification |
@@ -238,11 +238,12 @@ make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 
-# Solidity contracts (135 tests across 14 suites, all green)
+# Solidity contracts (178 tests across 18 suites, all green)
 cd contracts/ethereum && forge build
-cd contracts/ethereum && forge test                                      # full suite
-cd contracts/ethereum && forge test --match-contract "LayerHash" -vv     # layer-hash subset
-cd contracts/ethereum && forge test --match-contract "AaveTest" -vv      # AAVE subset (23 tests)
+cd contracts/ethereum && forge test                                                      # full suite
+cd contracts/ethereum && forge test --match-contract "LayerHash" -vv                     # layer-hash subset
+cd contracts/ethereum && forge test --match-contract "AaveTest" -vv                      # AAVE subset (23 tests)
+cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeVerifyBlock" -vv    # Phase 4 verifyBlock (17 tests)
 
 # Layer-hashes prover (standalone workspace, excluded from main)
 cd layer-hashes-prover
@@ -314,6 +315,15 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Sequential bridge update tested (L2_H16 → L2_H32 with chain anchoring)
 - Negative tests: wrong commitment, layers, hash, prev_hash, corrupted proof — all rejected
 
+**Phase 4.1 (`AckiNackiBridge.verifyBlock`, completed 2026-05-10, additive)**:
+- `AckiNackiBridge.sol` extended with AN→ETH state (`storedBkSetCommitment`, `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes[10]`, `storedPrevMaxLevelLayerHash`) + 3 immutable verifier slots + `verifyBlock(finType, attestationProof, layerHashesProof, blockId, bkSetCommitment, blockSeqNo, numLayers, layerHashes[10], prevMaxLevelLayerHash)` permissionless entry point.
+- Cross-circuit + monotonicity + chain-anchor invariants enforced (`BkSetCommitmentMismatch`, `BlockSeqNoNotMonotonic`, `PrevAnchorMismatch`, `InvalidNumLayers`, `LayerHashTailNonZero`, `AttestationProofRejected`, `LayerHashesProofRejected`).
+- Constructor takes a `VerifyBlockConfig` struct as 6th argument; passing `VerifyBlockConfigLib.disabled()` disables `verifyBlock` (legacy deployments).
+- Cross-circuit-bound test data: `crates/bridge-prover-orchestrator/src/bound_test_data.rs` wraps the partner's `generate_bridge_test_data` so Circuit 1A's primary attestation BLS-bytes and Circuit 2's layer-hashes preimage + Merkle siblings hash to the **same** `block_id` (the 8-leaf envelope tree root) and share `bk_set_poseidon`.
+- New binary `cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release` produces both proofs from one scenario in ~3.5 min wall time (uses cached 1A K=20 + Circuit 2 K=17 keys; gnark setup also cached).
+- 17 new Foundry tests in `AckiNackiBridgeVerifyBlock.t.sol` — real bound 1A + 2 Groth16 proofs go end-to-end through both adapters → on-chain `*Groth16VerifierGenerated.sol`. Per-block verify cost: ~700 k gas (well under the 1 M target). Mock fallback path covered by `test/mocks/MockFallbackVerifier.sol`.
+- 178/178 Foundry tests green. Phase 4.2 (delete legacy `LayerHashBridge.sol` + migrate its 45 tests) deferred until Phase 5/6 relayer-driven path lands.
+
 **BK Set Rotation (completed: Ethereum side)**:
 - `IBkSetRotationVerifier.sol`, `BkSetRotationVerifier.sol`, `BkSetRotationGroth16Verifier.sol`
 - `LayerHashBridge.rotateBkSet()` — permissionless ZK-proven BK set rotation
@@ -338,6 +348,7 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 |------|------|
 | `AckiNackiBridgeAaveTest` (AAVE) | 23 |
 | `AckiNackiBridgeV2Test` (deposit/withdraw) | 14 |
+| `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
 | `AxiomBlockHeaderOracleTest` | 16 |
 | `Blake2b/KeccakHalo2VerifierTest` | 8 |
 | `Halo2PoseidonVerifierTest` | 7 |
@@ -352,7 +363,7 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
-| **Total** | **161** |
+| **Total** | **178** |
 
 **Remaining (M7–M9)**:
 - BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)

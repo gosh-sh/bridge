@@ -9,6 +9,7 @@
 //! Re-exports the partner's primary key management for convenience so a single
 //! consumer can drive both Circuit 1A and 1B with one set of types.
 
+pub mod bound_test_data;
 pub mod keys;
 pub mod layer_hashes_keys;
 pub mod layer_hashes_prover;
@@ -32,6 +33,10 @@ pub use layer_hashes_keys::{
 pub use layer_hashes_prover::{
     generate_layer_hashes_proof, verify_layer_hashes_proof, LayerHashesProofInput,
     LayerHashesProofOutput, LAYER_HASHES_NUM_PUBLIC_INPUTS,
+};
+pub use bound_test_data::{
+    build_bound_test_data, compose_layer_hashes_input, promote_bridge_test_data,
+    BoundBlockTestData,
 };
 pub use layer_hashes_test_data::{
     build_synthetic_layer_hashes_input, SyntheticLayerHashesInput,

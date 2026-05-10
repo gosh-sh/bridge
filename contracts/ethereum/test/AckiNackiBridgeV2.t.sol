@@ -6,6 +6,7 @@ import "forge-std/console.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/IAckiNackiVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
+import "./helpers/VerifyBlockConfigLib.sol";
 
 /**
  * @title AckiNackiBridgeV2Test
@@ -37,7 +38,12 @@ contract AckiNackiBridgeV2Test is Test {
 
         // Deploy bridge with verifier and oracle addresses (AAVE disabled)
         bridge = new AckiNackiBridge(
-            address(verifier), address(oracle), address(0), address(0), address(0)
+            address(verifier),
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled()
         );
 
         // Fund test users
@@ -320,12 +326,26 @@ contract AckiNackiBridgeV2Test is Test {
     function testConstructorInvalidVerifier() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         vm.expectRevert(AckiNackiBridge.InvalidVerifier.selector);
-        new AckiNackiBridge(address(0), address(oracle), address(0), address(0), address(0));
+        new AckiNackiBridge(
+            address(0),
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled()
+        );
     }
 
     function testConstructorInvalidOracle() public {
         vm.expectRevert(AckiNackiBridge.InvalidOracle.selector);
-        new AckiNackiBridge(address(verifier), address(0), address(0), address(0), address(0));
+        new AckiNackiBridge(
+            address(verifier),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled()
+        );
     }
 }
 

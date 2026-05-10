@@ -7,6 +7,9 @@ import "../src/Groth16DepositVerifier.sol";
 import "../src/Groth16Verifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "../src/AxiomBlockHeaderOracle.sol";
+import "../src/IPrimaryVerifier.sol";
+import "../src/IFallbackVerifier.sol";
+import "../src/ILayerHashesMovementVerifier.sol";
 
 /**
  * @title DeployRealBridge
@@ -101,10 +104,25 @@ contract DeployRealBridge is Script {
             console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on mainnet)");
         }
 
-        // Step 5: Deploy the bridge contract
+        // Step 5: Deploy the bridge contract.
+        //
+        // Phase 4 verifyBlock wiring is intentionally left **disabled** in this
+        // script: the AN→ETH verifier triple (Primary/Fallback/LayerHashes)
+        // requires a known BK-set Poseidon commitment for genesis, which only
+        // materialises after the partner's first finalised block on the target
+        // network. A follow-up deployment / setter call (planned for Phase 5)
+        // wires the verifiers in once the genesis snapshot lands.
+        AckiNackiBridge.VerifyBlockConfig memory vbDisabled = AckiNackiBridge.VerifyBlockConfig({
+            primaryVerifier: IPrimaryVerifier(address(0)),
+            fallbackVerifier: IFallbackVerifier(address(0)),
+            layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
+            genesisBkSetCommitment: 0,
+            genesisPrevMaxLevelLayerHash: 0
+        });
         console.log("Deploying AckiNackiBridge...");
-        AckiNackiBridge bridge =
-            new AckiNackiBridge(address(verifier), oracleAddr, aavePool, wethGateway, aWETH);
+        AckiNackiBridge bridge = new AckiNackiBridge(
+            address(verifier), oracleAddr, aavePool, wethGateway, aWETH, vbDisabled
+        );
         console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();

@@ -6,6 +6,9 @@ import "./IBlockHeaderOracle.sol";
 import "./IAavePool.sol";
 import "./IWrappedTokenGatewayV3.sol";
 import "./IERC20.sol";
+import "./IPrimaryVerifier.sol";
+import "./IFallbackVerifier.sol";
+import "./ILayerHashesMovementVerifier.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain
@@ -15,6 +18,16 @@ import "./IERC20.sol";
 ///        batches supplies to AAVE with `supplyToAave()` to amortise gas.
 ///      - `withdraw()` transparently pulls from AAVE if the bridge's ETH balance is short.
 ///      - Owner can harvest accrued yield without touching user principal.
+///
+///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
+///      Acki Nacki side (`block_seq_no`, `bk_set_poseidon`, layer-hash roots,
+///      chain anchor). `verifyBlock` advances the commitment after verifying
+///      a tuple of two cross-circuit-bound Halo2/Groth16 proofs:
+///        - **proof1**: Circuit 1A (Primary) or 1B (Fallback) attestation, BLS-aggregated.
+///        - **proof2**: Circuit 2 (Layer hashes movement), Poseidon-Merkle-anchored.
+///      Both proofs share a common `block_id` and `bk_set_poseidon` by
+///      construction; the bridge enforces those equalities + the monotonic
+///      `block_seq_no` and chain-anchor invariants on top.
 contract AckiNackiBridge {
     // ---------------------------------------------------------------------
     // Constants
@@ -28,6 +41,18 @@ contract AckiNackiBridge {
 
     /// @notice Upper bound on the liquid reserve (50% of treasury kept as ETH)
     uint256 public constant MAX_LIQUID_RESERVE_BPS = 5_000;
+
+    /// @notice Maximum number of layer-hash slots per block (matches
+    ///         partner Circuit 2's MAX_LAYERS).
+    uint256 public constant MAX_LAYER_HASHES = 10;
+
+    /// @notice Finalization type for a block being verified by `verifyBlock`.
+    ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
+    ///         binary split: Primary (>= 2/3 quorum) or Fallback (>1/2 split).
+    enum FinalizationType {
+        Primary,
+        Fallback
+    }
 
     // ---------------------------------------------------------------------
     // Storage: core bridge state
@@ -85,6 +110,46 @@ contract AckiNackiBridge {
     uint256 private _reentrancyStatus;
 
     // ---------------------------------------------------------------------
+    // Storage: AN→ETH state (Phase 4 verifyBlock)
+    // ---------------------------------------------------------------------
+
+    /// @notice Circuit 1A (Primary attestation) verifier (Groth16 adapter).
+    ///         May be `address(0)` if AN→ETH verification is disabled at
+    ///         deployment; in that case `verifyBlock` reverts with `VerifyBlockDisabled`.
+    IPrimaryVerifier public immutable primaryVerifier;
+
+    /// @notice Circuit 1B (Fallback attestation) verifier (Groth16 adapter).
+    ///         May be `address(0)` (see `primaryVerifier`).
+    IFallbackVerifier public immutable fallbackVerifier;
+
+    /// @notice Circuit 2 (Layer hashes movement) verifier (Groth16 adapter).
+    ///         May be `address(0)` (see `primaryVerifier`).
+    ILayerHashesMovementVerifier public immutable layerHashesVerifier;
+
+    /// @notice Active Acki Nacki BK-set Poseidon commitment.
+    ///         Updated only by future Circuit 3 (BK-set rotation, Phase 1.C);
+    ///         seeded from the constructor's `_genesisBkSetCommitment`.
+    uint256 public storedBkSetCommitment;
+
+    /// @notice Highest AN block sequence number whose attestation has been
+    ///         verified on-chain. Strictly monotonic via `verifyBlock`.
+    uint64 public storedLastSeenBlockSeqNo;
+
+    /// @notice Number of active layer slots committed by the most recent
+    ///         layer-hashes proof. Range 1..=`MAX_LAYER_HASHES` (`MAX_LAYERS`).
+    uint8 public storedNumLayers;
+
+    /// @notice Per-layer Poseidon Merkle roots committed by the most recent
+    ///         layer-hashes proof. Indices `>= storedNumLayers` are zero.
+    uint256[MAX_LAYER_HASHES] public storedLayerHashes;
+
+    /// @notice Chain anchor — the Poseidon root of the previous chain that
+    ///         the next layer-hashes proof must extend. Equal to the
+    ///         `(storedNumLayers - 1)`-th entry of `storedLayerHashes` after
+    ///         each successful `verifyBlock` (the new top of the chain).
+    uint256 public storedPrevMaxLevelLayerHash;
+
+    // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
@@ -102,6 +167,18 @@ contract AckiNackiBridge {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
+
+    /// @notice Emitted on every successful `verifyBlock` call.
+    /// @param blockId AN block identifier (Merkle root committed by both proofs).
+    /// @param blockSeqNo AN block sequence number whose attestation was verified.
+    /// @param finType Primary (0) / Fallback (1) finalization path.
+    /// @param numLayers Number of active layer slots in the new commitment.
+    event BlockVerified(
+        uint256 indexed blockId,
+        uint64 indexed blockSeqNo,
+        FinalizationType finType,
+        uint8 numLayers
+    );
 
     // ---------------------------------------------------------------------
     // Errors
@@ -125,6 +202,16 @@ contract AckiNackiBridge {
     error AaveWithdrawFailed(uint256 requested, uint256 received);
     error NoYield();
 
+    // verifyBlock errors
+    error VerifyBlockDisabled();
+    error AttestationProofRejected();
+    error LayerHashesProofRejected();
+    error BkSetCommitmentMismatch(uint256 supplied, uint256 stored);
+    error BlockSeqNoNotMonotonic(uint64 supplied, uint64 stored);
+    error PrevAnchorMismatch(uint256 supplied, uint256 stored);
+    error InvalidNumLayers(uint256 numLayers);
+    error LayerHashTailNonZero(uint256 index);
+
     // ---------------------------------------------------------------------
     // Modifiers
     // ---------------------------------------------------------------------
@@ -145,11 +232,33 @@ contract AckiNackiBridge {
     // Constructor
     // ---------------------------------------------------------------------
 
-    /// @param _verifier           ZK verifier for withdrawal proofs
-    /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes
-    /// @param _aavePool           AAVE V3 Pool address (mainnet: 0x8787...fA4E2)
-    /// @param _wethGateway        AAVE V3 WrappedTokenGatewayV3
-    /// @param _aWETH              aWETH token minted by AAVE for supplied WETH
+    /// @notice Argument bundle for the AN→ETH `verifyBlock` wiring.
+    /// @dev Stored on the stack at construction; never persisted as a struct.
+    ///      Passing the zero address for *any* of the three verifiers disables
+    ///      `verifyBlock` (it reverts with `VerifyBlockDisabled`) — useful for
+    ///      legacy deployments that only exercise the deposit/AAVE surface.
+    struct VerifyBlockConfig {
+        IPrimaryVerifier primaryVerifier;
+        IFallbackVerifier fallbackVerifier;
+        ILayerHashesMovementVerifier layerHashesVerifier;
+        /// @notice Initial BK-set Poseidon commitment. Required when verifier
+        ///         addresses are non-zero (otherwise no proof would ever pass
+        ///         the BK-set check). Pass `0` only if `verifyBlock` is disabled.
+        uint256 genesisBkSetCommitment;
+        /// @notice Initial layer-hash chain anchor. Pass `0` for genesis
+        ///         (no prior layer-hash chain to anchor against — the very
+        ///         first verified block uses the zero anchor).
+        uint256 genesisPrevMaxLevelLayerHash;
+    }
+
+    /// @param _verifier           ZK verifier for withdrawal proofs (deposit path).
+    /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
+    /// @param _aavePool           AAVE V3 Pool address (mainnet: 0x8787...fA4E2).
+    /// @param _wethGateway        AAVE V3 WrappedTokenGatewayV3.
+    /// @param _aWETH              aWETH token minted by AAVE for supplied WETH.
+    /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
+    ///                            zeros to disable the AN→ETH path; the deposit/
+    ///                            AAVE surface stays fully functional.
     /// @dev Pass address(0) for `_aavePool`/`_wethGateway`/`_aWETH` to disable AAVE.
     ///      In that case, the bridge behaves as before (plain ETH custody).
     constructor(
@@ -157,7 +266,8 @@ contract AckiNackiBridge {
         address _blockHeaderOracle,
         address _aavePool,
         address _wethGateway,
-        address _aWETH
+        address _aWETH,
+        VerifyBlockConfig memory _vb
     ) {
         if (_verifier == address(0)) revert InvalidVerifier();
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
@@ -175,6 +285,13 @@ contract AckiNackiBridge {
         aavePool = IAavePool(_aavePool);
         wethGateway = IWrappedTokenGatewayV3(_wethGateway);
         aWETH = IERC20(_aWETH);
+
+        // verifyBlock wiring is all-or-nothing: any zero address disables it.
+        primaryVerifier = _vb.primaryVerifier;
+        fallbackVerifier = _vb.fallbackVerifier;
+        layerHashesVerifier = _vb.layerHashesVerifier;
+        storedBkSetCommitment = _vb.genesisBkSetCommitment;
+        storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -262,6 +379,144 @@ contract AckiNackiBridge {
         recipient.transfer(amount);
 
         emit Withdrawal(depositId, recipient, amount, block.timestamp);
+    }
+
+    // ---------------------------------------------------------------------
+    // AN→ETH state — verifyBlock (permissionless)
+    // ---------------------------------------------------------------------
+
+    /// @notice Advance the on-chain commitment to the Acki Nacki side after
+    ///         verifying a tuple of two cross-circuit-bound ZK proofs.
+    ///
+    /// The two proofs MUST share `block_id` and `bkSetCommitment` (the partner's
+    /// circuits already enforce those equalities at proof-generation time; this
+    /// function relies on the ABI passing a single value to both verifiers).
+    ///
+    /// @dev Permissionless — anyone can submit; the contract only mutates state
+    ///      after both gnark Groth16 verifiers report success and every cross-
+    ///      circuit / monotonicity / chain-anchor invariant holds.
+    ///
+    /// Invariants enforced (revert-on-violation):
+    ///   - `bkSetCommitment == storedBkSetCommitment`           (BK-set anchor; rotated only by Phase 1.C Circuit 3 in future)
+    ///   - `blockSeqNo > storedLastSeenBlockSeqNo`              (strictly monotonic)
+    ///   - `prevMaxLevelLayerHash == storedPrevMaxLevelLayerHash` (chain anchor — guards against fork & replay)
+    ///   - `1 <= numLayers <= MAX_LAYER_HASHES`                 (shape)
+    ///   - `layerHashes[i] == 0` for `i >= numLayers`           (tail must be zero — defends against
+    ///                                                            silent garbage in unused slots)
+    ///   - `primaryVerifier` / `fallbackVerifier` / `layerHashesVerifier` all reject the proofs
+    ///     ⇒ revert (no partial state mutation).
+    ///
+    /// State updates after success:
+    ///   - `storedLastSeenBlockSeqNo = blockSeqNo`
+    ///   - `storedNumLayers = numLayers`
+    ///   - `storedLayerHashes[i] = layerHashes[i]` for all 0..MAX_LAYER_HASHES
+    ///   - `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]`
+    ///     (the new top-of-chain layer becomes the anchor for the *next* call)
+    ///
+    /// @param finType            Primary or Fallback finalization path.
+    /// @param attestationProof   gnark Groth16 proof bytes for Circuit 1A or 1B (256 bytes).
+    /// @param layerHashesProof   gnark Groth16 proof bytes for Circuit 2 (256 bytes).
+    /// @param blockId            32-byte AN block identifier shared between both proofs.
+    /// @param bkSetCommitment    Poseidon commitment to the active BK set; shared between both proofs.
+    /// @param blockSeqNo         AN block sequence number being attested.
+    /// @param numLayers          Number of active layer slots (1..=MAX_LAYER_HASHES).
+    /// @param layerHashes        10 layer-hash field elements; tail (>= numLayers) must be zero.
+    /// @param prevMaxLevelLayerHash Chain anchor — must equal `storedPrevMaxLevelLayerHash`.
+    function verifyBlock(
+        FinalizationType finType,
+        bytes calldata attestationProof,
+        bytes calldata layerHashesProof,
+        uint256 blockId,
+        uint256 bkSetCommitment,
+        uint64 blockSeqNo,
+        uint8 numLayers,
+        uint256[MAX_LAYER_HASHES] calldata layerHashes,
+        uint256 prevMaxLevelLayerHash
+    ) external nonReentrant {
+        // Feature gate: all three verifier slots must be wired.
+        if (
+            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
+                || address(layerHashesVerifier) == address(0)
+        ) {
+            revert VerifyBlockDisabled();
+        }
+
+        // ---- Shape & range checks (cheap; before crypto). ----
+        if (numLayers == 0 || numLayers > MAX_LAYER_HASHES) {
+            revert InvalidNumLayers(numLayers);
+        }
+        for (uint256 i = numLayers; i < MAX_LAYER_HASHES; i++) {
+            if (layerHashes[i] != 0) revert LayerHashTailNonZero(i);
+        }
+
+        // ---- Anchor checks against stored state. ----
+        if (bkSetCommitment != storedBkSetCommitment) {
+            revert BkSetCommitmentMismatch(bkSetCommitment, storedBkSetCommitment);
+        }
+        if (blockSeqNo <= storedLastSeenBlockSeqNo) {
+            revert BlockSeqNoNotMonotonic(blockSeqNo, storedLastSeenBlockSeqNo);
+        }
+        if (prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash) {
+            revert PrevAnchorMismatch(prevMaxLevelLayerHash, storedPrevMaxLevelLayerHash);
+        }
+
+        // ---- Crypto: verify both proofs. The shared (blockId, bkSetCommitment,
+        //      blockSeqNo) values flow into both verifier calls, so any
+        //      mismatch between the two proofs surfaces here as one of the two
+        //      verifications failing (their public inputs are computed from
+        //      these values byte-for-byte).
+        bool attOk;
+        if (finType == FinalizationType.Primary) {
+            attOk = primaryVerifier.verifyPrimaryAttestation(
+                attestationProof,
+                blockId,
+                bkSetCommitment,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        } else {
+            attOk = fallbackVerifier.verifyFallbackAttestation(
+                attestationProof,
+                blockId,
+                bkSetCommitment,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        }
+        if (!attOk) revert AttestationProofRejected();
+
+        bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
+            layerHashesProof,
+            blockId,
+            bkSetCommitment,
+            uint256(numLayers),
+            layerHashes,
+            prevMaxLevelLayerHash
+        );
+        if (!lhOk) revert LayerHashesProofRejected();
+
+        // ---- Effects (CEI): commit the new state. ----
+        storedLastSeenBlockSeqNo = blockSeqNo;
+        storedNumLayers = numLayers;
+        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
+            storedLayerHashes[i] = layerHashes[i];
+        }
+        // The new top-of-chain becomes the anchor for the next call; keeps
+        // `storedPrevMaxLevelLayerHash` co-located with the canonical layer.
+        storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
+
+        emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
+    }
+
+    /// @notice View helper: returns the full `storedLayerHashes` array as a
+    ///         memory copy. Public mappings give per-index access; this is
+    ///         convenient for off-chain reads in one RPC call.
+    function getStoredLayerHashes() external view returns (uint256[MAX_LAYER_HASHES] memory) {
+        uint256[MAX_LAYER_HASHES] memory out;
+        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
+            out[i] = storedLayerHashes[i];
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------------

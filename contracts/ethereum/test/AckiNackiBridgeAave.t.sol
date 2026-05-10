@@ -6,6 +6,7 @@ import "../src/AckiNackiBridge.sol";
 import "../src/IAckiNackiVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "./mocks/MockAave.sol";
+import "./helpers/VerifyBlockConfigLib.sol";
 
 /// @notice Trivial always-passing verifier for AAVE behaviour tests.
 contract PermissiveVerifier is IAckiNackiVerifier {
@@ -59,7 +60,12 @@ contract AckiNackiBridgeAaveTest is Test {
         gateway = new MockWETHGateway(address(pool), address(aWETH));
 
         bridge = new AckiNackiBridge(
-            address(verifier), address(oracle), address(pool), address(gateway), address(aWETH)
+            address(verifier),
+            address(oracle),
+            address(pool),
+            address(gateway),
+            address(aWETH),
+            VerifyBlockConfigLib.disabled()
         );
 
         vm.deal(user1, 200 ether);
@@ -88,13 +94,23 @@ contract AckiNackiBridgeAaveTest is Test {
     function test_constructor_partialAaveWiringReverts() public {
         vm.expectRevert(AckiNackiBridge.InvalidAaveAddress.selector);
         new AckiNackiBridge(
-            address(verifier), address(oracle), address(pool), address(0), address(aWETH)
+            address(verifier),
+            address(oracle),
+            address(pool),
+            address(0),
+            address(aWETH),
+            VerifyBlockConfigLib.disabled()
         );
     }
 
     function test_constructor_noAaveIsLegal() public {
         AckiNackiBridge plain = new AckiNackiBridge(
-            address(verifier), address(oracle), address(0), address(0), address(0)
+            address(verifier),
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled()
         );
         assertFalse(plain.aaveEnabled(), "aave disabled when no addresses");
         assertEq(address(plain.aavePool()), address(0));

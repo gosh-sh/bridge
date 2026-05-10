@@ -22,6 +22,7 @@ halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base"
 halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc", default-features = false, features = ["halo2-axiom"] }
 
 anyhow = "1"
+bincode = "1.3"
 clap = { version = "4", features = ["derive"] }
 num-bigint = "0.4"
 rand = "0.8"
@@ -46,6 +47,10 @@ path = "src/bin/export_primary_proof.rs"
 [[bin]]
 name = "export-layer-hashes-proof"
 path = "src/bin/export_layer_hashes_proof.rs"
+
+[[bin]]
+name = "export-bound-block-proofs"
+path = "src/bin/export_bound_block_proofs.rs"
 
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.

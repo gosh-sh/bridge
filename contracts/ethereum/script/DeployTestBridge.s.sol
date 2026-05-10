@@ -5,6 +5,9 @@ import "forge-std/Script.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/DummyVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
+import "../src/IPrimaryVerifier.sol";
+import "../src/IFallbackVerifier.sol";
+import "../src/ILayerHashesMovementVerifier.sol";
 
 /**
  * @title DeployTestBridge
@@ -28,8 +31,17 @@ contract DeployTestBridge is Script {
         console.log("MockBlockHeaderOracle deployed at:", address(oracle));
 
         // Deploy the bridge contract (AAVE integration disabled in test deployment)
+        // verifyBlock disabled in this test deployment (Phase 4 wiring is
+        // exercised via DeployRealBridge / dedicated Phase 4 deployments).
+        AckiNackiBridge.VerifyBlockConfig memory vbDisabled = AckiNackiBridge.VerifyBlockConfig({
+            primaryVerifier: IPrimaryVerifier(address(0)),
+            fallbackVerifier: IFallbackVerifier(address(0)),
+            layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
+            genesisBkSetCommitment: 0,
+            genesisPrevMaxLevelLayerHash: 0
+        });
         AckiNackiBridge bridge = new AckiNackiBridge(
-            address(verifier), address(oracle), address(0), address(0), address(0)
+            address(verifier), address(oracle), address(0), address(0), address(0), vbDisabled
         );
         console.log("AckiNackiBridge deployed at:", address(bridge));
 

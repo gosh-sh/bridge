@@ -1,0 +1,27 @@
+[package]
+name = "bridge-relayer-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Relayer skeleton for the AN→ETH bridge: fetches AN block data + proofs, drives them through `AckiNackiBridge.verifyBlock` on Ethereum (Phase 5.1)."
+
+[dependencies]
+# Core async + ethers (relayer-side only — no halo2 here).
+tokio = { version = "1.42", features = ["full"] }
+async-trait = "0.1"
+ethers = { version = "2.0", features = ["abigen", "ws", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3"
+
+[[bin]]
+name = "relayer"
+path = "src/bin/relayer.rs"

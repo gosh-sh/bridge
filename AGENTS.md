@@ -141,7 +141,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IWrappedTokenGatewayV3.sol` | AAVE V3 ETH⇄WETH gateway interface (`depositETH` / `withdrawETH`) |
 | `IERC20.sol` | Trimmed ERC-20 interface for aWETH custody |
 
-Test mocks (under `test/mocks/`): `MockAave.sol` provides `MockAWETH`, `MockAavePool`, `MockWETHGateway` for unit testing the AAVE path without forking mainnet.
+Test mocks (under `test/mocks/`): `MockAave.sol` (`MockAWETH`, `MockAavePool`, `MockWETHGateway`) for the AAVE path without forking mainnet; `MockPrimaryVerifier.sol` / `MockFallbackVerifier.sol` / `MockLayerHashesMovementVerifier.sol` for driving `AckiNackiBridge.verifyBlock` through many synthetic blocks without re-running ZK proof generation (real verifiers covered end-to-end by `AckiNackiBridgeVerifyBlock.t.sol`).
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -149,10 +149,12 @@ Test: `cd contracts/ethereum && forge test`
 ## Rust Workspace
 
 **Workspace members** (in `Cargo.toml`): `crates/eth-frontend`, `crates/acki-nacki-interface`
-**Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`
+**Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`
 
 - `acki-nacki-interface`: Async traits (`AckiNackiClient`, `BlockProvider`, etc.) + mock implementations. No real AN node integration yet.
 - `eth-frontend`: Ethereum client using ethers-rs. Interacts with bridge contracts.
+- `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures.
+- `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
 - `deposit-prover`: Standalone Halo2 circuit crate. Uses axiom-crypto's halo2-lib (different from partner's gosh fork).
 - `poseidon-proof`: Halo2 circuit with Blake2b transcript for Poseidon commitment proofs.
 
@@ -238,12 +240,17 @@ make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 
-# Solidity contracts (178 tests across 18 suites, all green)
+# Solidity contracts (184 tests across 19 suites, all green)
 cd contracts/ethereum && forge build
 cd contracts/ethereum && forge test                                                      # full suite
 cd contracts/ethereum && forge test --match-contract "LayerHash" -vv                     # layer-hash subset
 cd contracts/ethereum && forge test --match-contract "AaveTest" -vv                      # AAVE subset (23 tests)
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeVerifyBlock" -vv    # Phase 4 verifyBlock (17 tests)
+cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeRelayerLoop" -vv    # Phase 5.1 relayer loop (6 tests)
+
+# Relayer skeleton (Phase 5.1, standalone)
+cd crates/bridge-relayer-daemon && cargo test                                            # 13 unit tests
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
 
 # Layer-hashes prover (standalone workspace, excluded from main)
 cd layer-hashes-prover
@@ -324,6 +331,12 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - 17 new Foundry tests in `AckiNackiBridgeVerifyBlock.t.sol` — real bound 1A + 2 Groth16 proofs go end-to-end through both adapters → on-chain `*Groth16VerifierGenerated.sol`. Per-block verify cost: ~700 k gas (well under the 1 M target). Mock fallback path covered by `test/mocks/MockFallbackVerifier.sol`.
 - 178/178 Foundry tests green. Phase 4.2 (delete legacy `LayerHashBridge.sol` + migrate its 45 tests) deferred until Phase 5/6 relayer-driven path lands.
 
+**Phase 5.1 (relayer skeleton, completed 2026-05-10)**:
+- New standalone crate `crates/bridge-relayer-daemon/` (excluded from workspace, like `bridge-prover-orchestrator`). Modules: `types` (`AnBlockData`, `FinalizationType`, `MAX_LAYER_HASHES = 10`, structural validation), `bridge` (`BridgeClient` async trait + `EthBridgeClient` over `abigen!`-bindings + `MockBridgeClient` mirroring the on-chain state machine byte-for-byte for unit tests), `source` (`BlockSource` async trait + `InMemoryBlockSource` + `FixturesBlockSource` reading Phase 4.1 bound proof artefacts), `state` (atomic `state.json` persistence with write-temp-then-rename), `relayer` (`Relayer::tick()` + `Relayer::run_loop(max_ticks, should_stop)`), CLI binary `relayer` with a `smoke-fixture` subcommand.
+- 13 Rust unit tests cover the loop end-to-end against `MockBridgeClient` + `InMemoryBlockSource`: 5 sequential blocks (mixed Primary/Fallback), `NotYetAvailable` recovery, verifier-rejection path, restart-from-persisted-state, `run_loop`'s `should_stop` semantics.
+- 6 new Foundry tests in `AckiNackiBridgeRelayerLoop.t.sol` drive `verifyBlock` through 10 sequential synthetic blocks with the new `MockPrimaryVerifier`/`MockFallbackVerifier`/`MockLayerHashesMovementVerifier` mocks: asserts `storedLastSeenBlockSeqNo`/`storedNumLayers`/`storedLayerHashes[..]`/`storedPrevMaxLevelLayerHash` after each step, plus restart-reads-anchor, replay-reverts, fast-forward-permitted, attestation-rejection-state-untouched (CEI), anchor-mismatch-reverts negatives.
+- 184/184 Foundry tests green (178 baseline + 6 new). Phase 5.2 (`LiveBlockSource` over partner GraphQL/BOC + halo2+gnark inside the relayer) blocked on Q1 + Q2; Phase 5.3 (10-block shellnet acceptance) blocked on Q1.
+
 **BK Set Rotation (completed: Ethereum side)**:
 - `IBkSetRotationVerifier.sol`, `BkSetRotationVerifier.sol`, `BkSetRotationGroth16Verifier.sol`
 - `LayerHashBridge.rotateBkSet()` — permissionless ZK-proven BK set rotation
@@ -342,13 +355,14 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
 - See `docs/aave_integration.md` for design + correctness verification protocol.
 
-**Test counts (Foundry, 17 suites, all green)**:
+**Test counts (Foundry, 19 suites, all green)**:
 
 | Suite | Count |
 |------|------|
 | `AckiNackiBridgeAaveTest` (AAVE) | 23 |
 | `AckiNackiBridgeV2Test` (deposit/withdraw) | 14 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
+| `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
 | `AxiomBlockHeaderOracleTest` | 16 |
 | `Blake2b/KeccakHalo2VerifierTest` | 8 |
 | `Halo2PoseidonVerifierTest` | 7 |
@@ -363,15 +377,22 @@ All 4 proven + Groth16 wrapped + verified on Ethereum (Foundry). Proof files in 
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
-| **Total** | **178** |
+| **Total Foundry** | **184** |
 
-**Remaining (M7–M9)**:
-- BK set rotation Halo2 circuit implementation (spec written; partner has stub `bk-set-change-verifier-halo2-circuit`)
-- Live node testing (testnet not ready; `circuit-data-exporter` on `bridge_halo2_tests` branch)
-- Relayer service: watch AN node → prove → wrap → submit to Ethereum
-- Real `acki-nacki-interface` implementation (currently mock only)
-- Production LAYER_TREE_DEPTH=8 testing
-- AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based)
+**Rust tests** (excluded crates, run with `cargo test` per crate):
+
+| Crate | Count | Notes |
+|------|------|------|
+| `bridge-relayer-daemon` | 13 | state persistence (2), `BlockSource` (2), `MockBridgeClient` (4), `Relayer` loop end-to-end (5) |
+
+**Remaining (Phase 5.2/5.3, 6, 7)**:
+- Phase 5.2: `LiveBlockSource` impl over partner's `gql_client` + `boc_parser` + relayer-side halo2+gnark (blocked on Q1 + Q2).
+- Phase 5.3: 10-block shellnet acceptance (Anvil + live AN node) — blocked on Q1.
+- Phase 1.C / Phase 3.4: BK-set update circuit (spec written; partner stub `bk-set-change-verifier-halo2-circuit`).
+- Phase 4.2: delete legacy `LayerHashBridge.sol` + migrate its 45 tests onto `AckiNackiBridge.verifyBlock` once a relayer-driven 2-block scenario exists.
+- Phase 6: real `acki-nacki-interface` implementation (currently mock only).
+- AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based).
+- Production LAYER_TREE_DEPTH=8 testing.
 
 See `docs/manual_verification_runbook.md` for the hands-on, copy-pasteable plan a human reviewer follows to verify the bridge end-to-end (~2.5 hours, includes 32 attack scenarios).
 See `docs/bridge_verification.md` for the property-driven verification reference (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-# invariants).

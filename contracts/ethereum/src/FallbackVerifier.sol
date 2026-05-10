@@ -12,7 +12,8 @@ import "./IFallbackGroth16Verifier.sol";
 ///      proof. This adapter re-assembles the 4 public inputs in the order the
 ///      gnark circuit expects (matches `FallbackProofOutput::instances` /
 ///      `IFallbackVerifier`'s docstring) and forwards to the generated
-///      `verifyProof`. Mirrors `LayerHashVerifier.sol`.
+///      `verifyProof`. Mirrors the other thin verifier adapters in this
+///      package (`PrimaryVerifier.sol`, `LayerHashesMovementVerifier.sol`).
 contract FallbackVerifier is IFallbackVerifier {
     IFallbackGroth16Verifier public immutable groth16Verifier;
 

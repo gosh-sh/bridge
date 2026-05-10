@@ -11,8 +11,8 @@ target/
 # independent dep tree.
 deposit-prover/Cargo.lock
 poseidon-proof/Cargo.lock
-layer-hashes-prover/Cargo.lock
 crates/bridge-prover-orchestrator/Cargo.lock
+crates/bridge-relayer-daemon/Cargo.lock
 
 # Foundry / Solidity
 contracts/ethereum/out/

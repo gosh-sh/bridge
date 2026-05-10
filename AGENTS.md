@@ -216,6 +216,43 @@ These are tightly coupled to the AN node's serialization and will break if the n
 2. **D-1**: No semantic BTreeMap validation in circuit. Layer hash extraction trusts that BLS-attested data is correctly formatted. Protocol-level trust assumption.
 3. **L-1**: Bincode layout constants are fragile across AN node releases. Need CI integration tests.
 
+## Partner Prover Bug Found (2026-05-10, GOSH stand)
+
+While running Alina's two-circuit live-stand experiment (`acki-nacki/latest_an_to_eth_bridge_test_lightweight` + `acki-nacki-to-eth-bridge-halo2-prover/test_both_circuits_lightweight`) on the GOSH server, Circuit 1a verified consistently but Circuit 2 was rejected for every live key block (`primary=true, layer=false`).
+
+**Root cause**: `bridge-prover-lib/src/keys.rs::ensure_layer_keys` builds the reference circuit used for VK/PK keygen with tree depth 3:
+
+```rust
+let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth(3, 2, 3);
+```
+
+The accompanying comment said `WINDOW_SIZE=4 → 6 leaves → pad to 8 → depth=3`, which was correct for the now-superseded `HISTORY_PROOF_WINDOW_SIZE=4`. The lightweight branch uses `HISTORY_PROOF_WINDOW_SIZE=8`, so real layer trees have `2 + 8 = 10` leaves padded to 16, **depth 4**. As a result, every `DenseChainLink` produced by `real_chain_builder` carries `siblings.len() == 4`, while the VK/PK were committed for `siblings.len() == 3`. The witness still satisfies the constraint system (MockProver passes), but `halo2::verify_proof` rejects every proof because the polynomial shape no longer matches the VK.
+
+**Diagnostic isolation** (in `bridge-prover-lib/tests/`):
+- `diagnostic_l1_block16.rs` — rebuilds the layer-1 Poseidon tree for live block 16 from blocks 8..15 leaves and confirms the prover's tree reconstruction matches the node's `history_proofs[1].root_hash` byte-for-byte (`fb3461c9...d175252c`). Tree math is fine.
+- `diagnostic_mockprover_block16.rs` — runs `MockProver` with the EXACT witness the live prover constructs (real preimage, real siblings, real chain). All constraints satisfied.
+- `diagnostic_chain_depth.rs` — proves the discrepancy: real chain links have `siblings.len()=4`, keygen reference has `siblings.len()=3`.
+
+**Fix**: change the keygen reference depth to 4 (and update the stale comment):
+
+```diff
+- // Tree depth must match real trees: WINDOW_SIZE=4 → 6 leaves → pad to 8 → depth=3.
+- let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth(3, 2, 3);
++ // Tree depth must match real trees: WINDOW_SIZE=8 → 10 leaves → pad to 16 → depth=4.
++ let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth(3, 2, 4);
+```
+
+**Verification (live)**: with the patch, after deleting cached `params/layer_*.bin` + `params/layer_config_params.json` and `state/*.json`, the prover regenerated keys (`base_circuit_params: k=17, num_advice_per_phase=[18], lookup_bits=Some(16)`) and successfully proved + verified Circuit 2 for blocks 16 and 24:
+
+```
+block 16: Circuit 1a VERIFIED (11.3ms), Circuit 2 VERIFIED (9.1ms)  → BOTH VERIFIED OK
+block 24: Circuit 1a VERIFIED (17.5ms), Circuit 2 VERIFIED (11.0ms) → BOTH VERIFIED OK
+```
+
+Three diagnostic tests are checked into the prover repo so this regression is catchable in CI without needing a live node only for the depth check (`diagnostic_chain_depth` is the smallest reproducer).
+
+**Long-term remediation suggestion (for the partner)**: derive the keygen depth from `HISTORY_WINDOW_SIZE` rather than hardcoding it, so the reference circuit shape automatically tracks the runtime constant.
+
 ## Build & Test Commands
 
 ```bash

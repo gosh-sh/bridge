@@ -311,19 +311,20 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - Phase 5.3: 10-block shellnet acceptance (Anvil + live AN node) — blocked on Q1. Re-introduces real-proof multi-block coverage that retired with the legacy E2E suite in Phase 4.2.
 - Phase 1.C / Phase 3.4: BK-set update circuit (partner stub `bk-set-change-verifier-halo2-circuit`); on landing, `verifyBlock` grows an optional fourth proof argument.
 - Phase 6: real `acki-nacki-interface` implementation (currently mock only).
-- Phase 7: rewrite `docs/integration_plan.md`, `docs/manual_verification_runbook.md`, `docs/bridge_verification.md`, `docs/verifying_an_proof.md`, `docs/verifying_eth_proof_on_an.md` for the v2 4-circuit architecture (currently they describe the retired single-circuit pipeline).
 - AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based).
 - Production LAYER_TREE_DEPTH=8 testing.
 
-See `docs/an_partner_integration_plan.md` for the **active** integration plan against the partner's four-circuit architecture (`acki-nacki-to-eth-bridge-halo2-circuits` + `acki-nacki-to-eth-bridge-halo2-prover` sibling repos). This is the source of truth for Phase 1.A through Phase 7.
-See `docs/aave_integration.md` for the AAVE yield integration design and correctness checks.
-See `docs/layer_hashes_circuit_audit.md` for the partner-circuit audit report (Phase 0 deliverable; still applies to the v2 architecture's Circuit 2).
-See `docs/integration_analysis.md` for the original architecture analysis (predates v2; partial coverage).
+### Canonical v2 doc set (Phase 7 done, 2026-05-10)
 
-The following docs describe the **legacy single-circuit architecture** retired by Phase 4.2 on 2026-05-10 and are kept only as historical reference; a v2 rewrite is scheduled for Phase 7:
-
-- `docs/integration_plan.md` (M0–M9; M7–M9 already marked superseded).
-- `docs/manual_verification_runbook.md` (hands-on review plan for the legacy `LayerHashBridge`).
-- `docs/bridge_verification.md` (property-driven verification reference: DEP-/LH-/BK-/OR-/AC-/FORK-# invariants — DEP-/AC-/OR- still apply; LH-/BK-/FORK- need v2 mapping).
-- `docs/verifying_an_proof.md` (5-stage layer-hash proof verification against the legacy 13-input flow).
-- `docs/verifying_eth_proof_on_an.md` (mirror flow for ETH→AN deposit proofs).
+- `docs/four_circuit_architecture.md` — **canonical v2 entry point**: envelope-hash leaf table, per-circuit public-input layouts, cross-circuit binding (CC-#), state machine, gas table.
+- `docs/audit_trail_v2.md` — **v1 → v2 trust delta**: 7 reduced assumptions, 12 retained, the cross-circuit soundness argument, the pre-tag sign-off checklist.
+- `docs/an_partner_integration_plan.md` — **active integration plan** against the partner's four-circuit architecture (`acki-nacki-to-eth-bridge-halo2-circuits` + `acki-nacki-to-eth-bridge-halo2-prover` sibling repos).
+- `docs/integration_analysis.md` — architecture analysis with §3 / §5 rewritten for v2 (deposit/AN-platform sections still original).
+- `docs/bridge_verification.md` — invariant labels (DEP-#, **LH-#** v2, **BK-#** Phase 1.C placeholder, OR-#, AC-#, FORK-#, **CC-#** new in v2, ZK-#) + reproducible run recipe.
+- `docs/manual_verification_runbook.md` — hands-on review (Phase D bound proof, Phase F `verifyBlock` walk, Phase G Phase-1.C placeholder, Phase J ≥ 30 attack scenarios incl. CC-1..CC-7).
+- `docs/verifying_an_proof.md` — per-circuit (1A/1B/2) verification flow, V1–V5 stages.
+- `docs/verifying_eth_proof_on_an.md` — deposit-side flow (unchanged in v2; cross-refs updated).
+- `docs/aave_integration.md` — AAVE yield integration (orthogonal to four-circuit surface).
+- `docs/layer_hashes_circuit_audit.md` — Phase 0 partner-circuit audit (still applies — chips reused by Circuit 1A/1B/2).
+- `docs/legacy/verifying_an_proof_v1.md` — the retired single-circuit walkthrough, kept for reproducibility of legacy proofs.
+- `docs/integration_plan.md` — historical M0–M9; M7–M9 banner-marked as superseded by `an_partner_integration_plan.md`.

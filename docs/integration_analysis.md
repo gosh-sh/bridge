@@ -1,14 +1,21 @@
 # Acki Nacki Bridge — Integration Analysis
 
+> **v2 update (2026-05-10).** §3 and §5 have been rewritten for the four-circuit architecture
+> (Phase 4.2 demolition complete; Phase 5.1 relayer skeleton complete). The single-circuit
+> `LayerHashesUpdateCircuit` narrative is preserved only where the partner's code is still
+> physically deployed (its `gosh-bls-verification`, `gosh-dense-balanced-tree`, and
+> `gosh-sha256-chip` chips are all still in use, by Circuit 1A/1B/2). The active architecture
+> overview lives in `docs/four_circuit_architecture.md`.
+
 This document provides a comprehensive analysis of both sides of the Acki Nacki cross-chain bridge: our Ethereum-side implementation and the partner's Acki Nacki-side ZK circuits.
 
 ## Table of Contents
 
 1. [Our Side: Ethereum Bridge](#1-our-side-ethereum-bridge)
 2. [Acki Nacki Platform](#2-acki-nacki-platform)
-3. [Partner's Work: Layer Hashes Circuit](#3-partners-work-layer-hashes-circuit)
+3. [Partner's Work: Four-Circuit Architecture (v2)](#3-partners-work-four-circuit-architecture-v2)
 4. [Partner's Work: ZK SNARK Halo2 Utils](#4-partners-work-zk-snark-halo2-utils)
-5. [Gap Analysis](#5-gap-analysis)
+5. [Gap Analysis (v2)](#5-gap-analysis-v2)
 
 ---
 
@@ -118,15 +125,21 @@ The keccak coprocessor pattern (documented in `docs/keccak_coprocessor_flowchart
 
 **gnark-wrapper**: Currently hardcoded for the deposit circuit (7 public inputs, specific witness commitment counts). Adapting it for a different circuit requires updating the JSON format, circuit struct sizes, and proof parser.
 
-### 1.5 Workspace Layout
+### 1.5 Workspace Layout (v2, post-Phase 4.2)
 
-Three separate Cargo workspaces due to dependency incompatibilities:
+Two main Cargo workspaces plus three excluded crates due to dependency incompatibilities:
 
-| Workspace | Crates | Halo2 Stack |
-|-----------|--------|-------------|
-| Root `Cargo.toml` | `eth-frontend`, `acki-nacki-interface` | None |
-| `deposit-prover/` | `deposit-prover` | axiom-eth + halo2-pse v2023_04_20 |
-| `poseidon-proof/` | `poseidon-proof` | halo2-axiom 0.5.x |
+| Workspace / Crate | Members | Halo2 Stack |
+|---|---|---|
+| Root `Cargo.toml` | `crates/eth-frontend`, `crates/acki-nacki-interface` | None |
+| `deposit-prover/` (excluded) | `deposit-prover` | axiom-eth + halo2-pse v2023_04_20 |
+| `poseidon-proof/` (excluded) | `poseidon-proof` | halo2-axiom 0.5.x |
+| `crates/bridge-prover-orchestrator/` (excluded) | orchestrator + per-circuit gnark wrappers | partner's `bridge-prover-lib` (halo2-axiom 0.5.x via gosh fork) |
+| `crates/bridge-relayer-daemon/` (excluded) | relayer daemon (Phase 5.1, mock sources) | none — pure orchestration + ethers-rs |
+
+Phase 4.2 removed the legacy `layer-hashes-prover/` and `bk-set-rotation-prover/` crates;
+`crates/bridge-prover-orchestrator/` is the v2 replacement and now hosts the per-circuit
+gnark wrappers under `gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`.
 
 ---
 
@@ -200,109 +213,106 @@ No built-in cross-chain API — bridge logic lives at the contract level plus of
 
 ---
 
-## 3. Partner's Work: Layer Hashes Circuit
+## 3. Partner's Work: Four-Circuit Architecture (v2)
 
-### 3.1 Repository: `layer-hashes-update-halo2-circuit`
+### 3.1 Repositories
 
-A Rust workspace implementing a Halo2 circuit (`LayerHashesUpdateCircuit`) that proves facts about a single finalized Acki Nacki block, enabling trustless layer hash updates on a bridge contract.
+| Repo | Purpose |
+|---|---|
+| `acki-nacki-to-eth-bridge-halo2-circuits` | All four Halo2 circuits (`attestation-bls-checker-circuit/{primary,fallback}_circuit.rs`, `historical-layer-hashes-movement-checker-circuit`, `bk-set-update-checker-circuit`) plus the canonical envelope-hash spec (`circuits/ENVELOPE_HASH_MERKLE_SPEC.md`). |
+| `acki-nacki-to-eth-bridge-halo2-prover` | `bridge-prover-lib` — keygen, BK-set fetcher, BOC parser; `bridge-test-data-gen` — synthetic generators used by our orchestrator's bound test data; `bridge-verifier-daemon` — partner's standalone Circuit-1A daemon (we don't use it; we have our own relayer). |
+| `gosh-halo2-crypto-lib` | Reused by all four circuits: `gosh-sha256-chip`, `gosh-bls-verification`, `gosh-dense-balanced-tree`. Audit findings BLS-1 and FORK-2 (G2 subgroup gap) carry over to v2. |
+| `halo2-lib-zkevm-sha256-and-bls12-381` | Gosh fork of axiom-crypto's halo2-lib; adds the BLS12-381 module to halo2-ecc. |
+| `gosh-zk-snark-halo2-utils` | Generic keygen/prove/verify helpers (KZG SRS, Blake2b transcript, SHPLONK). Used by all four circuits. |
 
-### 3.2 What the Circuit Proves
+### 3.2 What the Four Circuits Prove
 
-The circuit (`primary_circuit.rs`, function `build_primary_constraints`) enforces six constraint groups:
+See `docs/four_circuit_architecture.md` §1 for the canonical table. Quick summary:
 
-**A. Block Attestation (SHA-256 binding)**
-- Computes SHA-256 of `block_data` (up to 4096 bytes, padded to 65 × 64 compression blocks)
-- Constrains the hash output to equal the `envelope_hash` field within the attestation data
-- Uses `block_selector` (witness, 7-bit range-checked) to select the correct SHA state after the actual message length
+- **Circuit 1A (Primary attestation)** — BLS aggregate ≥ 2/3 of BK set signed an envelope whose `block_id` is committed; PI = `[blockId, bkSetCommitment, blockSeqNo, lastSeenBlockSeqNo]`.
+- **Circuit 1B (Fallback attestation)** — same shape as 1A but for fallback target_type and >1/2 threshold.
+- **Circuit 2 (Layer hashes movement)** — SHA-256-binds the layer-hash preimage to envelope leaf-0, runs a Poseidon Merkle chain from `prevMaxLevelLayerHash` to the new top-of-chain, range-checks `numLayers ∈ [1,10]`. PI = `[blockId, bkSetCommitment, numLayers, layerHashes[0..10], prevMaxLevelLayerHash]` (14 elements).
+- **Circuit 3 (BK-set update)** — planned for Phase 1.C; will prove the previous committee attests the next committee, advancing `storedBkSetCommitment` in-place. PI = `[oldBkSetCommitment, newBkSetCommitment]`.
 
-**B. Target Type Enforcement**
-- Four bytes at `TARGET_TYPE_REL_OFFSET` (offset 116 within `AttestationData`) constrained to zero
-- This enforces the attestation is for a **Primary** block (bincode u32 LE discriminant = 0)
+The *cross-circuit binding* lives at the public-input level: `block_id` (envelope leaf-1, offset
+48) and `bk_set_poseidon` (envelope leaf-2, offset 96) appear at fixed indices in each circuit's
+PI vector. The bridge passes a single `blockId` and a single `bkSetCommitment` argument into both
+verifier calls — any mismatch between the two proofs surfaces as a gnark `false`. Cost: zero
+additional gas vs. the legacy single-circuit design.
 
-**C. Layer Count Validation**
-- `num_layers` is a witness, range-checked to `[1, MAX_LAYERS]` (i.e., 1..10)
-- Enforced via three 4-bit range checks: `num_layers`, `num_layers - 1`, `MAX_LAYERS - num_layers`
+### 3.3 Per-Circuit Parameters (v2)
 
-**D. Layer Hash Extraction from Block Data**
-- Extracts 10 × 32-byte root hashes from `block_data` at bincode-predictable offsets
-- Uses `base_offset_cell` (12-bit range) as the start of the `history_proofs` BTreeMap
-- BTreeMap entry stride: `BTREE_ENTRY_SIZE = 124` bytes per layer
-- First root hash offset: `FIRST_ROOT_HASH_OFFSET = 10` (8-byte BTree header + 1-byte key + 1-byte root_hash_offset)
-- For each layer i, byte j: rotates `block_data_cells` by constant stride, uses inner product with one-hot `offset_indicator` (length 4096) to extract the byte
-- Packs 32 bytes to Fr via inner product with powers of 256
-- Inactive layers (i >= num_layers) are masked to zero via `active_mask`
+| Parameter | 1A Primary | 1B Fallback | 2 Layer hashes | 3 BK update (planned) |
+|---|---|---|---|---|
+| K | 19 | 19 | 19 | TBD |
+| Public inputs | 4 | 4 | 14 | 2 |
+| BLS12-381 path | Aggregate ≥ 2/3 | Aggregate > 1/2 | (none) | (none) |
+| SHA-256 path | over attestation envelope | over fallback envelope | over layer-hash preimage (331 B) | (none) |
+| Poseidon path | over BK set | over BK set | over BK set + Merkle chain | over old/new BK sets |
+| Halo2 PK size | ~2 GB | ~2 GB | ~2 GB | TBD |
+| Halo2 prove time | 3-6 min | 3-6 min | 3-6 min | TBD |
+| gnark Groth16 wrap | 5-15 s | 5-15 s | 5-15 s | TBD |
+| Final proof size | 256 B | 256 B | 256 B | 256 B |
 
-**E. Prev-Chain Merkle Verification**
-- Verifies a Poseidon Merkle chain from `prev_max_level_layer_hash` to `layer_hash_frs[num_layers - 1]`
-- `num_prev_chain_steps` range-checked to `[1, MAX_CHAIN_LEN]`
-- Uses `verify_chain_of_dense_proofs` from `gosh-dense-balanced-tree`
-- Poseidon parameters: T=3, RATE=2, R_F=8, R_P=57
+`MAX_LAYERS = 10`, `LAYER_TREE_DEPTH = 8` (production) / 2 (test), `MAX_SIGNERS = 300`,
+`MAX_BLOCK_DATA_BYTES = 4096`, `LIMB_BITS = 104`, `NUM_LIMBS = 5` are still the
+production-relevant constants — unchanged from v1.
 
-**F. BLS Signature Verification**
-- Hash-to-curve: `ExpandMsgXmd` on full attestation message bytes
-- Aggregate BLS12-381 signature verification with Primary threshold
-- Threshold mode enforces >= 2n/3 signers from the BK set
-- Cross-field arithmetic: BLS12-381 operations emulated over BN254 Fr (LIMB_BITS=104, NUM_LIMBS=5)
+### 3.4 Test Fixtures (v2)
 
-**G. BK Set Commitment**
-- Poseidon hash over sorted (signer_index, x-coordinate CRT limbs) for each G1 pubkey
-- Only x-coordinate is committed (y is derivable from on-curve constraint in BLS gadget)
+The legacy four "real-data" fixtures (`L2_H16_prevH0_S1`, `L2_H32_prevH16_S1`,
+`L5_H12288_prevH1024_S11`, `L6_H45056_prevH0_S11`) were specific to the single-circuit
+13-public-input layout and were retired with the legacy `layer-hashes-prover` crate in
+Phase 4.2. They are not portable to v2 because:
 
-### 3.3 Public Inputs (13 Field Elements)
+- the new envelope hash tree (8 leaves, partner commit `672854b`) is not present in the
+  AN node version that produced those fixtures;
+- the public-input layout grew from 13 to a tuple of (4, 14) elements;
+- the cross-circuit binding via `block_id` (envelope leaf-1 at offset 48) didn't exist yet.
 
-| Index | Field | Description |
-|-------|-------|-------------|
-| 0 | `bk_set_commitment` | Poseidon commitment over sorted BK set |
-| 1 | `num_layers` | Number of active layers (1..10) |
-| 2..11 | `layer_hash_frs[0..10]` | Layer root hashes (inactive = 0) |
-| 12 | `prev_max_level_layer_hash` | Previous top-level hash (chain anchor) |
+v2 fixtures come in two flavours:
 
-### 3.4 Circuit Parameters
+- **Bound synthetic fixtures**: generated by `crates/bridge-prover-orchestrator` via
+  `cargo run --bin export-bound-block-proofs`. Same-process consistency between Circuit 1A and
+  Circuit 2; non-deterministic across runs (uses `rand::thread_rng()` inside the partner's
+  `bridge-test-data-gen::generator::generate_bridge_test_data`).
+- **Live-node fixtures**: pending Phase 5.2 — blocked on Q1 (AN-node branch
+  `latest_an_to_eth_bridge_test` availability) and Q2 (`transition_hashes` migration).
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| K | 19 | Circuit degree (2^19 rows) |
-| LOOKUP_BITS | 18 | Range check table size |
-| LIMB_BITS | 104 | Non-native field limb size |
-| NUM_LIMBS | 5 | Limbs per BLS12-381 field element |
-| MAX_SIGNERS | 300 | Maximum BK set size |
-| MAX_BLOCK_DATA_BYTES | 4096 | Maximum block data for SHA-256 |
-| MAX_LAYERS | 10 | Maximum history proof layers |
-| LAYER_TREE_DEPTH | 8 (prod) / 2 (test) | Merkle tree depth per layer |
-| MAX_CHAIN_LEN | ≥ 11 | Maximum prev-chain steps (from `gosh-dense-balanced-tree`) |
+### 3.5 Halo2 Stack Compatibility
 
-### 3.5 Dependencies
+Unchanged from v1: halo2-base 0.4.0 with `halo2-axiom` feature, KZG + SHPLONK on BN254,
+Blake2b transcript via `gosh-zk-snark-halo2-utils`. The trusted setup (`kzg_bn254_19.srs`)
+is shared across all four circuits.
+
+### 3.6 What Each Circuit Internally Enforces (constraint groups)
+
+The constraint anatomy is the same across 1A/1B/2 and reuses the audited gosh chips. Quick sketch:
+
+| Constraint group | Where it appears | Notes |
+|---|---|---|
+| SHA-256 binding (4096-byte preimage, 65 × 64 compression blocks) | 1A, 1B (over attestation envelope), 2 (over 331-byte layer-hash preimage padded to 4096) | `gosh-sha256-chip` |
+| Target-type enforcement (Primary vs Fallback bincode discriminant) | 1A (=Primary), 1B (=Fallback) | 4 bytes at `TARGET_TYPE_REL_OFFSET = 116` of `AttestationData` |
+| Layer-count range check `[1, MAX_LAYERS]` | 2 only | three 4-bit range checks: `numLayers`, `numLayers-1`, `MAX_LAYERS-numLayers` |
+| Layer-hash extraction from `block_data` at bincode-predictable offsets (`BTREE_ENTRY_SIZE = 124`) | 2 only | one-hot inner-product byte selector + powers-of-256 packing |
+| Prev-chain Poseidon Merkle verification | 2 only | `gosh-dense-balanced-tree::verify_chain_of_dense_proofs`; Poseidon T=3 RATE=2 R_F=8 R_P=57 |
+| BLS12-381 aggregate signature verification | 1A (≥ 2n/3 threshold), 1B (> n/2 threshold) | `gosh-bls-verification`; cross-field arithmetic with LIMB_BITS=104 NUM_LIMBS=5 |
+| BK set Poseidon commitment | 1A, 1B, 2 | Poseidon over sorted `(signer_index, x_limbs)` tuples; only x-coordinate is committed (y is derivable) |
+| Envelope-hash leaf binding (8-leaf SHA-256 tree, partner commit `672854b`) | 1A, 1B (leaf-1 = `block_id` at offset 48), 2 (leaf-0 = layer-hash preimage at offset 0; leaf-1 = `block_id`) | this is the cross-circuit binding hook — see `four_circuit_architecture.md` §2 |
+
+### 3.7 Dependencies
 
 | Crate | Source | Purpose |
-|-------|--------|---------|
+|---|---|---|
 | `halo2-base` 0.4.0 | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` | Circuit builder (Axiom fork) |
 | `halo2-ecc` 0.4.0 | Same repo | Elliptic curve operations |
 | `gosh-sha256-chip` | `gosh-sh/gosh-halo2-crypto-lib` | In-circuit SHA-256 |
 | `gosh-dense-balanced-tree` | Same repo | Poseidon Merkle chain verification |
-| `gosh-bls-verification` | Same repo | BLS12-381 signature verification |
+| `gosh-bls-verification` | Same repo | BLS12-381 signature verification (G2 subgroup gap = audit FORK-2 / BLS-1, carried over to v2) |
 | `pse-poseidon` | `axiom-crypto/pse-poseidon` | Native Poseidon (tests) |
 | `tvm_block`, `tvm_types` | `tvmlabs/tvm-sdk` (branch `feature/cache-poseidon-spec`) | Block data generation (test) |
 
-**Missing dependency**: `gosh-halo2-crypto-lib` must be cloned to `../gosh-halo2-crypto-lib` for the `[patch]` table to resolve. The repository is at `https://github.com/gosh-sh/gosh-halo2-crypto-lib` but requires explicit access grant.
-
-### 3.6 Test Fixtures
-
-Four JSON fixtures captured from a local Acki Nacki node with window size 4 (LAYER_TREE_DEPTH=2):
-
-| Fixture | Layers | Block Height | Prev Height | Chain Steps |
-|---------|--------|-------------|-------------|-------------|
-| `circuit_test_data_L2_H16_prevH0_S1` | 2 | 16 | 0 | 1 |
-| `circuit_test_data_L2_H32_prevH16_S1` | 2 | 32 | 16 | 1 |
-| `circuit_test_data_L5_H12288_prevH1024_S11` | 5 | 12288 | 1024 | 11 |
-| `circuit_test_data_L6_H45056_prevH0_S11` | 6 | 45056 | 0 | 11 |
-
-Fixture JSON fields:
-- **Public**: `num_layers`, `root_hashes_hex`, `prev_max_level_layer_hash_hex`
-- **Private witness**: `block_envelope_hex`, `attestation_hex`, `bk_set`, `layer_hash_byte_offsets`, `num_prev_chain_steps`, `prev_chain_proofs`
-
-### 3.7 Halo2 Stack Compatibility
-
-The partner uses **halo2-base 0.4.0** with `halo2-axiom` feature (Axiom's Halo2 fork), **KZG + SHPLONK on BN254**, and **Blake2b transcript** (via `gosh-zk-snark-halo2-utils`). This matches the BN254 field used by Ethereum's pairing precompiles, making Groth16 wrapping feasible.
+`gosh-halo2-crypto-lib` must be cloned to `../gosh-halo2-crypto-lib` for the `[patch]` table to resolve.
 
 ---
 
@@ -341,31 +351,38 @@ One keygen produces keys that work for all fixtures with the same circuit parame
 
 ---
 
-## 5. Gap Analysis
+## 5. Gap Analysis (v2)
 
-### What Exists
+### 5.1 What Exists Today (HEAD)
 
 | Component | Status |
-|-----------|--------|
-| Ethereum bridge contract (deposit/withdraw) | Complete |
-| Groth16 deposit verifier | Complete |
-| Deposit-prover Halo2 circuit | Complete |
-| Gnark Groth16 wrapper (for deposits) | Working (stub `Define`) |
-| Partner's layer-hashes Halo2 circuit | Complete + tested |
-| Partner's utils (keygen/prove/verify) | Complete + tested |
-| Test fixtures from real node | 4 fixtures available |
+|---|---|
+| Ethereum deposit / withdrawal contract (`AckiNackiBridge.sol`) | Complete |
+| AAVE V3 yield bolt-on | Complete (23 tests, see `aave_integration.md`) |
+| Block-hash oracle (Axiom V2) | Complete |
+| Deposit-prover Halo2 circuit + gnark wrapper | Complete (stub `Define`; tracked under `integration_plan.md` §6.5) |
+| Partner's four Halo2 circuits (1A, 1B, 2, 3) | All complete + MockProver tests pass |
+| Partner's `bridge-prover-lib` (keys, BK-set fetcher, BOC parser) | Live (Circuit 1A wired upstream; we extend on our side) |
+| Partner's `bridge-test-data-gen` | Live; produces synthetic bound block scenarios |
+| Our `crates/bridge-prover-orchestrator` (Rust + per-circuit gnark wrappers) | Done — Phase 4.1 (bound test data generator + `export-bound-block-proofs` binary) |
+| `AckiNackiBridge.verifyBlock` (Phase 4 AN→ETH state) | Done — additive Phase 4.1; Phase 4.2 demolished the legacy `LayerHashBridge.sol` |
+| Foundry tests for verifyBlock | 17 single-block (`AckiNackiBridgeVerifyBlockTest`) + 6 multi-block (`AckiNackiBridgeRelayerLoopTest`) — all green |
+| `crates/bridge-relayer-daemon` (relayer skeleton) | Done — Phase 5.1 (mock sources + mock bridge client); CLI runnable |
 
-### What's Missing for Integration
+### 5.2 What's Still Missing
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| `gosh-halo2-crypto-lib` source review | Done | SHA-256, BLS, dense tree chips audited; see audit doc |
-| `halo2-lib` Gosh fork review | Done | Fork audited; adds BLS12-381 module; core halo2-base unchanged; build succeeds |
-| Partner circuit build + test | Done | Builds with `state_to_bytes` pub fix; mock + real prover tests pass |
-| Gnark wrapper for layer-hashes circuit | Not started | Different public input count (13 vs 7), different VK |
-| Ethereum contract for layer hash updates | Not started | Store/update layer hashes, verify Groth16 proofs |
-| Layer hash verifier contract | Not started | Like `Groth16DepositVerifier` but for 13 inputs |
-| Relayer service | Not started | Watch AN node → prove → wrap → submit to ETH |
-| BK set rotation mechanism | Undefined | How/when does the bridge learn about new BK sets? |
-| `acki-nacki-interface` real implementation | Not started | Only traits + mock exist |
-| Production LAYER_TREE_DEPTH=8 testing | Not started | Only depth=2 (window=4) fixtures available |
+| Component | Phase | Blocked on |
+|---|---|---|
+| Live AN-node `BlockSource` (replaces mock) | 5.2 | Q1: confirm `latest_an_to_eth_bridge_test` branch exists in upstream; Q2: confirm `transition_hashes` migration in AN node — Plan B is to recompute locally inside the relayer |
+| 10-block shellnet end-to-end against Anvil | 5.3 | Phase 5.2 |
+| Circuit 3 (BK-set update) wiring + Solidity verifier + `bkSetUpdateProof` argument to `verifyBlock` | 1.C | Partner signal that `bk-set-update-checker-circuit` is feature-complete |
+| Production `LAYER_TREE_DEPTH=8` proof generation against live data | 5.2 | Live node; the synthetic bound generator already supports it |
+| `acki-nacki-interface` real (non-mock) implementation | 5.2 | Same as above |
+
+### 5.3 Trust-assumption Delta vs v1
+
+See `docs/four_circuit_architecture.md` §8 for the canonical list. Five legacy assumptions
+are now *removed* (cross-circuit binding via `block_id`, monotonic seqno, chain anchor,
+finalization-type routing, no silent garbage in layer-hash tail). No new assumptions
+introduced. Three carry over unchanged: Halo2/SHPLONK soundness, `gosh-halo2-crypto-lib`
+correctness (incl. open BLS-1/FORK-2 medium audit findings), AN BFT economic security.

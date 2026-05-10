@@ -318,21 +318,25 @@ Recommend (2) for this milestone: get the trust-anchor right first; the burn-pro
 
 ### Phase 7 — Documentation, Audit Prep, Release (Week 4–5)
 
+**Status**: 🟢 7.1–7.8 done (2026-05-10). 7.9 pending — release manager creates the
+`v2.0.0-rc1` tag once Phase 5.2/5.3/1.C blockers clear or testnet launch is approved.
+
 **Tasks**:
-- 7.1 Update `AGENTS.md`: drop `LayerHashBridge.sol` references, add the new contract + 4 native verifiers + relayer.
-- 7.2 Update `docs/integration_analysis.md` with the new architecture (replace single-circuit narrative with 4-circuit + envelope-hash-tree narrative).
-- 7.3 Update `docs/integration_plan.md`: mark legacy M7-M9 as superseded by this plan.
-- 7.4 Update `docs/manual_verification_runbook.md`: rewrite Phase G (Layer Hash Bridge) and Phase H (BK Rotation) to match the new contract; add new attack scenarios specific to the 4-circuit cross-checks (e.g., mixing proofs from different blocks).
-- 7.5 Update `docs/verifying_an_proof.md` to V1–V5 against the **per-circuit** native Halo2 verifier rather than the gnark wrapper. Keep the gnark version as `docs/legacy/verifying_an_proof_gnark.md`.
-- 7.6 Update `docs/bridge_verification.md`: rewrite §5 (LH-#) and §6 (BK-#) for new architecture; add §6.5 cross-circuit invariants (CC-#).
-- 7.7 New doc: `docs/four_circuit_architecture.md` — concise overview, diagrams, leaf table, public-input layouts. Cross-link from `AGENTS.md` and `integration_analysis.md`.
-- 7.8 Audit prep: list of trust assumptions reduced (chain anchor, BK commitment, last_seen_block_seqno) and assumptions retained (AN consensus, Halo2/SHPLONK soundness, gosh-halo2-crypto-lib correctness — same audit findings BLS-1, FORK-2 still apply).
-- 7.9 Tagged release: `v2.0.0-rc1` once Phase 7 is complete and all CI pipelines (build, test, lint, format) pass.
+- 7.1 ✅ Update `AGENTS.md`: drop `LayerHashBridge.sol` references, add the new contract + verifiers + relayer (closed by Phase 4.2; v2 doc set table added in Phase 7.1).
+- 7.2 ✅ `docs/integration_analysis.md`: §3 + §5 rewritten for the four-circuit architecture; §1, §2, §4 retained (still valid for deposit/AN platform).
+- 7.3 ✅ `docs/integration_plan.md`: top-of-file banner marks the doc as legacy and M7–M9 as superseded by this plan.
+- 7.4 ✅ `docs/manual_verification_runbook.md`: Phase D (single-block bound proof), Phase F (`verifyBlock` walk), Phase G (Phase 1.C placeholder), Phase J Attack Group 4 (8 scenarios incl. CC-1..CC-7, J.17/J.18), Phase J Attack Group 5 (Phase 1.C placeholder), Phase K (sign-off checklist) all updated. Repo layout, A.3 spot-checks, suite list, gas table updated.
+- 7.5 ✅ `docs/verifying_an_proof.md` rewritten for the per-circuit (1A/1B/2) gnark-wrapped flow, V1–V5 stages updated. Legacy single-circuit walkthrough preserved at `docs/legacy/verifying_an_proof_v1.md`.
+- 7.5b ✅ `docs/verifying_eth_proof_on_an.md`: v2 banner + cross-refs updated; deposit flow itself is unchanged in v2.
+- 7.6 ✅ `docs/bridge_verification.md`: §1 / §2 retargeted to `verifyBlock`; §5 (LH-1..LH-9) rewritten for the v2 surface; §6 (BK-1..BK-5) reframed as Phase 1.C target invariants; §6.5 cross-circuit invariants (CC-1..CC-7) **added**; §8 ZK-1..ZK-5 (added ZK-5 length check); §9 access-control matrix updated; §10 fork resistance updated; §11 run recipe rewritten; §13 cross-references updated.
+- 7.7 ✅ NEW `docs/four_circuit_architecture.md` — canonical v2 entry point: 8-leaf envelope hash tree, per-circuit public-input layouts (1A/1B/2/3), cross-circuit binding mechanism (CC-#), state machine, end-to-end pipeline, test-surface mapping, trust-assumption delta, glossary.
+- 7.8 ✅ NEW `docs/audit_trail_v2.md` — 7 reduced assumptions + 12 retained, code-surface delta, cross-circuit soundness argument, pre-tag sign-off checklist.
+- 7.9 🟡 Release tag `v2.0.0-rc1` — release-manager step. Gates listed in `docs/audit_trail_v2.md` §6 (Phase 5.2/5.3/1.C, BLS-1/FORK-2 mitigation, CI green).
 
 **Acceptance**:
-- ✅ All docs consistent with code.
-- ✅ Audit-trail document listing what changed.
-- ✅ CI pipeline green on `v2.0.0-rc1`.
+- ✅ All docs consistent with code (135 Foundry tests; `cargo check` clean).
+- ✅ Audit-trail document listing what changed: `docs/audit_trail_v2.md`.
+- 🟡 CI pipeline green on `v2.0.0-rc1` — pending tag.
 
 ---
 
@@ -534,7 +538,7 @@ This assumes Phase 0 returns "all clear" within 2 days. Each "Medium" risk that 
 - **1.B — Circuit 2 (Layer Hashes Movement) wiring** — ✅ **Complete (2026-05-10)**. `LayerHashesKeyManager` + `generate_layer_hashes_proof` + `verify_layer_hashes_proof` + synthetic test-data builder + round-trip test all green. K=17, proof size 6 112 B, PK 339 MB.
 - **1.C — Circuit 3 (BK-set update) prover/verifier wiring** — wait for partner signal.
 
-Phases 3.1, 3.2, 3.3 are now live (Circuits 1B + 1A + 2); only Phase 3.4 (BK-set update) remains and it's gated on Phase 1.C. **Phases 4.1 + 4.2 + 5.1 all landed 2026-05-10**: additive `verifyBlock` (cross-circuit consistency + chain-anchor invariants), legacy `LayerHashBridge` + 8 sibling contracts + 49 tests + `layer-hashes-prover/` + `bk-set-rotation-prover/` removed, relayer skeleton (`crates/bridge-relayer-daemon/` with `Relayer::tick()`/`run_loop()` + `BlockSource`/`BridgeClient` traits + production `EthBridgeClient` over abigen + in-memory mocks + atomic `state.json` + CLI). Final state at end-of-day: **135/135 Foundry tests across 15 suites green** + **13/13 Rust relayer unit tests green** + zero references to the retired architecture in code. The natural next moves are: (a) **Phase 5.2** (`LiveBlockSource` over partner's `gql_client` + `boc_parser` + our `bridge-prover-orchestrator` for halo2+gnark wrapping inside the relayer); blocked on Q1 + Q2. (b) **Phase 5.3** (10-block shellnet end-to-end against Anvil — the §5 acceptance criterion; reintroduces real-proof multi-block coverage that retired with the legacy E2E suite in Phase 4.2). (c) **Phase 1.C** (Circuit 3 wiring + Phase 3.4 Solidity verifier + extending `verifyBlock` with an optional `bkSetUpdateProof` argument), once Alina signals. (d) **Phase 7** (rewrite legacy docs: `integration_plan.md`, `manual_verification_runbook.md`, `bridge_verification.md`, `verifying_an_proof.md`, `verifying_eth_proof_on_an.md` for the v2 4-circuit architecture).
+Phases 3.1, 3.2, 3.3 are now live (Circuits 1B + 1A + 2); only Phase 3.4 (BK-set update) remains and it's gated on Phase 1.C. **Phases 4.1 + 4.2 + 5.1 + 7.1–7.8 all landed 2026-05-10**: additive `verifyBlock` (cross-circuit consistency + chain-anchor invariants), legacy `LayerHashBridge` + 8 sibling contracts + 49 tests + `layer-hashes-prover/` + `bk-set-rotation-prover/` removed, relayer skeleton (`crates/bridge-relayer-daemon/` with `Relayer::tick()`/`run_loop()` + `BlockSource`/`BridgeClient` traits + production `EthBridgeClient` over abigen + in-memory mocks + atomic `state.json` + CLI), v2 doc set (canonical `four_circuit_architecture.md` + `audit_trail_v2.md` + rewrites of `integration_analysis.md` §3/§5, `bridge_verification.md` §5/§6/§6.5/§8/§9/§10/§11/§13, `manual_verification_runbook.md` Phase D/F/G/J Group4-5/K, `verifying_an_proof.md` per-circuit V1–V5, plus banner updates on `verifying_eth_proof_on_an.md` and `integration_plan.md`; legacy v1 walkthrough preserved at `docs/legacy/verifying_an_proof_v1.md`). Final state at end-of-day: **135/135 Foundry tests across 15 suites green** + **13/13 Rust relayer unit tests green** + zero references to the retired architecture in code. The natural next moves are: (a) **Phase 5.2** (`LiveBlockSource` over partner's `gql_client` + `boc_parser` + our `bridge-prover-orchestrator` for halo2+gnark wrapping inside the relayer); blocked on Q1 + Q2. (b) **Phase 5.3** (10-block shellnet end-to-end against Anvil — the §5 acceptance criterion; reintroduces real-proof multi-block coverage that retired with the legacy E2E suite in Phase 4.2). (c) **Phase 1.C** (Circuit 3 wiring + Phase 3.4 Solidity verifier + extending `verifyBlock` with an optional `bkSetUpdateProof` argument), once Alina signals. (d) **Phase 7.9** — release-manager step: tag `v2.0.0-rc1` once 5.2/5.3/1.C blockers clear or testnet launch is approved.
 
 ---
 

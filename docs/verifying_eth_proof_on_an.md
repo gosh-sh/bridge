@@ -1,5 +1,11 @@
 # Verifying an Ethereum Proof on the Acki Nacki Side
 
+> **v2 status (2026-05-10).** The ETH→AN **deposit** flow described here is unchanged in v2:
+> the Halo2 deposit-prover circuit, the gnark wrapper, the on-chain `Groth16DepositVerifier`,
+> and the AN-side TVM-verifier roadmap all carry over from v1. The AN→ETH path described in
+> the mirror doc (`docs/verifying_an_proof.md`) was rewritten for the four-circuit
+> architecture; the deposit path was not affected. Cross-references updated in this revision.
+
 This document is the operational guide for **verifying that an Ethereum-side proof of a `Deposit` event is correct** before the Acki Nacki side credits the corresponding tokens to the user.
 
 It is the mirror image of `docs/verifying_an_proof.md` (which covers AN → ETH proofs). The deposit flow is the **other** direction:
@@ -30,7 +36,7 @@ The doc serves three audiences:
 
 ## 0. State of Implementation (Important)
 
-The deposit-side verifier is **not yet deployed on Acki Nacki** as of this writing. The on-chain TVM Groth16 verifier is part of remaining work (`integration_plan.md` M7–M9). Until then, deposit verification on the AN side runs **off-chain** through the producer pipeline plus a BK consensus check.
+The deposit-side verifier is **not yet deployed on Acki Nacki** as of this writing. The on-chain TVM Groth16 verifier is tracked in the legacy `integration_plan.md` M7–M9 and is independent of the AN→ETH four-circuit work (see `docs/an_partner_integration_plan.md` for that side). Until the TVM verifier ships, deposit verification on the AN side runs **off-chain** through the producer pipeline plus a BK consensus check.
 
 This doc therefore covers:
 
@@ -507,7 +513,7 @@ func main() {
 }
 ```
 
-A reference implementation for the layer-hash side is in `layer-hashes-prover/gnark-wrapper/main.go`'s `runProve`; the deposit equivalent lives in `deposit-prover/gnark-wrapper/main.go`. Adapt it to a verify-only command if needed.
+A reference implementation for the AN→ETH side lives in `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/main.go` (one wrapper per circuit, post-Phase 4.2 layout); the deposit equivalent is `deposit-prover/gnark-wrapper/main.go`. Adapt either to a verify-only command if needed.
 
 ✅ Expected: prints `Groth16 OK`.
 
@@ -713,7 +719,7 @@ If an attacker compromises Ethereum L1 (51% reorg) or breaks BN254 / Poseidon / 
 | Halo2 stack | gosh-fork halo2-base | axiom-eth halo2 fork |
 | Wrapped proof bytes | 256 (no extra) | 288 (256 + 32 promise_commit) |
 | On-chain verifier (today) | EVM `LayerHashGroth16Verifier` | EVM `Groth16Verifier` (deposit) — but the **AN-side equivalent isn't deployed yet** |
-| Chain anchor / nullifier | Layer-hash chain anchor in `LayerHashBridge` | `processedDeposits[depositId]` (Ethereum side); AN-side equivalent **planned (V6)** |
+| Chain anchor / nullifier | `storedPrevMaxLevelLayerHash` in `AckiNackiBridge.verifyBlock` | `processedDeposits[depositId]` (Ethereum side); AN-side equivalent **planned (V6)** |
 | Canonical-chain oracle | `AxiomBlockHeaderOracle` on Ethereum | RPC quorum on AN BK nodes (no on-chain Ethereum oracle on AN today) |
 
 The two flows are conceptually symmetric, but the **implementation maturity differs**: AN→ETH is fully on-chain end-to-end; ETH→AN's on-chain AN-side verification is M9-pending.
@@ -749,10 +755,12 @@ cast block  <blockNumber> --rpc-url <ETH_RPC> --json
 
 ## 18. Cross-References
 
-- `docs/verifying_an_proof.md` — the mirror image (AN → ETH proof verification).
+- `docs/verifying_an_proof.md` — the mirror image (AN → ETH proof verification, v2 four-circuit flow).
+- `docs/four_circuit_architecture.md` — canonical v2 architecture overview.
+- `docs/an_partner_integration_plan.md` — phase-by-phase v2 roadmap (Phases 4.1/4.2/5.1 done, 5.2/5.3/1.C pending).
 - `docs/integration_analysis.md` §1.3 — what the deposit proof asserts at the architecture level.
 - `docs/keccak_coprocessor_flowchart.mmd` — the keccak coprocessor pattern that produces `promise_commit`.
-- `docs/integration_plan.md` M7–M9 — pending work for the AN-side on-chain verifier.
+- `docs/integration_plan.md` M7–M9 — legacy plan; M7–M9 are superseded by `docs/an_partner_integration_plan.md` for the AN→ETH path. The deposit-side TVM verifier roadmap is still tracked there until a successor doc is written.
 - `docs/bridge_verification.md` §4 — Ethereum-side properties (DEP-1 through DEP-6) that this AN-side flow mirrors.
 - `deposit-prover/README.md` — local generation pipeline.
 - `deposit-prover/examples/fetch_deposit_data.rs` — RPC fetcher used in V2.

@@ -1,4 +1,11 @@
-# Manual Verification Runbook
+# Manual Verification Runbook (v2)
+
+> **v2 update (2026-05-10).** Phase D, F, G, and Attack Groups 4 / 5 of Phase J have been
+> rewritten for the four-circuit architecture. The legacy `LayerHashBridge.sol` walkthrough
+> (Phase F v1) and the dual ZK + timelock BK-rotation flows (Phase G v1) were retired in
+> Phase 4.2; their successors are `verifyBlock` (Phase F v2) and Phase 1.C placeholder
+> (Phase G v2). 8 new CC-# attack scenarios were added; 5 legacy LH-/BK-specific scenarios
+> were retired.
 
 A hands-on, copy-pasteable plan for a single human reviewer to verify the bridge **works correctly and is attack-resistant** from the outside. No prior knowledge of the codebase is assumed.
 
@@ -14,13 +21,13 @@ This is the procedural twin of `docs/bridge_verification.md` (which states *what
 | 1 | A — Static Inspection | 15 min | Read the contracts |
 | 2 | B — Build | 3 min | Compile clean |
 | 3 | C — Automated Tests | 1 min | 135/135 green |
-| 4 | D — Real-Proof E2E | 1 min | Real Groth16 verifies on-chain |
+| 4 | D — Single-Block Bound Real-Proof | 1 min | Real Groth16 tuple verifies on-chain via `verifyBlock` |
 | 5 | E — Anvil ETH→AN | 30 min | Deposit/withdraw + 4 deliberate failures |
-| 6 | F — Layer Hash Bridge | 15 min | Walk a real proof + chain anchor |
-| 7 | G — BK Rotation | 15 min | Both ZK and timelock paths |
+| 6 | F — `verifyBlock` Walk-Through | 15 min | Walk the cross-circuit proof tuple + anchors |
+| 7 | G — BK Rotation (Phase 1.C, pending) | 5 min | Confirm `storedBkSetCommitment` is immutable today |
 | 8 | H — AAVE Yield | 20 min | Solvency + owner-can't-steal |
 | 9 | I — Oracle | 10 min | Recent + (optional) fork |
-| **10** | **J — Attack Scenarios** | **30 min** | **Try 32 attacks; all blocked** |
+| **10** | **J — Attack Scenarios** | **30 min** | **Try ≥ 30 attacks; all blocked** |
 | 11 | K — Final Sign-Off Checklist | 5 min | Tickbox gate |
 | 12 | Troubleshooting | as needed | Common symptoms |
 | 13 | After This Runbook | — | Where to go next |
@@ -76,15 +83,19 @@ ls -F
 You should see (relevant parts):
 
 ```
-contracts/ethereum/        ← Solidity (Foundry)
-crates/                    ← Rust workspace
-deposit-prover/            ← Halo2 circuit + gnark wrapper for ETH→AN
-layer-hashes-prover/       ← Halo2 proof export + gnark wrapper for AN→ETH
-bk-set-rotation-prover/    ← BK rotation circuit spec + gnark wrapper
-docs/                      ← Architecture + audits + runbooks (this file)
-Makefile                   ← Entry point
-AGENTS.md                  ← One-page project context
+contracts/ethereum/                 ← Solidity (Foundry)
+crates/                             ← Rust workspace
+  bridge-prover-orchestrator/       ← Halo2 prover orchestrator + per-circuit gnark wrappers (1A/1B/2)
+  bridge-relayer-daemon/            ← Relayer daemon (Phase 5.1, mock sources)
+  eth-frontend/, acki-nacki-interface/ ← thin clients
+deposit-prover/                     ← Halo2 circuit + gnark wrapper for ETH→AN deposit
+docs/                               ← Architecture + audits + runbooks (this file)
+Makefile                            ← Entry point
+AGENTS.md                           ← One-page project context
 ```
+
+The legacy `layer-hashes-prover/` and `bk-set-rotation-prover/` directories were retired in
+Phase 4.2 (2026-05-10). Their successors live under `crates/bridge-prover-orchestrator/`.
 
 ### A.2 Read the one-page summary
 
@@ -92,7 +103,7 @@ AGENTS.md                  ← One-page project context
 sed -n '1,60p' AGENTS.md
 ```
 
-You should learn: it's an Ethereum↔Acki Nacki bridge using ZK proofs. Two on-chain trust anchors: `AckiNackiBridge` (custodies user ETH) and `LayerHashBridge` (anchors AN state).
+You should learn: it's an Ethereum↔Acki Nacki bridge using ZK proofs. The single on-chain trust anchor is **`AckiNackiBridge.sol`**: custodies user ETH (with optional AAVE yield) AND anchors AN state via the `verifyBlock` surface (Phase 4.2 folded the legacy `LayerHashBridge.sol` into this one contract).
 
 ### A.3 Spot-check the critical contracts
 
@@ -108,13 +119,16 @@ Confirm by inspection:
 - [ ] `recipient.transfer(amount)` (2300 gas stipend) is the last action.
 - [ ] `MAX_DEPOSIT_AMOUNT = 100 ether`.
 
-#### `contracts/ethereum/src/LayerHashBridge.sol`
+#### `contracts/ethereum/src/AckiNackiBridge.sol::verifyBlock` (the AN→ETH path)
 
-- [ ] `updateLayerHashes` reverts if `numLayers == 0 || numLayers > MAX_LAYERS` (i.e. 1..10).
-- [ ] Chain anchor: `if (currentNumLayers > 0) require(prevMaxLevelLayerHash == currentLayerHashes[currentNumLayers-1])`.
-- [ ] `bkSetCommitment` passed to the verifier is read from storage (`currentBkSetCommitment`), not from caller.
-- [ ] `rotateBkSet` reverts if `bkRotationVerifier == address(0)` (rotation circuit not yet deployed → only timelock path is available).
-- [ ] `executeBkSetCommitment` is **permissionless** once timelock has passed (anti-grief).
+- [ ] `verifyBlock` reverts with `VerifyBlockDisabled` if any of `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` is `address(0)` (LH-9).
+- [ ] `verifyBlock` reverts with `InvalidNumLayers(numLayers)` if `numLayers == 0 || numLayers > MAX_LAYER_HASHES` (i.e. 1..10) (LH-4).
+- [ ] `verifyBlock` reverts with `LayerHashTailNonZero(i)` for any `layerHashes[i] != 0` where `i ≥ numLayers` (LH-5 / CC-7).
+- [ ] Chain anchor: `prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash ⇒ revert PrevAnchorMismatch` (LH-3 / CC-6).
+- [ ] BK-set check: `bkSetCommitment != storedBkSetCommitment ⇒ revert BkSetCommitmentMismatch` (LH-2 / CC-3).
+- [ ] Strict monotonicity: `blockSeqNo <= storedLastSeenBlockSeqNo ⇒ revert BlockSeqNoNotMonotonic` (LH-6 / CC-5).
+- [ ] All three verifier addresses are declared `immutable` — there is no setter post-deployment (AC-5).
+- [ ] After both gnark verifications return `true`, the storage writes precede the `BlockVerified` event emission (CEI: AC-6).
 
 #### `contracts/ethereum/src/AxiomBlockHeaderOracle.sol`
 
@@ -168,65 +182,67 @@ forge test 2>&1 | tail -20
 ✅ Expected (final two lines):
 
 ```
-Suite result: ok. 27 passed; 0 failed; 0 skipped; finished in ...
-Ran 14 test suites in ...: 135 tests passed, 0 failed, 0 skipped (135 total tests)
+Ran 15 test suites in ...: 135 tests passed, 0 failed, 0 skipped (135 total tests)
 ```
 
-Per-suite expectation:
+Per-suite expectation (post-Phase 4.2; canonical breakdown maintained in `AGENTS.md`):
 
 | Suite | Tests |
 |---|---|
-| AckiNackiBridgeAaveTest | 23 |
-| AckiNackiBridgeV2Test | 14 |
-| AxiomBlockHeaderOracleTest | 16 |
-| Blake2bHalo2VerifierTest + Keccak | 8 |
-| Halo2PoseidonVerifierTest | 7 |
-| FuzzAckiNackiBridgeTest | 5 |
-| FuzzGroth16DepositVerifierTest | 3 |
-| FuzzGroth16VerifierTest | 4 |
-| FuzzHalo2VerifierTest | 6 |
-| LayerHashBridgeTest | 27 |
-| LayerHashVerifierTest | 4 |
-| BkSetRotationVerifierTest | 4 |
-| LayerHashE2ETest | 14 |
+| `AckiNackiBridgeAaveTest` | 23 |
+| `AckiNackiBridgeV2Test` | 14 |
+| `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH) | 17 |
+| `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop) | 6 |
+| `AxiomBlockHeaderOracleTest` | 16 |
+| `Blake2bHalo2VerifierTest` / `KeccakHalo2VerifierTest` | 8 |
+| `Halo2PoseidonVerifierTest` | 7 |
+| `FuzzAckiNackiBridgeTest` | 5 |
+| `FuzzGroth16DepositVerifierTest` | 3 |
+| `FuzzGroth16VerifierTest` | 4 |
+| `FuzzHalo2VerifierTest` | 6 |
+| `PrimaryVerifierTest` (Circuit 1A) | 8 |
+| `FallbackVerifierTest` (Circuit 1B) | 8 |
+| `LayerHashesMovementVerifierTest` (Circuit 2) | 10 |
 | **Total** | **135** |
 
 ```bash
-forge test --gas-report 2>&1 | grep -E "AckiNackiBridge|LayerHashBridge|AAVE" | head -10
+forge test --gas-report 2>&1 | grep -E "AckiNackiBridge|verifyBlock|AAVE" | head -10
 ```
 
 Spot the headline numbers:
 
 - `AckiNackiBridge.deposit` ≈ 90k gas (no AAVE call).
-- `LayerHashBridge.updateLayerHashes` ≈ 290k–500k gas (depends on `numLayers`).
-- `LayerHashVerifier.verifyLayerHashUpdate` ≈ 287k gas (Groth16 pairing).
+- `AckiNackiBridge.verifyBlock` ≈ 440k gas (two pairings + storage updates).
+- `Groth16DepositVerifier.verify` ≈ 287k gas (Groth16 pairing for the deposit path).
 
 ---
 
-## 4. Phase D — Real-Proof End-to-End (≈ 1 min)
+## 4. Phase D — Single-Block Bound Real-Proof (≈ 1 min)
 
-This is the **smoking gun** test: real Groth16 proofs generated from real Acki Nacki node data, verified on-chain.
-
-```bash
-forge test --match-contract LayerHashE2ETest -vv 2>&1 | tail -25
-```
-
-✅ Expected: 14 tests pass. Look for:
-
-- `testE2E_L2_H16_verify` — first real proof verifies (~287k gas).
-- `testE2E_L2_H32_sequentialBridgeUpdate` — chain anchor works across two real proofs.
-- `testE2E_L5_corruptedProof` — single-byte mutation of the proof is rejected.
-- `testE2E_gasReport` — prints actual gas numbers.
-
-Inspect the proof artifacts that were verified:
+This is the **smoking gun** test for v2: a tuple of real bound Groth16 proofs (Circuit 1A + Circuit 2) generated by `crates/bridge-prover-orchestrator`, verified on-chain through `AckiNackiBridge.verifyBlock`.
 
 ```bash
-ls -la layer-hashes-prover/proofs/groth16/ | head
+cd contracts/ethereum
+forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv 2>&1 | tail -25
 ```
 
-✅ Expected: 4 files like `groth16_output_L2_H16_prevH0_S1.json` (≈ 1 KB each). Each contains a 256-byte Groth16 proof + 13 public inputs derived from real BK signatures and real layer hashes.
+✅ Expected: both tests pass. Look for:
 
-If any of these are missing, the E2E tests would have failed in Phase C/D — you don't need to regenerate them.
+- `BlockVerified(blockId=…, blockSeqNo=…, finType=0 [Primary], numLayers=…)` event in the trace.
+- ~440k gas total (two pairing checks + storage updates).
+- `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedPrevMaxLevelLayerHash` advance after the call.
+
+To regenerate the bound proofs from scratch (~10-15 min, requires Halo2 keygen + gnark wrap for both circuits):
+
+```bash
+cd ../..
+cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+ls -la crates/bridge-prover-orchestrator/exports/ | head
+```
+
+✅ Expected: a `bound_scenario.json` plus `groth16_proof_circuit-1a.hex` (256 B), `groth16_proof_circuit-2.hex` (256 B), and matching `groth16_public_inputs_*.hex` files.
+
+Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue with 4 fixtures) is **deferred to Phase 5.3** (10-block shellnet end-to-end against Anvil). At HEAD, only the single-block bound case is exercised with real proofs.
 
 ---
 
@@ -396,110 +412,124 @@ cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
 
 ---
 
-## 6. Phase F — Layer Hash Bridge Manual Walk-Through (≈ 15 min)
+## 6. Phase F — `verifyBlock` Walk-Through (≈ 15 min)
 
-The Solidity tests already exercise this with real proofs (Phase D), but it's worth doing one round by hand to feel it.
+The Solidity tests already exercise this with real proofs (Phase D) and a 10-block mock loop (Phase C → `AckiNackiBridgeRelayerLoopTest`). It's worth doing one round by hand to feel the cross-circuit binding and the state machine.
 
-### F.1 Read a real proof
+### F.1 Read the bound proof tuple
 
 ```bash
 cd ../..
-cat layer-hashes-prover/proofs/groth16/groth16_output_L2_H16_prevH0_S1.json | jq .
+cat crates/bridge-prover-orchestrator/exports/bound_scenario.json | jq .
 ```
 
 You should see fields like:
 
 ```json
 {
-  "proof": "0x..." (~256 bytes),
-  "public_inputs": [
-    "12345...",   // bkSetCommitment (Poseidon of BK set)
-    "2",          // numLayers
-    "0xabcd...",  // layer hash 0
-    ...
-    "0x0000..."   // prevMaxLevelLayerHash (genesis)
-  ],
-  "fixture": "L2_H16_prevH0_S1"
+  "block_id_hex": "0x...",
+  "bk_set_poseidon_hex": "0x...",
+  "block_seq_no": 12345,
+  "last_seen_block_seq_no": 12340,
+  "num_layers": 3,
+  "layer_hashes_hex": ["0x...", "0x...", "0x...", "0x0", ..., "0x0"],
+  "prev_max_level_layer_hash_hex": "0x...",
+  "primary_attestation_proof_hex": "0x..." (256 B),
+  "layer_hashes_proof_hex": "0x..." (256 B)
 }
 ```
 
-This is what the `LayerHashE2ETest` suite feeds into `LayerHashBridge.updateLayerHashes`.
+Both proofs commit to the same `block_id` and `bk_set_poseidon` by construction (CC-1, CC-2). This is what `AckiNackiBridgeVerifyBlockTest` feeds into `AckiNackiBridge.verifyBlock`.
 
-### F.2 Watch a real proof verify in slow motion
+### F.2 Watch the tuple verify in slow motion
 
 ```bash
 cd contracts/ethereum
-forge test --match-test testE2E_L2_H16_verify -vvv 2>&1 | grep -A5 "Verify\|Gas\|Success"
+forge test --match-test testHappyPathPrimary -vvv 2>&1 | grep -A5 "Verify\|verifyPrimary\|verifyLayerHashes\|BlockVerified\|Gas"
 ```
 
-You will see the actual `verifyProof` call going through `LayerHashGroth16VerifierGenerated` (the auto-generated 13-input gnark verifier), the pairing check happening on-chain, and the gas number printed.
+You will see, in order:
+
+1. The cheap shape & anchor checks (revert before crypto if any fail).
+2. The first pairing check via `PrimaryVerifier` → `PrimaryGroth16VerifierGenerated`.
+3. The second pairing check via `LayerHashesMovementVerifier` → `LayerHashesGroth16VerifierGenerated`.
+4. The state writes (`storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes`, `storedPrevMaxLevelLayerHash`).
+5. The `BlockVerified` event.
+
+Total cost: ~440k gas (two pairings dominate).
 
 ### F.3 Watch the chain anchor enforced
 
 ```bash
-forge test --match-test testE2E_L2_H32_sequentialBridgeUpdate -vvv 2>&1 | tail -25
+forge test --match-test testRevertOnPrevAnchorMismatch -vvv 2>&1 | tail -25
 ```
 
-This test:
-1. Submits the L2_H16 proof → bridge records its top-level hash.
-2. Submits the L2_H32 proof which references that hash as `prevMaxLevelLayerHash`.
-3. Confirms the second update succeeds **only because** the chain anchor matches.
+This test takes a known-good bound proof tuple and submits it with a `prevMaxLevelLayerHash` argument that doesn't match `storedPrevMaxLevelLayerHash`. The bridge reverts with `PrevAnchorMismatch(supplied, stored)` **before** either gnark verifier is called — the anchor check is among the cheap pre-crypto checks. (LH-3 / CC-6.)
 
-If the second proof's `prevMaxLevelLayerHash` were anything else, it would revert with `PrevHashMismatch(expected, got)`. Compare to:
+### F.4 Watch the strict monotonicity enforced
 
 ```bash
-forge test --match-test testE2E_L2_H32_wrongPrevHash -vvv 2>&1 | tail -10
+forge test --match-test test_relayerLoop_replaySameSeqNo_reverts -vvv 2>&1 | tail -25
 ```
 
-### F.4 Watch a corrupted proof rejected
+Submitting the same `blockSeqNo` twice (or a lower seqno) reverts with `BlockSeqNoNotMonotonic(supplied, stored)`. (LH-6 / CC-5.)
+
+### F.5 Watch a tampered proof rejected
 
 ```bash
-forge test --match-test testE2E_L5_corruptedProof -vvv 2>&1 | tail -10
+forge test --match-test "testRevertOnTamperedAttestationProof|testRevertOnTamperedLayerHashesProof" -vvv 2>&1 | tail -15
 ```
 
-This flips a single byte in a 256-byte Groth16 proof. The pairing equation fails, the verifier returns `false`, and the bridge reverts with `InvalidProof()`. Soundness in action.
+A single-byte mutation of either proof causes one of the two pairings to fail; the bridge surfaces `AttestationProofRejected` or `LayerHashesProofRejected` accordingly. Soundness in action.
+
+### F.6 Watch the cross-circuit binding break
+
+```bash
+forge test --match-test testRevertOnTamperedBkSetInProof -vvv 2>&1 | tail -15
+```
+
+This test changes the `bkSetCommitment` argument fed into `verifyBlock`, leaving both proofs untouched. Result: `BkSetCommitmentMismatch(supplied, stored)` revert (cheap pre-crypto check). To exercise the *circuit-level* binding (CC-2), generate two bound proofs with intentionally different `bk_set_poseidon` and watch one of the verifiers return `false` — the orchestrator's bound-test-data harness specifically prevents this construction, so you'd need to hand-craft the fixture.
 
 ---
 
-## 7. Phase G — BK Set Rotation Flows (≈ 15 min)
+## 7. Phase G — BK Set Rotation (Phase 1.C, pending — ≈ 5 min)
 
-Two paths exist. Verify both are exercised.
+> **v2 status**: the legacy `LayerHashBridge.rotateBkSet` (ZK-proven) and 7-day timelocked
+> owner fallback (`proposeBkSetCommitment` / `executeBkSetCommitment` / `cancelBkSetCommitment`)
+> were retired in Phase 4.2 (2026-05-10). Until Phase 1.C ships Circuit 3, BK-set rotation is
+> **not available on-chain**. Confirm `storedBkSetCommitment` is effectively immutable.
 
-### G.1 ZK-proven rotation (the real path)
-
-```bash
-forge test --match-test testZkRotation -vv 2>&1 | tail -15
-forge test --match-test testZkRotationCallableByAnyone -vv 2>&1 | tail -10
-forge test --match-test testZkRotationInvalidProof -vv 2>&1 | tail -10
-forge test --match-test testZkRotationNoVerifierSet -vv 2>&1 | tail -10
-```
-
-✅ Expected: each test passes. Note `testZkRotationCallableByAnyone` confirms it's permissionless — anyone can submit a valid rotation proof.
-
-### G.2 Timelock fallback (for emergencies)
+### G.1 Confirm immutability
 
 ```bash
-forge test --match-test "testTimelock|testRevertOnInvalidProof" -vv 2>&1 | tail -40
+cast call $BRIDGE "storedBkSetCommitment()(uint256)"
+# → equals the deployment-time genesisBkSetCommitment
+
+cast call $BRIDGE "primaryVerifier()(address)"
+cast call $BRIDGE "fallbackVerifier()(address)"
+cast call $BRIDGE "layerHashesVerifier()(address)"
+# → all three are immutable; no setter exists post-deployment
 ```
 
-Verify these specific properties:
+There is no `setBkSetCommitment`, no `proposeBkSetCommitment`, no `rotateBkSet` function on the v2 bridge. The only way to install a new committee at HEAD is to redeploy the bridge with a fresh `genesisBkSetCommitment`.
 
-- [ ] `testTimelockProposeOnlyOwner` — only owner can propose.
-- [ ] `testTimelockExecuteBeforeExpiry` — execute fails before 7 days.
-- [ ] `testTimelockExecuteCallableByAnyone` — after 7 days, anyone can execute (anti-grief).
-- [ ] `testTimelockCancel` — owner can cancel a pending proposal.
-- [ ] `testTimelockCancelOnlyOwner` — only owner can cancel.
-- [ ] `testTimelockOverwritesPrevious` — proposing again resets the timer.
-
-If any of these fails, the rotation governance logic is broken — investigate immediately.
-
-### G.3 Cross-flow: layer update across rotation
+### G.2 Confirm the negative test
 
 ```bash
-forge test --match-test testLayerUpdateThenRotationThenLayerUpdate -vv 2>&1 | tail -10
+forge test --match-test testRevertOnBkSetCommitmentMismatch -vv 2>&1 | tail -10
 ```
 
-This is the realistic end-to-end scenario: layer-hash update → BK set rotated → layer-hash update under new committee. All verified.
+✅ Expected: pass — any proof signed by a different committee is rejected with `BkSetCommitmentMismatch(supplied, stored)`. This is the only BK-set-related negative path on the v2 surface today.
+
+### G.3 Phase 1.C target invariants (forward-looking)
+
+Once Phase 1.C ships, this section will be expanded to cover:
+
+- `verifyBkSetUpdate(proof, oldCommitment, newCommitment)` — single-step ZK-proven rotation.
+- BK-1..BK-5 invariants (see `docs/bridge_verification.md` §6.2 for the target list).
+- Rotation across `verifyBlock` calls (a real shellnet epoch transition).
+
+Until then, this phase is a 5-minute confirmation that nothing rotates today.
 
 ---
 
@@ -604,7 +634,7 @@ echo "From oracle: $HASH_FROM_ORC"
 
 This phase reuses the Anvil session from Phase E (so deposit `0` and the test verifier are already deployed). Where indicated, some attacks are easier to exercise via `forge test -vvv` instead of `cast`, because they need cryptographic context the test verifier doesn't enforce.
 
-The attacks are grouped by surface. Numbers in **bold** are the property labels from `docs/bridge_verification.md` (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#).
+The attacks are grouped by surface. Numbers in **bold** are the property labels from `docs/bridge_verification.md` (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#, **CC-#**, ZK-#).
 
 ### Attack Group 1 — Proof Forgery and Replay (DEP-2, DEP-3, LH-1, LH-5)
 
@@ -758,98 +788,122 @@ grep -A3 "blockHash = blockHeaderOracle" contracts/ethereum/src/AckiNackiBridge.
 
 The hash is read from the oracle, not from caller input. There is no way for a fork-only block hash to enter the public input vector on the mainnet bridge.
 
-### Attack Group 4 — Layer Hash State Injection (LH-1, LH-2, LH-3, FORK-3)
+### Attack Group 4 — `verifyBlock` State Injection (LH-1..LH-9, CC-1..CC-7, FORK-1..FORK-4)
 
-#### J.12 Skip the chain anchor
+#### J.12 Skip the chain anchor (LH-3 / CC-6)
 
-Attacker objective: inject an arbitrary layer-hash state (e.g., one that mints fake balances).
+Attacker objective: inject an arbitrary layer-hash state (e.g., one that mints fake balances) by submitting a tuple with a wrong `prevMaxLevelLayerHash`.
 
 ```bash
-forge test --match-test testRevertOnPrevHashMismatch -vv 2>&1 | tail -10
-forge test --match-test testE2E_L2_H32_wrongPrevHash -vv 2>&1 | tail -10
+forge test --match-test testRevertOnPrevAnchorMismatch -vv 2>&1 | tail -10
+forge test --match-test test_relayerLoop_anchorMismatch_reverts -vv 2>&1 | tail -10
 ```
 
-✅ Expected: every wrong `prevHash` is rejected with `PrevHashMismatch(expected, got)`. The chain anchor only allows updates that continue from the stored top-level hash.
+✅ Expected: every wrong anchor is rejected with `PrevAnchorMismatch(supplied, stored)`. The chain anchor only allows updates that continue from the stored top-level hash.
 
-#### J.13 Submit a proof with a stale BK set commitment
+#### J.13 Submit a proof with a stale BK set commitment (LH-2 / CC-3)
 
 Attacker objective: use a proof signed by an old (compromised) BK committee.
 
 ```bash
-forge test --match-test testE2E_L2_H16_wrongCommitment -vv 2>&1 | tail -10
+forge test --match-test testRevertOnBkSetCommitmentMismatch -vv 2>&1 | tail -10
 ```
 
-✅ Expected: rejected. The bridge supplies its **current** `currentBkSetCommitment` to the verifier; if the proof's witness committee Poseidon doesn't match, the pairing fails.
+✅ Expected: rejected with `BkSetCommitmentMismatch(supplied, stored)` (cheap pre-crypto check). And: even if the caller supplies the matching `bkSetCommitment`, the proof's BLS witness must commit to the same Poseidon — if it doesn't, the gnark verifier returns `false`.
 
-#### J.14 Lie about `numLayers`
+#### J.14 Lie about `numLayers` (LH-4)
 
 ```bash
-forge test --match-test "testRevertOnTooManyLayers|testRevertOnZeroNumLayers|testE2E_L5_wrongLayers" -vv 2>&1 | tail -15
+forge test --match-test "testRevertOnZeroNumLayers|testRevertOnNumLayersAboveMax" -vv 2>&1 | tail -10
 ```
 
-✅ Expected: all rejected. `numLayers` is range-checked at the contract level (1..10) **and** is bound into the proof.
+✅ Expected: rejected with `InvalidNumLayers(numLayers)`. `numLayers` is range-checked at the contract level (1..=10) **and** is bound into Circuit 2's PI[2] inside the proof.
 
-#### J.15 Try to "rewind" by submitting an older proof
+#### J.15 Inject silent garbage in unused layer slots (LH-5 / CC-7)
 
-Attacker objective: submit a previously valid proof to revert state.
-
-The chain anchor (LH-3) prevents this: an old proof references an old `prevHash`, which no longer matches `currentLayerHashes[currentNumLayers - 1]` after newer updates. Re-submitting yields `PrevHashMismatch`.
-
-This is the same mechanism as J.12, exercised by `testRevertOnPrevHashMismatch`.
-
-### Attack Group 5 — BK Rotation Abuse (BK-1 through BK-7)
-
-#### J.16 Try to bypass the timelock
-
-Attacker objective: change the BK set commitment instantly without ZK proof.
+Attacker objective: with `numLayers = 3`, set `layerHashes[3..10]` to non-zero values, hoping the bridge stores them and they leak into a future call.
 
 ```bash
-forge test --match-test testTimelockExecuteBeforeExpiry -vv 2>&1 | tail -10
+forge test --match-test testRevertOnLayerHashTailNonZero -vv 2>&1 | tail -10
 ```
 
-✅ Expected: pass — confirms `executeBkSetCommitment` reverts with `TimelockNotExpired` if called before 7 days.
+✅ Expected: rejected with `LayerHashTailNonZero(i)` for the first non-zero index `i ≥ numLayers`.
 
-#### J.17 Owner refuses to flip after expiry (anti-grief)
+#### J.16 Replay an older proof to "rewind" state (LH-6 / CC-5)
 
-Attacker objective: a malicious owner blocks rotation by never calling execute.
+Attacker objective: submit a previously valid proof tuple to revert state.
 
 ```bash
-forge test --match-test testTimelockExecuteCallableByAnyone -vv 2>&1 | tail -10
+forge test --match-test "test_relayerLoop_replaySameSeqNo_reverts|test_relayerLoop_lowerSeqNo_reverts" -vv 2>&1 | tail -10
 ```
 
-✅ Expected: pass — anyone can execute, not just the owner. The owner's only powers are *propose* and *cancel*, both of which start fresh 7-day windows.
+✅ Expected: rejected with `BlockSeqNoNotMonotonic(supplied, stored)`. Strict monotonicity blocks both same-seqno replay and lower-seqno rewinds.
 
-#### J.18 Front-run a cancel with an execute
+#### J.17 Mix proofs from two different blocks (CC-1)
 
-This is **possible** during the tiny window where the owner sends `cancelBkSetCommitment` and a third party sends `executeBkSetCommitment` after the timelock has passed. By design, the executor wins if their tx is mined first. This is desired behaviour: once the timelock has elapsed, the proposal is "ratified by silence" and cannot be unilaterally cancelled.
+Attacker objective: pair Circuit 1A's proof for block X with Circuit 2's proof for block Y, hoping the cross-binding fails to fire.
 
-To see the property:
+The bridge passes a single `blockId` argument into both verifier calls. If the two proofs commit to different `block_id` values, then *whichever* proof's `block_id` differs from the supplied argument will return `false`. There is no way to satisfy both verifiers with mismatched `block_id`. To exercise:
 
 ```bash
-forge test --match-test "testTimelockCancel" -vv 2>&1 | tail -10
+# Programmatic — see crates/bridge-prover-orchestrator/tests/cross_block_binding.rs
+# (when added in Phase 5.3); at HEAD we rely on:
+forge test --match-test "testHappyPathPrimary" -vv  # passes by construction
 ```
 
-`cancel` only works while a proposal is pending. After execution, the slot is cleared.
+The bound-test-data harness specifically *prevents* generating fixtures with diverging
+`block_id` between Circuit 1A and Circuit 2; you'd need to hand-craft the negative case.
 
-#### J.19 Replace a pending proposal with a worse one
+#### J.18 Swap Primary and Fallback proofs (LH-1)
 
-Attacker objective: a hijacked owner key races the existing 6-day-into-timelock proposal with a new malicious one.
+Attacker objective: send a Primary proof but with `finType = Fallback` (or vice versa), routing it through the wrong verifier.
 
 ```bash
-forge test --match-test testTimelockOverwritesPrevious -vv 2>&1 | tail -10
+forge test --match-test "testRevertOnPrimaryProofViaFallbackPath|testRevertOnFallbackProofViaPrimaryPath" -vv 2>&1 | tail -10
 ```
 
-✅ Expected: pass — proposing **resets** the timer to 7 days. So the malicious proposal cannot land any sooner than 7 days from now, giving the community a window to react (e.g., revoke the owner via multisig governance).
+✅ Expected: rejected — each verifier has its own VK, so a Primary proof fails the Fallback pairing and vice versa. Inside the circuits, the target_type discriminant at offset 116 of `AttestationData` is constrained to `0` (Primary) or `1` (Fallback) respectively, so the BLS witness for one cannot satisfy the other.
 
-#### J.20 Forge a ZK rotation proof
+#### J.19 Disable `verifyBlock` post-deployment (LH-9)
+
+Attacker objective: set one of the three verifier slots to `address(0)` to permanently brick the surface.
+
+There is no setter for `primaryVerifier`, `fallbackVerifier`, or `layerHashesVerifier` — they are `immutable` after construction. To prove this:
+
+```bash
+grep -n "immutable.*Verifier\|primaryVerifier\|fallbackVerifier\|layerHashesVerifier" \
+  contracts/ethereum/src/AckiNackiBridge.sol
+```
+
+✅ Expected: each appears in an `immutable` declaration; no setter is defined.
+
+### Attack Group 5 — BK Rotation Abuse (Phase 1.C pending — placeholder)
+
+> **v2 status**: the legacy `LayerHashBridge.rotateBkSet` and 7-day timelocked owner
+> fallback were retired in Phase 4.2. There is no on-chain rotation surface at HEAD. The
+> attacks J.20 below is the only relevant negative path until Phase 1.C lands Circuit 3.
+
+#### J.20 Try to forge a BK-set rotation (no surface exists)
 
 Attacker objective: rotate the committee without the current committee's consent.
 
 ```bash
-forge test --match-test "testZkRotationInvalidProof|test_VerifyInvalidProofLength" -vv 2>&1 | tail -10
+grep -n "rotateBkSet\|proposeBkSetCommitment\|setBkSetCommitment" \
+  contracts/ethereum/src/AckiNackiBridge.sol
 ```
 
-✅ Expected: invalid proofs are rejected. The rotation circuit's public inputs include the `currentBkSetCommitment` from contract storage, and the proof must show that committee signed off on the new commitment.
+✅ Expected: no matches. There is no function that mutates `storedBkSetCommitment` post-deployment. Until Phase 1.C ships, the only way to install a new committee is to redeploy the bridge.
+
+#### J.20a (forward-looking, Phase 1.C) Forge a Circuit 3 proof
+
+Once Phase 1.C lands, this attack becomes:
+
+```bash
+# Future:
+# forge test --match-test "testRevertOnInvalidBkSetUpdateProof" -vv
+```
+
+The Circuit 3 verifier will check that the *current* committee (committed to `storedBkSetCommitment`) signed off on the *new* committee's commitment. Forgery without the current committee's signing keys is reduced to BLS12-381 forgery (covered by FORK-1 / K-6).
 
 ### Attack Group 6 — Reentrancy (AC-1, AC-2, AC-6)
 
@@ -1010,15 +1064,15 @@ cast balance $BRIDGE                              # increased by 0.1 ether
 | J.9 | Future block | `InvalidBlockHash` (oracle returns 0) | `test_GetBlockHash_FutureBlock` |
 | J.10 | Historical block without witness | revert | `test_GetBlockHash_HistoricalBlock` |
 | J.11 | Fork block hash | Pairing fails (oracle returns canonical) | source review |
-| J.12 | Skip chain anchor | `PrevHashMismatch` | `testRevertOnPrevHashMismatch` |
-| J.13 | Stale BK commitment | Pairing fails | `testE2E_L2_H16_wrongCommitment` |
-| J.14 | Wrong `numLayers` | `InvalidNumLayers` | `testRevertOnZeroNumLayers` |
-| J.15 | Rewind to old proof | `PrevHashMismatch` | (LH-3 by construction) |
-| J.16 | Bypass timelock | `TimelockNotExpired` | `testTimelockExecuteBeforeExpiry` |
-| J.17 | Owner refuses execute | execute is permissionless | `testTimelockExecuteCallableByAnyone` |
-| J.18 | Race cancel/execute | Execute wins after expiry | `testTimelockCancel` |
-| J.19 | Replace pending proposal | Timer resets | `testTimelockOverwritesPrevious` |
-| J.20 | Forge ZK rotation | `InvalidProof` | `testZkRotationInvalidProof` |
+| J.12 | Skip chain anchor | `PrevAnchorMismatch` | `testRevertOnPrevAnchorMismatch` |
+| J.13 | Stale BK commitment | `BkSetCommitmentMismatch` (cheap) + pairing fails | `testRevertOnBkSetCommitmentMismatch` |
+| J.14 | Wrong `numLayers` | `InvalidNumLayers` | `testRevertOnZeroNumLayers` / `testRevertOnNumLayersAboveMax` |
+| J.15 | Tail garbage in `layerHashes` | `LayerHashTailNonZero` | `testRevertOnLayerHashTailNonZero` |
+| J.16 | Replay / rewind seqno | `BlockSeqNoNotMonotonic` | `test_relayerLoop_replaySameSeqNo_reverts` |
+| J.17 | Mix proofs from two blocks (CC-1) | gnark `false` ⇒ `*ProofRejected` | by construction in `testHappyPathPrimary` |
+| J.18 | Swap Primary↔Fallback (LH-1) | gnark `false` ⇒ `AttestationProofRejected` | per-route mismatch test |
+| J.19 | Disable verifier slot post-deploy | impossible (immutable) | source review |
+| J.20 | Forge BK-set rotation (Phase 1.C, pending) | no surface; redeploy required | source review (no `rotateBkSet`) |
 | J.21 | Reenter via recipient | 2300 gas stipend + `nonReentrant` | source review |
 | J.22 | Reenter via AAVE | `nonReentrant` everywhere | source review |
 | J.23 | Non-owner privileged calls | `NotOwner` (every function) | per-function tests |
@@ -1032,19 +1086,21 @@ cast balance $BRIDGE                              # increased by 0.1 ether
 | J.31 | Drain via harvestYield overdraw | `NoYield` | `test_harvestYield_amountExceedsYieldReverts` |
 | J.32 | Direct ETH transfer | Phantom liquidity, no claim | manual |
 
-✅ All 32 attack vectors blocked. If any of these unexpectedly succeeds, **stop and escalate**.
+✅ All 30+ attack vectors blocked at HEAD. (J.20a is forward-looking for Phase 1.C.) If any of these unexpectedly succeeds, **stop and escalate**.
 
 ### Where attacks could theoretically still work
 
 To be honest about residual risk:
 
 - **51% attack on Ethereum L1**: would let an attacker rewrite history that the oracle reads. Out of scope for any L1 dApp.
-- **>2/3 attack on Acki Nacki BK set**: would let attackers forge BLS-signed blocks. Out of scope for any chain-to-chain bridge — see FORK-2 in `bridge_verification.md`.
-- **G2 subgroup gap (audit FORK-2 / BLS-1)**: open audit finding; attacker would need a non-trivial G2 element in the wrong subgroup with a forged-looking signature. Mitigated in next circuit revision.
-- **gnark wrapper stub `Define`**: the wrapper currently produces a Groth16 proof committing to the public inputs without verifying the underlying Halo2 proof inside Groth16. A malicious prover with `pk_groth16` could in principle generate a proof for arbitrary inputs. Mitigation: the prover never publishes `pk_groth16` (kept in a single trusted prover service). Final mitigation will be full in-circuit Halo2 verification (`integration_plan.md` §6.5).
-- **Trusted setup**: KZG SRS and gnark Groth16 setup ceremonies are points of trust. Verify the SRS checksums match a recognised ceremony before deployment.
+- **>2/3 attack on Acki Nacki BK set**: would let attackers forge BLS-signed Primary attestations. Out of scope for any chain-to-chain bridge — see FORK-2 / K-9 in `audit_trail_v2.md`.
+- **>1/2 attack on Acki Nacki BK set with Fallback path enabled**: a smaller adversarial threshold (1/2+1) suffices to forge Fallback-finalized blocks. The bridge accepts Fallback-attested updates by design (the AN protocol does too).
+- **G2 subgroup gap (audit FORK-2 / BLS-1 / K-6)**: open audit finding; attacker would need a non-trivial G2 element in the wrong subgroup with a forged-looking signature. **Carries over to v2's Circuit 1A and 1B unchanged.** Launch blocker for mainnet; testnet OK.
+- **gnark wrapper stub `Define` (deposit side only)**: the deposit wrapper currently produces a Groth16 proof committing to the public inputs without verifying the underlying Halo2 proof inside Groth16. The v2 AN→ETH wrappers (1A/1B/2) inherit the same shape — covered by `audit_trail_v2.md` K-4. Mitigation: the prover never publishes `pk_groth16` (kept in a single trusted prover service). Final mitigation will be full in-circuit Halo2 verification (`integration_plan.md` §6.5).
+- **Trusted setup**: KZG SRS and per-circuit gnark Groth16 setup ceremonies are points of trust. Verify the SRS checksums match a recognised ceremony before deployment.
+- **No on-chain BK-set rotation at HEAD**: a stale committee can attack until the bridge is redeployed with a fresh `genesisBkSetCommitment`. Phase 1.C eliminates this gap.
 
-These are documented in `docs/integration_plan.md` §7 (Risk Register).
+These are documented in `docs/audit_trail_v2.md` §2 and `docs/an_partner_integration_plan.md` §5 (Risk Register).
 
 ---
 
@@ -1060,8 +1116,8 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### Tests
 
-- [ ] `forge test` reports **135 passed; 0 failed; 0 skipped** across **14 suites**.
-- [ ] `LayerHashE2ETest` (14 tests) passes — real Groth16 proofs verify on-chain.
+- [ ] `forge test` reports **135 passed; 0 failed; 0 skipped** across **15 suites**.
+- [ ] `AckiNackiBridgeVerifyBlockTest` (17) + `AckiNackiBridgeRelayerLoopTest` (6) pass — `verifyBlock` happy paths and 6 sequencing scenarios.
 - [ ] `AckiNackiBridgeAaveTest` (23 tests) passes — including the fuzz solvency invariant.
 
 ### Property checks (Phase E hands-on)
@@ -1073,21 +1129,23 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 - [ ] Empty proof reverts with `InvalidProof`.
 - [ ] Future block reverts.
 
-### Layer hash bridge
+### `verifyBlock` (Phase F hands-on)
 
-- [ ] Real proof L2_H16 verifies on-chain (~287k gas).
-- [ ] Sequential update L2_H16 → L2_H32 succeeds (chain anchor).
-- [ ] Wrong `prevHash` reverts with `PrevHashMismatch`.
-- [ ] Single-byte mutation of a 256-byte proof is rejected.
-- [ ] Wrong `bkSetCommitment` is rejected.
+- [ ] Real bound proof tuple `testHappyPathPrimary` verifies on-chain (~440k gas).
+- [ ] `testHappyPathFallback` verifies on-chain through `FallbackVerifier`.
+- [ ] Wrong `prevMaxLevelLayerHash` reverts with `PrevAnchorMismatch`.
+- [ ] Single-byte mutation of either 256-byte proof is rejected (`AttestationProofRejected` or `LayerHashesProofRejected`).
+- [ ] Wrong `bkSetCommitment` argument reverts with `BkSetCommitmentMismatch` (cheap pre-crypto check).
+- [ ] Replay or lower `blockSeqNo` reverts with `BlockSeqNoNotMonotonic`.
+- [ ] `numLayers` outside `[1,10]` reverts with `InvalidNumLayers`.
+- [ ] Non-zero `layerHashes[i]` for `i ≥ numLayers` reverts with `LayerHashTailNonZero`.
+- [ ] Verifier slots are `immutable` — confirmed by source review.
 
-### BK rotation
+### BK rotation (Phase 1.C, pending)
 
-- [ ] ZK-proven rotation works and is permissionless.
-- [ ] Timelock requires 7 days.
-- [ ] Anyone can `executeBkSetCommitment` after timelock (anti-grief).
-- [ ] Owner can `cancelBkSetCommitment` (no one else).
-- [ ] Layer updates work across a rotation event.
+- [ ] `storedBkSetCommitment` returns the deployment-time `genesisBkSetCommitment` and is unchanged.
+- [ ] No on-chain rotation function exists (`grep -n "rotateBkSet\|setBkSetCommitment" src/AckiNackiBridge.sol` returns no matches).
+- [ ] `testRevertOnBkSetCommitmentMismatch` confirms wrong-committee proofs are rejected.
 
 ### AAVE
 
@@ -1104,18 +1162,18 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### Attacks blocked (Phase J)
 
-All 32 attack scenarios in Phase J reach their expected revert / rejection. Group totals:
+All ≥ 30 attack scenarios in Phase J reach their expected revert / rejection. Group totals:
 
 - [ ] **Group 1 (Proof forgery, J.1–J.5)** — 5 attacks blocked.
 - [ ] **Group 2 (Identity binding, J.6–J.7)** — 2 attacks blocked.
 - [ ] **Group 3 (Block hash, J.8–J.11)** — 4 attacks blocked.
-- [ ] **Group 4 (Layer-hash injection, J.12–J.15)** — 4 attacks blocked.
-- [ ] **Group 5 (BK rotation abuse, J.16–J.20)** — 5 attacks blocked.
+- [ ] **Group 4 (`verifyBlock` injection, J.12–J.19)** — 8 attacks blocked (LH-#, CC-#, FORK-#).
+- [ ] **Group 5 (BK rotation abuse, J.20)** — 1 attack blocked at HEAD; J.20a deferred to Phase 1.C.
 - [ ] **Group 6 (Reentrancy, J.21–J.22)** — 2 attacks blocked.
 - [ ] **Group 7 (Access control, J.23–J.24)** — every owner-only function rejects non-owners.
 - [ ] **Group 8 (Field/encoding, J.25–J.27)** — 3 fuzz suites pass.
 - [ ] **Group 9 (Economic/DoS, J.28–J.32)** — 5 attacks blocked.
-- [ ] Residual risks (51% on L1, >2/3 on AN, G2 subgroup, gnark stub, trusted setup) acknowledged and tracked in `integration_plan.md` §7.
+- [ ] Residual risks (51% on L1, >2/3 on AN, G2 subgroup, gnark stub, trusted setup, no-rotation gap) acknowledged and tracked in `docs/audit_trail_v2.md` §2 and `docs/an_partner_integration_plan.md` §5.
 
 ### Pre-deployment (only if shipping)
 
@@ -1131,7 +1189,7 @@ All 32 attack scenarios in Phase J reach their expected revert / rejection. Grou
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `forge build` complains about `node_modules/poseidon-solidity` | `npm install` not run | `cd contracts/ethereum && npm install` |
-| `LayerHashE2ETest` fails to load proof JSON | proof artifacts deleted or never generated | They are committed in `layer-hashes-prover/proofs/groth16/`. If missing, see `AGENTS.md` §"Build & Test Commands" for full regeneration (~33 min). |
+| `testHappyPathPrimary` fails to load bound proof JSON | bound-proof artifacts deleted or never generated | Run `cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release` (~10-15 min). The Foundry test reads `crates/bridge-prover-orchestrator/exports/bound_scenario.json` + `groth16_proof_*.hex`. |
 | `forge test` 1 fewer test than expected | filter / rename / removed test | Run `forge test --list` and diff against the table in §3 |
 | Anvil session: `withdraw` reverts unexpectedly | `BLOCKNUM` is the current block (no hash yet) — use `block.number - 1` | re-export `BLOCKNUM=$((... - 1))` |
 | Anvil session: `cast send` complains about gas | account out of ETH | use a different prefunded account |
@@ -1143,23 +1201,26 @@ All 32 attack scenarios in Phase J reach their expected revert / rejection. Grou
 
 If everything in §11 ticks:
 
-- The bridge is correct in the sense exercised by **135 unit/fuzz/E2E tests**, a **complete manual walk-through**, and **32 deliberate attack scenarios** that all fail in the expected way.
+- The bridge is correct in the sense exercised by **135 unit/fuzz/E2E tests**, a **complete manual walk-through**, and **≥ 30 deliberate attack scenarios** that all fail in the expected way.
 - You have personally observed:
   - A real deposit event being emitted.
-  - A real Groth16 proof being verified on-chain.
+  - A real Groth16 deposit proof being verified on-chain.
+  - A real bound Groth16 tuple (Circuit 1A + Circuit 2) being verified through `verifyBlock`.
   - A double-spend being rejected.
-  - The chain anchor preventing state injection.
+  - The chain anchor (`PrevAnchorMismatch`) and strict monotonicity (`BlockSeqNoNotMonotonic`) preventing state injection.
+  - The cross-circuit binding via `block_id` and `bk_set_poseidon` (CC-1, CC-2) holding by construction.
   - The owner being unable to steal principal.
-  - The timelock blocking instant rotation.
+  - `storedBkSetCommitment` confirmed immutable at HEAD (Phase 1.C pending).
   - Reentrancy guards firing.
   - Every owner-only function rejecting non-owners.
 
 If anything didn't tick: **stop and report**. Cross-reference the failing test or assertion to:
 
-- `docs/bridge_verification.md` for the property statement (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#).
-- `docs/integration_analysis.md` for the architectural context.
+- `docs/bridge_verification.md` for the property statement (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#, CC-#, ZK-#).
+- `docs/four_circuit_architecture.md` for the architectural context.
+- `docs/audit_trail_v2.md` for the trust-assumption delta.
 - `docs/layer_hashes_circuit_audit.md` for circuit-level details.
 
-Total elapsed time for a thorough first run: **≈ 2.5 hours**, split roughly 15 min static / 5 min build / 5 min test / 5 min E2E / 30 min Anvil / 15 min layer hashes / 15 min rotation / 20 min AAVE / 10 min oracle / 30 min attacks / 5 min checklist.
+Total elapsed time for a thorough first run: **≈ 2 hours**, split roughly 15 min static / 5 min build / 5 min test / 5 min real-proof / 30 min Anvil / 15 min `verifyBlock` walk / 5 min Phase 1.C check / 20 min AAVE / 10 min oracle / 30 min attacks / 5 min checklist.
 
-Subsequent runs (CI + spot-check after a code change): **≈ 5 min** (Phase B + C + D). Add Phase J for any change that touches `AckiNackiBridge.sol`, `LayerHashBridge.sol`, or any verifier — the attack scenarios catch regressions that unit tests might miss.
+Subsequent runs (CI + spot-check after a code change): **≈ 5 min** (Phase B + C + D). Add Phase J for any change that touches `AckiNackiBridge.sol` or any verifier — the attack scenarios catch regressions that unit tests might miss.

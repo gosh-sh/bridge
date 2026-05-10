@@ -1,6 +1,12 @@
-# Acki Nacki Bridge — Integration Plan
+# Acki Nacki Bridge — Integration Plan (Legacy, M0–M9)
 
-This document describes the concrete steps to integrate the partner's `LayerHashesUpdateCircuit` with our Ethereum bridge infrastructure, enabling trustless layer hash updates on Ethereum proven by ZK proofs of Acki Nacki block attestations.
+> **⚠ Superseded for M7–M9 (relayer + AN-side verification) by `docs/an_partner_integration_plan.md`.**
+> The single-circuit architecture (`LayerHashesUpdateCircuit` + `LayerHashBridge.sol`) described
+> below was retired in **Phase 4.2** (2026-05-10). The active four-circuit architecture is
+> documented in `docs/four_circuit_architecture.md`. This plan is preserved as historical
+> record only — milestones M0–M6 (deposit pipeline + AAVE + oracle) are still the source of
+> truth for those subsystems; M7–M9 are obsolete and replaced by Phases 4–7 of the partner
+> integration plan. Do not use as a forward-looking reference.
 
 ---
 

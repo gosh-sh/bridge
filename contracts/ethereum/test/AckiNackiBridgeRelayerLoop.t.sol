@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 
 import "../src/AckiNackiBridge.sol";
-import "../src/IAckiNackiVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
@@ -38,7 +37,6 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 ///   per block (no duplicates, no holes).
 contract AckiNackiBridgeRelayerLoopTest is Test {
     AckiNackiBridge internal bridge;
-    PermissiveTestVerifierLoop internal depositVerifier;
     MockBlockHeaderOracle internal oracle;
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
@@ -58,7 +56,6 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     );
 
     function setUp() public {
-        depositVerifier = new PermissiveTestVerifierLoop();
         oracle = new MockBlockHeaderOracle();
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
@@ -76,9 +73,8 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
             GENESIS_PREV_ANCHOR
         );
 
-        bridge = new AckiNackiBridge(
-            address(depositVerifier), address(oracle), address(0), address(0), address(0), vb
-        );
+        bridge =
+            new AckiNackiBridge(address(oracle), address(0), address(0), address(0), vb);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -318,25 +314,3 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     }
 }
 
-/// @dev Mirrors `PermissiveTestVerifier` from `AckiNackiBridgeVerifyBlock.t.sol`.
-///      Renamed locally to avoid an artifact-name collision when forge
-///      compiles both files together.
-contract PermissiveTestVerifierLoop is IAckiNackiVerifier {
-    uint256 private constant PUBLIC_INPUTS_COUNT = 6;
-
-    function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
-        external
-        pure
-        override
-        returns (bool, bytes32)
-    {
-        if (proof.length == 0 || publicInputs.length != PUBLIC_INPUTS_COUNT) {
-            return (false, bytes32(0));
-        }
-        return (true, bytes32(publicInputs[0]));
-    }
-
-    function getPublicInputsCount() external pure override returns (uint256) {
-        return PUBLIC_INPUTS_COUNT;
-    }
-}

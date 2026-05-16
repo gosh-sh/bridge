@@ -4,9 +4,21 @@
 > The single-circuit architecture (`LayerHashesUpdateCircuit` + `LayerHashBridge.sol`) described
 > below was retired in **Phase 4.2** (2026-05-10). The active four-circuit architecture is
 > documented in `docs/four_circuit_architecture.md`. This plan is preserved as historical
-> record only — milestones M0–M6 (deposit pipeline + AAVE + oracle) are still the source of
-> truth for those subsystems; M7–M9 are obsolete and replaced by Phases 4–7 of the partner
-> integration plan. Do not use as a forward-looking reference.
+> record only — M7–M9 are obsolete and replaced by Phases 4–7 of the partner integration plan.
+>
+> **Additional Phase 4.3 supersession (2026-05-17).** The "ETH-side deposit verifier" portions
+> of M0–M6 are also obsolete: the legacy refund-style `withdraw(...)`, the `IAckiNackiVerifier`
+> interface, the `Groth16DepositVerifier` adapter, the gnark-generated `Groth16Verifier` for the
+> deposit-prover, the `DummyVerifier`, and the `deposit-prover/gnark-wrapper/` Go module + the
+> Rust `groth16_wrapper` glue were all removed. The ETH→AN deposit proof is now consumed
+> natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode. See Decision Log
+> 2026-05-17 in `docs/an_partner_integration_plan.md` for the rationale and the §6.5 R&D track
+> that this supersession references. The deposit-prover Halo2 circuit itself (M3) is still the
+> source of truth; the AAVE V3 yield bolt-on (M6) and the block-hash oracle (M5) are also
+> still in production — the oracle is currently unused but preserved for a future burn-proof
+> ETH-side withdrawal flow.
+>
+> Do not use as a forward-looking reference.
 
 ---
 

@@ -1,6 +1,8 @@
 # Deposit Event Prover
 
-Standalone ZK proof generator for Ethereum Deposit events using axiom-eth. Proves that a `Deposit` event was emitted by the AckiNackiBridge contract on Ethereum, then wraps the Halo2 proof in Groth16 for efficient on-chain verification.
+Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit` event was emitted by the `AckiNackiBridge` contract on Ethereum.
+
+> **Phase 4.3 status (2026-05-17)**: this crate emits a raw Halo2 SHPLONK proof; the proof is consumed natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode (in development in `tvm-sdk`). The legacy Go gnark wrapper that used to live under `gnark-wrapper/` plus the Rust `groth16_wrapper` adapter under `src/groth16_wrapper/` were retired together with the ETH-side `AckiNackiBridge.withdraw()` chain. See Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md` for the rationale.
 
 ## Why Separate from Main Workspace?
 
@@ -38,42 +40,27 @@ TOPIC_NUM_BOUNDS: (0, 4)   // Min/max topics per log
 RECEIPT_PF_MAX_DEPTH: 10   // Max MPT proof depth
 ```
 
-## Groth16 Wrapper (`gnark-wrapper/`)
+## On-chain consumption
 
-The Halo2 verifier exceeds Ethereum's 24KB contract size limit. The gnark wrapper (Go) solves this by wrapping the Halo2 SNARK in a Groth16 proof with a ~2KB verifier.
+There is **no on-chain ETH-side ZK consumer** for this proof. The proof is consumed natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode (work-in-progress in `tvm-sdk`). The corresponding AN-side `TokenBridge.finalizeDeposit(halo2Proof, publicInputs, vk)` will:
 
-### Setup (one-time)
+1. Verify the Halo2 SHPLONK proof under the immutable VK.
+2. Enforce `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` (wrong-bridge proofs revert).
+3. Check the per-`depositId` nullifier (replay reverts).
+4. Mint the user's tokens.
 
-```bash
-cd gnark-wrapper
-go run . setup
-```
-
-Generates: `circuit.r1cs`, `proving.key`, `verification.key`, `Groth16Verifier.sol`
-
-### Prove
-
-```bash
-go run . prove \
-  --snark-proof ../path/to/halo2_proof.bin \
-  --snark-vk ../path/to/vk.bin \
-  --snark-instances ../path/to/instances.json
-```
-
-Output: 288 bytes = 256-byte Groth16 proof + 32-byte promise_commit
+See `docs/verifying_eth_proof_on_an.md` for the operational verification flow.
 
 ## Example Binaries
 
 | Binary                          | Description                                       |
 | ------------------------------- | ------------------------------------------------- |
 | `fetch_deposit_data`            | Fetch deposit event + MPT proof from Ethereum RPC |
-| `export_proof_for_gnark`        | Export Halo2 proof artifacts for gnark wrapper    |
-| `generate_verifier`             | Generate Solidity verifier bytecode               |
+| `generate_verifier`             | Generate Solidity verifier bytecode (legacy reference; AN side uses native verification) |
 | `generate_aggregation_verifier` | Generate aggregation verifier                     |
 | `test_with_real_data`           | Test circuit with real Ethereum data              |
 | `inspect_snark`                 | Inspect SNARK proof structure                     |
 | `parse_proof_detailed`          | Parse and display proof components                |
-| `analyze_proof_structure`       | Analyze proof structure for debugging             |
 
 ## Development
 
@@ -98,5 +85,6 @@ cargo run --release --example fetch_deposit_data -- --help
 ## References
 
 - [axiom-eth](https://github.com/axiom-crypto/axiom-eth) — Ethereum state proof library
-- [gnark](https://github.com/ConsenSys/gnark) — Go ZK proof library
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
+- `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 — Phase 4.3 demolition rationale
+- `docs/verifying_eth_proof_on_an.md` — Verification flow on the AN side

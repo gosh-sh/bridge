@@ -12,10 +12,9 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── crates/
 │   ├── acki-nacki-interface/  ← Rust traits + mock for AN node communication
 │   └── eth-frontend/          ← Rust Ethereum client (ethers-rs)
-├── deposit-prover/         ← Rust Halo2 circuit: proves Ethereum deposit events
-│   └── gnark-wrapper/      ← Go: wraps Halo2 SHPLONK proof into Groth16 for on-chain verification
+├── deposit-prover/         ← Rust Halo2 circuit: proves Ethereum deposit events. Halo2 SHPLONK proof is consumed natively on the AN side (no gnark wrapper — retired in Phase 4.3 2026-05-17).
 ├── crates/bridge-prover-orchestrator/  ← Wraps the partner's 4-circuit pipeline (Halo2 1A/1B/2[/3]) for prover/relayer use
-│   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-1b, circuit-2[, circuit-3]) producing 256-byte Groth16 proofs
+│   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-1b, circuit-2[, circuit-3]) producing 256-byte Groth16 proofs (AN→ETH side only; EIP-170 forces gnark wrap on this direction)
 ├── crates/bridge-relayer-daemon/       ← Phase 5.1 relayer skeleton: Relayer::tick() / run_loop() + BlockSource/BridgeClient traits + abigen!-generated AckiNackiBridge bindings + state.json persistence + CLI
 ├── poseidon-proof/         ← Rust Halo2 circuit with Blake2b transcript (Poseidon commitments)
 ├── frontend/               ← WASM frontend (excluded from workspace)
@@ -81,11 +80,10 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 ### Deposit Flow (Ethereum → Acki Nacki)
 
-1. User calls `AckiNackiBridge.deposit()` on Ethereum → emits `Deposit` event
-2. `deposit-prover` (Halo2, K=20) proves the event was emitted: Receipt RLP, MPT inclusion, log matching, block hash binding
-3. Keccak coprocessor handles SHA3/keccak256 via Poseidon promise commitments (~500x savings)
-4. `gnark-wrapper` (Go) wraps Halo2 SHPLONK proof → Groth16 (BN254) for cheap on-chain verification
-5. `Groth16DepositVerifier.sol` verifies on-chain (7 public inputs: depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit)
+1. User calls `AckiNackiBridge.deposit()` on Ethereum → emits `Deposit` event.
+2. `deposit-prover` (Halo2, K=20) proves the event was emitted: Receipt RLP, MPT inclusion, log matching, block hash binding.
+3. Keccak coprocessor handles SHA3/keccak256 via Poseidon promise commitments (~500× savings).
+4. **AN side verifies the Halo2 SHPLONK proof natively** via the future `VERHALO2SHPLONK` TVM opcode (work-in-progress in `tvm-sdk`; design notes in Decision Log 2026-05-17 of `docs/an_partner_integration_plan.md`). 7 public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`. **No on-chain ETH-side verifier**: the legacy `IAckiNackiVerifier` / `Groth16{Verifier,DepositVerifier}` chain + the deposit-prover's `gnark-wrapper/` were retired in Phase 4.3 (2026-05-17) — see Decision Log.
 
 ### Layer Hash Flow (Acki Nacki → Ethereum)
 
@@ -98,23 +96,19 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
    - Poseidon dense balanced Merkle tree chain continuity
    - BLS12-381 committee signature verification (≥2/3 threshold)
    - BK set Poseidon commitment
-4. Public inputs (13 field elements): old_layer_hashes_root, new_layer_hashes_root, bk_set_commitment, layer indices, block heights, chain lengths
-5. Needs gnark-wrapper adaptation (13 inputs vs 7 for deposits) → `Groth16Verifier.sol` on Ethereum
+4. The legacy single-circuit 13-input pipeline (`layer-hashes-update-halo2-circuit` with `gnark-wrapper/`) was retired by Phase 4.2 (2026-05-10) in favour of the four-circuit architecture below.
+5. **v2 (current)**: per-circuit Halo2 + gnark Groth16 wrappers (`crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2}/`) — public inputs split into Circuit 1A/1B (4 inputs: `[block_id, bk_set_poseidon, block_seq_no, last_seen]`) and Circuit 2 (14 inputs: `[block_id, bk_set_poseidon, num_layers, layer_hash[0..10], prev_max_level_layer_hash]`). Consumed on-chain by `PrimaryVerifier.sol`/`FallbackVerifier.sol`/`LayerHashesMovementVerifier.sol` → `*Groth16VerifierGenerated.sol`.
 
 ## Solidity Contracts (Foundry)
 
 | Contract | Purpose |
 |----------|---------|
-| `AckiNackiBridge.sol` | Main bridge: deposits, withdrawals, **AAVE V3 yield integration**, AN→ETH state with `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1) |
-| `Groth16Verifier.sol` | Auto-generated Groth16 verifier (gnark output) |
-| `Groth16DepositVerifier.sol` | Adapter: decodes deposit proof public inputs, calls Groth16Verifier |
-| `IAckiNackiVerifier.sol` | Interface for AN-side proof verification |
+| `AckiNackiBridge.sol` | Main bridge: `deposit()`, **AAVE V3 yield integration**, AN→ETH state via `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1). Legacy refund-style `withdraw()` + `IAckiNackiVerifier` chain retired in Phase 4.3 (2026-05-17). |
 | `IBlockHeaderOracle.sol` | Interface for Ethereum block hash oracle |
 | `AxiomBlockHeaderOracle.sol` | Axiom-based block hash oracle implementation |
 | `Halo2Verifier.sol` | Direct Halo2 SHPLONK verifier (Yul-based, for testing) |
 | `Blake2bHalo2Verifier.sol` | Blake2b-transcript Halo2 verifier |
 | `Blake2bTranscript.sol` / `Blake2bChallengeComputer.sol` | On-chain Blake2b transcript replay |
-| `DummyVerifier.sol` | Always-true verifier for testing |
 | `MockBlockHeaderOracle.sol` | Mock oracle for testing |
 | `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` | Bridge-side adapter for Circuit 1A (Primary attestation) — 4 public inputs `[blockId, bkSetCommitment, blockSeqNo, lastSeenBlockSeqNo]` (renamed from `envelopeHash → blockId` 2026-05-10 per partner offset shift) |
 | `IPrimaryGroth16Verifier.sol` / `PrimaryGroth16VerifierGenerated.sol` | Gnark-generated 4-input Groth16 verifier interface + impl |
@@ -331,38 +325,43 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - Deleted 8 legacy Solidity sources: `LayerHashBridge.sol`, `LayerHashVerifier.sol`, `LayerHashGroth16Verifier.sol`, `LayerHashGroth16VerifierGenerated.sol`, `ILayerHashVerifier.sol`, `BkSetRotationVerifier.sol`, `BkSetRotationGroth16Verifier.sol`, `IBkSetRotationVerifier.sol`. The single-circuit 13-input flow plus its old BK-rotation surface are gone — `AckiNackiBridge.verifyBlock` (Phase 4.1) is the only AN→ETH path; the future BK-set update will plug into it as an optional fourth proof argument once Phase 1.C / 3.4 land.
 - Deleted 2 legacy Foundry test files: `LayerHashBridge.t.sol` (35 tests across `LayerHashBridgeTest` + `LayerHashVerifierTest` + `BkSetRotationVerifierTest`) and `LayerHashE2E.t.sol` (14 real-proof tests across 4 fixtures). Net Foundry suite: 184 → **135 tests** across 15 suites; coverage of every surviving invariant is preserved by `AckiNackiBridgeVerifyBlock.t.sol` (17), `AckiNackiBridgeRelayerLoop.t.sol` (6), `LayerHashesMovementVerifier.t.sol` (10), `PrimaryVerifier.t.sol` (8), `FallbackVerifier.t.sol` (8). Real-proof multi-fixture E2E coverage will be re-introduced by Phase 5.3 (relayer-driven, multi-block from shellnet).
 - Deleted 2 legacy Rust trees: `layer-hashes-prover/` (the standalone single-circuit Halo2 → 13-input Groth16 wrapping pipeline) and `bk-set-rotation-prover/` (circuit spec + Go gnark wrapper for the old 2-input rotation design). Workspace `Cargo.toml` no longer excludes `layer-hashes-prover`.
-- Lingering doc references in `docs/integration_plan.md` / `docs/manual_verification_runbook.md` / `docs/bridge_verification.md` / `docs/verifying_an_proof.md` / `docs/verifying_eth_proof_on_an.md` are intentionally left unchanged — they describe the legacy architecture that's now superseded by `docs/an_partner_integration_plan.md`. A pointer in `docs/integration_plan.md` already marks M7–M9 as superseded; the v2-aware doc rewrite belongs to Phase 7.
+- Lingering doc references in `docs/integration_plan.md` / `docs/verifying_an_proof.md` are intentionally left unchanged — they describe the legacy architecture that's now superseded by `docs/an_partner_integration_plan.md`. A pointer in `docs/integration_plan.md` already marks M7–M9 as superseded.
+
+**Phase 4.3 — Legacy deposit-verifier demolition (2026-05-17)**:
+- Removed the legacy v1 ETH-side deposit-verifier chain: deleted `IAckiNackiVerifier.sol`, `Groth16Verifier.sol` (gnark-generated for deposit-prover), `Groth16DepositVerifier.sol`, `DummyVerifier.sol`, `AckiNackiBridgeV2.t.sol`, the `FuzzGroth16{Verifier,DepositVerifier}Test` contracts, and the withdraw-flow fuzz tests.
+- Surgically removed from `AckiNackiBridge.sol`: `verifier` storage slot, `processedDeposits` mapping, `event Withdrawal`, four errors (`InvalidProof`, `DepositAlreadyProcessed`, `InvalidVerifier`, `InvalidBlockHash`), the `withdraw(...)` function, the `isDepositProcessed(...)` view, and the `_verifier` ctor parameter. Ctor is now 5-args (was 6).
+- Deleted the deposit-prover gnark-wrapper toolchain: `deposit-prover/gnark-wrapper/` (Go module + R1CS + keys + generated `Groth16Verifier.sol`), `deposit-prover/src/groth16_wrapper/` (Rust JSON adapter), and 11 deposit-prover/top-level shell scripts that wired the Sepolia E2E.
+- Trimmed `crates/eth-frontend/src/contract.rs` ABI to deposit + read-only views; deleted `crates/eth-frontend/src/withdrawal.rs` stub.
+- Net Foundry suite: 135 → **109 tests across 12 suites** (−26 tests, −3 suites); `forge build` clean, `forge test` all green; `cargo check --workspace --all-targets` clean.
+- Rationale: AN-side will verify the deposit-prover's Halo2 SHPLONK proof natively via the future `VERHALO2SHPLONK` TVM opcode (no EIP-170 on AN side, so the gnark wrapper is unnecessary). The AN→ETH gnark wrappers under `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2}/` are **not affected** — EIP-170 still forces a wrapper on that side. See Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md`.
 
 **AAVE V3 Yield Integration (completed)**:
 - `AckiNackiBridge` extended with optional AAVE V3 wiring (pool + WETH gateway + aWETH).
 - New owner role manages routing only — **cannot touch user principal**.
-- `supplyToAave(amount)` routes idle ETH to AAVE; `withdrawFromAave` and `emergencyWithdrawAll` pull funds back.
-- `withdraw()` auto-pulls shortfall from AAVE if liquid buffer is insufficient — transparent to users.
-- Configurable `liquidReserveBps` (default 10%, capped at 50%) keeps a buffer for cheap small withdrawals.
+- `supplyToAave(amount)` routes idle ETH to AAVE; `withdrawFromAave` and `emergencyWithdrawAll` pull funds back (owner-only).
+- Configurable `liquidReserveBps` (default 10%, capped at 50%) governs how much of treasury stays liquid as ETH.
 - Yield isolated from principal: `accruedYield() = aWETH.balanceOf(bridge) - suppliedPrincipal`. `harvestYield(amount)` forwards to a separate `yieldRecipient`.
-- Reentrancy guard on all mutating functions; CEI preserved in `withdraw()`.
+- Reentrancy guard on all mutating functions; CEI preserved throughout.
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
-- See `docs/aave_integration.md` for design + correctness verification protocol.
+- See `docs/aave_integration.md` for design + correctness verification protocol. (Note: doc may still mention the legacy user-facing `withdraw()` auto-pull behaviour, which was retired in Phase 4.3 along with the rest of the legacy withdraw flow; the owner-only `withdrawFromAave` / `emergencyWithdrawAll` paths are unaffected.)
 
-**Test counts (Foundry, 15 suites, all green)**:
+**Test counts (Foundry, 12 suites, all green)**:
 
 | Suite | Count |
 |------|------|
-| `AckiNackiBridgeAaveTest` (AAVE) | 23 |
-| `AckiNackiBridgeV2Test` (deposit/withdraw) | 14 |
+| `AckiNackiBridgeAaveTest` (AAVE; owner-only top-up + yield) | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
 | `AxiomBlockHeaderOracleTest` | 16 |
-| `Blake2b/KeccakHalo2VerifierTest` | 8 |
+| `Blake2bHalo2VerifierTest` | 7 |
+| `KeccakHalo2VerifierTest` | 1 |
 | `Halo2PoseidonVerifierTest` | 7 |
-| `FuzzAckiNackiBridgeTest` | 5 |
-| `FuzzGroth16DepositVerifierTest` | 3 |
-| `FuzzGroth16VerifierTest` | 4 |
+| `FuzzAckiNackiBridgeDepositTest` (deposit fuzz only) | 3 |
 | `FuzzHalo2VerifierTest` | 6 |
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
-| **Total Foundry** | **135** |
+| **Total Foundry** | **109** |
 
 **Rust tests** (excluded crates, run with `cargo test` per crate):
 
@@ -387,7 +386,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - `docs/bridge_verification.md` — invariant labels (DEP-#, **LH-#** v2, **BK-#** Phase 1.C placeholder, OR-#, AC-#, FORK-#, **CC-#** new in v2, ZK-#) + reproducible run recipe.
 - `docs/manual_verification_runbook.md` — hands-on review (Phase D bound proof, Phase F `verifyBlock` walk, Phase G Phase-1.C placeholder, Phase J ≥ 30 attack scenarios incl. CC-1..CC-7).
 - `docs/verifying_an_proof.md` — per-circuit (1A/1B/2) verification flow, V1–V5 stages.
-- `docs/verifying_eth_proof_on_an.md` — deposit-side flow (unchanged in v2; cross-refs updated).
+- `docs/verifying_eth_proof_on_an.md` — deposit-side flow. **Rewritten 2026-05-17 after Phase 4.3 demolition**: the ETH-side Groth16 path was retired and the verification is now described as a pure AN-side native Halo2 SHPLONK check via the future `VERHALO2SHPLONK` TVM opcode.
 - `docs/aave_integration.md` — AAVE yield integration (orthogonal to four-circuit surface).
 - `docs/layer_hashes_circuit_audit.md` — Phase 0 partner-circuit audit (still applies — chips reused by Circuit 1A/1B/2).
 - `docs/legacy/verifying_an_proof_v1.md` — the retired single-circuit walkthrough, kept for reproducibility of legacy proofs.

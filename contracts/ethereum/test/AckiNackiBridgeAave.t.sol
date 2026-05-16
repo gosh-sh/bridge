@@ -3,37 +3,14 @@ pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
 import "../src/AckiNackiBridge.sol";
-import "../src/IAckiNackiVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "./mocks/MockAave.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
-
-/// @notice Trivial always-passing verifier for AAVE behaviour tests.
-contract PermissiveVerifier is IAckiNackiVerifier {
-    uint256 private constant PUBLIC_INPUTS_COUNT = 6;
-
-    function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
-        external
-        pure
-        override
-        returns (bool, bytes32)
-    {
-        if (proof.length == 0 || publicInputs.length != PUBLIC_INPUTS_COUNT) {
-            return (false, bytes32(0));
-        }
-        return (true, bytes32(publicInputs[0]));
-    }
-
-    function getPublicInputsCount() external pure override returns (uint256) {
-        return PUBLIC_INPUTS_COUNT;
-    }
-}
 
 /// @title AckiNackiBridgeAaveTest
 /// @notice Exercises the AAVE integration surface of AckiNackiBridge.
 contract AckiNackiBridgeAaveTest is Test {
     AckiNackiBridge internal bridge;
-    PermissiveVerifier internal verifier;
     MockBlockHeaderOracle internal oracle;
 
     MockAWETH internal aWETH;
@@ -52,7 +29,6 @@ contract AckiNackiBridgeAaveTest is Test {
     event AaveEnabledSet(bool enabled);
 
     function setUp() public {
-        verifier = new PermissiveVerifier();
         oracle = new MockBlockHeaderOracle();
 
         aWETH = new MockAWETH();
@@ -60,7 +36,6 @@ contract AckiNackiBridgeAaveTest is Test {
         gateway = new MockWETHGateway(address(pool), address(aWETH));
 
         bridge = new AckiNackiBridge(
-            address(verifier),
             address(oracle),
             address(pool),
             address(gateway),
@@ -94,7 +69,6 @@ contract AckiNackiBridgeAaveTest is Test {
     function test_constructor_partialAaveWiringReverts() public {
         vm.expectRevert(AckiNackiBridge.InvalidAaveAddress.selector);
         new AckiNackiBridge(
-            address(verifier),
             address(oracle),
             address(pool),
             address(0),
@@ -105,7 +79,6 @@ contract AckiNackiBridgeAaveTest is Test {
 
     function test_constructor_noAaveIsLegal() public {
         AckiNackiBridge plain = new AckiNackiBridge(
-            address(verifier),
             address(oracle),
             address(0),
             address(0),
@@ -170,42 +143,6 @@ contract AckiNackiBridgeAaveTest is Test {
         bridge.deposit{ value: 10 ether }();
         vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
         bridge.supplyToAave(10 ether); // only 9 ether is supplyable after 10% reserve
-    }
-
-    // -----------------------------------------------------------------
-    // withdraw auto-pulls from AAVE
-    // -----------------------------------------------------------------
-
-    function test_withdraw_pullsShortfallFromAave() public {
-        // Deposit 10, supply 9 (1 ether liquid), then withdraw 5.
-        vm.prank(user1);
-        bridge.deposit{ value: 10 ether }();
-        bridge.supplyToAave(type(uint256).max);
-
-        uint256 withdrawAmount = 5 ether;
-        (uint256 blockNumber, bytes memory proof) = _makeWithdrawContext();
-
-        uint256 balBefore = user1.balance;
-        bridge.withdraw(payable(user1), withdrawAmount, 0, blockNumber, proof);
-
-        assertEq(user1.balance, balBefore + withdrawAmount, "recipient paid");
-        assertEq(bridge.treasuryBalance(), 5 ether, "treasury decremented");
-        // 5 ether paid: 1 liquid + 4 from AAVE → principal 5 left.
-        assertEq(bridge.suppliedPrincipal(), 5 ether, "principal drawn down");
-        assertEq(bridge.aWethBalance(), 5 ether, "aWETH down");
-    }
-
-    function test_withdraw_usesLiquidBufferFirst() public {
-        vm.prank(user1);
-        bridge.deposit{ value: 10 ether }();
-        bridge.supplyToAave(type(uint256).max); // 1 ether liquid, 9 in AAVE
-
-        (uint256 blockNumber, bytes memory proof) = _makeWithdrawContext();
-
-        // Withdraw 0.5 ether — fully served from liquid buffer, no AAVE call.
-        bridge.withdraw(payable(user1), 0.5 ether, 0, blockNumber, proof);
-        assertEq(bridge.suppliedPrincipal(), 9 ether, "no AAVE touch");
-        assertEq(address(bridge).balance, 0.5 ether, "buffer decremented");
     }
 
     // -----------------------------------------------------------------
@@ -324,19 +261,6 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(address(bridge).balance, 10.7 ether, "all ETH home");
     }
 
-    function test_emergencyWithdraw_allowsSubsequentUserWithdrawals() public {
-        vm.prank(user1);
-        bridge.deposit{ value: 10 ether }();
-        bridge.supplyToAave(type(uint256).max);
-        bridge.emergencyWithdrawAll();
-
-        // Withdrawals still work (all funds are in ETH now).
-        (uint256 blockNumber, bytes memory proof) = _makeWithdrawContext();
-        uint256 balBefore = user1.balance;
-        bridge.withdraw(payable(user1), 10 ether, 0, blockNumber, proof);
-        assertEq(user1.balance, balBefore + 10 ether);
-    }
-
     // -----------------------------------------------------------------
     // Admin setters
     // -----------------------------------------------------------------
@@ -380,18 +304,5 @@ contract AckiNackiBridgeAaveTest is Test {
 
         // At all times: ETH + aWETH >= treasuryBalance.
         assertGe(bridge.totalAssets(), bridge.treasuryBalance(), "solvent");
-    }
-
-    // -----------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------
-
-    function _makeWithdrawContext()
-        internal
-        view
-        returns (uint256 blockNumber, bytes memory proof)
-    {
-        blockNumber = block.number - 1;
-        proof = hex"deadbeef";
     }
 }

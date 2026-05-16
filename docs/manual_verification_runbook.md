@@ -6,6 +6,19 @@
 > Phase 4.2; their successors are `verifyBlock` (Phase F v2) and Phase 1.C placeholder
 > (Phase G v2). 8 new CC-# attack scenarios were added; 5 legacy LH-/BK-specific scenarios
 > were retired.
+>
+> **v2.1 update (2026-05-17, Phase 4.3).** The legacy refund-style `withdraw(...)` was
+> retired together with the ETH-side `Groth16DepositVerifier` chain. Effect on this runbook:
+>
+> - Phase E ("Anvil ETH→AN: Deposit/withdraw + 4 deliberate failures") is now Anvil-deposit-
+>   only (no `withdraw`); the withdrawal-side rejection scenarios moved to AN-side
+>   responsibilities (covered in `docs/verifying_eth_proof_on_an.md`).
+> - Phase J attack scenarios that targeted `withdraw()` are **historical** — J.1, J.2, J.4,
+>   J.5, J.6, J.21, J.22 are kept for documentation continuity but each is prefixed with
+>   "**[Retired — Phase 4.3]**". The functions they probed no longer exist; the underlying
+>   threat model is now AN-side (`VERHALO2SHPLONK` opcode + AN-side `TokenBridge`).
+> - Test counts: 135 → **109 across 12 suites**. Test-suite table updated below.
+> - The Sign-Off Checklist (Phase K) is updated to reflect the post-demolition surface.
 
 A hands-on, copy-pasteable plan for a single human reviewer to verify the bridge **works correctly and is attack-resistant** from the outside. No prior knowledge of the codebase is assumed.
 
@@ -20,9 +33,9 @@ This is the procedural twin of `docs/bridge_verification.md` (which states *what
 | 0 | Prerequisites | 5 min | Tooling check |
 | 1 | A — Static Inspection | 15 min | Read the contracts |
 | 2 | B — Build | 3 min | Compile clean |
-| 3 | C — Automated Tests | 1 min | 135/135 green |
+| 3 | C — Automated Tests | 1 min | 109/109 green |
 | 4 | D — Single-Block Bound Real-Proof | 1 min | Real Groth16 tuple verifies on-chain via `verifyBlock` |
-| 5 | E — Anvil ETH→AN | 30 min | Deposit/withdraw + 4 deliberate failures |
+| 5 | E — Anvil ETH→AN | 15 min | Deposit-only flow + 2 deliberate failures (withdraw retired in Phase 4.3) |
 | 6 | F — `verifyBlock` Walk-Through | 15 min | Walk the cross-circuit proof tuple + anchors |
 | 7 | G — BK Rotation (Phase 1.C, pending) | 5 min | Confirm `storedBkSetCommitment` is immutable today |
 | 8 | H — AAVE Yield | 20 min | Solvency + owner-can't-steal |
@@ -114,10 +127,9 @@ Open and skim each in this order. Look for the listed properties.
 Confirm by inspection:
 
 - [ ] `deposit()` only does `treasuryBalance += msg.value` and emits `Deposit(...)`. **No AAVE call on the user path.**
-- [ ] `withdraw(...)` reads `bytes32 blockHash = blockHeaderOracle.getBlockHash(blockNumber);` — caller does **not** supply the block hash.
-- [ ] In `withdraw`, the order is: `processedDeposits[depositId] = true;` → `treasuryBalance -= amount;` → external call (CEI).
-- [ ] `recipient.transfer(amount)` (2300 gas stipend) is the last action.
+- [ ] There is **no** `function withdraw(...)` and **no** `import "./IAckiNackiVerifier.sol";` — both retired in Phase 4.3 (2026-05-17). Confirm via `! grep -E "function withdraw\(|IAckiNackiVerifier" contracts/ethereum/src/AckiNackiBridge.sol`.
 - [ ] `MAX_DEPOSIT_AMOUNT = 100 ether`.
+- [ ] The constructor takes `(blockHeaderOracle, aavePool, wethGateway, aWETH, …)` — the legacy `_verifier` parameter is gone (Phase 4.3).
 
 #### `contracts/ethereum/src/AckiNackiBridge.sol::verifyBlock` (the AN→ETH path)
 
@@ -182,28 +194,26 @@ forge test 2>&1 | tail -20
 ✅ Expected (final two lines):
 
 ```
-Ran 15 test suites in ...: 135 tests passed, 0 failed, 0 skipped (135 total tests)
+Ran 12 test suites in ...: 109 tests passed, 0 failed, 0 skipped (109 total tests)
 ```
 
-Per-suite expectation (post-Phase 4.2; canonical breakdown maintained in `AGENTS.md`):
+Per-suite expectation (post-Phase 4.3; canonical breakdown maintained in `AGENTS.md`):
 
 | Suite | Tests |
 |---|---|
-| `AckiNackiBridgeAaveTest` | 23 |
-| `AckiNackiBridgeV2Test` | 14 |
+| `AckiNackiBridgeAaveTest` | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH) | 17 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop) | 6 |
 | `AxiomBlockHeaderOracleTest` | 16 |
-| `Blake2bHalo2VerifierTest` / `KeccakHalo2VerifierTest` | 8 |
+| `Blake2bHalo2VerifierTest` | 7 |
+| `KeccakHalo2VerifierTest` | 1 |
 | `Halo2PoseidonVerifierTest` | 7 |
-| `FuzzAckiNackiBridgeTest` | 5 |
-| `FuzzGroth16DepositVerifierTest` | 3 |
-| `FuzzGroth16VerifierTest` | 4 |
+| `FuzzAckiNackiBridgeDepositTest` | 3 |
 | `FuzzHalo2VerifierTest` | 6 |
 | `PrimaryVerifierTest` (Circuit 1A) | 8 |
 | `FallbackVerifierTest` (Circuit 1B) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2) | 10 |
-| **Total** | **135** |
+| **Total** | **109** |
 
 ```bash
 forge test --gas-report 2>&1 | grep -E "AckiNackiBridge|verifyBlock|AAVE" | head -10
@@ -213,7 +223,7 @@ Spot the headline numbers:
 
 - `AckiNackiBridge.deposit` ≈ 90k gas (no AAVE call).
 - `AckiNackiBridge.verifyBlock` ≈ 440k gas (two pairings + storage updates).
-- `Groth16DepositVerifier.verify` ≈ 287k gas (Groth16 pairing for the deposit path).
+- (Legacy `Groth16DepositVerifier.verify` ≈ 287k gas was retired in Phase 4.3; deposit-proof verification now happens natively on the AN side via `VERHALO2SHPLONK`.)
 
 ---
 
@@ -276,21 +286,18 @@ PRIVATE_KEY=$PK forge script script/DeployTestBridge.s.sol \
   --rpc-url $RPC --broadcast 2>&1 | tee /tmp/deploy.log
 ```
 
-Pick out the bridge address:
+Pick out the addresses:
 
 ```bash
 BRIDGE=$(grep "AckiNackiBridge deployed at:" /tmp/deploy.log | awk '{print $NF}')
 ORACLE=$(grep "MockBlockHeaderOracle deployed at:" /tmp/deploy.log | awk '{print $NF}')
-VERIFIER=$(grep "TestDepositVerifier deployed at:" /tmp/deploy.log | awk '{print $NF}')
-echo "Bridge:   $BRIDGE"
-echo "Oracle:   $ORACLE"
-echo "Verifier: $VERIFIER"
+echo "Bridge: $BRIDGE"
+echo "Oracle: $ORACLE"
 ```
 
-Sanity-check it's wired:
+Sanity-check it's wired (legacy `verifier()` getter is gone — Phase 4.3):
 
 ```bash
-cast call $BRIDGE "verifier()(address)"            # → $VERIFIER
 cast call $BRIDGE "blockHeaderOracle()(address)"   # → $ORACLE
 cast call $BRIDGE "treasuryBalance()(uint256)"     # → 0
 cast call $BRIDGE "depositCounter()(uint256)"      # → 0
@@ -319,96 +326,28 @@ cast logs --address $BRIDGE --rpc-url $RPC | head -20
 
 You should see a log with topic `Deposit(uint256,address,uint256,uint256)` and the indexed `depositId=0`, `sender=$ME`.
 
-### E.4 Make a successful withdrawal
-
-The test verifier `TestDepositVerifier` accepts any non-empty proof with the right format, so we can drive `withdraw` end-to-end.
+### E.4 Try a zero-value deposit — must fail
 
 ```bash
-# Get a recent block hash — required input for the proof
-BLOCKNUM=$(cast block-number --rpc-url $RPC)
-BLOCKNUM=$((BLOCKNUM - 1))   # use a confirmed block
-echo "Using block: $BLOCKNUM"
-
-# A non-empty dummy proof — TestDepositVerifier accepts this
-PROOF=0xdeadbeef
-
-# Withdraw
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  $ME 1ether 0 $BLOCKNUM $PROOF \
-  --rpc-url $RPC --private-key $PK
+cast send $BRIDGE "deposit()" --value 0 --rpc-url $RPC --private-key $PK
 ```
 
-✅ Expected: transaction succeeds. State after:
+✅ Expected: revert with `InvalidAmount()` selector. Confirms DEP-2 (amount range check).
+
+### E.5 Try an over-cap deposit — must fail
 
 ```bash
-cast call $BRIDGE "treasuryBalance()(uint256)"          # → 0
-cast call $BRIDGE "isDepositProcessed(uint256)(bool)" 0 # → true
-cast balance $BRIDGE                                    # → 0
+cast send $BRIDGE "deposit()" --value 101ether --rpc-url $RPC --private-key $PK
 ```
 
-### E.5 Try a double-spend — must fail
-
-```bash
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  $ME 1ether 0 $BLOCKNUM $PROOF \
-  --rpc-url $RPC --private-key $PK
-```
-
-✅ Expected:
-
-```
-Error: ... 0xa1ff8b3b   (selector for DepositAlreadyProcessed())
-```
-
-This is **DEP-3** (the nullifier check) firing exactly as designed.
-
-### E.6 Try withdrawal to zero address — must fail
-
-First refund:
-
-```bash
-cast send $BRIDGE "deposit()" --value 1ether --rpc-url $RPC --private-key $PK
-```
-
-Then attempt:
-
-```bash
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  0x0000000000000000000000000000000000000000 1ether 1 $BLOCKNUM $PROOF \
-  --rpc-url $RPC --private-key $PK
-```
-
-✅ Expected: revert with selector `0x9c8d2cd2` (`InvalidRecipient()`).
-
-### E.7 Try empty proof — must fail
-
-```bash
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  $ME 1ether 1 $BLOCKNUM 0x \
-  --rpc-url $RPC --private-key $PK
-```
-
-✅ Expected: revert with `InvalidProof()` selector. The `TestDepositVerifier` rejects empty proofs.
-
-### E.8 Try future block — must fail
-
-```bash
-FUTURE=$((BLOCKNUM + 1000000))
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  $ME 1ether 1 $FUTURE $PROOF \
-  --rpc-url $RPC --private-key $PK
-```
-
-✅ Expected: revert. The mock oracle returns `0` for unknown blocks, and the bridge's `if (blockHash == bytes32(0)) revert InvalidBlockHash()` catches it.
+✅ Expected: revert with `InvalidAmount()` selector. Confirms the upper bound `MAX_DEPOSIT_AMOUNT = 100 ether`.
 
 **Phase E checkpoint** — at this point you have empirically verified:
 
-- Deposits emit events and update treasury.
-- Withdrawals require a non-empty proof and a known block hash.
-- Double-spends are rejected.
-- Zero-recipient is rejected.
-- Empty proofs are rejected.
-- Future blocks are rejected.
+- Deposits emit events and update treasury accounting (DEP-1, DEP-3).
+- Zero-value and over-cap deposits are rejected (DEP-2).
+
+> **Retired in Phase 4.3 (2026-05-17)**: the legacy `withdraw(recipient, amount, depositId, blockNumber, proof)` cast probes (former E.4–E.8), the `isDepositProcessed(...)` view, `TestDepositVerifier` deployment, and the `verifier()` getter are no longer applicable — the legacy refund-style withdrawal mechanism was removed. The equivalent acceptance / rejection scenarios moved to the AN-side `TokenBridge.finalizeDeposit(...)` path, exercised via `tvm-sdk` tests once `VERHALO2SHPLONK` ships (see `docs/verifying_eth_proof_on_an.md` §2).
 
 ---
 
@@ -661,132 +600,85 @@ cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
 
 ✅ Expected: second call reverts with selector `0xa1ff8b3b` (`DepositAlreadyProcessed()`).
 
-**Why it fails**: `processedDeposits[depositId] = true;` is set on the first successful call before the ETH transfer.
+**[Retired — Phase 4.3]** The `processedDeposits[depositId]` nullifier and the entire withdrawal-side double-spend protection moved to AN-side `TokenBridge.finalizeDeposit(...)`. The Halo2 deposit-prover circuit is unchanged; only the consumer side is gone on Ethereum. See `docs/verifying_eth_proof_on_an.md` §2 V5 for the AN-side nullifier responsibility.
 
 #### J.2 Reuse a proof for a different `depositId`
 
-Attacker objective: re-purpose a valid proof to drain a different deposit.
-
-```bash
-# Make a second deposit
-cast send $BRIDGE "deposit()" --value 1ether --rpc-url $RPC --private-key $PK
-# Try to withdraw deposit 1 using a proof crafted for deposit 0
-# (with TestDepositVerifier, the proof must "match" — it just checks format,
-# but a real Groth16 verifier ties depositId to the proof.)
-```
-
-For the *real* Groth16 verifier, the binding is enforced cryptographically. To see it:
-
-```bash
-cd contracts/ethereum
-forge test --match-test testFuzz_RandomProofAndInputsReject -vv 2>&1 | tail -5
-```
-
-✅ Expected: 256 random combinations of (proof, inputs) all reject. Cryptographic binding holds.
+**[Retired — Phase 4.3]** With the legacy ETH-side `Groth16DepositVerifier` removed, this attack now applies to the AN-side native verifier (`VERHALO2SHPLONK`). The cryptographic binding is the same — `depositId` is a public input of the Halo2 circuit, and the verifier rejects any proof whose witnessed `depositId` doesn't match. Coverage moves to `tvm-sdk` opcode tests + AN-side `TokenBridge` tests once those land.
 
 #### J.3 Submit a proof for a **different bridge** to this bridge
 
-Attacker objective: take a valid proof from bridge B and submit it to bridge A.
-
-The bridge writes `publicInputs[3] = uint256(uint160(address(this)));` — its own address. The Groth16 verifier checks this against the proof's witnessed contract. So a proof made for bridge B has `contractAddress = B`, and bridge A constructs `publicInputs[3] = A`, causing the pairing to fail.
-
-```bash
-# Conceptual: see the public input layout in source
-grep -A8 "publicInputs\[3\]" contracts/ethereum/src/AckiNackiBridge.sol
-```
+**[Reframed — Phase 4.3]** Same threat model, now AN-side. `TokenBridge.finalizeDeposit` will enforce `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR, "wrong bridge contract");`. The Halo2 circuit's `contractAddress` public input is the binding hook. See `docs/verifying_eth_proof_on_an.md` DEP-N-2.
 
 #### J.4 Bypass the proof entirely with a malformed length
 
+**[Retired — Phase 4.3]** for the ETH-side deposit path. The remaining ETH-side fuzz tests on length-rejection live in `FuzzHalo2VerifierTest` (for the bare Halo2 Yul verifier) and in the per-circuit AN→ETH adapter tests (`PrimaryVerifierTest::testVerifyInvalidProofLength`, etc.):
+
 ```bash
-forge test --match-test testFuzz_WrongProofLengthRejects -vv 2>&1 | tail -5
 forge test --match-test "testVerifyInvalidProofLength" -vv 2>&1 | tail -10
 ```
 
-✅ Expected: every length other than 256 (deposit: 288 = 256 + 32 commit) is rejected.
-
 #### J.5 Submit a single-byte-mutated Groth16 proof
 
+Only the AN→ETH-side fuzz tests apply now:
+
 ```bash
-forge test --match-test "testE2E_L5_corruptedProof|testFuzz_SingleByteMutationReverts|test_CorruptedProofPointReverts|test_CorruptedProofScalarReverts" -vv 2>&1 | tail -15
+forge test --match-test "testE2E_L5_corruptedProof|test_CorruptedProofPointReverts|test_CorruptedProofScalarReverts" -vv 2>&1 | tail -15
 ```
 
-✅ Expected: every mutation rejected. The pairing equation is rigid — no nearby points work.
+✅ Expected: every mutation rejected. The pairing equation is rigid — no nearby points work. (Deposit-side mutation tests are now an AN-side responsibility.)
 
-### Attack Group 2 — Recipient / Identity Binding (DEP-2, DEP-5)
+### Attack Group 2 — Recipient / Identity Binding (DEP-2 / DEP-N-#)
 
 #### J.6 Withdraw to a different address than the original sender
 
-Attacker objective: deposit from account A, withdraw to attacker-controlled account B without a valid proof binding.
-
-The bridge passes `publicInputs[1] = uint256(uint160(address(recipient)));` — the recipient appears as a public input. The deposit-prover circuit constrains `sender == recipient` (i.e. only the original depositor can withdraw to themselves, via a fresh recipient address they sign for). With the *real* Groth16 verifier:
-
-```bash
-forge test --match-test testFuzz_RandomProofAndInputsReject -vv 2>&1 | tail -5
-```
-
-Random recipient + valid-format proof → reject.
+**[Retired — Phase 4.3]** The Ethereum-side `withdraw(recipient, ...)` function no longer exists. The "sender == recipient" enforcement now lives in the Halo2 deposit circuit's public-input binding consumed on the AN side; the AN-side `TokenBridge.finalizeDeposit` will mint to the address committed by `publicInputs[1]`, so impersonation requires forging the Halo2 proof itself.
 
 #### J.7 Withdraw to `address(0)`
 
-```bash
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  0x0000000000000000000000000000000000000000 1ether 1 $BLOCKNUM 0xdeadbeef \
-  --rpc-url $RPC --private-key $PK
-```
-
-✅ Expected: revert with selector `0x9c8d2cd2` (`InvalidRecipient()`).
-
-This is checked **before** the proof verification, so it's a cheap fail.
+**[Retired — Phase 4.3]** No ETH-side `withdraw()` path exists. The AN-side mint target is derived from the Halo2 public input — `address(0)` would require the Halo2 prover to have witnessed it, which fails the in-circuit constraints.
 
 ### Attack Group 3 — Block Hash Manipulation (DEP-6, OR-1, OR-2, OR-3, FORK-1)
 
-#### J.8 Provide a forged block hash via the user input
+> **Note (Phase 4.3)**: The on-chain block-hash oracle is currently unused by the public surface — the only consumer used to be the legacy `withdraw()`. Attack scenarios J.8–J.11 remain valid as a *standalone* property check of `AxiomBlockHeaderOracle.sol` (and as a forward-compatibility check for the future burn-proof flow), but they no longer guard any user-facing entry point on the present `AckiNackiBridge.sol`.
 
-There is **no API** for the user to supply a block hash. The only input is `blockNumber`; the hash is read from the oracle. To verify:
+#### J.8 Provide a forged block hash via the user input (oracle property)
+
+There is **no API** for the user to supply a block hash to the oracle. The only input is `blockNumber`; the hash is computed internally. To verify:
 
 ```bash
-grep -n "blockHeaderOracle.getBlockHash\|blockHash =" contracts/ethereum/src/AckiNackiBridge.sol
+grep -n "function getBlockHash" contracts/ethereum/src/AxiomBlockHeaderOracle.sol
 ```
 
-✅ Expected: exactly one assignment, `bytes32 blockHash = blockHeaderOracle.getBlockHash(blockNumber);`. No path through which the caller's bytes touch the public inputs.
+✅ Expected: a `view` function whose only parameter is `uint256 blockNumber`. No caller bytes reach the returned hash.
 
 #### J.9 Reference a future block
 
 ```bash
-FUTURE=$((BLOCKNUM + 1000000))
-cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
-  $ME 1ether 1 $FUTURE 0xdeadbeef --rpc-url $RPC --private-key $PK
+forge test --match-test test_GetBlockHash_FutureBlock -vv 2>&1 | tail -5
 ```
 
-✅ Expected: revert (oracle returns `0`, bridge reverts with `InvalidBlockHash()`).
+✅ Expected: oracle reverts with `BlockNotYetMined()` for any block whose number is ≥ current.
 
 #### J.10 Reference a historical block (>256 ago) without a witness
 
-The Axiom-backed oracle reverts on `getBlockHash(n)` for any `n` older than 256:
+The Axiom-backed oracle reverts on `getBlockHash(n)` for any `n` older than 256 without an attached witness:
 
 ```bash
 forge test --match-test test_GetBlockHash_HistoricalBlock -vv 2>&1 | tail -5
 ```
 
-✅ Expected: pass — confirms the historical path requires a witness.
-
-This means relayers must submit withdrawal proofs within ~51 minutes of the deposit (256 × 12 s). Older proofs require an Axiom witness path, which currently is not wired into `withdraw()` (deliberate, to keep the trust model minimal).
+✅ Expected: pass — confirms the historical path requires an Axiom witness. (Until the burn-proof flow wires it in, this is a property of the oracle in isolation.)
 
 #### J.11 Substitute a fork-side block hash
 
-If an attacker forks Ethereum, builds a fake deposit on the fork, and tries to submit a proof to the mainnet bridge:
-
-- The mainnet `AxiomBlockHeaderOracle.getBlockHash` returns the **mainnet** hash for that block number.
-- The attacker's fork-side proof embeds the fork hash.
-- The two differ, the pairing fails.
-
-This is FORK-3 by construction. To verify the property:
+If an attacker forks Ethereum, the mainnet `AxiomBlockHeaderOracle.getBlockHash` returns the **mainnet** hash for that block number — the on-chain bytecode only sees the chain it executes on. Forks therefore cannot inject a fork-side hash into the oracle's output.
 
 ```bash
-grep -A3 "blockHash = blockHeaderOracle" contracts/ethereum/src/AckiNackiBridge.sol
+grep -A3 "function getBlockHash" contracts/ethereum/src/AxiomBlockHeaderOracle.sol
 ```
 
-The hash is read from the oracle, not from caller input. There is no way for a fork-only block hash to enter the public input vector on the mainnet bridge.
+This is FORK-3 by construction. The hash is computed from EVM state, not from caller input.
 
 ### Attack Group 4 — `verifyBlock` State Injection (LH-1..LH-9, CC-1..CC-7, FORK-1..FORK-4)
 
@@ -909,9 +801,7 @@ The Circuit 3 verifier will check that the *current* committee (committed to `st
 
 #### J.21 Reenter `withdraw` from the recipient
 
-Attacker objective: the recipient is a smart contract that calls `withdraw` again during the ETH transfer, draining the treasury.
-
-`recipient.transfer(amount)` uses the EVM `transfer` opcode with a 2300-gas stipend — not enough to make a `call` back into the bridge. As an added defence, `withdraw()` is `nonReentrant`.
+**[Retired — Phase 4.3]** The `withdraw(...)` function and its `recipient.transfer(amount)` call site are gone. The defence used to be a 2300-gas stipend + `nonReentrant` modifier on `withdraw()`. The remaining mutating functions on `AckiNackiBridge` (`deposit`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `verifyBlock`) all retain `nonReentrant`; only `verifyBlock` performs external calls (the two `view`-style Groth16 verifier calls), which cannot reenter even if the verifier is malicious. See J.22.
 
 To see the protection in source:
 
@@ -1051,19 +941,19 @@ cast balance $BRIDGE                              # increased by 0.1 ether
 
 ### Attack Summary Table
 
-| # | Attack | Expected revert / property | Test |
+| # | Attack | Expected revert / property | Test / source |
 |---|---|---|---|
-| J.1 | Replay withdraw | `DepositAlreadyProcessed` | `testWithdrawalDoubleSpend` |
-| J.2 | Reuse proof for another deposit ID | Cryptographic rejection | `testFuzz_RandomProofAndInputsReject` |
-| J.3 | Cross-contract proof | Pairing fails (contractAddress in PI) | source review |
-| J.4 | Wrong proof length | False / `InvalidProofLength` | `testFuzz_WrongProofLengthRejects` |
-| J.5 | Single-byte-mutated proof | Pairing fails | `testE2E_L5_corruptedProof` |
-| J.6 | Different recipient | Pairing fails | `testFuzz_RandomProofAndInputsReject` |
-| J.7 | Recipient = address(0) | `InvalidRecipient` | `testWithdrawalInvalidRecipient` |
-| J.8 | Forged block hash via user input | impossible (no API) | source review |
-| J.9 | Future block | `InvalidBlockHash` (oracle returns 0) | `test_GetBlockHash_FutureBlock` |
-| J.10 | Historical block without witness | revert | `test_GetBlockHash_HistoricalBlock` |
-| J.11 | Fork block hash | Pairing fails (oracle returns canonical) | source review |
+| J.1 | Replay withdraw | **[Retired Phase 4.3]** AN-side nullifier in `TokenBridge.finalizeDeposit` | `tvm-sdk` opcode tests (once `VERHALO2SHPLONK` lands) |
+| J.2 | Reuse proof for another deposit ID | **[Retired Phase 4.3]** AN-side cryptographic rejection | same |
+| J.3 | Cross-contract proof | **[Reframed Phase 4.3]** AN-side `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR)` | same |
+| J.4 | Wrong proof length | **[Retired Phase 4.3]** for deposit; AN→ETH adapters still enforce 256 B | `PrimaryVerifierTest::testVerifyInvalidProofLength` |
+| J.5 | Single-byte-mutated proof | Pairing fails (AN→ETH only) | `testE2E_L5_corruptedProof` |
+| J.6 | Different recipient | **[Retired Phase 4.3]** — no ETH-side `withdraw()` | — |
+| J.7 | Recipient = address(0) | **[Retired Phase 4.3]** — no ETH-side `withdraw()` | — |
+| J.8 | Forged block hash via user input (oracle property) | impossible (no API) | source review of `AxiomBlockHeaderOracle.sol` |
+| J.9 | Future block (oracle property) | `BlockNotYetMined` | `test_GetBlockHash_FutureBlock` |
+| J.10 | Historical block without witness (oracle property) | revert | `test_GetBlockHash_HistoricalBlock` |
+| J.11 | Fork block hash (oracle property) | Oracle returns canonical hash | source review |
 | J.12 | Skip chain anchor | `PrevAnchorMismatch` | `testRevertOnPrevAnchorMismatch` |
 | J.13 | Stale BK commitment | `BkSetCommitmentMismatch` (cheap) + pairing fails | `testRevertOnBkSetCommitmentMismatch` |
 | J.14 | Wrong `numLayers` | `InvalidNumLayers` | `testRevertOnZeroNumLayers` / `testRevertOnNumLayersAboveMax` |
@@ -1073,20 +963,20 @@ cast balance $BRIDGE                              # increased by 0.1 ether
 | J.18 | Swap Primary↔Fallback (LH-1) | gnark `false` ⇒ `AttestationProofRejected` | per-route mismatch test |
 | J.19 | Disable verifier slot post-deploy | impossible (immutable) | source review |
 | J.20 | Forge BK-set rotation (Phase 1.C, pending) | no surface; redeploy required | source review (no `rotateBkSet`) |
-| J.21 | Reenter via recipient | 2300 gas stipend + `nonReentrant` | source review |
+| J.21 | Reenter via recipient | **[Retired Phase 4.3]** — no `withdraw()` callsite | — |
 | J.22 | Reenter via AAVE | `nonReentrant` everywhere | source review |
 | J.23 | Non-owner privileged calls | `NotOwner` (every function) | per-function tests |
 | J.24 | Old owner after transfer | `NotOwner` | `test_transferOwnership_flowsAllAuthorities` |
-| J.25 | Input ≥ field modulus | Verifier rejects | `testFuzz_InputsAboveFieldModulusRevert` |
-| J.26 | Wrong input count | False / revert | `testFuzz_WrongInputCountRejects` |
-| J.27 | Random calldata | False / revert | fuzz suites |
-| J.28 | Deposit > 100 ETH | `DepositTooLarge` | `testDepositTooLarge` |
+| J.25 | Input ≥ field modulus | Verifier rejects | per-adapter fuzz |
+| J.26 | Wrong input count | False / revert | per-adapter tests |
+| J.27 | Random calldata | False / revert | `FuzzHalo2VerifierTest::*` |
+| J.28 | Deposit > 100 ETH | `InvalidAmount` | `testFuzz_DepositInvalidAmountReverts` |
 | J.29 | Owner sets reserve = 100% | `ReserveBpsTooHigh` (capped at 50%) | `test_setLiquidReserveBps_capped` |
 | J.30 | Drain via withdrawFromAave | No path; only rebalances | source review |
 | J.31 | Drain via harvestYield overdraw | `NoYield` | `test_harvestYield_amountExceedsYieldReverts` |
 | J.32 | Direct ETH transfer | Phantom liquidity, no claim | manual |
 
-✅ All 30+ attack vectors blocked at HEAD. (J.20a is forward-looking for Phase 1.C.) If any of these unexpectedly succeeds, **stop and escalate**.
+✅ All ETH-side attack vectors blocked at HEAD. (J.1, J.2, J.3 enforcement moved to the AN side; J.6, J.7, J.21 are retired together with `withdraw()`. J.20a is forward-looking for Phase 1.C.) If any of the live ones unexpectedly succeeds, **stop and escalate**.
 
 ### Where attacks could theoretically still work
 
@@ -1096,7 +986,8 @@ To be honest about residual risk:
 - **>2/3 attack on Acki Nacki BK set**: would let attackers forge BLS-signed Primary attestations. Out of scope for any chain-to-chain bridge — see FORK-2 / K-9 in `audit_trail_v2.md`.
 - **>1/2 attack on Acki Nacki BK set with Fallback path enabled**: a smaller adversarial threshold (1/2+1) suffices to forge Fallback-finalized blocks. The bridge accepts Fallback-attested updates by design (the AN protocol does too).
 - **G2 subgroup gap (audit FORK-2 / BLS-1 / K-6)**: open audit finding; attacker would need a non-trivial G2 element in the wrong subgroup with a forged-looking signature. **Carries over to v2's Circuit 1A and 1B unchanged.** Launch blocker for mainnet; testnet OK.
-- **gnark wrapper stub `Define` (deposit side only)**: the deposit wrapper currently produces a Groth16 proof committing to the public inputs without verifying the underlying Halo2 proof inside Groth16. The v2 AN→ETH wrappers (1A/1B/2) inherit the same shape — covered by `audit_trail_v2.md` K-4. Mitigation: the prover never publishes `pk_groth16` (kept in a single trusted prover service). Final mitigation will be full in-circuit Halo2 verification (`integration_plan.md` §6.5).
+- **gnark wrapper stub `Define` (AN→ETH side)**: R15 — the per-circuit AN→ETH wrappers (1A/1B/2) currently produce Groth16 proofs that commit to the public inputs without verifying the underlying Halo2 proof inside Groth16. The deposit-side wrapper that used to share this finding was **retired in Phase 4.3 together with the rest of the ETH-side deposit-verifier chain**, so this is now a one-sided AN→ETH-only concern, tracked under `an_partner_integration_plan.md` Phase 8.
+- **`VERHALO2SHPLONK` opcode soundness (new in Phase 4.3)**: the AN-side deposit verification depends on the correctness of the new TVM opcode in `tvm-sdk`. The opcode is in development; CI coverage + a partner-side review are required before mainnet. Tracked under Decision Log 2026-05-17 + Phase 8.
 - **Trusted setup**: KZG SRS and per-circuit gnark Groth16 setup ceremonies are points of trust. Verify the SRS checksums match a recognised ceremony before deployment.
 - **No on-chain BK-set rotation at HEAD**: a stale committee can attack until the bridge is redeployed with a fresh `genesisBkSetCommitment`. Phase 1.C eliminates this gap.
 
@@ -1116,18 +1007,16 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### Tests
 
-- [ ] `forge test` reports **135 passed; 0 failed; 0 skipped** across **15 suites**.
+- [ ] `forge test` reports **109 passed; 0 failed; 0 skipped** across **12 suites**.
 - [ ] `AckiNackiBridgeVerifyBlockTest` (17) + `AckiNackiBridgeRelayerLoopTest` (6) pass — `verifyBlock` happy paths and 6 sequencing scenarios.
-- [ ] `AckiNackiBridgeAaveTest` (23 tests) passes — including the fuzz solvency invariant.
+- [ ] `AckiNackiBridgeAaveTest` (20 tests) passes — including the fuzz solvency invariant.
 
 ### Property checks (Phase E hands-on)
 
 - [ ] Deposit succeeds, increments `depositCounter`, increases `treasuryBalance`, emits `Deposit`.
-- [ ] Withdraw with valid (test) proof succeeds and decrements treasury.
-- [ ] Double-spend (same `depositId`) reverts with `DepositAlreadyProcessed`.
-- [ ] Withdrawal to `address(0)` reverts with `InvalidRecipient`.
-- [ ] Empty proof reverts with `InvalidProof`.
-- [ ] Future block reverts.
+- [ ] Zero-value deposit reverts with `InvalidAmount`.
+- [ ] Over-cap deposit (> 100 ETH) reverts with `InvalidAmount`.
+- [ ] `! grep -E "function withdraw\(|IAckiNackiVerifier" contracts/ethereum/src/AckiNackiBridge.sol` is clean (no legacy surface).
 
 ### `verifyBlock` (Phase F hands-on)
 
@@ -1162,18 +1051,18 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### Attacks blocked (Phase J)
 
-All ≥ 30 attack scenarios in Phase J reach their expected revert / rejection. Group totals:
+All live ETH-side attack scenarios in Phase J reach their expected revert / rejection. Phase 4.3 moved some scenarios to AN-side responsibilities; group totals at HEAD:
 
-- [ ] **Group 1 (Proof forgery, J.1–J.5)** — 5 attacks blocked.
-- [ ] **Group 2 (Identity binding, J.6–J.7)** — 2 attacks blocked.
-- [ ] **Group 3 (Block hash, J.8–J.11)** — 4 attacks blocked.
+- [ ] **Group 1 (Proof forgery, J.1–J.5)** — J.1/J.2/J.3 retired to AN side; J.4 retired on deposit, live on AN→ETH adapters; J.5 live on AN→ETH.
+- [ ] **Group 2 (Identity binding, J.6–J.7)** — both retired in Phase 4.3 (no ETH-side `withdraw()`).
+- [ ] **Group 3 (Block hash, J.8–J.11)** — oracle properties only; no live consumer on ETH side.
 - [ ] **Group 4 (`verifyBlock` injection, J.12–J.19)** — 8 attacks blocked (LH-#, CC-#, FORK-#).
 - [ ] **Group 5 (BK rotation abuse, J.20)** — 1 attack blocked at HEAD; J.20a deferred to Phase 1.C.
-- [ ] **Group 6 (Reentrancy, J.21–J.22)** — 2 attacks blocked.
+- [ ] **Group 6 (Reentrancy, J.21–J.22)** — J.21 retired (no `withdraw()`); J.22 live (`nonReentrant` on all mutating functions).
 - [ ] **Group 7 (Access control, J.23–J.24)** — every owner-only function rejects non-owners.
-- [ ] **Group 8 (Field/encoding, J.25–J.27)** — 3 fuzz suites pass.
+- [ ] **Group 8 (Field/encoding, J.25–J.27)** — fuzz suites pass.
 - [ ] **Group 9 (Economic/DoS, J.28–J.32)** — 5 attacks blocked.
-- [ ] Residual risks (51% on L1, >2/3 on AN, G2 subgroup, gnark stub, trusted setup, no-rotation gap) acknowledged and tracked in `docs/audit_trail_v2.md` §2 and `docs/an_partner_integration_plan.md` §5.
+- [ ] Residual risks (51% on L1, >2/3 on AN, G2 subgroup, gnark stub on AN→ETH side, `VERHALO2SHPLONK` opcode soundness, trusted setup, no-rotation gap) acknowledged and tracked in `docs/audit_trail_v2.md` §2 and `docs/an_partner_integration_plan.md` §5.
 
 ### Pre-deployment (only if shipping)
 
@@ -1191,7 +1080,6 @@ All ≥ 30 attack scenarios in Phase J reach their expected revert / rejection. 
 | `forge build` complains about `node_modules/poseidon-solidity` | `npm install` not run | `cd contracts/ethereum && npm install` |
 | `testHappyPathPrimary` fails to load bound proof JSON | bound-proof artifacts deleted or never generated | Run `cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release` (~10-15 min). The Foundry test reads `crates/bridge-prover-orchestrator/exports/bound_scenario.json` + `groth16_proof_*.hex`. |
 | `forge test` 1 fewer test than expected | filter / rename / removed test | Run `forge test --list` and diff against the table in §3 |
-| Anvil session: `withdraw` reverts unexpectedly | `BLOCKNUM` is the current block (no hash yet) — use `block.number - 1` | re-export `BLOCKNUM=$((... - 1))` |
 | Anvil session: `cast send` complains about gas | account out of ETH | use a different prefunded account |
 | Fork test fails with "no upstream" or 401 | bad RPC URL | use a paid Alchemy / Infura key; public RPCs sometimes block historical reads |
 
@@ -1201,12 +1089,11 @@ All ≥ 30 attack scenarios in Phase J reach their expected revert / rejection. 
 
 If everything in §11 ticks:
 
-- The bridge is correct in the sense exercised by **135 unit/fuzz/E2E tests**, a **complete manual walk-through**, and **≥ 30 deliberate attack scenarios** that all fail in the expected way.
+- The bridge is correct in the sense exercised by **109 unit/fuzz/E2E tests** across 12 suites (post-Phase 4.3), a **complete manual walk-through**, and the ≥ 30 deliberate attack scenarios in Phase J (with the Phase 4.3 reclassifications above) all failing in the expected way.
 - You have personally observed:
   - A real deposit event being emitted.
-  - A real Groth16 deposit proof being verified on-chain.
   - A real bound Groth16 tuple (Circuit 1A + Circuit 2) being verified through `verifyBlock`.
-  - A double-spend being rejected.
+  - Zero-value and over-cap deposits being rejected.
   - The chain anchor (`PrevAnchorMismatch`) and strict monotonicity (`BlockSeqNoNotMonotonic`) preventing state injection.
   - The cross-circuit binding via `block_id` and `bk_set_poseidon` (CC-1, CC-2) holding by construction.
   - The owner being unable to steal principal.

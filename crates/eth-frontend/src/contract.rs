@@ -6,17 +6,19 @@ use ethers::prelude::*;
 
 use crate::error::{BridgeError, Result};
 
-// ABI for the AckiNackiBridge contract (matches actual deployed contract)
+// ABI subset for the AckiNackiBridge contract. Phase 4.3 (Decision Log
+// 2026-05-17) retired the legacy refund-style `withdraw()` plus its
+// `processedDeposits`/`Withdrawal` surface; this client now exposes the
+// deposit + read-only views only. The relayer (`crates/bridge-relayer-daemon`)
+// holds the AN→ETH `verifyBlock` ABI; a future burn-proof flow will reintroduce
+// a real cross-chain withdrawal once the corresponding circuit lands.
 abigen!(
     AckiNackiBridge,
     r#"[
         function deposit() external payable
-        function withdraw(address payable recipient, uint256 amount, uint256 depositId, bytes calldata proof) external
         function treasuryBalance() external view returns (uint256)
         function depositCounter() external view returns (uint256)
-        function processedDeposits(uint256 depositId) external view returns (bool)
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp)
-        event Withdrawal(uint256 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp)
     ]"#
 );
 
@@ -39,31 +41,6 @@ impl<M: Middleware> EthereumContract<M> {
     /// Make a deposit to the bridge
     pub async fn deposit(&self, amount: U256) -> Result<TransactionReceipt> {
         let tx = self.contract.deposit().value(amount);
-
-        let pending_tx = tx
-            .send()
-            .await
-            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
-
-        let receipt = pending_tx
-            .await
-            .map_err(|e| BridgeError::ContractError(e.to_string()))?
-            .ok_or_else(|| BridgeError::ContractError("No receipt".to_string()))?;
-
-        Ok(receipt)
-    }
-
-    /// Withdraw from the bridge using ZK proof
-    pub async fn withdraw(
-        &self,
-        recipient: Address,
-        amount: U256,
-        deposit_id: U256,
-        proof: Vec<u8>,
-    ) -> Result<TransactionReceipt> {
-        let tx = self
-            .contract
-            .withdraw(recipient, amount, deposit_id, proof.into());
 
         let pending_tx = tx
             .send()
@@ -102,15 +79,4 @@ impl<M: Middleware> EthereumContract<M> {
         Ok(counter)
     }
 
-    /// Check if a deposit has been processed
-    pub async fn is_deposit_processed(&self, deposit_id: U256) -> Result<bool> {
-        let processed = self
-            .contract
-            .processed_deposits(deposit_id)
-            .call()
-            .await
-            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
-
-        Ok(processed)
-    }
 }

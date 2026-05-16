@@ -4,8 +4,18 @@
 > have been retargeted from the retired `LayerHashBridge.sol` (deleted in Phase 4.2) to
 > `AckiNackiBridge.verifyBlock`. New §6.5 enumerates cross-circuit invariants (CC-#).
 > Read `docs/four_circuit_architecture.md` first for context.
+>
+> **v2.1 update (2026-05-17, Phase 4.3).** The DEP-# invariants (§4) have been rewritten:
+> the legacy refund-style `withdraw(...)` together with the ETH-side `Groth16DepositVerifier`
+> + `IAckiNackiVerifier` chain were retired (Decision Log 2026-05-17 in
+> `docs/an_partner_integration_plan.md`). Deposit-event verification now happens **on the
+> AN side** via the future `VERHALO2SHPLONK` TVM opcode. Until that opcode lands, deposit
+> verification runs off-chain at the AN-side relayer. Old DEP-3 / DEP-5 / DEP-6 (which talked
+> about double-spend nullifiers, recipient, oracle on the ETH side) are reframed in §4 as
+> AN-side responsibilities (DEP-N-# series), and the ETH-side rows are pruned to the surface
+> that actually still exists in `AckiNackiBridge.sol`.
 
-This article is the operational checklist for proving that the bridge is correct: every deposit on Ethereum maps to at most one withdrawal, every Acki Nacki block update reflects a real BLS-attested block whose `block_id` is bound across two ZK proofs, and no off-path actor can forge state. It complements two narrower documents:
+This article is the operational checklist for proving that the bridge is correct: every deposit on Ethereum maps to at most one credit on Acki Nacki, every Acki Nacki block update reflects a real BLS-attested block whose `block_id` is bound across two ZK proofs, and no off-path actor can forge state. It complements two narrower documents:
 
 - `aave_integration.md` — verifies the AAVE V3 yield bolt-on.
 - `layer_hashes_circuit_audit.md` — audits the partner's Halo2 circuits.
@@ -18,10 +28,10 @@ This doc is the **end-to-end view**. Every section follows the pattern: *what th
 
 **In scope** (everything the bridge contracts and ZK pipeline are responsible for):
 
-- ETH → AN: `AckiNackiBridge.deposit()` and `AckiNackiBridge.withdraw()`, including the deposit ZK proof and double-spend nullifier.
+- ETH → AN: `AckiNackiBridge.deposit()` (ETH side), the Halo2 deposit-prover proof (off-chain), and the future `VERHALO2SHPLONK`-based AN-side `TokenBridge.finalizeDeposit(...)` + nullifier. The legacy refund-style `withdraw(...)` was retired in Phase 4.3.
 - AN → ETH: `AckiNackiBridge.verifyBlock()` and the tuple of two cross-circuit-bound ZK proofs (Circuit 1A or 1B + Circuit 2).
 - BK-set commitment lifecycle: deferred to Phase 1.C (Circuit 3 / `bkSetUpdateProof`); the legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2**. Until Phase 1.C ships, `storedBkSetCommitment` only changes via redeployment.
-- Block-hash oracle (`AxiomBlockHeaderOracle` + the EVM `blockhash()` opcode) — used by the deposit-side `withdraw()`.
+- Block-hash oracle (`AxiomBlockHeaderOracle` + the EVM `blockhash()` opcode) — currently unused by the public surface; preserved for a future burn-proof / ETH-side withdrawal flow.
 - Cross-cutting properties: ZK verifier integrity, reentrancy, access control, fork resistance.
 - AAVE V3 integration: covered in detail in `docs/aave_integration.md`; this doc only summarises how it interacts with the rest.
 
@@ -38,14 +48,10 @@ This doc is the **end-to-end view**. Every section follows the pattern: *what th
 ```
             Ethereum                                          Acki Nacki
             ────────                                          ──────────
-deposit()  ─►  Deposit event  ─►  deposit-prover (Halo2)  ─►  AN side
-                                  ─► gnark wrapper (Groth16)
-                                  ─► cross-chain message
-                                  ─► claim minted on AN
-
-withdraw()  ◄─  ZK proof of past Deposit event              ◄─  AN burns/sends
-            (verified against blockHeaderOracle hash,
-             nullified by depositId)
+deposit()  ─►  Deposit event  ─►  deposit-prover (Halo2)  ─►  AN-side TokenBridge
+                                  ─► (no on-chain ETH-side ZK adapter)
+                                  ─► AN-side VERHALO2SHPLONK opcode (planned)
+                                  ─► tokens minted on AN, depositId nullified
 
 verifyBlock(finType, attestationProof, layerHashesProof,    ◄── AN consensus
             blockId, bkSetCommitment,                          (Primary ≥ 2/3
@@ -57,13 +63,16 @@ verifyBlock(finType, attestationProof, layerHashesProof,    ◄── AN consens
 
 verifyBkSetUpdate(...)                                       ◄── Phase 1.C, planned
         ◄── Circuit 3 proves (oldCommit, newCommit) hand-off    (Halo2 stub upstream)
+
+(Future, post-Phase 4.3) burn-based ETH-side withdrawal will be designed alongside a
+burn-proof circuit; the legacy v1 refund-style `withdraw(depositId, ...)` is gone.
 ```
 
 The single trust anchor is now:
 
-- `AckiNackiBridge.sol` — custodies user ETH (with optional AAVE yield), AND anchors Acki Nacki state via the `verifyBlock` surface. Phase 4.2 removed the legacy `LayerHashBridge.sol` and folded its responsibilities into this one contract.
+- `AckiNackiBridge.sol` — custodies user ETH (with optional AAVE yield), AND anchors Acki Nacki state via the `verifyBlock` surface. Phase 4.2 removed the legacy `LayerHashBridge.sol` and folded its responsibilities into this one contract. Phase 4.3 retired the legacy refund-style `withdraw()` and the associated ETH-side deposit-verifier chain.
 
-Plumbing: `Groth16DepositVerifier`, `PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier` (each calling its own `*Groth16VerifierGenerated.sol`), `AxiomBlockHeaderOracle`. All sit between `AckiNackiBridge` and the proof artifacts.
+Plumbing (current AN→ETH state): `PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier` (each calling its own `*Groth16VerifierGenerated.sol`). `AxiomBlockHeaderOracle` is in the tree but currently unused by the public surface. All AN→ETH adapters sit between `AckiNackiBridge` and the proof artefacts.
 
 ---
 
@@ -83,27 +92,43 @@ Run **L0–L3** for every PR. Run **L4–L5** for every deployment. Run **L6** c
 
 ---
 
-## 4. ETH → AN Deposit / Withdrawal
+## 4. ETH → AN Deposit (Phase 4.3 rewrite)
 
 ### 4.1 What must hold
+
+ETH-side (live in `AckiNackiBridge.sol`):
 
 | Property | Statement |
 |---|---|
 | **DEP-1** | Every successful `deposit()` emits a `Deposit(depositId, sender, amount, timestamp)` with a unique monotonic `depositId`. |
-| **DEP-2** | A successful `withdraw()` requires a Groth16 proof binding `(depositId, recipient, amount, bridgeAddr, blockHash)` to a real Deposit event in the receipt trie of an Ethereum block whose hash is canonical. |
-| **DEP-3** | `processedDeposits[depositId]` is set before the ETH transfer and is checked before processing — no `depositId` can be replayed. |
-| **DEP-4** | `treasuryBalance` is decremented before any external call (CEI). |
-| **DEP-5** | `recipient` cannot be `address(0)`. |
-| **DEP-6** | The `blockHash` used as the proof's public input is read from the oracle, never from caller input. |
+| **DEP-2** | `MAX_DEPOSIT_AMOUNT = 100 ether` is enforced; `msg.value` of zero reverts. |
+| **DEP-3** | `treasuryBalance` is incremented by exactly `msg.value` on every successful `deposit()`. |
+| **DEP-4** | `deposit()` is `nonReentrant`; no external calls are made inside it (yield routing to AAVE is owner-triggered separately via `supplyToAave`). |
+
+AN-side (planned, lands with the future `VERHALO2SHPLONK` opcode + `TokenBridge.finalizeDeposit`):
+
+| Property | Statement |
+|---|---|
+| **DEP-N-1** | A successful `finalizeDeposit(halo2Proof, publicInputs, vk)` requires the Halo2 SHPLONK proof to verify natively under the immutable VK, binding `(depositId, sender, amount, bridgeAddr, blockHash, promiseCommit)` to a real `Deposit` event in the receipt trie of an Ethereum block. |
+| **DEP-N-2** | `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` — wrong-bridge proofs revert. |
+| **DEP-N-3** | The per-`depositId` nullifier in `TokenBridge` is set before any token mint; replay reverts. |
+| **DEP-N-4** | Producer pipeline waits ≥ 12 finality confirmations before generating the proof, and the ground-truth block hash is cross-checked against ≥ 2 Ethereum RPC providers. |
 
 ### 4.2 Why each property holds
 
+ETH-side:
+
 - **DEP-1**: `depositCounter++` is `uint256` and only increments. At 1 deposit per second it would take ~10⁷⁰ years to overflow. There is no decrement path.
-- **DEP-2**: `withdraw()` builds the public input vector itself; the verifier is an `immutable` reference. The Groth16 verifier's pairing equation passes only if the prover knew witnesses to all the circuit's constraints (RLP decoding of the receipt, MPT inclusion, log selectors, and `keccak256(blockHeader) == blockHash`).
-- **DEP-3**: see the function body — the order is `processedDeposits[id] = true` (or check) → `treasuryBalance -= amount` → external call. CEI is preserved across the AAVE shortfall pull and the final `recipient.transfer`.
-- **DEP-4**: same as DEP-3.
-- **DEP-5**: explicit `revert InvalidRecipient()` at the top of `withdraw()`.
-- **DEP-6**: `bytes32 blockHash = blockHeaderOracle.getBlockHash(blockNumber);` — caller does not supply the hash.
+- **DEP-2**: explicit `require(msg.value > 0 && msg.value <= MAX_DEPOSIT_AMOUNT, ...)` at the top of `deposit()`.
+- **DEP-3**: `treasuryBalance += msg.value` is the only mutation in `deposit()`; there is no admin path that decrements it without a balanced AAVE supply / withdraw.
+- **DEP-4**: `nonReentrant` modifier; the function body has no `call`/`transfer`/`send`. Yield routing is an owner-only separate flow (`supplyToAave`).
+
+AN-side (post-`VERHALO2SHPLONK`):
+
+- **DEP-N-1**: the Halo2 SHPLONK verifier inside the TVM opcode accepts only proofs whose transcript matches `vk` and whose public inputs match the supplied vector. The circuit's internal constraints chain receipt RLP, MPT inclusion, log selector + topics + data, block-hash binding, and the keccak coprocessor commitment.
+- **DEP-N-2**: explicit `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR, "wrong bridge contract");` in `TokenBridge.finalizeDeposit`.
+- **DEP-N-3**: `nullifier[depositId] = true` is set before `_mintTo(...)`; second call reverts.
+- **DEP-N-4**: producer responsibility, not contract. Documented in `docs/verifying_eth_proof_on_an.md` §3.
 
 ### 4.3 How to verify
 
@@ -112,41 +137,42 @@ Run **L0–L3** for every PR. Run **L4–L5** for every deployment. Run **L6** c
 Open `contracts/ethereum/src/AckiNackiBridge.sol` and confirm by inspection:
 
 ```bash
-grep -n "depositCounter\|processedDeposits\|treasuryBalance\|recipient.transfer\|getBlockHash" \
+grep -n "depositCounter\|treasuryBalance\|MAX_DEPOSIT_AMOUNT\|emit Deposit" \
   contracts/ethereum/src/AckiNackiBridge.sol
 ```
 
-Expected ordering inside `withdraw()`:
+Confirm there is **no** `function withdraw(` and **no** `IAckiNackiVerifier` import (both retired in Phase 4.3):
 
-1. `recipient == address(0)` check
-2. `blockHeaderOracle.getBlockHash(blockNumber)` — public input source
-3. `verifier.verifyWithdrawalProof(proof, publicInputs)` — cryptographic check
-4. `processedDeposits[depositId]` check
-5. `treasuryBalance -= amount` — accounting effect
-6. (optional) `_pullFromAave(...)` — only if liquid balance is short
-7. `recipient.transfer(amount)` — external interaction last
+```bash
+! grep -E "function withdraw\(|IAckiNackiVerifier" contracts/ethereum/src/AckiNackiBridge.sol
+```
 
 #### L2 — tests
 
 ```bash
 cd contracts/ethereum
-forge test --match-contract "AckiNackiBridgeV2Test|FuzzAckiNackiBridgeTest|FuzzGroth16DepositVerifierTest|FuzzGroth16VerifierTest" -vv
+forge test --match-contract "FuzzAckiNackiBridgeDepositTest|AckiNackiBridgeAaveTest" -vv
 ```
 
-Expected mappings:
+Expected ETH-side mappings:
 
 | Property | Tests that enforce it |
 |---|---|
-| DEP-1 | `testDeposit`, `testDepositMultiple`, `testDepositCounterIncrement`, `testDepositFromDifferentUsers` |
-| DEP-2 | `testWithdrawal`, `FuzzGroth16VerifierTest::*` (random proofs reject), `FuzzGroth16DepositVerifierTest::*` |
-| DEP-3 | `testWithdrawalDoubleSpend`, `testFuzz_DoubleSpendReverts`, `testIsDepositProcessed` |
-| DEP-4 | `testWithdrawalInsufficientTreasury`, `testFuzz_DepositAmountInvariants`, `testFuzz_MultipleDepositsInvariant` |
-| DEP-5 | `testWithdrawalInvalidRecipient`, `testFuzz_WithdrawToZeroAddressReverts` |
-| DEP-6 | `AxiomBlockHeaderOracleTest::*` (oracle alone) + `testWithdrawal` (bridge wires oracle correctly) |
+| DEP-1 | `testDeposit`, `testDepositMultiple`, `testDepositCounterIncrement`, `testFuzz_MultipleDepositsInvariant` (in `FuzzAckiNackiBridgeDepositTest`) |
+| DEP-2 | `testFuzz_DepositAmountInvariants`, `testFuzz_DepositInvalidAmountReverts` |
+| DEP-3 | `testFuzz_DepositAmountInvariants` (treasury invariant) |
+| DEP-4 | `AckiNackiBridgeAaveTest::*` — exercises that yield routing is a separate owner-only path |
 
-#### L3 — real Groth16 proof
+AN-side DEP-N-# are out-of-scope for the Foundry suite; they will be enforced by `tvm-sdk` tests once the opcode lands and by AN-side `TokenBridge` tests once that contract exists. Track under `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 + Phase 8.
 
-The deposit pipeline currently uses a stubbed Groth16 wrapper (see `integration_plan.md` §6.5). For the layer-hash side, real proofs are exercised in L3 (next section).
+#### L3 — real Halo2 proof (deposit-prover, AN-side off-chain)
+
+```bash
+cd deposit-prover
+cargo test --release -- --nocapture test_real_data
+```
+
+This runs the real Halo2 round-trip (deposit-prover Halo2 SHPLONK prove + verify). Until `VERHALO2SHPLONK` lands, this is the closest thing to "real proof" verification of the ETH→AN deposit path.
 
 #### L4 — fork test (block hash oracle)
 
@@ -154,17 +180,18 @@ The deposit pipeline currently uses a stubbed Groth16 wrapper (see `integration_
 forge test --fork-url $ETH_RPC_URL --match-contract AxiomBlockHeaderOracleTest
 ```
 
-This exercises the Axiom V2 Core path against a recent mainnet block.
+Currently exercises Axiom V2 Core against a recent mainnet block; preserved for the future burn-proof flow.
 
 #### L5 — post-deployment
 
 ```bash
-cast call $BRIDGE "verifier()(address)"
-cast call $BRIDGE "blockHeaderOracle()(address)"
+cast call $BRIDGE "blockHeaderOracle()(address)"        # preserved but unused by public surface
 cast call $BRIDGE "depositCounter()(uint256)"
 cast call $BRIDGE "treasuryBalance()(uint256)"
-cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"   # 100000000000000000000 (100 ether)
+cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000 (100 ether)
 ```
+
+(The legacy `verifier()` getter is gone — Phase 4.3.)
 
 ---
 
@@ -307,9 +334,9 @@ cast call $BRIDGE "storedBkSetCommitment()(uint256)"   # static between deployme
 
 ### 6.4 Why this is safe in the interim
 
-The deposit/withdraw surface and the layer-hash advancement surface remain operational. The
-only operational impact of "no rotation" is that if the AN-side BK set rotates, the bridge
-must be redeployed with a fresh `genesisBkSetCommitment`. This is acceptable for testnet /
+The deposit surface and the layer-hash advancement surface remain operational. The only
+operational impact of "no rotation" is that if the AN-side BK set rotates, the bridge must
+be redeployed with a fresh `genesisBkSetCommitment`. This is acceptable for testnet /
 shellnet operation; production launch will gate on Phase 1.C.
 
 ---
@@ -359,7 +386,7 @@ forge test --match-test "testRevertOnBkSetCommitmentMismatch|testRevertOnPrevAnc
 
 ### 7.2 Why each property holds
 
-Direct from `AxiomBlockHeaderOracle.sol`. The two-tier design intentionally fails closed: if neither tier can produce a hash, the call reverts and `withdraw()` cannot proceed.
+Direct from `AxiomBlockHeaderOracle.sol`. The two-tier design intentionally fails closed: if neither tier can produce a hash, the call reverts. The oracle is currently unused by the public surface (the only consumer used to be the legacy `withdraw()` retired in Phase 4.3); it is preserved as the building block for the future burn-proof ETH-side withdrawal flow.
 
 ### 7.3 Fork resistance reasoning
 
@@ -406,27 +433,27 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 
 | Property | Statement |
 |---|---|
-| **ZK-1** | Each gnark Groth16 verifier (`Groth16Verifier`, `PrimaryGroth16VerifierGenerated`, `FallbackGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) is auto-generated and not subsequently edited. |
-| **ZK-2** | The adapter contracts (`Groth16DepositVerifier`, `PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) wrap the `verifyProof` call in `try/catch` so reverts are normalised to `false`. |
-| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Deposit: 7 inputs; Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs.) |
+| **ZK-1** | Each gnark Groth16 verifier (`PrimaryGroth16VerifierGenerated`, `FallbackGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) is auto-generated and not subsequently edited. |
+| **ZK-2** | The adapter contracts (`PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) wrap the `verifyProof` call in `try/catch` so reverts are normalised to `false`. |
+| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's 7 public inputs are consumed natively on the AN side, not on Ethereum.) |
 | **ZK-4** | Adapter constructors reject `address(0)` for the underlying Groth16 verifier. |
-| **ZK-5** | Each adapter rejects proofs of the wrong byte length (256 B for the v2 attestation/layer-hashes path; 288 B for the deposit path's 256+32 promise commit). |
+| **ZK-5** | Each adapter rejects proofs of the wrong byte length (256 B for the v2 attestation/layer-hashes path). |
 
 ### 8.2 How to verify
 
 #### L0 — diff against gnark output
 
 ```bash
-diff -u contracts/ethereum/src/Groth16Verifier.sol \
-  <(deposit-prover/gnark-wrapper/gnark-wrapper setup ... | tee /dev/stderr)
+diff -u contracts/ethereum/src/LayerHashesGroth16VerifierGenerated.sol \
+  <(cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
 ```
 
-This is a one-shot manual check whenever the deposit circuit changes. The same applies to `LayerHashGroth16VerifierGenerated.sol` for the layer-hash side.
+This is a one-shot manual check whenever the corresponding circuit (or its `circuit.go` `Define`) changes. The same applies to `PrimaryGroth16VerifierGenerated.sol` (circuit-1a) and `FallbackGroth16VerifierGenerated.sol` (circuit-1b).
 
 #### L2 — fuzz tests
 
 ```bash
-forge test --match-contract "FuzzHalo2VerifierTest|FuzzGroth16VerifierTest|FuzzGroth16DepositVerifierTest" -vv
+forge test --match-contract "FuzzHalo2VerifierTest" -vv
 ```
 
 These exercise the verifier with thousands of malformed/random calldata payloads — every one must be rejected. Coverage:
@@ -453,7 +480,7 @@ Exercises ZK-2, ZK-3, ZK-4 across all three adapters.
 
 | Property | Statement |
 |---|---|
-| **AC-1** | `AckiNackiBridge.deposit` and `withdraw` are `nonReentrant`. |
+| **AC-1** | `AckiNackiBridge.deposit` is `nonReentrant`. (The legacy `withdraw()` was also `nonReentrant`; it was retired in Phase 4.3.) |
 | **AC-2** | All AAVE-management functions on `AckiNackiBridge` are `onlyOwner` and `nonReentrant`. |
 | **AC-3** | `AckiNackiBridge.verifyBlock` is permissionless and `nonReentrant` (no modifier other than the proof checks). |
 | **AC-4** | `transferOwnership`, `setYieldRecipient`, `setLiquidReserveBps`, `setAaveEnabled`, `harvestYield`, `emergencyWithdrawAll` are `onlyOwner`. |
@@ -474,7 +501,7 @@ Tests:
 forge test --match-test "OnlyOwner|NotOwner|nonReentrant|Reentrancy|Unauthorized" -vv
 ```
 
-CEI by inspection: in `AckiNackiBridge.withdraw`, the line `processedDeposits[depositId] = true;` precedes both `_pullFromAave` and `recipient.transfer`. In `AckiNackiBridge.verifyBlock`, the two gnark verifier calls are `view`-style externals returning bool, and storage writes follow both successful verifications (effects come after both interactions return).
+CEI by inspection: in `AckiNackiBridge.verifyBlock`, the two gnark verifier calls are `view`-style externals returning bool, and storage writes (`storedLastSeenBlockSeqNo`, `storedPrevMaxLevelLayerHash`) follow both successful verifications (effects come after both interactions return). `deposit()` has no external call at all. The owner-only AAVE routing functions (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`) wrap external calls under `nonReentrant` and update `suppliedPrincipal` after the interaction (acceptable because `suppliedPrincipal` is not consulted to gate the call). Legacy `withdraw()`'s CEI (`processedDeposits` set before `_pullFromAave` and `recipient.transfer`) is no longer in scope — the function was retired in Phase 4.3.
 
 ---
 
@@ -527,7 +554,7 @@ forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv
 # Multi-block real-proof E2E is deferred to Phase 5.3 (relayer + Anvil).
 
 # ─── L0 — sanity grep for invariants ──────────────────────────
-grep -n "treasuryBalance\|processedDeposits\|recipient.transfer" src/AckiNackiBridge.sol
+grep -n "treasuryBalance\|emit Deposit\|MAX_DEPOSIT_AMOUNT" src/AckiNackiBridge.sol
 grep -n "verifyBlock\|stored\(BkSet\|LastSeen\|NumLayers\|LayerHashes\|PrevMaxLevel\)" \
   src/AckiNackiBridge.sol
 
@@ -581,7 +608,7 @@ To be explicit about the trust boundary:
 | Soundness of the Halo2 circuits (1A, 1B, 2, and 3 once it lands) | `docs/layer_hashes_circuit_audit.md`, partner audits, `docs/four_circuit_architecture.md` §3 |
 | BLS12-381 G2 subgroup gap (audit FORK-2 / BLS-1) | open audit finding; carries over to v2's Circuit 1A/1B (same `gosh-bls-verification` chip); will be addressed in next circuit revision |
 | Trusted setup of the KZG SRS for Halo2 | community-generated `kzg_bn254_19.srs` shared across all four circuits; verify checksum on download |
-| Trusted setup of the gnark Groth16 wrappers (one per circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`; deposit-side wrapper retains its v1 status (stub `Define`, see `integration_plan.md` §6.5) |
+| Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
 | Acki Nacki BFT economic security | not a bridge concern; the bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds |
 | Off-chain relayer liveness / censorship | a malicious relayer can stall but cannot forge state; multiple competing relayers are sufficient |
 | Phase 1.C BK-set rotation circuit + on-chain wiring | not yet shipped; until then `storedBkSetCommitment` is effectively immutable post-deployment |

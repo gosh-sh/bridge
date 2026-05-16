@@ -1,10 +1,12 @@
 # Blake2b Halo2 Proof Verification on Ethereum
 
+> **Phase 4.3 note (2026-05-17).** When this doc was first written, the bridge's only on-chain ZK consumer was the legacy ETH-side `Groth16DepositVerifier` chain for deposits (see §Existing Infrastructure below — preserved here for historical context). That chain was retired in Phase 4.3, and the deposit-prover's Halo2 proof is now verified natively on the AN side. The Blake2b-transcript Halo2 verifier described in this document remains the foundation of the AN→ETH cross-chain verification surface, which is now realised by the per-circuit gnark Groth16 wrappers around the partner's four-circuit stack (`crates/bridge-prover-orchestrator/gnark-wrappers/`). The Blake2b transcript work described here directly informed that infrastructure.
+
 ## Task Description
 
 **Goal:** Verify that a Halo2 zero-knowledge proof generated on the Acki Nacki blockchain (using Blake2b transcript) can be verified on Ethereum.
 
-The Acki Nacki bridge enables cross-chain deposits and withdrawals between Ethereum and the Acki Nacki blockchain using zero-knowledge proofs. The existing infrastructure uses a Groth16 wrapper around Halo2 proofs for Ethereum verification (because raw Halo2 verifiers exceed Ethereum's 24KB contract size limit). However, the current flow only handles **Ethereum → Acki Nacki** deposits.
+The Acki Nacki bridge connects Ethereum and Acki Nacki using zero-knowledge proofs in both directions. The historical infrastructure used a Groth16 wrapper around Halo2 proofs for Ethereum verification (because raw Halo2 verifiers exceed Ethereum's 24KB contract size limit). This document focuses on the AN→ETH direction.
 
 This task addresses the reverse direction: **Acki Nacki → Ethereum** — proving that a proof generated using Acki Nacki's native libraries and transcript (Blake2b) can be verified on Ethereum using a Solidity verifier that implements the same Blake2b transcript protocol via EIP-152.
 
@@ -42,13 +44,13 @@ The user explicitly requires:
 
 ## Architecture
 
-### Existing Infrastructure (Preserved)
+### Historical infrastructure (retired in Phase 4.3, 2026-05-17)
 
 ```
-Ethereum → Acki Nacki (Deposits):
+Ethereum → Acki Nacki (Deposits) — RETIRED in Phase 4.3:
   ┌────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
   │ AckiNackiBridge │───▶│ Groth16DepositVerifier│───▶│ Groth16Verifier  │
-  │   (deposit())   │    │ (IAckiNackiVerifier)  │    │ (gnark-generated)│
+  │  (withdraw())   │    │ (IAckiNackiVerifier)  │    │ (gnark-generated)│
   └────────────────┘    └──────────────────────┘    └──────────────────┘
          │                        │
          │                        ├── DummyVerifier (test)
@@ -58,6 +60,8 @@ Ethereum → Acki Nacki (Deposits):
               ├── MockBlockHeaderOracle (test)
               └── AxiomBlockHeaderOracle (production)
 ```
+
+The whole left-hand chain was retired in Phase 4.3. The ETH→AN deposit-event proof is now consumed natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode (in development in `tvm-sdk`). The `IBlockHeaderOracle` family is preserved in the tree but currently unused by the public surface; it is the building block for the future burn-proof ETH-side withdrawal flow.
 
 ### New Blake2b Verification Path (This Task)
 
@@ -263,12 +267,13 @@ Total: 213 bytes input → 64 bytes output
 
 ### Related Files in Repository
 
-| File                                                | Role                                             |
-| --------------------------------------------------- | ------------------------------------------------ |
-| `poseidon-proof/`                                   | New crate: Poseidon preimage circuit + proof gen |
-| `contracts/ethereum/src/IAckiNackiVerifier.sol`     | Verifier interface                               |
-| `contracts/ethereum/src/Halo2Verifier.sol`          | Existing Halo2 verifier (Keccak256)              |
-| `contracts/ethereum/src/DummyVerifier.sol`          | Test verifier (accepts any proof)                |
-| `contracts/ethereum/src/Groth16DepositVerifier.sol` | Production deposit verifier                      |
-| `contracts/ethereum/src/AckiNackiBridge.sol`        | Bridge contract                                  |
-| `../gosh_dark_dex_halo2_circuit/`                   | Reference Halo2 circuit (Acki Nacki)             |
+| File                                                                        | Role                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------ |
+| `poseidon-proof/`                                                           | Reference crate: Poseidon preimage circuit + Blake2b proof gen |
+| `contracts/ethereum/src/Halo2Verifier.sol`                                  | Bare Halo2 verifier (Keccak256 transcript)        |
+| `contracts/ethereum/src/Blake2bHalo2Verifier.sol`                           | Bare Halo2 verifier (Blake2b transcript via EIP-152) |
+| `contracts/ethereum/src/Blake2bTranscript.sol` / `Blake2bChallengeComputer.sol` | Blake2b Fiat–Shamir transcript replay         |
+| `contracts/ethereum/src/AckiNackiBridge.sol`                                | Bridge contract (Phase 4 `verifyBlock` + AAVE; legacy `withdraw()` retired in Phase 4.3) |
+| `contracts/ethereum/src/{Primary,Fallback,LayerHashesMovement}Verifier.sol` | AN→ETH per-circuit adapters; each calls its own `*Groth16VerifierGenerated.sol` |
+| `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2}/`       | Per-circuit gnark Groth16 wrappers — the production AN→ETH path |
+| `../gosh_dark_dex_halo2_circuit/`                                           | Reference Halo2 circuit (Acki Nacki) — initial inspiration for Blake2b transcript work |

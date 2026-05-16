@@ -22,12 +22,13 @@ const NumPublicInputs = 4
 // Like the layer-hashes and BK-set-rotation gnark wrappers in this repo, the
 // Define() method here uses identity constraints. Full in-circuit Halo2/SHPLONK
 // verification is planned as a future improvement (it would require a gnark
-// implementation of the Halo2 SHPLONK verifier — non-trivial). For now the
-// Groth16 proof commits to the public input values, giving the on-chain
-// verifier a compact proof that those specific values were attested. The
-// off-chain relayer is responsible for having held a verified Halo2 proof
-// before generating the Groth16 wrap. Same trust model as
-// `Groth16DepositVerifier.sol` and the per-circuit verifiers under contracts/ethereum/src/.
+// implementation of the Halo2 SHPLONK verifier — non-trivial; see Phase 8 R&D in
+// docs/an_partner_integration_plan.md). For now the Groth16 proof commits to the
+// public input values, giving the on-chain verifier a compact proof that those
+// specific values were attested. The off-chain relayer is responsible for
+// having held a verified Halo2 proof before generating the Groth16 wrap. Same
+// trust model as the sibling per-circuit verifiers under contracts/ethereum/src/
+// (`PrimaryVerifier.sol`, `LayerHashesMovementVerifier.sol`).
 type FallbackVerifierCircuit struct {
 	PublicInputs [NumPublicInputs]frontend.Variable `gnark:",public"`
 	DomainSize   frontend.Variable

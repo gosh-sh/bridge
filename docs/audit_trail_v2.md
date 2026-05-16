@@ -27,9 +27,12 @@ the rest of the doc tree.
 | R-5 | The relayer doesn't pad `layerHashes` with garbage in unused slots | `LayerHashTailNonZero(i)` reverts for any `layerHashes[i] != 0` where `i ≥ numLayers`. | LH-5 / CC-7 |
 | R-6 | The owner doesn't unilaterally rotate the BK set via the timelocked admin path | The legacy `proposeBkSetCommitment` / `executeBkSetCommitment` / `cancelBkSetCommitment` triple was **deleted in Phase 4.2**. There is no admin path to rotate `storedBkSetCommitment` post-deployment until Phase 1.C ships Circuit 3. | BK-1..BK-5 (Phase 1.C target invariants) in `bridge_verification.md` §6.2 |
 | R-7 | The relayer correctly tracks which BK-set committee is active for a given block | `bkSetCommitment` is committed by every circuit (envelope leaf-2, offset 96) and checked against `storedBkSetCommitment` at the bridge level (`BkSetCommitmentMismatch`). Both proofs must commit to the same committee. | LH-2 / CC-2 / CC-3 |
+| R-8 | The ETH-side `Groth16DepositVerifier` adapter + the gnark-generated `Groth16Verifier` correctly wrap and verify the deposit-prover's Halo2 SHPLONK proof | **Retired in Phase 4.3 (2026-05-17).** The whole ETH-side adapter chain was removed; the deposit proof is now verified natively on the AN side via `VERHALO2SHPLONK` (K-13). This eliminates two attack surfaces simultaneously: (a) the R15 no-op `Define` stub finding, and (b) any EIP-170-driven simplifications to the wrapper. | Decision Log 2026-05-17 in `an_partner_integration_plan.md` |
+| R-9 | The legacy refund-style `withdraw(...)` correctly composes block-hash oracle + ZK proof + treasury bookkeeping | **Retired in Phase 4.3 (2026-05-17).** The `withdraw()` function, `processedDeposits` mapping, `_pullFromAave` shortfall handling for users, and the `IBlockHeaderOracle` dependency for user-facing withdrawals are all gone. Future genuine ETH-side withdrawals will land alongside a burn-proof circuit + state-anchored verification (tracked in Phase 4 open design question). | Phase 4.3 section in §3 below |
 
-**Net reduction**: 7 assumptions removed. Every "the relayer must do X correctly" trust
-becomes a "the bridge reverts if X is wrong" enforcement.
+**Net reduction**: 9 assumptions removed (7 in Phase 4.2 + 2 in Phase 4.3). Every "the relayer
+must do X correctly" / "the ETH-side adapter must be honest" trust becomes either a "the
+bridge reverts if X is wrong" enforcement, or simply doesn't exist anymore.
 
 ---
 
@@ -38,9 +41,9 @@ becomes a "the bridge reverts if X is wrong" enforcement.
 | # | Assumption | Why we still need it | Open audit findings |
 |---|---|---|---|
 | K-1 | Halo2 SHPLONK soundness | Standard, well-studied. We don't have an alternative SNARK on the AN side. | None |
-| K-2 | Groth16 / BN254 pairing soundness | Standard. Used for both deposit (v1, unchanged) and AN→ETH wraps (v2). | None |
-| K-3 | KZG trusted setup (`kzg_bn254_19.srs`) | Community-generated; verify checksum on download. Shared across all four circuits. | None |
-| K-4 | gnark wrapping circuit honesty (per circuit) | One Groth16 wrapper per circuit under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. The wrapper is auto-generated from the Halo2 verifying key + a small shim. | Same `Define` stub status as v1's deposit wrapper, tracked in `integration_plan.md` §6.5 — applies symmetrically to the three AN→ETH wrappers. |
+| K-2 | Groth16 / BN254 pairing soundness | Standard. Used for AN→ETH wraps only (v2). The v1 deposit-side use was retired in Phase 4.3 (2026-05-17). | None |
+| K-3 | KZG trusted setup (`kzg_bn254_19.srs`) | Community-generated; verify checksum on download. Shared across all four AN→ETH circuits. | None |
+| K-4 | gnark wrapping circuit honesty (per circuit) | One Groth16 wrapper per AN→ETH circuit under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`, auto-generated from the Halo2 verifying key + a small shim. | **R15 (Phase 8 R&D track)** — as of 2026-05-17 each `circuit.go` `Define` is a no-op identity stub, so the on-chain Groth16 verifier does not yet cryptographically constrain the Halo2 SHPLONK proof. Tracked under `an_partner_integration_plan.md` Phase 8; mainnet `v2.0.0` is explicitly gated on closing it. |
 | K-5 | `gosh-sha256-chip` correctness | Used by Circuit 1A/1B (envelope SHA-256) and Circuit 2 (layer-hash preimage SHA-256). Identical chip as v1; audit findings unchanged. | None outstanding |
 | K-6 | `gosh-bls-verification` correctness, including the BLS12-381 G2 subgroup gap | Used by Circuit 1A (≥ 2/3 threshold) and Circuit 1B (> 1/2 threshold). | **BLS-1 / FORK-2** (medium): `load_private_g2_unchecked` skips on-curve and subgroup checks; calling code adds on-curve but not subgroup. G2 cofactor ≠ 1. **Carries over to v2 unchanged.** Severity: medium. Mitigation in next circuit revision. |
 | K-7 | `gosh-dense-balanced-tree` correctness | Used by Circuit 2 for the Poseidon Merkle chain anchor verification. Identical chip as v1. | None outstanding |
@@ -48,9 +51,10 @@ becomes a "the bridge reverts if X is wrong" enforcement.
 | K-9 | Acki Nacki BFT economic security | The bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds. A 2/3+ Byzantine majority is a consensus failure, not a bridge bug. | Out of scope |
 | K-10 | Genesis BK-set commitment honesty | Seeded once at construction via `VerifyBlockConfig.genesisBkSetCommitment`. A wrong genesis means the very first proof can't be made (no live attacker advantage; just a deployment redo). | None |
 | K-11 | Bincode layout stability of `AckiNackiBlock` / `AttestationData` / `BlockKeeperSetChangeProofData` | Circuit 2 has hard-coded byte offsets (`BTREE_ENTRY_SIZE = 124`, `TARGET_TYPE_REL_OFFSET = 116`, etc.). Any AN node release that changes the bincode layout breaks proof generation. | **L-1** (legacy): "Bincode layout constants are fragile across AN node releases." Mitigation: CI integration tests against AN node tags (Phase 5.2). |
-| K-12 | Block-hash oracle (Axiom V2 Core) for the deposit-side `withdraw()` only | Unchanged from v1. Not used by the AN→ETH path. | None outstanding |
+| K-12 | Block-hash oracle (Axiom V2 Core) — reserved | Unchanged from v1. Not used by either the AN→ETH path or the (currently deferred) burn-proof flow; the legacy refund-style `withdraw()` it serviced was retired in Phase 4.3 (2026-05-17). Preserved in code for the future burn-proof path. | None outstanding |
+| K-13 | `VERHALO2SHPLONK` TVM opcode soundness (planned) | The Phase 4.3 pivot routes the ETH→AN deposit proof through a new TVM opcode that does native Halo2 SHPLONK verification on the AN side. The opcode is under development in `tvm-sdk` (modelled on the `VERGRTH16WITHVK` pattern landed earlier in May 2026); CI / test coverage and a partner-side review are gating prerequisites for mainnet. | New in v2 (Phase 4.3, 2026-05-17). Tracked under `an_partner_integration_plan.md` Decision Log 2026-05-17 + Phase 8. |
 
-**Net retention**: 12 assumptions, all carried over from v1. No new fundamental crypto primitives.
+**Net retention**: 13 assumptions. K-12 retained but currently dormant; K-13 newly introduced by Phase 4.3 (replaces the retired ETH-side Groth16 deposit verifier — a net trust reduction once the opcode lands).
 
 ---
 
@@ -84,7 +88,20 @@ The retired v1 code surface (Phase 4.2 deletion):
 | `layer-hashes-prover/` Rust crate | Halo2 → JSON exporter + gnark wrapper | `crates/bridge-prover-orchestrator/` + `gnark-wrappers/` |
 | `bk-set-rotation-prover/` Rust crate | spec + Go gnark wrapper for 2-PI rotation | Deferred to Phase 1.C |
 
-**Net code-surface impact**: -49 Foundry tests (`LayerHashBridge.t.sol` + `LayerHashE2E.t.sol`), +23 Foundry tests (verify-block + relayer-loop + per-adapter sanity). 135 tests total at HEAD, all green.
+**Net code-surface impact (Phase 4.2)**: -49 Foundry tests (`LayerHashBridge.t.sol` + `LayerHashE2E.t.sol`), +23 Foundry tests (verify-block + relayer-loop + per-adapter sanity). 135 tests total after Phase 4.2.
+
+**Phase 4.3 demolition (2026-05-17)** — legacy ETH-side deposit-verifier chain retired:
+
+| Surface retired | LoC retired | Replacement |
+|---|---|---|
+| `AckiNackiBridge.withdraw(...)` + `processedDeposits` mapping + `isDepositProcessed(...)` view + `Withdrawal` event + 4 errors + `_verifier` ctor arg + `verifier` storage slot | ~60 lines inside `AckiNackiBridge.sol` | None on the ETH side. The ETH→AN deposit proof is now consumed on the AN side via `VERHALO2SHPLONK` (K-13). |
+| `IAckiNackiVerifier.sol` + `Groth16DepositVerifier.sol` + `Groth16Verifier.sol` (gnark-generated for deposit-prover) + `DummyVerifier.sol` | ~5k LoC (mostly the gnark-generated verifier) | Same as above. |
+| `deposit-prover/gnark-wrapper/` (Go module + R1CS + keys + generated `Groth16Verifier.sol`) + `deposit-prover/src/groth16_wrapper/` (Rust JSON adapter) | Go + Rust adapter trees | Same as above. |
+| `crates/eth-frontend/src/withdrawal.rs` stub + `withdraw`/`processedDeposits`/`Withdrawal` ABI rows in `contract.rs` | ~30 lines | None — the eth-frontend ABI now covers `deposit()` + read-only views only. |
+| 11 top-level + deposit-prover shell scripts (`test_e2e*.sh`, `check_e2e_prerequisites.sh`, `test_fuzz_e2e.sh`, `setup_gnark.sh`, `test_groth16_wrapper.sh`, `test_e2e_onchain.sh`, `test_e2e_sepolia.sh`, `test_multiple_proofs.sh`, `generate_and_deploy.sh`, plus 2 example binaries) | Several hundred lines of shell + Rust glue | Future relayer-style end-to-end runner (Phase 5.3, AN→ETH side) + AN-side native-verifier round-trip kit (planned with K-13). |
+| `AckiNackiBridgeV2.t.sol` (14 tests) + `FuzzGroth16VerifierTest` (4) + `FuzzGroth16DepositVerifierTest` (3) + AAVE/verifyBlock/relayer tests' `PermissiveVerifier` rewrites + AAVE `withdraw`-flow tests | -26 Foundry tests across 3 retired test contracts and 3 streamlined ones | `FuzzAckiNackiBridgeDepositTest` (3 deposit-only fuzz tests). |
+
+**Net code-surface impact after Phase 4.3**: 109 Foundry tests total across 12 suites (was 135 across 15 after Phase 4.2). `forge build`, `forge test`, and `cargo check --workspace --all-targets` all clean.
 
 ---
 

@@ -6,6 +6,16 @@
 > physically deployed (its `gosh-bls-verification`, `gosh-dense-balanced-tree`, and
 > `gosh-sha256-chip` chips are all still in use, by Circuit 1A/1B/2). The active architecture
 > overview lives in `docs/four_circuit_architecture.md`.
+>
+> **v2.1 update (2026-05-17, Phase 4.3 demolition).** §1 has been rewritten to remove the
+> legacy ETH-side deposit-verifier chain: the `withdraw(...)` user path, the
+> `IAckiNackiVerifier` interface, `Groth16DepositVerifier` adapter, `Groth16Verifier` (gnark-
+> generated for deposit-prover), `DummyVerifier`, and the deposit-prover-side `gnark-wrapper`
+> Go tree are **all gone**. The ETH→AN deposit-event proof is now consumed natively on the AN
+> side via the future `VERHALO2SHPLONK` TVM opcode (in development in `tvm-sdk`). The AN→ETH
+> per-circuit gnark wrappers under `crates/bridge-prover-orchestrator/gnark-wrappers/` are
+> unaffected (EIP-170 still forces a wrap on that side). See Decision Log 2026-05-17 in
+> `docs/an_partner_integration_plan.md`.
 
 This document provides a comprehensive analysis of both sides of the Acki Nacki cross-chain bridge: our Ethereum-side implementation and the partner's Acki Nacki-side ZK circuits.
 
@@ -25,11 +35,12 @@ This document provides a comprehensive analysis of both sides of the Acki Nacki 
 
 The `acki-nacki-bridge` repository implements the **Ethereum side** of a cross-chain bridge. It consists of:
 
-- **Solidity smart contracts** (Foundry) — bridge vault, ZK verifiers, block hash oracles
-- **deposit-prover** (Rust + axiom-eth) — Halo2 circuit proving Ethereum deposit events
-- **gnark-wrapper** (Go) — wraps Halo2 SNARK proofs in Groth16 for efficient on-chain verification
-- **poseidon-proof** (Rust) — Halo2 circuit with Blake2b transcript for Acki Nacki → Ethereum proofs
-- **acki-nacki-interface** (Rust) — trait definitions for Acki Nacki blockchain interaction (mock-only)
+- **Solidity smart contracts** (Foundry) — bridge vault, AN→ETH state verifiers, block hash oracles, AAVE V3 wiring.
+- **deposit-prover** (Rust + axiom-eth) — Halo2 circuit proving Ethereum deposit events; the proof is consumed natively on the AN side (no gnark wrapper — retired in Phase 4.3 2026-05-17).
+- **`crates/bridge-prover-orchestrator/`** (Rust + Go) — drives the partner's 4-circuit Halo2 stack (Circuit 1A / 1B / 2 / [3]) and the per-circuit gnark Groth16 wrappers under `gnark-wrappers/circuit-{1a,1b,2}/`. These wrappers stay because the AN→ETH side is gated by EIP-170.
+- **`crates/bridge-relayer-daemon/`** (Rust) — Phase 5.1 relayer skeleton (`Relayer::tick()` / `run_loop()`).
+- **poseidon-proof** (Rust) — Halo2 circuit with Blake2b transcript; reference / demo material.
+- **acki-nacki-interface** (Rust) — trait definitions for Acki Nacki blockchain interaction (mock-only).
 
 ### 1.2 Smart Contracts
 
@@ -37,66 +48,52 @@ All contracts are in `contracts/ethereum/src/`, compiled with Solidity 0.8.19 vi
 
 #### AckiNackiBridge.sol
 
-Main bridge contract with two user-facing entry points plus an optional AAVE V3 yield path:
+Main bridge contract with one user-facing entry point (`deposit()`), the AN→ETH state-update entry point `verifyBlock(...)`, and an optional AAVE V3 yield path:
 
 - **`deposit()`** — accepts ETH (max 100 ETH), increments `depositCounter`, emits `Deposit(depositId, sender, amount, timestamp)`. Funds accumulate in the contract; `deposit()` itself never calls AAVE (kept cheap).
-- **`withdraw(recipient, amount, depositId, blockNumber, proof)`** — queries block hash from oracle, builds 6 public inputs, calls verifier, transfers ETH on success. If the bridge's liquid ETH balance is short of `amount`, the shortfall is transparently pulled from AAVE.
+- **`verifyBlock(finType, attProof, attInputs, lhmProof, lhmInputs)`** — verifies the per-circuit Primary (1A) / Fallback (1B) attestation proof + the Circuit 2 layer-hashes movement proof, enforces cross-circuit binding (`block_id`, `bk_set_poseidon` must match between proofs), strict monotonicity (`block_seq_no > storedLastSeenBlockSeqNo`), and the Poseidon chain anchor (`prev_max_level_layer_hash == storedPrevMaxLevelLayerHash`).
+- **(removed in Phase 4.3, 2026-05-17)** The legacy refund-style `withdraw(recipient, amount, depositId, blockNumber, proof)` and the `isDepositProcessed(depositId)` view used to live here. Both were retired together with the `IAckiNackiVerifier` chain.
 
-Constructor (5 args): `(verifier, blockHeaderOracle, aavePool, wethGateway, aWETH)`. Pass `address(0)` for the last three to disable AAVE; this keeps the bridge in plain-ETH custody mode.
+Constructor (5 args): `(blockHeaderOracle, aavePool, wethGateway, aWETH, primaryVerifier|adapters)`. Pass `address(0)` for the AAVE addresses to disable AAVE; this keeps the bridge in plain-ETH custody mode. (In practice the production wiring also takes the Phase 4 `IPrimaryVerifier`, `IFallbackVerifier`, `ILayerHashesMovementVerifier` triplet — see `script/DeployRealBridge.s.sol` for the exact signature in your tree.)
 
 Storage:
-- Core: `processedDeposits` (double-spend prevention), `depositCounter`, `treasuryBalance`, pluggable `verifier`, `blockHeaderOracle`.
+
+- Core: `depositCounter`, `treasuryBalance`, `blockHeaderOracle` (preserved for the future burn-proof flow but unused by the present surface).
+- AN→ETH state: `storedBkSetCommitment`, `storedLastSeenBlockSeqNo`, `storedPrevMaxLevelLayerHash`, plus the three Phase 4 verifier addresses.
 - AAVE: immutable `aavePool` / `wethGateway` / `aWETH`; `aaveEnabled`, `suppliedPrincipal` (book value of supplied ETH), `liquidReserveBps` (default 1000 = 10 %, capped at 5000).
-- Access: `owner` (administers AAVE routing), `yieldRecipient` (gets harvested yield).
+- Access: `owner` (administers AAVE routing + AN-state genesis configuration), `yieldRecipient` (gets harvested yield).
 
-Public input layout assembled by the bridge for verification:
+`verifyBlock` is permissionless — anyone with a valid proof tuple can advance the AN state. `deposit()` is permissionless. The `owner` role only governs AAVE routing (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `setAaveEnabled`, `setLiquidReserveBps`, `harvestYield`, `setYieldRecipient`, `transferOwnership`) and the AN-state genesis (`initializeAnState`). The owner **cannot** withdraw user principal: `harvestYield` is bounded by `aWETH.balanceOf(bridge) - suppliedPrincipal`, and there is no admin path that bypasses ZK verification.
 
-| Index | Field | Description |
-|-------|-------|-------------|
-| 0 | depositId | Unique deposit identifier |
-| 1 | sender | Recipient address as uint256 |
-| 2 | amount | Deposit amount in wei |
-| 3 | contractAddress | Bridge contract address |
-| 4 | blockHashHigh | Upper 128 bits of block hash |
-| 5 | blockHashLow | Lower 128 bits of block hash |
-
-User-facing entry points (`deposit`, `withdraw`) are permissionless — anyone with a valid ZK proof can withdraw. The `owner` role only governs AAVE routing (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `setAaveEnabled`, `setLiquidReserveBps`, `harvestYield`, `setYieldRecipient`, `transferOwnership`). The owner **cannot** withdraw user principal: `harvestYield` is bounded by `aWETH.balanceOf(bridge) - suppliedPrincipal`, and there is no admin path that bypasses the ZK-verified `withdraw()`.
-
-See `docs/aave_integration.md` for the full design, invariants, and verification protocol.
-
-#### IAckiNackiVerifier.sol
-
-Verifier interface:
-- `verifyWithdrawalProof(bytes proof, uint256[] publicInputs) → (bool isValid, bytes32 depositId)`
-- `getPublicInputsCount() → uint256`
-
-#### Groth16DepositVerifier.sol
-
-Production verifier adapting the bridge's 6 public inputs to the circuit's 7 inputs:
-
-- Validates proof length = 288 bytes (256 Groth16 + 32 `promise_commit`)
-- Decodes 8 × uint256 Groth16 proof points
-- Extracts `promise_commit` from the last 32 bytes
-- Assembles 7 circuit inputs: bridge's 6 + `promise_commit`
-- Calls gnark-generated `Groth16Verifier.verifyProof(uint256[8], uint256[7])`
+See `docs/aave_integration.md` for the AAVE design, invariants, and verification protocol. See `docs/four_circuit_architecture.md` for the cross-circuit binding semantics.
 
 #### IBlockHeaderOracle.sol
 
 Oracle interface for trusted block hash sources:
+
 - `getBlockHash(blockNumber)`, `isBlockHashAvailable(blockNumber)`, `getLatestVerifiedBlock()`
 - Implementations: `MockBlockHeaderOracle` (testing), `AxiomBlockHeaderOracle` (production via Axiom V2)
+- Currently unused by the public surface; preserved for a future burn-proof / ETH-side withdrawal flow.
+
+#### AN→ETH per-circuit verifiers (Phase 4)
+
+- `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` — Circuit 1A adapter (Primary attestation, ≥ 2/3 BLS quorum), 4 public inputs.
+- `IFallbackVerifier.sol` / `FallbackVerifier.sol` — Circuit 1B adapter (Fallback attestation, > 1/2 split), 4 public inputs.
+- `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` — Circuit 2 adapter, 14 public inputs.
+- `PrimaryGroth16VerifierGenerated.sol`, `FallbackGroth16VerifierGenerated.sol`, `LayerHashesGroth16VerifierGenerated.sol` — gnark-generated, do not edit manually.
 
 #### Blake2b Verification Path
 
-For Acki Nacki → Ethereum proofs:
-- `Blake2bHalo2Verifier.sol` — Halo2 verifier using EIP-152 Blake2b precompile
-- `Blake2bTranscript.sol` — Fiat-Shamir transcript matching `halo2_proofs::Blake2bWrite`
-- `Blake2bChallengeComputer.sol` — challenge computation (split out for 24KB limit)
+For Acki Nacki → Ethereum proofs in the bare Halo2 form (used by tests and as a reference; production goes through the gnark wrappers above):
 
-### 1.3 ZK Proof Pipeline (Deposits)
+- `Blake2bHalo2Verifier.sol` — Halo2 verifier using EIP-152 Blake2b precompile.
+- `Blake2bTranscript.sol` — Fiat-Shamir transcript matching `halo2_proofs::Blake2bWrite`.
+- `Blake2bChallengeComputer.sol` — challenge computation (split out for 24KB limit).
+
+### 1.3 ZK Proof Pipeline (Deposits, post-Phase 4.3)
 
 ```
-Ethereum deposit event
+Ethereum deposit event (deposit() on AckiNackiBridge)
     → deposit-prover (Rust/axiom-eth): Halo2 circuit
         - Receipt trie inclusion (MPT proof)
         - RLP decoding, event log extraction
@@ -106,24 +103,24 @@ Ethereum deposit event
         → 7 public inputs: [depositId, sender, amount, contractAddress,
                             blockHashHigh, blockHashLow, promiseCommit]
 
-    → gnark-wrapper (Go): Halo2 → Groth16
-        - Loads halo2_proof.json (proof bytes + protocol metadata)
-        - Wraps in Groth16 on BN254
-        → 288 bytes: 256-byte Groth16 proof + 32-byte promise_commit
-
-    → On-chain: Groth16DepositVerifier → Groth16Verifier
-        - Pairing check on BN254 (~280k gas)
+    → AN-side native verification (planned, via VERHALO2SHPLONK TVM opcode)
+        - tvm-sdk: new opcode wraps `ark-groth16`-style native Halo2 SHPLONK verification
+        - AN-side TokenBridge.finalizeDeposit(proof, publicInputs, vk)
+            consumes the proof and mints the user's tokens
+        - depositId nullifier prevents replay
 ```
 
 The keccak coprocessor pattern (documented in `docs/keccak_coprocessor_flowchart.mmd`) delegates expensive keccak256 computations to a separate circuit via Poseidon-based promise commitments, achieving ~500x constraint savings per hash.
 
 ### 1.4 Integration Surfaces
 
-**`crates/acki-nacki-interface`**: Defines `IAckiNacki` and `TransactionSender` traits for Acki Nacki blockchain interaction. Currently **mock-only** — the actual implementation is expected from the Acki Nacki team. Types include `AckiNackiTransaction`, `TransactionReceipt`, `TransactionStatus`, `Log`.
+**`crates/acki-nacki-interface`**: Defines `IAckiNacki` and `TransactionSender` traits for Acki Nacki blockchain interaction. Currently **mock-only** — the actual implementation is expected from the Acki Nacki team.
 
-**`crates/eth-frontend`**: `DepositManager` and `WithdrawalManager` are **empty stubs**. The `contract.rs` abigen does not fully match the latest `AckiNackiBridge.sol` signature.
+**`crates/eth-frontend`**: `DepositManager` is functional. The `contract.rs` abigen exposes `deposit()` + read-only views. The legacy `WithdrawalManager` stub and the v1 `withdraw` ABI rows were removed in Phase 4.3 (2026-05-17).
 
-**gnark-wrapper**: Currently hardcoded for the deposit circuit (7 public inputs, specific witness commitment counts). Adapting it for a different circuit requires updating the JSON format, circuit struct sizes, and proof parser.
+**`crates/bridge-prover-orchestrator/gnark-wrappers/`**: One gnark wrapper per circuit (1A / 1B / 2), each producing its own `Groth16Verifier.sol`. Adapting them for a new circuit involves duplicating the per-circuit folder and updating the JSON schema + circuit struct.
+
+> **Stub-status caveat (R15)**: as of 2026-05-17 the `circuit.go` in each gnark wrapper is a no-op (identity-only Define). The on-chain `*Groth16VerifierGenerated.sol` artefacts therefore do not yet cryptographically constrain the Halo2 SHPLONK proof — they verify Groth16 over a trivial relation. Phase 8 (Decision Log 2026-05-17) is the R&D track that closes this gap. Mainnet `v2.0.0` is explicitly gated on it.
 
 ### 1.5 Workspace Layout (v2, post-Phase 4.2)
 
@@ -338,7 +335,7 @@ A generic Halo2/KZG utility library standardizing:
 
 ### 4.3 Transcript
 
-**Blake2b** Fiat-Shamir transcript with `Challenge255` for challenge squeezing. This is the transcript the Ethereum verifier must reproduce if verifying Halo2 proofs directly (or the Groth16 wrapper must understand when wrapping).
+**Blake2b** Fiat-Shamir transcript with `Challenge255` for challenge squeezing. This is the transcript the Ethereum-side verifier must reproduce when verifying Halo2 proofs directly, and the one the AN→ETH gnark wrappers must understand when wrapping (the ETH→AN deposit-prover side uses a Keccak transcript instead, since its proof is consumed natively on the AN side via `VERHALO2SHPLONK`).
 
 ### 4.4 Test Workflow (from Alina's Instructions)
 
@@ -357,10 +354,10 @@ One keygen produces keys that work for all fixtures with the same circuit parame
 
 | Component | Status |
 |---|---|
-| Ethereum deposit / withdrawal contract (`AckiNackiBridge.sol`) | Complete |
-| AAVE V3 yield bolt-on | Complete (23 tests, see `aave_integration.md`) |
-| Block-hash oracle (Axiom V2) | Complete |
-| Deposit-prover Halo2 circuit + gnark wrapper | Complete (stub `Define`; tracked under `integration_plan.md` §6.5) |
+| Ethereum bridge vault (`AckiNackiBridge.sol`) — `deposit()` + Phase 4 `verifyBlock()` + AAVE | Complete (Phase 4.3 retired the legacy `withdraw()` flow, 2026-05-17) |
+| AAVE V3 yield bolt-on | Complete (20 tests, see `aave_integration.md`) |
+| Block-hash oracle (Axiom V2) | Complete (currently unused by the public surface; reserved for the future burn-proof flow) |
+| Deposit-prover Halo2 circuit (ETH→AN) | Complete; consumed natively on the AN side via `VERHALO2SHPLONK` (in development) — no gnark wrapper |
 | Partner's four Halo2 circuits (1A, 1B, 2, 3) | All complete + MockProver tests pass |
 | Partner's `bridge-prover-lib` (keys, BK-set fetcher, BOC parser) | Live (Circuit 1A wired upstream; we extend on our side) |
 | Partner's `bridge-test-data-gen` | Live; produces synthetic bound block scenarios |
@@ -384,5 +381,23 @@ One keygen produces keys that work for all fixtures with the same circuit parame
 See `docs/four_circuit_architecture.md` §8 for the canonical list. Five legacy assumptions
 are now *removed* (cross-circuit binding via `block_id`, monotonic seqno, chain anchor,
 finalization-type routing, no silent garbage in layer-hash tail). No new assumptions
-introduced. Three carry over unchanged: Halo2/SHPLONK soundness, `gosh-halo2-crypto-lib`
-correctness (incl. open BLS-1/FORK-2 medium audit findings), AN BFT economic security.
+introduced for the AN→ETH path. Three carry over unchanged: Halo2/SHPLONK soundness,
+`gosh-halo2-crypto-lib` correctness (incl. open BLS-1/FORK-2 medium audit findings), AN BFT
+economic security.
+
+### 5.4 Trust-assumption Delta from Phase 4.3 (ETH→AN path, 2026-05-17)
+
+Phase 4.3 retired the legacy refund-style `withdraw()` mechanism and its ETH-side gnark
+chain. Effect on the *deposit* side trust model:
+
+- **Removed**: trust in the ETH-side `Groth16DepositVerifier` adapter + the gnark-generated
+  verifier, since neither is on the path anymore. (Both were also subject to R15 — the
+  no-op gnark wrapper finding — so this removal is a net trust reduction.)
+- **Removed**: trust in the EIP-170-driven Halo2 → Groth16 wrapping for this direction,
+  including any 24 KB-imposed simplifications.
+- **Added**: trust in (a) the new `VERHALO2SHPLONK` TVM opcode implementation in `tvm-sdk`
+  and its CI/audit story, and (b) the AN-side `TokenBridge` contract that will call it. Both
+  are tracked in `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 and Phase 8.
+- **Unchanged**: trust in the deposit-prover Halo2 circuit itself (`deposit-prover/`), the
+  Ethereum RPC quorum used to feed it (which now lives only producer-side), and the keccak
+  coprocessor commitment.

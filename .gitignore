@@ -139,16 +139,16 @@ deposit-prover/params/
 # KZG parameters (downloaded from trusted setup, not stored in git)
 deposit-prover/data/*.srs
 
-# Gnark wrapper build artifacts and generated files
-deposit-prover/gnark-wrapper/gnark-wrapper
-deposit-prover/gnark-wrapper/circuit.r1cs
-deposit-prover/gnark-wrapper/groth16_proof_bytes.hex
-deposit-prover/gnark-wrapper/groth16_test_data.txt
-deposit-prover/gnark-wrapper/halo2_proof.json
-deposit-prover/gnark-wrapper/halo2_proof_test.json
-deposit-prover/gnark-wrapper/proving.key
-deposit-prover/gnark-wrapper/verification.key
-deposit-prover/gnark-wrapper/Groth16Verifier_sepolia.address
+# AN→ETH gnark wrapper build artifacts (per-circuit, under bridge-prover-orchestrator)
+# The deposit-prover/gnark-wrapper/ tree was retired in Phase 4.3 (2026-05-17).
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/circuit.r1cs
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/proving.key
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/verification.key
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/groth16_proof.hex
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/groth16_output.json
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a/circuit-1a
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1b/circuit-1b
+crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2/circuit-2
 
 # Prompt files
 *.prompt

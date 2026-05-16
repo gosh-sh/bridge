@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 
 import "../src/AckiNackiBridge.sol";
-import "../src/IAckiNackiVerifier.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "../src/PrimaryVerifier.sol";
 import "../src/PrimaryGroth16VerifierGenerated.sol";
@@ -71,7 +70,6 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
     // ─── Test rig ─────────────────────────────────────────────────────────
     AckiNackiBridge internal bridge;
-    PermissiveTestVerifier internal depositVerifier;
     MockBlockHeaderOracle internal oracle;
     PrimaryGroth16VerifierGenerated internal primaryGroth16;
     PrimaryVerifier internal primaryVerifier;
@@ -87,7 +85,6 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     );
 
     function setUp() public {
-        depositVerifier = new PermissiveTestVerifier();
         oracle = new MockBlockHeaderOracle();
 
         primaryGroth16 = new PrimaryGroth16VerifierGenerated();
@@ -104,9 +101,8 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
             PREV_MAX_LEVEL_LAYER_HASH
         );
 
-        bridge = new AckiNackiBridge(
-            address(depositVerifier), address(oracle), address(0), address(0), address(0), vb
-        );
+        bridge =
+            new AckiNackiBridge(address(oracle), address(0), address(0), address(0), vb);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -432,7 +428,6 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
     function test_verifyBlock_disabled_revertsOnFreshBridge() public {
         AckiNackiBridge disabled = new AckiNackiBridge(
-            address(depositVerifier),
             address(oracle),
             address(0),
             address(0),
@@ -457,7 +452,6 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     function test_verifyBlock_partiallyWired_revertsAsDisabled() public {
         // Only primary wired; fallback + layer-hashes both zero.
         AckiNackiBridge partialBridge = new AckiNackiBridge(
-            address(depositVerifier),
             address(oracle),
             address(0),
             address(0),
@@ -485,26 +479,3 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     }
 }
 
-/// @notice Minimal IAckiNackiVerifier implementation used to satisfy the
-///         deposit-verifier slot of the AckiNackiBridge constructor in this
-///         suite. Phase 4 tests do not exercise withdraw(); accepting any
-///         well-formed proof is sufficient.
-contract PermissiveTestVerifier is IAckiNackiVerifier {
-    uint256 private constant PUBLIC_INPUTS_COUNT = 6;
-
-    function verifyWithdrawalProof(bytes calldata proof, uint256[] calldata publicInputs)
-        external
-        pure
-        override
-        returns (bool, bytes32)
-    {
-        if (proof.length == 0 || publicInputs.length != PUBLIC_INPUTS_COUNT) {
-            return (false, bytes32(0));
-        }
-        return (true, bytes32(publicInputs[0]));
-    }
-
-    function getPublicInputsCount() external pure override returns (uint256) {
-        return PUBLIC_INPUTS_COUNT;
-    }
-}

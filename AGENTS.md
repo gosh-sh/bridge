@@ -253,6 +253,33 @@ Three diagnostic tests are checked into the prover repo so this regression is ca
 
 **Long-term remediation suggestion (for the partner)**: derive the keygen depth from `HISTORY_WINDOW_SIZE` rather than hardcoding it, so the reference circuit shape automatically tracks the runtime constant.
 
+### Resolution upstream (2026-05-11, Alina)
+
+Alina confirmed the diagnosis and pushed the long-term remediation across all three repos. The actual story turned out to be a *duplicate-constant* drift, not a Window-= 8 production setting: `HISTORY_PROOF_WINDOW_SIZE` was defined in two places inside `acki-nacki` (`node/src/types/history_proof.rs` = 8, `node/libs/node-block-client/src/history_proof.rs` = 4). Her local node had been built from a cached Docker image where `node/src/types/history_proof.rs` = 8 while the prover daemon used the lightweight crate's `= 4` definition — masking the desync for several full E2E runs.
+
+The chain of three coordinated commits:
+
+- `acki-nacki@8c54dd7c` — single source of truth lives in `node/libs/node-block-client/src/history_proof.rs` (value reverted to `= 4` for fast E2E coverage); `node/src/types/history_proof.rs` now does `pub use node_block_client::history_proof::HISTORY_PROOF_WINDOW_SIZE`. Old `8` and production `128` preserved as comments.
+- `acki-nacki-to-eth-bridge-halo2-prover@4cdc932 + c8495f9 + 24dffa1` — `bridge-prover-daemon` no longer carries its own `HISTORY_WINDOW_SIZE = …` literal; it imports `node_block_client::history_proof::HISTORY_PROOF_WINDOW_SIZE` at compile time. `ensure_layer_keys` computes `REF_TREE_DEPTH = (W + 2).next_power_of_two().trailing_zeros() as usize` — exactly the recommendation above. For the current `W = 4` this is depth `3`, bit-identical to the pre-fix literal, so cached VK/PK survive the patch with no keygen rerun.
+- `acki-nacki-to-eth-bridge-halo2-circuits@55a22b9` — `historical-layer-hashes-movement-checker-circuit/tests/real_prover.rs` aligned to `TREE_DEPTH = 3`, README table now lists all three rows (W=4 → depth 3, W=8 → 4, W=128 → 8), `.gitignore` covers `test_cache_real_prover/`.
+
+She independently re-verified end-to-end on her lightweight stand: 16/16 key blocks (heights 8..68) BOTH VERIFIED OK at `~3:20`/block steady state. Her note for future testing: stay on `W = 4` to maximise configuration coverage per unit time; bump to `8` only for the mid-size sanity sweep, and to `128` for production. The class of bug ("daemon literal drifts from node constant") is now eliminated at the type-system level — the prover crate physically depends on `node-block-client`, and the node crate physically re-exports the same constant.
+
+### Independent re-verification on our stand (2026-05-11)
+
+To close the loop we rebuilt the lightweight stand from scratch against Alina's unified `W = 4` ribosome (no Docker cache for `ackinacki-bridge-lite:latest`, fresh `params/layer_*.bin`, empty `state/`) and ran the prover+verifier pair against it. Six consecutive key blocks from the freshly bootstrapped chain all came through clean:
+
+```
+block  8: Circuit 1a VERIFIED (9.8 ms),  Circuit 2 VERIFIED (10.1 ms)  → BOTH VERIFIED OK  (3:32 e2e)
+block 12: Circuit 1a VERIFIED (11.3 ms), Circuit 2 VERIFIED (9.7 ms)   → BOTH VERIFIED OK  (3:27 e2e)
+block 16: Circuit 1a VERIFIED (8.8 ms),  Circuit 2 VERIFIED (10.0 ms)  → BOTH VERIFIED OK  (3:23 e2e)
+block 20: Circuit 1a VERIFIED (15.2 ms), Circuit 2 VERIFIED (12.4 ms)  → BOTH VERIFIED OK  (3:28 e2e)
+block 24: Circuit 1a VERIFIED (9.7 ms),  Circuit 2 VERIFIED (10.6 ms)  → BOTH VERIFIED OK  (3:25 e2e)
+block 28: Circuit 1a VERIFIED (13.0 ms), Circuit 2 VERIFIED (8.1 ms)   → BOTH VERIFIED OK  (3:24 e2e)
+```
+
+Steady-state ~3:25/block end-to-end (prove+verify), matching Alina's reported ~3:20/block within noise. Halo2 verify time stays at ~10 ms/circuit. The class of bug is empirically closed on our stand too.
+
 ## Build & Test Commands
 
 ```bash

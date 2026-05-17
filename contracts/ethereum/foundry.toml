@@ -18,6 +18,17 @@ fs_permissions = [
 fuzz = { runs = 5000 }
 invariant = { runs = 1000 }
 
+# Mainnet-fork tests (AAVE V3 integration). Requires `evm_version = "shanghai"`
+# so the foundry REVM can execute live AAVE bytecode (post-Shanghai opcodes,
+# including PUSH0). The default `paris` profile rejects PUSH0 with an
+# InvalidOpcode revert — see `test/AckiNackiBridgeAaveFork.t.sol` docstring
+# for the diagnosis. Solc 0.8.19 supports `shanghai`, and Ethereum mainnet
+# has been on Shanghai since April 2023, so this is a safe override.
+#
+# Run with: `FOUNDRY_PROFILE=fork FORK_URL=$RPC forge test --match-contract ...Fork`
+[profile.fork]
+evm_version = "shanghai"
+
 [fmt]
 line_length = 100
 tab_width = 4

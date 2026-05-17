@@ -288,7 +288,12 @@ make build-solidity # Solidity only
 # Solidity contracts (135 tests across 15 suites, all green)
 cd contracts/ethereum && forge build
 cd contracts/ethereum && forge test                                                      # full suite
-cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeAave" -vv           # AAVE subset (23 tests)
+cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeAaveTest" -vv       # AAVE mock subset (20 tests)
+
+# AAVE V3 mainnet-fork tests (opt-in, requires RPC + `fork` profile for evm_version=shanghai
+# because AAVE V3 aWETH bytecode uses PUSH0). Without FORK_URL the suite skips cleanly.
+FOUNDRY_PROFILE=fork FORK_URL=https://ethereum-rpc.publicnode.com \
+    forge test --match-contract AckiNackiBridgeAaveForkTest -vv         # 4 fork tests against real V3 Pool/Gateway/aWETH
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeVerifyBlock" -vv    # Phase 4 verifyBlock (17 tests)
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeRelayerLoop" -vv    # Phase 5.1 relayer loop (6 tests)
 cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHashesMovement)Verifier" -vv  # Per-circuit Groth16 adapters
@@ -377,7 +382,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - Phase 5.3: 10-block shellnet acceptance (Anvil + live AN node) — blocked on Q1. Re-introduces real-proof multi-block coverage that retired with the legacy E2E suite in Phase 4.2.
 - Phase 1.C / Phase 3.4: BK-set update circuit (partner stub `bk-set-change-verifier-halo2-circuit`); on landing, `verifyBlock` grows an optional fourth proof argument.
 - Phase 6: real `acki-nacki-interface` implementation (currently mock only).
-- AAVE: mainnet fork tests against the real `WrappedTokenGatewayV3` + `Pool` (currently mock-based).
+- AAVE: mainnet fork tests landed 2026-05-17 in `AckiNackiBridgeAaveFork.t.sol` (4 tests: constructor wiring, supply+withdraw round-trip, 1-year yield accrual + harvest, emergency exit). Opt-in via `FOUNDRY_PROFILE=fork FORK_URL=...`. Default `forge test` skips them. Validates real V3 `Pool` + `WrappedTokenGatewayV3` + `aWETH` ABI assumptions against the mock-based `AckiNackiBridgeAaveTest`.
 - Production LAYER_TREE_DEPTH=8 testing.
 
 ### Canonical v2 doc set (Phase 7 done, 2026-05-10)

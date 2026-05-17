@@ -83,7 +83,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 1. User calls `AckiNackiBridge.deposit()` on Ethereum → emits `Deposit` event.
 2. `deposit-prover` (Halo2, K=20) proves the event was emitted: Receipt RLP, MPT inclusion, log matching, block hash binding.
 3. Keccak coprocessor handles SHA3/keccak256 via Poseidon promise commitments (~500× savings).
-4. **AN side verifies the Halo2 SHPLONK proof natively** via the future `VERHALO2SHPLONK` TVM opcode (work-in-progress in `tvm-sdk`; design notes in Decision Log 2026-05-17 of `docs/an_partner_integration_plan.md`). 7 public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`. **No on-chain ETH-side verifier**: the legacy `IAckiNackiVerifier` / `Groth16{Verifier,DepositVerifier}` chain + the deposit-prover's `gnark-wrapper/` were retired in Phase 4.3 (2026-05-17) — see Decision Log.
+4. **AN side verifies the Halo2 SHPLONK proof natively** via the proposed `ZKHALO2VERIFYWITHVK` TVM opcode (work-in-progress in `tvm-sdk`; bridge-side design memo: `docs/zk_halo2_an_side_design.md`; tvm-sdk skeleton: branch `serhii/verhalo2shplonk-skeleton`, dispatch byte `0xC7 0x4A`). Partner's parallel `ZKHALO2VERIFY` (hard-coded DarkDex VK, dispatch byte `0xC7 0x49`) lives on `tvm-sdk` branch `serhii/node-3406-vergrth16-with-vk`; our WithVK sibling adds caller-supplied VK so per-deployment bridge circuits can be verified. 7 public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`. **No on-chain ETH-side verifier**: the legacy `IAckiNackiVerifier` / `Groth16{Verifier,DepositVerifier}` chain + the deposit-prover's `gnark-wrapper/` were retired in Phase 4.3 (2026-05-17) — see Decision Log.
 
 ### Layer Hash Flow (Acki Nacki → Ethereum)
 
@@ -386,7 +386,8 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - `docs/bridge_verification.md` — invariant labels (DEP-#, **LH-#** v2, **BK-#** Phase 1.C placeholder, OR-#, AC-#, FORK-#, **CC-#** new in v2, ZK-#) + reproducible run recipe.
 - `docs/manual_verification_runbook.md` — hands-on review (Phase D bound proof, Phase F `verifyBlock` walk, Phase G Phase-1.C placeholder, Phase J ≥ 30 attack scenarios incl. CC-1..CC-7).
 - `docs/verifying_an_proof.md` — per-circuit (1A/1B/2) verification flow, V1–V5 stages.
-- `docs/verifying_eth_proof_on_an.md` — deposit-side flow. **Rewritten 2026-05-17 after Phase 4.3 demolition**: the ETH-side Groth16 path was retired and the verification is now described as a pure AN-side native Halo2 SHPLONK check via the future `VERHALO2SHPLONK` TVM opcode.
+- `docs/verifying_eth_proof_on_an.md` — deposit-side flow. **Rewritten 2026-05-17 after Phase 4.3 demolition**: the ETH-side Groth16 path was retired and the verification is now described as a pure AN-side native Halo2 SHPLONK check via the proposed `ZKHALO2VERIFYWITHVK` TVM opcode.
+- `docs/zk_halo2_an_side_design.md` — design memo for the AN-side `ZKHALO2VERIFYWITHVK` opcode: gap analysis vs. partner's `ZKHALO2VERIFY` (hard-coded DarkDex VK), proposed stack ABI / gas model / per-VK cache, five open Q-WIRE-# questions, six-phase roadmap. Companion skeleton lives in `tvm-sdk` branch `serhii/verhalo2shplonk-skeleton`. New 2026-05-17.
 - `docs/aave_integration.md` — AAVE yield integration (orthogonal to four-circuit surface).
 - `docs/layer_hashes_circuit_audit.md` — Phase 0 partner-circuit audit (still applies — chips reused by Circuit 1A/1B/2).
 - `docs/legacy/verifying_an_proof_v1.md` — the retired single-circuit walkthrough, kept for reproducibility of legacy proofs.

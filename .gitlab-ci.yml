@@ -250,13 +250,20 @@ lint:solidity:fmt:
   allow_failure: false
 
 # Security stage
+#
+# `cargo audit` is post-alloy (2026-05): 0 vulnerabilities, only
+# informational warnings (unmaintained transitive deps). We run with
+# `allow_failure: false` so that any *new* RUSTSEC vulnerability hard-fails
+# the pipeline. False positives can be silenced via `.cargo/audit.toml`
+# (the file is committed and documents the policy).
 security:rust:audit:
   extends: .rust_base
   stage: security
   script:
-    - cargo install cargo-audit
+    # `--locked` pins cargo-audit's own deps for reproducibility.
+    - cargo install --locked cargo-audit
     - cargo audit
-  allow_failure: true
+  allow_failure: false
   only:
     - main
     - merge_requests

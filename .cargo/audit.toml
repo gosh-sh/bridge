@@ -1,8 +1,22 @@
-# Known advisories that cannot be fixed without replacing ethers-rs with alloy.
-# All are transitive dependencies of ethers 2.0.14.
+# Ignore-list for `cargo audit` (and the CI `security:rust:audit` job).
+#
+# After the 2026-05 `ethers-rs → alloy-rs` migration there are **0**
+# vulnerabilities and 4 informational warnings (unmaintained / unsound)
+# from transitive deps we don't own:
+#   - `derivative`         (RUSTSEC-2024-0388) — pulled in by `ark-ff` 0.4.2
+#   - `paste`              (RUSTSEC-2024-0436) — pulled in by halo2 / proptest
+#   - `rand` 0.9.x         (RUSTSEC-2026-0097) — pulled in by alloy / proptest
+#
+# Those are *warnings*, not vulnerabilities, so `cargo audit` exits 0 with
+# the default config and the CI job runs without `allow_failure`. We do
+# **not** list them here on purpose — we want them visible in the CI log
+# so a future fix (e.g. ark-ff 0.5 dropping `derivative`) can be picked up.
+#
+# Only list IDs here if the cargo-audit *exit code* needs to be flipped
+# back to 0 for a real vulnerability we have a documented reason to defer.
+# Format:
+#     [advisories]
+#     ignore = ["RUSTSEC-YYYY-NNNN"]
 [advisories]
-ignore = [
-    # ring 0.16.20: AES panic with overflow checking (via ethers → jsonwebtoken → ring)
-    "RUSTSEC-2025-0009",
-]
+ignore = []
 

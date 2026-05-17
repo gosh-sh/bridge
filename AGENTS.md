@@ -299,8 +299,9 @@ cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeRelayerLoop
 cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHashesMovement)Verifier" -vv  # Per-circuit Groth16 adapters
 
 # Relayer skeleton (Phase 5.1, standalone)
-cd crates/bridge-relayer-daemon && cargo test                                            # 13 unit tests
+cd crates/bridge-relayer-daemon && cargo test                                            # 19 unit tests (13 baseline + 6 sentry)
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
+cd crates/bridge-relayer-daemon && cargo test --test live_bk_set_sentry -- --ignored     # live BK-set sentry against AN testnet
 
 # Cross-circuit-bound proof generation (Phase 4.1 fixture builder)
 cd crates/bridge-prover-orchestrator
@@ -375,7 +376,8 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 
 | Crate | Count | Notes |
 |------|------|------|
-| `bridge-relayer-daemon` | 13 | state persistence (2), `BlockSource` (2), `MockBridgeClient` (4), `Relayer` loop end-to-end (5) |
+| `bridge-relayer-daemon` | 19 | state persistence (2), `BlockSource` (2), `MockBridgeClient` (4), `Relayer` loop end-to-end (5), `BkSetSentry` Bootstrapped/Quiet/RotationDetected classification + metrics counters + `run_until_stop` orchestration (6) |
+| `bridge-relayer-daemon` (live) | 1 | `#[ignore]`-gated `live_sentry_bootstraps_then_quiet_or_rotation` — two-tick sequence against the public AN testnet `/v2/bk_set_update` |
 
 **Remaining (Phase 5.2/5.3, 6, 7)**:
 - Phase 5.2: `LiveBlockSource` impl over partner's `gql_client` + `boc_parser` + relayer-side halo2+gnark (blocked on Q1 + Q2).

@@ -47,6 +47,7 @@
 //!                                └──────────────────────────┘
 //! ```
 
+pub mod bk_set_sentry;
 pub mod bridge;
 pub mod error;
 pub mod relayer;
@@ -54,6 +55,7 @@ pub mod source;
 pub mod state;
 pub mod types;
 
+pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BridgeClient, BridgeOnChainState, EthBridgeClient, MockBridgeClient, SubmitOutcome,
 };

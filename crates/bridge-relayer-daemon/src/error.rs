@@ -44,10 +44,23 @@ pub enum RelayerError {
     #[error("relayer state serde error: {0}")]
     StateSerde(#[from] serde_json::Error),
 
+    /// An Acki Nacki HTTP / schema / shape failure surfacing from
+    /// `acki-nacki-interface` (e.g. `BkSetTracker` polling). Recoverable
+    /// — the sentry caller decides whether to retry; we wrap the original
+    /// error here for visibility without leaking the dependency type.
+    #[error("acki-nacki interface error: {0}")]
+    AckiNacki(String),
+
     /// An unexpected condition we don't have a finer-grained variant
     /// for. Use sparingly.
     #[error("relayer error: {0}")]
     Other(String),
+}
+
+impl From<acki_nacki_interface::AckiNackiError> for RelayerError {
+    fn from(e: acki_nacki_interface::AckiNackiError) -> Self {
+        Self::AckiNacki(e.to_string())
+    }
 }
 
 impl RelayerError {

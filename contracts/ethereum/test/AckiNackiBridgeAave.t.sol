@@ -79,11 +79,7 @@ contract AckiNackiBridgeAaveTest is Test {
 
     function test_constructor_noAaveIsLegal() public {
         AckiNackiBridge plain = new AckiNackiBridge(
-            address(oracle),
-            address(0),
-            address(0),
-            address(0),
-            VerifyBlockConfigLib.disabled()
+            address(oracle), address(0), address(0), address(0), VerifyBlockConfigLib.disabled()
         );
         assertFalse(plain.aaveEnabled(), "aave disabled when no addresses");
         assertEq(address(plain.aavePool()), address(0));

@@ -78,5 +78,4 @@ impl<M: Middleware> EthereumContract<M> {
 
         Ok(counter)
     }
-
 }

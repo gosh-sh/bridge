@@ -137,9 +137,7 @@ contract AckiNackiBridgeAaveForkTest is Test {
         bridge.deposit{ value: depositAmount }();
         assertEq(bridge.treasuryBalance(), depositAmount, "treasury == deposit");
         assertEq(
-            address(bridge).balance - ethStart,
-            depositAmount,
-            "bridge ETH grew by depositAmount"
+            address(bridge).balance - ethStart, depositAmount, "bridge ETH grew by depositAmount"
         );
 
         // Step 2: supply maximum allowed (respects 10% reserve).
@@ -172,16 +170,9 @@ contract AckiNackiBridgeAaveForkTest is Test {
         bridge.withdrawFromAave(3 ether);
 
         assertEq(bridge.suppliedPrincipal(), principalBefore - 3 ether, "principal decremented");
-        assertEq(
-            address(bridge).balance - ethBefore,
-            3 ether,
-            "bridge received exactly 3 ETH"
-        );
+        assertEq(address(bridge).balance - ethBefore, 3 ether, "bridge received exactly 3 ETH");
         assertApproxEqAbs(
-            aWethBefore - bridge.aWethBalance(),
-            3 ether,
-            DRIFT_TOLERANCE,
-            "aWETH burned ~= 3 ETH"
+            aWethBefore - bridge.aWethBalance(), 3 ether, DRIFT_TOLERANCE, "aWETH burned ~= 3 ETH"
         );
     }
 
@@ -239,9 +230,7 @@ contract AckiNackiBridgeAaveForkTest is Test {
             "harvest delivered ~ yield/2"
         );
         assertEq(
-            bridge.suppliedPrincipal(),
-            principalBeforeHarvest,
-            "harvest must not touch principal"
+            bridge.suppliedPrincipal(), principalBeforeHarvest, "harvest must not touch principal"
         );
     }
 

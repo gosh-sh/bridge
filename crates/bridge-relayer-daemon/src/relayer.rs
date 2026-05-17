@@ -6,23 +6,23 @@
 //! 2. computes the target seqNo (`last_seen + 1`);
 //! 3. asks the configured [`crate::source::BlockSource`] for that block;
 //! 4. submits via the configured [`crate::bridge::BridgeClient`];
-//! 5. on success — updates [`crate::state::RelayerState`] and persists
-//!    it; otherwise records the attempt.
+//! 5. on success — updates [`crate::state::RelayerState`] and persists it;
+//!    otherwise records the attempt.
 //!
 //! [`Relayer::run_loop`] just calls `tick` in a `loop` with a configurable
 //! delay between iterations and a "max ticks" budget for tests.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::bridge::{BridgeClient, BridgeOnChainState, SubmitOutcome};
-use crate::error::RelayerError;
-use crate::source::BlockSource;
-use crate::state::RelayerState;
+use crate::{
+    bridge::{BridgeClient, BridgeOnChainState, SubmitOutcome},
+    error::RelayerError,
+    source::BlockSource,
+    state::RelayerState,
+};
 
 /// Static configuration for one relayer instance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ pub enum TickOutcome {
     Verified {
         seq_no: u64,
         new_state: BridgeOnChainState,
-        tx_hash: Option<ethers::types::H256>,
+        tx_hash: Option<alloy::primitives::B256>,
     },
     /// `BlockSource` says the next block isn't available yet.
     NotYetAvailable { target_seq_no: u64 },
@@ -87,7 +87,11 @@ pub struct Relayer<S: BlockSource, B: BridgeClient> {
 impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
     /// Build a relayer, loading any existing state from disk. If
     /// `state.json` doesn't exist, a fresh [`RelayerState`] is created.
-    pub fn new(config: RelayerConfig, source: Arc<S>, bridge: Arc<B>) -> Result<Self, RelayerError> {
+    pub fn new(
+        config: RelayerConfig,
+        source: Arc<S>,
+        bridge: Arc<B>,
+    ) -> Result<Self, RelayerError> {
         let state = RelayerState::load(&config.state_path)?.unwrap_or_default();
         Ok(Self {
             config,
@@ -142,7 +146,7 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
                 return Ok(TickOutcome::NotYetAvailable {
                     target_seq_no: target,
                 });
-            }
+            },
         };
 
         if block.block_seq_no != target {
@@ -181,7 +185,10 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
         }
 
         match self.bridge.submit_block(&block).await? {
-            SubmitOutcome::Verified { new_state, tx_hash } => {
+            SubmitOutcome::Verified {
+                new_state,
+                tx_hash,
+            } => {
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -196,8 +203,10 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
                     new_state,
                     tx_hash,
                 })
-            }
-            SubmitOutcome::Reverted { reason } => {
+            },
+            SubmitOutcome::Reverted {
+                reason,
+            } => {
                 self.state.record_attempt(target);
                 self.persist_state()?;
                 warn!(
@@ -210,7 +219,7 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
                     target_seq_no: target,
                     reason,
                 })
-            }
+            },
         }
     }
 
@@ -249,22 +258,23 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
 mod tests {
     use std::sync::Arc;
 
-    use ethers::types::{Bytes, U256};
+    use alloy::primitives::{Bytes, U256};
     use tempfile::tempdir;
 
-    use crate::bridge::MockBridgeClient;
-    use crate::source::InMemoryBlockSource;
-    use crate::types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES};
-
     use super::*;
+    use crate::{
+        bridge::MockBridgeClient,
+        source::InMemoryBlockSource,
+        types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
+    };
 
     const BK: u64 = 0xBE5E7;
 
     fn block(seq: u64, prev_anchor: U256) -> AnBlockData {
-        let mut layer_hashes = [U256::zero(); MAX_LAYER_HASHES];
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         layer_hashes[0] = U256::from(seq * 100 + 1);
         AnBlockData {
-            fin_type: if seq % 3 == 0 {
+            fin_type: if seq.is_multiple_of(3) {
                 FinalizationType::Fallback
             } else {
                 FinalizationType::Primary
@@ -298,28 +308,34 @@ mod tests {
         let dir = tempdir().unwrap();
         let bridge = Arc::new(MockBridgeClient::with_genesis(
             U256::from(BK),
-            U256::zero(),
+            U256::ZERO,
             Arc::new(|_| true),
         ));
         let source = Arc::new(InMemoryBlockSource::new());
 
         // Stage 5 blocks chained by their anchors.
-        let mut anchor = U256::zero();
+        let mut anchor = U256::ZERO;
         for seq in 1..=5 {
             let b = block(seq, anchor);
             anchor = b.next_anchor();
             source.insert(b);
         }
 
-        let mut relayer = make_relayer(source.clone(), bridge.clone(), dir.path().join("state.json"));
+        let mut relayer = make_relayer(
+            source.clone(),
+            bridge.clone(),
+            dir.path().join("state.json"),
+        );
         for seq in 1..=5 {
             match relayer.tick().await.unwrap() {
                 TickOutcome::Verified {
-                    seq_no, new_state, ..
+                    seq_no,
+                    new_state,
+                    ..
                 } => {
                     assert_eq!(seq_no, seq);
                     assert_eq!(new_state.last_seen_block_seq_no, seq);
-                }
+                },
                 other => panic!("expected Verified at seq {seq}, got {other:?}"),
             }
         }
@@ -333,14 +349,20 @@ mod tests {
         let dir = tempdir().unwrap();
         let bridge = Arc::new(MockBridgeClient::with_genesis(
             U256::from(BK),
-            U256::zero(),
+            U256::ZERO,
             Arc::new(|_| true),
         ));
         let source = Arc::new(InMemoryBlockSource::new());
-        let mut relayer = make_relayer(source.clone(), bridge.clone(), dir.path().join("state.json"));
+        let mut relayer = make_relayer(
+            source.clone(),
+            bridge.clone(),
+            dir.path().join("state.json"),
+        );
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::NotYetAvailable { target_seq_no } => assert_eq!(target_seq_no, 1),
+            TickOutcome::NotYetAvailable {
+                target_seq_no,
+            } => assert_eq!(target_seq_no, 1),
             other => panic!("expected NotYetAvailable, got {other:?}"),
         }
         assert_eq!(bridge.accepted_count(), 0);
@@ -349,9 +371,11 @@ mod tests {
         assert_eq!(relayer.state().attempts_since_progress, 1);
 
         // Now stage block 1; next tick should accept it.
-        source.insert(block(1, U256::zero()));
+        source.insert(block(1, U256::ZERO));
         match relayer.tick().await.unwrap() {
-            TickOutcome::Verified { seq_no, .. } => assert_eq!(seq_no, 1),
+            TickOutcome::Verified {
+                seq_no, ..
+            } => assert_eq!(seq_no, 1),
             other => panic!("expected Verified, got {other:?}"),
         }
         assert_eq!(relayer.state().attempts_since_progress, 0);
@@ -362,27 +386,46 @@ mod tests {
         let dir = tempdir().unwrap();
         // Reject any block whose seqNo is 2; accept everything else.
         let verifier = Arc::new(|b: &AnBlockData| b.block_seq_no != 2);
-        let bridge =
-            Arc::new(MockBridgeClient::with_genesis(U256::from(BK), U256::zero(), verifier));
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            verifier,
+        ));
         let source = Arc::new(InMemoryBlockSource::new());
 
-        let mut anchor = U256::zero();
+        let mut anchor = U256::ZERO;
         for seq in 1..=3 {
             let b = block(seq, anchor);
             anchor = b.next_anchor();
             source.insert(b);
         }
 
-        let mut relayer = make_relayer(source.clone(), bridge.clone(), dir.path().join("state.json"));
+        let mut relayer = make_relayer(
+            source.clone(),
+            bridge.clone(),
+            dir.path().join("state.json"),
+        );
 
         // 1: accepted
-        assert!(matches!(relayer.tick().await.unwrap(), TickOutcome::Verified { seq_no: 1, .. }));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Verified {
+                seq_no: 1,
+                ..
+            }
+        ));
         // 2: bridge reverts (verifier says no)
         match relayer.tick().await.unwrap() {
-            TickOutcome::BridgeReverted { target_seq_no, reason } => {
+            TickOutcome::BridgeReverted {
+                target_seq_no,
+                reason,
+            } => {
                 assert_eq!(target_seq_no, 2);
-                assert!(reason.contains("AttestationProofRejected") || reason.contains("LayerHashesProofRejected"));
-            }
+                assert!(
+                    reason.contains("AttestationProofRejected")
+                        || reason.contains("LayerHashesProofRejected")
+                );
+            },
             other => panic!("expected revert, got {other:?}"),
         }
         // The rejected block stays at seqNo 2; we'd need a new-and-better
@@ -405,12 +448,12 @@ mod tests {
 
         let bridge = Arc::new(MockBridgeClient::with_genesis(
             U256::from(BK),
-            U256::zero(),
+            U256::ZERO,
             Arc::new(|_| true),
         ));
         let source = Arc::new(InMemoryBlockSource::new());
 
-        let mut anchor = U256::zero();
+        let mut anchor = U256::ZERO;
         for seq in 1..=4 {
             let b = block(seq, anchor);
             anchor = b.next_anchor();
@@ -420,8 +463,14 @@ mod tests {
         // Run 2 ticks, then drop relayer.
         {
             let mut r = make_relayer(source.clone(), bridge.clone(), state_path.clone());
-            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified { seq_no: 1, .. }));
-            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified { seq_no: 2, .. }));
+            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+                seq_no: 1,
+                ..
+            }));
+            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+                seq_no: 2,
+                ..
+            }));
         }
 
         // Restart: a fresh relayer reads the persisted state and the
@@ -429,8 +478,14 @@ mod tests {
         let mut r2 = make_relayer(source, bridge.clone(), state_path);
         assert_eq!(r2.state().last_processed_seqno, Some(2));
 
-        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified { seq_no: 3, .. }));
-        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified { seq_no: 4, .. }));
+        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 3,
+            ..
+        }));
+        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 4,
+            ..
+        }));
 
         assert_eq!(bridge.accepted_count(), 4);
         assert_eq!(r2.state().last_processed_seqno, Some(4));
@@ -441,11 +496,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let bridge = Arc::new(MockBridgeClient::with_genesis(
             U256::from(BK),
-            U256::zero(),
+            U256::ZERO,
             Arc::new(|_| true),
         ));
         let source = Arc::new(InMemoryBlockSource::new());
-        let mut anchor = U256::zero();
+        let mut anchor = U256::ZERO;
         for seq in 1..=5 {
             let b = block(seq, anchor);
             anchor = b.next_anchor();
@@ -455,7 +510,10 @@ mod tests {
 
         let history = r
             .run_loop(10, |outcome| {
-                matches!(outcome, TickOutcome::Verified { seq_no: 3, .. })
+                matches!(outcome, TickOutcome::Verified {
+                    seq_no: 3,
+                    ..
+                })
             })
             .await
             .unwrap();

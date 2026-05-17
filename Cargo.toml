@@ -24,10 +24,23 @@ repository = "https://vcs.modus-ponens.com/ton/acki-nacki-bridge"
 tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
 
-# Ethereum
-ethers = { version = "2.0", features = ["abigen", "ws", "rustls"] }
-alloy-primitives = "0.8"
-alloy-sol-types = "0.8"
+# Ethereum (alloy-rs, migrated 2026-05-17 from ethers-rs 2.0.14 — the latter
+# is unmaintained and pulls rustls-webpki 0.101.7 carrying RUSTSEC-2026-0098,
+# RUSTSEC-2026-0099, RUSTSEC-2026-0104 via transitive deps. `alloy = "2.0"`
+# uses rustls 0.23 + rustls-webpki 0.103, eliminating all three CVEs.
+alloy = { version = "2.0", features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "signer-local",
+    "signers",
+    "contract",
+    "network",
+    "sol-types",
+    "transport-http",
+] }
+alloy-primitives = "1"
+alloy-sol-types = "1"
 
 
 # Serialization

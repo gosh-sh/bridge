@@ -5,10 +5,23 @@ edition = "2021"
 description = "Relayer skeleton for the AN→ETH bridge: fetches AN block data + proofs, drives them through `AckiNackiBridge.verifyBlock` on Ethereum (Phase 5.1)."
 
 [dependencies]
-# Core async + ethers (relayer-side only — no halo2 here).
+# Core async + alloy (relayer-side only — no halo2 here).
+# Migrated from ethers-rs 2.0.14 on 2026-05-17 to clear RUSTSEC-2026-0098/-0099/-0104
+# (rustls-webpki) and the wider unmaintained-dep churn (`derivative`, `instant`,
+# `fxhash`, `rustls-pemfile`). See the workspace Cargo.toml for full context.
 tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
-ethers = { version = "2.0", features = ["abigen", "ws", "rustls"] }
+alloy = { version = "2.0", features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "signer-local",
+    "signers",
+    "contract",
+    "network",
+    "sol-types",
+    "transport-http",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

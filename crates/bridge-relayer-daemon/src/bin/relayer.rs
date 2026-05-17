@@ -10,20 +10,25 @@
 //! `cargo run -p bridge-relayer-daemon --bin relayer -- --help` is the
 //! best entry point.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use clap::{Parser, Subcommand};
-use ethers::prelude::*;
-use ethers::signers::{LocalWallet, Signer};
-use tracing::{error, info};
-
+use alloy::{
+    network::EthereumWallet,
+    primitives::Address,
+    providers::{Provider, ProviderBuilder},
+    signers::{local::PrivateKeySigner, Signer},
+};
 use bridge_relayer_daemon::{
     EthBridgeClient, FixturesBlockSource, Relayer, RelayerConfig, TickOutcome,
 };
+use clap::{Parser, Subcommand};
+use tracing::{error, info};
 
 #[derive(Parser, Debug)]
-#[command(name = "relayer", about = "Acki Nacki → Ethereum bridge relayer (Phase 5.1 skeleton)")]
+#[command(
+    name = "relayer",
+    about = "Acki Nacki → Ethereum bridge relayer (Phase 5.1 skeleton)"
+)]
 struct Args {
     /// Where to persist `state.json`.
     #[arg(long, default_value = "./relayer-state.json")]
@@ -68,19 +73,26 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Status => {
             info!("relayer state file = {}", args.state.display());
             Ok(())
-        }
+        },
         Cmd::SmokeFixture {
             fixtures_dir,
             rpc_url,
             bridge_address,
             private_key,
             max_ticks,
-        } => smoke_fixture(args.state, fixtures_dir, rpc_url, bridge_address, private_key, max_ticks)
-            .await
-            .map_err(|e| {
-                error!(?e, "smoke run failed");
-                e
-            }),
+        } => smoke_fixture(
+            args.state,
+            fixtures_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            max_ticks,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "smoke run failed");
+            e
+        }),
     }
 }
 
@@ -92,19 +104,29 @@ async fn smoke_fixture(
     private_key: String,
     max_ticks: usize,
 ) -> anyhow::Result<()> {
-    let provider = Provider::<Http>::try_from(rpc_url.as_str())?;
-    let chain_id = provider.get_chainid().await?.as_u64();
-    let wallet: LocalWallet = private_key.parse::<LocalWallet>()?.with_chain_id(chain_id);
-    let client = Arc::new(SignerMiddleware::new(provider, wallet));
+    // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
+    // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
+    // chain that yields a wallet-filled provider in a single call. The
+    // signer's chain ID is derived from the RPC endpoint to mirror the
+    // ethers behaviour (which called `get_chainid` before `with_chain_id`).
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe_provider.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
 
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, client));
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
     let source = Arc::new(FixturesBlockSource::from_dir(&fixtures_dir)?);
 
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
 
     let history = relayer
-        .run_loop(max_ticks, |outcome| matches!(outcome, TickOutcome::Verified { .. }))
+        .run_loop(max_ticks, |outcome| {
+            matches!(outcome, TickOutcome::Verified { .. })
+        })
         .await?;
     info!(?history, "smoke run complete");
     Ok(())

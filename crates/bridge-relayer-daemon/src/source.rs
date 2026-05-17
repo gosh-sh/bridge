@@ -1,35 +1,34 @@
 //! [`BlockSource`] — abstraction over "where do AN blocks come from?".
 //!
 //! Phase 5.1 ships:
-//! - [`InMemoryBlockSource`] — pre-baked map keyed by seqNo. Used by
-//!   the unit tests in this crate to drive multi-block scenarios in
-//!   < 10 ms each.
-//! - [`FixturesBlockSource`] — reads pre-generated bound proof
-//!   artefacts from disk (the Phase 4.1 outputs of
-//!   `bridge-prover-orchestrator/proofs/bound/...` plus the gnark JSON
-//!   produced by `circuit-1a/circuit-2`). Yields a single canned block
-//!   keyed by `block_seq_no = 1`.
+//! - [`InMemoryBlockSource`] — pre-baked map keyed by seqNo. Used by the unit
+//!   tests in this crate to drive multi-block scenarios in < 10 ms each.
+//! - [`FixturesBlockSource`] — reads pre-generated bound proof artefacts from
+//!   disk (the Phase 4.1 outputs of
+//!   `bridge-prover-orchestrator/proofs/bound/...` plus the gnark JSON produced
+//!   by `circuit-1a/circuit-2`). Yields a single canned block keyed by
+//!   `block_seq_no = 1`.
 //!
 //! Phase 5.2 will add `LiveBlockSource` backed by GraphQL + BOC parsing
 //! + halo2 + gnark.
 
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Mutex;
+use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
+use alloy::primitives::{Bytes, U256};
 use async_trait::async_trait;
-use ethers::types::{Bytes, U256};
 use serde::Deserialize;
 
-use crate::error::RelayerError;
-use crate::types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES};
+use crate::{
+    error::RelayerError,
+    types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
+};
 
 /// Asynchronous source of AN block payloads.
 ///
 /// `fetch(seqno)` returns:
 /// - `Ok(Some(block))` — a fully-prepared payload we can submit;
-/// - `Ok(None)` — the block isn't available yet (not finalised, proof
-///   not generated, partner node still syncing); the relayer waits.
+/// - `Ok(None)` — the block isn't available yet (not finalised, proof not
+///   generated, partner node still syncing); the relayer waits.
 /// - `Err(RelayerError)` — terminal error inside the source.
 #[async_trait]
 pub trait BlockSource: Send + Sync {
@@ -155,7 +154,7 @@ impl FixturesBlockSource {
                 scenario.num_layers
             )));
         }
-        let mut layer_hashes = [U256::zero(); MAX_LAYER_HASHES];
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         for (i, dec) in scenario.layer_hash_decimals.iter().enumerate() {
             if i >= MAX_LAYER_HASHES {
                 break;
@@ -176,7 +175,9 @@ impl FixturesBlockSource {
         };
         block.validate_shape()?;
 
-        Ok(Self { block })
+        Ok(Self {
+            block,
+        })
     }
 
     pub fn block(&self) -> &AnBlockData {
@@ -206,7 +207,10 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, RelayerError> {
 }
 
 fn parse_dec_u256(s: &str) -> Result<U256, RelayerError> {
-    U256::from_dec_str(s.trim()).map_err(|e| RelayerError::other(format!("bad decimal U256: {e}")))
+    use std::str::FromStr;
+    // alloy's `U256` implements `FromStr` (base 10). The old ethers helper
+    // `U256::from_dec_str` is replaced by this trait method.
+    U256::from_str(s.trim()).map_err(|e| RelayerError::other(format!("bad decimal U256: {e}")))
 }
 
 #[cfg(test)]
@@ -215,7 +219,7 @@ mod tests {
     use crate::types::{AnBlockData, FinalizationType};
 
     fn dummy_block(seq: u64) -> AnBlockData {
-        let mut layer_hashes = [U256::zero(); MAX_LAYER_HASHES];
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         layer_hashes[0] = U256::from(seq * 2 + 1);
         AnBlockData {
             fin_type: FinalizationType::Primary,
@@ -224,7 +228,7 @@ mod tests {
             block_seq_no: seq,
             num_layers: 1,
             layer_hashes,
-            prev_max_level_layer_hash: U256::zero(),
+            prev_max_level_layer_hash: U256::ZERO,
             attestation_proof: Bytes::from(vec![0u8; 256]),
             layer_hashes_proof: Bytes::from(vec![0u8; 256]),
         }
@@ -252,11 +256,7 @@ mod tests {
             r#"{"proof":"0xdeadbeef"}"#,
         )
         .unwrap();
-        std::fs::write(
-            lh.join("groth16_output.json"),
-            r#"{"proof":"0xcafebabe"}"#,
-        )
-        .unwrap();
+        std::fs::write(lh.join("groth16_output.json"), r#"{"proof":"0xcafebabe"}"#).unwrap();
         std::fs::write(
             dir.path().join("bound_scenario.json"),
             serde_json::to_string(&serde_json::json!({

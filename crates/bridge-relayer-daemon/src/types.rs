@@ -6,7 +6,7 @@
 //! Solidity's `enum FinalizationType` represented as a Rust enum and
 //! Solidity's `uint256[10] layerHashes` as a fixed-size `[U256; 10]`.
 
-use ethers::types::{Bytes, U256};
+use alloy::primitives::{Bytes, U256};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of layer hashes per AN block (mirrors

@@ -3,34 +3,47 @@
 //!
 //! Two implementations:
 //!
-//! - [`EthBridgeClient`] — production. Wraps an ethers-rs
-//!   `abigen!`-generated contract binding. Reads
-//!   `storedLastSeenBlockSeqNo` / `storedBkSetCommitment` /
-//!   `storedPrevMaxLevelLayerHash` from chain and submits
-//!   `verifyBlock(...)` transactions.
-//! - [`MockBridgeClient`] — a deterministic in-memory mirror of the
-//!   contract's state machine, exposed to unit tests so we can drive the
-//!   relayer through 5+ blocks in microseconds without spawning Anvil.
-//!   The mock reproduces *exactly* the cheap pre-flight checks the real
-//!   contract performs (numLayers range, tail zero, BK-set match,
-//!   monotonic seqNo, anchor match) — so any consumer that passes the
-//!   mock will also pass the real bridge unless ZK proofs are bad.
+//! - [`EthBridgeClient`] — production. Wraps an alloy-rs `sol!`-generated
+//!   contract binding. Reads `storedLastSeenBlockSeqNo` /
+//!   `storedBkSetCommitment` / `storedPrevMaxLevelLayerHash` from chain and
+//!   submits `verifyBlock(...)` transactions.
+//! - [`MockBridgeClient`] — a deterministic in-memory mirror of the contract's
+//!   state machine, exposed to unit tests so we can drive the relayer through
+//!   5+ blocks in microseconds without spawning Anvil. The mock reproduces
+//!   *exactly* the cheap pre-flight checks the real contract performs
+//!   (numLayers range, tail zero, BK-set match, monotonic seqNo, anchor match)
+//!   — so any consumer that passes the mock will also pass the real bridge
+//!   unless ZK proofs are bad.
 //!
 //! ZK verification itself is *not* mocked here in the way the Solidity
 //! `MockPrimaryVerifier` etc. mocks do; the [`MockBridgeClient`] takes
 //! a `verifier_decision: Fn(&AnBlockData) -> bool` so tests can simulate
 //! a verifier-rejection path explicitly.
+//!
+//! ## Migration note (2026-05-17)
+//!
+//! Migrated from `ethers-rs 2.0.14` to `alloy 2.0.4`. The trait surface
+//! ([`BridgeClient`]) is unchanged so callers (the relayer loop, the
+//! mock-based unit tests) need no edits beyond the primitive type swap
+//! `ethers::types::{U256, H256, Bytes}` → `alloy::primitives::{U256, B256,
+//! Bytes}`. The production wrapper grew a tiny bit of generic plumbing to
+//! abstract over the alloy [`Provider`] trait the same way it used to
+//! abstract over ethers' `Middleware`.
 
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use alloy::{
+    contract::Error as AlloyContractError,
+    network::{Network, ReceiptResponse},
+    primitives::{Address, B256, U256},
+    providers::Provider,
+};
 use async_trait::async_trait;
-use ethers::contract::Contract;
-use ethers::prelude::*;
-use ethers::types::{Address, Bytes, TransactionReceipt, U256};
 
-use crate::error::RelayerError;
-use crate::types::{AnBlockData, MAX_LAYER_HASHES};
+use crate::{
+    error::RelayerError,
+    types::{AnBlockData, MAX_LAYER_HASHES},
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types
@@ -53,7 +66,7 @@ pub enum SubmitOutcome {
     Verified {
         new_state: BridgeOnChainState,
         /// `Some` for the real bridge, `None` for the mock (no tx).
-        tx_hash: Option<H256>,
+        tx_hash: Option<B256>,
     },
     /// `verifyBlock` reverted. The string carries the human-readable
     /// reason; the relayer doesn't try to parse selectors here (the
@@ -108,7 +121,7 @@ impl MockBridgeClient {
                 last_seen_block_seq_no: 0,
                 bk_set_commitment,
                 num_layers: 0,
-                layer_hashes: [U256::zero(); MAX_LAYER_HASHES],
+                layer_hashes: [U256::ZERO; MAX_LAYER_HASHES],
                 prev_max_level_layer_hash,
                 accepted_log: Vec::new(),
             }),
@@ -123,7 +136,11 @@ impl MockBridgeClient {
 
     /// Test helper: clone the accepted log.
     pub fn accepted_log(&self) -> Vec<AnBlockData> {
-        self.inner.lock().expect("poisoned lock").accepted_log.clone()
+        self.inner
+            .lock()
+            .expect("poisoned lock")
+            .accepted_log
+            .clone()
     }
 }
 
@@ -195,33 +212,69 @@ impl BridgeClient for MockBridgeClient {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// EthBridgeClient — production wrapper over ethers-rs abigen bindings
+// EthBridgeClient — production wrapper over alloy sol! bindings
 // ─────────────────────────────────────────────────────────────────────
 
-abigen!(
-    AckiNackiBridge,
-    r#"[
-        function verifyBlock(uint8 finType, bytes attestationProof, bytes layerHashesProof, uint256 blockId, uint256 bkSetCommitment, uint64 blockSeqNo, uint8 numLayers, uint256[10] layerHashes, uint256 prevMaxLevelLayerHash) external
-        function storedLastSeenBlockSeqNo() external view returns (uint64)
-        function storedBkSetCommitment() external view returns (uint256)
-        function storedPrevMaxLevelLayerHash() external view returns (uint256)
-        event BlockVerified(uint256 indexed blockId, uint64 indexed blockSeqNo, uint8 finType, uint8 numLayers)
-    ]"#
-);
+// `sol!` expands into a `verifyBlock(...)` builder function with 10
+// arguments — clippy's `too_many_arguments` lint trips on macro-generated
+// code. Wrapping the macro invocation in a private module lets us scope
+// the `allow` to just the generated bindings without polluting the rest
+// of the file.
+#[allow(clippy::too_many_arguments)]
+mod sol_bindings {
+    use alloy::sol;
+    sol! {
+        #[sol(rpc)]
+        #[allow(missing_docs)]
+        contract AckiNackiBridge {
+            function verifyBlock(
+                uint8 finType,
+                bytes calldata attestationProof,
+                bytes calldata layerHashesProof,
+                uint256 blockId,
+                uint256 bkSetCommitment,
+                uint64 blockSeqNo,
+                uint8 numLayers,
+                uint256[10] calldata layerHashes,
+                uint256 prevMaxLevelLayerHash
+            ) external;
 
-/// Production bridge client — wraps `abigen!`-generated bindings.
+            function storedLastSeenBlockSeqNo() external view returns (uint64);
+            function storedBkSetCommitment() external view returns (uint256);
+            function storedPrevMaxLevelLayerHash() external view returns (uint256);
+
+            event BlockVerified(
+                uint256 indexed blockId,
+                uint64 indexed blockSeqNo,
+                uint8 finType,
+                uint8 numLayers
+            );
+        }
+    }
+}
+
+use sol_bindings::AckiNackiBridge;
+
+/// Production bridge client — wraps `sol!`-generated bindings.
 ///
-/// Generic over any ethers `Middleware` (a signer-middleware in
-/// production; `Provider<Http>` in read-only smoke tests).
-pub struct EthBridgeClient<M: Middleware + 'static> {
-    contract: AckiNackiBridge<M>,
+/// Generic over any alloy [`Provider`] (a wallet-filled provider in
+/// production; a plain HTTP provider in read-only smoke tests).
+pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum> {
+    contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
     address: Address,
 }
 
-impl<M: Middleware + 'static> EthBridgeClient<M> {
-    pub fn new(address: Address, client: Arc<M>) -> Self {
-        let contract = AckiNackiBridge::new(address, client);
-        Self { contract, address }
+impl<P, N> EthBridgeClient<P, N>
+where
+    P: Provider<N> + Clone,
+    N: Network,
+{
+    pub fn new(address: Address, provider: P) -> Self {
+        let contract = AckiNackiBridge::new(address, provider);
+        Self {
+            contract,
+            address,
+        }
     }
 
     pub fn address(&self) -> Address {
@@ -230,32 +283,33 @@ impl<M: Middleware + 'static> EthBridgeClient<M> {
 
     /// Direct access to the underlying contract (escape hatch for
     /// tests that want to attach event-stream subscriptions etc.).
-    pub fn contract(&self) -> &AckiNackiBridge<M> {
+    pub fn contract(&self) -> &AckiNackiBridge::AckiNackiBridgeInstance<P, N> {
         &self.contract
     }
 }
 
 #[async_trait]
-impl<M: Middleware + 'static> BridgeClient for EthBridgeClient<M>
+impl<P, N> BridgeClient for EthBridgeClient<P, N>
 where
-    M::Error: 'static,
+    P: Provider<N> + Clone + Send + Sync + 'static,
+    N: Network,
 {
     async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError> {
         let last = self
             .contract
-            .stored_last_seen_block_seq_no()
+            .storedLastSeenBlockSeqNo()
             .call()
             .await
             .map_err(map_contract_err)?;
         let bk = self
             .contract
-            .stored_bk_set_commitment()
+            .storedBkSetCommitment()
             .call()
             .await
             .map_err(map_contract_err)?;
         let anchor = self
             .contract
-            .stored_prev_max_level_layer_hash()
+            .storedPrevMaxLevelLayerHash()
             .call()
             .await
             .map_err(map_contract_err)?;
@@ -269,7 +323,7 @@ where
     async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError> {
         block.validate_shape()?;
 
-        let call = self.contract.verify_block(
+        let call = self.contract.verifyBlock(
             block.fin_type.tag(),
             block.attestation_proof.clone(),
             block.layer_hashes_proof.clone(),
@@ -281,44 +335,34 @@ where
             block.prev_max_level_layer_hash,
         );
 
-        // Send-and-await with the borrow of `call` already dropped before
-        // we re-borrow `self` for `read_state()`.
         let send_res = call.send().await;
-        let outcome = match send_res {
-            Ok(pending) => match pending.await {
-                Ok(Some(receipt)) => Some(receipt.transaction_hash),
-                Ok(None) => {
-                    return Ok(SubmitOutcome::Reverted {
-                        reason: "tx dropped from mempool without receipt".to_string(),
-                    });
-                }
+        let tx_hash = match send_res {
+            Ok(pending) => match pending.get_receipt().await {
+                Ok(receipt) => Some(receipt.transaction_hash()),
                 Err(e) => {
                     return Ok(SubmitOutcome::Reverted {
                         reason: format!("tx confirmation error: {e}"),
                     });
-                }
+                },
             },
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {
                     reason: format!("verifyBlock send failed: {e}"),
                 });
-            }
+            },
         };
 
         let new_state = self.read_state().await?;
-        Ok(SubmitOutcome::Verified { new_state, tx_hash: outcome })
+        Ok(SubmitOutcome::Verified {
+            new_state,
+            tx_hash,
+        })
     }
 }
 
-fn map_contract_err<E: std::fmt::Display>(e: E) -> RelayerError {
+fn map_contract_err(e: AlloyContractError) -> RelayerError {
     RelayerError::other(format!("contract call failed: {e}"))
 }
-
-// Suppress warnings from auto-generated abigen code that aren't relevant
-// for this skeleton (tx receipt parsing helpers). The lints fire on
-// downstream-untouched code paths.
-#[allow(dead_code)]
-fn _force_eth_types_in_scope(_b: Bytes, _t: Option<TransactionReceipt>, _c: Option<Contract<()>>) {}
 
 // ─────────────────────────────────────────────────────────────────────
 // Tests
@@ -326,6 +370,8 @@ fn _force_eth_types_in_scope(_b: Bytes, _t: Option<TransactionReceipt>, _c: Opti
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::Bytes;
+
     use super::*;
     use crate::types::FinalizationType;
 
@@ -334,7 +380,7 @@ mod tests {
     }
 
     fn block(seq: u64, prev_anchor: U256) -> AnBlockData {
-        let mut layer_hashes = [U256::zero(); MAX_LAYER_HASHES];
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         layer_hashes[0] = U256::from(seq * 100 + 1);
         AnBlockData {
             fin_type: FinalizationType::Primary,
@@ -352,17 +398,21 @@ mod tests {
     #[tokio::test]
     async fn mock_bridge_advances_state_through_three_blocks() {
         let bridge =
-            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::zero(), always_accept());
+            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
 
         for seq in 1..=3 {
             let st = bridge.read_state().await.unwrap();
             let b = block(seq, st.prev_max_level_layer_hash);
             match bridge.submit_block(&b).await.unwrap() {
-                SubmitOutcome::Verified { new_state, .. } => {
+                SubmitOutcome::Verified {
+                    new_state, ..
+                } => {
                     assert_eq!(new_state.last_seen_block_seq_no, seq);
                     assert_eq!(new_state.prev_max_level_layer_hash, b.next_anchor());
-                }
-                SubmitOutcome::Reverted { reason } => panic!("unexpected revert: {reason}"),
+                },
+                SubmitOutcome::Reverted {
+                    reason,
+                } => panic!("unexpected revert: {reason}"),
             }
         }
         assert_eq!(bridge.accepted_count(), 3);
@@ -371,15 +421,17 @@ mod tests {
     #[tokio::test]
     async fn mock_bridge_reverts_on_seqno_replay() {
         let bridge =
-            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::zero(), always_accept());
-        bridge.submit_block(&block(1, U256::zero())).await.unwrap();
+            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
+        bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         let st = bridge.read_state().await.unwrap();
         let outcome = bridge
             .submit_block(&block(1, st.prev_max_level_layer_hash))
             .await
             .unwrap();
         match outcome {
-            SubmitOutcome::Reverted { reason } => assert!(reason.contains("BlockSeqNoNotMonotonic")),
+            SubmitOutcome::Reverted {
+                reason,
+            } => assert!(reason.contains("BlockSeqNoNotMonotonic")),
             _ => panic!("expected revert"),
         }
     }
@@ -387,30 +439,34 @@ mod tests {
     #[tokio::test]
     async fn mock_bridge_reverts_on_anchor_mismatch() {
         let bridge =
-            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::zero(), always_accept());
-        bridge.submit_block(&block(1, U256::zero())).await.unwrap();
+            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
+        bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         let outcome = bridge
             .submit_block(&block(2, U256::from(0xDEAD_BEEFu64)))
             .await
             .unwrap();
         match outcome {
-            SubmitOutcome::Reverted { reason } => assert!(reason.contains("PrevAnchorMismatch")),
+            SubmitOutcome::Reverted {
+                reason,
+            } => assert!(reason.contains("PrevAnchorMismatch")),
             _ => panic!("expected revert"),
         }
     }
 
     #[tokio::test]
     async fn mock_bridge_reverts_when_verifier_rejects() {
-        let bridge = MockBridgeClient::with_genesis(
-            U256::from(0xBE5E7u64),
-            U256::zero(),
-            Arc::new(|_| false),
-        );
-        let outcome = bridge.submit_block(&block(1, U256::zero())).await.unwrap();
+        let bridge =
+            MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, Arc::new(|_| false));
+        let outcome = bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         match outcome {
-            SubmitOutcome::Reverted { reason } => {
-                assert!(reason.contains("AttestationProofRejected") || reason.contains("LayerHashesProofRejected"))
-            }
+            SubmitOutcome::Reverted {
+                reason,
+            } => {
+                assert!(
+                    reason.contains("AttestationProofRejected")
+                        || reason.contains("LayerHashesProofRejected")
+                )
+            },
             _ => panic!("expected revert"),
         }
     }

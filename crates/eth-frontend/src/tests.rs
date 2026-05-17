@@ -3,11 +3,6 @@
 use crate::DepositManager;
 
 #[test]
-fn test_placeholder() {
-    assert!(true);
-}
-
-#[test]
 fn test_deposit_manager_creation() {
     let manager = DepositManager::new();
     assert!(std::mem::size_of_val(&manager) == 0); // Empty struct

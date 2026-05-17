@@ -5,14 +5,13 @@
 //! state is a *cache* + a *retry log*. Specifically:
 //!
 //! - `last_processed_seqno` mirrors the bridge's `storedLastSeenBlockSeqNo`
-//!   after every successful submission, so we can detect divergence at
-//!   startup (e.g. another relayer instance advanced the bridge past us).
+//!   after every successful submission, so we can detect divergence at startup
+//!   (e.g. another relayer instance advanced the bridge past us).
 //! - `last_attempt_seqno` records the seqno of the most recent attempt,
-//!   regardless of outcome. Used for metrics and to spot persistent
-//!   failures.
-//! - `attempts_since_progress` increments on every non-success outcome
-//!   and resets after a successful submission; it caps the relayer's
-//!   willingness to spin on one block.
+//!   regardless of outcome. Used for metrics and to spot persistent failures.
+//! - `attempts_since_progress` increments on every non-success outcome and
+//!   resets after a successful submission; it caps the relayer's willingness to
+//!   spin on one block.
 //!
 //! Concurrency note: the relayer is intended to be a single-process
 //! daemon; the state file is overwritten atomically (write-temp-then-
@@ -92,8 +91,9 @@ fn sibling_tmp_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn roundtrip_persists_state() {

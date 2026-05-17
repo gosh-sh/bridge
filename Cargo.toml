@@ -59,6 +59,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proptest = "1.6"
 mockall = "0.13"
 
+# HTTP client (matches the version transitively pulled by `alloy = "2.0"` to
+# keep one reqwest in the tree).
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+    "http2",
+    "charset",
+] }
+
 # Utilities
 hex = "0.4"
 bytes = "1.9"

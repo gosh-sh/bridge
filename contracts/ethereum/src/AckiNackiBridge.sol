@@ -8,6 +8,7 @@ import "./IERC20.sol";
 import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
+import "./IBridgeEventVerifier.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -32,6 +33,21 @@ import "./ILayerHashesMovementVerifier.sol";
 ///      Both proofs share a common `block_id` and `bk_set_poseidon` by
 ///      construction; the bridge enforces those equalities + the monotonic
 ///      `block_seq_no` and chain-anchor invariants on top.
+///
+///      AN→ETH event verification (Phase 4 + Circuit 4 scaffolding): every
+///      successful `verifyBlock` also pushes the new top-of-chain anchor into
+///      a rolling `_layerWindow` ring buffer (size `LAYER_WINDOW_SIZE = 100`,
+///      matching partner Circuit 4's `NUM_LAYER_HASHES`). `verifyEvent`
+///      consumes that window plus a Circuit 4 (`bridge-event-prove-circuit`)
+///      Groth16 proof and asserts that a `WithdrawalInitiated` event for
+///      `tokenId` was emitted by the AN-side `TokenBridge` identified by the
+///      immutable `(bridgeEventDappFr, bridgeEventAccFr)` pair, anchored into
+///      one of the windowed layer hashes (the circuit hides *which* one via
+///      a private `hash_choice_index`).  **No `withdraw()` yet** — the
+///      Phase A scope deliberately stops at attestation because the partner
+///      circuit keeps `amount`/`recipient`/`dstChainId`/`sender` as private
+///      witnesses. See `docs/circuit_4_open_questions.md` for the Phase B
+///      circuit-extension shopping list.
 contract AckiNackiBridge {
     // ---------------------------------------------------------------------
     // Constants
@@ -49,6 +65,15 @@ contract AckiNackiBridge {
     /// @notice Maximum number of layer-hash slots per block (matches
     ///         partner Circuit 2's MAX_LAYERS).
     uint256 public constant MAX_LAYER_HASHES = 10;
+
+    /// @notice Length of the rolling layer-hash window kept on-chain to back
+    ///         Circuit 4 (Bridge Event Prove) proofs. Matches partner's
+    ///         `NUM_LAYER_HASHES` in `bridge-event-prove-circuit/src/
+    ///         bridge_event_prove_circuit.rs` — the circuit takes exactly
+    ///         this many candidate layer hashes as public inputs and binds
+    ///         (privately) to one of them via `hash_choice_index`. Increasing
+    ///         it requires a partner-side circuit rebuild + new VK.
+    uint256 public constant LAYER_WINDOW_SIZE = 100;
 
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
@@ -151,6 +176,50 @@ contract AckiNackiBridge {
     uint256 public storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
+    // Storage: Circuit 4 (Bridge Event Prove) — AN→ETH event verification
+    // ---------------------------------------------------------------------
+
+    /// @notice Circuit 4 (Bridge Event Prove) verifier (Groth16 adapter).
+    ///         May be `address(0)` if Circuit 4 verification is disabled at
+    ///         deployment; in that case `verifyEvent` reverts with
+    ///         `VerifyEventDisabled`. Independent of the `verifyBlock` toggle —
+    ///         a deployment can wire Circuit 1A/1B/2 (state tracking) without
+    ///         Circuit 4 (event attestation), or vice versa.
+    IBridgeEventVerifier public immutable bridgeEventVerifier;
+
+    /// @notice Fr-encoded AN-side bridge dApp identifier. Set at construction
+    ///         and immutable. The Circuit 4 proof binds to a specific
+    ///         `(dappFr, accFr)` pair via its `dapp_fr` / `acc_fr` public
+    ///         inputs — pinning these on Ethereum at deploy time prevents a
+    ///         caller from substituting an event emitted by a different AN
+    ///         contract (e.g. a malicious lookalike `TokenBridge`).
+    uint256 public immutable bridgeEventDappFr;
+
+    /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeEventDappFr`).
+    uint256 public immutable bridgeEventAccFr;
+
+    /// @notice Rolling ring buffer of the last `LAYER_WINDOW_SIZE`
+    ///         top-of-chain anchors committed by successful `verifyBlock`
+    ///         calls. Indexed by `layerWindowHead` modulo `LAYER_WINDOW_SIZE`.
+    ///
+    /// @dev Backs Circuit 4 — the contract supplies this entire array as the
+    ///      `layerHashes` public input. The circuit privately picks one entry
+    ///      via `hash_choice_index` and asserts its anchored chain root
+    ///      equals the picked entry; the verifier learns *that* the proof
+    ///      anchors to some known layer, but not *which* one.
+    ///
+    ///      Empty slots (before the buffer has filled up) are zero. A
+    ///      well-formed Circuit 4 proof will (with overwhelming probability)
+    ///      not match the zero hash, so leaving empties at zero is safe.
+    uint256[LAYER_WINDOW_SIZE] private _layerWindow;
+
+    /// @notice Number of writes to `_layerWindow` so far (monotonic, never
+    ///         reset). The active slot for the next push is
+    ///         `layerWindowHead % LAYER_WINDOW_SIZE`. Exposed publicly so
+    ///         off-chain tooling can detect new entries.
+    uint256 public layerWindowHead;
+
+    // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
@@ -177,6 +246,26 @@ contract AckiNackiBridge {
         FinalizationType finType,
         uint8 numLayers
     );
+
+    /// @notice Emitted whenever a new top-of-chain anchor is pushed into the
+    ///         `_layerWindow` ring buffer (i.e. once per successful
+    ///         `verifyBlock`). `slot` is the index modulo `LAYER_WINDOW_SIZE`
+    ///         that received the write; `headAfter` is the new value of
+    ///         `layerWindowHead` (monotonic).
+    event LayerWindowPushed(uint256 indexed slot, uint256 anchor, uint256 headAfter);
+
+    /// @notice Emitted on every successful `verifyEvent` call (Circuit 4).
+    ///         A genuine cross-chain `withdraw()` is NOT exposed in Phase A
+    ///         (the circuit keeps `amount` / `recipient` private). This event
+    ///         lets off-chain consumers observe that *some* withdrawal event
+    ///         was attested for `tokenId` under the configured AN-side
+    ///         identity `(bridgeEventDappFr, bridgeEventAccFr)`, anchored to
+    ///         one of the `LAYER_WINDOW_SIZE` recent layer hashes (the
+    ///         circuit hides *which* one).
+    /// @param tokenId Token id (uint32 packed from the event body).
+    /// @param submitter `msg.sender` of the `verifyEvent` call (operational
+    ///        breadcrumb; the proof itself doesn't bind to a submitter).
+    event BridgeEventVerified(uint256 indexed tokenId, address indexed submitter);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -205,6 +294,11 @@ contract AckiNackiBridge {
     error PrevAnchorMismatch(uint256 supplied, uint256 stored);
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
+
+    // verifyEvent (Circuit 4) errors
+    error VerifyEventDisabled();
+    error BridgeEventProofRejected();
+    error InvalidBridgeEventIdentity();
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -245,6 +339,19 @@ contract AckiNackiBridge {
         uint256 genesisPrevMaxLevelLayerHash;
     }
 
+    /// @notice Argument bundle for the AN→ETH Circuit 4 (Bridge Event Prove)
+    ///         wiring. Independent of `VerifyBlockConfig` — a deployment may
+    ///         enable one without the other.
+    /// @dev Passing `bridgeEventVerifier == address(0)` disables `verifyEvent`
+    ///      (it reverts with `VerifyEventDisabled`). When enabled, both
+    ///      `dappFr` and `accFr` must be non-zero — they pin the AN-side
+    ///      identity the Circuit 4 proof must bind to.
+    struct BridgeEventConfig {
+        IBridgeEventVerifier bridgeEventVerifier;
+        uint256 dappFr;
+        uint256 accFr;
+    }
+
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
     ///                            Kept for future burn-proof anchoring; currently
     ///                            unused by the public surface but required at
@@ -256,6 +363,10 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
+    /// @param _be                 Circuit 4 (Bridge Event Prove) wiring. Pass
+    ///                            `BridgeEventConfig({...address(0), 0, 0})` to
+    ///                            disable; can be enabled / disabled independently
+    ///                            of `_vb`.
     /// @dev Pass address(0) for `_aavePool`/`_wethGateway`/`_aWETH` to disable AAVE.
     ///      In that case, the bridge behaves as before (plain ETH custody).
     constructor(
@@ -263,7 +374,8 @@ contract AckiNackiBridge {
         address _aavePool,
         address _wethGateway,
         address _aWETH,
-        VerifyBlockConfig memory _vb
+        VerifyBlockConfig memory _vb,
+        BridgeEventConfig memory _be
     ) {
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
 
@@ -286,6 +398,18 @@ contract AckiNackiBridge {
         layerHashesVerifier = _vb.layerHashesVerifier;
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
+
+        // Circuit 4 (bridge event prove) wiring — independent of `_vb`.
+        // Verifier address is the toggle; if non-zero, both Fr identifiers
+        // must also be non-zero (otherwise no real proof could ever bind).
+        if (address(_be.bridgeEventVerifier) != address(0)) {
+            if (_be.dappFr == 0 || _be.accFr == 0) {
+                revert InvalidBridgeEventIdentity();
+            }
+        }
+        bridgeEventVerifier = _be.bridgeEventVerifier;
+        bridgeEventDappFr = _be.dappFr;
+        bridgeEventAccFr = _be.accFr;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -443,7 +567,21 @@ contract AckiNackiBridge {
         }
         // The new top-of-chain becomes the anchor for the next call; keeps
         // `storedPrevMaxLevelLayerHash` co-located with the canonical layer.
-        storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
+        uint256 newAnchor = layerHashes[numLayers - 1];
+        storedPrevMaxLevelLayerHash = newAnchor;
+
+        // Push the new top-of-chain anchor into the Circuit 4 ring buffer.
+        // Even when Circuit 4 isn't wired we still maintain the window so a
+        // later opt-in deployment doesn't have to back-fill 100 blocks. Cost
+        // is one SSTORE per `verifyBlock` (overwriting a single slot).
+        uint256 slot = layerWindowHead % LAYER_WINDOW_SIZE;
+        _layerWindow[slot] = newAnchor;
+        unchecked {
+            // `layerWindowHead` is a monotonic counter; overflow at 2^256
+            // is unreachable on any realistic timescale.
+            layerWindowHead = layerWindowHead + 1;
+        }
+        emit LayerWindowPushed(slot, newAnchor, layerWindowHead);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
     }
@@ -457,6 +595,93 @@ contract AckiNackiBridge {
             out[i] = storedLayerHashes[i];
         }
         return out;
+    }
+
+    // ---------------------------------------------------------------------
+    // AN→ETH event verification — verifyEvent (Circuit 4, permissionless)
+    // ---------------------------------------------------------------------
+
+    /// @notice Verify a Circuit 4 (Bridge Event Prove) proof that a
+    ///         `WithdrawalInitiated` event for `tokenId` was emitted on the
+    ///         AN-side `TokenBridge` identified by `(bridgeEventDappFr,
+    ///         bridgeEventAccFr)` and anchored into one of the most recent
+    ///         `LAYER_WINDOW_SIZE` top-of-chain layer hashes.
+    ///
+    ///         Emits `BridgeEventVerified(tokenId, msg.sender)` on success.
+    ///         Does NOT pay anything to anyone — the Phase A circuit keeps
+    ///         `amount`/`recipient`/`dstChainId`/`sender` as private
+    ///         witnesses, so the bridge has nothing actionable to do with
+    ///         them on its own. A genuine `withdraw()` will land alongside a
+    ///         circuit variant that exposes those fields (and adds a
+    ///         replay-resistant nullifier — see
+    ///         `docs/circuit_4_open_questions.md` Q-CIRC4-{1,2,3}).
+    ///
+    /// @dev Permissionless. The contract assembles the 103-element public
+    ///      input vector itself (the 100 `layerHashes` are read from the
+    ///      on-chain `_layerWindow`, not taken from the caller — so an
+    ///      attacker can't substitute a known-good window from a different
+    ///      bridge instance).
+    ///
+    /// @param proof    256-byte gnark Groth16 proof bytes (Circuit 4 wrap).
+    /// @param tokenId  Token id committed by the event body[54..58).
+    /// @return success Always `true` on a verified proof; reverts on failure
+    ///         (matches `verifyBlock`'s pattern — no silent success).
+    function verifyEvent(bytes calldata proof, uint256 tokenId)
+        external
+        nonReentrant
+        returns (bool success)
+    {
+        if (address(bridgeEventVerifier) == address(0)) {
+            revert VerifyEventDisabled();
+        }
+
+        // Snapshot the rolling window into memory (one copy, then the
+        // adapter ABI takes a calldata array — using `memory` here matches
+        // how Solidity passes fixed-size arrays to external calls).
+        uint256[LAYER_WINDOW_SIZE] memory window;
+        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
+            window[i] = _layerWindow[i];
+        }
+
+        bool ok = bridgeEventVerifier.verifyBridgeEvent(
+            proof, tokenId, bridgeEventDappFr, bridgeEventAccFr, window
+        );
+        if (!ok) revert BridgeEventProofRejected();
+
+        emit BridgeEventVerified(tokenId, msg.sender);
+        return true;
+    }
+
+    /// @notice Return the rolling layer-hash window as a memory snapshot.
+    ///         Indices `0..LAYER_WINDOW_SIZE` map to ring-buffer slots,
+    ///         *not* to time-ordered positions. To reconstruct chronological
+    ///         order, use `layerWindowHead`:
+    ///           `chronological[k] = window[(head - LAYER_WINDOW_SIZE + k) % LAYER_WINDOW_SIZE]`
+    ///         for `k ∈ [0, min(head, LAYER_WINDOW_SIZE))`.
+    ///         Empty slots (before the buffer fills) are zero.
+    function getLayerWindow() external view returns (uint256[LAYER_WINDOW_SIZE] memory out) {
+        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
+            out[i] = _layerWindow[i];
+        }
+    }
+
+    /// @notice Return one slot of the rolling layer-hash window.
+    /// @param slot Ring-buffer slot index in `[0, LAYER_WINDOW_SIZE)`. Use
+    ///        `(layerWindowHead - 1) % LAYER_WINDOW_SIZE` for the most recent.
+    function layerWindowAt(uint256 slot) external view returns (uint256) {
+        require(slot < LAYER_WINDOW_SIZE, "slot oob");
+        return _layerWindow[slot];
+    }
+
+    /// @notice O(LAYER_WINDOW_SIZE) helper: is `hash` present in the current
+    ///         window? Cheap to call off-chain; not used inside `verifyEvent`
+    ///         itself (the ZK proof already enforces the membership check
+    ///         via `hash_choice_index`).
+    function isLayerHashInWindow(uint256 hash) external view returns (bool) {
+        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
+            if (_layerWindow[i] == hash) return true;
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------------

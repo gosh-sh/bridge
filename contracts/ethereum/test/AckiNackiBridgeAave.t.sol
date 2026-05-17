@@ -40,7 +40,8 @@ contract AckiNackiBridgeAaveTest is Test {
             address(pool),
             address(gateway),
             address(aWETH),
-            VerifyBlockConfigLib.disabled()
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
 
         vm.deal(user1, 200 ether);
@@ -73,13 +74,19 @@ contract AckiNackiBridgeAaveTest is Test {
             address(pool),
             address(0),
             address(aWETH),
-            VerifyBlockConfigLib.disabled()
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
     }
 
     function test_constructor_noAaveIsLegal() public {
         AckiNackiBridge plain = new AckiNackiBridge(
-            address(oracle), address(0), address(0), address(0), VerifyBlockConfigLib.disabled()
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
         assertFalse(plain.aaveEnabled(), "aave disabled when no addresses");
         assertEq(address(plain.aavePool()), address(0));

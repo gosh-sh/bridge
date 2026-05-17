@@ -73,7 +73,14 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
             GENESIS_PREV_ANCHOR
         );
 
-        bridge = new AckiNackiBridge(address(oracle), address(0), address(0), address(0), vb);
+        bridge = new AckiNackiBridge(
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            vb,
+            VerifyBlockConfigLib.disabledBridgeEvent()
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────

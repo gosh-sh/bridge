@@ -103,7 +103,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 | Contract | Purpose |
 |----------|---------|
-| `AckiNackiBridge.sol` | Main bridge: `deposit()`, **AAVE V3 yield integration**, AN→ETH state via `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1). Legacy refund-style `withdraw()` + `IAckiNackiVerifier` chain retired in Phase 4.3 (2026-05-17). |
+| `AckiNackiBridge.sol` | Main bridge: `deposit()`, **AAVE V3 yield integration**, AN→ETH state via `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1). AN→ETH event attestation via `verifyEvent(proof, tokenId)` + rolling `_layerWindow[100]` ring buffer (Phase A Circuit 4 scaffold, 2026-05-17 — see `docs/circuit_4_open_questions.md`). Legacy refund-style `withdraw()` + `IAckiNackiVerifier` chain retired in Phase 4.3 (2026-05-17). |
 | `IBlockHeaderOracle.sol` | Interface for Ethereum block hash oracle |
 | `AxiomBlockHeaderOracle.sol` | Axiom-based block hash oracle implementation |
 | `Halo2Verifier.sol` | Direct Halo2 SHPLONK verifier (Yul-based, for testing) |
@@ -116,11 +116,13 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IFallbackGroth16Verifier.sol` / `FallbackGroth16VerifierGenerated.sol` | Gnark-generated 4-input Groth16 verifier for Fallback (separate VK from 1A) |
 | `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` | Bridge-side adapter for Circuit 2 (Layer Hashes Movement) — 14 public inputs `[blockId, bkSetCommitment, numLayers, layerHashes[0..10], prevMaxLevelLayerHash]` |
 | `ILayerHashesGroth16Verifier.sol` / `LayerHashesGroth16VerifierGenerated.sol` | Gnark-generated 14-input Groth16 verifier for Circuit 2 |
+| `IBridgeEventVerifier.sol` / `BridgeEventVerifier.sol` | Bridge-side adapter for Circuit 4 (Bridge Event Prove, Phase A scaffold) — 103 public inputs `[tokenId, dappFr, accFr, layerHashes[0..100]]`. Mock-tested only; real `BridgeEventGroth16VerifierGenerated.sol` pending Phase B (see `docs/circuit_4_open_questions.md`). |
+| `IBridgeEventGroth16Verifier.sol` | Interface for the future gnark-generated 103-input Groth16 verifier (Circuit 4) |
 | `IAavePool.sol` | Minimal AAVE V3 Pool interface (`supply` / `withdraw` / `getReserveData`) |
 | `IWrappedTokenGatewayV3.sol` | AAVE V3 ETH⇄WETH gateway interface (`depositETH` / `withdrawETH`) |
 | `IERC20.sol` | Trimmed ERC-20 interface for aWETH custody |
 
-Test mocks (under `test/mocks/`): `MockAave.sol` (`MockAWETH`, `MockAavePool`, `MockWETHGateway`) for the AAVE path without forking mainnet; `MockPrimaryVerifier.sol` / `MockFallbackVerifier.sol` / `MockLayerHashesMovementVerifier.sol` for driving `AckiNackiBridge.verifyBlock` through many synthetic blocks without re-running ZK proof generation (real verifiers covered end-to-end by `AckiNackiBridgeVerifyBlock.t.sol`).
+Test mocks (under `test/mocks/`): `MockAave.sol` (`MockAWETH`, `MockAavePool`, `MockWETHGateway`) for the AAVE path without forking mainnet; `MockPrimaryVerifier.sol` / `MockFallbackVerifier.sol` / `MockLayerHashesMovementVerifier.sol` for driving `AckiNackiBridge.verifyBlock` through many synthetic blocks without re-running ZK proof generation (real verifiers covered end-to-end by `AckiNackiBridgeVerifyBlock.t.sol`); `MockBridgeEventVerifier.sol` with optional **strict mode** (pin expected layerHashes window + identity triple) for Phase A Circuit 4 tests.
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -345,13 +347,14 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
 - See `docs/aave_integration.md` for design + correctness verification protocol. (Note: doc may still mention the legacy user-facing `withdraw()` auto-pull behaviour, which was retired in Phase 4.3 along with the rest of the legacy withdraw flow; the owner-only `withdrawFromAave` / `emergencyWithdrawAll` paths are unaffected.)
 
-**Test counts (Foundry, 12 suites, all green)**:
+**Test counts (Foundry, 13 suites, all green)**:
 
 | Suite | Count |
 |------|------|
 | `AckiNackiBridgeAaveTest` (AAVE; owner-only top-up + yield) | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
+| `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 scaffolding — layerWindow + verifyEvent) | 16 |
 | `AxiomBlockHeaderOracleTest` | 16 |
 | `Blake2bHalo2VerifierTest` | 7 |
 | `KeccakHalo2VerifierTest` | 1 |
@@ -361,7 +364,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
-| **Total Foundry** | **109** |
+| **Total Foundry** | **125** |
 
 **Rust tests** (excluded crates, run with `cargo test` per crate):
 
@@ -388,6 +391,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - `docs/verifying_an_proof.md` — per-circuit (1A/1B/2) verification flow, V1–V5 stages.
 - `docs/verifying_eth_proof_on_an.md` — deposit-side flow. **Rewritten 2026-05-17 after Phase 4.3 demolition**: the ETH-side Groth16 path was retired and the verification is now described as a pure AN-side native Halo2 SHPLONK check via the proposed `ZKHALO2VERIFYWITHVK` TVM opcode.
 - `docs/zk_halo2_an_side_design.md` — design memo for the AN-side `ZKHALO2VERIFYWITHVK` opcode: gap analysis vs. partner's `ZKHALO2VERIFY` (hard-coded DarkDex VK), proposed stack ABI / gas model / per-VK cache, five open Q-WIRE-# questions, six-phase roadmap. Companion skeleton lives in `tvm-sdk` branch `serhii/verhalo2shplonk-skeleton`. New 2026-05-17.
+- `docs/circuit_4_open_questions.md` — Phase A vs Phase B split for Circuit 4 (`bridge-event-prove-circuit`). Phase A landed in this commit (`AckiNackiBridge.verifyEvent`, `_layerWindow`, `BridgeEventVerifier`, 16 mock-based Foundry tests, gnark wrapper skeleton at `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/`). Phase B (real `withdraw()`) gated on five circuit-side design questions Q-CIRC4-1..5. New 2026-05-17.
 - `docs/aave_integration.md` — AAVE yield integration (orthogonal to four-circuit surface).
 - `docs/layer_hashes_circuit_audit.md` — Phase 0 partner-circuit audit (still applies — chips reused by Circuit 1A/1B/2).
 - `docs/legacy/verifying_an_proof_v1.md` — the retired single-circuit walkthrough, kept for reproducibility of legacy proofs.

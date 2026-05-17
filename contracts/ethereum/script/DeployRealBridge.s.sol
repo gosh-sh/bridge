@@ -8,6 +8,7 @@ import "../src/AxiomBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
+import "../src/IBridgeEventVerifier.sol";
 
 /**
  * @title DeployRealBridge
@@ -98,7 +99,11 @@ contract DeployRealBridge is Script {
             console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on mainnet)");
         }
 
-        // Step 3: Deploy the bridge contract with verifyBlock initially disabled.
+        // Step 3: Deploy the bridge contract with verifyBlock + verifyEvent
+        //         initially disabled. Operators wire the verifiers in a
+        //         follow-up deploy once VKs are finalised (see
+        //         `docs/circuit_4_open_questions.md` for the Circuit 4
+        //         Phase A/B split).
         AckiNackiBridge.VerifyBlockConfig memory vbDisabled = AckiNackiBridge.VerifyBlockConfig({
             primaryVerifier: IPrimaryVerifier(address(0)),
             fallbackVerifier: IFallbackVerifier(address(0)),
@@ -106,9 +111,12 @@ contract DeployRealBridge is Script {
             genesisBkSetCommitment: 0,
             genesisPrevMaxLevelLayerHash: 0
         });
+        AckiNackiBridge.BridgeEventConfig memory beDisabled = AckiNackiBridge.BridgeEventConfig({
+            bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
+        });
         console.log("Deploying AckiNackiBridge...");
         AckiNackiBridge bridge =
-            new AckiNackiBridge(oracleAddr, aavePool, wethGateway, aWETH, vbDisabled);
+            new AckiNackiBridge(oracleAddr, aavePool, wethGateway, aWETH, vbDisabled, beDisabled);
         console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();

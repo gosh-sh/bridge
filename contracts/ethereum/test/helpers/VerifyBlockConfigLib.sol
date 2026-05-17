@@ -5,13 +5,15 @@ import "../../src/AckiNackiBridge.sol";
 import "../../src/IPrimaryVerifier.sol";
 import "../../src/IFallbackVerifier.sol";
 import "../../src/ILayerHashesMovementVerifier.sol";
+import "../../src/IBridgeEventVerifier.sol";
 
 /// @title VerifyBlockConfigLib
 /// @notice Test-only helper for assembling `AckiNackiBridge.VerifyBlockConfig`
-///         literals without typing 5 named fields each time. The deposit /
-///         AAVE / withdraw test suites only need a *disabled* config — pass
-///         `disabled()` and `verifyBlock` reverts with `VerifyBlockDisabled`,
-///         mirroring how legacy deployments behaved before Phase 4.
+///         and `AckiNackiBridge.BridgeEventConfig` literals without typing
+///         every named field each time. The deposit / AAVE / withdraw test
+///         suites only need *disabled* configs — pass `disabled()` /
+///         `disabledBridgeEvent()` and the corresponding entrypoint reverts
+///         with `VerifyBlockDisabled` / `VerifyEventDisabled`.
 library VerifyBlockConfigLib {
     /// @notice Build an all-zero `VerifyBlockConfig` (verifyBlock disabled).
     function disabled() internal pure returns (AckiNackiBridge.VerifyBlockConfig memory) {
@@ -39,6 +41,30 @@ library VerifyBlockConfigLib {
             layerHashesVerifier: layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
             genesisPrevMaxLevelLayerHash: genesisPrevAnchor
+        });
+    }
+
+    /// @notice All-zero `BridgeEventConfig` — Circuit 4 verifyEvent disabled.
+    function disabledBridgeEvent()
+        internal
+        pure
+        returns (AckiNackiBridge.BridgeEventConfig memory)
+    {
+        return AckiNackiBridge.BridgeEventConfig({
+            bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
+        });
+    }
+
+    /// @notice `BridgeEventConfig` wired with an explicit verifier + AN-side
+    ///         `(dappFr, accFr)` identity. Both Fr values must be non-zero
+    ///         when the verifier is non-zero (enforced by the constructor).
+    function withBridgeEvent(IBridgeEventVerifier verifier, uint256 dappFr, uint256 accFr)
+        internal
+        pure
+        returns (AckiNackiBridge.BridgeEventConfig memory)
+    {
+        return AckiNackiBridge.BridgeEventConfig({
+            bridgeEventVerifier: verifier, dappFr: dappFr, accFr: accFr
         });
     }
 }

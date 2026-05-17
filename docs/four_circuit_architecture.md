@@ -22,6 +22,7 @@ The v2 architecture splits the responsibility across four independent circuits, 
 | **1B** Fallback attestation | same repo, `fallback_circuit.rs` | BLS aggregate > 1/2 of BK set signed a fallback envelope (same `block_id`) | 4 | ✅ |
 | **2** Layer-hashes movement | `…/historical-layer-hashes-movement-checker-circuit` | The new layer-hash roots + chain anchor are consistent with the AN block whose `block_id` matches Circuit 1A/1B | 14 | ✅ |
 | **3** BK-set update | `…/bk-set-update-checker-circuit` | The previous committee proved a transition to the next committee | 2 (planned) | ⏸ Phase 1.C |
+| **4** Bridge event prove | `…/bridge-event-prove-circuit` | The AN-side `TokenBridge` emitted a `WithdrawalInitiated(tokenId, …)` event anchored into one of the 100 most recent layer hashes | 103 | 🅿️ Phase A scaffold (this commit) — Phase B pending partner circuit extension, see §11 |
 
 `verifyBlock` consumes exactly **two** of these per block:
 
@@ -299,6 +300,57 @@ None. The four-circuit split removes assumptions; it doesn't add any. The cross-
 - `docs/an_partner_integration_plan.md` — live phase-by-phase roadmap.
 - `docs/bridge_verification.md` — invariant labels (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#, CC-#, ZK-#).
 - `docs/aave_integration.md` — independent yield bolt-on (AAVE V3); orthogonal to the four-circuit verifyBlock surface.
+
+---
+
+## 11. Circuit 4 — Bridge Event Prove (Phase A scaffold)
+
+> **Status (2026-05-17, this commit):** Phase A landed. Real `withdraw()` is **Phase B** and blocked on five partner-circuit design questions in `docs/circuit_4_open_questions.md`.
+
+Circuit 4 is **orthogonal to the four-circuit `verifyBlock` flow**. Where Circuits 1A/1B/2 advance the bridge's *state commitment* (block by block, monotonic seq-no), Circuit 4 lets anyone prove that a specific event was emitted on AN — i.e. it's the AN→ETH **event-attestation** channel, the dual of the ETH→AN deposit-attestation channel that `VERHALO2SHPLONK` will eventually serve on the AN side.
+
+### 11.1 Public-input layout (103 elements)
+
+```
+[0]            tokenId        (uint32 packed BE from event body[54..58))
+[1]            dappFr         (Fr-encoded AN-side TokenBridge dApp id)
+[2]            accFr          (Fr-encoded AN-side TokenBridge account id)
+[3..=102]      layerHashes    100 candidate latest-layer hashes
+```
+
+The circuit privately picks one of `layerHashes[hash_choice_index]` and asserts that its dense-Merkle chain root equals the selected slot — the verifier learns the proof anchors to *some* known layer hash, not *which* one (privacy ⊂ dark-dex lineage).
+
+### 11.2 Bridge-side plumbing
+
+| Surface | Detail |
+|---|---|
+| `AckiNackiBridge._layerWindow[100]` | Ring buffer of the last 100 top-of-chain anchors. **Written once per successful `verifyBlock`** (slot `layerWindowHead % 100`). Backs Circuit 4's `layerHashes` public input. |
+| `AckiNackiBridge.layerWindowHead` | Monotonic counter; never reset. |
+| `AckiNackiBridge.bridgeEventDappFr` / `bridgeEventAccFr` | Immutable pair pinning the AN-side bridge contract identity. Wrong identity ⇒ proof refuses to verify. |
+| `AckiNackiBridge.verifyEvent(proof, tokenId) → bool` | Permissionless. Assembles the 103-element public-input vector (3 immutables + the 100 ring-buffer slots) and forwards to `IBridgeEventVerifier`. Emits `BridgeEventVerified(tokenId, msg.sender)` on success. **Does NOT move money** (see Phase A trade-off below). |
+| `IBridgeEventVerifier.sol` + `BridgeEventVerifier.sol` | Adapter mirroring `ILayerHashesMovementVerifier` / `LayerHashesMovementVerifier`. |
+| `IBridgeEventGroth16Verifier.sol` | Interface for the gnark-generated 103-input verifier; the production `BridgeEventGroth16VerifierGenerated.sol` will come from `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/` once Phase B circuit changes land. |
+
+### 11.3 Phase A trade-off — verifyEvent is replayable
+
+A successful `verifyEvent` does **not** consume a nullifier (the partner circuit doesn't expose one yet). Replay protection is Phase B (Q-CIRC4-2). Phase A's only consumer is off-chain observation, where idempotent replay is benign — but **no `withdraw()` flow can be built on top of it**. This is enforced at the contract level: `verifyEvent` mutates no balance-bearing state and emits only a tagging event.
+
+### 11.4 What blocks `withdraw()`
+
+See `docs/circuit_4_open_questions.md` for the full list. Headline blockers:
+
+1. **Q-CIRC4-1**: `amount` and `recipient` are circuit-private. The contract has nothing to spend or pay to.
+2. **Q-CIRC4-2**: no nullifier ⇒ a single valid AN-event would let an attacker drain the bridge on replay.
+3. **Q-CIRC4-3**: `dstChainId` semantics undefined ⇒ no protection against a "withdraw to BSC" proof being replayed on Ethereum.
+
+### 11.5 Trust assumptions added by Circuit 4 (Phase A)
+
+| Assumption | Why we need it |
+|---|---|
+| `(bridgeEventDappFr, bridgeEventAccFr)` is the *correct* AN-side bridge identity | Seeded once at construction; a wrong identity means no real proof can verify (no live attacker advantage, just a redeploy). |
+| Partner's `bridge-event-prove-circuit` correctly implements the privacy-preserving hash-choice mechanism | Same trust class as the existing Halo2 / SHPLONK / Groth16 soundness; in scope for Phase B audit. |
+
+No reduction or strengthening of the existing four-circuit trust model.
 
 ---
 

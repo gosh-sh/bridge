@@ -101,7 +101,14 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
             PREV_MAX_LEVEL_LAYER_HASH
         );
 
-        bridge = new AckiNackiBridge(address(oracle), address(0), address(0), address(0), vb);
+        bridge = new AckiNackiBridge(
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            vb,
+            VerifyBlockConfigLib.disabledBridgeEvent()
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -427,7 +434,12 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
     function test_verifyBlock_disabled_revertsOnFreshBridge() public {
         AckiNackiBridge disabled = new AckiNackiBridge(
-            address(oracle), address(0), address(0), address(0), VerifyBlockConfigLib.disabled()
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
 
         vm.expectRevert(AckiNackiBridge.VerifyBlockDisabled.selector);
@@ -457,7 +469,8 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
                 ILayerHashesMovementVerifier(address(0)),
                 BK_SET_POSEIDON,
                 PREV_MAX_LEVEL_LAYER_HASH
-            )
+            ),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
         vm.expectRevert(AckiNackiBridge.VerifyBlockDisabled.selector);
         partialBridge.verifyBlock(

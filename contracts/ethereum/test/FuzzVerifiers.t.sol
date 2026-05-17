@@ -172,7 +172,12 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
         bridge = new AckiNackiBridge(
-            address(oracle), address(0), address(0), address(0), VerifyBlockConfigLib.disabled()
+            address(oracle),
+            address(0),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledBridgeEvent()
         );
     }
 

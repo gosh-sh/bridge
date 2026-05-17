@@ -55,6 +55,9 @@ crates/bridge-prover-orchestrator/proofs/
 # are regenerated locally by `gnark-wrappers/circuit-1b/circuit-1b setup`.
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1a
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1b
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-2
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-3
+crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-4
 crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit.r1cs

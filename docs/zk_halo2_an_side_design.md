@@ -238,7 +238,43 @@ Working name `ZKHALO2VERIFYWITHVK` (parallel to `VERGRTH16WITHVK`). Alternatives
 ### Phase A — confirm transcript + VK envelope (Q-WIRE-1, Q-WIRE-4)
 
 Owner: AN team (Serhii) + bridge team (this side).
-Outcome: a one-paragraph agreement on transcript flavour and VK on-wire format. No code yet.
+Outcome: a one-paragraph agreement on transcript flavour and VK on-wire format.
+
+**Status (2026-05-18): bridge-side proposal landed, awaiting partner ack.** The
+bridge has committed to a concrete byte layout and verified it
+end-to-end against a real Circuit 1B (fallback attestation) proof. See
+`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` (the
+`Halo2TvmBundle` wire format, 8-byte magic + version + transcript_kind
+byte + length-prefixed `(config_json, vk_bytes, instances, proof)`
+chunks) and the round-trip integration test
+`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`.
+
+What's now known:
+
+- **Q-WIRE-1**: bridge-side proof generator (`generate_fallback_proof`)
+  uses the Blake2b SHPLONK transcript today; the bundle commits to it.
+  Switching to Keccak would be a one-line change on both sides if the AN
+  team prefers — the format reserves a `transcript_kind` discriminator
+  byte. Bridge preference: keep Blake2b (matches `gosh-zk-snark-halo2-utils`).
+- **Q-WIRE-3**: bundle uses strict 32-byte little-endian `Fr::to_repr()`,
+  no u64 shortcut. `Fr::from_repr` rejects ≥ modulus inputs structurally.
+- **Q-WIRE-4 / Option B**: bundle is self-describing — the VK envelope
+  carries `BaseCircuitParams` JSON inline, so the consumer doesn't need
+  any out-of-band schema. Verified for the `(k=20, advice=44, lookup=19,
+  instance=1)` Circuit 1B shape; format is generic across K and
+  `BaseCircuitParams`.
+- **Q-WIRE-2** still open: the KZG SRS is intentionally NOT in the
+  bundle. The consumer (TVM opcode) is expected to load it once at VM
+  startup keyed by `k`. The round-trip test sources it from the local
+  shared `kzg_bn254_K.srs` cache.
+
+Empirical sizes (real fixture, Circuit 1B, 10 signers, K=20):
+bundle ≈ 21.2 KB (VK 6.1 KB + proof 14.8 KB + 4 × 32 B instances +
+headers).
+
+Partner action needed: explicit ack of the format, or a counter-proposal
+on Q-WIRE-1 / Q-WIRE-4. Once acked, the TVM-side opcode wiring (Phase B
+below) can take this format as the contract.
 
 ### Phase B — `ZKHALO2VERIFYWITHVK` opcode skeleton in tvm-sdk
 

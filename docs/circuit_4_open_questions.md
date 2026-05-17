@@ -33,16 +33,29 @@ Proposed extension of the public-input layout:
 ```
 [0]            tokenId        (uint32)
 [1]            amount         (uint128)        ← new
-[2]            recipient_hi   (uint256 high 16 bytes; recipient ∈ 20-byte EVM addr)
-[3]            recipient_lo   (uint256 low  16 bytes)
-[4]            dstChainId     (uint256)        ← new (or keep private if we only ever target chainId == 1)
-[5]            dappFr
-[6]            accFr
-[7..=106]      layerHashes    (100 candidates)
+[2]            recipientFr    (Fr-encoded 20-byte EVM address; same `bytes_to_fr` convention as dappFr/accFr) ← new
+[3]            dstChainId     (uint256)        ← new (or keep private if we only ever target chainId == 1)
+[4]            dappFr
+[5]            accFr
+[6..=105]      layerHashes    (100 candidates)
 ```
 
-- Alternative: pack `(amount, recipient)` into one Fr element if their bit-widths fit (amount 128 bits + recipient 160 bits = 288 bits > Fr 254 bits — doesn't fit. Two slots needed).
+Total: 106 public Fr.
+
+Notes:
+- BN254 `Fr` is 254 bits (≈31.75 bytes); a 20-byte EVM address fits in a
+  single Fr, so a hi/lo split is unnecessary — same encoding the partner
+  already uses for `account_dapp_id`/`account_id` via `bytes_to_fr`.
+- Packing `(amount, recipient)` into one Fr does **not** work
+  (128 + 160 = 288 bits > 254-bit Fr); they must be separate slots.
 - Decision needed from partner: which slot order matches the partner's preferred witness encoding.
+- Either layout is a hard ABI break for `BridgeEventVerifier.sol` (slots
+  0..2 are hard-coded against the legacy `[tokenId, dappFr, accFr]`); we
+  rerun gnark setup and patch the adapter once v2 is published. A softer
+  alternative is to append the new fields at the tail
+  (`[103]=amount, [104]=recipientFr, [105]=dstChainId, [106..]=layerHashes`),
+  preserving the existing 103-input prefix; free on the circuit side, saves
+  us one re-spin.
 
 ### Q-CIRC4-2 — Nullifier
 
@@ -50,25 +63,35 @@ Proposed extension of the public-input layout:
 
 The standard fix is a **circuit-side nullifier**: a public Fr input derived from the event's binding witnesses such that two distinct withdrawals produce two distinct nullifiers, while two replays of the same withdrawal produce the same one.
 
-Proposed nullifier formula (partner's call):
+**Preferred (cheapest) option**: expose the existing `block_leaf =
+Poseidon96(block_id, envelope_hash, ext_out_root)` (computed at
+`bridge_event_prove_circuit.rs:719-744` as an internal witness for the
+events Merkle proof) as a public Fr. Zero new constraints, zero new
+Poseidon caps — the value is already in the circuit, we just need it
+exposed. Alternatively `Poseidon(block_id, envelope_hash)` works the
+same way and avoids `ext_out_root` if it's inconvenient to expose.
 
-```
-nullifier := Poseidon( envelope_hash || block_id || tokenId || amount || recipient || sender_dapp || sender_acc )
-```
+Fallbacks (if `block_leaf` isn't a fit):
+- 7-field Poseidon
+  `Poseidon(envelope_hash || block_id || tokenId || amount || recipient || sender_dapp || sender_acc)` —
+  all ingredients already SHA-256-bound, collision-safe, but more
+  Poseidon caps than `block_leaf`.
+- Plain `nullifier := envelope_hash` — **unsafe**: two identical
+  `WithdrawalInitiated` events from the same account in the same block
+  produce the same `repr_hash`, so the second withdraw would silently
+  collide. `block_id` must be in the formula.
 
-— or alternatively just `nullifier := envelope_hash` if `envelope_hash` is already globally unique on AN (envelope_hash already binds to a specific block; replaying the same envelope_hash *is* the replay we're guarding against).
-
-Bridge-side: an `nullifierUsed[bytes32] public` mapping that `withdraw()` consults + writes after a successful proof. Estimated cost: 1 SSTORE per withdraw.
+Bridge-side: an `nullifierUsed[bytes32] public` mapping that `withdraw()` consults + writes after a successful proof. Estimated cost: 1 SSTORE per withdraw (~22 100 gas cold, ~5 000 warm).
 
 ### Q-CIRC4-3 — `dstChainId` semantics
 
 > The circuit currently witnesses `dstChainId` (uint256) but doesn't enforce anything about it. For a multi-chain bridge we'd want the verifier to assert `dstChainId == THIS_CHAIN_ID` so a proof targeting "withdraw to BSC" cannot be replayed on Ethereum.
 
 Two options:
-- **Per-chain bridge instance**: hard-wire `dstChainId` as an immutable on the Ethereum bridge and assert in `verifyEvent`. Simple but doubles deployment count when new chains arrive.
-- **`dstChainId` public**: lift to public input; the verifier asserts `dstChainId == address(this).chainId`. Single circuit, multiple deployments.
+- **Per-chain circuit + VK**: ship one circuit + one VK per target chain, partner hard-asserts `dstChainId == EXPECTED` inside the circuit body (with `EXPECTED` baked in as a circuit constant per VK). Simple but multiplies trusted-setup ceremonies and VKs by N target chains.
+- **`dstChainId` public**: lift to public input; the verifier asserts `dstChainId == block.chainid`. Single circuit, single VK, multi-chain.
 
-Recommended: lift to public (option 2). It composes better with the existing `dappFr`/`accFr` immutability pattern.
+Recommended: lift to public (option 2). It composes better with the existing `dappFr`/`accFr` immutability pattern, and `block.chainid` is exact on mainnet, testnets, L2s, and Anvil.
 
 ### Q-CIRC4-4 — Variable-length `recipient`
 
@@ -78,7 +101,7 @@ Decision: defer variable-length to Phase C. Phase B uses fixed 20-byte recipient
 
 ### Q-CIRC4-5 — Trusted setup ceremony
 
-> The Phase A gnark wrapper is an identity stub (same trust model as Circuits 1A/1B/2). Once Phase B circuit-side changes land, **every wrapper needs a fresh trusted setup**. We need to decide whether to bundle Circuit 4's ceremony with the existing four-circuit ceremony (Phase 8 of `integration_plan.md`) or run a separate one.
+> The Phase A gnark wrapper is an identity stub (same trust model as Circuits 1A/1B/2 — internal risk **R15**). A trusted-setup ceremony (**R14** / Phase 9) is **strictly downstream** of the Phase 8 R&D that replaces the stub with a real Halo2-in-gnark verifier — running the ceremony before that would produce a perfectly-secured stub. Once Phase 8 lands, we decide whether to bundle Circuit 4's ceremony with the existing four-circuit ceremony (Phase 8 of `integration_plan.md`) or run a separate one.
 
 Bridge-side cost is identical either way; the question is logistical.
 

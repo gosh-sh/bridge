@@ -567,23 +567,30 @@ contract AckiNackiBridge {
         }
         // The new top-of-chain becomes the anchor for the next call; keeps
         // `storedPrevMaxLevelLayerHash` co-located with the canonical layer.
-        uint256 newAnchor = layerHashes[numLayers - 1];
-        storedPrevMaxLevelLayerHash = newAnchor;
+        // Also push it into the Circuit 4 ring buffer (via a helper to keep
+        // this function's stack frame small enough to compile cleanly under
+        // `forge coverage`, which runs without `--via-ir`).
+        storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
+        _pushLayerWindow(layerHashes[numLayers - 1]);
 
-        // Push the new top-of-chain anchor into the Circuit 4 ring buffer.
-        // Even when Circuit 4 isn't wired we still maintain the window so a
-        // later opt-in deployment doesn't have to back-fill 100 blocks. Cost
-        // is one SSTORE per `verifyBlock` (overwriting a single slot).
+        emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
+    }
+
+    /// @dev Append `anchor` to the rolling `_layerWindow` ring buffer.
+    ///      Extracted from `verifyBlock` so the latter compiles without
+    ///      `--via-ir` (needed for `forge coverage`). Cost: one SSTORE per
+    ///      call (overwriting a single slot) plus the `layerWindowHead`
+    ///      bump. Maintained even when Circuit 4 isn't wired so a later
+    ///      opt-in deployment doesn't have to back-fill 100 blocks.
+    function _pushLayerWindow(uint256 anchor) internal {
         uint256 slot = layerWindowHead % LAYER_WINDOW_SIZE;
-        _layerWindow[slot] = newAnchor;
+        _layerWindow[slot] = anchor;
         unchecked {
             // `layerWindowHead` is a monotonic counter; overflow at 2^256
             // is unreachable on any realistic timescale.
             layerWindowHead = layerWindowHead + 1;
         }
-        emit LayerWindowPushed(slot, newAnchor, layerWindowHead);
-
-        emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
+        emit LayerWindowPushed(slot, anchor, layerWindowHead);
     }
 
     /// @notice View helper: returns the full `storedLayerHashes` array as a

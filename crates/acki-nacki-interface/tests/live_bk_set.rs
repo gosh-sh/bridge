@@ -27,7 +27,8 @@
 //! coordinate with the partner team before patching the client.
 
 use acki_nacki_interface::{
-    BkSetClient, BkSetResponse, BkSetUpdateResponse, BLS_PUBKEY_LEN, ID32_LEN,
+    BkSetChange, BkSetClient, BkSetResponse, BkSetTracker, BkSetUpdateResponse, BLS_PUBKEY_LEN,
+    ID32_LEN,
 };
 
 const DEFAULT_NODE_URL: &str = "http://94.156.178.19:8600";
@@ -144,4 +145,60 @@ async fn live_signer_index_map_is_collision_free() {
         map.keys().min().unwrap(),
         map.keys().max().unwrap(),
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_bk_set_tracker_two_polls_against_real_node() {
+    // Two back-to-back polls against the live node. The first must produce
+    // `FirstObservation`; the second is almost certainly `Unchanged` (BK
+    // rotations on AN are slow — `epoch_start_seq_no - seq_no` is ~5e5
+    // blocks on the public test node), so we accept either `Unchanged` or
+    // `MembershipChanged` but assert exhaustive coverage of the variant.
+    let _ = tracing_subscriber::fmt::try_init();
+    let url = node_url();
+    let client = BkSetClient::new(&url).expect("client construction");
+    let mut tracker = BkSetTracker::new(client);
+
+    let first = tracker.poll().await.expect("first poll");
+    let snap1 = match &first {
+        BkSetChange::FirstObservation {
+            snapshot,
+        } => snapshot.clone(),
+        other => panic!("expected FirstObservation, got {other:?}"),
+    };
+    assert!(snap1.current_size() > 0);
+    println!(
+        "OK first poll: seq_no={} current_size={}",
+        snap1.observed_seq_no,
+        snap1.current_size()
+    );
+
+    let second = tracker.poll().await.expect("second poll");
+    match &second {
+        BkSetChange::Unchanged {
+            observed_seq_no, ..
+        } => {
+            assert!(*observed_seq_no >= snap1.observed_seq_no);
+            println!("OK second poll: Unchanged at seq_no={}", observed_seq_no);
+        },
+        BkSetChange::MembershipChanged {
+            new_seq_no,
+            delta,
+            ..
+        } => {
+            println!(
+                "OK second poll: MembershipChanged at seq_no={} (+{} -{} mut={})",
+                new_seq_no,
+                delta.added.len(),
+                delta.removed.len(),
+                delta.pubkey_mutations.len(),
+            );
+        },
+        BkSetChange::FirstObservation {
+            ..
+        } => panic!("FirstObservation must not repeat — cache wasn't updated"),
+    }
+
+    assert!(tracker.latest().is_some(), "cache populated after polls");
 }

@@ -10,8 +10,8 @@ Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/
 acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── contracts/ethereum/     ← Solidity (Foundry): bridge contract, verifiers, oracles
 ├── crates/
-│   ├── acki-nacki-interface/  ← Rust traits + mock for AN node communication
-│   └── eth-frontend/          ← Rust Ethereum client (ethers-rs)
+│   ├── acki-nacki-interface/  ← Rust traits + mock for AN node communication; live `BkSetClient` + stateful `BkSetTracker` against AN-node REST `/v2/bk_set{,_update}`
+│   └── eth-frontend/          ← Rust Ethereum client (alloy-rs; migrated 2026-05-17 from ethers-rs)
 ├── deposit-prover/         ← Rust Halo2 circuit: proves Ethereum deposit events. Halo2 SHPLONK proof is consumed natively on the AN side (no gnark wrapper — retired in Phase 4.3 2026-05-17).
 ├── crates/bridge-prover-orchestrator/  ← Wraps the partner's 4-circuit pipeline (Halo2 1A/1B/2[/3]) for prover/relayer use
 │   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-1b, circuit-2[, circuit-3]) producing 256-byte Groth16 proofs (AN→ETH side only; EIP-170 forces gnark wrap on this direction)
@@ -285,7 +285,7 @@ make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 
-# Solidity contracts (135 tests across 15 suites, all green)
+# Solidity contracts (125 tests across 13 suites, all green; +4 opt-in AAVE fork tests)
 cd contracts/ethereum && forge build
 cd contracts/ethereum && forge test                                                      # full suite
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeAaveTest" -vv       # AAVE mock subset (20 tests)
@@ -313,6 +313,18 @@ cargo run --bin export-bound-block-proofs --release        # writes proofs/bound
 cd gnark-wrappers/circuit-1a && ./circuit-1a prove ../../proofs/bound/primary/halo2_proof.json
 cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-hashes/halo2_proof.json
 ```
+
+## CI Pipeline (`.gitlab-ci.yml`)
+
+| Stage | Jobs |
+|------|------|
+| `setup` | `setup:rust` (`cargo fetch --locked`), `setup:foundry` (npm + `forge install forge-std`) |
+| `build` | `build:rust:debug`, `build:rust:release` (workspace only), **`build:rust:relayer`** (the relayer crate is excluded from the main workspace and has its own `Cargo.lock`; this job catches what `--workspace` skips, added 2026-05-18), `build:solidity` |
+| `test` | `test:rust` (workspace), **`test:rust:relayer`**, `test:solidity` (forge), `test:solidity:coverage`, `lint:rust:fmt`, `lint:rust:clippy`, **`lint:rust:relayer:{fmt,clippy}`**, `lint:solidity:fmt` |
+| `security` | `security:rust:audit` (`cargo audit` hard-gating; `--locked` cargo-audit install, RUSTSEC fail = pipeline fail; `main` + MR only), `security:solidity:slither` (allow_failure) |
+| `deploy` | `docs:rust`, `docs:solidity`, manual `deploy:testnet`/`deploy:mainnet` placeholders |
+
+`bridge-prover-orchestrator` and `deposit-prover` are **not** yet in CI (they pull halo2 deps that take minutes to build); their `cargo test` happens only locally. Tracking as future A2.
 
 ## Integration Status
 
@@ -403,6 +415,8 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - `docs/verifying_eth_proof_on_an.md` — deposit-side flow. **Rewritten 2026-05-17 after Phase 4.3 demolition**: the ETH-side Groth16 path was retired and the verification is now described as a pure AN-side native Halo2 SHPLONK check via the proposed `ZKHALO2VERIFYWITHVK` TVM opcode.
 - `docs/zk_halo2_an_side_design.md` — design memo for the AN-side `ZKHALO2VERIFYWITHVK` opcode: gap analysis vs. partner's `ZKHALO2VERIFY` (hard-coded DarkDex VK), proposed stack ABI / gas model / per-VK cache, five open Q-WIRE-# questions, six-phase roadmap. Companion skeleton lives in `tvm-sdk` branch `serhii/verhalo2shplonk-skeleton`. New 2026-05-17.
 - `docs/circuit_4_open_questions.md` — Phase A vs Phase B split for Circuit 4 (`bridge-event-prove-circuit`). Phase A landed in this commit (`AckiNackiBridge.verifyEvent`, `_layerWindow`, `BridgeEventVerifier`, 16 mock-based Foundry tests, gnark wrapper skeleton at `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/`). Phase B (real `withdraw()`) gated on five circuit-side design questions Q-CIRC4-1..5. New 2026-05-17.
+- `docs/an_partner_questions_circuit4_2026-05-17.md` — open-question pack for Alina specific to Circuit 4 (instance binding, ephemeral roots, witness export, multi-token, withdrawal flow). Companion to `docs/circuit_4_open_questions.md`.
+- `docs/reviews/alina_review_pack_2026-05-18.md` — metadata for the out-of-tree review pack delivered to Alina (`dist/alina_review_pack_2026-05-18.tar.gz`, 46 files / 165 KB / SHA-256 pinned): three AN→ETH circuit VKs + sample Blake2b-SHPLONK proofs + integration glue + retired `deposit-prover/` source + 1A↔2 bound-scenario artefacts. Lists Q1..Q7 queued for her.
 - `docs/aave_integration.md` — AAVE yield integration (orthogonal to four-circuit surface).
 - `docs/layer_hashes_circuit_audit.md` — Phase 0 partner-circuit audit (still applies — chips reused by Circuit 1A/1B/2).
 - `docs/legacy/verifying_an_proof_v1.md` — the retired single-circuit walkthrough, kept for reproducibility of legacy proofs.

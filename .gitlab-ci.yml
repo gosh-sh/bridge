@@ -132,6 +132,23 @@ build:rust:release:
     - main
     - tags
 
+# bridge-relayer-daemon is excluded from the workspace (has its own Cargo.lock
+# + alloy/clap deps) so the `--workspace` jobs above don't touch it. Without a
+# dedicated job, regressions in the relayer (build errors, broken tests,
+# clippy/fmt drift) ship to main silently. This job closes that gap.
+build:rust:relayer:
+  extends: .rust_base
+  stage: build
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-relayer-daemon/target/
+    policy: pull-push
+  script:
+    - cd crates/bridge-relayer-daemon
+    - cargo build --locked --all-targets
+
 build:solidity:
   extends: .foundry_base
   stage: build
@@ -162,6 +179,23 @@ test:rust:
     - build:rust:debug
   script:
     - cargo test --workspace
+
+# `#[ignore]`-gated live tests (e.g. `tests/live_bk_set_sentry.rs`) stay
+# skipped; this job runs the unit + non-live integration tests.
+test:rust:relayer:
+  extends: .rust_base
+  stage: test
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-relayer-daemon/target/
+    policy: pull
+  needs:
+    - build:rust:relayer
+  script:
+    - cd crates/bridge-relayer-daemon
+    - cargo test --locked
 
 test:solidity:
   extends: .foundry_base
@@ -227,6 +261,32 @@ lint:rust:clippy:
   <<: *rust_cache
   script:
     - cargo clippy --workspace -- -D warnings
+  allow_failure: false
+
+# Same gap-coverage rationale as `build:rust:relayer`: clippy/fmt on the
+# workspace skip the excluded relayer crate.
+lint:rust:relayer:fmt:
+  extends: .rust_base
+  stage: test
+  script:
+    - cd crates/bridge-relayer-daemon
+    - cargo fmt --all -- --check
+  allow_failure: false
+
+lint:rust:relayer:clippy:
+  extends: .rust_base
+  stage: test
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-relayer-daemon/target/
+    policy: pull
+  needs:
+    - build:rust:relayer
+  script:
+    - cd crates/bridge-relayer-daemon
+    - cargo clippy --locked --all-targets -- -D warnings
   allow_failure: false
 
 lint:solidity:fmt:

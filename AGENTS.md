@@ -285,7 +285,7 @@ make build          # Build all (Rust workspace + Solidity)
 make test           # Run all tests
 make build-solidity # Solidity only
 
-# Solidity contracts (125 tests across 13 suites, all green; +4 opt-in AAVE fork tests)
+# Solidity contracts (132 tests across 14 suites, all green; +4 opt-in AAVE fork tests)
 cd contracts/ethereum && forge build
 cd contracts/ethereum && forge test                                                      # full suite
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeAaveTest" -vv       # AAVE mock subset (20 tests)
@@ -369,12 +369,13 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 - Mainnet addresses hardcoded in `script/DeployRealBridge.s.sol`; opt-in via `USE_AAVE=true`.
 - See `docs/aave_integration.md` for design + correctness verification protocol. (Note: doc may still mention the legacy user-facing `withdraw()` auto-pull behaviour, which was retired in Phase 4.3 along with the rest of the legacy withdraw flow; the owner-only `withdrawFromAave` / `emergencyWithdrawAll` paths are unaffected.)
 
-**Test counts (Foundry, 13 suites, all green)**:
+**Test counts (Foundry, 14 suites, all green)**:
 
 | Suite | Count |
 |------|------|
 | `AckiNackiBridgeAaveTest` (AAVE; owner-only top-up + yield) | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
+| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input-validation invariants, 256 runs × 7 properties) | 7 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
 | `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 scaffolding — layerWindow + verifyEvent) | 16 |
 | `AxiomBlockHeaderOracleTest` | 16 |
@@ -386,7 +387,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 | `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
 | `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
 | `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
-| **Total Foundry** | **125** |
+| **Total Foundry** | **132** |
 
 **Rust tests** (excluded crates, run with `cargo test` per crate):
 

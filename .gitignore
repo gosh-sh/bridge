@@ -161,6 +161,9 @@ crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2/circuit-2
 cache/
 out/
 
+# Review packs for partners (produced by build_pack.sh; not for git)
+dist/
+
 # Generated verifier and deployment artifacts
 contracts/DepositVerifier.*
 deployment_addresses.json

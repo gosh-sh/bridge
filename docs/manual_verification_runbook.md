@@ -19,6 +19,23 @@
 >   threat model is now AN-side (`VERHALO2SHPLONK` opcode + AN-side `TokenBridge`).
 > - Test counts: 135 → **109 across 12 suites**. Test-suite table updated below.
 > - The Sign-Off Checklist (Phase K) is updated to reflect the post-demolition surface.
+>
+> **v2.2 update (2026-05-18).** Three small refreshes:
+>
+> - Foundry total now **132 across 14 suites** (109 → 125 was Circuit 4 Phase A
+>   scaffolding + a new `AckiNackiBridgeVerifyEventTest` suite; 125 → 132 adds
+>   `FuzzAckiNackiBridgeVerifyBlockTest`, 7 property-based tests covering
+>   `VerifyBlockDisabled`/`InvalidNumLayers`/`LayerHashTailNonZero`/
+>   `BkSetCommitmentMismatch`/`BlockSeqNoNotMonotonic`/`PrevAnchorMismatch`).
+>   Phase C test-suite table updated.
+> - Stale test-name references throughout this runbook (`testHappyPathPrimary`,
+>   `testRevertOnPrevAnchorMismatch`, etc.) were never renamed when the Phase 4.1
+>   verifyBlock suite landed; replaced with the actual names below
+>   (`test_verifyBlock_primary_bound_succeeds_andUpdatesState`,
+>   `test_verifyBlock_prevAnchorMismatch_reverts`, etc.).
+> - `crates/bridge-prover-orchestrator/proofs/bound/` now contains a fallback
+>   sub-directory (Circuit 1B) alongside primary/layer-hashes — the
+>   `export-bound-block-proofs` bin generates all three. Phase D updated.
 
 A hands-on, copy-pasteable plan for a single human reviewer to verify the bridge **works correctly and is attack-resistant** from the outside. No prior knowledge of the codebase is assumed.
 
@@ -194,26 +211,33 @@ forge test 2>&1 | tail -20
 ✅ Expected (final two lines):
 
 ```
-Ran 12 test suites in ...: 109 tests passed, 0 failed, 0 skipped (109 total tests)
+Ran 15 test suites in ...: 132 tests passed, 0 failed, 1 skipped (133 total tests)
 ```
 
-Per-suite expectation (post-Phase 4.3; canonical breakdown maintained in `AGENTS.md`):
+The 1 skipped test belongs to `AckiNackiBridgeAaveFork.t.sol`, which
+auto-skips unless `FORK_URL` points at a mainnet RPC (see Phase H for the
+opt-in flow). The remaining 14 suites all pass.
+
+Per-suite expectation (post-Phase 4.3 + Phase A Circuit 4 scaffolding + v2.2 fuzz;
+canonical breakdown maintained in `AGENTS.md`):
 
 | Suite | Tests |
 |---|---|
 | `AckiNackiBridgeAaveTest` | 20 |
-| `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH) | 17 |
-| `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop) | 6 |
+| `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs) | 17 |
+| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input invariants, 256 runs × 7) | 7 |
+| `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop, mock verifiers) | 6 |
+| `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 — layerWindow + verifyEvent) | 16 |
 | `AxiomBlockHeaderOracleTest` | 16 |
 | `Blake2bHalo2VerifierTest` | 7 |
 | `KeccakHalo2VerifierTest` | 1 |
 | `Halo2PoseidonVerifierTest` | 7 |
 | `FuzzAckiNackiBridgeDepositTest` | 3 |
 | `FuzzHalo2VerifierTest` | 6 |
-| `PrimaryVerifierTest` (Circuit 1A) | 8 |
-| `FallbackVerifierTest` (Circuit 1B) | 8 |
-| `LayerHashesMovementVerifierTest` (Circuit 2) | 10 |
-| **Total** | **109** |
+| `PrimaryVerifierTest` (Circuit 1A, real gnark proof) | 8 |
+| `FallbackVerifierTest` (Circuit 1B, real gnark proof) | 8 |
+| `LayerHashesMovementVerifierTest` (Circuit 2, real gnark proof) | 10 |
+| **Total** | **132** |
 
 ```bash
 forge test --gas-report 2>&1 | grep -E "AckiNackiBridge|verifyBlock|AAVE" | head -10
@@ -233,7 +257,7 @@ This is the **smoking gun** test for v2: a tuple of real bound Groth16 proofs (C
 
 ```bash
 cd contracts/ethereum
-forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv 2>&1 | tail -25
+forge test --match-test "test_verifyBlock_primary_bound_succeeds|test_verifyBlock_fallback_routesToFallbackVerifier" -vv 2>&1 | tail -25
 ```
 
 ✅ Expected: both tests pass. Look for:
@@ -242,15 +266,31 @@ forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv 2>&1 | 
 - ~440k gas total (two pairing checks + storage updates).
 - `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedPrevMaxLevelLayerHash` advance after the call.
 
-To regenerate the bound proofs from scratch (~10-15 min, requires Halo2 keygen + gnark wrap for both circuits):
+To regenerate the bound proofs from scratch (~30-45 min as of v2.2 — keygen + Halo2 prove + gnark wrap for all three circuits 1A, 1B, 2):
 
 ```bash
 cd ../..
 cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
-ls -la crates/bridge-prover-orchestrator/exports/ | head
+ls -la crates/bridge-prover-orchestrator/proofs/bound/{primary,fallback,layer-hashes}/
+cat crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json | jq .
 ```
 
-✅ Expected: a `bound_scenario.json` plus `groth16_proof_circuit-1a.hex` (256 B), `groth16_proof_circuit-2.hex` (256 B), and matching `groth16_public_inputs_*.hex` files.
+✅ Expected: under `crates/bridge-prover-orchestrator/proofs/bound/`:
+
+- `bound_scenario.json` with `block_id`, `bk_set_poseidon`, `num_layers`,
+  `layer_hash_decimals[]`, `prev_max_level_layer_hash_decimal`,
+  and (since v2.2) `primary_proof_bytes`, `fallback_proof_bytes`,
+  `layer_hashes_proof_bytes` — Circuit 1A and 1B share the same Public
+  Inputs by construction; the JSON keys reflect this.
+- `primary/`, `fallback/`, `layer-hashes/` sub-directories each holding a
+  raw Halo2 `proof.bin` + `instances.bin` + gnark `halo2_proof.json`.
+
+The third circuit (Fallback, Circuit 1B) is generated even though the
+Foundry happy-path test for Phase D wires the Fallback verifier to a
+`MockFallbackVerifier` — having all three artifacts cross-checked against
+each other inside the orchestrator is how we keep cross-circuit consistency
+(shared `block_id` + `bk_set_poseidon`) honest. Real-proof Fallback
+on-chain coverage lives in `FallbackVerifierTest` independently.
 
 Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue with 4 fixtures) is **deferred to Phase 5.3** (10-block shellnet end-to-end against Anvil). At HEAD, only the single-block bound case is exercised with real proofs.
 
@@ -359,7 +399,7 @@ The Solidity tests already exercise this with real proofs (Phase D) and a 10-blo
 
 ```bash
 cd ../..
-cat crates/bridge-prover-orchestrator/exports/bound_scenario.json | jq .
+cat crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json | jq .
 ```
 
 You should see fields like:
@@ -384,7 +424,7 @@ Both proofs commit to the same `block_id` and `bk_set_poseidon` by construction 
 
 ```bash
 cd contracts/ethereum
-forge test --match-test testHappyPathPrimary -vvv 2>&1 | grep -A5 "Verify\|verifyPrimary\|verifyLayerHashes\|BlockVerified\|Gas"
+forge test --match-test test_verifyBlock_primary_bound_succeeds_andUpdatesState -vvv 2>&1 | grep -A5 "Verify\|verifyPrimary\|verifyLayerHashes\|BlockVerified\|Gas"
 ```
 
 You will see, in order:
@@ -400,7 +440,7 @@ Total cost: ~440k gas (two pairings dominate).
 ### F.3 Watch the chain anchor enforced
 
 ```bash
-forge test --match-test testRevertOnPrevAnchorMismatch -vvv 2>&1 | tail -25
+forge test --match-test test_verifyBlock_prevAnchorMismatch_reverts -vvv 2>&1 | tail -25
 ```
 
 This test takes a known-good bound proof tuple and submits it with a `prevMaxLevelLayerHash` argument that doesn't match `storedPrevMaxLevelLayerHash`. The bridge reverts with `PrevAnchorMismatch(supplied, stored)` **before** either gnark verifier is called — the anchor check is among the cheap pre-crypto checks. (LH-3 / CC-6.)
@@ -416,7 +456,7 @@ Submitting the same `blockSeqNo` twice (or a lower seqno) reverts with `BlockSeq
 ### F.5 Watch a tampered proof rejected
 
 ```bash
-forge test --match-test "testRevertOnTamperedAttestationProof|testRevertOnTamperedLayerHashesProof" -vvv 2>&1 | tail -15
+forge test --match-test "test_verifyBlock_tamperedAttestationProof_reverts|test_verifyBlock_tamperedLayerHashesProof_reverts" -vvv 2>&1 | tail -15
 ```
 
 A single-byte mutation of either proof causes one of the two pairings to fail; the bridge surfaces `AttestationProofRejected` or `LayerHashesProofRejected` accordingly. Soundness in action.
@@ -424,7 +464,7 @@ A single-byte mutation of either proof causes one of the two pairings to fail; t
 ### F.6 Watch the cross-circuit binding break
 
 ```bash
-forge test --match-test testRevertOnTamperedBkSetInProof -vvv 2>&1 | tail -15
+forge test --match-test test_verifyBlock_blockIdMismatchAcrossProofs_reverts -vvv 2>&1 | tail -15
 ```
 
 This test changes the `bkSetCommitment` argument fed into `verifyBlock`, leaving both proofs untouched. Result: `BkSetCommitmentMismatch(supplied, stored)` revert (cheap pre-crypto check). To exercise the *circuit-level* binding (CC-2), generate two bound proofs with intentionally different `bk_set_poseidon` and watch one of the verifiers return `false` — the orchestrator's bound-test-data harness specifically prevents this construction, so you'd need to hand-craft the fixture.
@@ -455,7 +495,7 @@ There is no `setBkSetCommitment`, no `proposeBkSetCommitment`, no `rotateBkSet` 
 ### G.2 Confirm the negative test
 
 ```bash
-forge test --match-test testRevertOnBkSetCommitmentMismatch -vv 2>&1 | tail -10
+forge test --match-test test_verifyBlock_bkSetMismatch_reverts -vv 2>&1 | tail -10
 ```
 
 ✅ Expected: pass — any proof signed by a different committee is rejected with `BkSetCommitmentMismatch(supplied, stored)`. This is the only BK-set-related negative path on the v2 surface today.
@@ -615,7 +655,7 @@ cast send $BRIDGE "withdraw(address,uint256,uint256,uint256,bytes)" \
 **[Retired — Phase 4.3]** for the ETH-side deposit path. The remaining ETH-side fuzz tests on length-rejection live in `FuzzHalo2VerifierTest` (for the bare Halo2 Yul verifier) and in the per-circuit AN→ETH adapter tests (`PrimaryVerifierTest::testVerifyInvalidProofLength`, etc.):
 
 ```bash
-forge test --match-test "testVerifyInvalidProofLength" -vv 2>&1 | tail -10
+forge test --match-test "testVerify_wrongProofLength_fails" -vv 2>&1 | tail -10
 ```
 
 #### J.5 Submit a single-byte-mutated Groth16 proof
@@ -623,7 +663,7 @@ forge test --match-test "testVerifyInvalidProofLength" -vv 2>&1 | tail -10
 Only the AN→ETH-side fuzz tests apply now:
 
 ```bash
-forge test --match-test "testE2E_L5_corruptedProof|test_CorruptedProofPointReverts|test_CorruptedProofScalarReverts" -vv 2>&1 | tail -15
+forge test --match-test "testVerify_tamperedProof_fails|test_verifyBlock_tamperedAttestationProof_reverts|test_verifyBlock_tamperedLayerHashesProof_reverts" -vv 2>&1 | tail -15
 ```
 
 ✅ Expected: every mutation rejected. The pairing equation is rigid — no nearby points work. (Deposit-side mutation tests are now an AN-side responsibility.)
@@ -687,7 +727,7 @@ This is FORK-3 by construction. The hash is computed from EVM state, not from ca
 Attacker objective: inject an arbitrary layer-hash state (e.g., one that mints fake balances) by submitting a tuple with a wrong `prevMaxLevelLayerHash`.
 
 ```bash
-forge test --match-test testRevertOnPrevAnchorMismatch -vv 2>&1 | tail -10
+forge test --match-test test_verifyBlock_prevAnchorMismatch_reverts -vv 2>&1 | tail -10
 forge test --match-test test_relayerLoop_anchorMismatch_reverts -vv 2>&1 | tail -10
 ```
 
@@ -698,7 +738,7 @@ forge test --match-test test_relayerLoop_anchorMismatch_reverts -vv 2>&1 | tail 
 Attacker objective: use a proof signed by an old (compromised) BK committee.
 
 ```bash
-forge test --match-test testRevertOnBkSetCommitmentMismatch -vv 2>&1 | tail -10
+forge test --match-test test_verifyBlock_bkSetMismatch_reverts -vv 2>&1 | tail -10
 ```
 
 ✅ Expected: rejected with `BkSetCommitmentMismatch(supplied, stored)` (cheap pre-crypto check). And: even if the caller supplies the matching `bkSetCommitment`, the proof's BLS witness must commit to the same Poseidon — if it doesn't, the gnark verifier returns `false`.
@@ -706,7 +746,7 @@ forge test --match-test testRevertOnBkSetCommitmentMismatch -vv 2>&1 | tail -10
 #### J.14 Lie about `numLayers` (LH-4)
 
 ```bash
-forge test --match-test "testRevertOnZeroNumLayers|testRevertOnNumLayersAboveMax" -vv 2>&1 | tail -10
+forge test --match-test "test_verifyBlock_numLayersZero_reverts|test_verifyBlock_numLayersAboveCap_reverts" -vv 2>&1 | tail -10
 ```
 
 ✅ Expected: rejected with `InvalidNumLayers(numLayers)`. `numLayers` is range-checked at the contract level (1..=10) **and** is bound into Circuit 2's PI[2] inside the proof.
@@ -716,7 +756,7 @@ forge test --match-test "testRevertOnZeroNumLayers|testRevertOnNumLayersAboveMax
 Attacker objective: with `numLayers = 3`, set `layerHashes[3..10]` to non-zero values, hoping the bridge stores them and they leak into a future call.
 
 ```bash
-forge test --match-test testRevertOnLayerHashTailNonZero -vv 2>&1 | tail -10
+forge test --match-test test_verifyBlock_layerTailNonZero_reverts -vv 2>&1 | tail -10
 ```
 
 ✅ Expected: rejected with `LayerHashTailNonZero(i)` for the first non-zero index `i ≥ numLayers`.
@@ -740,7 +780,7 @@ The bridge passes a single `blockId` argument into both verifier calls. If the t
 ```bash
 # Programmatic — see crates/bridge-prover-orchestrator/tests/cross_block_binding.rs
 # (when added in Phase 5.3); at HEAD we rely on:
-forge test --match-test "testHappyPathPrimary" -vv  # passes by construction
+forge test --match-test "test_verifyBlock_primary_bound_succeeds_andUpdatesState" -vv  # passes by construction
 ```
 
 The bound-test-data harness specifically *prevents* generating fixtures with diverging
@@ -751,7 +791,12 @@ The bound-test-data harness specifically *prevents* generating fixtures with div
 Attacker objective: send a Primary proof but with `finType = Fallback` (or vice versa), routing it through the wrong verifier.
 
 ```bash
-forge test --match-test "testRevertOnPrimaryProofViaFallbackPath|testRevertOnFallbackProofViaPrimaryPath" -vv 2>&1 | tail -10
+# Cross-path: a proof generated for Primary public-inputs fed into the Fallback path
+# (or vice versa) is rejected by the receiving verifier — the deterministic case is
+# covered by the AttestationProofRejected branch in `test_verifyBlock_fallback_rejected_byMock_reverts`
+# and by `testVerify_wrongBlockSeqNo_fails` in `PrimaryVerifier.t.sol` / `FallbackVerifier.t.sol`
+# (the two circuits expose different public inputs around blockSeqNo / lastSeenBlockSeqNo).
+forge test --match-test "test_verifyBlock_fallback_rejected_byMock_reverts|testVerify_wrongBlockSeqNo_fails" -vv 2>&1 | tail -10
 ```
 
 ✅ Expected: rejected — each verifier has its own VK, so a Primary proof fails the Fallback pairing and vice versa. Inside the circuits, the target_type discriminant at offset 116 of `AttestationData` is constrained to `0` (Primary) or `1` (Fallback) respectively, so the BLS witness for one cannot satisfy the other.
@@ -946,20 +991,20 @@ cast balance $BRIDGE                              # increased by 0.1 ether
 | J.1 | Replay withdraw | **[Retired Phase 4.3]** AN-side nullifier in `TokenBridge.finalizeDeposit` | `tvm-sdk` opcode tests (once `VERHALO2SHPLONK` lands) |
 | J.2 | Reuse proof for another deposit ID | **[Retired Phase 4.3]** AN-side cryptographic rejection | same |
 | J.3 | Cross-contract proof | **[Reframed Phase 4.3]** AN-side `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR)` | same |
-| J.4 | Wrong proof length | **[Retired Phase 4.3]** for deposit; AN→ETH adapters still enforce 256 B | `PrimaryVerifierTest::testVerifyInvalidProofLength` |
-| J.5 | Single-byte-mutated proof | Pairing fails (AN→ETH only) | `testE2E_L5_corruptedProof` |
+| J.4 | Wrong proof length | **[Retired Phase 4.3]** for deposit; AN→ETH adapters still enforce 256 B | `PrimaryVerifierTest::testVerify_wrongProofLength_fails` (+ `FallbackVerifierTest`, `LayerHashesMovementVerifierTest` analogues) |
+| J.5 | Single-byte-mutated proof | Pairing fails (AN→ETH only) | `test_verifyBlock_tamperedAttestationProof_reverts` + `test_verifyBlock_tamperedLayerHashesProof_reverts` |
 | J.6 | Different recipient | **[Retired Phase 4.3]** — no ETH-side `withdraw()` | — |
 | J.7 | Recipient = address(0) | **[Retired Phase 4.3]** — no ETH-side `withdraw()` | — |
 | J.8 | Forged block hash via user input (oracle property) | impossible (no API) | source review of `AxiomBlockHeaderOracle.sol` |
 | J.9 | Future block (oracle property) | `BlockNotYetMined` | `test_GetBlockHash_FutureBlock` |
 | J.10 | Historical block without witness (oracle property) | revert | `test_GetBlockHash_HistoricalBlock` |
 | J.11 | Fork block hash (oracle property) | Oracle returns canonical hash | source review |
-| J.12 | Skip chain anchor | `PrevAnchorMismatch` | `testRevertOnPrevAnchorMismatch` |
-| J.13 | Stale BK commitment | `BkSetCommitmentMismatch` (cheap) + pairing fails | `testRevertOnBkSetCommitmentMismatch` |
-| J.14 | Wrong `numLayers` | `InvalidNumLayers` | `testRevertOnZeroNumLayers` / `testRevertOnNumLayersAboveMax` |
-| J.15 | Tail garbage in `layerHashes` | `LayerHashTailNonZero` | `testRevertOnLayerHashTailNonZero` |
+| J.12 | Skip chain anchor | `PrevAnchorMismatch` | `test_verifyBlock_prevAnchorMismatch_reverts` + `testFuzz_prevAnchorMismatch_reverts` |
+| J.13 | Stale BK commitment | `BkSetCommitmentMismatch` (cheap) + pairing fails | `test_verifyBlock_bkSetMismatch_reverts` + `testFuzz_bkSetMismatch_reverts` |
+| J.14 | Wrong `numLayers` | `InvalidNumLayers` | `test_verifyBlock_numLayersZero_reverts` / `test_verifyBlock_numLayersAboveCap_reverts` + `testFuzz_invalidNumLayers_reverts` |
+| J.15 | Tail garbage in `layerHashes` | `LayerHashTailNonZero` | `test_verifyBlock_layerTailNonZero_reverts` + `testFuzz_layerTailNonZero_reverts` |
 | J.16 | Replay / rewind seqno | `BlockSeqNoNotMonotonic` | `test_relayerLoop_replaySameSeqNo_reverts` |
-| J.17 | Mix proofs from two blocks (CC-1) | gnark `false` ⇒ `*ProofRejected` | by construction in `testHappyPathPrimary` |
+| J.17 | Mix proofs from two blocks (CC-1) | gnark `false` ⇒ `*ProofRejected` | by construction in `test_verifyBlock_primary_bound_succeeds_andUpdatesState` (bound scenario shares `block_id` + `bk_set_poseidon` across 1A and 2 by construction) |
 | J.18 | Swap Primary↔Fallback (LH-1) | gnark `false` ⇒ `AttestationProofRejected` | per-route mismatch test |
 | J.19 | Disable verifier slot post-deploy | impossible (immutable) | source review |
 | J.20 | Forge BK-set rotation (Phase 1.C, pending) | no surface; redeploy required | source review (no `rotateBkSet`) |
@@ -1007,7 +1052,7 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### Tests
 
-- [ ] `forge test` reports **109 passed; 0 failed; 0 skipped** across **12 suites**.
+- [ ] `forge test` reports **132 passed; 0 failed; 0 skipped** across **14 suites** (+1 auto-skipped suite without `FORK_URL`).
 - [ ] `AckiNackiBridgeVerifyBlockTest` (17) + `AckiNackiBridgeRelayerLoopTest` (6) pass — `verifyBlock` happy paths and 6 sequencing scenarios.
 - [ ] `AckiNackiBridgeAaveTest` (20 tests) passes — including the fuzz solvency invariant.
 
@@ -1020,8 +1065,8 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 ### `verifyBlock` (Phase F hands-on)
 
-- [ ] Real bound proof tuple `testHappyPathPrimary` verifies on-chain (~440k gas).
-- [ ] `testHappyPathFallback` verifies on-chain through `FallbackVerifier`.
+- [ ] Real bound proof tuple `test_verifyBlock_primary_bound_succeeds_andUpdatesState` verifies on-chain (~440k gas).
+- [ ] `test_verifyBlock_fallback_routesToFallbackVerifier` verifies on-chain through `FallbackVerifier` (mock-shaped at this layer; real Fallback proof coverage in `FallbackVerifierTest`).
 - [ ] Wrong `prevMaxLevelLayerHash` reverts with `PrevAnchorMismatch`.
 - [ ] Single-byte mutation of either 256-byte proof is rejected (`AttestationProofRejected` or `LayerHashesProofRejected`).
 - [ ] Wrong `bkSetCommitment` argument reverts with `BkSetCommitmentMismatch` (cheap pre-crypto check).
@@ -1034,7 +1079,7 @@ Run through this in order. Tick each. **Do not deploy if any item is unchecked.*
 
 - [ ] `storedBkSetCommitment` returns the deployment-time `genesisBkSetCommitment` and is unchanged.
 - [ ] No on-chain rotation function exists (`grep -n "rotateBkSet\|setBkSetCommitment" src/AckiNackiBridge.sol` returns no matches).
-- [ ] `testRevertOnBkSetCommitmentMismatch` confirms wrong-committee proofs are rejected.
+- [ ] `test_verifyBlock_bkSetMismatch_reverts` (+ `testFuzz_bkSetMismatch_reverts`) confirms wrong-committee proofs are rejected.
 
 ### AAVE
 
@@ -1078,7 +1123,7 @@ All live ETH-side attack scenarios in Phase J reach their expected revert / reje
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `forge build` complains about `node_modules/poseidon-solidity` | `npm install` not run | `cd contracts/ethereum && npm install` |
-| `testHappyPathPrimary` fails to load bound proof JSON | bound-proof artifacts deleted or never generated | Run `cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release` (~10-15 min). The Foundry test reads `crates/bridge-prover-orchestrator/exports/bound_scenario.json` + `groth16_proof_*.hex`. |
+| `test_verifyBlock_primary_bound_succeeds_andUpdatesState` fails | bound proof bytes hard-coded in the test file no longer match a regenerated scenario | The bound proof bytes (`PROOF_PRIMARY`, `PROOF_LAYER_HASHES`) and public-input constants (`BLOCK_ID`, `BK_SET_POSEIDON`, `LAYER_HASH_*`, `PREV_MAX_LEVEL_LAYER_HASH`) are hard-coded in `contracts/ethereum/test/AckiNackiBridgeVerifyBlock.t.sol`. If they need refreshing, regenerate via `cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release` (~30-45 min), then copy the new values out of `crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json` into the constants and re-run `forge test`. |
 | `forge test` 1 fewer test than expected | filter / rename / removed test | Run `forge test --list` and diff against the table in §3 |
 | Anvil session: `cast send` complains about gas | account out of ETH | use a different prefunded account |
 | Fork test fails with "no upstream" or 401 | bad RPC URL | use a paid Alchemy / Infura key; public RPCs sometimes block historical reads |
@@ -1089,7 +1134,7 @@ All live ETH-side attack scenarios in Phase J reach their expected revert / reje
 
 If everything in §11 ticks:
 
-- The bridge is correct in the sense exercised by **109 unit/fuzz/E2E tests** across 12 suites (post-Phase 4.3), a **complete manual walk-through**, and the ≥ 30 deliberate attack scenarios in Phase J (with the Phase 4.3 reclassifications above) all failing in the expected way.
+- The bridge is correct in the sense exercised by **132 unit/fuzz/E2E tests** across 14 suites (post-Phase 4.3 + Circuit 4 Phase A scaffolding + verifyBlock fuzz coverage), a **complete manual walk-through**, and the ≥ 30 deliberate attack scenarios in Phase J (with the Phase 4.3 reclassifications above) all failing in the expected way.
 - You have personally observed:
   - A real deposit event being emitted.
   - A real bound Groth16 tuple (Circuit 1A + Circuit 2) being verified through `verifyBlock`.

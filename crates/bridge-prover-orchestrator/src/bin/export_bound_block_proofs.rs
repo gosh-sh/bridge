@@ -2,19 +2,27 @@
 //!
 //! Drives one synthetic AN block scenario via
 //! [`bridge_prover_orchestrator::build_bound_test_data`] and emits proofs for
-//! both:
+//! all three live AN→ETH circuits:
 //!  - **Circuit 1A** (Primary attestation, K=20) — 4 public inputs.
+//!  - **Circuit 1B** (Fallback attestation, K=20) — 4 public inputs.
 //!  - **Circuit 2** (Layer hashes movement, K=17) — 14 public inputs.
 //!
-//! Both proofs share `block_id` (public input 0) and `bk_set_poseidon`
+//! All three proofs share `block_id` (public input 0) and `bk_set_poseidon`
 //! (public input 1) by construction, so the on-chain `AckiNackiBridge.verifyBlock`
-//! cross-circuit consistency checks pass.
+//! cross-circuit consistency checks pass for *either* attestation finality type
+//! (Primary or Fallback) against the same Circuit 2 layer-hashes proof. This
+//! is the keystone fixture for Foundry's `BlockIdMismatch` / `BkSetCommitmentMismatch`
+//! revert-path tests and answers Q4 from the 2026-05-18 Alina review pack
+//! ("add Fallback to bound_scenario").
 //!
 //! Output layout:
 //! ```text
 //!   <out_dir>/primary/proof.bin
 //!   <out_dir>/primary/instances.bin
 //!   <out_dir>/primary/halo2_proof.json
+//!   <out_dir>/fallback/proof.bin
+//!   <out_dir>/fallback/instances.bin
+//!   <out_dir>/fallback/halo2_proof.json
 //!   <out_dir>/layer-hashes/proof.bin
 //!   <out_dir>/layer-hashes/instances.bin
 //!   <out_dir>/layer-hashes/halo2_proof.json
@@ -22,7 +30,8 @@
 //! ```
 //!
 //! Re-uses the cached SRS/VK/PK on disk under `--params-dir`. First run does
-//! keygen if absent; subsequent runs are pure prove-and-write.
+//! keygen for all three circuits if absent (Primary K=20 ~140s, Fallback K=20
+//! ~180s, Layer-hashes K=17 ~10s); subsequent runs are pure prove-and-write.
 
 use std::path::PathBuf;
 
@@ -35,10 +44,10 @@ use tracing::info;
 
 use bridge_prover_orchestrator::{
     build_bound_test_data, compose_layer_hashes_input, format_field_element,
-    generate_layer_hashes_proof,
+    generate_fallback_proof, generate_layer_hashes_proof,
     layer_hashes_keys::LayerHashesReferenceWitness,
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
-    BoundBlockTestData, Fr, LayerHashesKeyManager, LAYER_HASHES_K,
+    BoundBlockTestData, FallbackKeyManager, Fr, LayerHashesKeyManager, LAYER_HASHES_K,
 };
 
 #[derive(Parser, Debug)]
@@ -87,6 +96,7 @@ struct BoundScenario {
     layer_hash_decimals: Vec<String>,
     prev_max_level_layer_hash_decimal: String,
     primary_proof_bytes: usize,
+    fallback_proof_bytes: usize,
     layer_hashes_proof_bytes: usize,
 }
 
@@ -102,29 +112,38 @@ fn main() -> anyhow::Result<()> {
     let params_dir = PathBuf::from(&args.params_dir);
     let out_dir = PathBuf::from(&args.out_dir);
     let primary_dir = out_dir.join("primary");
+    let fallback_dir = out_dir.join("fallback");
     let layer_dir = out_dir.join("layer-hashes");
     std::fs::create_dir_all(&primary_dir)
         .with_context(|| format!("failed to create {:?}", primary_dir))?;
+    std::fs::create_dir_all(&fallback_dir)
+        .with_context(|| format!("failed to create {:?}", fallback_dir))?;
     std::fs::create_dir_all(&layer_dir).with_context(|| format!("failed to create {:?}", layer_dir))?;
 
     info!(
         ?params_dir, ?out_dir, signers = args.signers,
         num_layers = args.num_layers, num_chain_steps = args.num_chain_steps,
-        "exporting bound block proofs (Circuit 1A + Circuit 2)"
+        "exporting bound block proofs (Circuit 1A + 1B + Circuit 2)"
     );
 
     // ------------------------------------------------------------------
-    // 1. Bound scenario.
+    // 1. Bound scenario. `with_fallback = true` adds a Fallback envelope
+    //    signed over the same `block_id` as the primary attestation, so
+    //    Circuit 1B can be proved against the same scenario and answer
+    //    Q4 in the 2026-05-18 Alina review pack.
     // ------------------------------------------------------------------
     let bound = build_bound_test_data(
         args.signers,
         args.num_layers,
         args.num_chain_steps,
-        false, // fallback not needed for Phase 4 binary; export-fallback-proof handles 1B.
+        true,
     )
     .context("building bound test data failed")?;
 
-    let primary_instances = bound.attestation_instances();
+    let attestation_instances = bound.attestation_instances();
+    // 1A and 1B share the same public-instance layout; reuse the vector.
+    let primary_instances = attestation_instances;
+    let fallback_instances = attestation_instances;
     let layer_instances = bound.layer_hashes_instances();
 
     info!(
@@ -167,7 +186,53 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ------------------------------------------------------------------
-    // 3. Circuit 2 (Layer hashes movement) — K=17.
+    // 3. Circuit 1B (Fallback attestation) — K=20, same SRS as 1A.
+    //
+    //    Drives `FallbackAttestationBlsCheckerCircuit` against the same
+    //    `bound.attestation_primary_bytes` *and* the freshly-signed
+    //    `bound.attestation_fallback_bytes` over the same block_id. The
+    //    circuit constrains the two envelopes to agree on `block_id` byte-
+    //    by-byte; the resulting public-instance vector therefore equals
+    //    Circuit 1A's (4-element layout). Sanity-checked below.
+    // ------------------------------------------------------------------
+    let fallback_attestation_bytes = bound
+        .attestation_fallback_bytes
+        .as_ref()
+        .context("bound test data must include Fallback attestation when with_fallback=true")?;
+
+    let mut fallback_km = FallbackKeyManager::new(&params_dir);
+    fallback_km
+        .ensure_keys(&bound.bk_set)
+        .context("ensure fallback keys failed")?;
+
+    let fallback_proof = generate_fallback_proof(
+        &fallback_km,
+        &bound.attestation_primary_bytes,
+        fallback_attestation_bytes,
+        &bound.bk_set,
+        bound.last_seen_block_seqno,
+    )
+    .context("generate_fallback_proof failed")?;
+
+    // Cross-circuit sanity: 1B's instances must match 1A's byte-for-byte.
+    debug_assert_eq!(fallback_proof.block_id_fr, bound.block_id_fr);
+    debug_assert_eq!(fallback_proof.bk_set_commitment_fr, bound.bk_set_poseidon_fr);
+    debug_assert_eq!(fallback_proof.block_seq_no, bound.block_seq_no);
+    debug_assert_eq!(fallback_proof.last_seen_block_seqno, bound.last_seen_block_seqno);
+
+    write_proof_artefacts(
+        &fallback_dir,
+        &fallback_proof.proof_bytes,
+        &fallback_instances,
+        primary_k(),
+    )?;
+    info!(
+        bytes = fallback_proof.proof_bytes.len(),
+        "wrote Circuit 1B proof"
+    );
+
+    // ------------------------------------------------------------------
+    // 4. Circuit 2 (Layer hashes movement) — K=17.
     // ------------------------------------------------------------------
     let mut layer_km = LayerHashesKeyManager::new(&params_dir);
     layer_km
@@ -191,7 +256,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ------------------------------------------------------------------
-    // 4. Summary metadata (JSON, useful for Foundry fixture extraction).
+    // 5. Summary metadata (JSON, useful for Foundry fixture extraction).
     // ------------------------------------------------------------------
     let scenario = BoundScenario {
         bk_set_size: args.signers,
@@ -208,6 +273,7 @@ fn main() -> anyhow::Result<()> {
             .collect(),
         prev_max_level_layer_hash_decimal: format_field_element(&bound.prev_max_level_layer_hash),
         primary_proof_bytes: primary_proof.proof_bytes.len(),
+        fallback_proof_bytes: fallback_proof.proof_bytes.len(),
         layer_hashes_proof_bytes: layer_proof.proof_bytes.len(),
     };
     let scenario_path = out_dir.join("bound_scenario.json");
@@ -218,9 +284,11 @@ fn main() -> anyhow::Result<()> {
     println!("    block_id (dec)        = {}", scenario.block_id_decimal);
     println!("    bk_set_poseidon (dec) = {}", scenario.bk_set_poseidon_decimal);
     println!("    block_seq_no          = {}", scenario.block_seq_no);
-    println!("    primary proof bytes   = {}", scenario.primary_proof_bytes);
+    println!("    primary  proof bytes  = {}", scenario.primary_proof_bytes);
+    println!("    fallback proof bytes  = {}", scenario.fallback_proof_bytes);
     println!("    layer-hashes proof bytes = {}", scenario.layer_hashes_proof_bytes);
     println!("    primary  artefacts -> {}", primary_dir.display());
+    println!("    fallback artefacts -> {}", fallback_dir.display());
     println!("    layer-h. artefacts -> {}", layer_dir.display());
     println!("    summary             -> {}", scenario_path.display());
 

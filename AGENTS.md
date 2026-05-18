@@ -301,6 +301,10 @@ cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHas
 # Relayer skeleton (Phase 5.1, standalone)
 cd crates/bridge-relayer-daemon && cargo test                                            # 24 unit tests (13 baseline + 6 sentry + 5 guarded)
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
+    --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
+    --an-node-url http://94.156.178.19:8600                                              # smoke run wrapped in SentryGuardedRelayer
 cd crates/bridge-relayer-daemon && cargo test --test live_bk_set_sentry -- --ignored     # live BK-set sentry against AN testnet
 
 # Cross-circuit-bound proof generation (Phase 4.1 fixture builder)

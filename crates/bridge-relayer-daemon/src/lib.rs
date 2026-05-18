@@ -50,6 +50,7 @@
 pub mod bk_set_sentry;
 pub mod bridge;
 pub mod error;
+pub mod guarded_relayer;
 pub mod relayer;
 pub mod source;
 pub mod state;
@@ -60,6 +61,7 @@ pub use bridge::{
     BridgeClient, BridgeOnChainState, EthBridgeClient, MockBridgeClient, SubmitOutcome,
 };
 pub use error::RelayerError;
+pub use guarded_relayer::{GuardedOutcome, SentryGuardedRelayer};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{BlockSource, FixturesBlockSource, InMemoryBlockSource};
 pub use state::RelayerState;

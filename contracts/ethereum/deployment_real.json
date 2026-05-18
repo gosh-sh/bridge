@@ -1,7 +1,0 @@
-{
-  "groth16_verifier": "0x332AD83F1C0DFA8521ab0729E79FD615f4717728",
-  "deposit_verifier": "0x93bdf5bAeE23d987093fdDD590BCA6fEbb7AB98D",
-  "oracle": "0xBE55Cfcc0D07B40bDc11d99Db5f2f7fe65Dc62C3",
-  "oracle_type": "MockBlockHeaderOracle",
-  "bridge": "0x9A0407ba235A498257535055B22C81c7C2E5cedA"
-}

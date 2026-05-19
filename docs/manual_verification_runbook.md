@@ -20,6 +20,12 @@
 > - Test counts: 135 → **109 across 12 suites**. Test-suite table updated below.
 > - The Sign-Off Checklist (Phase K) is updated to reflect the post-demolition surface.
 >
+> **v2.3 update (2026-05-20).** Phase E gains a new **E.6 — long-running
+> relayer daemon** subsection covering the `relayer daemon` subcommand
+> (exponential backoff, signal-aware shutdown, metrics snapshot,
+> optional sentry guard). Production deployments should drive
+> `verifyBlock` through this entry point rather than `smoke-fixture`.
+>
 > **v2.2 update (2026-05-18).** Three small refreshes:
 >
 > - Foundry total now **132 across 14 suites** (109 → 125 was Circuit 4 Phase A
@@ -388,6 +394,85 @@ cast send $BRIDGE "deposit()" --value 101ether --rpc-url $RPC --private-key $PK
 - Zero-value and over-cap deposits are rejected (DEP-2).
 
 > **Retired in Phase 4.3 (2026-05-17)**: the legacy `withdraw(recipient, amount, depositId, blockNumber, proof)` cast probes (former E.4–E.8), the `isDepositProcessed(...)` view, `TestDepositVerifier` deployment, and the `verifier()` getter are no longer applicable — the legacy refund-style withdrawal mechanism was removed. The equivalent acceptance / rejection scenarios moved to the AN-side `TokenBridge.finalizeDeposit(...)` path, exercised via `tvm-sdk` tests once `VERHALO2SHPLONK` ships (see `docs/verifying_eth_proof_on_an.md` §2).
+
+### E.6 Drive `verifyBlock` via the long-running relayer daemon
+
+The AN→ETH side is exercised by `crates/bridge-relayer-daemon`. For
+Phase D you already saw the one-shot `smoke-fixture` subcommand; the
+operator entry point is the new `daemon` subcommand (B5, 2026-05-20):
+
+```bash
+# Build once. The relayer is excluded from the workspace (own Cargo.lock,
+# own alloy + clap deps), so it has dedicated CI jobs and is built per-crate.
+cd crates/bridge-relayer-daemon
+cargo build --release --bin relayer
+
+# (Re-)deploy a wired bridge so verifyBlock isn't disabled. The deploy
+# script also prints the genesis BK-set commitment that you'll feed back
+# into the relayer's fixture directory. See `script/DeployRealBridge.s.sol`.
+cd ../../contracts/ethereum
+WIRE_VERIFY_BLOCK=true \
+  GENESIS_BK_SET_COMMITMENT=$(cat ../../crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json \
+                              | jq -r '.bk_set_poseidon_decimal') \
+  GENESIS_PREV_MAX_LEVEL_LAYER_HASH=$(cat ../../crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json \
+                                       | jq -r '.prev_max_level_layer_hash_decimal') \
+  PRIVATE_KEY=$PK \
+  forge script script/DeployRealBridge.s.sol --rpc-url $RPC --broadcast | grep "deployed at:"
+
+# Read the wired bridge address from `deployment_real.json`.
+BRIDGE=$(jq -r .bridge deployment_real.json)
+
+# Start the daemon. It will submit the one bound fixture (Verified),
+# then back off exponentially (NotYetAvailable on every subsequent tick).
+cd ../../crates/bridge-relayer-daemon
+RUST_LOG=info ./target/release/relayer daemon \
+    --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+    --rpc-url $RPC \
+    --bridge-address $BRIDGE \
+    --private-key $PK \
+    --backoff-initial-secs 1 \
+    --backoff-max-secs 8 \
+    --backoff-multiplier 2
+```
+
+✅ Expected log shape (truncated):
+
+```
+INFO daemon starting backoff=BackoffConfig { initial: 1s, max: 8s, multiplier: 2 } an_node_url=None
+WARN running without sentry — a live BK rotation will NOT pause this daemon
+INFO daemon: verified seq_no=1
+INFO daemon: tick ... seq_no=2 status=NotYetAvailable          # backoff = 1s
+INFO daemon: tick ... seq_no=2 status=NotYetAvailable          # backoff = 2s
+INFO daemon: tick ... seq_no=2 status=NotYetAvailable          # backoff = 4s
+INFO daemon: tick ... seq_no=2 status=NotYetAvailable          # backoff = 8s (capped)
+...
+```
+
+Hit `Ctrl-C` at any time. You should observe:
+
+- An immediate `INFO SIGINT received` log line.
+- The daemon flushes `state.json` and prints `daemon stopped` with the
+  final `DaemonRunSummary` and `RelayerMetricsSnapshot`.
+- `cat ./relayer-state.json` shows `last_processed_seqno = 1` and
+  `attempts_since_progress` matches the number of post-Verified ticks.
+
+To exercise the sentry-guarded path, add `--an-node-url
+http://94.156.178.19:8600` (or your own AN-node URL). The daemon will
+then run inside a `SentryGuardedRelayer`; if a live BK rotation lands
+during the run you'll see a `daemon[guarded]: rotation detected …
+relayer is now paused, awaiting Phase 5.2 reconcile` warning and no
+further verifyBlock submissions until you restart (Phase 5.2 will wire
+`resume()` into the Circuit 3 rotation pipeline).
+
+**Phase E.6 checkpoint** — empirically verified:
+
+- The daemon honours `--backoff-{initial,max}-secs` + `--backoff-multiplier`.
+- `Ctrl-C` triggers a clean shutdown at the next sleep boundary (no
+  half-finished transactions, `state.json` consistent on disk).
+- Metrics counters (`ticks_total`, `verified_total`,
+  `not_yet_available_total`, `current_backoff_secs`,
+  `last_verified_seq_no`) are emitted in the final `daemon stopped`
+  log line.
 
 ---
 

@@ -58,6 +58,24 @@ import "../src/LayerHashesMovementVerifier.sol";
  *   Sepolia: 0x69963768F8407dE501029680dE46945F838Fc98B (mock, same address via CREATE3)
  */
 contract DeployRealBridge is Script {
+    // Bundle the JSON-writer's many fields into a single memory struct.
+    // Without this packing the helper has 10 plain parameters and trips
+    // "Stack too deep" under the coverage profile (optimizer + viaIR are
+    // both disabled there so each parameter consumes a separate stack
+    // slot; see pipeline #5744).
+    struct DeploymentJsonArgs {
+        address oracleAddr;
+        string oracleType;
+        address bridgeAddr;
+        bool useAave;
+        bool wireVerifyBlock;
+        address primaryVerifierAddr;
+        address fallbackVerifierAddr;
+        address layerHashesVerifierAddr;
+        uint256 genesisBkSetCommitment;
+        uint256 genesisPrevAnchor;
+    }
+
     // Axiom V2 Core addresses
     address constant AXIOM_V2_CORE_MAINNET = 0x69963768F8407dE501029680dE46945F838Fc98B;
     address constant AXIOM_V2_CORE_SEPOLIA = 0x69963768F8407dE501029680dE46945F838Fc98B;
@@ -68,7 +86,6 @@ contract DeployRealBridge is Script {
     address constant AAVE_V3_aWETH_MAINNET = 0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8;
 
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         bool useAxiomOracle = vm.envOr("USE_AXIOM_ORACLE", false);
         bool useAave = vm.envOr("USE_AAVE", false);
         bool wireVerifyBlock = vm.envOr("WIRE_VERIFY_BLOCK", false);
@@ -88,128 +105,68 @@ contract DeployRealBridge is Script {
             // genesisPrevAnchor == 0 is legitimate (genesis chain head).
         }
 
-        vm.startBroadcast(deployerPrivateKey);
+        // Scope `deployerPrivateKey` to just the broadcast handshake so
+        // it doesn't pin a stack slot through the rest of the function
+        // (the coverage profile is *very* tight on stack depth — see the
+        // `DeploymentJsonArgs` comment).
+        {
+            uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+            vm.startBroadcast(deployerPrivateKey);
+        }
 
         // Step 1: Deploy block header oracle (kept for the future burn-proof flow).
-        address oracleAddr;
-        string memory oracleType;
+        (address oracleAddr, string memory oracleType) = _deployOracle(useAxiomOracle);
 
-        if (useAxiomOracle) {
-            address axiomV2Core;
-            if (block.chainid == 1) {
-                axiomV2Core = AXIOM_V2_CORE_MAINNET;
-            } else if (block.chainid == 11155111) {
-                axiomV2Core = AXIOM_V2_CORE_SEPOLIA;
-            } else {
-                revert(
-                    "Axiom oracle not supported on this chain. Use USE_AXIOM_ORACLE=false for local testing."
-                );
-            }
-            require(axiomV2Core != address(0), "Axiom V2 Core address not set");
-
-            console.log("Deploying AxiomBlockHeaderOracle...");
-            console.log("  AxiomV2Core:", axiomV2Core);
-            AxiomBlockHeaderOracle axiomOracle = new AxiomBlockHeaderOracle(axiomV2Core);
-            oracleAddr = address(axiomOracle);
-            oracleType = "AxiomBlockHeaderOracle";
-        } else {
-            console.log("Deploying MockBlockHeaderOracle (TESTING ONLY)...");
-            console.log(
-                "  WARNING: Mock oracle is NOT trustless. Use USE_AXIOM_ORACLE=true for production."
-            );
-            MockBlockHeaderOracle mockOracle = new MockBlockHeaderOracle();
-            oracleAddr = address(mockOracle);
-            oracleType = "MockBlockHeaderOracle";
-        }
-        console.log(string(abi.encodePacked(oracleType, " deployed at:")), oracleAddr);
-
-        // Step 2: Pick AAVE addresses (only supported on mainnet, optional).
-        address aavePool;
-        address wethGateway;
-        address aWETH;
-        if (useAave) {
-            require(block.chainid == 1, "AAVE wiring only supported on mainnet (chainid=1)");
-            aavePool = AAVE_V3_POOL_MAINNET;
-            wethGateway = AAVE_V3_WETH_GATEWAY_MAINNET;
-            aWETH = AAVE_V3_aWETH_MAINNET;
-            console.log("AAVE integration: ENABLED");
-            console.log("  Pool:", aavePool);
-            console.log("  WETH Gateway:", wethGateway);
-            console.log("  aWETH:", aWETH);
-        } else {
-            console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on mainnet)");
-        }
-
-        // Step 3: Optionally deploy the AN→ETH verifier triple (Primary /
-        //         Fallback / LayerHashes). The constructor of `AckiNackiBridge`
-        //         is the only place verifier addresses can be set — no
-        //         post-deploy setter — so wiring must happen here.
-        AckiNackiBridge.VerifyBlockConfig memory vb;
+        // Step 2 + 3 + 4 + 5 are bundled into a scope block so the AAVE
+        // address locals, `vb`, `beDisabled`, and `bridge` fall out of
+        // scope before the JSON assembly below — otherwise `run()` carries
+        // 17+ live locals into the `DeploymentJsonArgs` literal and the
+        // coverage profile (optimizer + viaIR off) hits "Stack too deep".
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
         address layerHashesVerifierAddr;
-        if (wireVerifyBlock) {
-            console.log("Deploying Groth16 verifier triple...");
+        address bridgeAddr;
+        {
+            // Step 2: AAVE addresses.
+            (address aavePool, address wethGateway, address aWETH) = _resolveAaveAddresses(useAave);
 
-            PrimaryGroth16VerifierGenerated pG = new PrimaryGroth16VerifierGenerated();
-            console.log("  PrimaryGroth16VerifierGenerated:", address(pG));
-            PrimaryVerifier pv = new PrimaryVerifier(address(pG));
-            primaryVerifierAddr = address(pv);
-            console.log("  PrimaryVerifier (adapter):", primaryVerifierAddr);
+            // Step 3: optional AN→ETH verifier triple. Extracted into a
+            //         helper so the six per-contract locals don't pile up
+            //         here either.
+            AckiNackiBridge.VerifyBlockConfig memory vb = _buildVerifyBlockConfig(
+                wireVerifyBlock, genesisBkSetCommitment, genesisPrevAnchor
+            );
+            if (wireVerifyBlock) {
+                primaryVerifierAddr = address(vb.primaryVerifier);
+                fallbackVerifierAddr = address(vb.fallbackVerifier);
+                layerHashesVerifierAddr = address(vb.layerHashesVerifier);
+            }
 
-            FallbackGroth16VerifierGenerated fG = new FallbackGroth16VerifierGenerated();
-            console.log("  FallbackGroth16VerifierGenerated:", address(fG));
-            FallbackVerifier fv = new FallbackVerifier(address(fG));
-            fallbackVerifierAddr = address(fv);
-            console.log("  FallbackVerifier (adapter):", fallbackVerifierAddr);
-
-            LayerHashesGroth16VerifierGenerated lG = new LayerHashesGroth16VerifierGenerated();
-            console.log("  LayerHashesGroth16VerifierGenerated:", address(lG));
-            LayerHashesMovementVerifier lv = new LayerHashesMovementVerifier(address(lG));
-            layerHashesVerifierAddr = address(lv);
-            console.log("  LayerHashesMovementVerifier (adapter):", layerHashesVerifierAddr);
-
-            vb = AckiNackiBridge.VerifyBlockConfig({
-                primaryVerifier: IPrimaryVerifier(primaryVerifierAddr),
-                fallbackVerifier: IFallbackVerifier(fallbackVerifierAddr),
-                layerHashesVerifier: ILayerHashesMovementVerifier(layerHashesVerifierAddr),
-                genesisBkSetCommitment: genesisBkSetCommitment,
-                genesisPrevMaxLevelLayerHash: genesisPrevAnchor
-            });
-            console.log("verifyBlock anchors:");
-            console.log("  genesis BK-set commitment:", genesisBkSetCommitment);
-            console.log("  genesis prev-anchor      :", genesisPrevAnchor);
-        } else {
-            console.log("verifyBlock wiring: DISABLED (set WIRE_VERIFY_BLOCK=true to wire)");
-            vb = AckiNackiBridge.VerifyBlockConfig({
-                primaryVerifier: IPrimaryVerifier(address(0)),
-                fallbackVerifier: IFallbackVerifier(address(0)),
-                layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
-                genesisBkSetCommitment: 0,
-                genesisPrevMaxLevelLayerHash: 0
-            });
+            // Step 4 + 5: Circuit 4 (verifyEvent) always disabled here (no
+            //             gnark-generated verifier yet — Phase A scaffolding
+            //             only, Phase B blocked on docs/circuit_4_open_questions.md).
+            //             Deploy the bridge wired against the configs above.
+            console.log("Deploying AckiNackiBridge...");
+            AckiNackiBridge bridge = new AckiNackiBridge(
+                oracleAddr,
+                aavePool,
+                wethGateway,
+                aWETH,
+                vb,
+                AckiNackiBridge.BridgeEventConfig({
+                    bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
+                })
+            );
+            bridgeAddr = address(bridge);
+            console.log("AckiNackiBridge deployed at:", bridgeAddr);
         }
-
-        // Step 4: Circuit 4 (verifyEvent) is always disabled in this script —
-        //         no gnark-generated `BridgeEventGroth16VerifierGenerated`
-        //         exists yet (Phase A scaffolding only; Phase B blocked on
-        //         `docs/circuit_4_open_questions.md`).
-        AckiNackiBridge.BridgeEventConfig memory beDisabled = AckiNackiBridge.BridgeEventConfig({
-            bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
-        });
-
-        // Step 5: Deploy the bridge wired against the configs above.
-        console.log("Deploying AckiNackiBridge...");
-        AckiNackiBridge bridge =
-            new AckiNackiBridge(oracleAddr, aavePool, wethGateway, aWETH, vb, beDisabled);
-        console.log("AckiNackiBridge deployed at:", address(bridge));
 
         vm.stopBroadcast();
 
         console.log("\n=== Deployment Complete ===");
         console.log("Oracle type:", oracleType);
         console.log("Oracle:", oracleAddr);
-        console.log("AckiNackiBridge:", address(bridge));
+        console.log("AckiNackiBridge:", bridgeAddr);
         if (wireVerifyBlock) {
             console.log("PrimaryVerifier (adapter):", primaryVerifierAddr);
             console.log("FallbackVerifier (adapter):", fallbackVerifierAddr);
@@ -237,24 +194,162 @@ contract DeployRealBridge is Script {
 
         console.log("\nSave these addresses for testing!");
 
+        // JSON assembly extracted to a helper, with args packed into a
+        // single memory struct to keep both `run()` and the helper itself
+        // under the coverage profile's stack-depth limit. See the
+        // `DeploymentJsonArgs` definition + comment above.
+        _writeDeploymentJson(
+            DeploymentJsonArgs({
+                oracleAddr: oracleAddr,
+                oracleType: oracleType,
+                bridgeAddr: bridgeAddr,
+                useAave: useAave,
+                wireVerifyBlock: wireVerifyBlock,
+                primaryVerifierAddr: primaryVerifierAddr,
+                fallbackVerifierAddr: fallbackVerifierAddr,
+                layerHashesVerifierAddr: layerHashesVerifierAddr,
+                genesisBkSetCommitment: genesisBkSetCommitment,
+                genesisPrevAnchor: genesisPrevAnchor
+            })
+        );
+        console.log("\nDeployment info saved to: deployment_real.json");
+    }
+
+    /// Deploy the block header oracle. Extracted out of `run()` so the
+    /// per-oracle local (`axiomOracle` or `mockOracle`) and `axiomV2Core`
+    /// don't pile up in run()'s frame under the coverage profile.
+    function _deployOracle(bool useAxiomOracle)
+        internal
+        returns (address oracleAddr, string memory oracleType)
+    {
+        if (useAxiomOracle) {
+            address axiomV2Core;
+            if (block.chainid == 1) {
+                axiomV2Core = AXIOM_V2_CORE_MAINNET;
+            } else if (block.chainid == 11155111) {
+                axiomV2Core = AXIOM_V2_CORE_SEPOLIA;
+            } else {
+                revert(
+                    "Axiom oracle not supported on this chain. Use USE_AXIOM_ORACLE=false for local testing."
+                );
+            }
+            require(axiomV2Core != address(0), "Axiom V2 Core address not set");
+
+            console.log("Deploying AxiomBlockHeaderOracle...");
+            console.log("  AxiomV2Core:", axiomV2Core);
+            oracleAddr = address(new AxiomBlockHeaderOracle(axiomV2Core));
+            oracleType = "AxiomBlockHeaderOracle";
+        } else {
+            console.log("Deploying MockBlockHeaderOracle (TESTING ONLY)...");
+            console.log(
+                "  WARNING: Mock oracle is NOT trustless. Use USE_AXIOM_ORACLE=true for production."
+            );
+            oracleAddr = address(new MockBlockHeaderOracle());
+            oracleType = "MockBlockHeaderOracle";
+        }
+        console.log(string(abi.encodePacked(oracleType, " deployed at:")), oracleAddr);
+    }
+
+    /// Resolve the AAVE V3 addresses to wire into the bridge constructor.
+    /// All-zero unless `useAave == true` *and* we're on mainnet. Extracted
+    /// out of run() to free three stack slots (the three addresses live
+    /// only until the bridge constructor is called).
+    function _resolveAaveAddresses(bool useAave)
+        internal
+        view
+        returns (address aavePool, address wethGateway, address aWETH)
+    {
+        if (!useAave) {
+            console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on mainnet)");
+            return (address(0), address(0), address(0));
+        }
+        require(block.chainid == 1, "AAVE wiring only supported on mainnet (chainid=1)");
+        aavePool = AAVE_V3_POOL_MAINNET;
+        wethGateway = AAVE_V3_WETH_GATEWAY_MAINNET;
+        aWETH = AAVE_V3_aWETH_MAINNET;
+        console.log("AAVE integration: ENABLED");
+        console.log("  Pool:", aavePool);
+        console.log("  WETH Gateway:", wethGateway);
+        console.log("  aWETH:", aWETH);
+    }
+
+    /// Build the `VerifyBlockConfig` struct, deploying the Primary /
+    /// Fallback / LayerHashes Groth16 verifier triple + their adapter
+    /// contracts when `wire == true`, or returning the all-zero "disabled"
+    /// config otherwise. Extracted out of `run()` so the half-dozen per-
+    /// contract locals stay in this frame rather than `run()`'s — the
+    /// coverage profile (optimizer + viaIR off) cannot afford them in
+    /// `run()`. Called from inside `vm.startBroadcast(...)` so the
+    /// deployment calls are recorded as broadcast tx's.
+    function _buildVerifyBlockConfig(
+        bool wire,
+        uint256 genesisBkSetCommitment,
+        uint256 genesisPrevAnchor
+    ) internal returns (AckiNackiBridge.VerifyBlockConfig memory vb) {
+        if (!wire) {
+            console.log("verifyBlock wiring: DISABLED (set WIRE_VERIFY_BLOCK=true to wire)");
+            return AckiNackiBridge.VerifyBlockConfig({
+                primaryVerifier: IPrimaryVerifier(address(0)),
+                fallbackVerifier: IFallbackVerifier(address(0)),
+                layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
+                genesisBkSetCommitment: 0,
+                genesisPrevMaxLevelLayerHash: 0
+            });
+        }
+
+        console.log("Deploying Groth16 verifier triple...");
+
+        PrimaryGroth16VerifierGenerated pG = new PrimaryGroth16VerifierGenerated();
+        console.log("  PrimaryGroth16VerifierGenerated:", address(pG));
+        PrimaryVerifier pv = new PrimaryVerifier(address(pG));
+        console.log("  PrimaryVerifier (adapter):", address(pv));
+
+        FallbackGroth16VerifierGenerated fG = new FallbackGroth16VerifierGenerated();
+        console.log("  FallbackGroth16VerifierGenerated:", address(fG));
+        FallbackVerifier fv = new FallbackVerifier(address(fG));
+        console.log("  FallbackVerifier (adapter):", address(fv));
+
+        LayerHashesGroth16VerifierGenerated lG = new LayerHashesGroth16VerifierGenerated();
+        console.log("  LayerHashesGroth16VerifierGenerated:", address(lG));
+        LayerHashesMovementVerifier lv = new LayerHashesMovementVerifier(address(lG));
+        console.log("  LayerHashesMovementVerifier (adapter):", address(lv));
+
+        vb = AckiNackiBridge.VerifyBlockConfig({
+            primaryVerifier: IPrimaryVerifier(address(pv)),
+            fallbackVerifier: IFallbackVerifier(address(fv)),
+            layerHashesVerifier: ILayerHashesMovementVerifier(address(lv)),
+            genesisBkSetCommitment: genesisBkSetCommitment,
+            genesisPrevMaxLevelLayerHash: genesisPrevAnchor
+        });
+        console.log("verifyBlock anchors:");
+        console.log("  genesis BK-set commitment:", genesisBkSetCommitment);
+        console.log("  genesis prev-anchor      :", genesisPrevAnchor);
+    }
+
+    /// Serialise the deployment result to `deployment_real.json`. Extracted
+    /// out of `run()` for the same coverage stack-depth reason as
+    /// `_buildVerifyBlockConfig`. The verifier-triple fields are emitted
+    /// only when `wireVerifyBlock == true` so the disabled-mode JSON is
+    /// shape-compatible with the pre-E4 (2026-05-19) script output.
+    function _writeDeploymentJson(DeploymentJsonArgs memory a) internal {
         string memory verifierJson = "";
-        if (wireVerifyBlock) {
+        if (a.wireVerifyBlock) {
             verifierJson = string(
                 abi.encodePacked(
                     '  "primary_verifier": "',
-                    vm.toString(primaryVerifierAddr),
+                    vm.toString(a.primaryVerifierAddr),
                     '",\n',
                     '  "fallback_verifier": "',
-                    vm.toString(fallbackVerifierAddr),
+                    vm.toString(a.fallbackVerifierAddr),
                     '",\n',
                     '  "layer_hashes_verifier": "',
-                    vm.toString(layerHashesVerifierAddr),
+                    vm.toString(a.layerHashesVerifierAddr),
                     '",\n',
                     '  "genesis_bk_set_commitment": "',
-                    vm.toString(genesisBkSetCommitment),
+                    vm.toString(a.genesisBkSetCommitment),
                     '",\n',
                     '  "genesis_prev_max_level_layer_hash": "',
-                    vm.toString(genesisPrevAnchor),
+                    vm.toString(a.genesisPrevAnchor),
                     '",\n'
                 )
             );
@@ -264,25 +359,24 @@ contract DeployRealBridge is Script {
             abi.encodePacked(
                 "{\n",
                 '  "oracle": "',
-                vm.toString(oracleAddr),
+                vm.toString(a.oracleAddr),
                 '",\n',
                 '  "oracle_type": "',
-                oracleType,
+                a.oracleType,
                 '",\n',
                 '  "bridge": "',
-                vm.toString(address(bridge)),
+                vm.toString(a.bridgeAddr),
                 '",\n',
                 '  "verify_block_wired": ',
-                wireVerifyBlock ? "true" : "false",
+                a.wireVerifyBlock ? "true" : "false",
                 ",\n",
                 verifierJson,
                 '  "aave_enabled": ',
-                useAave ? "true" : "false",
+                a.useAave ? "true" : "false",
                 "\n}"
             )
         );
 
         vm.writeFile("deployment_real.json", deploymentJson);
-        console.log("\nDeployment info saved to: deployment_real.json");
     }
 }

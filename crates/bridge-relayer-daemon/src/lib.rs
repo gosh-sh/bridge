@@ -49,6 +49,7 @@
 
 pub mod bk_set_sentry;
 pub mod bridge;
+pub mod daemon;
 pub mod error;
 pub mod guarded_relayer;
 pub mod relayer;
@@ -59,6 +60,9 @@ pub mod types;
 pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BridgeClient, BridgeOnChainState, EthBridgeClient, MockBridgeClient, SubmitOutcome,
+};
+pub use daemon::{
+    BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
 pub use error::RelayerError;
 pub use guarded_relayer::{GuardedOutcome, SentryGuardedRelayer};

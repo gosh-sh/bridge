@@ -1,6 +1,6 @@
 //! Phase 5.1 — Relayer CLI binary.
 //!
-//! Two subcommands:
+//! Three subcommands:
 //!
 //! - `smoke-fixture` — submits one canned block from a Phase 4.1 bound-proof
 //!   fixture directory through the real
@@ -14,8 +14,15 @@
 //!   operators wanting to confirm that the committee they think is active
 //!   really is, before running the bridge relayer in earnest.
 //!
-//! In Phase 5.2 the binary gains a `LiveBlockSource` impl and the
-//! sentry's `resume()` gets wired into the rotation pipeline. For now,
+//! - `daemon` — long-running operator entry point. Drives `Relayer::tick`
+//!   forever with exponential backoff, until SIGINT/SIGTERM. Optionally wraps
+//!   in `SentryGuardedRelayer` when `--an-node-url` is supplied so the loop
+//!   pauses on a live BK rotation. Logs a structured metrics snapshot on every
+//!   shutdown.
+//!
+//! In Phase 5.2 the `daemon` subcommand will swap `FixturesBlockSource`
+//! for a real `LiveBlockSource` and the sentry's `resume()` gets wired
+//! into the rotation pipeline. For now,
 //! `cargo run -p bridge-relayer-daemon --bin relayer -- --help` is the
 //! best entry point.
 
@@ -28,8 +35,8 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BkSetSentry, EthBridgeClient, FixturesBlockSource, GuardedOutcome, Relayer, RelayerConfig,
-    SentryGuardedRelayer, SentryStatus, TickOutcome,
+    BackoffConfig, BkSetSentry, EthBridgeClient, FixturesBlockSource, GuardedOutcome, Relayer,
+    RelayerConfig, RelayerMetrics, SentryGuardedRelayer, SentryStatus, TickOutcome,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -92,6 +99,43 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         interval_secs: u64,
     },
+    /// Long-running daemon mode. Drives `Relayer::tick` forever with
+    /// exponential backoff until SIGINT/SIGTERM. The fixture source is
+    /// kept here as a Phase 5.1 placeholder; Phase 5.2 will swap it for
+    /// a `LiveBlockSource` over the partner's GraphQL + BOC pipeline.
+    Daemon {
+        /// Phase 5.1 placeholder source: one canned block from a bound-
+        /// proof fixture directory. The daemon will submit it (once) and
+        /// then idle on `NotYetAvailable` with exponential backoff. The
+        /// purpose is to exercise the long-running scaffolding under
+        /// `cargo run` against a local Anvil; production deployments
+        /// will pass a `--source live` flag in Phase 5.2.
+        #[arg(long)]
+        fixtures_dir: PathBuf,
+        /// Ethereum RPC URL (HTTP).
+        #[arg(long)]
+        rpc_url: String,
+        /// `AckiNackiBridge` contract address.
+        #[arg(long)]
+        bridge_address: Address,
+        /// Hex-encoded private key of the relayer EOA.
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Optional AN node base URL. When provided, the daemon runs
+        /// inside a `SentryGuardedRelayer` and pauses on a live BK
+        /// rotation (waiting for the future Phase 5.2 reconcile path).
+        #[arg(long, env = "AN_NODE_URL")]
+        an_node_url: Option<String>,
+        /// Initial backoff sleep on the first non-success outcome.
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        /// Maximum sleep length the backoff is allowed to grow to.
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        /// Backoff multiplier (next = min(current × multiplier, max)).
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+    },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
 }
@@ -137,6 +181,36 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "sentry watch failed");
                 e
             }),
+        Cmd::Daemon {
+            fixtures_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            an_node_url,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_daemon(
+                args.state,
+                fixtures_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                an_node_url,
+                backoff,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon failed");
+                e
+            })
+        },
     }
 }
 
@@ -315,6 +389,81 @@ async fn sentry_watch(node_url: String, ticks: u64, interval_secs: u64) -> anyho
     }
     let metrics = sentry.metrics();
     info!(?metrics, "sentry watch complete");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // CLI surface; each arg maps to a flag
+async fn run_daemon(
+    state_path: PathBuf,
+    fixtures_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    an_node_url: Option<String>,
+    backoff: BackoffConfig,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe_provider.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let source = Arc::new(FixturesBlockSource::from_dir(&fixtures_dir)?);
+    let cfg = RelayerConfig::new(state_path);
+    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let metrics = RelayerMetrics::new();
+
+    // Cross-platform graceful shutdown: SIGINT on every OS, plus SIGTERM
+    // on Unix (Docker / systemd send SIGTERM by default).
+    let shutdown = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(?e, "failed to install SIGTERM handler; SIGINT only");
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                },
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+                _ = sigterm.recv() => info!("SIGTERM received"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("SIGINT received");
+        }
+    };
+
+    info!(?backoff, ?an_node_url, "daemon starting");
+    let summary = match an_node_url {
+        None => {
+            warn!(
+                "running without sentry — a live BK rotation will NOT pause this daemon; \
+                 verifyBlock calls will start reverting until the operator restarts."
+            );
+            relayer
+                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+                .await?
+        },
+        Some(url) => {
+            info!(node_url = %url, "wrapping in SentryGuardedRelayer");
+            let sentry = BkSetSentry::from_node_url(url)?;
+            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
+            guarded
+                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+                .await?
+        },
+    };
+
+    info!(?summary, snapshot = ?metrics.snapshot(), "daemon stopped");
     Ok(())
 }
 

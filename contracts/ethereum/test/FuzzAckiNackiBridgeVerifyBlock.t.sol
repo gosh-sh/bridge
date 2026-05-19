@@ -235,16 +235,17 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
     // Invariant: any `blockSeqNo <= storedLastSeenBlockSeqNo` reverts with
     // `BlockSeqNoNotMonotonic(supplied, stored)`. On a fresh bridge
     // `storedLastSeenBlockSeqNo == 0`, so the offending value space is the
-    // single u64 zero — fuzz it as a regression check anyway, and then run
-    // a second case after one successful verify so the stored anchor moves
-    // to 1 and the value space widens to {0, 1}.
+    // *single* u64 zero — this is therefore a regular unit test, not a
+    // fuzz target (a fuzzer with a `vm.assume(seqNo == 0)` filter rejects
+    // 2^64 − 1 of 2^64 inputs and trips Foundry's 65 536-rejection cap).
+    // The post-advance case below is the genuinely-fuzzable variant: once
+    // stored = 1, the value space widens to {0, 1} and `bound(...)` keeps
+    // every fuzzer-supplied seed productive.
     // ────────────────────────────────────────────────────────────────────
-    function testFuzz_seqNoNotMonotonic_genesis_reverts(uint64 seqNo) public {
-        vm.assume(seqNo == 0);
-
+    function test_seqNoNotMonotonic_genesis_reverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.BlockSeqNoNotMonotonic.selector, seqNo, uint64(0)
+                AckiNackiBridge.BlockSeqNoNotMonotonic.selector, uint64(0), uint64(0)
             )
         );
         bridge.verifyBlock(
@@ -253,7 +254,7 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
             PROOF_LAYER_HASHES,
             BLOCK_ID,
             BK_SET_POSEIDON,
-            seqNo,
+            uint64(0),
             NUM_LAYERS,
             _layerHashes(),
             PREV_MAX_LEVEL_LAYER_HASH

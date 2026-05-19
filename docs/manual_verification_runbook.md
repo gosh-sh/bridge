@@ -33,7 +33,10 @@
 >
 > - Foundry total now **132 across 14 suites** (109 → 125 was Circuit 4 Phase A
 >   scaffolding + a new `AckiNackiBridgeVerifyEventTest` suite; 125 → 132 adds
->   `FuzzAckiNackiBridgeVerifyBlockTest`, 7 property-based tests covering
+>   `FuzzAckiNackiBridgeVerifyBlockTest`, 6 property-based fuzz tests + 1
+>   plain unit test (the genesis-seqNo case has a single valid input and
+>   was demoted from fuzz after pipeline #5741 tripped the 65 536-reject
+>   cap) covering
 >   `VerifyBlockDisabled`/`InvalidNumLayers`/`LayerHashTailNonZero`/
 >   `BkSetCommitmentMismatch`/`BlockSeqNoNotMonotonic`/`PrevAnchorMismatch`).
 >   Phase C test-suite table updated.
@@ -234,7 +237,7 @@ canonical breakdown maintained in `AGENTS.md`):
 |---|---|
 | `AckiNackiBridgeAaveTest` | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs) | 17 |
-| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input invariants, 256 runs × 7) | 7 |
+| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input invariants, 6 fuzz × 256 + 1 unit) | 7 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop, mock verifiers) | 6 |
 | `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 — layerWindow + verifyEvent) | 16 |
 | `AxiomBlockHeaderOracleTest` | 16 |

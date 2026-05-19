@@ -382,7 +382,7 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 |------|------|
 | `AckiNackiBridgeAaveTest` (AAVE; owner-only top-up + yield) | 20 |
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
-| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input-validation invariants, 256 runs × 7 properties) | 7 |
+| `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input-validation invariants, 6 fuzz × 256 runs + 1 unit) | 7 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
 | `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 scaffolding — layerWindow + verifyEvent) | 16 |
 | `AxiomBlockHeaderOracleTest` | 16 |

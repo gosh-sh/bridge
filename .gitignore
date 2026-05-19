@@ -164,6 +164,11 @@ out/
 # Review packs for partners (produced by build_pack.sh; not for git)
 dist/
 
+# Local cargo-audit snapshot (regenerated on demand; CI runs `cargo audit`
+# fresh via the security:rust:audit job — the file in the workspace root is
+# a developer convenience artefact, not a checked-in dependency).
+cargo.audit
+
 # Generated verifier and deployment artifacts
 contracts/DepositVerifier.*
 deployment_addresses.json

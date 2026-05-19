@@ -20,11 +20,14 @@
 > - Test counts: 135 → **109 across 12 suites**. Test-suite table updated below.
 > - The Sign-Off Checklist (Phase K) is updated to reflect the post-demolition surface.
 >
-> **v2.3 update (2026-05-20).** Phase E gains a new **E.6 — long-running
-> relayer daemon** subsection covering the `relayer daemon` subcommand
-> (exponential backoff, signal-aware shutdown, metrics snapshot,
-> optional sentry guard). Production deployments should drive
-> `verifyBlock` through this entry point rather than `smoke-fixture`.
+> **v2.3 update (2026-05-20).** Phase E gains two new subsections:
+> **E.6 — long-running relayer daemon** covers the `relayer daemon`
+> subcommand (exponential backoff, signal-aware shutdown, metrics
+> snapshot, optional sentry guard); **E.7 — `verify-fixture`** is a
+> read-only pre-flight check operators run *before* the daemon to
+> confirm anchors line up between the fixture and the live bridge.
+> Production deployments should drive `verifyBlock` through the daemon
+> entry point rather than `smoke-fixture`.
 >
 > **v2.2 update (2026-05-18).** Three small refreshes:
 >
@@ -473,6 +476,51 @@ further verifyBlock submissions until you restart (Phase 5.2 will wire
   `not_yet_available_total`, `current_backoff_secs`,
   `last_verified_seq_no`) are emitted in the final `daemon stopped`
   log line.
+
+### E.7 Pre-flight: `verify-fixture` (no private key needed)
+
+Before letting the daemon submit anything to a freshly deployed bridge,
+operators should run the **read-only** `verify-fixture` subcommand. It
+loads the same fixture the daemon would consume, reads the on-chain
+anchors over HTTP, and prints a per-field diagnostic on whether the
+*cheap* pre-crypto checks in `verifyBlock` (bk-set match, monotonic
+seqNo, prev-anchor match) would pass. No private key, no transaction —
+suitable for pre-deploy CI.
+
+```bash
+cd crates/bridge-relayer-daemon
+RUST_LOG=info ./target/release/relayer verify-fixture \
+    --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+    --rpc-url $RPC \
+    --bridge-address $BRIDGE
+echo "exit=$?"
+```
+
+✅ Expected on a freshly deployed wired bridge:
+
+```
+INFO on-chain state read … last_seen=0
+INFO fixture loaded fixture_seq_no=1 fixture_block_id=… fixture_num_layers=…
+INFO BkSetCommitment matches on-chain
+INFO seqNo is strictly greater than last_seen
+INFO PrevAnchor matches on-chain
+INFO verify-fixture: all pre-crypto checks PASS; ZK proofs are NOT checked offline
+exit=0
+```
+
+What it catches (per-field diagnostics + `exit=1`):
+
+- Pointing at the wrong network — `read_state` returns garbage zeros
+  and the BkSetCommitment line says `MISMATCH: fixture = 0xabc…,
+  on-chain = 0x0`.
+- Re-submitting the same fixture after a successful daemon run —
+  `BlockSeqNo NOT MONOTONIC: fixture seqNo = 1, on-chain last_seen = 1`.
+- Hot-swapping the fixture directory to one generated against a
+  different BK set — `BkSetCommitment MISMATCH`.
+
+What it cannot catch: bad ZK proofs. Those only surface as `Reverted`
+outcomes from the real `daemon` submit — and the verifier itself rejects
+them on-chain.
 
 ---
 

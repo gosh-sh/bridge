@@ -42,9 +42,9 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BackoffConfig, BkSetSentry, BlockSource, BridgeClient, EthBridgeClient, FixturesBlockSource,
-    GuardedOutcome, Relayer, RelayerConfig, RelayerMetrics, SentryGuardedRelayer, SentryStatus,
-    TickOutcome,
+    BackoffConfig, BkSetSentry, BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient,
+    FixturesBlockSource, GuardedOutcome, Relayer, RelayerConfig, RelayerMetrics,
+    SentryGuardedRelayer, SentryStatus, TickOutcome,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -145,20 +145,23 @@ enum Cmd {
         backoff_multiplier: u32,
     },
     /// Read-only pre-flight check. Loads a fixture, reads the on-chain
-    /// bridge anchors over RPC, and reports field-by-field whether the
-    /// fixture would be accepted by the *cheap* pre-crypto checks in
-    /// `verifyBlock`. No private key, no transaction. Exits with code 1
-    /// on any mismatch, so it slots into a pre-deploy shell pipeline.
+    /// bridge anchors over RPC, then (by default) `eth_call`-simulates
+    /// the full `verifyBlock(...)` so bad proofs surface here too. No
+    /// private key, no transaction, no gas. Exits with code 1 on any
+    /// mismatch or simulated revert; suitable for pre-deploy CI.
     ///
-    /// What this catches (operator-level mistakes):
+    /// What this catches:
     /// - wrong network → bridge contract not deployed at the address
     /// - wrong fixture → bk_set_commitment / prev_anchor mismatches
     /// - stale fixture → seqNo ≤ storedLastSeenBlockSeqNo
+    /// - bad ZK proof → eth_call surfaces the Groth16 verifier revert (Solidity
+    ///   `AttestationProofRejected` / `LayerHashesProofRejected`)
+    /// - disabled bridge → eth_call surfaces `VerifyBlockDisabled`
     ///
-    /// What this *cannot* catch (would still revert on real submit):
-    /// - bad ZK proofs (we don't eth_call the verifier here; the gnark
-    ///   verifiers cost ~287k gas each and we want this pre-flight to be free
-    ///   and offline-friendly).
+    /// Pass `--no-simulate` to skip the eth_call (faster, doesn't run the
+    /// ~287 k-gas Groth16 verifier triple inside the call). Useful when
+    /// the operator only wants to confirm anchor alignment and trusts the
+    /// proof generation pipeline.
     VerifyFixture {
         /// Directory containing `bound_scenario.json` +
         /// `primary/groth16_output.json` + `layer-hashes/groth16_output.json`.
@@ -170,6 +173,11 @@ enum Cmd {
         /// `AckiNackiBridge` contract address.
         #[arg(long)]
         bridge_address: Address,
+        /// Skip the `eth_call`-based `verifyBlock` simulation. By default
+        /// the pre-flight runs the full simulation (catches bad proofs).
+        /// `--no-simulate` reduces it to the cheap anchor checks only.
+        #[arg(long)]
+        no_simulate: bool,
     },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
@@ -220,7 +228,8 @@ async fn main() -> anyhow::Result<()> {
             fixtures_dir,
             rpc_url,
             bridge_address,
-        } => verify_fixture(fixtures_dir, rpc_url, bridge_address)
+            no_simulate,
+        } => verify_fixture(fixtures_dir, rpc_url, bridge_address, !no_simulate)
             .await
             .map_err(|e| {
                 error!(?e, "verify-fixture failed");
@@ -532,6 +541,7 @@ async fn verify_fixture(
     fixtures_dir: PathBuf,
     rpc_url: String,
     bridge_address: Address,
+    simulate: bool,
 ) -> anyhow::Result<()> {
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
@@ -630,10 +640,7 @@ async fn verify_fixture(
         );
     }
 
-    if ok {
-        info!("verify-fixture: all pre-crypto checks PASS; ZK proofs are NOT checked offline");
-        Ok(())
-    } else {
+    if !ok {
         for d in &diagnostics {
             error!("{}", d);
         }
@@ -642,6 +649,41 @@ async fn verify_fixture(
         // anyhow then prints the error as "verify-fixture failed:
         // ..." which duplicates the per-field log lines.
         std::process::exit(1);
+    }
+
+    info!("verify-fixture: cheap anchor checks PASS");
+
+    if !simulate {
+        info!("verify-fixture: --no-simulate set; skipping eth_call verifier triple simulation");
+        return Ok(());
+    }
+
+    info!(
+        "verify-fixture: running eth_call simulation of verifyBlock(...) — this exercises the \
+         full Groth16 verifier triple inside the contract; ~1 s on a free RPC"
+    );
+    match bridge.dry_run_block(&block).await? {
+        DryRunOutcome::WouldSucceed => {
+            info!(
+                "verify-fixture: eth_call simulation PASS; a real submit at the current head \
+                 would verify (subject to no on-chain state change between now and submit)"
+            );
+            Ok(())
+        },
+        DryRunOutcome::WouldRevert {
+            reason,
+        } => {
+            error!(
+                "verify-fixture: eth_call simulation REVERTED: {reason}\nCommon selectors:\n  - \
+                 AttestationProofRejected: the Primary/Fallback verifier rejected the proof \
+                 (regen needed — proof bytes don't match the public-instance VK)\n  - \
+                 LayerHashesProofRejected: the LayerHashesMovement verifier rejected (same fix)\n  \
+                 - VerifyBlockDisabled: bridge was deployed without WIRE_VERIFY_BLOCK=true\n  - \
+                 BkSetCommitmentMismatch / BlockSeqNoNotMonotonic / PrevAnchorMismatch: an \
+                 on-chain state change landed between the cheap-check read and this simulation"
+            );
+            std::process::exit(1);
+        },
     }
 }
 

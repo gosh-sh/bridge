@@ -485,10 +485,9 @@ further verifyBlock submissions until you restart (Phase 5.2 will wire
 Before letting the daemon submit anything to a freshly deployed bridge,
 operators should run the **read-only** `verify-fixture` subcommand. It
 loads the same fixture the daemon would consume, reads the on-chain
-anchors over HTTP, and prints a per-field diagnostic on whether the
-*cheap* pre-crypto checks in `verifyBlock` (bk-set match, monotonic
-seqNo, prev-anchor match) would pass. No private key, no transaction —
-suitable for pre-deploy CI.
+anchors over HTTP, **and** by default `eth_call`-simulates the full
+`verifyBlock(...)` so bad proofs surface in pre-flight too. No private
+key, no transaction, no gas — suitable for pre-deploy CI.
 
 ```bash
 cd crates/bridge-relayer-daemon
@@ -499,7 +498,7 @@ RUST_LOG=info ./target/release/relayer verify-fixture \
 echo "exit=$?"
 ```
 
-✅ Expected on a freshly deployed wired bridge:
+✅ Expected on a freshly deployed wired bridge with valid fixtures:
 
 ```
 INFO on-chain state read … last_seen=0
@@ -507,23 +506,32 @@ INFO fixture loaded fixture_seq_no=1 fixture_block_id=… fixture_num_layers=…
 INFO BkSetCommitment matches on-chain
 INFO seqNo is strictly greater than last_seen
 INFO PrevAnchor matches on-chain
-INFO verify-fixture: all pre-crypto checks PASS; ZK proofs are NOT checked offline
+INFO verify-fixture: cheap anchor checks PASS
+INFO verify-fixture: running eth_call simulation of verifyBlock(...) — …
+INFO verify-fixture: eth_call simulation PASS; a real submit at the current head would verify
 exit=0
 ```
 
 What it catches (per-field diagnostics + `exit=1`):
 
-- Pointing at the wrong network — `read_state` returns garbage zeros
-  and the BkSetCommitment line says `MISMATCH: fixture = 0xabc…,
-  on-chain = 0x0`.
-- Re-submitting the same fixture after a successful daemon run —
+- **Wrong network** — `read_state` returns garbage zeros and the
+  BkSetCommitment line says `MISMATCH: fixture = 0xabc…, on-chain = 0x0`.
+- **Stale fixture** — re-submitting after a successful daemon run gives
   `BlockSeqNo NOT MONOTONIC: fixture seqNo = 1, on-chain last_seen = 1`.
-- Hot-swapping the fixture directory to one generated against a
-  different BK set — `BkSetCommitment MISMATCH`.
+- **Mis-paired fixture** — hot-swapping to one generated against a
+  different BK set: `BkSetCommitment MISMATCH`.
+- **Bad ZK proof** — the eth_call surfaces the verifier triple's revert
+  as `eth_call simulation REVERTED: …AttestationProofRejected…` or
+  `…LayerHashesProofRejected…` (the help text enumerates all common
+  selectors). This used to only manifest as a real `daemon`-submit
+  `Reverted` outcome; pre-flight now catches it without burning a tx.
+- **Disabled bridge** — eth_call returns `VerifyBlockDisabled` if the
+  bridge was deployed without `WIRE_VERIFY_BLOCK=true`.
 
-What it cannot catch: bad ZK proofs. Those only surface as `Reverted`
-outcomes from the real `daemon` submit — and the verifier itself rejects
-them on-chain.
+Pass `--no-simulate` to skip the eth_call step (drops back to the cheap
+anchor checks only). Useful when the operator wants a sub-second
+pre-flight and trusts the proof generation pipeline (e.g. when the
+fixture was just regenerated against a known-good VK).
 
 ---
 

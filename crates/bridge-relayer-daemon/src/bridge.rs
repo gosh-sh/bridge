@@ -74,6 +74,22 @@ pub enum SubmitOutcome {
     Reverted { reason: String },
 }
 
+/// Outcome of [`EthBridgeClient::dry_run_block`] — a read-only
+/// `eth_call` simulation of `verifyBlock(...)`. Used by the
+/// `relayer verify-fixture` pre-flight check to confirm that a real
+/// submit would not revert (including the ~287 k-gas Groth16 path
+/// inside the verifier triple).
+#[derive(Clone, Debug)]
+pub enum DryRunOutcome {
+    /// Simulation succeeded — a real submit at this point would verify
+    /// (subject to no on-chain state change between now and the submit).
+    WouldSucceed,
+    /// Simulation reverted. `reason` is the raw alloy error chain so the
+    /// operator can grep for custom-error selectors like
+    /// `AttestationProofRejected` or `LayerHashesProofRejected`.
+    WouldRevert { reason: String },
+}
+
 #[async_trait]
 pub trait BridgeClient: Send + Sync {
     async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError>;
@@ -285,6 +301,42 @@ where
     /// tests that want to attach event-stream subscriptions etc.).
     pub fn contract(&self) -> &AckiNackiBridge::AckiNackiBridgeInstance<P, N> {
         &self.contract
+    }
+
+    /// Simulate `verifyBlock(...)` via `eth_call` without sending a
+    /// transaction. No gas spent, no signer required, no state mutated.
+    /// Returns:
+    ///
+    /// - [`DryRunOutcome::WouldSucceed`] — every check the contract performs
+    ///   (cheap pre-crypto + the three Groth16 verifiers) would accept the
+    ///   inputs at the *current* on-chain state.
+    /// - [`DryRunOutcome::WouldRevert`] — at least one check rejects; the alloy
+    ///   error chain in `reason` typically carries the Solidity custom-error
+    ///   selector and decoded args.
+    ///
+    /// This is what the `relayer verify-fixture` CLI uses to catch bad
+    /// proofs as well as bad operator state. The cost on the operator's
+    /// RPC quota is one `eth_call` per invocation — the verifier triple
+    /// is fully executed, so on a free RPC this may take ~1 s per call.
+    pub async fn dry_run_block(&self, block: &AnBlockData) -> Result<DryRunOutcome, RelayerError> {
+        block.validate_shape()?;
+        let call = self.contract.verifyBlock(
+            block.fin_type.tag(),
+            block.attestation_proof.clone(),
+            block.layer_hashes_proof.clone(),
+            block.block_id,
+            block.bk_set_commitment,
+            block.block_seq_no,
+            block.num_layers,
+            block.layer_hashes,
+            block.prev_max_level_layer_hash,
+        );
+        match call.call().await {
+            Ok(_) => Ok(DryRunOutcome::WouldSucceed),
+            Err(e) => Ok(DryRunOutcome::WouldRevert {
+                reason: format!("{e}"),
+            }),
+        }
     }
 }
 

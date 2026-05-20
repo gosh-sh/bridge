@@ -59,7 +59,8 @@ pub mod types;
 
 pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
-    BridgeClient, BridgeOnChainState, EthBridgeClient, MockBridgeClient, SubmitOutcome,
+    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
+    SubmitOutcome,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

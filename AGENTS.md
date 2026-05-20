@@ -333,6 +333,15 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 
 `bridge-prover-orchestrator` and `deposit-prover` are **not** yet in CI (they pull halo2 deps that take minutes to build); their `cargo test` happens only locally. Tracking as future A2.
 
+### Reproducing CI locally before pushing
+
+Run `make pre-push` before any non-trivial push — it mirrors every job CI runs and catches the two failure modes that the default `make test` doesn't:
+
+1. **`vm.assume` rejection-cap trips** (pipeline #5741, fix `13d59431`): a fuzz test with `vm.assume(seqNo == 0)` rejects 2^64 − 1 of 2^64 inputs, blowing past Foundry's 65 536-rejected-inputs cap. The default `forge test` may happen to seed past it; CI's seed often doesn't. **Lesson**: if the constrained value space has < ~5 % of total inputs, demote to a regular unit test or use `bound(rawVal, lo, hi)` to project the seed into the valid range.
+2. **`Stack too deep` under coverage** (pipeline #5744, fix `b63a4d3`): `forge coverage` disables the optimizer + viaIR for accurate coverage, so functions with > 16 live local stack slots fail to compile in the coverage profile even though `forge build` happily inlines them. **Lesson**: keep deploy-script `run()` lean — use scope blocks `{}` to drop dead locals, extract helpers, or pack multi-arg calls into a memory `struct`.
+
+`make pre-push` runs: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the same for the relayer crate, `forge fmt --check`, `forge test`, **`forge coverage --report summary`** (this is the key one), `cargo test --workspace --locked`, and `cargo test` inside the relayer crate. ~3 min total on a warm cache.
+
 ## Integration Status
 
 **Architecture v2 (4-circuit, since Phase 1.A 2026-05-06 onward)**: AN→ETH state lives directly on `AckiNackiBridge.sol` (`verifyBlock`); the legacy single-circuit pipeline (`LayerHashBridge.sol`, `LayerHashVerifier.sol`, the `bk-set-rotation-prover/` design, and the `layer-hashes-prover/` crate with its 13-input Groth16 wrapper) was retired by Phase 4.2 on 2026-05-10. Per-circuit Groth16 adapters (`PrimaryVerifier.sol`, `FallbackVerifier.sol`, `LayerHashesMovementVerifier.sol`) and the bound proof toolchain (`crates/bridge-prover-orchestrator/`) now own the surface that used to be split across the legacy crate + `LayerHashBridge`.

@@ -1,4 +1,5 @@
-.PHONY: help setup build test clean format lint check install run-local deploy docs
+.PHONY: help setup build test clean format lint check install run-local deploy docs \
+        coverage-solidity pre-push relayer-test relayer-fmt relayer-clippy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -146,6 +147,47 @@ dev-setup: setup ## Setup development environment
 	@echo "$(YELLOW)Don't forget to configure .env file$(NC)"
 
 ci: format-check lint test ## Run CI checks locally
+
+# ────────────────────────────────────────────────────────────────────────────
+# Coverage and pre-push targets — mirror what CI runs so red pipelines are
+# easy to reproduce locally.
+#
+# Pipelines #5741 + #5744 (2026-05-20) both failed on patterns that pass
+# `forge test` and `cargo test` locally but trip `forge coverage`:
+#   - vm.assume rejection cap (fuzz test rejected > 65 536 inputs);
+#   - Stack-too-deep (forge coverage disables optimizer + viaIR).
+# Run `make pre-push` before pushing any non-trivial Solidity or Rust change
+# to catch both classes locally.
+# ────────────────────────────────────────────────────────────────────────────
+
+coverage-solidity: ## Run forge coverage --report summary (matches test:solidity:coverage CI job)
+	@echo "$(BLUE)Running forge coverage --report summary...$(NC)"
+	@echo "$(YELLOW)Note: coverage disables optimizer + viaIR; expect Stack-too-deep here$(NC)"
+	@echo "$(YELLOW)      if any function has > 16 live local stack slots.$(NC)"
+	@cd contracts/ethereum && forge coverage --report summary
+
+relayer-test: ## Run bridge-relayer-daemon unit tests (excluded from workspace)
+	@echo "$(BLUE)Running bridge-relayer-daemon tests...$(NC)"
+	@cd crates/bridge-relayer-daemon && cargo test --locked
+
+relayer-fmt: ## Check bridge-relayer-daemon formatting
+	@cd crates/bridge-relayer-daemon && cargo fmt --check
+
+relayer-clippy: ## Run clippy on bridge-relayer-daemon
+	@cd crates/bridge-relayer-daemon && cargo clippy --all-targets -- -D warnings
+
+pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
+	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"
+	@$(MAKE) format-check
+	@$(MAKE) lint
+	@$(MAKE) relayer-fmt
+	@$(MAKE) relayer-clippy
+	@cd contracts/ethereum && forge fmt --check
+	@cd contracts/ethereum && forge test
+	@$(MAKE) coverage-solidity
+	@cargo test --workspace --locked
+	@$(MAKE) relayer-test
+	@echo "$(GREEN)── pre-push: all green; safe to push ──$(NC)"
 
 # Quick commands
 q-build: ## Quick build (debug mode)

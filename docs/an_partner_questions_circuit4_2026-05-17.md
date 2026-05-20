@@ -1,5 +1,23 @@
 # Вопросы по Circuit 4 (`bridge-event-prove-circuit`) — 2026-05-17
 
+> **Статус 2026-05-21 (вечер): Алина ответила почти на всё.** Полная
+> расшифровка её ответов + финальный consolidated layout — в
+> `docs/an_partner_circuit4_alina_replies_2026-05-21.md`. Здесь оригинал
+> сохраняется для протокольной памяти.
+>
+> **Принято**: Q-C4-1 (`amount` + `recipient` public, но `recipient` =
+> 2 Fr вместо 1), Q-C4-2 (nullifier = `Poseidon(block_id, tokenId,
+> amount, recipient, senderDapp, senderAcc)`, public), Q-C4-3 (б)
+> (`dstChainId` public), Q-C4-4 (фикс 20 байт). Q-C4-6 (implicit):
+> sender — отдельные `senderDappFr` + `senderAccFr` (видно из формулы
+> nullifier'а; ждём явного подтверждения семантики `dappFr`/`accFr`).
+> Q-C4-5 — Алина встревожилась; в ответе её успокаиваем (ceremony это
+> R14, Phase 9, далеко за горизонтом).
+>
+> **Финальный layout**: 110 public Fr (см. файл выше).
+> **Открытые под-вопросы**: split-конвенция recipient'а (10/10 vs 16/4),
+> recipient в Poseidon-preimage идёт 1 или 2 Fr.
+
 Алина, привет. Прочитал твой `bridge-event-prove-circuit` и
 `EVENT_LAYOUT_COMPARISON.md`, на нашей стороне всё нужное для приёма этого
 proof-а уже стоит — `AckiNackiBridge` собирает rolling-окно из 100 последних

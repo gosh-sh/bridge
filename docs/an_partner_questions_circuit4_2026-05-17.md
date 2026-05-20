@@ -120,6 +120,54 @@ warm), это нас вполне устраивает.
 Подтверди, что переменная длина — это Phase C (не Phase B), и мы не
 тратим circuit-бюджет сейчас на эту обобщённость.
 
+## Q-C4-6. Семантика `dappFr`/`accFr` + `sender` в public (добавлено 2026-05-21)
+
+**Контекст**: Алина в обсуждении Q-C4-1 (2026-05-20 evening) подняла
+концептуальный вопрос — «выходит после Q-C4-1 останется лишь `sender`
+приватным? Цель анонимизации в бридже — скрывать чисто сендера?».
+Полный идейный ответ с разбором «ZKP в бридже ≠ ZKP в dex'е»
+вынесен в `docs/an_partner_circuit4_concept_response_2026-05-21.md`.
+
+Краткое: **в бридже нет цели анонимизировать ничего**. ZKP здесь это
+trustless verification of remote-chain state, не privacy. Все поля
+события должны быть public — иначе мы либо теряем функциональность
+(`recipient` private ⟶ не знаем кому платить), либо audit trail
+(`sender` private ⟶ нельзя off-chain мониторить откуда withdraw).
+
+**Конкретный вопрос для Алины**: что такое `dappFr`/`accFr` в текущем
+layout (`bridge_event_prove_circuit.rs:813-817`)?
+
+- (а) `bytes_to_fr(event.sender.dapp_id)` + `bytes_to_fr(event.sender.account_id)`
+  — т.е. это и есть sender, разложенный на два Fr. Тогда `sender` УЖЕ
+  public, ничего добавлять не нужно, Q-C4-1 layout достаточен.
+- (б) Что-то другое (dapp_id / account_id самого bridge-контракта на
+  AN-стороне, или какие-то circuit-internal binders). Тогда **поднимай
+  ещё два public Fr** для самого sender'а:
+  `senderDappFr = bytes_to_fr(event.sender.dapp_id)` и
+  `senderAccFr = bytes_to_fr(event.sender.account_id)`.
+
+В случае (б) предлагаемый итоговый layout:
+
+```
+[0]       tokenId         (uint32)
+[1]       amount          (uint128)         — Q-C4-1
+[2]       recipientFr     (Fr, EVM-addr)    — Q-C4-1
+[3]       dstChainId      (uint64)          — Q-C4-3 (б)
+[4]       senderDappFr    (Fr)              — Q-C4-6
+[5]       senderAccFr     (Fr)              — Q-C4-6
+[6]       dappFr                            — уже public
+[7]       accFr                             — уже public
+[8..107]  layerHashes     (100 candidates)  — уже public
+```
+
+108 public Fr вместо 106. Constraint-wise: 2 internal witness'а
+pin'нуты как instance, нет новых Poseidon-cap'ов, размер Groth16
+proof не меняется. Цена нулевая, audit trail полный.
+
+**Без блокера для Phase B** — Phase B может стартовать на (а)-layout
+(106 public) и подняться до (б)-layout без второго gnark-respin, если
+Алина в первой же v2 включит оба `senderDappFr`+`senderAccFr` сразу.
+
 ## Q-C4-5. Trusted setup ceremony
 
 Маленькое уточнение по терминологии у нас в плане. Phase A wrapper для
@@ -172,6 +220,9 @@ Q-C4-2.
 - **Q-C4-4** — confirm-only, скорее всего «да, это Phase C», на 30
   секунд.
 - **Q-C4-5** — стратегический, не блокирует ничего сейчас.
+- **Q-C4-6** — 1-минутный clarification (что такое `dappFr`/`accFr`).
+  Если ответ (б), бесплатно бандлится в v2 одним коммитом — Phase B не
+  блокируется ни в одном из двух кейсов.
 
 Phase A (attestation-only `verifyEvent` + rolling layer-window) уже
 зелёная и продолжает работать независимо от ответов.

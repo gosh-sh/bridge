@@ -1,8 +1,16 @@
 # Ответы Алины по Circuit 4 (2026-05-21)
 
-**Контекст**: Алина прислала ответы на Q-C4-1..6 + concept-response.
-Этот файл — её ответы дословно + наш decoded layout, чтобы протокольная
-память хранилась в репо, а не только в мессенджере.
+**Контекст**: Алина прислала ответы на Q-C4-1..6 + concept-response
++ follow-up уточнение по trusted-setup ceremony (07:49). Этот файл —
+её ответы дословно + наш decoded layout, чтобы протокольная память
+хранилась в репо, а не только в мессенджере.
+
+**Update 2026-05-20 (вечер)**: Q-C4-5 расширен — Алина прояснила свою
+ментальную модель (Phase 1 PoT universal vs Phase 2 per-circuit) и
+оказалась полностью права. Мы привели нашу терминологию в соответствие,
+зафиксировали что Phase 2 нужна **per wrapper** (5 ceremonies для
+1A/1B/2/3/4) и что PoT (Phase 1) переиспользуется готовый. См. секцию
+**Q-C4-5 → Уточнение Алины** ниже.
 
 ---
 
@@ -96,36 +104,102 @@ recipient, senderDapp, senderAcc). Если у Алины Poseidon hash рабо
 
 ## Q-C4-5 — Trusted setup ceremony
 
+### Первый ответ Алины (07:02–07:40)
+
 > «ну вот этот самый страшный вопрос пожалуй»
 
-**Decoded**: Алина встревожилась. Это понятно — multi-party trusted
-setup ceremony это серьёзная логистическая операция (ZkSync, Aztec
-делают весь год MPC).
+### Уточнение Алины (07:49)
 
-**Что нужно сказать в ответе**: ceremony это **R14, Phase 9** — далеко
-за горизонтом текущего спринта. Прямо сейчас её НЕ актуально готовить
-по двум причинам:
+> «по Trusted setup ceremony я в целом пока идейно не понимаю полностью
+> как эти обёртки gros16 вокруг halo работают. я понимаю так что
+> видимо gros16-серкут который умеет проверять halo2-пруф он по сути
+> типовой структуры, но всё же он нефиксированный, ведь ты же меняешь
+> public inputs и halo2-verification-key под конкретный halo-серкут.
+> Это вероятно приводит к тому что серкут gros16-обёртка всё-таки
+> меняется и получается что под каждый конкретный halo2 своя
+> конкретная gros16-обёртка-серкут и свой verification key надо
+> генерить или как?
+>
+> и если так то под каждый halo2-серкут надо Trusted setup ceremony
+> проводить, то бишь вторую фазу ptau, ориентированную на конкретный
+> серкут..
+>
+> мне кажется что возможно у нас какое-то расхождение в терминологии.
+> Я просто когда говорю ptau то для меня это синоним Trusted setup
+> ceremony. может это не совсем верно..
+>
+> Но для gros16 у нас там в любом случае 2 фазы:
+> 1) собственно сами степени тау сделать, агностик к серкутам и это
+>    уже конечно есть готовое, можно взять то что Mysten Sui юзало
+>    например для zkLogin
+> 2) подготовить уже под конкретный серкут ключи используя степени тау.
+>
+> и вот я так понимаю что фазу 2) нам надо делать будет под все наши
+> серкуты обёрнутые в gros16?»
 
-1. У нас все gnark wrapper'ы — **identity-stub'ы** (R15): они принимают
-   Halo2-proof как unverified byte-blob и пробрасывают public inputs.
-   Реальная Halo2-in-gnark verification (полноценная SHPLONK → R1CS
-   reduction) — это **Phase 8 R&D**, мы за неё ещё не сели. Без Phase
-   8 ceremony защищала бы заглушку: «идеально защищённую церемонией
-   заглушку».
-2. Phase 9 (multi-party ceremony) запускается только после Phase 8,
-   когда у нас есть **финальный, production-ready** wrapper-circuit.
-   Иначе любое изменение в wrapper'е обнуляет результаты ceremony.
+### Decoded — Алина права на 100%
 
-В практическом плане: Алине **сейчас** делать ничего по Q-C4-5 не нужно.
-Когда придёт время Phase 8/9 (skeptically, через 3–6 месяцев — после
-того как 1A/1B/2/3 и 4 все стабилизируются и все open vk'и
-зафиксируются), мы соберёмся отдельно, разберём что такое MPC ceremony
-(`snarkjs powersOfTau` или `kzg-ceremony-client`) и спланируем.
+Её ментальная модель **точна**, и она опередила меня — я в первом
+ответе сэкономил technical detail, что и вызвало путаницу. Правильная
+терминология которой мы должны держаться:
 
-Bundle vs separate: вопрос остаётся открытым, но логистически имеет
-смысл **bundle**ить 1A/1B/2/3/4 в одну ceremony — экономит вдвое
-participant-tooling и обеспечивает общий SRS. Я бы рекомендовал именно
-bundle. Но это решается потом, не сейчас.
+| Этап | Также называется | Universal / Per-circuit | Откуда брать |
+|---|---|---|---|
+| **Phase 1** | Powers of Tau, PoT, "степени тау", `pot28_final.ptau` | **Universal** (circuit-agnostic) | Готовый: Hermez (174 contributors, 2^28), Mysten Sui (zkLogin), Perpetual PoT |
+| **Phase 2** | Circuit-specific ceremony, ZK-key ceremony, contribution chain, MPC setup | **Per-circuit** (по одной на каждый R1CS) | Делаем сами, MPC ≥ 5 contributors |
+
+Phase 2 нам действительно нужно провести **на каждый** gnark wrapper:
+1A, 1B, 2, 3, 4 → **5 отдельных Phase 2 ceremonies**.
+
+Phase 1 (PoT) мы **не** делаем — берём готовый. Именно это означало моё
+исходное «не надо ptau, всё есть», но термин «ptau» в коммьюнити часто
+используется как синоним всего trusted setup, отсюда расхождение.
+**Договорились на терминологии**: «Phase 1 / PoT» = universal SRS,
+«Phase 2» = per-circuit ceremony.
+
+### Почему я говорил «не критично прямо сейчас»
+
+Наши gnark wrapper'ы прямо сейчас — **R15 identity stubs**. Они
+принимают Halo2-proof как opaque byte-blob и пробрасывают public inputs
+наружу без реальной верификации. R1CS у них ~5 constraints. Phase 2
+для stub'ов даже single-party безопасна — нечего forge'ить, wrapper
+и так пропускает что угодно.
+
+### Когда Phase 2 ceremony станет критичной
+
+После **Phase 8** (наша R&D, 2–4 месяца) — переписать каждый wrapper
+чтобы он реально верифицировал Halo2 SHPLONK внутри R1CS. После Phase 8
+R1CS вырастает до 10⁷+ constraints (real SHPLONK verification внутри
+circuit'а), и без MPC любой с proving key может forge'ить wrapper-
+proof'ы. Вот тогда Phase 2 ceremony становится security-critical.
+
+### Bundle vs separate Phase 2
+
+gnark требует **separate R1CS** на каждый wrapper (потому что R1CS
+жёстко привязан к Halo2 VK конкретного circuit'а — и сам Halo2 VK, и
+схема public inputs hardcode'ятся в R1CS). Поэтому **5 ceremonies**.
+
+Но **contributors могут быть те же** и проводить все 5 в одном sprint
+(~2–3 недели по плану). Логистически именно так мы планируем: один
+coordinator, один pool of 5–7 contributors, 5 contribution chains
+параллельно или последовательно.
+
+### Что Алине делать сейчас
+
+**Ничего по Q-C4-5.** Phase 8 целиком на нашей стороне (Pruvendo R&D),
+Phase 9 координируется нами и поднимется отдельным разговором когда
+подойдёт время (после стабилизации всех 5 circuit'ов + final VK lock).
+
+### Reference в нашем плане
+
+`docs/an_partner_integration_plan.md` §3:
+- **Phase 8** (R&D, real Halo2-in-gnark verification) — задачи 8.1–8.6.
+  Acceptance: tampered Halo2 → wrapper prove fails; R1CS ≥ 1 MB on disk.
+- **Phase 9** (MPC ceremony) — 8.1 adopt PoT (Hermez `pot28_final`),
+  8.2 Phase 2 MPC per circuit с N ≥ 5 contributors, 8.3 on-chain
+  verifier rotation, 8.4 published audit trail (PGP-signed waste-
+  destruction attestations + hash chain), 8.5 CI guard against
+  accidental single-party Setup regression.
 
 ## Q-C4-6 — `dappFr`/`accFr` semantics + sender public
 

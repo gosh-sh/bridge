@@ -9,6 +9,7 @@ import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeEventVerifier.sol";
+import "./IBridgeWithdrawalVerifier.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -198,6 +199,27 @@ contract AckiNackiBridge {
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeEventDappFr`).
     uint256 public immutable bridgeEventAccFr;
 
+    // ---------------------------------------------------------------------
+    // Storage: Circuit 4 v2 (Bridge Withdrawal Prove) — AN→ETH payout
+    // ---------------------------------------------------------------------
+
+    /// @notice Circuit 4 v2 (Bridge Withdrawal Prove) verifier (Groth16 adapter).
+    ///         May be `address(0)` if Phase B withdrawal verification is
+    ///         disabled at deployment; in that case `withdrawByProof` reverts
+    ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock` and
+    ///         Phase A `verifyEvent`. Shares the immutable `(bridgeEventDappFr,
+    ///         bridgeEventAccFr)` identity pair with Phase A — both bind to the
+    ///         same AN-side TokenBridge contract.
+    IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier;
+
+    /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
+    ///         the proof's public input slot [9]. The Circuit 4 v2 nullifier
+    ///         is `Poseidon(block_id, tokenId, amount, recipient, senderDapp,
+    ///         senderAcc)` per Alina 2026-05-21; uniqueness per event is
+    ///         enforced inside the circuit, but the bridge still needs the
+    ///         mapping to reject *re-submission* of an already-paid proof.
+    mapping(bytes32 => bool) private _nullifiers;
+
     /// @notice Rolling ring buffer of the last `LAYER_WINDOW_SIZE`
     ///         top-of-chain anchors committed by successful `verifyBlock`
     ///         calls. Indexed by `layerWindowHead` modulo `LAYER_WINDOW_SIZE`.
@@ -267,6 +289,27 @@ contract AckiNackiBridge {
     ///        breadcrumb; the proof itself doesn't bind to a submitter).
     event BridgeEventVerified(uint256 indexed tokenId, address indexed submitter);
 
+    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4 v2).
+    ///         Phase B's payout path: a verified ZK proof releases `amount` ETH
+    ///         to `recipient` exactly once (replay-protected by `nullifier`).
+    /// @param nullifier The Poseidon-derived nullifier from public input slot [9];
+    ///        also the key in the `_nullifiers` mapping.
+    /// @param recipient The 20-byte EVM address reconstructed from
+    ///        `(recipientHi, recipientLo)`.
+    /// @param amount Amount of ETH transferred to `recipient`.
+    /// @param tokenId Token id from the event body (Phase B only supports
+    ///        `tokenId == 0` = native ETH; non-zero reserved for ERC-20 in a
+    ///        future milestone).
+    /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
+    ///        a relayer; the payout goes to `recipient`, not `submitter`).
+    event WithdrawalByProofExecuted(
+        uint256 indexed nullifier,
+        address indexed recipient,
+        uint256 amount,
+        uint256 indexed tokenId,
+        address submitter
+    );
+
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
@@ -299,6 +342,24 @@ contract AckiNackiBridge {
     error VerifyEventDisabled();
     error BridgeEventProofRejected();
     error InvalidBridgeEventIdentity();
+
+    // withdrawByProof (Circuit 4 v2) errors
+    error WithdrawByProofDisabled();
+    error WithdrawalProofRejected();
+    error NullifierAlreadyUsed(uint256 nullifier);
+    error DstChainIdMismatch(uint256 supplied, uint256 expected);
+    error RecipientHalfOutOfRange(uint256 value);
+    error WithdrawIdentityMismatch();
+    /// @notice Phase B only supports `tokenId == 0` (native ETH). Non-zero
+    ///         token ids are reserved for ERC-20 wiring in a future milestone.
+    error UnsupportedTokenId(uint256 tokenId);
+    error WithdrawTransferFailed(address recipient, uint256 amount);
+    /// @notice Bridge holds less ETH than the proof asks for. Should be
+    ///         unreachable in steady state because deposits flow into
+    ///         `treasuryBalance` and AAVE-supplied principal is auto-pulled
+    ///         on demand. Surfaced as a distinct error to make debugging
+    ///         easier than `WithdrawTransferFailed`.
+    error WithdrawTreasuryShortfall(uint256 requested, uint256 available);
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -352,6 +413,25 @@ contract AckiNackiBridge {
         uint256 accFr;
     }
 
+    /// @notice Argument bundle for the AN→ETH Circuit 4 v2 (Bridge Withdrawal
+    ///         Prove) wiring. Independent of `BridgeEventConfig`; both Phase A
+    ///         (attestation) and Phase B (payout) verifiers may be enabled
+    ///         simultaneously during the v1→v2 migration window.
+    /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
+    ///      `withdrawByProof` (it reverts with `WithdrawByProofDisabled`).
+    ///      The Phase B path *reuses* the immutable `(bridgeEventDappFr,
+    ///      bridgeEventAccFr)` identity from `BridgeEventConfig` — both
+    ///      Circuit 4 variants must bind to the same AN-side TokenBridge
+    ///      contract, so duplicating the identity in two places would be a
+    ///      footgun. Therefore Phase B requires Phase A's identity to be set
+    ///      (i.e. `BridgeEventConfig.dappFr != 0` and `accFr != 0`); enable
+    ///      Phase B *only* alongside a non-zero Phase A identity. The Phase A
+    ///      verifier itself may be `address(0)` (disabled attestation surface)
+    ///      while keeping the identity slots set.
+    struct BridgeWithdrawConfig {
+        IBridgeWithdrawalVerifier bridgeWithdrawalVerifier;
+    }
+
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
     ///                            Kept for future burn-proof anchoring; currently
     ///                            unused by the public surface but required at
@@ -367,6 +447,12 @@ contract AckiNackiBridge {
     ///                            `BridgeEventConfig({...address(0), 0, 0})` to
     ///                            disable; can be enabled / disabled independently
     ///                            of `_vb`.
+    /// @param _bw                 Circuit 4 v2 (Bridge Withdrawal Prove) wiring.
+    ///                            Pass `BridgeWithdrawConfig({...address(0)})` to
+    ///                            disable. When enabled, the AN-side identity must
+    ///                            already be set via `_be.dappFr` / `_be.accFr`
+    ///                            (Phase B inherits the same identity that Phase A
+    ///                            pins; see `BridgeWithdrawConfig` natspec).
     /// @dev Pass address(0) for `_aavePool`/`_wethGateway`/`_aWETH` to disable AAVE.
     ///      In that case, the bridge behaves as before (plain ETH custody).
     constructor(
@@ -375,7 +461,8 @@ contract AckiNackiBridge {
         address _wethGateway,
         address _aWETH,
         VerifyBlockConfig memory _vb,
-        BridgeEventConfig memory _be
+        BridgeEventConfig memory _be,
+        BridgeWithdrawConfig memory _bw
     ) {
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
 
@@ -410,6 +497,15 @@ contract AckiNackiBridge {
         bridgeEventVerifier = _be.bridgeEventVerifier;
         bridgeEventDappFr = _be.dappFr;
         bridgeEventAccFr = _be.accFr;
+
+        // Circuit 4 v2 (bridge withdrawal prove) wiring. Reuses the Phase A
+        // identity slots above; if Phase B is enabled, those slots must be set.
+        if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
+            if (_be.dappFr == 0 || _be.accFr == 0) {
+                revert InvalidBridgeEventIdentity();
+            }
+        }
+        bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -689,6 +785,138 @@ contract AckiNackiBridge {
             if (_layerWindow[i] == hash) return true;
         }
         return false;
+    }
+
+    // ---------------------------------------------------------------------
+    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4 v2, permissionless)
+    // ---------------------------------------------------------------------
+
+    /// @notice Mask for each half of a split-α `recipient` address (10 bytes = 80 bits).
+    /// @dev Phase B currently assumes split-α (10/10 byte halves) per the
+    ///      default in `docs/an_partner_circuit4_alina_replies_2026-05-21.md`.
+    ///      If Alina's final ack picks a different split (β = 16/4, γ = 12/8),
+    ///      this mask + `_reconstructRecipient` change in lockstep with the
+    ///      circuit. The split is locked at deployment via the immutable
+    ///      `bridgeWithdrawalVerifier` — its on-chain VK only accepts proofs
+    ///      with the matching layout.
+    uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
+
+    /// @notice Pay out a withdrawal proven by a Circuit 4 v2 (Bridge Withdrawal
+    ///         Prove) Groth16 proof.
+    ///
+    /// Verifies that:
+    ///   1. The proof witnesses a `WithdrawalInitiated(dstChainId, recipient,
+    ///      amount, tokenId, sender)` event emitted by the AN-side TokenBridge
+    ///      identified by `(bridgeEventDappFr, bridgeEventAccFr)`, anchored to
+    ///      one of the most recent `LAYER_WINDOW_SIZE` top-of-chain layer
+    ///      hashes (circuit's `hash_choice_index` is private).
+    ///   2. `pub.dstChainId == block.chainid` (the event was destined for
+    ///      *this* chain, not a sibling EVM chain that shares the bridge VK).
+    ///   3. `pub.dappFr == bridgeEventDappFr` and `pub.accFr == bridgeEventAccFr`
+    ///      (defensive — also enforced by the verifier under the same identity,
+    ///      but checked here so the explicit `WithdrawIdentityMismatch` error
+    ///      surfaces before the more opaque `WithdrawalProofRejected`).
+    ///   4. `pub.nullifier` has not been used before (replay protection).
+    ///   5. `pub.tokenId == 0` (Phase B only supports native ETH; non-zero
+    ///      reserved for ERC-20 in a future milestone).
+    ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
+    ///      (well-formedness check against malformed split inputs).
+    ///
+    /// State updates (CEI):
+    ///   - **Effects**: mark `nullifier` used; decrement `treasuryBalance`.
+    ///   - **Interactions**: (optional) `_pullFromAave(shortfall)` to top up
+    ///     liquid ETH; `recipient.call{value: amount}("")` to pay out.
+    ///
+    /// @dev Permissionless. The caller pays gas but the payout goes to
+    ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
+    ///      Typical caller is a relayer running `bridge-relayer-daemon`.
+    ///
+    /// @param proof   256-byte gnark Groth16 proof bytes (Circuit 4 v2 wrap).
+    /// @param pub     Public-input slots [0..9]; see `IBridgeWithdrawalVerifier`.
+    /// @return success Always `true` on a successful payout; reverts on failure.
+    function withdrawByProof(
+        bytes calldata proof,
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
+    ) external nonReentrant returns (bool success) {
+        if (address(bridgeWithdrawalVerifier) == address(0)) {
+            revert WithdrawByProofDisabled();
+        }
+
+        // ---- Checks: identity, chain, replay, shape ----
+        if (pub.dappFr != bridgeEventDappFr || pub.accFr != bridgeEventAccFr) {
+            revert WithdrawIdentityMismatch();
+        }
+        if (pub.dstChainId != block.chainid) {
+            revert DstChainIdMismatch(pub.dstChainId, block.chainid);
+        }
+        if (pub.tokenId != 0) {
+            revert UnsupportedTokenId(pub.tokenId);
+        }
+        if (pub.recipientHi > RECIPIENT_HALF_MASK) {
+            revert RecipientHalfOutOfRange(pub.recipientHi);
+        }
+        if (pub.recipientLo > RECIPIENT_HALF_MASK) {
+            revert RecipientHalfOutOfRange(pub.recipientLo);
+        }
+        bytes32 nullifierKey = bytes32(pub.nullifier);
+        if (_nullifiers[nullifierKey]) {
+            revert NullifierAlreadyUsed(pub.nullifier);
+        }
+
+        // ---- Crypto: verify the Groth16 proof against the on-chain window. ----
+        //      The `layerHashes` argument is sourced from on-chain storage so a
+        //      caller can't substitute a known-good window from a different
+        //      bridge instance.
+        uint256[LAYER_WINDOW_SIZE] memory window;
+        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
+            window[i] = _layerWindow[i];
+        }
+        bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub, window);
+        if (!ok) revert WithdrawalProofRejected();
+
+        // ---- Treasury check (must happen before the AAVE pull). ----
+        if (pub.amount > treasuryBalance) {
+            revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
+        }
+
+        // ---- Effects (CEI: mutate state before any external call). ----
+        _nullifiers[nullifierKey] = true;
+        treasuryBalance -= pub.amount;
+
+        // ---- Interactions ----
+        // Top up liquid ETH from AAVE if the contract's plain ETH balance
+        // is below the requested amount. Mirrors what a future native
+        // `withdraw()` would do.
+        if (address(this).balance < pub.amount && suppliedPrincipal > 0) {
+            uint256 shortfall = pub.amount - address(this).balance;
+            uint256 toPull = shortfall > suppliedPrincipal ? suppliedPrincipal : shortfall;
+            _pullFromAave(toPull);
+        }
+
+        address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
+        (bool txOk,) = payable(recipient).call{ value: pub.amount }("");
+        if (!txOk) revert WithdrawTransferFailed(recipient, pub.amount);
+
+        emit WithdrawalByProofExecuted(
+            pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
+        );
+        return true;
+    }
+
+    /// @notice View helper: has `nullifier` already been consumed?
+    /// @dev Useful for relayers / front-ends to skip re-submission of an
+    ///      already-paid proof before paying gas for the verify call.
+    function isNullifierUsed(uint256 nullifier) external view returns (bool) {
+        return _nullifiers[bytes32(nullifier)];
+    }
+
+    /// @dev Recombine a split-α `recipient` (10/10 byte halves) back into the
+    ///      original 20-byte EVM address. The 80-bit range check on each half
+    ///      is enforced by the caller before this is invoked.
+    function _reconstructRecipient(uint256 hi, uint256 lo) internal pure returns (address) {
+        // (hi << 80) | lo cannot overflow uint160 because both halves fit
+        // in 80 bits (verified by RecipientHalfOutOfRange above).
+        return address(uint160((hi << 80) | lo));
     }
 
     // ---------------------------------------------------------------------

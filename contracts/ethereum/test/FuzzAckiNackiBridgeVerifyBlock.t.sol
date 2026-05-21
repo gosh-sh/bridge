@@ -95,7 +95,8 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
             address(0),
             address(0),
             vb,
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
 
         disabledBridge = new AckiNackiBridge(
@@ -104,7 +105,8 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 

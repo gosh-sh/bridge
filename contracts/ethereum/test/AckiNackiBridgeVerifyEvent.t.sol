@@ -92,7 +92,8 @@ contract AckiNackiBridgeVerifyEventTest is Test {
             ),
             VerifyBlockConfigLib.withBridgeEvent(
                 IBridgeEventVerifier(address(bridgeEventVerifier)), DAPP_FR, ACC_FR
-            )
+            ),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 
@@ -143,7 +144,8 @@ contract AckiNackiBridgeVerifyEventTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
         assertEq(address(plain.bridgeEventVerifier()), address(0));
         assertEq(plain.bridgeEventDappFr(), 0);
@@ -160,7 +162,8 @@ contract AckiNackiBridgeVerifyEventTest is Test {
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.withBridgeEvent(
                 IBridgeEventVerifier(address(bridgeEventVerifier)), 0, ACC_FR
-            )
+            ),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 
@@ -174,7 +177,8 @@ contract AckiNackiBridgeVerifyEventTest is Test {
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.withBridgeEvent(
                 IBridgeEventVerifier(address(bridgeEventVerifier)), DAPP_FR, 0
-            )
+            ),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 
@@ -266,7 +270,8 @@ contract AckiNackiBridgeVerifyEventTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
         vm.expectRevert(AckiNackiBridge.VerifyEventDisabled.selector);
         plain.verifyEvent(hex"deadbeef", 42);

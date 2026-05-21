@@ -98,7 +98,8 @@ contract AckiNackiBridgeAaveForkTest is Test {
             AAVE_V3_WETH_GATEWAY,
             aWETH,
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
 
         vm.deal(user1, 200 ether);

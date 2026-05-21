@@ -6,6 +6,7 @@ import "../../src/IPrimaryVerifier.sol";
 import "../../src/IFallbackVerifier.sol";
 import "../../src/ILayerHashesMovementVerifier.sol";
 import "../../src/IBridgeEventVerifier.sol";
+import "../../src/IBridgeWithdrawalVerifier.sol";
 
 /// @title VerifyBlockConfigLib
 /// @notice Test-only helper for assembling `AckiNackiBridge.VerifyBlockConfig`
@@ -66,5 +67,44 @@ library VerifyBlockConfigLib {
         return AckiNackiBridge.BridgeEventConfig({
             bridgeEventVerifier: verifier, dappFr: dappFr, accFr: accFr
         });
+    }
+
+    /// @notice `BridgeEventConfig` with identity slots set but the Phase A
+    ///         verifier zeroed. Useful when a deployment wants Phase B
+    ///         (`withdrawByProof`) without exposing Phase A's `verifyEvent`.
+    function bridgeEventIdentityOnly(uint256 dappFr, uint256 accFr)
+        internal
+        pure
+        returns (AckiNackiBridge.BridgeEventConfig memory)
+    {
+        return AckiNackiBridge.BridgeEventConfig({
+            bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: dappFr, accFr: accFr
+        });
+    }
+
+    /// @notice All-zero `BridgeWithdrawConfig` — Circuit 4 v2 `withdrawByProof`
+    ///         disabled.
+    function disabledWithdraw()
+        internal
+        pure
+        returns (AckiNackiBridge.BridgeWithdrawConfig memory)
+    {
+        return AckiNackiBridge.BridgeWithdrawConfig({
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0))
+        });
+    }
+
+    /// @notice `BridgeWithdrawConfig` wired with an explicit verifier. The AN-
+    ///         side identity is inherited from the paired `BridgeEventConfig`
+    ///         (both Circuit 4 variants bind to the same TokenBridge), so
+    ///         callers must ensure their `BridgeEventConfig` carries non-zero
+    ///         `dappFr` / `accFr` (use `withBridgeEvent` or
+    ///         `bridgeEventIdentityOnly`).
+    function withWithdraw(IBridgeWithdrawalVerifier verifier)
+        internal
+        pure
+        returns (AckiNackiBridge.BridgeWithdrawConfig memory)
+    {
+        return AckiNackiBridge.BridgeWithdrawConfig({ bridgeWithdrawalVerifier: verifier });
     }
 }

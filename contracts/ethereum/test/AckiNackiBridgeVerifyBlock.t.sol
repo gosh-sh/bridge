@@ -107,7 +107,8 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
             address(0),
             address(0),
             vb,
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 
@@ -439,7 +440,8 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
 
         vm.expectRevert(AckiNackiBridge.VerifyBlockDisabled.selector);
@@ -470,7 +472,8 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
                 BK_SET_POSEIDON,
                 PREV_MAX_LEVEL_LAYER_HASH
             ),
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
         vm.expectRevert(AckiNackiBridge.VerifyBlockDisabled.selector);
         partialBridge.verifyBlock(

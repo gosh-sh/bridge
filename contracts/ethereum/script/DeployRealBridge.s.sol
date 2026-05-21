@@ -9,6 +9,7 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeEventVerifier.sol";
+import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/PrimaryGroth16VerifierGenerated.sol";
 import "../src/FallbackGroth16VerifierGenerated.sol";
 import "../src/LayerHashesGroth16VerifierGenerated.sol";
@@ -142,9 +143,11 @@ contract DeployRealBridge is Script {
                 layerHashesVerifierAddr = address(vb.layerHashesVerifier);
             }
 
-            // Step 4 + 5: Circuit 4 (verifyEvent) always disabled here (no
-            //             gnark-generated verifier yet — Phase A scaffolding
-            //             only, Phase B blocked on docs/circuit_4_open_questions.md).
+            // Step 4 + 5: Circuit 4 (verifyEvent) + Circuit 4 v2 (withdrawByProof)
+            //             both disabled here (no gnark-generated verifiers yet —
+            //             Phase A attestation scaffolding only, Phase B payout
+            //             pending partner's v2 circuit; see
+            //             docs/an_partner_questions_circuit4_2026-05-17.md).
             //             Deploy the bridge wired against the configs above.
             console.log("Deploying AckiNackiBridge...");
             AckiNackiBridge bridge = new AckiNackiBridge(
@@ -155,6 +158,9 @@ contract DeployRealBridge is Script {
                 vb,
                 AckiNackiBridge.BridgeEventConfig({
                     bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
+                }),
+                AckiNackiBridge.BridgeWithdrawConfig({
+                    bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0))
                 })
             );
             bridgeAddr = address(bridge);

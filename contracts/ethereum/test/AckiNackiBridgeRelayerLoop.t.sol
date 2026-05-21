@@ -79,7 +79,8 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
             address(0),
             address(0),
             vb,
-            VerifyBlockConfigLib.disabledBridgeEvent()
+            VerifyBlockConfigLib.disabledBridgeEvent(),
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 

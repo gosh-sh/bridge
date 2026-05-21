@@ -8,6 +8,7 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeEventVerifier.sol";
+import "../src/IBridgeWithdrawalVerifier.sol";
 
 /**
  * @title DeployTestBridge
@@ -36,8 +37,11 @@ contract DeployTestBridge is Script {
         AckiNackiBridge.BridgeEventConfig memory beDisabled = AckiNackiBridge.BridgeEventConfig({
             bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
         });
+        AckiNackiBridge.BridgeWithdrawConfig memory bwDisabled = AckiNackiBridge.BridgeWithdrawConfig({
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0))
+        });
         AckiNackiBridge bridge = new AckiNackiBridge(
-            address(oracle), address(0), address(0), address(0), vbDisabled, beDisabled
+            address(oracle), address(0), address(0), address(0), vbDisabled, beDisabled, bwDisabled
         );
         console.log("AckiNackiBridge deployed at:", address(bridge));
 

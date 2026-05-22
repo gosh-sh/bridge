@@ -785,8 +785,31 @@ The 4 historical fixtures (`L2_H16_prevH0_S1` et al.) targeted the retired 13-in
 
 ### P-1 (proactive, partner-notify, 2026-05-17) — current Pruvendo gnark wrappers are stubs
 
+> **OBSOLETED 2026-05-17 (same-day, by Phase 4.3 demolition).** Kept
+> verbatim below as the audit-trail record of what we told Alina, but
+> it is no longer actionable: Phase 4.3 (Decision Log 2026-05-17)
+> retired the entire ETH-side Groth16 deposit-verification chain
+> (`IAckiNackiVerifier`, `Groth16{,Deposit}Verifier.sol`,
+> `deposit-prover/gnark-wrapper/`). The ETH→AN deposit proof now
+> reaches the AN side as a **native Halo2 SHPLONK** payload that is
+> verified by `ZKHALO2VERIFYWITHVK` (wire format
+> frozen 2026-05-22, see Decision Log entry). There is no longer any
+> path where `gosh.vergrth16WithVK` participates in the bridge's
+> deposit flow — neither in PR 2112's `TokenBridge.finalizeDeposit`
+> (which Alina dropped the commented-out call from), nor anywhere
+> downstream. The "we'll re-handoff once Phase 8 closes" promise also
+> falls away: the deposit path no longer needs a gnark-wrapper at all.
+> R15 / Phase 8 stay relevant only for the **AN→ETH direction**
+> (Circuit 1A/1B/2/3/4 wrappers) where Groth16 is still the
+> cryptographically-required envelope; that work is tracked
+> independently in §3 Phase 8 and §5 R15.
+>
+> See: Decision Log 2026-05-17 (Phase 4.3 demolition), Decision
+> Log 2026-05-22 (Q-WIRE-1..5 freeze), `docs/zk_halo2_an_side_design.md`,
+> `docs/verifying_eth_proof_on_an.md`.
+
 Not a question for the partner — a heads-up. While preparing a `verification.key` + `circuit.go` handoff for Alina (so AN-side could wire `gosh.vergrth16WithVK` into `TokenBridge.finalizeDeposit`), we discovered that all four of our gnark wrappers (`deposit-prover/gnark-wrapper/`, `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2}/`) compile to a ~1 KB R1CS that adds no real Halo2-verification constraints — see R15 in §5 and Phase 8 in §3 of this plan. **AN-side should not wire our current VK (`deposit-prover/gnark-wrapper/verification.key`) into anything that claims cryptographic verification**, including the commented-out `gosh.vergrth16WithVK` call in PR 2112's `TokenBridge.finalizeDeposit`. We'll re-handoff the artefacts once Phase 8 closes (~8–16 calendar weeks of R&D, see §6). The `gosh.vergrth16WithVK` opcode in tvm-sdk is unaffected — that's correct generic Groth16-with-VK plumbing; only our specific VK is currently a stub-VK. For ABI smoke-testing on AN-side (verifying the call shape, gas measurement, integration scaffolding) the stub VK is *usable* as long as it's explicitly labelled as such in commit messages and code comments.
 
 ---
 
-Q1 + Q2 gate Phase 1.C. Q3 + Q4 affect Phase 5.2 cleanliness. Q5 is CI-hermeticity polish. P-1 is a one-way heads-up — no answer required. Phases 5.2 (Primary-only) and 5.3 can otherwise start now (they don't depend on the wrapper actually verifying Halo2 — the stub gives valid Groth16 calldata to exercise the integration path).
+Q1 + Q2 gate Phase 1.C. Q3 + Q4 affect Phase 5.2 cleanliness. Q5 is CI-hermeticity polish. ~~P-1 is a one-way heads-up — no answer required.~~ **P-1 was a 2026-05-17 same-day heads-up to Alina about `gosh.vergrth16WithVK` wiring; obsoleted within hours by Phase 4.3 demolition retiring the entire deposit-side Groth16 chain (see OBSOLETED block above).** Phases 5.2 (Primary-only) and 5.3 can otherwise start now (they don't depend on the wrapper actually verifying Halo2 — the stub gives valid Groth16 calldata to exercise the integration path).

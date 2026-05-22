@@ -1,0 +1,30 @@
+# Circuit 4 design + Q-doc bundle for Alina.
+#
+# Regenerate with: `scripts/build_partner_pack.sh circuit4_for_alina`
+# Output: `circuit4_for_alina_<today>.zip` (+ .tar.gz + .sha256 sidecars).
+#
+# Bumps the date in the filename so multiple iterations don't clobber.
+# Always pulls the latest committed snapshot from the working tree.
+
+docs/an_partner_questions_circuit4_2026-05-17.md
+docs/an_partner_circuit4_concept_response_2026-05-21.md
+docs/an_partner_circuit4_alina_replies_2026-05-21.md
+docs/an_partner_integration_plan.md
+
+---
+## Reading order
+
+1. `an_partner_questions_circuit4_2026-05-17.md` — original Q-C4-1..6 questions.
+2. `an_partner_circuit4_alina_replies_2026-05-21.md` — your answers + decoded
+   110-Fr public input layout + Q-C4-5 trusted-setup terminology alignment.
+3. (Optional) `an_partner_circuit4_concept_response_2026-05-21.md` —
+   conceptual explanation of why bridge ZKP is for trustless verification
+   of remote-chain state, not privacy.
+4. (Optional) `an_partner_integration_plan.md` §3 Phase 8 + Phase 9 —
+   gnark Halo2-verifier R&D + MPC ceremony plan (lines 365–448).
+
+## Open Q-C4 sub-questions back to Alina
+
+- Q-C4-1 follow-up: recipient split convention (α=10/10 default, β=16/4, γ=12/8)?
+- Q-C4-2 detail: is `recipient` in the Poseidon preimage 1 Fr or 2 Fr (matching the public-input split)?
+- Q-C4-6 confirmation: are `dappFr` / `accFr` the bridge-contract identity (not sender)?

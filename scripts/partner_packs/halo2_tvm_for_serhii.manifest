@@ -1,0 +1,45 @@
+# Halo2 TVM bundle wire-format pack for Serhii (AN team).
+#
+# Regenerate with: `scripts/build_partner_pack.sh halo2_tvm_for_serhii`
+#
+# Context: response to "how do I populate `bytes vk` and `bytes publicInputs`
+# in the new ZKHALO2VERIFYWITHVK opcode?" The pack ships the producer-side
+# reference impl + design memo + green round-trip test so the TVM side has a
+# concrete byte layout to wire against.
+
+docs/zk_halo2_an_side_design.md => 01_design_memo.md
+crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs => 02_halo2_tvm_bundle.rs
+crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs => 03_halo2_tvm_bundle_round_trip.rs
+
+---
+## TL;DR
+
+### `bytes vk`
+
+Serialised `halo2_proofs::plonk::VerifyingKey<G1Affine>` via:
+
+    vk.write(&mut buf, SerdeFormat::RawBytes)  // RawBytes is mandatory:
+                                                // runs curve-membership check
+                                                // on every G1 point.
+
+~6 KB for K=20. NOT self-describing — `VerifyingKey::read` needs
+`BaseCircuitParams` separately. We recommend the **self-describing
+bundle** (see `02_halo2_tvm_bundle.rs`) where `BaseCircuitParams` is
+inlined as serde_json.
+
+### `bytes publicInputs`
+
+Flat `N × 32` bytes, each element = strict 32-byte LE `Fr::to_repr()`.
+**No u64 shortcut.** Length check: `len % 32 == 0`, otherwise fatal.
+`Fr::from_repr` rejects values ≥ modulus.
+
+### Open Q-WIRE for ack
+
+- **Q-WIRE-1**: transcript = Blake2b (default). `transcript_kind` byte
+  reserved for a Keccak variant if you prefer.
+- **Q-WIRE-2**: KZG SRS NOT in the bundle — shared globally on the opcode
+  side, indexed by `k`.
+- **Q-WIRE-4**: self-describing VK envelope (Option B) — implemented in
+  `Halo2TvmBundle`.
+
+Waiting on your ack or counter-proposal before the TVM-side wiring lands.

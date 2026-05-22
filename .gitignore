@@ -164,12 +164,15 @@ out/
 # Review packs for partners (produced by build_pack.sh; not for git)
 dist/
 
-# Doc / code bundles for partners (zip archives produced on demand to
-# ship selected docs + reference sources via messenger; the canonical
-# source lives under docs/ and crates/). Pattern is anchored to the
-# repo root so any future top-level `<topic>_for_<recipient>_*.zip`
-# is auto-ignored.
+# Doc / code bundles for partners (zip / tar archives produced on
+# demand by `scripts/build_partner_pack.sh` to ship selected docs +
+# reference sources via messenger; the canonical source lives under
+# docs/ and crates/). Patterns are anchored to the repo root so any
+# future top-level `<topic>_for_<recipient>_*.{zip,tar.gz,sha256}` is
+# auto-ignored.
 /*_for_*.zip
+/*_for_*.tar.gz
+/*_for_*.sha256
 
 # Local cargo-audit snapshot (regenerated on demand; CI runs `cargo audit`
 # fresh via the security:rust:audit job — the file in the workspace root is

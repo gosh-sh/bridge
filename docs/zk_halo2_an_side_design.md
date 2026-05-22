@@ -11,7 +11,7 @@
 
 The Phase 4.3 pivot (Decision Log 2026-05-17) retires the legacy ETH-side Groth16 deposit-verifier chain and routes the ETH→AN deposit-event proof through **native AN-side Halo2 SHPLONK verification**. The AN side already has a Halo2 SHPLONK opcode in flight — `ZKHALO2VERIFY` (0xC7 0x49) on branch `serhii/node-3406-vergrth16-with-vk` of `tvm-sdk`. The current implementation, however, **hard-codes the verifying key** to the DarkDex W=8 circuit (`DARK_DEX_W8_VK_BYTES`, 842 bytes), which is the wrong shape for a general bridge use-case.
 
-The bridge needs the same structural pivot that `VERGRTH16` → `VERGRTH16WITHVK` solved on the Groth16 side: a variant of the opcode that **accepts the verifying key as a caller-supplied operand** so the deposit-prover circuit's VK can be set once at deployment time and used by `TokenBridge.finalizeDeposit(...)`. We call the proposed opcode `ZKHALO2VERIFYWITHVK` here (final name to be agreed with the partner).
+The bridge needs a variant of the opcode that **accepts the verifying key as a caller-supplied operand** so the deposit-prover circuit's VK can be set once at deployment time and used by `TokenBridge.finalizeDeposit(...)`. We call this opcode `ZKHALO2VERIFYWITHVK`; it landed in `tvm-sdk` on 2026-05-22 at dispatch byte `0xC7 0x4A` (PR #240, real implementation on the `serhii/verhalo2shplonk-real-impl` branch).
 
 The single biggest open question (Q-WIRE-1 below) is *which Halo2 transcript flavour* the AN-side verifier expects. The current implementation uses Blake2b via `gosh-zk-snark-halo2-utils::proof::Proof::verify_with_vk`; the bridge's `deposit-prover/` crate has historically used the Keccak transcript for EVM compatibility. Aligning these is a one-line producer-side switch *or* a transcript parameter on the opcode — and the answer dictates whether `deposit-prover/` needs a `--blake2b-transcript` mode.
 
@@ -63,14 +63,14 @@ ZKHALO2VERIFY:
 
 - **Hard-coded VK and circuit params**. The bridge's deposit-prover Halo2 circuit has a different `BaseCircuitParams` (different K, different `num_advice_per_phase`, different `lookup_bits`) and a different VK from DarkDex W=8. The opcode as written cannot verify our circuit at all.
 - **No per-VK cache**. Even if `DARK_DEX_W8_VK_BYTES` were replaced by an `enum CircuitFlavour { DarkDexW8, DarkDexW128, BridgeDeposit, … }`, every additional flavour requires a code change to the VM.
-- **No gas accounting**. Mainnet readiness requires marginal-cost tuning of the same flavour as `VERGRTH16WITHVK` (+220 over `VERGRTH16`, see `tvm_vm/src/executor/zk.rs::VERGRTH16_WITH_VK_GAS_PRICE`).
+- **No gas accounting**. Mainnet readiness requires a benchmark-driven gas number for `ZKHALO2VERIFY` + `ZKHALO2VERIFYWITHVK`; the current placeholder `ZKHALO2_VERIFY_WITH_VK_GAS_PRICE = 5_000` (see `tvm_vm/src/executor/zk_halo2_with_vk.rs`) is a structural guess scaled from `VERGRTH16_GAS_PRICE` for the bigger VK (kilobytes vs 192 B).
 - **Transcript flavour not parameterised** (see §4 Q-WIRE-1).
 
 ---
 
 ## 3. Proposed extension: `ZKHALO2VERIFYWITHVK`
 
-We propose adding a **second opcode** rather than re-purposing `ZKHALO2VERIFY`, for the same reasons that motivated `VERGRTH16` + `VERGRTH16WITHVK` coexisting (`docs/an_partner_integration_plan.md` Decision Log 2026-05-17):
+We added a **second opcode** rather than re-purposing `ZKHALO2VERIFY`, for the reasons captured in `docs/an_partner_integration_plan.md` Decision Log 2026-05-17:
 
 - `ZKHALO2VERIFY` keeps its compact 2-operand calling convention for circuits whose VK is naturally global to the chain (zkLogin-style; DarkDex). Cheaper gas, no per-call deserialization of the VK.
 - `ZKHALO2VERIFYWITHVK` takes 1 operand (a `Halo2TvmBundle` cell carrying the VK + config + instances + proof together) and lets a contract carry its own VK in storage. Slightly more expensive gas; one opcode covers every circuit anybody ever deploys to AN.
@@ -100,12 +100,12 @@ ZKHALO2VERIFYWITHVK:
     - Proof bytes don't deserialize as a valid SHPLONK proof container
 
   Cryptographic failure (well-formed but invalid proof) → false, no exception.
-  This matches the VERGRTH16WITHVK convention.
+  This matches the VERGRTH16 / ZKHALO2VERIFY convention.
 ```
 
 ### 3.2 Proposed gas model
 
-Mirror `VERGRTH16_WITH_VK_GAS_PRICE`:
+Modelled on `VERGRTH16_GAS_PRICE`, scaled up for the bigger VK (kilobytes vs 192 B):
 
 ```rust
 /// Gas price for the `ZKHALO2VERIFYWITHVK` opcode.
@@ -330,14 +330,14 @@ on-wire drift in the partner fork.
 
 ### Q-NAME-1 — Opcode name
 
-Working name `ZKHALO2VERIFYWITHVK` (parallel to `VERGRTH16WITHVK`). Alternatives the AN team has floated informally include `HALO2VERIFYVK`, `VERHALO2WITHVK`. Final pick is partner's call; we'll align our compiler PR (`gosh.zkHalo2VerifyWithVK` / `gosh.verHalo2WithVK` / …) accordingly.
+Working name `ZKHALO2VERIFYWITHVK`. Alternatives the AN team floated informally included `HALO2VERIFYVK`, `VERHALO2WITHVK`.
 
-**Decision 2026-05-22 — DECIDED `ZKHALO2VERIFYWITHVK` @ `0xC7 0x4A`.**
-Mirrors `VERGRTH16WITHVK`. Dispatch byte `0x4A` chosen as the next free
-slot after `0xC7 0x49 = ZKHALO2VERIFY`. If `serhii/node-3406-vergrth16-with-vk`
-reshuffles dispatch bytes pre-merge, our follow-up PR rebases onto
-whatever byte ends up adjacent to the final `ZKHALO2VERIFY` byte. The
-compiler-side builtin is `gosh.zkHalo2VerifyWithVK(proof, pub_inputs, vk_bundle)`.
+**Decision 2026-05-22 — `ZKHALO2VERIFYWITHVK` @ `0xC7 0x4A` (LANDED).**
+Dispatch byte `0x4A` chosen as the next free slot after `0xC7 0x49 = ZKHALO2VERIFY`.
+The compiler-side builtin is `gosh.zkHalo2VerifyWithVK(bundle)`. The
+single-operand `Halo2TvmBundle` ABI replaced the original 3-operand
+sketch during the real-impl pass; see `tvm-sdk` PR #240 and
+`docs/an_partner_integration_plan.md` Decision Log 2026-05-22.
 
 ---
 
@@ -400,7 +400,7 @@ Scope:
 - `tvm_vm/src/executor/zk_halo2.rs::execute_halo2_proof_verification_with_vk` (alongside the existing handler).
 - Per-VK LRU cache (`§3.3`).
 - Gas constant `ZKHALO2VERIFY_WITH_VK_GAS_PRICE` (`§3.2`).
-- Mnemonic registration: `ZKHALO2VERIFYWITHVK => 0xC7 0x4A` (next free byte after `0xC7 0x49 = ZKHALO2VERIFY` and before `0xC7 0x52 = VERGRTH16WITHVK`).
+- Mnemonic registration: `ZKHALO2VERIFYWITHVK => 0xC7 0x4A` (next free byte after `0xC7 0x49 = ZKHALO2VERIFY`).
 - Unit tests against a bridge-supplied test VK + a known-good proof generated by `deposit-prover/`.
 
 A *partial* skeleton (handler + mnemonic + gas + docstring; no live cache; test marked `#[ignore]` pending real VK fixture) lives on branch `serhii/verhalo2shplonk-skeleton` of `tvm-sdk` for discussion. It does **not** depend on `serhii/node-3406-vergrth16-with-vk`'s halo2 deps — that wiring lands when Phase A finalises the on-wire format.
@@ -456,8 +456,9 @@ Scope: a CI test that drives `deposit-prover/` to produce a proof for a syntheti
 
 ## 7. References
 
-- `tvm-sdk` branch [`serhii/node-3406-vergrth16-with-vk`](https://github.com/tvmlabs/tvm-sdk/tree/serhii/node-3406-vergrth16-with-vk) — current `ZKHALO2VERIFY` + `VERGRTH16WITHVK` work.
-- `tvm-sdk` branch [`serhii/verhalo2shplonk-skeleton`](https://github.com/tvmlabs/tvm-sdk/tree/serhii/verhalo2shplonk-skeleton) — this side's WithVK skeleton + design notes.
+- `tvm-sdk` branch [`serhii/node-3406-vergrth16-with-vk`](https://github.com/tvmlabs/tvm-sdk/tree/serhii/node-3406-vergrth16-with-vk) — current home of `ZKHALO2VERIFY` + `ZKHALO2VERIFYWITHVK` (after PR #240). `VERGRTH16WITHVK` was retired on 2026-05-22 via PR #242.
+- `tvm-sdk` PR [#240 — ZKHALO2VERIFYWITHVK (real implementation)](https://github.com/tvmlabs/tvm-sdk/pull/240) — handler, `Halo2TvmBundle` decoder, per-VK cache, tests.
+- `tvm-sdk` PR [#242 — Remove VERGRTH16WITHVK + nightly fmt](https://github.com/tvmlabs/tvm-sdk/pull/242) — retirement of the per-VK Groth16 path now superseded by native Halo2.
 - `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 — Phase 4.3 rationale.
 - `docs/audit_trail_v2.md` §1 R-8/R-9 — trust delta from Phase 4.3.
 - `docs/verifying_eth_proof_on_an.md` — operational verification flow.

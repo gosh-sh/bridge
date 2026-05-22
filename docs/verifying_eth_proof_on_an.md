@@ -45,8 +45,8 @@ The deposit-side native verifier is **not yet deployed on Acki Nacki** as of 202
 | --------- | ------ |
 | `deposit-prover/` — Halo2 SHPLONK circuit (Keccak transcript) | ✅ Live; round-trips against Sepolia historical data. |
 | Halo2 verification kit (Rust crate) | ✅ Live in `deposit-prover/src/prover.rs::verify_proof`. |
-| `VERHALO2SHPLONK` TVM opcode (`tvm-sdk`) | 🚧 In development — new branch, modelled on the `VERGRTH16WITHVK` PR pattern landed earlier in May 2026. |
-| `gosh.verHalo2Shplonk(proof, publicInputs, vk)` compiler support (`TVM-Solidity-Compiler`) | 🚧 In development, depends on the opcode. |
+| `ZKHALO2VERIFYWITHVK` TVM opcode (`tvm-sdk`) | ✅ Landed 2026-05-22 at dispatch byte `0xC7 0x4A` via PR #240; takes a single `Halo2TvmBundle` cell (magic `HALO2TVM`, Blake2b SHPLONK). |
+| `gosh.zkHalo2VerifyWithVK(bundle)` compiler support (`TVM-Solidity-Compiler`) | 🚧 In development, depends on the opcode. |
 | AN-side `TokenBridge.finalizeDeposit(...)` wiring | 🚧 Pending — will call the new opcode with the on-chain VK. |
 | AN-side nullifier mapping on `depositId` | 🚧 Pending. |
 
@@ -181,7 +181,7 @@ When generating a proof to submit:
 | ETH-AN-3 | Replay of an already-credited deposit | V5 nullifier check. |
 | ETH-AN-4 | Wrong-bridge spoofing (`contractAddress` of an attacker contract) | V4 enforces `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR`. |
 | ETH-AN-5 | Halo2 forgery via VK tampering | VK is set immutable at AN-side `TokenBridge` deployment; rotation requires a contract upgrade. |
-| ETH-AN-6 | `VERHALO2SHPLONK` opcode soundness bug | Mitigation: the opcode is tested in `tvm-sdk` against malformed proofs / mutated inputs / wrong VK (mirroring the `VERGRTH16WITHVK` test pattern); production deployment is gated on a partner-side review of the opcode implementation. |
+| ETH-AN-6 | `ZKHALO2VERIFYWITHVK` opcode soundness bug | Mitigation: the opcode is tested in `tvm-sdk` against malformed proofs / mutated inputs / wrong VK (`test_halo2_with_vk.rs` covers positive round-trip, flipped-proof rejection, tweaked-instance rejection, bad-magic `FatalError`, LRU cache reuse); production deployment is gated on a partner-side review of the opcode implementation. |
 
 ---
 

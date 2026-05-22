@@ -73,7 +73,7 @@ ZKHALO2VERIFY:
 We propose adding a **second opcode** rather than re-purposing `ZKHALO2VERIFY`, for the same reasons that motivated `VERGRTH16` + `VERGRTH16WITHVK` coexisting (`docs/an_partner_integration_plan.md` Decision Log 2026-05-17):
 
 - `ZKHALO2VERIFY` keeps its compact 2-operand calling convention for circuits whose VK is naturally global to the chain (zkLogin-style; DarkDex). Cheaper gas, no per-call deserialization of the VK.
-- `ZKHALO2VERIFYWITHVK` takes 3 operands and lets a contract carry its own VK in storage. Slightly more expensive gas; one opcode covers every circuit anybody ever deploys to AN.
+- `ZKHALO2VERIFYWITHVK` takes 1 operand (a `Halo2TvmBundle` cell carrying the VK + config + instances + proof together) and lets a contract carry its own VK in storage. Slightly more expensive gas; one opcode covers every circuit anybody ever deploys to AN.
 
 Final naming is a partner decision; below we use `ZKHALO2VERIFYWITHVK` for concreteness.
 
@@ -189,9 +189,9 @@ The `vk` argument is stored once at deployment in immutable storage. Same trust-
 > | ID | Decision | Owner of next action |
 > |----|----------|----------------------|
 > | Q-WIRE-1 | Blake2b SHPLONK transcript (sole supported flavour for v1; the bundle still carries a `transcript_kind` discriminator byte to keep the door open for Keccak in a future version) | bridge / closed |
-> | Q-WIRE-2 | Globally shared `ParamsKZG<Bn256>` keyed by `k`, loaded once at VM startup; NOT carried in `Halo2TvmBundle` | AN node ops (provision `kzg_bn254_K.srs` on disk per supported `k`) |
+> | Q-WIRE-2 | Verifier-only `ParamsKZG<Bn256>` built at runtime from 3 globally-embedded G1/G2 points, parameterised by `k = vk.cs.degree`. NOT carried in `Halo2TvmBundle` and NOT loaded from disk — SHPLONK verification only needs `g[0]`, `g2`, `s_g2`. | tvm-sdk (reuses the same `KZG_*_BYTES` constants `ZKHALO2VERIFY` uses for DarkDex W=8) |
 > | Q-WIRE-3 | Strict 32-byte little-endian `Fr::to_repr()`; no u64 shortcut. `Fr::from_repr` rejects ≥ modulus inputs structurally | bridge / closed |
-> | Q-WIRE-4 | Self-describing `Halo2TvmBundle` (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`). Magic `b"H2TVMBND"` + version `0x01` + transcript_kind byte + length-prefixed `(config_json, vk_bytes, instances, proof)` | bridge / closed |
+> | Q-WIRE-4 | Self-describing `Halo2TvmBundle` (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`). Magic `b"HALO2TVM"` + version `0x01` + transcript_kind byte + length-prefixed `(config_json, vk_bytes, instances, proof)` | bridge / closed |
 > | Q-WIRE-5 | Pin `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` to a commit SHA in `tvm_vm/Cargo.toml`. Any SHA bump requires a CI gate that proves & verifies a checked-in `Halo2TvmBundle` fixture; deserialisation drift = red CI = blocked merge | tvm-sdk maintainer + bridge CI |
 > | Q-NAME-1 | `ZKHALO2VERIFYWITHVK`, dispatch byte `0xC7 0x4A` (adjacent to `ZKHALO2VERIFY = 0xC7 0x49`). If `node-3406` reshuffles bytes pre-merge, our follow-up PR rebases onto whatever byte ends up adjacent | bridge / will rebase at follow-up PR |
 >
@@ -217,37 +217,35 @@ exercises this end-to-end against a real Circuit 1B fixture (k=20, 10
 signers, ~21.2 KB bundle). Forcing Keccak on the AN side would require a
 duplicate transcript gadget stack on a node that has no EVM-style
 Keccak-precompile pressure to begin with. The `transcript_kind` byte in
-`Halo2TvmBundle` is reserved (`0x01 = Blake2b`); we keep the door open
+`Halo2TvmBundle` is reserved (`0x00 = Blake2b`); we keep the door open
 for `0x02 = Keccak` in a future format version without breaking
 existing VKs.
 
 ### Q-WIRE-2 — SRS sharing vs per-circuit
 
-`ZKHALO2VERIFY` builds `ParamsKZG<Bn256>` from a per-circuit blob (`build_kzg_verifier_params` for the DarkDex W=8 case). Is the intent that every circuit ships its own KZG SRS?
+Originally proposed as "load `$AN_DATA_DIR/halo2_srs/kzg_bn254_<k>.srs`
+per supported `k` at VM startup". On real-impl review (2026-05-22) we
+discovered the verifier-only path is much cheaper: SHPLONK only ever
+touches `g[0]`, `g2`, and `s_g2` from the SRS — three group elements,
+~320 bytes total. Serhii's existing
+`tvm_vm/src/executor/zk_halo2_utils::build_kzg_verifier_params()`
+hard-codes these for DarkDex W=8 at `k=19`. The real-impl branch
+parameterises that pattern by `k`:
 
-Our preference: share a single `ParamsKZG<Bn256>` for a given K across all circuits on the chain (this is the standard Halo2 KZG convention — the SRS only depends on `2^K`, not on the circuit shape). That would let `ZKHALO2VERIFYWITHVK` take just the VK on the stack and look up the shared params by K. Practically:
-
-```rust
-fn shared_kzg_params(k: u32) -> &'static ParamsKZG<Bn256> {
-    static CACHE: Lazy<Mutex<HashMap<u32, &'static ParamsKZG<Bn256>>>> = ...;
-    // build_kzg_verifier_params(k) on first miss; leak the Box for &'static
+```
+fn build_shared_kzg_params(k: u32) -> ParamsKZG<Bn256> {
+    // ... reads embedded KZG_{G0,G2,S_G2}_BYTES into a K=0 dummy blob,
+    //     then `dummy.from_parts(k, vec![g0], Some(vec![]), g2, s_g2)`.
 }
 ```
 
-Bridge VK announces its K via the embedded `BaseCircuitParams`.
+This means **no on-disk SRS file is required**. The `KZG_*_BYTES`
+constants live in `zk_halo2_utils.rs` (promoted to `pub(crate)` on the
+real-impl branch) and are the same trusted-setup points DarkDex W=8
+uses. The producer side (`bridge-prover-orchestrator`) still uses a
+full `kzg_bn254_20.srs` blob for proving (proving needs g[0..2^k]); the
+saving is purely on the verifier (TVM) side.
 
-**Decision 2026-05-22 — DECIDED globally shared per `k`.** `Halo2TvmBundle`
-does **not** carry the SRS. The TVM node provisions a
-`kzg_bn254_K.srs` blob per supported `k` (currently k=19 for DarkDex,
-k=20 for the bridge fallback circuit) and loads it once at VM startup
-via a `static SHARED_KZG_PARAMS: Lazy<HashMap<u32, ParamsKZG<Bn256>>>`.
-The opcode looks up `shared_kzg_params(vk.cs.k())` after deserialising
-the VK. The follow-up implementation PR will document the on-disk SRS
-path convention (`$AN_DATA_DIR/halo2_srs/kzg_bn254_<k>.srs`) and
-provide a small CLI `tvm-sdk-tools srs-provision --k 20` that fetches
-the agreed SRS hash from the trusted-setup ceremony archive. Bridge
-preference for the K range: k ∈ {19, 20, 21} initially; the AN team
-provisions whatever `k` values their declared system circuits need.
 
 ### Q-WIRE-3 — Public-input layout: full 32-byte LE Fr vs the u64 shortcut
 
@@ -290,9 +288,9 @@ layout is:
 ```
 offset  size   field
 ------  ----   -----
- 0      8      magic = b"H2TVMBND"            (ASCII)
+ 0      8      magic = b"HALO2TVM"            (ASCII)
  8      1      format_version = 0x01
- 9      1      transcript_kind                (0x01 = Blake2b; 0x02 reserved for Keccak)
+ 9      1      transcript_kind                (0x00 = Blake2b; 0x01 reserved for Keccak)
 10      4      config_json_len  (LE u32)
 14      n0     config_json bytes              (serde_json of BaseCircuitParams)
 14+n0   4      vk_len (LE u32)
@@ -381,7 +379,7 @@ What's now known:
   any out-of-band schema. Verified for the `(k=20, advice=44, lookup=19,
   instance=1)` Circuit 1B shape; format is generic across K and
   `BaseCircuitParams`.
-- **Q-WIRE-2** still open: the KZG SRS is intentionally NOT in the
+- **Q-WIRE-2** closed (2026-05-22): the KZG SRS is intentionally NOT in the
   bundle. The consumer (TVM opcode) is expected to load it once at VM
   startup keyed by `k`. The round-trip test sources it from the local
   shared `kzg_bn254_K.srs` cache.

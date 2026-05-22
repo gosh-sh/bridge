@@ -174,6 +174,30 @@ The `vk` argument is stored once at deployment in immutable storage. Same trust-
 
 ## 4. Open questions for the AN partner team
 
+> **Status update 2026-05-22**: Serhii's explicit response — _"Принимай решения на
+> свой вкус, Сергей готов принять любое наше решение"_ — closes the design phase
+> from the partner side. The bridge team has therefore **frozen all five Q-WIRE
+> questions** with the decisions below. The text of the original open questions
+> is preserved for the audit trail. Phase A is now considered closed; the
+> remaining work is purely implementation (Phase B onward).
+>
+> Each decision is dated **2026-05-22** and authored by the bridge integration
+> team. Any future change to these decisions must be paired with a follow-up
+> Decision Log entry in `docs/an_partner_integration_plan.md` and a bumped
+> `Halo2TvmBundle::FORMAT_VERSION` byte.
+>
+> | ID | Decision | Owner of next action |
+> |----|----------|----------------------|
+> | Q-WIRE-1 | Blake2b SHPLONK transcript (sole supported flavour for v1; the bundle still carries a `transcript_kind` discriminator byte to keep the door open for Keccak in a future version) | bridge / closed |
+> | Q-WIRE-2 | Globally shared `ParamsKZG<Bn256>` keyed by `k`, loaded once at VM startup; NOT carried in `Halo2TvmBundle` | AN node ops (provision `kzg_bn254_K.srs` on disk per supported `k`) |
+> | Q-WIRE-3 | Strict 32-byte little-endian `Fr::to_repr()`; no u64 shortcut. `Fr::from_repr` rejects ≥ modulus inputs structurally | bridge / closed |
+> | Q-WIRE-4 | Self-describing `Halo2TvmBundle` (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`). Magic `b"H2TVMBND"` + version `0x01` + transcript_kind byte + length-prefixed `(config_json, vk_bytes, instances, proof)` | bridge / closed |
+> | Q-WIRE-5 | Pin `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` to a commit SHA in `tvm_vm/Cargo.toml`. Any SHA bump requires a CI gate that proves & verifies a checked-in `Halo2TvmBundle` fixture; deserialisation drift = red CI = blocked merge | tvm-sdk maintainer + bridge CI |
+> | Q-NAME-1 | `ZKHALO2VERIFYWITHVK`, dispatch byte `0xC7 0x4A` (adjacent to `ZKHALO2VERIFY = 0xC7 0x49`). If `node-3406` reshuffles bytes pre-merge, our follow-up PR rebases onto whatever byte ends up adjacent | bridge / will rebase at follow-up PR |
+>
+> The five sub-sections below are kept as the rationale capture for each closed
+> question. They explain _why_ we picked each side, not _whether_.
+
 ### Q-WIRE-1 — Halo2 transcript flavour
 
 The current `ZKHALO2VERIFY` consumes proofs produced with `gosh-zk-snark-halo2-utils::Proof::create_for_circuit`, which uses the **Blake2b** SHPLONK transcript (`Blake2bWrite` from `halo2_proofs`).
@@ -183,6 +207,19 @@ The bridge's `deposit-prover/` currently produces proofs with the **Keccak256** 
 **Question**: should the bridge's `deposit-prover/` switch to the Blake2b transcript so its proofs are verifiable by the existing `gosh-zk-snark-halo2-utils` machinery? Or should `ZKHALO2VERIFYWITHVK` carry a transcript flavour discriminator on the stack (e.g. an additional `uint8` operand)?
 
 Our preference: switch the producer side to Blake2b. It's a single-line change in `deposit-prover/src/prover.rs` and avoids growing the opcode surface.
+
+**Decision 2026-05-22 — DECIDED Blake2b.** The fallback path in
+`crates/bridge-prover-orchestrator/src/prover.rs::generate_fallback_proof`
+already uses `Blake2bWrite` / `Blake2bRead`, and the
+`Halo2TvmBundle` round-trip test in
+`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`
+exercises this end-to-end against a real Circuit 1B fixture (k=20, 10
+signers, ~21.2 KB bundle). Forcing Keccak on the AN side would require a
+duplicate transcript gadget stack on a node that has no EVM-style
+Keccak-precompile pressure to begin with. The `transcript_kind` byte in
+`Halo2TvmBundle` is reserved (`0x01 = Blake2b`); we keep the door open
+for `0x02 = Keccak` in a future format version without breaking
+existing VKs.
 
 ### Q-WIRE-2 — SRS sharing vs per-circuit
 
@@ -199,6 +236,19 @@ fn shared_kzg_params(k: u32) -> &'static ParamsKZG<Bn256> {
 
 Bridge VK announces its K via the embedded `BaseCircuitParams`.
 
+**Decision 2026-05-22 — DECIDED globally shared per `k`.** `Halo2TvmBundle`
+does **not** carry the SRS. The TVM node provisions a
+`kzg_bn254_K.srs` blob per supported `k` (currently k=19 for DarkDex,
+k=20 for the bridge fallback circuit) and loads it once at VM startup
+via a `static SHARED_KZG_PARAMS: Lazy<HashMap<u32, ParamsKZG<Bn256>>>`.
+The opcode looks up `shared_kzg_params(vk.cs.k())` after deserialising
+the VK. The follow-up implementation PR will document the on-disk SRS
+path convention (`$AN_DATA_DIR/halo2_srs/kzg_bn254_<k>.srs`) and
+provide a small CLI `tvm-sdk-tools srs-provision --k 20` that fetches
+the agreed SRS hash from the trusted-setup ceremony archive. Bridge
+preference for the K range: k ∈ {19, 20, 21} initially; the AN team
+provisions whatever `k` values their declared system circuits need.
+
 ### Q-WIRE-3 — Public-input layout: full 32-byte LE Fr vs the u64 shortcut
 
 The current opcode does dual-path parsing per element:
@@ -209,6 +259,16 @@ The current opcode does dual-path parsing per element:
 This is convenient for short integers (deposit IDs, block heights) but is **ambiguous** for genuine `Fr` elements whose first 24 bytes happen to be zero (e.g. a low-bit pattern in `Fr::from_bytes_le`).
 
 **Question**: is this ambiguity intentional? For the bridge we'd prefer the WithVK variant to be *strictly LE Fr* — no shortcut — since the 7 deposit public inputs include addresses (160 bits, never confusable) and hashes (always full 32 bytes). Strictness saves us from a class of subtle bugs where a small Ethereum address coincidentally has 24 zero bytes prefix and gets reinterpreted.
+
+**Decision 2026-05-22 — DECIDED strict 32-byte LE.** `ZKHALO2VERIFYWITHVK`
+uses `Fr::from_repr(<[u8; 32]>)` directly, with no preprocessing.
+`Fr::from_repr` returns `CtOption::None` for ≥ modulus inputs and the
+opcode throws `FatalError` in that case (structural error, not
+cryptographic reject). The legacy `ZKHALO2VERIFY` keeps its
+dual-path / u64-shortcut behavior for backward compatibility with the
+DarkDex W=8 contract that's already deployed. The two opcodes are
+intentionally **not** interchangeable on the public-inputs encoding —
+this is documented in the opcode mnemonic table comment.
 
 ### Q-WIRE-4 — VK serialization format
 
@@ -221,15 +281,65 @@ The current `ZKHALO2VERIFY` works around this by hard-coding `dark_dex_w8_config
 
 We prefer **Option B** and are happy to send a PR to `gosh-zk-snark-halo2-utils` for it.
 
+**Decision 2026-05-22 — DECIDED Option B (self-describing bundle).** The
+bridge has already implemented the format under the name
+`Halo2TvmBundle` in
+`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`. The wire
+layout is:
+
+```
+offset  size   field
+------  ----   -----
+ 0      8      magic = b"H2TVMBND"            (ASCII)
+ 8      1      format_version = 0x01
+ 9      1      transcript_kind                (0x01 = Blake2b; 0x02 reserved for Keccak)
+10      4      config_json_len  (LE u32)
+14      n0     config_json bytes              (serde_json of BaseCircuitParams)
+14+n0   4      vk_len (LE u32)
+…       n1     vk_bytes                       (canonical-compressed VerifyingKey<G1Affine>)
+…       4      instances_len (LE u32)         (== num_instance_columns * count_per_col * 32)
+…       n2     instances bytes                (concatenated 32-byte LE Fr per column, in column-major order)
+…       4      proof_len (LE u32)
+…       n3     proof bytes                    (raw SHPLONK proof body)
+```
+
+The opcode deserialises `config_json` → `BaseCircuitParams`, calls
+`VerifyingKey::<G1Affine>::read(&vk_bytes, SerdeFormat::RawBytes, &cp)`,
+then runs the standard `gosh-zk-snark-halo2-utils::Proof::verify_with_vk`
+path. The round-trip test
+(`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`)
+proves and verifies a real Circuit 1B (k=20, 10 signers) fixture
+through this format; format version byte will bump on any breaking
+change.
+
 ### Q-WIRE-5 — Halo2 axiom fork stability
 
 `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` is a single-commit fork of axiom's halo2-lib. It's pinned by `branch = "main"` in `tvm_vm/Cargo.toml`. Bridge proofs will be verified by this same crate, so we share a lockstep upgrade risk: any rebase of that fork that changes `VerifyingKey::read`'s on-wire format breaks every previously-issued bridge VK.
 
 **Question**: do we pin to a commit SHA in `tvm-sdk` going forward? Or is there a CI test on the partner fork that asserts wire-format stability?
 
+**Decision 2026-05-22 — DECIDED pin to commit SHA + format-stability CI
+gate.** `tvm_vm/Cargo.toml` pins
+`gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` to a `rev = "<sha>"` (not
+a branch). The bridge's CI checks in a `Halo2TvmBundle` fixture
+(`crates/bridge-prover-orchestrator/tests/fixtures/halo2_tvm_bundle_v1_circuit1b_k20.bin`)
+along with its expected `verify_with_vk` outcome. Any future SHA bump
+must run this fixture through the latest verifier; a deserialisation
+failure or a flipped verdict is a red CI and blocks the bump until the
+producer side emits a new bundle under a bumped `format_version`. This
+gives us a single, mechanical, hard-to-bypass guard against silent
+on-wire drift in the partner fork.
+
 ### Q-NAME-1 — Opcode name
 
 Working name `ZKHALO2VERIFYWITHVK` (parallel to `VERGRTH16WITHVK`). Alternatives the AN team has floated informally include `HALO2VERIFYVK`, `VERHALO2WITHVK`. Final pick is partner's call; we'll align our compiler PR (`gosh.zkHalo2VerifyWithVK` / `gosh.verHalo2WithVK` / …) accordingly.
+
+**Decision 2026-05-22 — DECIDED `ZKHALO2VERIFYWITHVK` @ `0xC7 0x4A`.**
+Mirrors `VERGRTH16WITHVK`. Dispatch byte `0x4A` chosen as the next free
+slot after `0xC7 0x49 = ZKHALO2VERIFY`. If `serhii/node-3406-vergrth16-with-vk`
+reshuffles dispatch bytes pre-merge, our follow-up PR rebases onto
+whatever byte ends up adjacent to the final `ZKHALO2VERIFY` byte. The
+compiler-side builtin is `gosh.zkHalo2VerifyWithVK(proof, pub_inputs, vk_bundle)`.
 
 ---
 
@@ -239,6 +349,14 @@ Working name `ZKHALO2VERIFYWITHVK` (parallel to `VERGRTH16WITHVK`). Alternatives
 
 Owner: AN team (Serhii) + bridge team (this side).
 Outcome: a one-paragraph agreement on transcript flavour and VK on-wire format.
+
+**Status (2026-05-22): CLOSED.** Serhii's "Принимай решения на свой вкус"
+explicitly delegates the call to the bridge team, so all five Q-WIRE
+questions are now decided (see §4 above). The bundle format is frozen at
+`format_version = 0x01`; any change requires a version bump. The
+implementation is unblocked on the design front; the only remaining
+gate is `serhii/node-3406-vergrth16-with-vk` landing the
+`gosh-zk-snark-halo2-utils` dep tree on `tvm-sdk`'s `main`.
 
 **Status (2026-05-18): bridge-side proposal landed, awaiting partner ack.** The
 bridge has committed to a concrete byte layout and verified it
@@ -288,6 +406,16 @@ Scope:
 - Unit tests against a bridge-supplied test VK + a known-good proof generated by `deposit-prover/`.
 
 A *partial* skeleton (handler + mnemonic + gas + docstring; no live cache; test marked `#[ignore]` pending real VK fixture) lives on branch `serhii/verhalo2shplonk-skeleton` of `tvm-sdk` for discussion. It does **not** depend on `serhii/node-3406-vergrth16-with-vk`'s halo2 deps — that wiring lands when Phase A finalises the on-wire format.
+
+**Status (2026-05-22)**: Phase A is closed (§ above). Skeleton on
+`serhii/verhalo2shplonk-skeleton` will be flipped into a Draft PR with
+the locked decisions inlined into the cover letter. Real
+implementation (replace `FatalError` stub with a live
+`Proof::verify_with_vk` call against an LRU-cached `(VerifyingKey,
+ParamsKZG)` pair) rebases onto `serhii/node-3406-vergrth16-with-vk`
+after that branch merges — we don't want to maintain conflict
+resolution against a 272-commit-wide moving target while it's still
+under review. Tracked locally as task `tvm-sdk:zkhalo2vk-real-impl`.
 
 ### Phase C — `TVM-Solidity-Compiler` support
 

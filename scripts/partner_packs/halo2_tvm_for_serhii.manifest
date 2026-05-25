@@ -1,45 +1,149 @@
-# Halo2 TVM bundle wire-format pack for Serhii (AN team).
+# `ZKHALO2VERIFYWITHVK` partner pack for Serhii (AN team) — v2 (2026-05-25)
 #
 # Regenerate with: `scripts/build_partner_pack.sh halo2_tvm_for_serhii`
 #
-# Context: response to "how do I populate `bytes vk` and `bytes publicInputs`
-# in the new ZKHALO2VERIFYWITHVK opcode?" The pack ships the producer-side
-# reference impl + design memo + green round-trip test so the TVM side has a
-# concrete byte layout to wire against.
+# This pack carries the **landed** `ZKHALO2VERIFYWITHVK` opcode wire
+# format (frozen Variant A — three stack operands) plus a real
+# end-to-end-verified Circuit 1B fallback fixture so the AN side can
+# smoke-test the opcode without booting the bridge prover.
+#
+# Status:
+# - tvm-sdk PR #243 (Lint + Test/Priority Units + Test/tvm_client all
+#   green): https://github.com/tvmlabs/tvm-sdk/pull/243
+# - 12 integration tests + 9 VkBlob unit tests green on tvm-sdk
+# - Producer-side round-trip green on bridge-prover-orchestrator
 
-docs/zk_halo2_an_side_design.md => 01_design_memo.md
-crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs => 02_halo2_tvm_bundle.rs
-crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs => 03_halo2_tvm_bundle_round_trip.rs
+# Top-level reference docs (consumer-side / producer-side reference + opcode reference).
+docs/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
+
+# Producer-side ref impl (the bytes you'll see on the wire are produced by this).
+crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs => 02_producer_halo2_tvm_bundle.rs
+crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs => 03_producer_round_trip_test.rs
+
+# Real Circuit 1B fallback fixture — drop-in ready for ZKHALO2VERIFYWITHVK.
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/README.md => fixtures/README.md
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_vk_blob.bin => fixtures/fallback_vk_blob.bin
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_public_inputs.bin => fixtures/fallback_public_inputs.bin
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_proof.bin => fixtures/fallback_proof.bin
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_vk.bin => fixtures/fallback_vk.bin
+crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_config_params.json => fixtures/fallback_config_params.json
 
 ---
-## TL;DR
+## TL;DR — what changed since v1 (2026-05-22)
 
-### `bytes vk`
+`ZKHALO2VERIFYWITHVK` now takes **three stack cells**, not one
+self-describing bundle:
 
-Serialised `halo2_proofs::plonk::VerifyingKey<G1Affine>` via:
+```text
+   top      proof_cell           raw SHPLONK proof bytes (no header)
+   ↑        public_inputs_cell   raw N × 32 LE Fr (no header)
+   bottom   vk_cell              VkBlob (magic "VKBLOB\x00\x00" + version
+                                  + transcript + config_json + vk_bytes)
+```
 
-    vk.write(&mut buf, SerdeFormat::RawBytes)  // RawBytes is mandatory:
-                                                // runs curve-membership check
-                                                // on every G1 point.
+```text
+   PUSHREF vk_cell
+   PUSHREF public_inputs_cell
+   PUSHREF proof_cell
+   ZKHALO2VERIFYWITHVK
+```
 
-~6 KB for K=20. NOT self-describing — `VerifyingKey::read` needs
-`BaseCircuitParams` separately. We recommend the **self-describing
-bundle** (see `02_halo2_tvm_bundle.rs`) where `BaseCircuitParams` is
-inlined as serde_json.
+### Why three cells
 
-### `bytes publicInputs`
+| Operand               | Lifetime                                                            |
+|-----------------------|---------------------------------------------------------------------|
+| `vk_cell`             | Deploy-time. Stored once in the contract's `c4` / persistent storage. Magic-tagged + versioned so a drifted producer/consumer is rejected loudly. |
+| `public_inputs_cell`  | Per-call. Contract builds it O(1) from the call arguments (no header to skip). |
+| `proof_cell`          | Per-call. Comes verbatim from off-chain prover output. |
 
-Flat `N × 32` bytes, each element = strict 32-byte LE `Fr::to_repr()`.
-**No u64 shortcut.** Length check: `len % 32 == 0`, otherwise fatal.
-`Fr::from_repr` rejects values ≥ modulus.
+### `vk_cell` payload (`VkBlob`)
 
-### Open Q-WIRE for ack
+```text
+   off  size  field
+   ───  ────  ─────────────────────────────────────────────────────────
+     0     8  magic           = b"VKBLOB\x00\x00"
+     8     1  version         = 0x01
+     9     1  transcript_kind = 0x00 (Blake2b; 0x01 reserved for Keccak)
+    10     6  reserved        = 0 × 6
+    16     4  config_len   (u32 LE)
+    20  cl    config_json  (UTF-8 serde_json of `BaseCircuitParams`)
+   ...     4  vk_len       (u32 LE)
+   ...  vl    vk_bytes     (`VerifyingKey::write(SerdeFormat::RawBytes)`)
+```
 
-- **Q-WIRE-1**: transcript = Blake2b (default). `transcript_kind` byte
-  reserved for a Keccak variant if you prefer.
-- **Q-WIRE-2**: KZG SRS NOT in the bundle — shared globally on the opcode
-  side, indexed by `k`.
-- **Q-WIRE-4**: self-describing VK envelope (Option B) — implemented in
-  `Halo2TvmBundle`.
+`SerdeFormat::RawBytes` runs the on-curve check on every G1 element of
+the VK — **mandatory** because the VK is supplied by an untrusted
+contract. The producer side at
+`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::VkBlob::from_native`
+mirrors this byte layout exactly.
 
-Waiting on your ack or counter-proposal before the TVM-side wiring lands.
+### `public_inputs_cell` payload
+
+No header at all. Just `N × 32` flat little-endian `Fr::to_repr()`
+values concatenated. Length must be a multiple of 32; values
+`≥ Fr modulus` are rejected as `FatalError` (not a silent
+verify-false — caller bug, fail loudly).
+
+### `proof_cell` payload
+
+No header at all. Raw SHPLONK proof bytes from
+`Blake2bWrite::<_, _, Challenge255<_>>::finalize()`. Hand them
+verbatim to a TVM cell.
+
+## Fixture: Circuit 1B fallback BLS attestation verifier (K=20)
+
+The `fixtures/` directory carries the **real** verification key for
+the bridge's fallback BLS attestation circuit, plus a sample
+proof + public-input vector that the producer round-trip test
+verified end-to-end (`verify_proof::<KZG, VerifierSHPLONK, …,
+Blake2bRead, SingleStrategy>` returns `Ok(true)`) before exporting.
+
+| File | Size | What it is |
+|---|---|---|
+| `fallback_vk_blob.bin` | 6 308 B | Ready-to-load `vk_cell` payload — drop into a TVM cell verbatim. |
+| `fallback_public_inputs.bin` | 128 B | 4 × 32 B LE Fr (bk_set_commit, env_hash_hi, env_hash_lo, last_seen_seqno). |
+| `fallback_proof.bin` | 14 784 B | SHPLONK proof + Blake2b transcript, K=20. |
+| `fallback_vk.bin` | 6 154 B | Raw `VerifyingKey` for partners who want to assemble their own `VkBlob`. |
+| `fallback_config_params.json` | 181 B | Matching `BaseCircuitParams`. |
+
+The same three fixture files are checked in on the consumer side at
+`tvm-sdk/tvm_vm/halo2_test_data/fallback_*.bin` and exercised by
+`test_halo2_with_vk::bridge_circuit_1b_fallback_real_proof_verifies`
+(passes; CI green on PR #243).
+
+## Smoke test (Rust producer side)
+
+```bash
+cd acki-nacki-bridge
+cargo test -p bridge-prover-orchestrator --lib   # 6 unit tests, ~1 s
+cargo test -p bridge-prover-orchestrator --test halo2_tvm_bundle_round_trip --release  # ~5 min with cached keys
+```
+
+## Smoke test (Rust consumer side, tvm-sdk PR #243)
+
+```bash
+cd tvm-sdk
+cargo test -p tvm_vm --lib --tests test_halo2_with_vk  # 12 tests, ~6 s
+cargo test -p tvm_vm --lib zk_halo2_with_vk_bundle     # 9 VkBlob unit tests
+```
+
+## Open items still pending your ack
+
+- **Q-GAS-1** — current gas price `5_000` is a structural placeholder
+  modelled on `VERGRTH16_GAS_PRICE = 2_380`. Needs re-benchmarking
+  against the cached / cold-cache verify wall-clock at K=20 before
+  mainnet. Fixture in `fixtures/` is large enough to benchmark realistically.
+- **Q-TRANS-1** — would you prefer Keccak transcript as an alternate
+  flavour (reserved as `transcript_kind = 0x01`)? Default stays
+  Blake2b; switching is a one-byte change in the `VkBlob` header.
+
+## Cross-references
+
+- `tvm-sdk` PR #243 — landed and refactored to 3-operand ABI:
+  https://github.com/tvmlabs/tvm-sdk/pull/243
+- `tvm-sdk/docs/zkhalo2verifywithvk_design.md` — frozen design memo
+  (consumer side).
+- `tvm-sdk/docs/vm-instructions/acki-nacki-vm-instructions.md` —
+  canonical TVM-instructions doc entry (3-operand ABI documented).
+- `acki-nacki-bridge/docs/zkhalo2verifywithvk_reference.md` —
+  producer-side integration reference (this pack's `01_…`).

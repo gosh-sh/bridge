@@ -128,6 +128,9 @@ while IFS= read -r line; do
         exit 1
     fi
 
+    # Allow `dest` to contain subdirectories — auto-create the parent.
+    dest_parent="$stage_dir/$(dirname "$dest")"
+    mkdir -p "$dest_parent"
     cp "$src" "$stage_dir/$dest"
     included_files+=("$dest")
 done <<< "$files_section"

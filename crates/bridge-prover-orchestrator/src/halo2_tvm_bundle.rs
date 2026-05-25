@@ -1,89 +1,87 @@
-//! Wire format for AN-side `ZKHALO2VERIFYWITHVK` opcode (Phase A artifact).
+//! Producer-side wire format for the AN `ZKHALO2VERIFYWITHVK` opcode.
 //!
-//! This module is the **producer-side counterpart** of the proposed
-//! `ZKHALO2VERIFYWITHVK` TVM opcode skeletoned in `tvm-sdk` on branch
-//! `serhii/verhalo2shplonk-skeleton` (see
-//! `docs/zk_halo2_an_side_design.md` for the full design memo and the
-//! Q-WIRE-1..5 open questions).
+//! This module is the **producer counterpart** of the
+//! `ZKHALO2VERIFYWITHVK` TVM opcode landed in `tvm-sdk` `main` (see PR
+//! #243). The opcode takes **three stack operands** — not one bundle —
+//! and this module emits them.
 //!
-//! ## Scope
+//! ## Stack ABI (Variant A, frozen 2026-05-25)
 //!
-//! - **Locks in the wire format** the producer (`bridge-prover-orchestrator`)
-//!   and the consumer (`tvm_vm` Halo2 opcode) will agree on, so the AN partner
-//!   team has a concrete byte layout to review during Phase A.
-//! - **Round-trip verifiable** in [`tests/halo2_tvm_bundle_round_trip.rs`]:
-//!   prove with `FallbackKeyManager`, serialise via [`Halo2TvmBundle`],
-//!   deserialise via [`Halo2TvmBundle::read`], verify against the reconstructed
-//!   `(vk, instances, proof)` triple. If the test passes the wire format is
-//!   self-consistent.
-//! - **Resolves Q-WIRE-4 Option B**: the VK envelope is self-describing
-//!   (carries the `BaseCircuitParams` JSON inline) so the consumer doesn't need
-//!   any out-of-band schema.
+//! ```text
+//!   top      proof_cell           raw SHPLONK proof bytes (no header)
+//!   ↑        public_inputs_cell   raw Fr × N (strict 32-byte LE, no header)
+//!   bottom   vk_cell              VkBlob (magic "VKBLOB\0\0" + version
+//!                                  + transcript + config_json + vk_bytes)
+//! ```
 //!
-//! ## Out of scope
+//! Assembly snippet:
 //!
-//! - **KZG SRS** is NOT carried in the bundle (Q-WIRE-2). The consumer is
-//!   expected to source `ParamsKZG<Bn256>` from a chain-wide shared trusted
-//!   setup keyed by `k = vk.cs.degree`. For the round-trip test we just re-run
-//!   `gen_srs(K)`.
-//! - **Cell layout** for the actual TVM stack (which TVM cells carry which byte
-//!   ranges) — that's part of the opcode-side wiring and will be defined when
-//!   Phase B of the roadmap lands.
-//! - **Transcript discriminator** (Q-WIRE-1). The bundle commits to **Blake2b**
-//!   SHPLONK transcript exclusively (matches the producer-side pattern in
-//!   [`crate::verifier::verify_fallback_proof`] and the
-//!   `gosh-zk-snark-halo2-utils` AN-side machinery). A `transcript_kind` byte
-//!   in the header is reserved for a future Keccak variant if the AN team
-//!   prefers a different default.
+//! ```text
+//!   PUSHREF vk_cell
+//!   PUSHREF public_inputs_cell
+//!   PUSHREF proof_cell
+//!   ZKHALO2VERIFYWITHVK
+//! ```
 //!
-//! ## Byte layout
+//! The producer side builds:
+//!
+//! 1. **`VkBlob` payload** — magic-tagged, versioned, self-describing
+//!    (carries `BaseCircuitParams` JSON inline so the consumer doesn't
+//!    need any out-of-band schema). One blob per circuit, expected to
+//!    be deployed once into the verifier contract's `c4`/storage.
+//! 2. **`public_inputs` payload** — bare `N × 32` LE `Fr::to_repr()`,
+//!    no header. The contract assembles this O(1) on the hot path
+//!    from the call arguments.
+//! 3. **`proof` payload** — bare SHPLONK proof bytes (Blake2b
+//!    transcript), no header. Comes straight from
+//!    `Blake2bWrite::finalize()`.
+//!
+//! ## `VkBlob` byte layout
 //!
 //! ```text
 //!   off  size  field
 //!   ───  ────  ─────────────────────────────────────────────────────────
-//!     0     8  magic = b"HALO2TVM" (ASCII, no NUL)
+//!     0     8  magic = b"VKBLOB\x00\x00"
 //!     8     1  version           = 1
-//!     9     1  transcript_kind   = 0 (Blake2b)
+//!     9     1  transcript_kind   = 0 (Blake2b; reserved for Keccak)
 //!    10     6  reserved          = 0 × 6
 //!    16     4  config_len  (u32 LE)
 //!    20  cl    config_json (UTF-8 serde_json of `BaseCircuitParams`)
 //!   ...     4  vk_len      (u32 LE)
 //!   ...  vl    vk_bytes    (`VerifyingKey::write(SerdeFormat::RawBytes)`)
-//!   ...     4  instances_len  (u32 LE; must be a multiple of 32)
-//!   ...  il    instances_bytes (N × 32-byte LE `Fr::to_repr()`, strict)
-//!   ...     4  proof_len   (u32 LE)
-//!   ...  pl    proof_bytes (SHPLONK proof with Blake2b transcript)
 //! ```
 //!
-//! All length prefixes are `u32` LE because (a) bundles are always < 4 GB
-//! and (b) it keeps the parser branch-free vs varints.
+//! All length prefixes are `u32` LE because (a) VKs are always well
+//! under 4 GB and (b) it keeps the parser branch-free vs varints.
 //!
-//! ## Strictness vs `ZKHALO2VERIFY`'s u64 shortcut
+//! ## Strict 32-byte LE `Fr`
 //!
-//! Per Q-WIRE-3, this format mandates **strict 32-byte LE `Fr`** encoding
-//! for every public input. There is no u64 shortcut. This makes the bundle
-//! unambiguous when an address (160 bits) happens to have a 24-zero-byte
-//! prefix.
+//! Per Q-WIRE-3, the `public_inputs` payload mandates **strict 32-byte
+//! LE `Fr`** encoding for every public input. There is no u64
+//! shortcut. This makes the wire format unambiguous when an address
+//! (160 bits) happens to have a 24-zero-byte prefix.
 //!
 //! ## Safety of VK deserialisation
 //!
 //! VK is written with [`SerdeFormat::RawBytes`] (NOT `RawBytesUnchecked`).
-//! `RawBytes` runs the curve membership check on every group element on
-//! read, which is required for soundness when consuming a caller-supplied
-//! VK on-chain. The producer side intentionally trades a few hundred ms of
-//! serialise time for safety on the consumer side.
+//! `RawBytes` runs the curve membership check on every group element
+//! on read, which is required for soundness when consuming a
+//! caller-supplied VK on-chain. The producer side intentionally
+//! trades a few hundred ms of serialise time for safety on the
+//! consumer side.
 
 use std::io::{Read, Write};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use halo2_base::{
-    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+    gates::circuit::{BaseCircuitParams, builder::BaseCircuitBuilder},
     halo2_proofs::{
+        SerdeFormat,
         halo2curves::{
             bn256::{Bn256, Fr, G1Affine},
             ff::PrimeField,
         },
-        plonk::{verify_proof, VerifyingKey},
+        plonk::{VerifyingKey, verify_proof},
         poly::{
             commitment::ParamsProver,
             kzg::{
@@ -93,26 +91,25 @@ use halo2_base::{
             },
         },
         transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
-        SerdeFormat,
     },
 };
 
-/// 8-byte ASCII magic at offset 0 of every bundle.
-pub const BUNDLE_MAGIC: &[u8; 8] = b"HALO2TVM";
+/// 8-byte ASCII magic at offset 0 of every `VkBlob` payload.
+pub const VK_BLOB_MAGIC: &[u8; 8] = b"VKBLOB\x00\x00";
 
-/// Current bundle layout version. Bump on any breaking change.
-pub const BUNDLE_VERSION: u8 = 1;
+/// Current `VkBlob` layout version. Bump on any breaking change.
+pub const VK_BLOB_VERSION: u8 = 1;
 
 /// Transcript flavour for the proof bytes.
 ///
-/// Current opcode design (Phase A) commits to Blake2b. The discriminator
-/// byte exists so a future Keccak variant could be added without breaking
-/// already-emitted bundles.
+/// Current opcode (Variant A) commits to Blake2b. The discriminator
+/// byte exists so a future Keccak variant could be added without
+/// breaking already-emitted blobs.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptKind {
     Blake2b = 0,
-    // Reserved for Q-WIRE-1 resolution if the AN team prefers Keccak:
+    // Reserved if the AN team prefers Keccak:
     // Keccak = 1,
 }
 
@@ -127,57 +124,42 @@ impl TranscriptKind {
     }
 }
 
-/// VK + public inputs + proof in the wire format consumed by the proposed
-/// `ZKHALO2VERIFYWITHVK` opcode.
-///
-/// Construct via [`Halo2TvmBundle::from_native`] (producer side), serialise
-/// via [`Halo2TvmBundle::write`], read back via [`Halo2TvmBundle::read`],
-/// and run the actual SHPLONK verification with [`Halo2TvmBundle::verify`].
+/// Payload of the `vk_cell` stack operand — circuit shape + verifying
+/// key, magic-tagged and versioned so the consumer can refuse a
+/// drifted producer loudly.
 #[derive(Clone, Debug)]
-pub struct Halo2TvmBundle {
+pub struct VkBlob {
     /// Circuit shape that `BaseCircuitBuilder` needs at VK-deserialisation
-    /// time. Carried inline so the bundle is self-describing (Q-WIRE-4 / B).
+    /// time. Carried inline so the blob is self-describing.
     pub config: BaseCircuitParams,
     /// `VerifyingKey<G1Affine>` serialised with [`SerdeFormat::RawBytes`].
     pub vk_bytes: Vec<u8>,
-    /// `N × 32` flat little-endian `Fr::to_repr()`. Strictly LE, no u64
-    /// shortcut.
-    pub instances_bytes: Vec<u8>,
-    /// SHPLONK proof bytes from `Blake2bWrite`.
-    pub proof_bytes: Vec<u8>,
     /// Transcript discriminator (must currently equal `Blake2b`).
     pub transcript: TranscriptKind,
 }
 
-impl Halo2TvmBundle {
-    /// Build a bundle from in-memory artifacts produced by the bridge's
+impl VkBlob {
+    /// Build a `VkBlob` from in-memory artifacts produced by the bridge's
     /// existing prover machinery.
     pub fn from_native(
         config: &BaseCircuitParams,
         vk: &VerifyingKey<G1Affine>,
-        instances: &[Fr],
-        proof_bytes: Vec<u8>,
     ) -> Result<Self> {
         let mut vk_bytes = Vec::new();
         vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
             .context("serialising VerifyingKey<G1Affine> with SerdeFormat::RawBytes")?;
-
-        let instances_bytes = encode_instances(instances);
-
         Ok(Self {
             config: config.clone(),
             vk_bytes,
-            instances_bytes,
-            proof_bytes,
             transcript: TranscriptKind::Blake2b,
         })
     }
 
-    /// Write the bundle to any [`Write`] sink in the layout documented at
-    /// the module level.
+    /// Write the `VkBlob` to any [`Write`] sink. The result is the byte
+    /// payload of the `vk_cell` operand.
     pub fn write<W: Write>(&self, mut w: W) -> Result<()> {
-        w.write_all(BUNDLE_MAGIC)?;
-        w.write_all(&[BUNDLE_VERSION])?;
+        w.write_all(VK_BLOB_MAGIC)?;
+        w.write_all(&[VK_BLOB_VERSION])?;
         w.write_all(&[self.transcript as u8])?;
         w.write_all(&[0u8; 6])?;
 
@@ -185,28 +167,29 @@ impl Halo2TvmBundle {
             serde_json::to_vec(&self.config).context("serialising BaseCircuitParams as JSON")?;
         write_chunk(&mut w, &config_json)?;
         write_chunk(&mut w, &self.vk_bytes)?;
-        write_chunk(&mut w, &self.instances_bytes)?;
-        write_chunk(&mut w, &self.proof_bytes)?;
         Ok(())
     }
 
-    /// Read a bundle back from any [`Read`] source.
-    ///
-    /// Validates the magic, version, transcript discriminator, and that
-    /// `instances_bytes.len() % 32 == 0`. Does **not** validate the
-    /// `vk_bytes` cryptographically — that happens inside [`Self::verify`]
-    /// because deserialisation needs `config`, which is read here.
+    /// Serialise to an owned byte vector. Convenience wrapper around
+    /// [`Self::write`].
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.write(&mut out)?;
+        Ok(out)
+    }
+
+    /// Read a `VkBlob` back from any [`Read`] source.
     pub fn read<R: Read>(mut r: R) -> Result<Self> {
         let mut header = [0u8; 16];
         r.read_exact(&mut header)
-            .context("reading 16-byte bundle header")?;
-        if &header[0..8] != BUNDLE_MAGIC {
-            bail!("bundle magic mismatch: expected b\"HALO2TVM\"");
+            .context("reading 16-byte VkBlob header")?;
+        if &header[0..8] != VK_BLOB_MAGIC {
+            bail!("VkBlob magic mismatch: expected b\"VKBLOB\\x00\\x00\"");
         }
         let version = header[8];
-        if version != BUNDLE_VERSION {
+        if version != VK_BLOB_VERSION {
             bail!(
-                "bundle version mismatch: expected {BUNDLE_VERSION}, got {version}; producer / \
+                "VkBlob version mismatch: expected {VK_BLOB_VERSION}, got {version}; producer / \
                  consumer have drifted"
             );
         }
@@ -215,61 +198,82 @@ impl Halo2TvmBundle {
 
         let config_json = read_chunk(&mut r).context("reading config chunk")?;
         let config: BaseCircuitParams = serde_json::from_slice(&config_json)
-            .context("parsing BaseCircuitParams JSON from bundle")?;
+            .context("parsing BaseCircuitParams JSON from VkBlob")?;
         let vk_bytes = read_chunk(&mut r).context("reading vk chunk")?;
-        let instances_bytes = read_chunk(&mut r).context("reading instances chunk")?;
-        if !instances_bytes.len().is_multiple_of(32) {
-            bail!(
-                "instances chunk length {} is not a multiple of 32 bytes (each public input must \
-                 be a 32-byte LE Fr)",
-                instances_bytes.len()
-            );
-        }
-        let proof_bytes = read_chunk(&mut r).context("reading proof chunk")?;
 
         Ok(Self {
             config,
             vk_bytes,
-            instances_bytes,
-            proof_bytes,
             transcript,
         })
     }
+}
 
-    /// Reassemble the bundle into a live `(vk, instances)` pair and run
-    /// `verify_proof::<KZG, VerifierSHPLONK, _, Blake2bRead, SingleStrategy>`
-    /// against `srs.verifier_params()`.
+/// All three stack operands of the `ZKHALO2VERIFYWITHVK` opcode, ready
+/// to be loaded into TVM cells.
+///
+/// Construct via [`Halo2TvmOperands::from_native`] (producer side), and
+/// verify the same `(vk, instances, proof)` triple in-process with
+/// [`Halo2TvmOperands::verify`] before shipping to the AN VM.
+#[derive(Clone, Debug)]
+pub struct Halo2TvmOperands {
+    /// Byte payload of the `vk_cell` operand — a serialised [`VkBlob`].
+    pub vk_blob: Vec<u8>,
+    /// Byte payload of the `public_inputs_cell` operand — raw `N × 32`
+    /// LE `Fr::to_repr()` (strict, no header).
+    pub public_inputs: Vec<u8>,
+    /// Byte payload of the `proof_cell` operand — raw SHPLONK proof
+    /// bytes from `Blake2bWrite::finalize()` (no header).
+    pub proof: Vec<u8>,
+}
+
+impl Halo2TvmOperands {
+    /// Build the three operand byte streams from in-memory artifacts.
+    pub fn from_native(
+        config: &BaseCircuitParams,
+        vk: &VerifyingKey<G1Affine>,
+        instances: &[Fr],
+        proof_bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let blob = VkBlob::from_native(config, vk)?;
+        let vk_blob = blob.to_bytes()?;
+        let public_inputs = encode_instances(instances);
+        Ok(Self {
+            vk_blob,
+            public_inputs,
+            proof: proof_bytes,
+        })
+    }
+
+    /// Reassemble the three byte streams into a live `(vk, instances)`
+    /// pair and run `verify_proof::<KZG, VerifierSHPLONK, _, Blake2bRead,
+    /// SingleStrategy>` against `srs.verifier_params()`.
     ///
-    /// The `srs` argument represents the chain-wide shared trusted setup
-    /// (Q-WIRE-2). In the TVM opcode this would be a static loaded once at
-    /// VM startup and indexed by `k`; here the test scaffold passes it in
-    /// directly.
-    ///
-    /// Returns `Ok(true)` on a valid proof, `Ok(false)` on a well-formed
-    /// but invalid proof, and `Err(_)` on a structural failure (malformed
-    /// VK bytes, malformed proof bytes, malformed Fr in `instances_bytes`).
+    /// Mirrors the on-chain handler so the producer can round-trip a
+    /// proof end-to-end without booting the AN VM.
     pub fn verify(&self, srs: &ParamsKZG<Bn256>) -> Result<bool> {
-        if self.transcript != TranscriptKind::Blake2b {
+        let blob = VkBlob::read(self.vk_blob.as_slice())?;
+        if blob.transcript != TranscriptKind::Blake2b {
             bail!(
-                "bundle transcript {:?} is not supported by this verifier (Blake2b only in v1)",
-                self.transcript
+                "VkBlob transcript {:?} is not supported by this verifier (Blake2b only in v1)",
+                blob.transcript
             );
         }
 
         let vk = VerifyingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(
-            &mut self.vk_bytes.as_slice(),
+            &mut blob.vk_bytes.as_slice(),
             SerdeFormat::RawBytes,
-            self.config.clone(),
+            blob.config.clone(),
         )
-        .context("deserialising VerifyingKey<G1Affine> from bundle vk chunk")?;
+        .context("deserialising VerifyingKey<G1Affine> from VkBlob")?;
 
-        let instances = decode_instances(&self.instances_bytes)?;
+        let instances = decode_instances(&self.public_inputs)?;
         let instance_refs: &[&[Fr]] = &[&instances];
 
         let verifier_params = srs.verifier_params();
         let strategy = SingleStrategy::new(srs);
         let mut transcript =
-            Blake2bRead::<_, _, Challenge255<_>>::init(self.proof_bytes.as_slice());
+            Blake2bRead::<_, _, Challenge255<_>>::init(self.proof.as_slice());
         Ok(verify_proof::<
             KZGCommitmentScheme<Bn256>,
             VerifierSHPLONK<'_, Bn256>,
@@ -286,9 +290,9 @@ impl Halo2TvmBundle {
         .is_ok())
     }
 
-    /// Number of public inputs encoded in the bundle.
+    /// Number of public inputs encoded in the operand bundle.
     pub fn num_instances(&self) -> usize {
-        self.instances_bytes.len() / 32
+        self.public_inputs.len() / 32
     }
 }
 
@@ -350,7 +354,6 @@ mod unit_tests {
 
     #[test]
     fn instances_round_trip_strict_le() {
-        // Fr(1), Fr(2), Fr(3) round-trip exactly.
         let xs = vec![Fr::one(), Fr::from(2u64), Fr::from(3u64)];
         let bytes = encode_instances(&xs);
         assert_eq!(bytes.len(), 96);
@@ -367,7 +370,6 @@ mod unit_tests {
 
     #[test]
     fn decode_rejects_out_of_range_fr() {
-        // 0xFF × 32 is well past the Fr modulus and must be rejected.
         let bytes = vec![0xFFu8; 32];
         let err = decode_instances(&bytes).unwrap_err();
         assert!(
@@ -377,28 +379,28 @@ mod unit_tests {
     }
 
     #[test]
-    fn header_magic_mismatch_rejected() {
-        let bogus = vec![0u8; 16 + 4 + 4 + 4 + 4];
-        let err = Halo2TvmBundle::read(bogus.as_slice()).unwrap_err();
+    fn vk_blob_header_magic_mismatch_rejected() {
+        let bogus = vec![0u8; 16 + 4 + 4];
+        let err = VkBlob::read(bogus.as_slice()).unwrap_err();
         assert!(err.to_string().contains("magic mismatch"));
     }
 
     #[test]
-    fn version_mismatch_rejected() {
+    fn vk_blob_version_mismatch_rejected() {
         let mut header = [0u8; 16];
-        header[0..8].copy_from_slice(BUNDLE_MAGIC);
+        header[0..8].copy_from_slice(VK_BLOB_MAGIC);
         header[8] = 99;
-        let err = Halo2TvmBundle::read(header.as_slice()).unwrap_err();
+        let err = VkBlob::read(header.as_slice()).unwrap_err();
         assert!(err.to_string().contains("version mismatch"));
     }
 
     #[test]
-    fn transcript_kind_unknown_rejected() {
+    fn vk_blob_transcript_kind_unknown_rejected() {
         let mut header = [0u8; 16];
-        header[0..8].copy_from_slice(BUNDLE_MAGIC);
-        header[8] = BUNDLE_VERSION;
+        header[0..8].copy_from_slice(VK_BLOB_MAGIC);
+        header[8] = VK_BLOB_VERSION;
         header[9] = 7;
-        let err = Halo2TvmBundle::read(header.as_slice()).unwrap_err();
+        let err = VkBlob::read(header.as_slice()).unwrap_err();
         assert!(err.to_string().contains("unknown transcript_kind"));
     }
 }

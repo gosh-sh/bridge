@@ -1,38 +1,40 @@
-//! `Halo2TvmBundle` round-trip test.
+//! `Halo2TvmOperands` round-trip test.
 //!
-//! Validates the wire format we propose for the AN-side
+//! Validates the **3-operand** wire format consumed by the AN-side
 //! `ZKHALO2VERIFYWITHVK` opcode (see `crate::halo2_tvm_bundle` and
-//! `docs/zk_halo2_an_side_design.md`).
+//! `docs/zkhalo2verifywithvk_reference.md`).
 //!
 //! ## What this test proves
 //!
 //! 1. **Producer side**: generate a real Halo2 SHPLONK proof (Blake2b
 //!    transcript) for Circuit 1B (Fallback attestation).
-//! 2. **Serialise**: pack `(BaseCircuitParams, VK, instances, proof)` into the
-//!    [`Halo2TvmBundle`] byte layout.
-//! 3. **Re-load**: deserialise the bundle from those bytes only — no in-memory
-//!    shortcut, no key manager reference.
-//! 4. **Verify**: reassemble `vk` + `instances` from the bundle and run
-//!    `verify_proof::<KZG, VerifierSHPLONK, Blake2bRead, SingleStrategy>` using
-//!    a freshly-loaded `ParamsKZG<Bn256>` (chain-wide shared SRS, Q-WIRE-2 in
-//!    the design memo).
-//! 5. **Negative cases**: a flipped proof byte and a wrong public input must
-//!    both make the bundle-side verify return `Ok(false)`.
+//! 2. **Pack as three operands**: build a [`VkBlob`] for the `vk_cell`,
+//!    encode public inputs as raw `N × 32` LE `Fr`, keep the proof
+//!    bytes raw.
+//! 3. **Round-trip**: serialise the `VkBlob` to bytes, parse it back
+//!    via [`VkBlob::read`], decode public inputs via
+//!    [`bridge_prover_orchestrator::decode_instances`].
+//! 4. **Verify**: reassemble `vk` + `instances` and run
+//!    `verify_proof::<KZG, VerifierSHPLONK, Blake2bRead, SingleStrategy>`
+//!    using the freshly-loaded `ParamsKZG<Bn256>` (chain-wide shared
+//!    SRS, Q-WIRE-2 in the design memo).
+//! 5. **Negative cases**: a flipped proof byte and a wrong public
+//!    input must both make the operand-side verify return `Ok(false)`.
 //!
-//! If all assertions hold, every byte boundary the AN-side opcode would
-//! ever touch is exercised on the producer side and we have a concrete
-//! fixture for the partner team to review.
+//! If all assertions hold, every byte boundary the AN-side opcode
+//! would touch is exercised on the producer side and we have a
+//! concrete fixture for the partner team to review.
 //!
 //! ## Cost
 //!
-//! Reuses the `params/` cache populated by `fallback_round_trip` — first
-//! invocation of either test does ~2-5 min keygen, this one is then
-//! seconds (re-uses VK/PK from disk, only does prove+verify).
+//! Reuses the `params/` cache populated by `fallback_round_trip` —
+//! first invocation of either test does ~2-5 min keygen, this one is
+//! then seconds (re-uses VK/PK from disk, only does prove+verify).
 
 use std::path::PathBuf;
 
 use bridge_prover_orchestrator::{
-    generate_fallback_proof, FallbackKeyManager, Fr, Halo2TvmBundle, TranscriptKind,
+    FallbackKeyManager, Fr, Halo2TvmOperands, TranscriptKind, VkBlob, generate_fallback_proof,
 };
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
@@ -43,7 +45,7 @@ fn params_dir() -> PathBuf {
 }
 
 #[test]
-fn halo2_tvm_bundle_round_trip_fallback_circuit() {
+fn halo2_tvm_operands_round_trip_fallback_circuit() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -78,77 +80,93 @@ fn halo2_tvm_bundle_round_trip_fallback_circuit() {
 
     let instances: Vec<Fr> = proof.instances().to_vec();
 
-    // ---- Wire-format pack. ----
-    let bundle =
-        Halo2TvmBundle::from_native(km.config(), km.vk(), &instances, proof.proof_bytes.clone())
-            .expect("bundle construction must succeed");
+    // ---- Pack as three opcode operands. ----
+    let operands =
+        Halo2TvmOperands::from_native(km.config(), km.vk(), &instances, proof.proof_bytes.clone())
+            .expect("operand bundle construction must succeed");
 
-    assert_eq!(bundle.num_instances(), instances.len());
-    assert_eq!(bundle.transcript, TranscriptKind::Blake2b);
+    assert_eq!(operands.num_instances(), instances.len());
+    assert_eq!(operands.public_inputs.len(), instances.len() * 32);
+    assert_eq!(operands.proof, proof.proof_bytes);
 
-    let mut bytes = Vec::new();
-    bundle.write(&mut bytes).unwrap();
+    // ---- Round-trip the VkBlob via its serialised bytes. ----
+    let blob = VkBlob::read(operands.vk_blob.as_slice())
+        .expect("VkBlob deserialisation must succeed");
+    assert_eq!(blob.transcript, TranscriptKind::Blake2b);
+    // Re-emit the VkBlob and confirm byte-stable round-trip.
+    let reemitted = blob.to_bytes().unwrap();
+    assert_eq!(reemitted, operands.vk_blob, "VkBlob round-trip must be byte-stable");
 
-    // ---- Wire-format unpack. ----
-    let recovered =
-        Halo2TvmBundle::read(bytes.as_slice()).expect("bundle deserialisation must succeed");
-
-    assert_eq!(recovered.num_instances(), instances.len());
-    assert_eq!(recovered.transcript, TranscriptKind::Blake2b);
-    assert_eq!(recovered.proof_bytes, proof.proof_bytes);
-    // Decoded instances must match the originals bit-for-bit (strict 32-byte LE).
+    // Decoded public inputs must match the originals bit-for-bit
+    // (strict 32-byte LE).
     let recovered_instances =
-        bridge_prover_orchestrator::decode_instances(&recovered.instances_bytes)
-            .expect("instances bytes must decode");
+        bridge_prover_orchestrator::decode_instances(&operands.public_inputs)
+            .expect("public inputs must decode");
     assert_eq!(recovered_instances, instances);
 
-    // ---- Verify from the bundle, using only the re-loaded contents. ----
+    // ---- Verify from the operands, using only their byte payloads. ----
     //
-    // The SRS plays the role of the chain-wide shared trusted setup the
-    // TVM opcode would look up by `k`. We just reuse the key manager's
-    // SRS reference here (same on-disk file).
-    let ok = recovered.verify(&km.srs).expect("verify must not panic");
-    assert!(ok, "round-tripped bundle must verify");
+    // The SRS plays the role of the chain-wide shared trusted setup
+    // the TVM opcode would look up by `k`. We just reuse the key
+    // manager's SRS reference here (same on-disk file).
+    let ok = operands.verify(&km.srs).expect("verify must not panic");
+    assert!(ok, "round-tripped operand bundle must verify");
 
     // ---- Negative test: flipped proof byte must reject (Ok(false)). ----
-    let mut tampered_bundle = recovered.clone();
-    let mid = tampered_bundle.proof_bytes.len() / 2;
-    tampered_bundle.proof_bytes[mid] ^= 0xFF;
-    let tampered_ok = tampered_bundle
+    let mut tampered = operands.clone();
+    let mid = tampered.proof.len() / 2;
+    tampered.proof[mid] ^= 0xFF;
+    let tampered_ok = tampered
         .verify(&km.srs)
         .expect("verify must not panic on tampered proof bytes");
     assert!(
         !tampered_ok,
-        "bundle with flipped proof byte must NOT verify"
+        "operands with flipped proof byte must NOT verify"
     );
 
     // ---- Negative test: bumped instance must reject (Ok(false)). ----
-    let mut wrong_instances_bundle = recovered.clone();
+    let mut wrong = operands.clone();
     {
         // Bump instance[3] (= last_seen_block_seqno) by 1 in-place.
         let off = 3 * 32;
         let mut repr = <Fr as PrimeField>::Repr::default();
         repr.as_mut()
-            .copy_from_slice(&wrong_instances_bundle.instances_bytes[off..off + 32]);
+            .copy_from_slice(&wrong.public_inputs[off..off + 32]);
         let next = Fr::from_repr(repr).unwrap() + Fr::one();
-        wrong_instances_bundle.instances_bytes[off..off + 32]
-            .copy_from_slice(next.to_bytes().as_ref());
+        wrong.public_inputs[off..off + 32].copy_from_slice(next.to_bytes().as_ref());
     }
-    let wrong_ok = wrong_instances_bundle
+    let wrong_ok = wrong
         .verify(&km.srs)
         .expect("verify must not panic on wrong instances");
     assert!(
         !wrong_ok,
-        "bundle with mutated public instance must NOT verify"
+        "operands with mutated public instance must NOT verify"
     );
 
+    // ---- Optional fixture export. ----
+    //
+    // When `EXPORT_HALO2_FIXTURE_DIR=/some/path` is set in the
+    // environment, dump the three operand byte streams as separate
+    // files so they can be checked in as TVM fixtures (e.g. in
+    // `tvm-sdk/tvm_vm/halo2_test_data/fallback_*`) and consumed by
+    // `test_halo2_with_vk.rs`. The files are written exactly as they
+    // appear on the wire — no extra framing.
+    if let Ok(dir) = std::env::var("EXPORT_HALO2_FIXTURE_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("creating fixture export dir");
+        std::fs::write(dir.join("fallback_vk_blob.bin"), &operands.vk_blob).unwrap();
+        std::fs::write(dir.join("fallback_public_inputs.bin"), &operands.public_inputs)
+            .unwrap();
+        std::fs::write(dir.join("fallback_proof.bin"), &operands.proof).unwrap();
+        println!("Exported fallback fixture to {}", dir.display());
+    }
+
     println!(
-        "OK: Halo2TvmBundle round-trip succeeded (bundle size = {} B, vk = {} B, proof = {} B, \
-         instances = {} × 32 B)",
-        bytes.len(),
-        recovered.vk_bytes.len(),
-        recovered.proof_bytes.len(),
-        recovered.num_instances(),
+        "OK: Halo2TvmOperands round-trip succeeded (vk_blob = {} B, public_inputs = {} × 32 B, \
+         proof = {} B)",
+        operands.vk_blob.len(),
+        operands.num_instances(),
+        operands.proof.len(),
     );
 }
 

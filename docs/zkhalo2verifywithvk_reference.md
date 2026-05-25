@@ -41,10 +41,14 @@ ZKHALO2VERIFYWITHVK:
       (this includes the curve-membership check; soundness-critical)
     - instances_bytes length is not a multiple of 32
     - a 32-byte instance chunk is >= the Fr modulus
-    - proof_bytes fails the SHPLONK structural shape check
+    - bundle.config.k disagrees with vk.get_domain().k() (defence-in-depth
+      against a malicious header that lies about k)
+    - BaseCircuitBuilder::new(config) panics on internally-inconsistent
+      params (e.g. lookup_bits >= k) — caught via std::panic::catch_unwind
+      and converted to a structural FatalError
 ```
 
-**Cryptographic rejection vs structural rejection.** A *well-formed* proof that just doesn't satisfy the relation is reported as `Boolean::false` on the stack — never as an exception. Only structural problems with the bytes (malformed VK, malformed proof, garbled bundle) raise `FatalError`. This matches the convention of the existing `VERGRTH16` and `ZKHALO2VERIFY` opcodes.
+**Cryptographic rejection vs structural rejection.** A *well-formed* proof that just doesn't satisfy the relation is reported as `Boolean::false` on the stack — never as an exception. Only structural problems with the **bundle / VK / instances / config** raise `FatalError`. A malformed `proof_bytes` that fails SHPLONK deserialisation **also** collapses into `Boolean::false` via the handler's `.is_ok()` mapping over `verify_proof`'s `Result` — matching the convention of the existing `VERGRTH16` opcode (every verifier error is a cryptographic reject, never an exception).
 
 **One operand, not three.** During the skeleton phase the design memo sketched a 3-operand ABI (`vk_cell`, `pub_inputs_cell`, `proof_cell`). The real implementation collapsed this to a single self-describing bundle, because:
 
@@ -83,7 +87,7 @@ All length prefixes are `u32` little-endian (bundles are always under 4 GiB; the
 |---|---|---|---|
 | 0 | 8 | `magic` | `b"HALO2TVM"` (`0x48 0x41 0x4C 0x4F 0x32 0x54 0x56 0x4D`). Distinguishes the bundle from any other TVM cell payload. |
 | 8 | 1 | `version` | `0x01` today. Bump on any breaking change to the byte layout. The consumer rejects every other value with `FatalError`. |
-| 9 | 1 | `transcript_kind` | `0x00 = Blake2b SHPLONK` (the only flavour the AN-side `gosh-zk-snark-halo2-utils::Proof::verify_with_vk` machinery speaks today). `0x01 = Keccak` is **reserved** for a future variant — emitting `0x01` today raises `FatalError`. |
+| 9 | 1 | `transcript_kind` | `0x00 = Blake2b SHPLONK` (the only flavour the AN-side handler speaks today — `verify_proof::<KZGCommitmentScheme<Bn256>, VerifierSHPLONK, Challenge255, Blake2bRead, SingleStrategy>`). `0x01 = Keccak` is **reserved** for a future variant — emitting `0x01` today raises `FatalError`. |
 | 10..15 | 6 | `reserved` | Must be zero on write. The consumer does not enforce zero on read (future format extensions may repurpose these bytes). |
 
 ### 3.3 Payload chunks
@@ -101,20 +105,20 @@ Each chunk is a `u32` little-endian length followed by exactly that many bytes. 
 
 | Chunk | Size | Notes |
 |---|---|---|
-| `config_json` | ~150 B | `BaseCircuitParams` is small JSON. |
-| `vk_bytes` | ~840 B | `K=19` circuit, a few dozen advice columns + permutation polynomials. |
-| `instances_bytes` | `13 × 32` = 416 B | 13 public inputs for DarkDex W=8 layer 0. The bridge's deposit-prover circuit has 7. |
-| `proof_bytes` | ~9.4 KB | SHPLONK + Blake2b transcript at `K=19`. |
+| `config_json` | ~125 B | `BaseCircuitParams` serialised by `serde_json` (compact form, no whitespace). |
+| `vk_bytes` | 842 B | `K=19` DarkDex W=8 circuit, 4 advice + 1 fixed + 1 lookup column, 1 instance column. |
+| `instances_bytes` | `5 × 32` = 160 B | 5 public inputs for DarkDex W=8 layer 0 (matches the checked-in `dark_dex_w8_L0_instances.bin` fixture). The bridge's deposit-prover circuit has 7. |
+| `proof_bytes` | 2 080 B | SHPLONK + Blake2b transcript at `K=19` for this specific fixture. Larger circuits or different parameter sets yield proofs of a few KB to ~10 KB. |
 | **Header + length prefixes** | 32 B | 8 + 1 + 1 + 6 + 4 × 4 |
-| **Total bundle** | **~10.8 KB** | Well under the 16 MiB cap. |
+| **Total bundle** | **~3.2 KB** | Well under the 16 MiB cap. |
 
 The **16 MiB cap** (`MAX_BUNDLE_BYTES` in `tvm_vm/src/executor/zk_halo2_with_vk_bundle.rs`) is the only DoS guard; without it a pathological `u32::MAX` length prefix would let a hostile producer ask the consumer to allocate 4 GiB.
 
 ### 3.5 Why `SerdeFormat::RawBytes` and not `RawBytesUnchecked`
 
-`gosh-zk-snark-halo2-utils::io::read_vk` uses `RawBytesUnchecked` — the variant that **skips** curve-membership checks on every group element of the verifying key. This is fine when the VK comes from your own trusted prover. It is **not** fine when the VK is supplied by the caller of an on-chain opcode: a maliciously-crafted off-curve point in the VK lets the attacker produce verifications that don't actually correspond to any valid proof.
+`SerdeFormat::RawBytesUnchecked` — the variant historically used by the `gosh-zk-snark-halo2-utils` test helper `io::read_vk` — **skips** curve-membership checks on every group element of the verifying key. This is fine when the VK comes from your own trusted prover. It is **not** fine when the VK is supplied by the caller of an on-chain opcode: a maliciously-crafted off-curve point in the VK lets the attacker produce verifications that don't actually correspond to any valid proof.
 
-The opcode handler therefore uses `SerdeFormat::RawBytes`, which runs the on-curve check on every group element. The producer side mirrors this (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::from_native`) so producer and consumer agree on the exact byte layout.
+The opcode handler therefore uses `SerdeFormat::RawBytes`, which runs the on-curve check on every group element. The producer side mirrors this byte layout (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::from_native`) so producer and consumer agree.
 
 This costs a few hundred milliseconds per first-time VK deserialisation. The per-VK cache (§5) amortises that across calls.
 
@@ -130,9 +134,9 @@ The verifier needs `ParamsKZG<Bn256>`. For SHPLONK verification (not proving) on
 | G2 generator | `g2` | Pairing base. |
 | `[s]_2` (G2) | `s_g2` | Trapdoor-shifted G2 generator. |
 
-These three points are **embedded in `tvm_vm` as constants** (`KZG_G0_BYTES`, `KZG_G2_BYTES`, `KZG_S_G2_BYTES` in `tvm_vm/src/executor/zk_halo2_utils.rs`) and `build_shared_kzg_params(k)` reconstructs a `ParamsKZG<Bn256>` for any `k` at runtime. **No on-disk SRS file is required** for verification.
+These three points are **embedded in `tvm_vm` as constants** (`KZG_G0_BYTES`, `KZG_G2_BYTES`, `KZG_S_G2_BYTES` in `tvm_vm/src/executor/zk_halo2_utils.rs`) and `build_shared_kzg_params(k)` (in `zk_halo2_with_vk.rs`) reconstructs a `ParamsKZG<Bn256>` for any `k` at runtime via `from_parts`. **No on-disk SRS file is required** for verification.
 
-The points come from the `gosh-zk-snark-halo2-utils` repo's KZG setup, which itself uses the Hermez Phase 1 ceremony as its trust root. The bridge inherits that trust assumption transparently — no separate Phase 2 ceremony is needed for SHPLONK verification because SHPLONK is non-universal-but-trapdoor-free at verification time.
+The points were extracted from the KZG setup used by the bridge's Halo2 prover (`gosh-zk-snark-halo2-utils`-tested), which in turn uses the Hermez Phase 1 ceremony as its trust root. The bridge inherits that trust assumption transparently — no separate Phase 2 ceremony is needed for SHPLONK verification because SHPLONK is non-universal-but-trapdoor-free at verification time.
 
 ---
 
@@ -165,11 +169,11 @@ Currently a placeholder: `ZKHALO2_VERIFY_WITH_VK_GAS_PRICE = 5_000` (see `tvm_vm
 **Re-bench TODO** (before mainnet):
 
 1. Measure cold-cache verify (single VK, no prior calls). Use this as the `gas_price` upper bound.
-2. Measure warm-cache verify (LRU hit). This is what most calls will pay.
+2. Measure warm-cache verify (FIFO hit). This is what most calls will pay.
 3. Decide whether to charge a flat amortised number or to split cold/warm via two-tier pricing.
 4. Re-run with the bridge's actual deposit-prover VK (not just DarkDex W=8) once the circuit lands.
 
-See `tvm-sdk/docs/zkhalo2verifywithvk_design.md` §7 for the open benchmarking checklist.
+See `tvm-sdk/docs/zkhalo2verifywithvk_design.md` §5 (Q-GAS-1) for the open benchmarking checklist.
 
 ---
 
@@ -225,12 +229,20 @@ The producer is expected to be self-consistent with the consumer, but the consum
 | Test (location: `tvm_vm/src/tests/test_halo2_with_vk.rs`) | What it covers |
 |---|---|
 | `round_trip_dark_dex_w8_l0_valid_proof_returns_true` | Positive: real Halo2 SHPLONK proof for DarkDex W=8 L0 → bundle → opcode → `true`. Warm-path ~0.6 s. |
-| `flipped_proof_byte_rejected_as_false` | Negative: flip a byte in the middle of `proof_bytes` → opcode returns `false`. No exception. |
-| `tweaked_instance_fr_rejected_as_false` | Negative: increment one byte of one public-input `Fr` → opcode returns `false`. No exception. |
-| `bad_magic_returns_fatal_error` | Negative: clobber `magic` → opcode raises `FatalError`. |
-| `lru_cache_reused_across_two_invocations` | Smoke: same VK across two calls, second is fast (warm cache). |
+| `flipped_proof_byte_rejected_as_false` | Negative: flip a byte in `proof_bytes` → opcode returns `Ok(false)` (handler maps every `verify_proof` error via `.is_ok()`). |
+| `tweaked_instance_fr_rejected_as_false` | Negative: flip the low bit of the first public-input `Fr` (stays in-modulus) → opcode returns `Ok(false)`. |
+| `bad_magic_returns_fatal_error` | Negative: clobber the 8-byte magic → opcode raises `FatalError`. |
+| `corrupt_vk_byte_never_verifies_as_true` | Negative: flip a byte inside the VK G1 region → either `FatalError` (curve-membership) or `Ok(false)` (deserialised but cryptographically wrong) — never `Ok(true)`. |
+| `instance_ge_modulus_returns_fatal_error` | Negative: set first 32 instance bytes to `0xFF…FF` (> Fr modulus) → `FatalError` via strict `Fr::from_repr`. |
+| `instance_count_mismatch_rejected_as_false` | Negative: drop the last 32-byte instance Fr from a valid bundle → `verify_proof` sees N-1 columns instead of N → `Ok(false)`. |
+| `empty_proof_rejected_as_false` | Negative: zero-length `proof_bytes` → `Ok(false)`. |
+| `malformed_config_json_returns_fatal_error` | Negative: replace `config_json` with `b"this is not json"` → `FatalError` in `Halo2TvmBundle::parse`. |
+| `config_k_mismatch_returns_fatal_error` | Negative: mutate `"k":19` → `"k":18` in JSON; either our `config.k != vk.domain().k()` guard fires, or `BaseCircuitBuilder::new` panics on `lookup_bits=18` against `k=18` and our `catch_unwind` wrapper surfaces it as `FatalError`. |
+| `fifo_cache_reused_across_two_invocations` | Smoke: same VK across two calls, second is fast (warm cache). |
 
-Bundle decoder tests in `tvm_vm/src/executor/zk_halo2_with_vk_bundle.rs` (`tests::` module): 8 negative tests covering magic / version / transcript / chunk-length / trailing-garbage / instance-multiple-of-32 / oversized-bundle DoS guard.
+Bundle decoder tests in `tvm_vm/src/executor/zk_halo2_with_vk_bundle.rs` (`tests::` module): negative tests covering magic / version / transcript / chunk-length / trailing-garbage / instance-multiple-of-32 / oversized-bundle DoS guard.
+
+Total `tvm_vm --features gosh --lib`: **116 tests passed** (110 baseline + 11 new opcode + the bundle decoder tests are counted under module `zk_halo2_with_vk_bundle::tests`).
 
 Assembler round-trip test in `tvm_assembler/src/lib.rs::gosh_zk_opcode_tests::zk_opcode_bytes_round_trip` ensures the mnemonic `ZKHALO2VERIFYWITHVK` assembles to exactly `0xC7 0x4A`.
 
@@ -282,7 +294,7 @@ The contract is responsible for ensuring that the 7 public inputs encoded *insid
 | `FatalError` with "Fr::from_repr rejected" | Producer passed a value ≥ Fr modulus as a public input | Reduce the value mod p on the producer side; use `Fr::from(value).to_repr()` |
 | `FatalError` deserialising VK | VK bytes were written with the wrong `SerdeFormat`, or VK was for a different curve, or an off-curve point was injected | Re-emit VK via `vk.write(&mut buf, SerdeFormat::RawBytes)` |
 | `false` on the stack (no exception) | The proof is well-formed but doesn't satisfy the relation. Either the prover was given the wrong witness, or the public inputs in the bundle don't match what the proof was generated against, or VK ↔ proof drift between deploys | Re-run the producer-side `Halo2TvmBundle::verify` locally — if it returns `false` there too, it's a prover-side issue, not an opcode issue |
-| `false` on the stack but local `Halo2TvmBundle::verify` returns `true` | `ParamsKZG` mismatch — producer used different SRS bytes than the consumer reconstructs from the three embedded points | Verify the producer uses the same KZG points (`gosh-zk-snark-halo2-utils` defaults); if you're using a custom SRS, that needs an explicit `transcript_kind` extension and a wire-format bump |
+| `false` on the stack but local `Halo2TvmBundle::verify` returns `true` | `ParamsKZG` mismatch — producer used different SRS bytes than the consumer reconstructs from the three embedded points | Verify the producer uses the same KZG points as `tvm_vm/src/executor/zk_halo2_utils.rs::KZG_*_BYTES`; if you're using a custom SRS, that needs an explicit `transcript_kind` extension and a wire-format bump |
 | `FatalError` "bundle byte length .. exceeds MAX_BUNDLE_BYTES" | Bundle > 16 MiB | Almost certainly a producer-side bug emitting a giant length prefix; check that `proof_bytes` is reasonable (~10 KB for the bridge's circuit) |
 
 ---

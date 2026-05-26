@@ -1,6 +1,7 @@
 # R15 — Real on-chain Halo2 verifier via snark-verifier aggregator
 
-**Status:** Roadmap accepted 2026-05-26. Execution in progress (M1 → M8).
+**Status:** Roadmap accepted 2026-05-26. **M1 ✅, M2 ✅, M3 ✅** (as of
+2026-05-27). M4 blocked on partner Circuit 4 stability.
 **Owner:** Bridge team.
 **Audit finding:** R15 — current `circuit-{1a,1b,2,4}` gnark wrappers are **identity stubs**
 (`Define()` body is `for i { api.AssertIsEqual(PI[i], PI[i]) }`). They do **not**
@@ -228,18 +229,78 @@ target.
     on a `.bin` file built externally). M6 lifts this approach to the
     aggregator's verifier.
 
-### M3. Transcript strategy
+### M3. Transcript strategy ✅ (orchestrator side; 2026-05-27)
 
-**Sub-tasks:**
-  - M3.a — Add a `transcript_kind` parameter to
-    `bridge-prover-orchestrator::generate_fallback_proof` (and forthcoming
-    `generate_circuit4_proof`) that switches between Blake2b (AN-side
-    `ZKHALO2VERIFYWITHVK`) and Poseidon (ETH-side aggregator).
-  - M3.b — Round-trip test: prove with Poseidon, verify natively in Rust
-    with `snark_verifier::verifier::plonk::PlonkVerifier`.
-  - M3.c — (Stretch) evaluate whether the same Halo2 proof can serve both
-    on-chain consumers simultaneously by including BOTH transcripts in the
-    SNARK envelope, vs. producing two separate proofs.
+**Outcome:** the orchestrator can now emit Circuit-1B proofs under either
+Blake2b (AN-side default) or Poseidon (ETH-side aggregator) Fiat–Shamir.
+The Poseidon implementation is vendored — see "Vendoring decision" below
+for why we did not depend on `snark-verifier` directly.
+
+**Deliverables (committed):**
+
+  - `crates/bridge-prover-orchestrator/src/poseidon_transcript.rs` — native
+    `Poseidon<Fr, Fr, T=3, RATE=2>` permutation + `PoseidonRead<R>` /
+    `PoseidonWrite<W>` implementing
+    `halo2_proofs::transcript::{Transcript, TranscriptRead/Write,
+    TranscriptReadBuffer/WriterBuffer}`. Spec constants
+    `(T, RATE, R_F, R_P, SECURE_MDS) = (3, 2, 8, 57, 0)` match
+    `snark-verifier-sdk/src/halo2.rs` v0.1.7-git lines 54–58 so the
+    Aggregator's in-circuit verifier (M5) will derive the same challenges.
+  - `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` — extended
+    `TranscriptKind` with `Poseidon = 2`. `VkBlob` decoders still bail on
+    anything ≠ Blake2b (AN-side opcode is unchanged).
+  - `crates/bridge-prover-orchestrator/src/{prover,verifier}.rs` — new
+    `generate_fallback_proof_with_transcript(..., TranscriptKind)` and
+    `verify_fallback_proof_with_transcript(..., TranscriptKind)` variants;
+    the legacy `generate_fallback_proof` / `verify_fallback_proof` now
+    delegate to them with `TranscriptKind::Blake2b`.
+  - `crates/bridge-prover-orchestrator/src/poseidon_transcript.rs::tests`
+    — five unit tests covering deterministic squeezes, scalar
+    round-trip, EC point round-trip, tampered-byte detection, spec
+    determinism (all green; sub-second).
+  - `crates/bridge-prover-orchestrator/tests/fallback_round_trip.rs`
+    — heavy integration test extended to prove + verify with BOTH
+    transcripts, asserting (1) Poseidon proof verifies under
+    Poseidon-Read, (2) mixing transcripts rejects, (3) the two proof byte
+    streams differ.
+
+**Vendoring decision — why we re-implemented Poseidon rather than depending
+on `snark-verifier`:**
+
+`snark-verifier` declares `halo2-base` (axiom-crypto fork) as a
+*non-optional* `[dependencies]` entry — there is no feature flag that
+turns it into a pure proofs-only crate. The orchestrator pins
+`halo2-base` to the **gosh** fork (so it can compile the partner's
+circuits, which embed `gosh-halo2-crypto-lib` chips). Pulling in
+`axiom-crypto/halo2-lib` alongside causes a duplicate-symbol conflict
+that Cargo refuses to resolve.
+
+So we copied the ~80 lines of native permutation logic from
+`snark-verifier/src/util/hash/poseidon.rs` into
+`poseidon_transcript.rs`, parameterised over `OptimizedPoseidonSpec`
+(which IS available in gosh `halo2-base` under the same module path —
+both forks took it from PSE upstream verbatim). The spec generation is
+deterministic (the round constants and MDS are computed from
+`T`/`RATE`/`R_F`/`R_P`/`SECURE_MDS` and the field modulus, no entropy),
+so the gosh-fork build of the spec is byte-identical to the
+axiom-fork build.
+
+**Verification of byte-for-byte compatibility with `snark-verifier-sdk`
+is deferred to M5** — that's where the orchestrator's Poseidon proof
+will actually be fed into an `AggregationCircuit` for the first time. If
+the in-circuit verifier accepts our proof, the transcripts agree. If
+not, M5 will surface the discrepancy and we'll add a golden-vector
+cross-test against `snark-verifier-sdk::PoseidonTranscript<NativeLoader,
+_>`.
+
+**What was deliberately deferred:**
+
+  - M3.c (one proof, two transcripts simultaneously) — superseded by the
+    cleaner two-flavour model. Each consumer (AN opcode vs. ETH
+    aggregator) gets its own proof; the prover takes a transcript
+    discriminator at the API boundary.
+  - Cross-implementation golden test against `snark-verifier-sdk` — see
+    above; the aggregator round-trip in M5 IS the golden test.
 
 ### M4. Circuit 4 prover in orchestrator (depends on partner)
 
@@ -291,7 +352,7 @@ This is the deliverable that **actually closes R15**.
 |---|---|---|
 | M1 — Roadmap | 0.5 day | none |
 | M2 — Feasibility spike | 3–5 days | medium (dep conflicts) |
-| M3 — Transcript strategy | 2–4 days | low |
+| M3 — Transcript strategy | done (2 days) | n/a |
 | M4 — Circuit 4 prover | 1–2 days **+ partner blocker** | low once unblocked |
 | M5 — Circuit 4 aggregator | 5–8 days | medium |
 | M6 — Yul verifier | 1–2 days | low |

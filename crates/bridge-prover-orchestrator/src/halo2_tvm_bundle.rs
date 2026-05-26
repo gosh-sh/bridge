@@ -101,23 +101,30 @@ pub const VK_BLOB_VERSION: u8 = 1;
 
 /// Transcript flavour for the proof bytes.
 ///
-/// Current opcode (Variant A) commits to Blake2b. The discriminator
-/// byte exists so a future Keccak variant could be added without
-/// breaking already-emitted blobs.
+/// The on-chain Acki Nacki opcode (`ZKHALO2VERIFYWITHVK`, Variant A) commits
+/// to Blake2b. The discriminator byte exists so a future Keccak variant
+/// could be added without breaking already-emitted blobs.
+///
+/// `Poseidon = 2` was added in 2026-05-27 (R15 milestone M3) for the
+/// ETH-side aggregator pipeline (`crates/bridge-evm-aggregator/`):
+/// inner SNARKs that feed `snark-verifier-sdk::AggregationCircuit` MUST use
+/// Poseidon. This variant is intentionally NOT accepted by the
+/// `ZKHALO2VERIFYWITHVK` opcode — see [`VkBlob::write`] / verifier checks.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptKind {
     Blake2b = 0,
-    // Reserved if the AN team prefers Keccak:
-    // Keccak = 1,
+    // 1 is reserved for Keccak (EvmTranscript).
+    Poseidon = 2,
 }
 
 impl TranscriptKind {
     fn from_u8(b: u8) -> Result<Self> {
         match b {
             0 => Ok(Self::Blake2b),
+            2 => Ok(Self::Poseidon),
             other => Err(anyhow!(
-                "unknown transcript_kind byte {other} (only 0 = Blake2b is currently defined)"
+                "unknown transcript_kind byte {other} (defined: 0 = Blake2b, 2 = Poseidon)"
             )),
         }
     }

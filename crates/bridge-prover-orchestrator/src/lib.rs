@@ -16,6 +16,7 @@ pub mod keys;
 pub mod layer_hashes_keys;
 pub mod layer_hashes_prover;
 pub mod layer_hashes_test_data;
+pub mod poseidon_transcript;
 pub mod proof_export;
 pub mod prover;
 pub mod verifier;
@@ -45,9 +46,12 @@ pub use layer_hashes_prover::{
     LayerHashesProofOutput, LAYER_HASHES_NUM_PUBLIC_INPUTS,
 };
 pub use layer_hashes_test_data::{build_synthetic_layer_hashes_input, SyntheticLayerHashesInput};
+pub use poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite};
 pub use proof_export::{
     build_proof_data, format_field_element, load_instances_binary, save_instances_binary,
     save_proof_data_json, Halo2ProofData, ProtocolData,
 };
-pub use prover::{generate_fallback_proof, FallbackProofOutput};
-pub use verifier::verify_fallback_proof;
+pub use prover::{
+    generate_fallback_proof, generate_fallback_proof_with_transcript, FallbackProofOutput,
+};
+pub use verifier::{verify_fallback_proof, verify_fallback_proof_with_transcript};

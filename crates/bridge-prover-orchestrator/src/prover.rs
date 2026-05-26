@@ -20,7 +20,8 @@ use tracing::info;
 
 use crate::{
     circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
-    circuit_num_unusable_rows, keys::FallbackKeyManager,
+    circuit_num_unusable_rows, halo2_tvm_bundle::TranscriptKind, keys::FallbackKeyManager,
+    poseidon_transcript::PoseidonWrite,
 };
 
 /// Output of a fallback proof generation.
@@ -71,6 +72,31 @@ pub fn generate_fallback_proof(
     bk_set: &HashMap<u16, Vec<u8>>,
     last_seen_block_seqno: u32,
 ) -> anyhow::Result<FallbackProofOutput> {
+    generate_fallback_proof_with_transcript(
+        key_manager,
+        attestation_primary_bytes,
+        attestation_fallback_bytes,
+        bk_set,
+        last_seen_block_seqno,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Generate a Circuit 1B proof with the chosen Fiat–Shamir transcript.
+///
+/// - [`TranscriptKind::Blake2b`] — default, matches what `ZKHALO2VERIFYWITHVK`
+///   expects on the AN side.
+/// - [`TranscriptKind::Poseidon`] — for ETH-side aggregator consumption (R15
+///   pipeline, `crates/bridge-evm-aggregator/`). Proofs in this flavour MUST
+///   NOT be shipped to the AN side; the opcode rejects them.
+pub fn generate_fallback_proof_with_transcript(
+    key_manager: &FallbackKeyManager,
+    attestation_primary_bytes: &[u8],
+    attestation_fallback_bytes: &[u8],
+    bk_set: &HashMap<u16, Vec<u8>>,
+    last_seen_block_seqno: u32,
+    transcript: TranscriptKind,
+) -> anyhow::Result<FallbackProofOutput> {
     let block_id_fr = compute_block_id_fr(attestation_primary_bytes);
     let (bk_set_commitment_fr, _) = crate::compute_bk_set_poseidon(bk_set);
     let block_seq_no = extract_block_seq_no(attestation_primary_bytes);
@@ -81,6 +107,7 @@ pub fn generate_fallback_proof(
         block_seq_no,
         last_seen_block_seqno,
         bk_set_size = bk_set.len(),
+        ?transcript,
         "generating fallback proof"
     );
 
@@ -105,24 +132,49 @@ pub fn generate_fallback_proof(
         last_seen_fr,
     ];
     let instance_refs: &[&[Fr]] = &[&instances];
-    let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        _,
-        Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
-        _,
-    >(
-        &key_manager.srs,
-        key_manager.pk(),
-        &[circuit],
-        &[instance_refs],
-        OsRng,
-        &mut transcript,
-    )
-    .context("fallback proof generation failed")?;
-    let proof_bytes = transcript.finalize();
+
+    let proof_bytes = match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("fallback proof generation failed (Blake2b transcript)")?;
+            t.finalize()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("fallback proof generation failed (Poseidon transcript)")?;
+            t.finalize()
+        },
+    };
 
     Ok(FallbackProofOutput {
         proof_bytes,

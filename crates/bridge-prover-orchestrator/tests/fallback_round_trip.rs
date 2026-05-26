@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 
 use bridge_prover_orchestrator::{
-    generate_fallback_proof, verify_fallback_proof, FallbackKeyManager,
+    generate_fallback_proof, generate_fallback_proof_with_transcript,
+    halo2_tvm_bundle::TranscriptKind, verify_fallback_proof, verify_fallback_proof_with_transcript,
+    FallbackKeyManager,
 };
 
 /// Where to cache SRS / VK / PK for this test run.
@@ -86,6 +88,77 @@ fn fallback_round_trip_10_signers() {
         proof.proof_bytes.len(),
         test_data.bk_set.len(),
         block_seq_no
+    );
+
+    // --- Poseidon transcript round-trip (R15 / M3) -----------------------
+    //
+    // Reuses the cached VK/PK so we do NOT pay another keygen pass. The
+    // transcript choice does not affect the verifying key — only how Fiat–
+    // Shamir challenges are derived from the (proof, instances) stream.
+    //
+    // Acceptance criteria for M3:
+    //   1. Poseidon proof verifies under the matching Poseidon verifier.
+    //   2. Mixing transcripts (prove Poseidon → verify Blake2b, or vice versa)
+    //      rejects — confirms the two paths are independent and the reader is
+    //      actually using the chosen hash.
+    //   3. Poseidon proof bytes differ from Blake2b proof bytes (otherwise we'd be
+    //      silently using the same transcript under the hood).
+
+    let proof_poseidon = generate_fallback_proof_with_transcript(
+        &km,
+        &test_data.attestation_bytes,
+        &attestation_2_bytes,
+        &test_data.bk_set,
+        last_seen,
+        TranscriptKind::Poseidon,
+    )
+    .expect("fallback proof generation (Poseidon) must succeed");
+
+    let instances_p = proof_poseidon.instances();
+    assert_eq!(
+        instances_p, instances,
+        "Poseidon transcript must produce identical public instances"
+    );
+
+    let ok_p = verify_fallback_proof_with_transcript(
+        &km,
+        &proof_poseidon.proof_bytes,
+        &instances_p,
+        TranscriptKind::Poseidon,
+    );
+    assert!(ok_p, "native Poseidon-transcript verification must succeed");
+
+    let mismatched_a = verify_fallback_proof_with_transcript(
+        &km,
+        &proof_poseidon.proof_bytes,
+        &instances_p,
+        TranscriptKind::Blake2b,
+    );
+    assert!(
+        !mismatched_a,
+        "Poseidon proof must NOT verify under Blake2b transcript"
+    );
+
+    let mismatched_b = verify_fallback_proof_with_transcript(
+        &km,
+        &proof.proof_bytes,
+        &instances,
+        TranscriptKind::Poseidon,
+    );
+    assert!(
+        !mismatched_b,
+        "Blake2b proof must NOT verify under Poseidon transcript"
+    );
+
+    assert_ne!(
+        proof.proof_bytes, proof_poseidon.proof_bytes,
+        "Blake2b and Poseidon transcripts must produce distinct proof byte streams"
+    );
+
+    println!(
+        "OK: Poseidon round-trip succeeded (proof = {} bytes, |Δ vs Blake2b| = {})",
+        proof_poseidon.proof_bytes.len(),
+        proof_poseidon.proof_bytes.len() as i64 - proof.proof_bytes.len() as i64
     );
 }
 

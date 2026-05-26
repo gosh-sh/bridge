@@ -5,7 +5,15 @@
 //! a single `kzg_bn254_20.srs` file is shared.
 //!
 //! On disk (under `params_dir`):
-//! - `kzg_bn254_{K}.srs` — produced by `halo2_base::utils::fs::gen_srs` (shared with primary)
+//! - `kzg_bn254_{K}.srs` — **Hermez Perpetual Powers of Tau (BN254, K=20 slice)** SRS,
+//!   loaded by `halo2_base::utils::fs::gen_srs` (shared with primary).
+//!   Provenance: `powersOfTau28_hez_final.ptau` → `han0110/halo2-kzg-srs`
+//!   `convert-from-snarkjs` → raw halo2 canonical format, validated via
+//!   `same_ratio` (`e(g[1], g2) == e(g[0], s_g2)`). SHA-256:
+//!   `80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608`.
+//!   If the cached file is missing, `gen_srs` falls back to a **test**
+//!   deterministic SRS (known trapdoor) — make sure the ceremony file is
+//!   present before generating production keys.
 //! - `fallback_vk.bin`
 //! - `fallback_pk.bin`
 //! - `fallback_config_params.json`

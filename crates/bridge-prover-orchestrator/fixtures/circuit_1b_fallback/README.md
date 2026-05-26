@@ -6,10 +6,27 @@ A real, end-to-end-verified set of operands for the AN-side
 
 Use this fixture to:
 - Smoke-test a fresh `ZKHALO2VERIFYWITHVK` deployment without re-running
-  the (~2–5 min on cached keys / ~30 min from scratch) prover.
+  the (~5 min on cached keys / ~20 min from scratch) prover.
 - Verify producer / consumer wire compatibility byte-for-byte.
 - Sanity-check a contract's `public_inputs_cell` assembly logic against
   the same Fr values the on-chain handler will see.
+
+## Trusted setup
+
+These artefacts are **production-grade**. The underlying KZG SRS is the
+[Hermez Perpetual Powers of Tau][ppot] ceremony output (BN254, K=20
+slice of `powersOfTau28_hez_final.ptau`), the same multi-party trusted
+setup used by snarkjs, iden3 and Polygon zkEVM. The `[s]·G2` point
+embedded in `tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`
+is sourced from the same ceremony, so verifier and prover agree on the
+KZG commitment scheme byte-for-byte.
+
+To rebuild these fixtures yourself, run
+`scripts/bootstrap_hermez_srs.sh` from the repo root to populate
+`crates/bridge-prover-orchestrator/params/kzg_bn254_20.srs`, then
+`EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-prover-orchestrator`.
+
+[ppot]: https://github.com/privacy-scaling-explorations/perpetualpowersoftau
 
 ## Provenance
 

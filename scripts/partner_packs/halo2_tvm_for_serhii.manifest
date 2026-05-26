@@ -1,4 +1,4 @@
-# `ZKHALO2VERIFYWITHVK` partner pack for Serhii (AN team) — v2 (2026-05-25)
+# `ZKHALO2VERIFYWITHVK` partner pack for Serhii (AN team) — v3 (2026-05-26)
 #
 # Regenerate with: `scripts/build_partner_pack.sh halo2_tvm_for_serhii`
 #
@@ -12,6 +12,9 @@
 #   green): https://github.com/tvmlabs/tvm-sdk/pull/243
 # - 12 integration tests + 9 VkBlob unit tests green on tvm-sdk
 # - Producer-side round-trip green on bridge-prover-orchestrator
+# - v3: All artefacts now use the **Hermez Perpetual Powers of Tau**
+#   production trusted setup (BN254, K=20 slice of
+#   `powersOfTau28_hez_final.ptau`). Test SRS retired.
 
 # Top-level reference docs (consumer-side / producer-side reference + opcode reference).
 docs/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
@@ -19,6 +22,9 @@ docs/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
 # Producer-side ref impl (the bytes you'll see on the wire are produced by this).
 crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs => 02_producer_halo2_tvm_bundle.rs
 crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs => 03_producer_round_trip_test.rs
+
+# Trusted setup bootstrap (idempotent; downloads Hermez ceremony + converts to halo2 raw).
+scripts/bootstrap_hermez_srs.sh => 04_bootstrap_hermez_srs.sh
 
 # Real Circuit 1B fallback fixture — drop-in ready for ZKHALO2VERIFYWITHVK.
 crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/README.md => fixtures/README.md
@@ -29,6 +35,47 @@ crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_vk.bin =
 crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_config_params.json => fixtures/fallback_config_params.json
 
 ---
+## TL;DR — what changed since v2 (2026-05-25)
+
+**Production trusted setup.** All fixtures now use the **Hermez
+Perpetual Powers of Tau** ceremony (BN254, K=20 slice of
+`powersOfTau28_hez_final.ptau`) — the same 80+-contributor public
+ceremony snarkjs, iden3 and Polygon zkEVM use.
+
+The `[s]·G2` point embedded in
+`tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES` is
+sourced from the same ceremony, so prover (`bridge-prover-orchestrator`)
+and verifier (the AN-side `ZKHALO2VERIFYWITHVK` handler) agree on the
+KZG commitment scheme byte-for-byte. `KZG_G0_BYTES` and `KZG_G2_BYTES`
+are curve generators (BN254 constants) and didn't change.
+
+To rebuild the SRS locally (≈25 min wall-clock — download + convert +
+`same_ratio` validation):
+
+```bash
+bash scripts/bootstrap_hermez_srs.sh
+```
+
+The script is idempotent (skips already-cached `.ptau` / matching SRS)
+and verifies the canonical halo2 SRS via SHA-256
+`80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608`.
+
+Then re-keygen + reprove if you want to regenerate the fixtures:
+
+```bash
+rm -f crates/bridge-prover-orchestrator/params/{fallback_pk,fallback_vk,fallback_config_params}.{bin,json}
+cd crates/bridge-prover-orchestrator
+EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback \
+  cargo test --release --test halo2_tvm_bundle_round_trip -- --nocapture
+```
+
+Wall-clock: ~3.5 min keygen + ~14 min prove. The new VK
+(`fallback_vk.bin`, 6 154 B) is structurally identical to the old one
+(same circuit, same `BaseCircuitParams`) but its commitments are
+evaluated against the ceremony's `[s]`, so old `fallback_proof.bin`
+WILL NOT verify against new `KZG_S_G2_BYTES` — the whole bundle
+(`vk_blob` + `public_inputs` + `proof`) regenerates atomically.
+
 ## TL;DR — what changed since v1 (2026-05-22)
 
 `ZKHALO2VERIFYWITHVK` now takes **three stack cells**, not one
@@ -136,6 +183,12 @@ cargo test -p tvm_vm --lib zk_halo2_with_vk_bundle     # 9 VkBlob unit tests
 - **Q-TRANS-1** — would you prefer Keccak transcript as an alternate
   flavour (reserved as `transcript_kind = 0x01`)? Default stays
   Blake2b; switching is a one-byte change in the `VkBlob` header.
+
+## Closed since v2
+
+- **Trusted setup** — resolved in v3. Test SRS retired; all fixtures
+  + embedded `KZG_S_G2_BYTES` now sourced from Hermez Perpetual Powers
+  of Tau (production-grade BN254 ceremony, 80+ contributions).
 
 ## Cross-references
 

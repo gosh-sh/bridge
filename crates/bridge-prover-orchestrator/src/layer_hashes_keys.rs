@@ -14,29 +14,31 @@
 //! - `layer_hashes_pk.bin`
 //! - `layer_hashes_config_params.json`
 
-use std::io::{BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::{
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
-    SerdeFormat,
-};
-use halo2_base::utils::fs::gen_srs;
-use historical_layer_hashes_movement_checker_circuit::circuit::LayerHashesMovementCheckerCircuit;
-use historical_layer_hashes_movement_checker_circuit::test_helpers::{
-    K as LH_K, LOOKUP_BITS as LH_LOOKUP_BITS, NUM_UNUSABLE_ROWS as LH_NUM_UNUSABLE_ROWS,
+use gosh_dense_balanced_tree::DenseChainLink;
+use halo2_base::{
+    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+        SerdeFormat,
+    },
+    utils::fs::gen_srs,
 };
 use historical_layer_hashes_movement_checker_circuit::{
+    circuit::LayerHashesMovementCheckerCircuit,
+    test_helpers::{
+        K as LH_K, LOOKUP_BITS as LH_LOOKUP_BITS, NUM_UNUSABLE_ROWS as LH_NUM_UNUSABLE_ROWS,
+    },
     LAYER_PREIMAGE_SIZE, NUM_MERKLE_SIBLINGS,
 };
 use tracing::info;
-
-use gosh_dense_balanced_tree::DenseChainLink;
 
 const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
 const PREFIX: &str = "layer_hashes";
@@ -154,7 +156,9 @@ impl LayerHashesKeyManager {
         self.pk.as_ref().expect("layer-hashes PK not loaded")
     }
     pub fn config(&self) -> &BaseCircuitParams {
-        self.config.as_ref().expect("layer-hashes config not loaded")
+        self.config
+            .as_ref()
+            .expect("layer-hashes config not loaded")
     }
 
     fn vk_path(&self) -> PathBuf {

@@ -46,18 +46,15 @@ fn layer_hashes_round_trip_synthetic() {
 
     // Real test input: minimal (num_layers=1, num_chain_steps=1).
     let input_data = build_synthetic_layer_hashes_input(1, 1);
-    let proof = generate_layer_hashes_proof(
-        &km,
-        LayerHashesProofInput {
-            layer_hashes_preimage: input_data.layer_hashes_preimage,
-            merkle_siblings: input_data.merkle_siblings,
-            prev_max_level_layer_hash: input_data.prev_max_level_layer_hash,
-            num_prev_chain_steps: input_data.num_prev_chain_steps,
-            prev_chain_proofs: &input_data.prev_chain_proofs,
-            bk_set_poseidon_hash: input_data.bk_set_poseidon_hash,
-            expected_instances: input_data.expected_instances,
-        },
-    )
+    let proof = generate_layer_hashes_proof(&km, LayerHashesProofInput {
+        layer_hashes_preimage: input_data.layer_hashes_preimage,
+        merkle_siblings: input_data.merkle_siblings,
+        prev_max_level_layer_hash: input_data.prev_max_level_layer_hash,
+        num_prev_chain_steps: input_data.num_prev_chain_steps,
+        prev_chain_proofs: &input_data.prev_chain_proofs,
+        bk_set_poseidon_hash: input_data.bk_set_poseidon_hash,
+        expected_instances: input_data.expected_instances,
+    })
     .expect("layer-hashes proof generation must succeed");
 
     assert!(!proof.proof_bytes.is_empty(), "proof must be non-empty");

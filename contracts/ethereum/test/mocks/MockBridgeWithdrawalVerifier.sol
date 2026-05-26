@@ -40,7 +40,12 @@ contract MockBridgeWithdrawalVerifier is IBridgeWithdrawalVerifier {
     function verifyWithdrawal(
         bytes calldata, /* proof */
         WithdrawalPublicInputs calldata pub
-    ) external view override returns (bool) {
+    )
+        external
+        view
+        override
+        returns (bool)
+    {
         if (!shouldAccept) return false;
 
         if (useStrictPub) {

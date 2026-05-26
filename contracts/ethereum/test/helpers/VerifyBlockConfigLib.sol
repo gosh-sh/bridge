@@ -52,9 +52,7 @@ library VerifyBlockConfigLib {
         returns (AckiNackiBridge.BridgeWithdrawConfig memory)
     {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
-            dappFr: 0,
-            accFr: 0
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)), dappFr: 0, accFr: 0
         });
     }
 
@@ -68,9 +66,7 @@ library VerifyBlockConfigLib {
         returns (AckiNackiBridge.BridgeWithdrawConfig memory)
     {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: verifier,
-            dappFr: dappFr,
-            accFr: accFr
+            bridgeWithdrawalVerifier: verifier, dappFr: dappFr, accFr: accFr
         });
     }
 }

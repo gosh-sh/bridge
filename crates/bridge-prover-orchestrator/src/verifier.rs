@@ -1,7 +1,8 @@
 //! Circuit 1B native Halo2 SHPLONK verification (off-chain).
 //!
-//! Same transcript and strategy as `bridge_prover_lib::verifier::verify_primary_proof`,
-//! just keyed by [`FallbackKeyManager`].
+//! Same transcript and strategy as
+//! `bridge_prover_lib::verifier::verify_primary_proof`, just keyed by
+//! [`FallbackKeyManager`].
 
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
@@ -19,8 +20,9 @@ use crate::keys::FallbackKeyManager;
 
 /// Verify a Circuit 1B (fallback) proof against `instances`.
 ///
-/// `instances` must be `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`
-/// in that order — same layout the prover emits via `FallbackProofOutput::instances`.
+/// `instances` must be `[block_id, bk_set_poseidon, block_seq_no,
+/// last_seen_block_seqno]` in that order — same layout the prover emits via
+/// `FallbackProofOutput::instances`.
 pub fn verify_fallback_proof(
     key_manager: &FallbackKeyManager,
     proof_bytes: &[u8],

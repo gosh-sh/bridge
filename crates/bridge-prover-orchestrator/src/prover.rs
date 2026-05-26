@@ -1,11 +1,14 @@
 //! Circuit 1B (Fallback attestation) proof generation.
 //!
-//! Mirrors `bridge_prover_lib::prover::generate_primary_proof` but takes two attestations
-//! (Primary-typed + Fallback-typed) and uses `FallbackAttestationBlsCheckerCircuit`.
+//! Mirrors `bridge_prover_lib::prover::generate_primary_proof` but takes two
+//! attestations (Primary-typed + Fallback-typed) and uses
+//! `FallbackAttestationBlsCheckerCircuit`.
 
 use std::collections::HashMap;
 
 use anyhow::Context;
+use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
+use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
     plonk::create_proof,
@@ -15,13 +18,9 @@ use halo2_base::halo2_proofs::{
 use rand::rngs::OsRng;
 use tracing::info;
 
-use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
-
-use crate::keys::FallbackKeyManager;
 use crate::{
-    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers,
-    circuit_num_limbs, circuit_num_unusable_rows,
+    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
+    circuit_num_unusable_rows, keys::FallbackKeyManager,
 };
 
 /// Output of a fallback proof generation.
@@ -55,12 +54,16 @@ impl FallbackProofOutput {
 /// Generate a Circuit 1B (fallback attestation) proof.
 ///
 /// # Arguments
-/// - `key_manager` — VK/PK/SRS for Circuit 1B (must have run `ensure_keys` first).
-/// - `attestation_primary_bytes` — serialized Envelope<AttestationData> with target_type = Primary.
-/// - `attestation_fallback_bytes` — serialized Envelope<AttestationData> with target_type = Fallback.
-///   Both attestations MUST reference the same `block_id` (the circuit constrains this byte-by-byte).
+/// - `key_manager` — VK/PK/SRS for Circuit 1B (must have run `ensure_keys`
+///   first).
+/// - `attestation_primary_bytes` — serialized Envelope<AttestationData> with
+///   target_type = Primary.
+/// - `attestation_fallback_bytes` — serialized Envelope<AttestationData> with
+///   target_type = Fallback. Both attestations MUST reference the same
+///   `block_id` (the circuit constrains this byte-by-byte).
 /// - `bk_set` — current BK set: signer_index → 48-byte compressed BLS pubkey.
-/// - `last_seen_block_seqno` — must be < block_seq_no extracted from the primary attestation.
+/// - `last_seen_block_seqno` — must be < block_seq_no extracted from the
+///   primary attestation.
 pub fn generate_fallback_proof(
     key_manager: &FallbackKeyManager,
     attestation_primary_bytes: &[u8],
@@ -95,7 +98,12 @@ pub fn generate_fallback_proof(
     );
     circuit.override_base_circuit_params(key_manager.config().clone());
 
-    let instances = vec![block_id_fr, bk_set_commitment_fr, block_seq_no_fr, last_seen_fr];
+    let instances = vec![
+        block_id_fr,
+        bk_set_commitment_fr,
+        block_seq_no_fr,
+        last_seen_fr,
+    ];
     let instance_refs: &[&[Fr]] = &[&instances];
     let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
     create_proof::<
@@ -125,9 +133,9 @@ pub fn generate_fallback_proof(
     })
 }
 
-/// Extract `block_id` as Fr from raw attestation bytes (offset 48..80, since the
-/// partner's 2026-05-10 rename of `env_hash_cells → block_id_cells`). Mirrors
-/// `bridge_prover_lib::prover::compute_block_id_fr` byte-for-byte.
+/// Extract `block_id` as Fr from raw attestation bytes (offset 48..80, since
+/// the partner's 2026-05-10 rename of `env_hash_cells → block_id_cells`).
+/// Mirrors `bridge_prover_lib::prover::compute_block_id_fr` byte-for-byte.
 fn compute_block_id_fr(attestation_bytes: &[u8]) -> Fr {
     const BLOCK_ID_REL_OFFSET: usize = 48;
 

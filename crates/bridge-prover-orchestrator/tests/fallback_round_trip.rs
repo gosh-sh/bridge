@@ -1,11 +1,13 @@
 //! End-to-end round-trip test for Circuit 1B (Fallback attestation):
 //! synthetic test data → prove → verify → check public instances.
 //!
-//! This is the Phase 1.A acceptance criterion. Runs the full pipeline using the partner's
+//! This is the Phase 1.A acceptance criterion. Runs the full pipeline using the
+//! partner's
 //! `bridge_test_data_gen::generator::generate_test_data_fallback_all_sign(N)`.
 //!
-//! Heavy: first run does keygen (~2-5 min) and writes a multi-GB PK to disk under
-//! `crates/bridge-prover-orchestrator/params/`. Subsequent runs reuse the cache.
+//! Heavy: first run does keygen (~2-5 min) and writes a multi-GB PK to disk
+//! under `crates/bridge-prover-orchestrator/params/`. Subsequent runs reuse the
+//! cache.
 
 use std::path::PathBuf;
 
@@ -39,9 +41,10 @@ fn fallback_round_trip_10_signers() {
     let mut km = FallbackKeyManager::new(&params_dir());
     km.ensure_keys(&test_data.bk_set).unwrap();
 
-    // Pick last_seen = block_seq_no - 1 (must be strictly less than the value embedded
-    // in the primary attestation). The synthetic generator produces a known seq_no per
-    // call; we re-derive it by parsing the primary attestation here.
+    // Pick last_seen = block_seq_no - 1 (must be strictly less than the value
+    // embedded in the primary attestation). The synthetic generator produces a
+    // known seq_no per call; we re-derive it by parsing the primary attestation
+    // here.
     let block_seq_no = extract_block_seq_no_from_primary(&test_data.attestation_bytes);
     let last_seen = block_seq_no
         .checked_sub(1)
@@ -78,15 +81,16 @@ fn fallback_round_trip_10_signers() {
     assert!(!ok_wrong, "wrong instances must NOT verify");
 
     println!(
-        "OK: fallback round-trip succeeded (proof = {} bytes, bk_set = {} signers, block_seq_no = {})",
+        "OK: fallback round-trip succeeded (proof = {} bytes, bk_set = {} signers, block_seq_no = \
+         {})",
         proof.proof_bytes.len(),
         test_data.bk_set.len(),
         block_seq_no
     );
 }
 
-/// Mirror of the private helper in `prover.rs` so the test can derive the seq_no the
-/// generator embedded.
+/// Mirror of the private helper in `prover.rs` so the test can derive the
+/// seq_no the generator embedded.
 fn extract_block_seq_no_from_primary(attestation_bytes: &[u8]) -> u32 {
     use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
     const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;

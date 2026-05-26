@@ -10,26 +10,26 @@
 //!   4. Write three artefacts side by side:
 //!        - `<out_dir>/proof.bin`         — raw Halo2 SHPLONK proof bytes.
 //!        - `<out_dir>/instances.bin`     — flat 32-byte LE Fr concatenation
-//!                                          (14 elements).
+//!          (14 elements).
 //!        - `<out_dir>/halo2_proof.json`  — gnark-wrapper-friendly JSON.
 
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::Parser;
-use tracing::info;
-
 use bridge_prover_orchestrator::{
     build_synthetic_layer_hashes_input, generate_layer_hashes_proof,
     layer_hashes_keys::LayerHashesReferenceWitness,
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
     LayerHashesKeyManager, LayerHashesProofInput, LAYER_HASHES_K,
 };
+use clap::Parser;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "export-layer-hashes-proof",
-    about = "Generate a Circuit 2 (Layer Hashes Movement) proof and write proof.bin + instances.bin + halo2_proof.json"
+    about = "Generate a Circuit 2 (Layer Hashes Movement) proof and write proof.bin + \
+             instances.bin + halo2_proof.json"
 )]
 struct Args {
     #[arg(long, default_value_t = default_params_dir())]
@@ -39,7 +39,8 @@ struct Args {
     /// Number of active layer hashes (1..=10).
     #[arg(long, default_value_t = 1)]
     num_layers: usize,
-    /// Number of active chain steps (≥1, num_chain_steps + 1 ≤ MAX_CHAIN_LEN=11).
+    /// Number of active chain steps (≥1, num_chain_steps + 1 ≤
+    /// MAX_CHAIN_LEN=11).
     #[arg(long, default_value_t = 1)]
     num_chain_steps: usize,
 }
@@ -72,7 +73,9 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to create out_dir {:?}", out_dir))?;
 
     info!(
-        ?params_dir, ?out_dir, num_layers = args.num_layers,
+        ?params_dir,
+        ?out_dir,
+        num_layers = args.num_layers,
         num_chain_steps = args.num_chain_steps,
         "exporting layer-hashes proof"
     );
@@ -94,18 +97,15 @@ fn main() -> anyhow::Result<()> {
 
     let input_data = build_synthetic_layer_hashes_input(args.num_layers, args.num_chain_steps);
 
-    let proof = generate_layer_hashes_proof(
-        &km,
-        LayerHashesProofInput {
-            layer_hashes_preimage: input_data.layer_hashes_preimage,
-            merkle_siblings: input_data.merkle_siblings,
-            prev_max_level_layer_hash: input_data.prev_max_level_layer_hash,
-            num_prev_chain_steps: input_data.num_prev_chain_steps,
-            prev_chain_proofs: &input_data.prev_chain_proofs,
-            bk_set_poseidon_hash: input_data.bk_set_poseidon_hash,
-            expected_instances: input_data.expected_instances,
-        },
-    )
+    let proof = generate_layer_hashes_proof(&km, LayerHashesProofInput {
+        layer_hashes_preimage: input_data.layer_hashes_preimage,
+        merkle_siblings: input_data.merkle_siblings,
+        prev_max_level_layer_hash: input_data.prev_max_level_layer_hash,
+        num_prev_chain_steps: input_data.num_prev_chain_steps,
+        prev_chain_proofs: &input_data.prev_chain_proofs,
+        bk_set_poseidon_hash: input_data.bk_set_poseidon_hash,
+        expected_instances: input_data.expected_instances,
+    })
     .context("layer-hashes proof generation failed")?;
 
     let instances = proof.instances();
@@ -117,8 +117,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&proof_bin_path, &proof.proof_bytes)
         .with_context(|| format!("failed to write {:?}", proof_bin_path))?;
     save_instances_binary(&instances, &instances_bin_path)?;
-    let proof_data =
-        build_proof_data(proof.proof_bytes.clone(), &instances, LAYER_HASHES_K);
+    let proof_data = build_proof_data(proof.proof_bytes.clone(), &instances, LAYER_HASHES_K);
     save_proof_data_json(&proof_data, &json_path)?;
 
     info!(
@@ -134,7 +133,10 @@ fn main() -> anyhow::Result<()> {
         LAYER_HASHES_K
     );
     println!("    proof.bin            : {}", proof_bin_path.display());
-    println!("    instances.bin        : {}", instances_bin_path.display());
+    println!(
+        "    instances.bin        : {}",
+        instances_bin_path.display()
+    );
     println!("    halo2_proof.json     : {}", json_path.display());
     Ok(())
 }

@@ -25,16 +25,15 @@
 //!
 //! The producer side builds:
 //!
-//! 1. **`VkBlob` payload** — magic-tagged, versioned, self-describing
-//!    (carries `BaseCircuitParams` JSON inline so the consumer doesn't
-//!    need any out-of-band schema). One blob per circuit, expected to
-//!    be deployed once into the verifier contract's `c4`/storage.
-//! 2. **`public_inputs` payload** — bare `N × 32` LE `Fr::to_repr()`,
-//!    no header. The contract assembles this O(1) on the hot path
-//!    from the call arguments.
-//! 3. **`proof` payload** — bare SHPLONK proof bytes (Blake2b
-//!    transcript), no header. Comes straight from
-//!    `Blake2bWrite::finalize()`.
+//! 1. **`VkBlob` payload** — magic-tagged, versioned, self-describing (carries
+//!    `BaseCircuitParams` JSON inline so the consumer doesn't need any
+//!    out-of-band schema). One blob per circuit, expected to be deployed once
+//!    into the verifier contract's `c4`/storage.
+//! 2. **`public_inputs` payload** — bare `N × 32` LE `Fr::to_repr()`, no
+//!    header. The contract assembles this O(1) on the hot path from the call
+//!    arguments.
+//! 3. **`proof` payload** — bare SHPLONK proof bytes (Blake2b transcript), no
+//!    header. Comes straight from `Blake2bWrite::finalize()`.
 //!
 //! ## `VkBlob` byte layout
 //!
@@ -72,16 +71,15 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use halo2_base::{
-    gates::circuit::{BaseCircuitParams, builder::BaseCircuitBuilder},
+    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
     halo2_proofs::{
-        SerdeFormat,
         halo2curves::{
             bn256::{Bn256, Fr, G1Affine},
             ff::PrimeField,
         },
-        plonk::{VerifyingKey, verify_proof},
+        plonk::{verify_proof, VerifyingKey},
         poly::{
             commitment::ParamsProver,
             kzg::{
@@ -91,6 +89,7 @@ use halo2_base::{
             },
         },
         transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
+        SerdeFormat,
     },
 };
 
@@ -141,10 +140,7 @@ pub struct VkBlob {
 impl VkBlob {
     /// Build a `VkBlob` from in-memory artifacts produced by the bridge's
     /// existing prover machinery.
-    pub fn from_native(
-        config: &BaseCircuitParams,
-        vk: &VerifyingKey<G1Affine>,
-    ) -> Result<Self> {
+    pub fn from_native(config: &BaseCircuitParams, vk: &VerifyingKey<G1Affine>) -> Result<Self> {
         let mut vk_bytes = Vec::new();
         vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
             .context("serialising VerifyingKey<G1Affine> with SerdeFormat::RawBytes")?;
@@ -272,8 +268,7 @@ impl Halo2TvmOperands {
 
         let verifier_params = srs.verifier_params();
         let strategy = SingleStrategy::new(srs);
-        let mut transcript =
-            Blake2bRead::<_, _, Challenge255<_>>::init(self.proof.as_slice());
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(self.proof.as_slice());
         Ok(verify_proof::<
             KZGCommitmentScheme<Bn256>,
             VerifierSHPLONK<'_, Bn256>,

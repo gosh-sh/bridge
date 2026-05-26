@@ -1,9 +1,11 @@
 //! Phase 3 — Export a Phase 1.A fallback proof + instances to disk in the
-//! formats consumed by the gnark Groth16 wrapper (`gnark-wrappers/circuit-1b/`).
+//! formats consumed by the gnark Groth16 wrapper
+//! (`gnark-wrappers/circuit-1b/`).
 //!
 //! Workflow:
 //!   1. Load the cached `FallbackKeyManager` (SRS + VK + PK).
-//!   2. Generate synthetic test data (`bridge_test_data_gen::generate_test_data_fallback_all_sign(N)`).
+//!   2. Generate synthetic test data
+//!      (`bridge_test_data_gen::generate_test_data_fallback_all_sign(N)`).
 //!   3. Produce a fallback proof via `generate_fallback_proof`.
 //!   4. Write three artefacts side by side:
 //!        - `<out_dir>/proof.bin`         — raw Halo2 SHPLONK proof bytes.
@@ -26,19 +28,19 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
+use bridge_prover_orchestrator::{
+    circuit_k, generate_fallback_proof,
+    proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
+    FallbackKeyManager,
+};
 use clap::Parser;
 use tracing::info;
-
-use bridge_prover_orchestrator::{
-    circuit_k,
-    proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
-    FallbackKeyManager, generate_fallback_proof,
-};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "export-fallback-proof",
-    about = "Generate a Circuit 1B (fallback) proof and write proof.bin + instances.bin + halo2_proof.json"
+    about = "Generate a Circuit 1B (fallback) proof and write proof.bin + instances.bin + \
+             halo2_proof.json"
 )]
 struct Args {
     /// Where the FallbackKeyManager looks for SRS / VK / PK / config.
@@ -82,14 +84,18 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create out_dir {:?}", out_dir))?;
 
-    info!(?params_dir, ?out_dir, signers = args.signers, "exporting fallback proof");
+    info!(
+        ?params_dir,
+        ?out_dir,
+        signers = args.signers,
+        "exporting fallback proof"
+    );
 
     let mut km = FallbackKeyManager::new(&params_dir);
 
-    let test_data = bridge_test_data_gen::generator::generate_test_data_fallback_all_sign(
-        args.signers,
-    )
-    .context("failed to generate synthetic fallback test data")?;
+    let test_data =
+        bridge_test_data_gen::generator::generate_test_data_fallback_all_sign(args.signers)
+            .context("failed to generate synthetic fallback test data")?;
     let attestation_2_bytes = test_data
         .attestation_2_bytes
         .clone()
@@ -131,9 +137,17 @@ fn main() -> anyhow::Result<()> {
         instances = instances.len(),
         "wrote fallback proof artefacts"
     );
-    println!("OK: wrote {} ({} bytes proof, {} public inputs)", out_dir.display(), proof.proof_bytes.len(), instances.len());
+    println!(
+        "OK: wrote {} ({} bytes proof, {} public inputs)",
+        out_dir.display(),
+        proof.proof_bytes.len(),
+        instances.len()
+    );
     println!("    proof.bin            : {}", proof_bin_path.display());
-    println!("    instances.bin        : {}", instances_bin_path.display());
+    println!(
+        "    instances.bin        : {}",
+        instances_bin_path.display()
+    );
     println!("    halo2_proof.json     : {}", json_path.display());
     Ok(())
 }

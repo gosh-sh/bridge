@@ -8,12 +8,12 @@
 //!  - **Circuit 2** (Layer hashes movement, K=17) — 14 public inputs.
 //!
 //! All three proofs share `block_id` (public input 0) and `bk_set_poseidon`
-//! (public input 1) by construction, so the on-chain `AckiNackiBridge.verifyBlock`
-//! cross-circuit consistency checks pass for *either* attestation finality type
-//! (Primary or Fallback) against the same Circuit 2 layer-hashes proof. This
-//! is the keystone fixture for Foundry's `BlockIdMismatch` / `BkSetCommitmentMismatch`
-//! revert-path tests and answers Q4 from the 2026-05-18 Alina review pack
-//! ("add Fallback to bound_scenario").
+//! (public input 1) by construction, so the on-chain
+//! `AckiNackiBridge.verifyBlock` cross-circuit consistency checks pass for
+//! *either* attestation finality type (Primary or Fallback) against the same
+//! Circuit 2 layer-hashes proof. This is the keystone fixture for Foundry's
+//! `BlockIdMismatch` / `BkSetCommitmentMismatch` revert-path tests and answers
+//! Q4 from the 2026-05-18 Alina review pack ("add Fallback to bound_scenario").
 //!
 //! Output layout:
 //! ```text
@@ -36,12 +36,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_prover_lib::keys::{circuit_k as primary_k, KeyManager as PrimaryKeyManager};
-use bridge_prover_lib::prover::generate_primary_proof;
-use clap::Parser;
-use serde::Serialize;
-use tracing::info;
-
+use bridge_prover_lib::{
+    keys::{circuit_k as primary_k, KeyManager as PrimaryKeyManager},
+    prover::generate_primary_proof,
+};
 use bridge_prover_orchestrator::{
     build_bound_test_data, compose_layer_hashes_input, format_field_element,
     generate_fallback_proof, generate_layer_hashes_proof,
@@ -49,11 +47,15 @@ use bridge_prover_orchestrator::{
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
     BoundBlockTestData, FallbackKeyManager, Fr, LayerHashesKeyManager, LAYER_HASHES_K,
 };
+use clap::Parser;
+use serde::Serialize;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "export-bound-block-proofs",
-    about = "Generate bound Circuit 1A (Primary) + Circuit 2 (Layer Hashes) proofs sharing a block_id and bk_set_poseidon"
+    about = "Generate bound Circuit 1A (Primary) + Circuit 2 (Layer Hashes) proofs sharing a \
+             block_id and bk_set_poseidon"
 )]
 struct Args {
     #[arg(long, default_value_t = default_params_dir())]
@@ -66,7 +68,8 @@ struct Args {
     /// Number of active layer slots (1..=10).
     #[arg(long, default_value_t = 5)]
     num_layers: usize,
-    /// Number of active prev-chain steps (>= 1, num_chain_steps + 1 <= MAX_CHAIN_LEN = 11).
+    /// Number of active prev-chain steps (>= 1, num_chain_steps + 1 <=
+    /// MAX_CHAIN_LEN = 11).
     #[arg(long, default_value_t = 3)]
     num_chain_steps: usize,
 }
@@ -118,27 +121,26 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to create {:?}", primary_dir))?;
     std::fs::create_dir_all(&fallback_dir)
         .with_context(|| format!("failed to create {:?}", fallback_dir))?;
-    std::fs::create_dir_all(&layer_dir).with_context(|| format!("failed to create {:?}", layer_dir))?;
+    std::fs::create_dir_all(&layer_dir)
+        .with_context(|| format!("failed to create {:?}", layer_dir))?;
 
     info!(
-        ?params_dir, ?out_dir, signers = args.signers,
-        num_layers = args.num_layers, num_chain_steps = args.num_chain_steps,
+        ?params_dir,
+        ?out_dir,
+        signers = args.signers,
+        num_layers = args.num_layers,
+        num_chain_steps = args.num_chain_steps,
         "exporting bound block proofs (Circuit 1A + 1B + Circuit 2)"
     );
 
     // ------------------------------------------------------------------
-    // 1. Bound scenario. `with_fallback = true` adds a Fallback envelope
-    //    signed over the same `block_id` as the primary attestation, so
-    //    Circuit 1B can be proved against the same scenario and answer
-    //    Q4 in the 2026-05-18 Alina review pack.
+    // 1. Bound scenario. `with_fallback = true` adds a Fallback envelope signed
+    //    over the same `block_id` as the primary attestation, so Circuit 1B can be
+    //    proved against the same scenario and answer Q4 in the 2026-05-18 Alina
+    //    review pack.
     // ------------------------------------------------------------------
-    let bound = build_bound_test_data(
-        args.signers,
-        args.num_layers,
-        args.num_chain_steps,
-        true,
-    )
-    .context("building bound test data failed")?;
+    let bound = build_bound_test_data(args.signers, args.num_layers, args.num_chain_steps, true)
+        .context("building bound test data failed")?;
 
     let attestation_instances = bound.attestation_instances();
     // 1A and 1B share the same public-instance layout; reuse the vector.
@@ -216,9 +218,15 @@ fn main() -> anyhow::Result<()> {
 
     // Cross-circuit sanity: 1B's instances must match 1A's byte-for-byte.
     debug_assert_eq!(fallback_proof.block_id_fr, bound.block_id_fr);
-    debug_assert_eq!(fallback_proof.bk_set_commitment_fr, bound.bk_set_poseidon_fr);
+    debug_assert_eq!(
+        fallback_proof.bk_set_commitment_fr,
+        bound.bk_set_poseidon_fr
+    );
     debug_assert_eq!(fallback_proof.block_seq_no, bound.block_seq_no);
-    debug_assert_eq!(fallback_proof.last_seen_block_seqno, bound.last_seen_block_seqno);
+    debug_assert_eq!(
+        fallback_proof.last_seen_block_seqno,
+        bound.last_seen_block_seqno
+    );
 
     write_proof_artefacts(
         &fallback_dir,
@@ -249,7 +257,12 @@ fn main() -> anyhow::Result<()> {
     let layer_proof = generate_layer_hashes_proof(&layer_km, compose_layer_hashes_input(&bound))
         .context("generate_layer_hashes_proof failed")?;
 
-    write_proof_artefacts(&layer_dir, &layer_proof.proof_bytes, &layer_instances, LAYER_HASHES_K)?;
+    write_proof_artefacts(
+        &layer_dir,
+        &layer_proof.proof_bytes,
+        &layer_instances,
+        LAYER_HASHES_K,
+    )?;
     info!(
         bytes = layer_proof.proof_bytes.len(),
         "wrote Circuit 2 proof"
@@ -282,11 +295,23 @@ fn main() -> anyhow::Result<()> {
 
     println!("OK: bound scenario written");
     println!("    block_id (dec)        = {}", scenario.block_id_decimal);
-    println!("    bk_set_poseidon (dec) = {}", scenario.bk_set_poseidon_decimal);
+    println!(
+        "    bk_set_poseidon (dec) = {}",
+        scenario.bk_set_poseidon_decimal
+    );
     println!("    block_seq_no          = {}", scenario.block_seq_no);
-    println!("    primary  proof bytes  = {}", scenario.primary_proof_bytes);
-    println!("    fallback proof bytes  = {}", scenario.fallback_proof_bytes);
-    println!("    layer-hashes proof bytes = {}", scenario.layer_hashes_proof_bytes);
+    println!(
+        "    primary  proof bytes  = {}",
+        scenario.primary_proof_bytes
+    );
+    println!(
+        "    fallback proof bytes  = {}",
+        scenario.fallback_proof_bytes
+    );
+    println!(
+        "    layer-hashes proof bytes = {}",
+        scenario.layer_hashes_proof_bytes
+    );
     println!("    primary  artefacts -> {}", primary_dir.display());
     println!("    fallback artefacts -> {}", fallback_dir.display());
     println!("    layer-h. artefacts -> {}", layer_dir.display());

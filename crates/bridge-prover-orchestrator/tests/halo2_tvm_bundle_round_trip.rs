@@ -8,18 +8,16 @@
 //!
 //! 1. **Producer side**: generate a real Halo2 SHPLONK proof (Blake2b
 //!    transcript) for Circuit 1B (Fallback attestation).
-//! 2. **Pack as three operands**: build a [`VkBlob`] for the `vk_cell`,
-//!    encode public inputs as raw `N × 32` LE `Fr`, keep the proof
-//!    bytes raw.
-//! 3. **Round-trip**: serialise the `VkBlob` to bytes, parse it back
-//!    via [`VkBlob::read`], decode public inputs via
+//! 2. **Pack as three operands**: build a [`VkBlob`] for the `vk_cell`, encode
+//!    public inputs as raw `N × 32` LE `Fr`, keep the proof bytes raw.
+//! 3. **Round-trip**: serialise the `VkBlob` to bytes, parse it back via
+//!    [`VkBlob::read`], decode public inputs via
 //!    [`bridge_prover_orchestrator::decode_instances`].
-//! 4. **Verify**: reassemble `vk` + `instances` and run
-//!    `verify_proof::<KZG, VerifierSHPLONK, Blake2bRead, SingleStrategy>`
-//!    using the freshly-loaded `ParamsKZG<Bn256>` (chain-wide shared
-//!    SRS, Q-WIRE-2 in the design memo).
-//! 5. **Negative cases**: a flipped proof byte and a wrong public
-//!    input must both make the operand-side verify return `Ok(false)`.
+//! 4. **Verify**: reassemble `vk` + `instances` and run `verify_proof::<KZG,
+//!    VerifierSHPLONK, Blake2bRead, SingleStrategy>` using the freshly-loaded
+//!    `ParamsKZG<Bn256>` (chain-wide shared SRS, Q-WIRE-2 in the design memo).
+//! 5. **Negative cases**: a flipped proof byte and a wrong public input must
+//!    both make the operand-side verify return `Ok(false)`.
 //!
 //! If all assertions hold, every byte boundary the AN-side opcode
 //! would touch is exercised on the producer side and we have a
@@ -34,7 +32,7 @@
 use std::path::PathBuf;
 
 use bridge_prover_orchestrator::{
-    FallbackKeyManager, Fr, Halo2TvmOperands, TranscriptKind, VkBlob, generate_fallback_proof,
+    generate_fallback_proof, FallbackKeyManager, Fr, Halo2TvmOperands, TranscriptKind, VkBlob,
 };
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
@@ -90,18 +88,20 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
     assert_eq!(operands.proof, proof.proof_bytes);
 
     // ---- Round-trip the VkBlob via its serialised bytes. ----
-    let blob = VkBlob::read(operands.vk_blob.as_slice())
-        .expect("VkBlob deserialisation must succeed");
+    let blob =
+        VkBlob::read(operands.vk_blob.as_slice()).expect("VkBlob deserialisation must succeed");
     assert_eq!(blob.transcript, TranscriptKind::Blake2b);
     // Re-emit the VkBlob and confirm byte-stable round-trip.
     let reemitted = blob.to_bytes().unwrap();
-    assert_eq!(reemitted, operands.vk_blob, "VkBlob round-trip must be byte-stable");
+    assert_eq!(
+        reemitted, operands.vk_blob,
+        "VkBlob round-trip must be byte-stable"
+    );
 
     // Decoded public inputs must match the originals bit-for-bit
     // (strict 32-byte LE).
-    let recovered_instances =
-        bridge_prover_orchestrator::decode_instances(&operands.public_inputs)
-            .expect("public inputs must decode");
+    let recovered_instances = bridge_prover_orchestrator::decode_instances(&operands.public_inputs)
+        .expect("public inputs must decode");
     assert_eq!(recovered_instances, instances);
 
     // ---- Verify from the operands, using only their byte payloads. ----
@@ -155,8 +155,11 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).expect("creating fixture export dir");
         std::fs::write(dir.join("fallback_vk_blob.bin"), &operands.vk_blob).unwrap();
-        std::fs::write(dir.join("fallback_public_inputs.bin"), &operands.public_inputs)
-            .unwrap();
+        std::fs::write(
+            dir.join("fallback_public_inputs.bin"),
+            &operands.public_inputs,
+        )
+        .unwrap();
         std::fs::write(dir.join("fallback_proof.bin"), &operands.proof).unwrap();
         println!("Exported fallback fixture to {}", dir.display());
     }

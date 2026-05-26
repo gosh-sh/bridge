@@ -10,8 +10,7 @@ use std::{
     path::Path,
 };
 
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
+use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, ff::PrimeField};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

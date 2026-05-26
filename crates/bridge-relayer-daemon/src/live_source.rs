@@ -4,19 +4,18 @@
 //! The live source is intentionally split into two narrow traits so a
 //! deployment can swap either side without rebuilding the relayer:
 //!
-//! - [`RawBlockProvider`]   — "give me the witness materials for block seq N
-//!                            (BOC, BLS attestation, BK-set snapshot, layer
-//!                            hashes, chain anchor)".
+//! - [`RawBlockProvider`] — "give me the witness materials for block seq N
+//!   (BOC, BLS attestation, BK-set snapshot, layer hashes, chain anchor)".
 //! - [`BoundProofGenerator`] — "given those witnesses, produce a cross-circuit-
-//!                            bound `(attestation_proof, layer_hashes_proof)`
-//!                            in gnark Groth16 marshal-solidity bytes".
+//!   bound `(attestation_proof, layer_hashes_proof)` in gnark Groth16
+//!   marshal-solidity bytes".
 //!
 //! `LiveBlockSource` orchestrates both behind `BlockSource::fetch`:
 //!
-//! 1. `RawBlockProvider::fetch_raw(target_seq_no)` → `RawBlockWitness`
-//!    (cheap; just HTTP / GraphQL against the partner node).
-//! 2. `BoundProofGenerator::prove(raw)` → `BoundProofArtifacts`
-//!    (expensive; Halo2 SHPLONK on K=20 + gnark wrap; minutes per call).
+//! 1. `RawBlockProvider::fetch_raw(target_seq_no)` → `RawBlockWitness` (cheap;
+//!    just HTTP / GraphQL against the partner node).
+//! 2. `BoundProofGenerator::prove(raw)` → `BoundProofArtifacts` (expensive;
+//!    Halo2 SHPLONK on K=20 + gnark wrap; minutes per call).
 //! 3. Assemble [`AnBlockData`] from both, validate shape, return.
 //!
 //! Where the live backends live (planned, not yet wired here):
@@ -32,10 +31,10 @@
 //! - **`BoundProofGenerator`**: wraps `bridge-prover-orchestrator`'s
 //!   `generate_*_proof` + `bridge_prover_lib::compose_layer_hashes_input`
 //!   functions and the `gnark-wrappers/circuit-1a` + `circuit-2` subprocess
-//!   invocations. The wrap is heavyweight (≈26 min per layer-hashes proof
-//!   at production K=19; deposit-proof side is comparable) so prod
-//!   deployments run a separate `bridge-prover-daemon` and the relayer
-//!   talks to it over an internal queue (Phase 6).
+//!   invocations. The wrap is heavyweight (≈26 min per layer-hashes proof at
+//!   production K=19; deposit-proof side is comparable) so prod deployments run
+//!   a separate `bridge-prover-daemon` and the relayer talks to it over an
+//!   internal queue (Phase 6).
 //!
 //! Both traits are async + `Send + Sync` so the relayer loop stays
 //! single-threaded but a multi-block pipeline can run multiple
@@ -118,12 +117,11 @@ pub struct BoundProofArtifacts {
 ///
 /// Returns:
 /// - `Ok(Some(witness))` — block is finalised and ready to prove.
-/// - `Ok(None)`          — block isn't finalised yet (or witness assembly
-///                         is gated waiting on a downstream sibling — e.g.
-///                         the Circuit-2 dense-chain extension hasn't
-///                         caught up). The relayer waits and retries.
-/// - `Err(RelayerError)` — terminal upstream failure (HTTP / schema /
-///                         malformed payload).
+/// - `Ok(None)`          — block isn't finalised yet (or witness assembly is
+///   gated waiting on a downstream sibling — e.g. the Circuit-2 dense-chain
+///   extension hasn't caught up). The relayer waits and retries.
+/// - `Err(RelayerError)` — terminal upstream failure (HTTP / schema / malformed
+///   payload).
 #[async_trait]
 pub trait RawBlockProvider: Send + Sync {
     async fn fetch_raw(&self, target_seq_no: u64) -> Result<Option<RawBlockWitness>, RelayerError>;
@@ -140,7 +138,8 @@ pub trait BoundProofGenerator: Send + Sync {
     async fn prove(&self, raw: &RawBlockWitness) -> Result<BoundProofArtifacts, RelayerError>;
 }
 
-/// [`BlockSource`] composed of a [`RawBlockProvider`] + [`BoundProofGenerator`].
+/// [`BlockSource`] composed of a [`RawBlockProvider`] +
+/// [`BoundProofGenerator`].
 ///
 /// Pluggable both ways: swap the raw-fetch side to retarget a different
 /// AN node deployment, or swap the prover side to point at a daemon
@@ -160,7 +159,10 @@ where
     G: BoundProofGenerator,
 {
     pub fn new(raw: P, prover: G) -> Self {
-        Self { raw, prover }
+        Self {
+            raw,
+            prover,
+        }
     }
 
     /// Access the underlying raw provider (e.g. for health checks).
@@ -364,10 +366,13 @@ mod tests {
         let src = LiveBlockSource::new(Bogus, prover);
         let err = src.fetch(7).await.expect_err("seq mismatch");
         match err {
-            RelayerError::SeqNoMismatch { requested, got } => {
+            RelayerError::SeqNoMismatch {
+                requested,
+                got,
+            } => {
                 assert_eq!(requested, 7);
                 assert_eq!(got, 42);
-            }
+            },
             other => panic!("expected SeqNoMismatch, got {other:?}"),
         }
     }
@@ -404,7 +409,7 @@ mod tests {
         match err {
             RelayerError::Other(msg) => {
                 assert!(msg.contains("num_layers 0"), "unexpected: {msg}")
-            }
+            },
             other => panic!("expected Other, got {other:?}"),
         }
     }

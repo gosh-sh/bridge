@@ -1,16 +1,17 @@
 //! Phase 4 — Cross-circuit bound test data.
 //!
-//! Wraps the partner's [`generate_bridge_test_data`] so all three live verifiers
-//! (Circuit 1A primary, Circuit 1B fallback, Circuit 2 layer-hashes-movement)
-//! consume **the same** synthetic block scenario and therefore emit
-//! `(block_id, bk_set_poseidon)` public-input pairs that match byte-for-byte.
+//! Wraps the partner's [`generate_bridge_test_data`] so all three live
+//! verifiers (Circuit 1A primary, Circuit 1B fallback, Circuit 2
+//! layer-hashes-movement) consume **the same** synthetic block scenario and
+//! therefore emit `(block_id, bk_set_poseidon)` public-input pairs that match
+//! byte-for-byte.
 //!
-//! That cross-circuit consistency is the whole reason `AckiNackiBridge.verifyBlock`
-//! can safely accept a tuple of two independent Halo2 SHPLONK / gnark Groth16
-//! proofs and treat them as describing the same AN block: if 1A's `block_id`
-//! disagrees with 2's, the bridge reverts with `BlockIdMismatch`. Foundry tests
-//! that exercise that revert path need bound fixtures to assert the bridge
-//! accepts the matching case at all.
+//! That cross-circuit consistency is the whole reason
+//! `AckiNackiBridge.verifyBlock` can safely accept a tuple of two independent
+//! Halo2 SHPLONK / gnark Groth16 proofs and treat them as describing the same
+//! AN block: if 1A's `block_id` disagrees with 2's, the bridge reverts with
+//! `BlockIdMismatch`. Foundry tests that exercise that revert path need bound
+//! fixtures to assert the bridge accepts the matching case at all.
 //!
 //! Two helpers:
 //!
@@ -28,20 +29,19 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-
-use bridge_test_data_gen::bls::{Secret, SignerIndex};
-use bridge_test_data_gen::envelope_hash::poseidon_hash_bytes;
-use bridge_test_data_gen::generator::{
-    create_attestation_data, generate_bridge_test_data, sign_attestation_multi, BridgeTestData,
+use bridge_test_data_gen::{
+    bls::{Secret, SignerIndex},
+    envelope_hash::poseidon_hash_bytes,
+    generator::{
+        create_attestation_data, generate_bridge_test_data, sign_attestation_multi, BridgeTestData,
+    },
+    layer_hashes::ChainProofStep,
+    types::AttestationTargetType,
 };
-use bridge_test_data_gen::layer_hashes::ChainProofStep;
-use bridge_test_data_gen::types::AttestationTargetType;
-
 use gosh_dense_balanced_tree::DenseChainLink;
-use historical_layer_hashes_movement_checker_circuit::test_helpers::bytes_le_to_fr;
+use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use historical_layer_hashes_movement_checker_circuit::{
-    LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
+    test_helpers::bytes_le_to_fr, LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
 };
 
 use crate::layer_hashes_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
@@ -103,15 +103,17 @@ impl BoundBlockTestData {
 /// 1. derives the Poseidon BK-set commitment via the partner's
 ///    `bridge_poseidon::compute_bk_set_poseidon`;
 /// 2. computes the 14 Circuit 2 public instances from the chain data;
-/// 3. converts `ChainProofStep` (partner) → `DenseChainLink` (gosh-dense-balanced-tree)
-///    so the orchestrator's existing prover can consume it without changes;
+/// 3. converts `ChainProofStep` (partner) → `DenseChainLink`
+///    (gosh-dense-balanced-tree) so the orchestrator's existing prover can
+///    consume it without changes;
 /// 4. when `with_fallback = true`, additionally signs a Fallback attestation
 ///    over the same `block_id` with all keypairs.
 ///
 /// Constraints (mirrored from `generate_bridge_test_data`):
 /// - `bk_set_size >= 2`;
 /// - `1 <= num_layers <= 10`;
-/// - `1 <= num_prev_chain_steps`, `num_prev_chain_steps + 1 <= MAX_CHAIN_LEN = 11`.
+/// - `1 <= num_prev_chain_steps`, `num_prev_chain_steps + 1 <= MAX_CHAIN_LEN =
+///   11`.
 pub fn build_bound_test_data(
     bk_set_size: usize,
     num_layers: usize,
@@ -168,8 +170,7 @@ pub fn promote_bridge_test_data(
         *lh = bytes_le_to_fr(&td.layer_hash_chain.root_hashes[i]);
     }
 
-    let prev_max_level_layer_hash =
-        bytes_le_to_fr(&td.layer_hash_chain.prev_max_level_layer_hash);
+    let prev_max_level_layer_hash = bytes_le_to_fr(&td.layer_hash_chain.prev_max_level_layer_hash);
     let num_prev_chain_steps = td.layer_hash_chain.num_prev_chain_steps as u8;
 
     let prev_chain_proofs = td
@@ -217,7 +218,8 @@ pub fn promote_bridge_test_data(
 }
 
 /// Build a Fallback attestation envelope (`target_type = Fallback`) signed by
-/// every BK-set keypair over the same `block_id` carried by `td.attestation_bytes`.
+/// every BK-set keypair over the same `block_id` carried by
+/// `td.attestation_bytes`.
 ///
 /// Mirrors the Primary attestation construction in `generate_bridge_test_data`
 /// step 12 — reuses `td.keypairs` (the original signers; the partner's
@@ -254,7 +256,8 @@ fn chain_step_to_dense_link(step: &ChainProofStep) -> DenseChainLink {
     }
 }
 
-/// Compose the Circuit 2 [`LayerHashesProofInput`](crate::LayerHashesProofInput)
+/// Compose the Circuit 2
+/// [`LayerHashesProofInput`](crate::LayerHashesProofInput)
 /// from a [`BoundBlockTestData`]. Trivial slot-filling helper kept here so
 /// callers don't need to know the field-name mapping.
 pub fn compose_layer_hashes_input<'a>(

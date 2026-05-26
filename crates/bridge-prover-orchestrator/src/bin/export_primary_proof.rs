@@ -10,7 +10,8 @@
 //! Workflow:
 //!   1. Load `bridge_prover_lib::KeyManager` from `params/` (re-uses the same
 //!      SRS as our Phase 1.A FallbackKeyManager — both want K=20).
-//!   2. Generate synthetic test data via `bridge_test_data_gen::generate_test_data_all_sign(N)`.
+//!   2. Generate synthetic test data via
+//!      `bridge_test_data_gen::generate_test_data_all_sign(N)`.
 //!   3. Produce a primary proof via `generate_primary_proof`.
 //!   4. Write `proof.bin`, `instances.bin`, `halo2_proof.json` side by side.
 //!
@@ -26,20 +27,22 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
-use bridge_prover_lib::keys::{circuit_k, KeyManager};
-use bridge_prover_lib::prover::generate_primary_proof;
-use bridge_prover_lib::Fr;
-use clap::Parser;
-use tracing::info;
-
+use bridge_prover_lib::{
+    keys::{circuit_k, KeyManager},
+    prover::generate_primary_proof,
+    Fr,
+};
 use bridge_prover_orchestrator::proof_export::{
     build_proof_data, save_instances_binary, save_proof_data_json,
 };
+use clap::Parser;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "export-primary-proof",
-    about = "Generate a Circuit 1A (primary) proof and write proof.bin + instances.bin + halo2_proof.json"
+    about = "Generate a Circuit 1A (primary) proof and write proof.bin + instances.bin + \
+             halo2_proof.json"
 )]
 struct Args {
     /// Where the partner's KeyManager looks for SRS / VK / PK / config.
@@ -82,7 +85,12 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create out_dir {:?}", out_dir))?;
 
-    info!(?params_dir, ?out_dir, signers = args.signers, "exporting primary proof");
+    info!(
+        ?params_dir,
+        ?out_dir,
+        signers = args.signers,
+        "exporting primary proof"
+    );
 
     let mut km = KeyManager::new(&params_dir);
 
@@ -97,8 +105,13 @@ fn main() -> anyhow::Result<()> {
         .checked_sub(1)
         .context("synthetic block_seq_no must be >= 1")?;
 
-    let proof = generate_primary_proof(&km, &test_data.attestation_bytes, &test_data.bk_set, last_seen)
-        .context("primary proof generation failed")?;
+    let proof = generate_primary_proof(
+        &km,
+        &test_data.attestation_bytes,
+        &test_data.bk_set,
+        last_seen,
+    )
+    .context("primary proof generation failed")?;
 
     let instances: [Fr; 4] = [
         proof.block_id_fr,
@@ -131,7 +144,10 @@ fn main() -> anyhow::Result<()> {
         instances.len()
     );
     println!("    proof.bin            : {}", proof_bin_path.display());
-    println!("    instances.bin        : {}", instances_bin_path.display());
+    println!(
+        "    instances.bin        : {}",
+        instances_bin_path.display()
+    );
     println!("    halo2_proof.json     : {}", json_path.display());
     Ok(())
 }

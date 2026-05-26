@@ -12,9 +12,11 @@
 //! ```
 //!
 //! The instance order matches `build_layer_hashes_constraints`'s push sequence
-//! in `historical-layer-hashes-movement-checker-circuit/src/circuit.rs:289-296`.
+//! in `historical-layer-hashes-movement-checker-circuit/src/circuit.rs:
+//! 289-296`.
 
 use anyhow::Context;
+use gosh_dense_balanced_tree::DenseChainLink;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
     plonk::{create_proof, verify_proof},
@@ -30,16 +32,15 @@ use halo2_base::halo2_proofs::{
         Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
     },
 };
-use historical_layer_hashes_movement_checker_circuit::circuit::LayerHashesMovementCheckerCircuit;
-use historical_layer_hashes_movement_checker_circuit::{LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS};
+use historical_layer_hashes_movement_checker_circuit::{
+    circuit::LayerHashesMovementCheckerCircuit, LAYER_PREIMAGE_SIZE, MAX_LAYERS,
+    NUM_MERKLE_SIBLINGS,
+};
 use rand::rngs::OsRng;
 use tracing::info;
 
-use gosh_dense_balanced_tree::DenseChainLink;
-
 use crate::layer_hashes_keys::{
-    LayerHashesKeyManager, LAYER_HASHES_K, LAYER_HASHES_LOOKUP_BITS,
-    LAYER_HASHES_NUM_UNUSABLE_ROWS,
+    LayerHashesKeyManager, LAYER_HASHES_K, LAYER_HASHES_LOOKUP_BITS, LAYER_HASHES_NUM_UNUSABLE_ROWS,
 };
 
 /// Number of public instances Circuit 2 emits (block_id + bk_set + num_layers

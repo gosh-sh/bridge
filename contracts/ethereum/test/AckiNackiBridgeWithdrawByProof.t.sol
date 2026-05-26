@@ -411,9 +411,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         uint256 unknownRoot = uint256(keccak256("not-recorded"));
         pub.finalRoot = unknownRoot;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, unknownRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, unknownRoot));
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 

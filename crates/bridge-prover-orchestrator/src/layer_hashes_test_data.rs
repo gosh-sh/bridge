@@ -6,18 +6,15 @@
 //! round-trip integration test and the `export-layer-hashes-proof` binary
 //! drive identical inputs without copying ~150 lines of generator code.
 
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-use historical_layer_hashes_movement_checker_circuit::test_helpers::bytes_le_to_fr;
-use historical_layer_hashes_movement_checker_circuit::{
-    LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
-};
-use rand::RngCore;
-use sha2::{Digest, Sha256};
-
 use gosh_dense_balanced_tree::{
     compute_root_native, fr_to_bytes, preprocess_dense_proof, DenseChainLink, MAX_CHAIN_LEN,
 };
+use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, group::ff::PrimeField};
+use historical_layer_hashes_movement_checker_circuit::{
+    test_helpers::bytes_le_to_fr, LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
+};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 use crate::layer_hashes_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
 
@@ -159,7 +156,8 @@ pub fn build_synthetic_layer_hashes_input(
     root_le.reverse();
     let block_id_fr = bytes_le_to_fr(&root_le);
 
-    // 5. Pass-through BK set commitment (the circuit doesn't recompute it for Circuit 2).
+    // 5. Pass-through BK set commitment (the circuit doesn't recompute it for
+    //    Circuit 2).
     let bk_set_poseidon_hash = Fr::from(0xDEADBEEFu64);
 
     // 6. Assemble the 14 expected public instances in circuit-emit order.

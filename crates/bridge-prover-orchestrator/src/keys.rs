@@ -1,16 +1,17 @@
 //! Fallback (Circuit 1B) key management.
 //!
-//! Mirrors `bridge_prover_lib::keys::KeyManager` but for `FallbackAttestationBlsCheckerCircuit`.
-//! Uses the same K, lookup bits, limb sizes, and SerdeFormat as the partner's primary path so
+//! Mirrors `bridge_prover_lib::keys::KeyManager` but for
+//! `FallbackAttestationBlsCheckerCircuit`. Uses the same K, lookup bits, limb
+//! sizes, and SerdeFormat as the partner's primary path so
 //! a single `kzg_bn254_20.srs` file is shared.
 //!
 //! On disk (under `params_dir`):
-//! - `kzg_bn254_{K}.srs` — **Hermez Perpetual Powers of Tau (BN254, K=20 slice)** SRS,
-//!   loaded by `halo2_base::utils::fs::gen_srs` (shared with primary).
-//!   Provenance: `powersOfTau28_hez_final.ptau` → `han0110/halo2-kzg-srs`
-//!   `convert-from-snarkjs` → raw halo2 canonical format, validated via
-//!   `same_ratio` (`e(g[1], g2) == e(g[0], s_g2)`). SHA-256:
-//!   `80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608`.
+//! - `kzg_bn254_{K}.srs` — **Hermez Perpetual Powers of Tau (BN254, K=20
+//!   slice)** SRS, loaded by `halo2_base::utils::fs::gen_srs` (shared with
+//!   primary). Provenance: `powersOfTau28_hez_final.ptau` →
+//!   `han0110/halo2-kzg-srs` `convert-from-snarkjs` → raw halo2 canonical
+//!   format, validated via `same_ratio` (`e(g[1], g2) == e(g[0], s_g2)`).
+//!   SHA-256: `80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608`.
 //!   If the cached file is missing, `gen_srs` falls back to a **test**
 //!   deterministic SRS (known trapdoor) — make sure the ceremony file is
 //!   present before generating production keys.
@@ -18,27 +19,29 @@
 //! - `fallback_pk.bin`
 //! - `fallback_config_params.json`
 
-use std::collections::HashMap;
-use std::io::{BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
-    SerdeFormat,
+use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
+use halo2_base::{
+    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+        SerdeFormat,
+    },
+    utils::fs::gen_srs,
 };
-use halo2_base::utils::fs::gen_srs;
 use tracing::info;
 
-use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-
 use crate::{
-    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers,
-    circuit_num_limbs, circuit_num_unusable_rows,
+    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
+    circuit_num_unusable_rows,
 };
 
 const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
@@ -54,9 +57,10 @@ pub struct FallbackKeyManager {
 }
 
 impl FallbackKeyManager {
-    /// Create a new key manager. Loads SRS (cached on disk by halo2-base), then attempts
-    /// to load `fallback_*.bin` artifacts from disk if they exist. Does NOT run keygen
-    /// proactively — call [`ensure_keys`] before generating proofs.
+    /// Create a new key manager. Loads SRS (cached on disk by halo2-base), then
+    /// attempts to load `fallback_*.bin` artifacts from disk if they exist.
+    /// Does NOT run keygen proactively — call [`ensure_keys`] before
+    /// generating proofs.
     pub fn new(params_dir: &Path) -> Self {
         std::fs::create_dir_all(params_dir).ok();
 
@@ -90,9 +94,10 @@ impl FallbackKeyManager {
         mgr
     }
 
-    /// Ensure VK + PK exist for Circuit 1B. If not cached, runs keygen against a synthetic
-    /// reference circuit sized to `bk_set.len()` (mirrors partner's `ensure_primary_keys`).
-    /// Keygen takes ~2-5 minutes the first time and produces a multi-GB PK on disk.
+    /// Ensure VK + PK exist for Circuit 1B. If not cached, runs keygen against
+    /// a synthetic reference circuit sized to `bk_set.len()` (mirrors
+    /// partner's `ensure_primary_keys`). Keygen takes ~2-5 minutes the
+    /// first time and produces a multi-GB PK on disk.
     pub fn ensure_keys(&mut self, bk_set: &HashMap<u16, Vec<u8>>) -> anyhow::Result<()> {
         if self.vk.is_some() && self.pk.is_some() {
             info!("fallback keys already loaded");
@@ -101,7 +106,8 @@ impl FallbackKeyManager {
 
         info!("running fallback keygen (this may take a few minutes)…");
 
-        // Build a reference circuit using synthetic test data of the same shape as `bk_set`.
+        // Build a reference circuit using synthetic test data of the same shape as
+        // `bk_set`.
         let test_data =
             bridge_test_data_gen::generator::generate_test_data_fallback_all_sign(bk_set.len())
                 .context("failed to generate reference fallback test data for keygen")?;

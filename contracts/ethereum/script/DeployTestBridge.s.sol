@@ -34,9 +34,7 @@ contract DeployTestBridge is Script {
             genesisPrevMaxLevelLayerHash: 0
         });
         AckiNackiBridge.BridgeWithdrawConfig memory bwDisabled = AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
-            dappFr: 0,
-            accFr: 0
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)), dappFr: 0, accFr: 0
         });
         AckiNackiBridge bridge = new AckiNackiBridge(
             address(oracle), address(0), address(0), address(0), vbDisabled, bwDisabled

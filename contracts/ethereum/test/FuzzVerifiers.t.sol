@@ -177,7 +177,6 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
     }

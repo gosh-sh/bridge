@@ -1,10 +1,14 @@
-// Phase A — gnark Groth16 wrapper for Circuit 4 (Bridge Event Prove).
+// gnark Groth16 wrapper for Circuit 4 (`bridge-event-prove-circuit`,
+// single-final-root layout — partner branch `circuit4-single-final-root`).
 //
-// Mirrors `gnark-wrappers/circuit-2/main.go` 1:1 but with `NumPublicInputs =
-// 3 + NumLayerHashes = 103` instead of 14 — see `circuit.go` for the full
-// layout and `docs/circuit_4_open_questions.md` in the bridge repo for the
-// Phase A vs Phase B split (the latter introduces a nullifier + makes the
-// `amount`/`recipient` fields public so a real `withdraw()` can land).
+// Mirrors `gnark-wrappers/circuit-2/main.go` 1:1 but with
+// `NumPublicInputs = 10` (down from the legacy 103-PI Phase A / 110-PI
+// Phase B layouts — the v3 circuit exposes a single `finalRoot` instead
+// of a 100-wide layer-hash candidate window).
+//
+// R15 status: identity-stub Halo2 verification only; replacing this with
+// a real Halo2-in-gnark verifier is Phase 8 of
+// `docs/an_partner_integration_plan.md`.
 //
 // Two subcommands:
 //
@@ -12,7 +16,7 @@
 //	    Compile circuit, run Groth16.Setup, save circuit.r1cs / proving.key /
 //	    verification.key, and emit `Groth16Verifier.sol` (~7 KB Solidity
 //	    verifier; copy into
-//	    contracts/ethereum/src/BridgeEventGroth16VerifierGenerated.sol).
+//	    contracts/ethereum/src/BridgeWithdrawalGroth16VerifierGenerated.sol).
 //
 //	prove [proof.json]
 //	    Generate a Groth16 proof, verify locally, and write
@@ -21,10 +25,10 @@
 // Typical pipeline (once the partner exports a Circuit 4 Halo2 proof):
 //
 //	cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4
-//	go run . setup ../../proofs/bridge-event/halo2_proof.json
-//	go run . prove ../../proofs/bridge-event/halo2_proof.json
+//	go run . setup ../../proofs/bridge-withdrawal/halo2_proof.json
+//	go run . prove ../../proofs/bridge-withdrawal/halo2_proof.json
 //	cp Groth16Verifier.sol \
-//	   ../../../../contracts/ethereum/src/BridgeEventGroth16VerifierGenerated.sol
+//	   ../../../../contracts/ethereum/src/BridgeWithdrawalGroth16VerifierGenerated.sol
 
 package main
 
@@ -78,7 +82,7 @@ func printUsage() {
 }
 
 func runSetup(proofFile string) {
-	fmt.Println("=== Circuit 4 (Bridge Event Prove) Groth16 Setup ===")
+	fmt.Println("=== Circuit 4 (Bridge Withdrawal, single-final-root) Groth16 Setup ===")
 
 	proofData, err := LoadHalo2Proof(proofFile)
 	if err != nil {
@@ -86,7 +90,7 @@ func runSetup(proofFile string) {
 	}
 	fmt.Printf("Loaded proof with %d public inputs, k=%d\n", len(proofData.PublicInputs), proofData.Protocol.K)
 
-	circuit, err := NewBridgeEventVerifierCircuit(proofData)
+	circuit, err := NewBridgeWithdrawalVerifierCircuit(proofData)
 	if err != nil {
 		log.Fatalf("Failed to create circuit: %v", err)
 	}
@@ -116,7 +120,7 @@ func runSetup(proofFile string) {
 }
 
 func runProve(proofFile string) {
-	fmt.Println("=== Circuit 4 (Bridge Event Prove) Groth16 Prove ===")
+	fmt.Println("=== Circuit 4 (Bridge Withdrawal, single-final-root) Groth16 Prove ===")
 
 	proofData, err := LoadHalo2Proof(proofFile)
 	if err != nil {
@@ -133,7 +137,7 @@ func runProve(proofFile string) {
 	vk := groth16.NewVerifyingKey(ecc.BN254)
 	loadFile("verification.key", func(f *os.File) error { _, e := vk.ReadFrom(f); return e })
 
-	witnessCircuit, err := NewBridgeEventVerifierCircuit(proofData)
+	witnessCircuit, err := NewBridgeWithdrawalVerifierCircuit(proofData)
 	if err != nil {
 		log.Fatalf("Failed to create witness: %v", err)
 	}
@@ -190,7 +194,7 @@ func runProve(proofFile string) {
 
 	fmt.Println("Output files:")
 	fmt.Println("  groth16_proof.hex          - 256-byte Groth16 proof (0x-prefixed)")
-	fmt.Println("  groth16_public_inputs.hex  - 103 × 32-byte public inputs (0x-prefixed)")
+	fmt.Println("  groth16_public_inputs.hex  - 10 × 32-byte public inputs (0x-prefixed)")
 	fmt.Println("  groth16_output.json        - Combined proof + public inputs")
 }
 

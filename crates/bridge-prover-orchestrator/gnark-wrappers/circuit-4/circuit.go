@@ -6,38 +6,47 @@ import (
 	"github.com/consensys/gnark/frontend"
 )
 
-// NumPublicInputs matches Circuit 4 (Bridge Event Prove) public-input layout
-// emitted by `bridge-event-prove-circuit` (sibling repo
-// `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits`):
+// NumPublicInputs matches Circuit 4 (`bridge-event-prove-circuit`,
+// single-final-root layout — partner branch
+// `circuit4-single-final-root`) public-input layout emitted by
+// `bridge-prover-orchestrator`:
 //
-//	[0]            tokenId        (uint32 BE-packed from event body[54..58))
-//	[1]            dappFr         (Fr-encoded AN-side bridge dApp id)
-//	[2]            accFr          (Fr-encoded AN-side bridge account id)
-//	[3..=102]      layerHashes    100 candidate latest-layer hashes
+//	[0]  tokenId       (uint32 packed BE from event body[54..58))
+//	[1]  amount        (uint128)
+//	[2]  recipientHi   (Fr; top 10 bytes of 20-byte EVM address, BE)
+//	[3]  recipientLo   (Fr; bottom 10 bytes of 20-byte EVM address, BE)
+//	[4]  dstChainId    (uint256)
+//	[5]  senderAccFr   (Fr; AN-side sender 256-bit account id)
+//	[6]  dappFr        (Fr; bridge dApp identifier on AN side)
+//	[7]  accFr         (Fr; bridge account identifier on AN side)
+//	[8]  nullifier     (Fr; Poseidon(block_id_fr, tokenId, amount,
+//	                    recipientHi, recipientLo, senderAccFr))
+//	[9]  finalRoot     (Fr; off-circuit anchor checked against
+//	                    `_knownAnchors` in `AckiNackiBridge.sol`)
 //
-// = 103 BN254 Fr field elements (3 + NumLayerHashes).
+// = 10 BN254 Fr field elements (matches `PUB_*` slot indices in
+// `bridge_event_prove_circuit::PUB_*`; `TOTAL_PUBLIC_INPUTS = 10`).
 //
-// IMPORTANT — Phase A status (see ../../README.md and
-// `docs/circuit_4_open_questions.md` in the bridge repo). The partner's
-// Circuit 4 keeps `dstChainId`, `amount`, `recipient`, `sender` as private
-// witnesses. The bridge therefore cannot deploy a real `withdraw()` yet,
-// and this wrapper is a Phase A scaffold: `setup` / `prove` will run against
-// an actual halo2 proof once it lands, but until then the only consumer is
-// the contract-side `verifyEvent` adapter (mock-tested).
-const NumLayerHashes = 100
-const NumPublicInputs = 3 + NumLayerHashes
+// IMPORTANT — R15 status. This wrapper enforces only identity-stub
+// assertions over the public inputs. The Halo2 SHPLONK proof itself
+// is **NOT verified** inside Groth16. Replacing the wrapper with a
+// real Halo2-in-gnark verifier is tracked as Phase 8 of
+// `docs/an_partner_integration_plan.md` and is the single biggest
+// open mainnet blocker on the AN→ETH side.
+const NumPublicInputs = 10
 
-// BridgeEventVerifierCircuit is a Groth16 circuit that commits to the 103
-// public inputs of the Circuit 4 Halo2 SHPLONK proof. Same identity-stub
-// trust model as the sibling wrappers in this repo: the gnark circuit only
-// enforces that the public inputs flow through unchanged; the upstream
-// Halo2 proof is the actual cryptographic guarantee.
-type BridgeEventVerifierCircuit struct {
+// BridgeWithdrawalVerifierCircuit is a Groth16 circuit that commits to
+// the 10 public inputs of the Circuit 4 (single-final-root) Halo2
+// SHPLONK proof. Same identity-stub trust model as the sibling wrappers
+// in this repo: the gnark circuit only enforces that the public inputs
+// flow through unchanged; the upstream Halo2 proof is (today) the only
+// cryptographic guarantee.
+type BridgeWithdrawalVerifierCircuit struct {
 	PublicInputs [NumPublicInputs]frontend.Variable `gnark:",public"`
 	DomainSize   frontend.Variable
 }
 
-func (circuit *BridgeEventVerifierCircuit) Define(api frontend.API) error {
+func (circuit *BridgeWithdrawalVerifierCircuit) Define(api frontend.API) error {
 	for i := 0; i < NumPublicInputs; i++ {
 		api.AssertIsEqual(circuit.PublicInputs[i], circuit.PublicInputs[i])
 	}
@@ -45,11 +54,11 @@ func (circuit *BridgeEventVerifierCircuit) Define(api frontend.API) error {
 	return nil
 }
 
-func NewBridgeEventVerifierCircuit(proofData *Halo2ProofData) (*BridgeEventVerifierCircuit, error) {
+func NewBridgeWithdrawalVerifierCircuit(proofData *Halo2ProofData) (*BridgeWithdrawalVerifierCircuit, error) {
 	if len(proofData.PublicInputs) != NumPublicInputs {
 		return nil, fmt.Errorf("expected %d public inputs, got %d", NumPublicInputs, len(proofData.PublicInputs))
 	}
-	circuit := &BridgeEventVerifierCircuit{}
+	circuit := &BridgeWithdrawalVerifierCircuit{}
 	for i := 0; i < NumPublicInputs; i++ {
 		circuit.PublicInputs[i] = proofData.PublicInputs[i]
 	}

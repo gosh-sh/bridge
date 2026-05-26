@@ -1,11 +1,16 @@
 //! Relayer skeleton for the Acki Nacki → Ethereum bridge.
 //!
-//! ## Phase scope (5.1)
+//! ## Phase scope (5.1 + 5.2 scaffolding)
 //!
 //! - Defines the **`BlockSource`** abstraction that decouples the relayer loop
-//!   from any specific AN node integration. The future [`LiveBlockSource`]
-//!   (Phase 5.2) will be a single implementation backed by the partner's
-//!   `gql_client` + `boc_parser` + our [`bridge-prover-orchestrator`].
+//!   from any specific AN node integration. The [`LiveBlockSource`]
+//!   composition (Phase 5.2 scaffolding) splits the live path into two
+//!   narrow traits — [`RawBlockProvider`] (HTTP / GraphQL against the AN
+//!   node) and [`BoundProofGenerator`] (Halo2 + gnark wrap) — so each side
+//!   can be swapped independently. Stub backends (`InMemoryRawBlockProvider`,
+//!   `StubBoundProofGenerator`) ship with the crate; real backends land in
+//!   Phase 5.2 (`circuit-data-exporter` adapter) and Phase 6
+//!   (`bridge-prover-daemon` IPC).
 //! - Defines the **`BridgeClient`** abstraction over the on-chain
 //!   `AckiNackiBridge.verifyBlock` entry point. The real implementation in
 //!   [`bridge::EthBridgeClient`] uses alloy-rs `sol!`-generated bindings; the
@@ -22,9 +27,14 @@
 //!
 //! ## Out of scope (handled by Phase 5.2 / 5.3)
 //!
-//! - GraphQL / BOC parsing of the live AN node.
-//! - Halo2 + gnark wrapping invocation from inside the relayer (Phase 5.2 wires
-//!   the orchestrator + a Go FFI or subprocess).
+//! - Real `RawBlockProvider` backed by partner's GraphQL endpoint (gated on
+//!   public exposure; today only `/v2/bk_set_update` REST is reachable on
+//!   port 8600 — see `AGENTS.md`). A local-cluster path through
+//!   `http://127.0.0.1:11000/graphql` is feasible once the cluster builds
+//!   with the `history_proofs` feature.
+//! - Real `BoundProofGenerator` invoking the orchestrator + gnark wrappers
+//!   (Phase 6 `bridge-prover-daemon` over IPC; in-process Halo2 takes
+//!   minutes per call and would starve the relayer's single-tick budget).
 //! - 10 sequential blocks against shellnet — that's the Phase 5 acceptance
 //!   criterion from §5 of the integration plan.
 //!
@@ -52,6 +62,7 @@ pub mod bridge;
 pub mod daemon;
 pub mod error;
 pub mod guarded_relayer;
+pub mod live_source;
 pub mod relayer;
 pub mod source;
 pub mod state;
@@ -67,6 +78,10 @@ pub use daemon::{
 };
 pub use error::RelayerError;
 pub use guarded_relayer::{GuardedOutcome, SentryGuardedRelayer};
+pub use live_source::{
+    BoundProofArtifacts, BoundProofGenerator, InMemoryRawBlockProvider, LiveBlockSource,
+    RawBlockProvider, RawBlockWitness, StubBoundProofGenerator,
+};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{BlockSource, FixturesBlockSource, InMemoryBlockSource};
 pub use state::RelayerState;

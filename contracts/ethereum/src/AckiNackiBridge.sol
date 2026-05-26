@@ -8,7 +8,6 @@ import "./IERC20.sol";
 import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
-import "./IBridgeEventVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
 
 /// @title AckiNackiBridge
@@ -35,20 +34,18 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      construction; the bridge enforces those equalities + the monotonic
 ///      `block_seq_no` and chain-anchor invariants on top.
 ///
-///      AN→ETH event verification (Phase 4 + Circuit 4 scaffolding): every
-///      successful `verifyBlock` also pushes the new top-of-chain anchor into
-///      a rolling `_layerWindow` ring buffer (size `LAYER_WINDOW_SIZE = 100`,
-///      matching partner Circuit 4's `NUM_LAYER_HASHES`). `verifyEvent`
-///      consumes that window plus a Circuit 4 (`bridge-event-prove-circuit`)
-///      Groth16 proof and asserts that a `WithdrawalInitiated` event for
-///      `tokenId` was emitted by the AN-side `TokenBridge` identified by the
-///      immutable `(bridgeEventDappFr, bridgeEventAccFr)` pair, anchored into
-///      one of the windowed layer hashes (the circuit hides *which* one via
-///      a private `hash_choice_index`).  **No `withdraw()` yet** — the
-///      Phase A scope deliberately stops at attestation because the partner
-///      circuit keeps `amount`/`recipient`/`dstChainId`/`sender` as private
-///      witnesses. See `docs/circuit_4_open_questions.md` for the Phase B
-///      circuit-extension shopping list.
+///      AN→ETH event verification + payout (Circuit 4, single-final-root):
+///      every successful `verifyBlock` also records the new top-of-chain
+///      anchor in a set of `knownAnchors`. `withdrawByProof` consumes that
+///      set plus a Circuit 4 (`bridge-event-prove-circuit`) Groth16 proof
+///      whose 10 public inputs include a single `finalRoot`. The bridge
+///      checks `finalRoot ∈ knownAnchors` off-circuit (this contract) — the
+///      circuit only proves that the event's hash chain extends *into*
+///      `finalRoot` via a dense-chain extension. The proof binds the
+///      payout's `amount` and `recipient` (split-α 10/10 bytes) along
+///      with the AN-side bridge identity `(bridgeWithdrawalDappFr,
+///      bridgeWithdrawalAccFr)` and a Poseidon nullifier for replay
+///      protection.
 contract AckiNackiBridge {
     // ---------------------------------------------------------------------
     // Constants
@@ -66,15 +63,6 @@ contract AckiNackiBridge {
     /// @notice Maximum number of layer-hash slots per block (matches
     ///         partner Circuit 2's MAX_LAYERS).
     uint256 public constant MAX_LAYER_HASHES = 10;
-
-    /// @notice Length of the rolling layer-hash window kept on-chain to back
-    ///         Circuit 4 (Bridge Event Prove) proofs. Matches partner's
-    ///         `NUM_LAYER_HASHES` in `bridge-event-prove-circuit/src/
-    ///         bridge_event_prove_circuit.rs` — the circuit takes exactly
-    ///         this many candidate layer hashes as public inputs and binds
-    ///         (privately) to one of them via `hash_choice_index`. Increasing
-    ///         it requires a partner-side circuit rebuild + new VK.
-    uint256 public constant LAYER_WINDOW_SIZE = 100;
 
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
@@ -136,6 +124,13 @@ contract AckiNackiBridge {
     uint256 private constant _ENTERED = 2;
     uint256 private _reentrancyStatus;
 
+    /// @notice Global pause flag. When `true`, all user-facing entrypoints
+    ///         (`deposit`, `verifyBlock`, `withdrawByProof`) revert with
+    ///         `BridgePaused`. Owner-only AAVE management remains
+    ///         available so funds can still be evacuated in an incident.
+    /// @dev Toggled via `pause()` / `unpause()` (owner-only).
+    bool public paused;
+
     // ---------------------------------------------------------------------
     // Storage: AN→ETH state (Phase 4 verifyBlock)
     // ---------------------------------------------------------------------
@@ -177,69 +172,58 @@ contract AckiNackiBridge {
     uint256 public storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
-    // Storage: Circuit 4 (Bridge Event Prove) — AN→ETH event verification
+    // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
     // ---------------------------------------------------------------------
 
-    /// @notice Circuit 4 (Bridge Event Prove) verifier (Groth16 adapter).
-    ///         May be `address(0)` if Circuit 4 verification is disabled at
-    ///         deployment; in that case `verifyEvent` reverts with
-    ///         `VerifyEventDisabled`. Independent of the `verifyBlock` toggle —
-    ///         a deployment can wire Circuit 1A/1B/2 (state tracking) without
-    ///         Circuit 4 (event attestation), or vice versa.
-    IBridgeEventVerifier public immutable bridgeEventVerifier;
+    /// @notice Circuit 4 verifier (Groth16 adapter; 10-input single-final-root
+    ///         layout). May be `address(0)` if AN→ETH payout verification is
+    ///         disabled at deployment; in that case `withdrawByProof` reverts
+    ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock`.
+    IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier;
 
     /// @notice Fr-encoded AN-side bridge dApp identifier. Set at construction
     ///         and immutable. The Circuit 4 proof binds to a specific
-    ///         `(dappFr, accFr)` pair via its `dapp_fr` / `acc_fr` public
-    ///         inputs — pinning these on Ethereum at deploy time prevents a
-    ///         caller from substituting an event emitted by a different AN
-    ///         contract (e.g. a malicious lookalike `TokenBridge`).
-    uint256 public immutable bridgeEventDappFr;
+    ///         `(dappFr, accFr)` pair via its public inputs — pinning these
+    ///         on Ethereum at deploy time prevents a caller from substituting
+    ///         an event emitted by a different AN contract (e.g. a malicious
+    ///         lookalike `TokenBridge`).
+    uint256 public immutable bridgeWithdrawalDappFr;
 
-    /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeEventDappFr`).
-    uint256 public immutable bridgeEventAccFr;
-
-    // ---------------------------------------------------------------------
-    // Storage: Circuit 4 v2 (Bridge Withdrawal Prove) — AN→ETH payout
-    // ---------------------------------------------------------------------
-
-    /// @notice Circuit 4 v2 (Bridge Withdrawal Prove) verifier (Groth16 adapter).
-    ///         May be `address(0)` if Phase B withdrawal verification is
-    ///         disabled at deployment; in that case `withdrawByProof` reverts
-    ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock` and
-    ///         Phase A `verifyEvent`. Shares the immutable `(bridgeEventDappFr,
-    ///         bridgeEventAccFr)` identity pair with Phase A — both bind to the
-    ///         same AN-side TokenBridge contract.
-    IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier;
+    /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
+    uint256 public immutable bridgeWithdrawalAccFr;
 
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
-    ///         the proof's public input slot [9]. The Circuit 4 v2 nullifier
-    ///         is `Poseidon(block_id, tokenId, amount, recipient, senderDapp,
-    ///         senderAcc)` per Alina 2026-05-21; uniqueness per event is
-    ///         enforced inside the circuit, but the bridge still needs the
-    ///         mapping to reject *re-submission* of an already-paid proof.
+    ///         the proof's public input slot [8]. The Circuit 4
+    ///         single-final-root nullifier is
+    ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
+    ///                   recipientLo, senderAccFr)` — uniqueness per event
+    ///         is enforced inside the circuit, but the bridge still needs
+    ///         the mapping to reject *re-submission* of an already-paid proof.
     mapping(bytes32 => bool) private _nullifiers;
 
-    /// @notice Rolling ring buffer of the last `LAYER_WINDOW_SIZE`
-    ///         top-of-chain anchors committed by successful `verifyBlock`
-    ///         calls. Indexed by `layerWindowHead` modulo `LAYER_WINDOW_SIZE`.
+    /// @notice Set of anchors (Fr) observed via successful `verifyBlock`
+    ///         calls. Each `withdrawByProof` proof exposes one `finalRoot`
+    ///         (slot [9]) and the bridge requires `_knownAnchors[finalRoot]`
+    ///         to be `true` before accepting the proof.
     ///
-    /// @dev Backs Circuit 4 — the contract supplies this entire array as the
-    ///      `layerHashes` public input. The circuit privately picks one entry
-    ///      via `hash_choice_index` and asserts its anchored chain root
-    ///      equals the picked entry; the verifier learns *that* the proof
-    ///      anchors to some known layer, but not *which* one.
+    /// @dev This replaces the legacy `_layerWindow[100]` ring-buffer +
+    ///      private-index design from Circuit 4 v1/v2. v3
+    ///      (`circuit4-single-final-root`) exposes the anchor as a single
+    ///      public input rather than as a 1-of-N private selection, so the
+    ///      on-chain check is a flat set membership.
     ///
-    ///      Empty slots (before the buffer has filled up) are zero. A
-    ///      well-formed Circuit 4 proof will (with overwhelming probability)
-    ///      not match the zero hash, so leaving empties at zero is safe.
-    uint256[LAYER_WINDOW_SIZE] private _layerWindow;
+    ///      Anchors stay valid forever once recorded — partner's dense-chain
+    ///      construction makes each `finalRoot` unique per (layer, block-
+    ///      height range), and a withdrawal proven against any *previously
+    ///      observed* `finalRoot` is by definition a valid withdrawal that
+    ///      we missed paying out earlier (re-org-resistant by virtue of AN's
+    ///      finalization model).
+    mapping(uint256 => bool) private _knownAnchors;
 
-    /// @notice Number of writes to `_layerWindow` so far (monotonic, never
-    ///         reset). The active slot for the next push is
-    ///         `layerWindowHead % LAYER_WINDOW_SIZE`. Exposed publicly so
-    ///         off-chain tooling can detect new entries.
-    uint256 public layerWindowHead;
+    /// @notice Monotonic counter of distinct anchors recorded by
+    ///         `verifyBlock` calls (never reset; useful for off-chain
+    ///         tooling to detect new state).
+    uint256 public anchorsRecorded;
 
     // ---------------------------------------------------------------------
     // Events
@@ -248,6 +232,12 @@ contract AckiNackiBridge {
     event Deposit(
         uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp
     );
+    /// @notice Bridge paused — emitted when the owner sets `paused = true`.
+    /// @param by Owner address that triggered the pause (`msg.sender`).
+    event Paused(address indexed by);
+    /// @notice Bridge unpaused — emitted when the owner sets `paused = false`.
+    /// @param by Owner address that lifted the pause (`msg.sender`).
+    event Unpaused(address indexed by);
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
     event YieldHarvested(address indexed recipient, uint256 amount);
@@ -269,37 +259,24 @@ contract AckiNackiBridge {
         uint8 numLayers
     );
 
-    /// @notice Emitted whenever a new top-of-chain anchor is pushed into the
-    ///         `_layerWindow` ring buffer (i.e. once per successful
-    ///         `verifyBlock`). `slot` is the index modulo `LAYER_WINDOW_SIZE`
-    ///         that received the write; `headAfter` is the new value of
-    ///         `layerWindowHead` (monotonic).
-    event LayerWindowPushed(uint256 indexed slot, uint256 anchor, uint256 headAfter);
+    /// @notice Emitted whenever a new top-of-chain anchor is recorded by a
+    ///         successful `verifyBlock` call. `anchor` is the new
+    ///         `storedPrevMaxLevelLayerHash`; `totalAnchors` is the new
+    ///         value of `anchorsRecorded` (monotonic, never resets).
+    event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
 
-    /// @notice Emitted on every successful `verifyEvent` call (Circuit 4).
-    ///         A genuine cross-chain `withdraw()` is NOT exposed in Phase A
-    ///         (the circuit keeps `amount` / `recipient` private). This event
-    ///         lets off-chain consumers observe that *some* withdrawal event
-    ///         was attested for `tokenId` under the configured AN-side
-    ///         identity `(bridgeEventDappFr, bridgeEventAccFr)`, anchored to
-    ///         one of the `LAYER_WINDOW_SIZE` recent layer hashes (the
-    ///         circuit hides *which* one).
-    /// @param tokenId Token id (uint32 packed from the event body).
-    /// @param submitter `msg.sender` of the `verifyEvent` call (operational
-    ///        breadcrumb; the proof itself doesn't bind to a submitter).
-    event BridgeEventVerified(uint256 indexed tokenId, address indexed submitter);
-
-    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4 v2).
-    ///         Phase B's payout path: a verified ZK proof releases `amount` ETH
-    ///         to `recipient` exactly once (replay-protected by `nullifier`).
-    /// @param nullifier The Poseidon-derived nullifier from public input slot [9];
+    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
+    ///         single-final-root layout). A verified ZK proof releases
+    ///         `amount` ETH to `recipient` exactly once (replay-protected by
+    ///         `nullifier`).
+    /// @param nullifier The Poseidon-derived nullifier from public input slot [8];
     ///        also the key in the `_nullifiers` mapping.
     /// @param recipient The 20-byte EVM address reconstructed from
     ///        `(recipientHi, recipientLo)`.
     /// @param amount Amount of ETH transferred to `recipient`.
-    /// @param tokenId Token id from the event body (Phase B only supports
-    ///        `tokenId == 0` = native ETH; non-zero reserved for ERC-20 in a
-    ///        future milestone).
+    /// @param tokenId Token id from the event body (only `tokenId == 0` =
+    ///        native ETH is currently supported; non-zero reserved for
+    ///        ERC-20 wiring in a future milestone).
     /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
     ///        a relayer; the payout goes to `recipient`, not `submitter`).
     event WithdrawalByProofExecuted(
@@ -327,6 +304,12 @@ contract AckiNackiBridge {
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
     error NoYield();
+    /// @notice User-facing entrypoints are paused. Owner-only AAVE
+    ///         management (`emergencyWithdrawAll`, `withdrawFromAave`,
+    ///         `harvestYield`) remains available regardless of the pause
+    ///         state so funds can still be evacuated in an incident.
+    error BridgePaused();
+    error AlreadyInThatPauseState();
 
     // verifyBlock errors
     error VerifyBlockDisabled();
@@ -338,20 +321,26 @@ contract AckiNackiBridge {
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
 
-    // verifyEvent (Circuit 4) errors
-    error VerifyEventDisabled();
-    error BridgeEventProofRejected();
-    error InvalidBridgeEventIdentity();
-
-    // withdrawByProof (Circuit 4 v2) errors
+    // withdrawByProof (Circuit 4, single-final-root) errors
     error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
     error NullifierAlreadyUsed(uint256 nullifier);
     error DstChainIdMismatch(uint256 supplied, uint256 expected);
     error RecipientHalfOutOfRange(uint256 value);
     error WithdrawIdentityMismatch();
-    /// @notice Phase B only supports `tokenId == 0` (native ETH). Non-zero
-    ///         token ids are reserved for ERC-20 wiring in a future milestone.
+    /// @notice The proof's `finalRoot` (PI slot [9]) is not in the bridge's
+    ///         set of known anchors. Either the proof was generated against
+    ///         a state the bridge has not yet observed (caller should wait
+    ///         for the matching `verifyBlock` to land), or the anchor is
+    ///         forged.
+    error UnknownAnchor(uint256 finalRoot);
+    /// @notice Withdrawal verifier was wired but the AN-side
+    ///         `(dappFr, accFr)` identity slots are zero — no real proof
+    ///         could ever bind to a zero-identity bridge.
+    error InvalidBridgeWithdrawalIdentity();
+    /// @notice Only `tokenId == 0` (native ETH) is currently supported.
+    ///         Non-zero token ids are reserved for ERC-20 wiring in a
+    ///         future milestone.
     error UnsupportedTokenId(uint256 tokenId);
     error WithdrawTransferFailed(address recipient, uint256 amount);
     /// @notice Bridge holds less ETH than the proof asks for. Should be
@@ -377,6 +366,15 @@ contract AckiNackiBridge {
         _reentrancyStatus = _NOT_ENTERED;
     }
 
+    /// @dev User-facing entrypoints revert when the bridge is paused.
+    ///      Owner-only AAVE management is deliberately *not* gated by
+    ///      this modifier so the owner can still pull liquidity in an
+    ///      incident.
+    modifier whenNotPaused() {
+        if (paused) revert BridgePaused();
+        _;
+    }
+
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
@@ -400,36 +398,21 @@ contract AckiNackiBridge {
         uint256 genesisPrevMaxLevelLayerHash;
     }
 
-    /// @notice Argument bundle for the AN→ETH Circuit 4 (Bridge Event Prove)
+    /// @notice Argument bundle for the AN→ETH Circuit 4 (single-final-root)
     ///         wiring. Independent of `VerifyBlockConfig` — a deployment may
     ///         enable one without the other.
-    /// @dev Passing `bridgeEventVerifier == address(0)` disables `verifyEvent`
-    ///      (it reverts with `VerifyEventDisabled`). When enabled, both
-    ///      `dappFr` and `accFr` must be non-zero — they pin the AN-side
-    ///      identity the Circuit 4 proof must bind to.
-    struct BridgeEventConfig {
-        IBridgeEventVerifier bridgeEventVerifier;
-        uint256 dappFr;
-        uint256 accFr;
-    }
-
-    /// @notice Argument bundle for the AN→ETH Circuit 4 v2 (Bridge Withdrawal
-    ///         Prove) wiring. Independent of `BridgeEventConfig`; both Phase A
-    ///         (attestation) and Phase B (payout) verifiers may be enabled
-    ///         simultaneously during the v1→v2 migration window.
     /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
     ///      `withdrawByProof` (it reverts with `WithdrawByProofDisabled`).
-    ///      The Phase B path *reuses* the immutable `(bridgeEventDappFr,
-    ///      bridgeEventAccFr)` identity from `BridgeEventConfig` — both
-    ///      Circuit 4 variants must bind to the same AN-side TokenBridge
-    ///      contract, so duplicating the identity in two places would be a
-    ///      footgun. Therefore Phase B requires Phase A's identity to be set
-    ///      (i.e. `BridgeEventConfig.dappFr != 0` and `accFr != 0`); enable
-    ///      Phase B *only* alongside a non-zero Phase A identity. The Phase A
-    ///      verifier itself may be `address(0)` (disabled attestation surface)
-    ///      while keeping the identity slots set.
+    ///      When enabled, both `dappFr` and `accFr` must be non-zero — they
+    ///      pin the AN-side identity the Circuit 4 proof must bind to.
     struct BridgeWithdrawConfig {
         IBridgeWithdrawalVerifier bridgeWithdrawalVerifier;
+        /// @notice Fr-encoded AN-side bridge dApp identifier. Must be
+        ///         non-zero when `bridgeWithdrawalVerifier` is non-zero.
+        uint256 dappFr;
+        /// @notice Fr-encoded AN-side bridge account identifier. Must be
+        ///         non-zero when `bridgeWithdrawalVerifier` is non-zero.
+        uint256 accFr;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -443,16 +426,11 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
-    /// @param _be                 Circuit 4 (Bridge Event Prove) wiring. Pass
-    ///                            `BridgeEventConfig({...address(0), 0, 0})` to
-    ///                            disable; can be enabled / disabled independently
-    ///                            of `_vb`.
-    /// @param _bw                 Circuit 4 v2 (Bridge Withdrawal Prove) wiring.
-    ///                            Pass `BridgeWithdrawConfig({...address(0)})` to
-    ///                            disable. When enabled, the AN-side identity must
-    ///                            already be set via `_be.dappFr` / `_be.accFr`
-    ///                            (Phase B inherits the same identity that Phase A
-    ///                            pins; see `BridgeWithdrawConfig` natspec).
+    /// @param _bw                 Circuit 4 (single-final-root) wiring. Pass
+    ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
+    ///                            to disable. When `bridgeWithdrawalVerifier`
+    ///                            is non-zero, both `dappFr` and `accFr`
+    ///                            must be non-zero.
     /// @dev Pass address(0) for `_aavePool`/`_wethGateway`/`_aWETH` to disable AAVE.
     ///      In that case, the bridge behaves as before (plain ETH custody).
     constructor(
@@ -461,7 +439,6 @@ contract AckiNackiBridge {
         address _wethGateway,
         address _aWETH,
         VerifyBlockConfig memory _vb,
-        BridgeEventConfig memory _be,
         BridgeWithdrawConfig memory _bw
     ) {
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
@@ -486,26 +463,17 @@ contract AckiNackiBridge {
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
 
-        // Circuit 4 (bridge event prove) wiring — independent of `_vb`.
+        // Circuit 4 (single-final-root) wiring — independent of `_vb`.
         // Verifier address is the toggle; if non-zero, both Fr identifiers
         // must also be non-zero (otherwise no real proof could ever bind).
-        if (address(_be.bridgeEventVerifier) != address(0)) {
-            if (_be.dappFr == 0 || _be.accFr == 0) {
-                revert InvalidBridgeEventIdentity();
-            }
-        }
-        bridgeEventVerifier = _be.bridgeEventVerifier;
-        bridgeEventDappFr = _be.dappFr;
-        bridgeEventAccFr = _be.accFr;
-
-        // Circuit 4 v2 (bridge withdrawal prove) wiring. Reuses the Phase A
-        // identity slots above; if Phase B is enabled, those slots must be set.
         if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
-            if (_be.dappFr == 0 || _be.accFr == 0) {
-                revert InvalidBridgeEventIdentity();
+            if (_bw.dappFr == 0 || _bw.accFr == 0) {
+                revert InvalidBridgeWithdrawalIdentity();
             }
         }
         bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
+        bridgeWithdrawalDappFr = _bw.dappFr;
+        bridgeWithdrawalAccFr = _bw.accFr;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -531,7 +499,7 @@ contract AckiNackiBridge {
     /// @dev Emits a `Deposit` event that is later proven by a ZK circuit.
     ///      Funds stay as ETH in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
-    function deposit() external payable nonReentrant {
+    function deposit() external payable nonReentrant whenNotPaused {
         if (msg.value == 0) revert InvalidAmount();
         if (msg.value > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
 
@@ -592,7 +560,7 @@ contract AckiNackiBridge {
         uint8 numLayers,
         uint256[MAX_LAYER_HASHES] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         // Feature gate: all three verifier slots must be wired.
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -667,26 +635,25 @@ contract AckiNackiBridge {
         // this function's stack frame small enough to compile cleanly under
         // `forge coverage`, which runs without `--via-ir`).
         storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
-        _pushLayerWindow(layerHashes[numLayers - 1]);
+        _recordAnchor(layerHashes[numLayers - 1]);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
     }
 
-    /// @dev Append `anchor` to the rolling `_layerWindow` ring buffer.
-    ///      Extracted from `verifyBlock` so the latter compiles without
-    ///      `--via-ir` (needed for `forge coverage`). Cost: one SSTORE per
-    ///      call (overwriting a single slot) plus the `layerWindowHead`
-    ///      bump. Maintained even when Circuit 4 isn't wired so a later
-    ///      opt-in deployment doesn't have to back-fill 100 blocks.
-    function _pushLayerWindow(uint256 anchor) internal {
-        uint256 slot = layerWindowHead % LAYER_WINDOW_SIZE;
-        _layerWindow[slot] = anchor;
+    /// @dev Record `anchor` in the `_knownAnchors` set and bump the
+    ///      monotonic `anchorsRecorded` counter. Extracted from
+    ///      `verifyBlock` so the latter compiles without `--via-ir`
+    ///      (needed for `forge coverage`). Cost: one SSTORE for the
+    ///      mapping (new key) and one for the counter. The same anchor
+    ///      may be recorded multiple times safely (re-write to true is a
+    ///      no-op in terms of correctness; the counter still bumps so
+    ///      off-chain tooling sees every `verifyBlock` event).
+    function _recordAnchor(uint256 anchor) internal {
+        _knownAnchors[anchor] = true;
         unchecked {
-            // `layerWindowHead` is a monotonic counter; overflow at 2^256
-            // is unreachable on any realistic timescale.
-            layerWindowHead = layerWindowHead + 1;
+            anchorsRecorded = anchorsRecorded + 1;
         }
-        emit LayerWindowPushed(slot, anchor, layerWindowHead);
+        emit AnchorRecorded(anchor, anchorsRecorded);
     }
 
     /// @notice View helper: returns the full `storedLayerHashes` array as a
@@ -700,125 +667,44 @@ contract AckiNackiBridge {
         return out;
     }
 
-    // ---------------------------------------------------------------------
-    // AN→ETH event verification — verifyEvent (Circuit 4, permissionless)
-    // ---------------------------------------------------------------------
-
-    /// @notice Verify a Circuit 4 (Bridge Event Prove) proof that a
-    ///         `WithdrawalInitiated` event for `tokenId` was emitted on the
-    ///         AN-side `TokenBridge` identified by `(bridgeEventDappFr,
-    ///         bridgeEventAccFr)` and anchored into one of the most recent
-    ///         `LAYER_WINDOW_SIZE` top-of-chain layer hashes.
-    ///
-    ///         Emits `BridgeEventVerified(tokenId, msg.sender)` on success.
-    ///         Does NOT pay anything to anyone — the Phase A circuit keeps
-    ///         `amount`/`recipient`/`dstChainId`/`sender` as private
-    ///         witnesses, so the bridge has nothing actionable to do with
-    ///         them on its own. A genuine `withdraw()` will land alongside a
-    ///         circuit variant that exposes those fields (and adds a
-    ///         replay-resistant nullifier — see
-    ///         `docs/circuit_4_open_questions.md` Q-CIRC4-{1,2,3}).
-    ///
-    /// @dev Permissionless. The contract assembles the 103-element public
-    ///      input vector itself (the 100 `layerHashes` are read from the
-    ///      on-chain `_layerWindow`, not taken from the caller — so an
-    ///      attacker can't substitute a known-good window from a different
-    ///      bridge instance).
-    ///
-    /// @param proof    256-byte gnark Groth16 proof bytes (Circuit 4 wrap).
-    /// @param tokenId  Token id committed by the event body[54..58).
-    /// @return success Always `true` on a verified proof; reverts on failure
-    ///         (matches `verifyBlock`'s pattern — no silent success).
-    function verifyEvent(bytes calldata proof, uint256 tokenId)
-        external
-        nonReentrant
-        returns (bool success)
-    {
-        if (address(bridgeEventVerifier) == address(0)) {
-            revert VerifyEventDisabled();
-        }
-
-        // Snapshot the rolling window into memory (one copy, then the
-        // adapter ABI takes a calldata array — using `memory` here matches
-        // how Solidity passes fixed-size arrays to external calls).
-        uint256[LAYER_WINDOW_SIZE] memory window;
-        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
-            window[i] = _layerWindow[i];
-        }
-
-        bool ok = bridgeEventVerifier.verifyBridgeEvent(
-            proof, tokenId, bridgeEventDappFr, bridgeEventAccFr, window
-        );
-        if (!ok) revert BridgeEventProofRejected();
-
-        emit BridgeEventVerified(tokenId, msg.sender);
-        return true;
-    }
-
-    /// @notice Return the rolling layer-hash window as a memory snapshot.
-    ///         Indices `0..LAYER_WINDOW_SIZE` map to ring-buffer slots,
-    ///         *not* to time-ordered positions. To reconstruct chronological
-    ///         order, use `layerWindowHead`:
-    ///           `chronological[k] = window[(head - LAYER_WINDOW_SIZE + k) % LAYER_WINDOW_SIZE]`
-    ///         for `k ∈ [0, min(head, LAYER_WINDOW_SIZE))`.
-    ///         Empty slots (before the buffer fills) are zero.
-    function getLayerWindow() external view returns (uint256[LAYER_WINDOW_SIZE] memory out) {
-        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
-            out[i] = _layerWindow[i];
-        }
-    }
-
-    /// @notice Return one slot of the rolling layer-hash window.
-    /// @param slot Ring-buffer slot index in `[0, LAYER_WINDOW_SIZE)`. Use
-    ///        `(layerWindowHead - 1) % LAYER_WINDOW_SIZE` for the most recent.
-    function layerWindowAt(uint256 slot) external view returns (uint256) {
-        require(slot < LAYER_WINDOW_SIZE, "slot oob");
-        return _layerWindow[slot];
-    }
-
-    /// @notice O(LAYER_WINDOW_SIZE) helper: is `hash` present in the current
-    ///         window? Cheap to call off-chain; not used inside `verifyEvent`
-    ///         itself (the ZK proof already enforces the membership check
-    ///         via `hash_choice_index`).
-    function isLayerHashInWindow(uint256 hash) external view returns (bool) {
-        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
-            if (_layerWindow[i] == hash) return true;
-        }
-        return false;
+    /// @notice O(1) helper: is `anchor` in the bridge's set of known anchors?
+    ///         Cheap to call off-chain; mirrored inside `withdrawByProof`.
+    function isKnownAnchor(uint256 anchor) external view returns (bool) {
+        return _knownAnchors[anchor];
     }
 
     // ---------------------------------------------------------------------
-    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4 v2, permissionless)
+    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4, single-final-root)
     // ---------------------------------------------------------------------
 
     /// @notice Mask for each half of a split-α `recipient` address (10 bytes = 80 bits).
-    /// @dev Phase B currently assumes split-α (10/10 byte halves) per the
-    ///      default in `docs/an_partner_circuit4_alina_replies_2026-05-21.md`.
-    ///      If Alina's final ack picks a different split (β = 16/4, γ = 12/8),
-    ///      this mask + `_reconstructRecipient` change in lockstep with the
-    ///      circuit. The split is locked at deployment via the immutable
-    ///      `bridgeWithdrawalVerifier` — its on-chain VK only accepts proofs
-    ///      with the matching layout.
+    /// @dev Circuit 4 single-final-root uses split-α (10/10) per
+    ///      `bridge_event_prove_circuit::RECIPIENT_HI_*` / `RECIPIENT_LO_*`
+    ///      offsets in the partner repo. The split is locked at deployment
+    ///      via the immutable `bridgeWithdrawalVerifier` — its on-chain VK
+    ///      only accepts proofs with the matching layout.
     uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
-    /// @notice Pay out a withdrawal proven by a Circuit 4 v2 (Bridge Withdrawal
-    ///         Prove) Groth16 proof.
+    /// @notice Pay out a withdrawal proven by a Circuit 4 (single-final-root)
+    ///         Groth16 proof.
     ///
     /// Verifies that:
     ///   1. The proof witnesses a `WithdrawalInitiated(dstChainId, recipient,
     ///      amount, tokenId, sender)` event emitted by the AN-side TokenBridge
-    ///      identified by `(bridgeEventDappFr, bridgeEventAccFr)`, anchored to
-    ///      one of the most recent `LAYER_WINDOW_SIZE` top-of-chain layer
-    ///      hashes (circuit's `hash_choice_index` is private).
+    ///      identified by `(bridgeWithdrawalDappFr, bridgeWithdrawalAccFr)`,
+    ///      anchored — via the proof's dense-chain extension — to a
+    ///      `finalRoot` the bridge has previously observed via `verifyBlock`
+    ///      (`_knownAnchors[finalRoot] == true`).
     ///   2. `pub.dstChainId == block.chainid` (the event was destined for
     ///      *this* chain, not a sibling EVM chain that shares the bridge VK).
-    ///   3. `pub.dappFr == bridgeEventDappFr` and `pub.accFr == bridgeEventAccFr`
-    ///      (defensive — also enforced by the verifier under the same identity,
-    ///      but checked here so the explicit `WithdrawIdentityMismatch` error
-    ///      surfaces before the more opaque `WithdrawalProofRejected`).
+    ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
+    ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
+    ///      by the verifier under the same identity, but checked here so
+    ///      the explicit `WithdrawIdentityMismatch` error surfaces before
+    ///      the more opaque `WithdrawalProofRejected`).
     ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId == 0` (Phase B only supports native ETH; non-zero
-    ///      reserved for ERC-20 in a future milestone).
+    ///   5. `pub.tokenId == 0` (only native ETH is currently supported;
+    ///      non-zero token ids reserved for ERC-20 in a future milestone).
     ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
@@ -831,19 +717,19 @@ contract AckiNackiBridge {
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
     ///      Typical caller is a relayer running `bridge-relayer-daemon`.
     ///
-    /// @param proof   256-byte gnark Groth16 proof bytes (Circuit 4 v2 wrap).
+    /// @param proof   256-byte gnark Groth16 proof bytes (Circuit 4 wrap).
     /// @param pub     Public-input slots [0..9]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
         bytes calldata proof,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-    ) external nonReentrant returns (bool success) {
+    ) external nonReentrant whenNotPaused returns (bool success) {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
 
-        // ---- Checks: identity, chain, replay, shape ----
-        if (pub.dappFr != bridgeEventDappFr || pub.accFr != bridgeEventAccFr) {
+        // ---- Checks: identity, chain, replay, shape, anchor ----
+        if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
         }
         if (pub.dstChainId != block.chainid) {
@@ -862,16 +748,21 @@ contract AckiNackiBridge {
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-
-        // ---- Crypto: verify the Groth16 proof against the on-chain window. ----
-        //      The `layerHashes` argument is sourced from on-chain storage so a
-        //      caller can't substitute a known-good window from a different
-        //      bridge instance.
-        uint256[LAYER_WINDOW_SIZE] memory window;
-        for (uint256 i = 0; i < LAYER_WINDOW_SIZE; i++) {
-            window[i] = _layerWindow[i];
+        // Off-circuit anchor check. The proof exposes `finalRoot` as a
+        // public input (slot [9]) — we accept it only if we have previously
+        // observed it through a successful `verifyBlock` extension. This
+        // replaces the legacy `_layerWindow[100]` private-index design with
+        // an O(1) set lookup that matches the v3 circuit's single-final-root
+        // layout.
+        if (!_knownAnchors[pub.finalRoot]) {
+            revert UnknownAnchor(pub.finalRoot);
         }
-        bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub, window);
+
+        // ---- Crypto: verify the Groth16 proof. The 10 public inputs flow
+        //      verbatim through the adapter; the anchor check above guards
+        //      against a forged `finalRoot` that the circuit alone cannot
+        //      bind to the bridge's view of AN state.
+        bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
 
         // ---- Treasury check (must happen before the AAVE pull). ----
@@ -993,6 +884,28 @@ contract AckiNackiBridge {
         (bool ok,) = payable(yieldRecipient).call{ value: received }("");
         require(ok, "yield transfer failed");
         emit YieldHarvested(yieldRecipient, received);
+    }
+
+    // ---------------------------------------------------------------------
+    // Pause controls (owner-only)
+    // ---------------------------------------------------------------------
+
+    /// @notice Halt all user-facing entrypoints (`deposit`, `verifyBlock`,
+    ///         `withdrawByProof`). Reverts if the bridge is already paused.
+    /// @dev Owner-only AAVE management is *not* gated — the owner must
+    ///      still be able to evacuate funds via `emergencyWithdrawAll` /
+    ///      `withdrawFromAave` / `harvestYield` while paused.
+    function pause() external onlyOwner {
+        if (paused) revert AlreadyInThatPauseState();
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @notice Re-enable user-facing entrypoints. Reverts if not paused.
+    function unpause() external onlyOwner {
+        if (!paused) revert AlreadyInThatPauseState();
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     /// @notice Enable or disable further supplies to AAVE.

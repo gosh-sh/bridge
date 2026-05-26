@@ -41,7 +41,6 @@ contract AckiNackiBridgeAaveTest is Test {
             address(gateway),
             address(aWETH),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
 
@@ -76,7 +75,6 @@ contract AckiNackiBridgeAaveTest is Test {
             address(0),
             address(aWETH),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
     }
@@ -88,7 +86,6 @@ contract AckiNackiBridgeAaveTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
         assertFalse(plain.aaveEnabled(), "aave disabled when no addresses");

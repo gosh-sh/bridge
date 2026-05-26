@@ -103,7 +103,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 | Contract | Purpose |
 |----------|---------|
-| `AckiNackiBridge.sol` | Main bridge: `deposit()`, **AAVE V3 yield integration**, AN→ETH state via `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1). AN→ETH event attestation via `verifyEvent(proof, tokenId)` + rolling `_layerWindow[100]` ring buffer (Phase A Circuit 4 scaffold, 2026-05-17 — see `docs/circuit_4_open_questions.md`). Legacy refund-style `withdraw()` + `IAckiNackiVerifier` chain retired in Phase 4.3 (2026-05-17). |
+| `AckiNackiBridge.sol` | Main bridge: `deposit()`, **AAVE V3 yield integration**, AN→ETH state via `verifyBlock(finType, 1A-or-1B proof, Circuit-2 proof, …)` enforcing cross-circuit `block_id`/`bk_set_poseidon` agreement + monotonic `block_seq_no` + Poseidon chain anchor (Phase 4.1). AN→ETH payout via `withdrawByProof(proof, pub)` against Circuit 4 (single-final-root layout, partner branch `circuit4-single-final-root`) — verifies a 10-PI proof, checks `pub.finalRoot ∈ _knownAnchors` (set populated by `verifyBlock`), enforces `dstChainId == block.chainid`, identity match, 80-bit recipient halves, `tokenId == 0` (native ETH), nullifier replay protection, then pays out reconstructed recipient. Legacy refund-style `withdraw()` + `IAckiNackiVerifier` chain retired in Phase 4.3 (2026-05-17); the Phase A `verifyEvent` + `_layerWindow[100]` scaffold and Phase B 110-PI withdrawal were retired in Phase 4.4 (2026-05-26) once the partner shipped the unified single-final-root v3 circuit. |
 | `IBlockHeaderOracle.sol` | Interface for Ethereum block hash oracle |
 | `AxiomBlockHeaderOracle.sol` | Axiom-based block hash oracle implementation |
 | `Halo2Verifier.sol` | Direct Halo2 SHPLONK verifier (Yul-based, for testing) |
@@ -116,15 +116,13 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 | `IFallbackGroth16Verifier.sol` / `FallbackGroth16VerifierGenerated.sol` | Gnark-generated 4-input Groth16 verifier for Fallback (separate VK from 1A) |
 | `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` | Bridge-side adapter for Circuit 2 (Layer Hashes Movement) — 14 public inputs `[blockId, bkSetCommitment, numLayers, layerHashes[0..10], prevMaxLevelLayerHash]` |
 | `ILayerHashesGroth16Verifier.sol` / `LayerHashesGroth16VerifierGenerated.sol` | Gnark-generated 14-input Groth16 verifier for Circuit 2 |
-| `IBridgeEventVerifier.sol` / `BridgeEventVerifier.sol` | Bridge-side adapter for Circuit 4 v1 (Bridge Event Prove, Phase A scaffold) — 103 public inputs `[tokenId, dappFr, accFr, layerHashes[0..100]]`. Mock-tested only; real `BridgeEventGroth16VerifierGenerated.sol` pending Phase B. Retires once the partner ships the v2 circuit (110-input layout, see below). |
-| `IBridgeEventGroth16Verifier.sol` | Interface for the future gnark-generated 103-input Groth16 verifier (Circuit 4 v1) |
-| `IBridgeWithdrawalVerifier.sol` / `BridgeWithdrawalVerifier.sol` | Bridge-side adapter for **Circuit 4 v2 (Bridge Withdrawal Prove, Phase B)** — 110 public inputs `[tokenId, amount, recipientHi, recipientLo, dstChainId, senderDappFr, senderAccFr, dappFr, accFr, nullifier, layerHashes[0..100]]`. Used by `AckiNackiBridge.withdrawByProof()` (the actual AN→ETH payout path). Mock-tested only; real `BridgeWithdrawalGroth16VerifierGenerated.sol` pending Alina's v2 circuit. Layout per `docs/an_partner_circuit4_alina_replies_2026-05-21.md`. |
-| `IBridgeWithdrawalGroth16Verifier.sol` | Interface for the future gnark-generated 110-input Groth16 verifier (Circuit 4 v2) |
+| `IBridgeWithdrawalVerifier.sol` / `BridgeWithdrawalVerifier.sol` | Bridge-side adapter for **Circuit 4 (Bridge Withdrawal, single-final-root)** — 10 public inputs `[tokenId, amount, recipientHi, recipientLo, dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot]`. Used by `AckiNackiBridge.withdrawByProof()` (the AN→ETH payout path). Mock-tested only; real `BridgeWithdrawalGroth16VerifierGenerated.sol` pending **Phase 8** (real Halo2-in-gnark wrapper — R15). Layout per partner branch `circuit4-single-final-root` (`bridge_event_prove_circuit.rs` `PUB_*` constants). The `finalRoot` is verified off-circuit against the bridge's `_knownAnchors` set (populated on every `verifyBlock`); the v1/v2 `layerHashes[100]` private-index design is retired. |
+| `IBridgeWithdrawalGroth16Verifier.sol` | Interface for the future gnark-generated 10-input Groth16 verifier (Circuit 4 single-final-root) |
 | `IAavePool.sol` | Minimal AAVE V3 Pool interface (`supply` / `withdraw` / `getReserveData`) |
 | `IWrappedTokenGatewayV3.sol` | AAVE V3 ETH⇄WETH gateway interface (`depositETH` / `withdrawETH`) |
 | `IERC20.sol` | Trimmed ERC-20 interface for aWETH custody |
 
-Test mocks (under `test/mocks/`): `MockAave.sol` (`MockAWETH`, `MockAavePool`, `MockWETHGateway`) for the AAVE path without forking mainnet; `MockPrimaryVerifier.sol` / `MockFallbackVerifier.sol` / `MockLayerHashesMovementVerifier.sol` for driving `AckiNackiBridge.verifyBlock` through many synthetic blocks without re-running ZK proof generation (real verifiers covered end-to-end by `AckiNackiBridgeVerifyBlock.t.sol`); `MockBridgeEventVerifier.sol` with optional **strict mode** (pin expected layerHashes window + identity triple) for Phase A Circuit 4 tests; `MockBridgeWithdrawalVerifier.sol` for Phase B `withdrawByProof` tests (same strict-mode trick: pins expected `WithdrawalPublicInputs` + on-chain `layerHashes` snapshot so a passing test is itself proof the bridge forwarded the right bytes).
+Test mocks (under `test/mocks/`): `MockAave.sol` (`MockAWETH`, `MockAavePool`, `MockWETHGateway`) for the AAVE path without forking mainnet; `MockPrimaryVerifier.sol` / `MockFallbackVerifier.sol` / `MockLayerHashesMovementVerifier.sol` for driving `AckiNackiBridge.verifyBlock` through many synthetic blocks without re-running ZK proof generation (real verifiers covered end-to-end by `AckiNackiBridgeVerifyBlock.t.sol`); `MockBridgeWithdrawalVerifier.sol` for `withdrawByProof` tests with optional **strict-pub mode** (pins expected `WithdrawalPublicInputs` byte-for-byte so a passing test is itself proof the bridge forwarded the right bytes).
 
 Build: `cd contracts/ethereum && forge build`
 Test: `cd contracts/ethereum && forge test`
@@ -416,8 +414,8 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 | `AckiNackiBridgeVerifyBlockTest` (Phase 4 AN→ETH, real bound 1A+2 proofs + invariants) | 17 |
 | `FuzzAckiNackiBridgeVerifyBlockTest` (Phase 4 input-validation invariants, 6 fuzz × 256 runs + 1 unit) | 7 |
 | `AckiNackiBridgeRelayerLoopTest` (Phase 5.1 — 10-block loop with mock verifiers) | 6 |
-| `AckiNackiBridgeVerifyEventTest` (Phase A Circuit 4 scaffolding — layerWindow + verifyEvent) | 16 |
-| `AckiNackiBridgeWithdrawByProofTest` (Phase B Circuit 4 v2 — `withdrawByProof` + nullifier mapping + recipient split + treasury shortfall + strict-mode plumbing) | 20 |
+| `AckiNackiBridgeWithdrawByProofTest` (Circuit 4 single-final-root — `withdrawByProof` + nullifier mapping + anchor lookup + recipient split + treasury shortfall + strict-pub plumbing) | 24 |
+| `AckiNackiBridgePauseTest` (global pause / unpause — owner-only, blocks deposit / verifyBlock / withdrawByProof; AAVE management remains available) | 12 |
 | `AxiomBlockHeaderOracleTest` | 16 |
 | `Blake2bHalo2VerifierTest` | 7 |
 | `KeccakHalo2VerifierTest` | 1 |

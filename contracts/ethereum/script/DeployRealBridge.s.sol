@@ -8,7 +8,6 @@ import "../src/AxiomBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeEventVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/PrimaryGroth16VerifierGenerated.sol";
 import "../src/FallbackGroth16VerifierGenerated.sol";
@@ -49,10 +48,12 @@ import "../src/LayerHashesMovementVerifier.sol";
  * AAVE mode:
  *   - Set USE_AAVE=true to wire AAVE V3 (mainnet only).
  *
- * Circuit 4 (verifyEvent) wiring is *not* exposed here: there is no
- * gnark-generated `BridgeEventGroth16VerifierGenerated.sol` yet (Phase A
- * scaffolding only, Phase B blocked on the open questions in
- * `docs/circuit_4_open_questions.md`).
+ * Circuit 4 (withdrawByProof) wiring is *not* exposed here: the gnark
+ * wrapper is still an R15 identity stub (see Phase 8 in
+ * `docs/an_partner_integration_plan.md`). Once the real Halo2-in-gnark
+ * verifier lands, add a `WIRE_WITHDRAW_BY_PROOF=true` env path that
+ * deploys the generated verifier + adapter and wires them through
+ * `AckiNackiBridge.BridgeWithdrawConfig`.
  *
  * Axiom V2 Core addresses (from axiom-v2-contracts deployed.json):
  *   Mainnet: 0x69963768F8407dE501029680dE46945F838Fc98B
@@ -143,12 +144,12 @@ contract DeployRealBridge is Script {
                 layerHashesVerifierAddr = address(vb.layerHashesVerifier);
             }
 
-            // Step 4 + 5: Circuit 4 (verifyEvent) + Circuit 4 v2 (withdrawByProof)
-            //             both disabled here (no gnark-generated verifiers yet —
-            //             Phase A attestation scaffolding only, Phase B payout
-            //             pending partner's v2 circuit; see
-            //             docs/an_partner_questions_circuit4_2026-05-17.md).
-            //             Deploy the bridge wired against the configs above.
+            // Step 4: Circuit 4 (withdrawByProof) — disabled here. Pending
+            //         the R15 gnark wrapper replacement (Phase 8); a future
+            //         env-driven branch will deploy the generated 10-input
+            //         verifier + adapter and wire them through
+            //         `BridgeWithdrawConfig` with the live AN-side
+            //         `(dappFr, accFr)` identity.
             console.log("Deploying AckiNackiBridge...");
             AckiNackiBridge bridge = new AckiNackiBridge(
                 oracleAddr,
@@ -156,11 +157,10 @@ contract DeployRealBridge is Script {
                 wethGateway,
                 aWETH,
                 vb,
-                AckiNackiBridge.BridgeEventConfig({
-                    bridgeEventVerifier: IBridgeEventVerifier(address(0)), dappFr: 0, accFr: 0
-                }),
                 AckiNackiBridge.BridgeWithdrawConfig({
-                    bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0))
+                    bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
+                    dappFr: 0,
+                    accFr: 0
                 })
             );
             bridgeAddr = address(bridge);

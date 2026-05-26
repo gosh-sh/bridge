@@ -8,54 +8,56 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeEventVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
-import "./mocks/MockBridgeEventVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofTest
-/// @notice Phase B Circuit 4 v2 (Bridge Withdrawal Prove) tests.
+/// @notice Circuit 4 (single-final-root) tests — the unified AN→ETH payout
+///         path landed in v3 of `bridge-event-prove-circuit` (partner branch
+///         `circuit4-single-final-root`). Replaces the previous Phase A
+///         (`verifyEvent`) + Phase B (110-input withdrawal) split.
 ///
-/// Drives the `withdrawByProof` entry point — the AN→ETH payout path that
-/// retires the legacy refund-style `withdraw` (demolished in Phase 4.3) and
-/// supersedes Phase A's attestation-only `verifyEvent`. Uses a mock
-/// `IBridgeWithdrawalVerifier` because the real gnark wrap for the partner's
-/// Circuit 4 v2 doesn't exist yet — see
-/// `docs/an_partner_questions_circuit4_2026-05-17.md` and the 110-Fr layout in
-/// `docs/an_partner_circuit4_alina_replies_2026-05-21.md`.
+/// Uses a mock `IBridgeWithdrawalVerifier` because the R15 gnark wrapper is
+/// still an identity stub — tracked as Phase 8 of
+/// `docs/an_partner_integration_plan.md`. Once the real Halo2-in-gnark
+/// verifier lands, this suite stays unchanged and a sibling E2E suite picks
+/// up real bound proofs.
 ///
 /// Coverage:
 ///
-/// 1. **Constructor wiring**: Phase B enabled / disabled toggles; identity
-///    inheritance from Phase A (`BridgeEventConfig`); revert if identity slots
-///    aren't set when Phase B is enabled.
-/// 2. **Happy path**: a verified proof transfers `amount` ETH to the
+/// 1. **Constructor wiring**: enabled / disabled toggles; revert if identity
+///    slots aren't set when the verifier is non-zero
+///    (`InvalidBridgeWithdrawalIdentity`).
+/// 2. **Anchor recording**: every `verifyBlock` records the new top-of-chain
+///    anchor in `_knownAnchors` and bumps `anchorsRecorded`; `AnchorRecorded`
+///    event reflects the same state change.
+/// 3. **Happy path**: a verified proof transfers `amount` ETH to the
 ///    reconstructed `recipient`, marks the nullifier used, emits
 ///    `WithdrawalByProofExecuted`, decrements `treasuryBalance`.
-/// 3. **Replay protection**: re-submitting the same nullifier reverts with
+/// 4. **Replay protection**: re-submitting the same nullifier reverts with
 ///    `NullifierAlreadyUsed`. The `isNullifierUsed` view reports correctly.
-/// 4. **Identity mismatch**: a proof carrying mismatching `(dappFr, accFr)`
+/// 5. **Identity mismatch**: a proof carrying mismatching `(dappFr, accFr)`
 ///    reverts with `WithdrawIdentityMismatch` *before* the verifier is
-///    invoked (cheap path).
-/// 5. **dstChainId mismatch**: a proof for a different chain reverts with
+///    invoked.
+/// 6. **dstChainId mismatch**: a proof for a different chain reverts with
 ///    `DstChainIdMismatch(supplied, expected)`.
-/// 6. **Recipient split validation**: `recipientHi` or `recipientLo`
+/// 7. **Recipient split validation**: `recipientHi` or `recipientLo`
 ///    exceeding 80 bits reverts with `RecipientHalfOutOfRange`. Valid splits
 ///    round-trip cleanly through `_reconstructRecipient`.
-/// 7. **Treasury shortfall**: amount > treasuryBalance reverts with
+/// 8. **Anchor unknown**: a proof referencing a `finalRoot` not in
+///    `_knownAnchors` reverts with `UnknownAnchor`.
+/// 9. **Treasury shortfall**: amount > treasuryBalance reverts with
 ///    `WithdrawTreasuryShortfall`.
-/// 8. **Unsupported tokenId**: any `tokenId != 0` reverts (Phase B is
-///    native-ETH-only).
-/// 9. **Mock crypto rejection**: the underlying verifier returning `false`
-///    reverts with `WithdrawalProofRejected` and leaves state untouched.
-/// 10. **`layerHashes` are forwarded from on-chain `_layerWindow`**, not from
-///     the caller — proven via the mock's strict-mode hash matcher.
-/// 11. **Public inputs are forwarded byte-for-byte** to the verifier —
+/// 10. **Unsupported tokenId**: any `tokenId != 0` reverts (Phase B is
+///     native-ETH-only).
+/// 11. **Mock crypto rejection**: the underlying verifier returning `false`
+///     reverts with `WithdrawalProofRejected` and leaves state untouched.
+/// 12. **Public inputs are forwarded byte-for-byte** to the verifier —
 ///     proven via the mock's strict-pub matcher.
 contract AckiNackiBridgeWithdrawByProofTest is Test {
     AckiNackiBridge internal bridge;
@@ -63,7 +65,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
-    MockBridgeEventVerifier internal bridgeEventVerifier;
     MockBridgeWithdrawalVerifier internal withdrawalVerifier;
 
     uint256 internal constant BK_SET = 0xBE5E7;
@@ -75,7 +76,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     uint256 internal constant DAPP_FR = 0xD499F4CEC0FFEE01;
     uint256 internal constant ACC_FR = 0xAC0F4CEDEADBEEF1;
 
-    uint256 internal constant LAYER_WINDOW_SIZE = 100;
     uint256 internal constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
     /// @dev Foundry's default `block.chainid` in unit tests is 31337 (Anvil).
@@ -87,6 +87,10 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     /// @dev Sample funder for deposits.
     address internal funder = address(0xF00D);
 
+    /// @dev Anchor recorded into `_knownAnchors` via `setUp`'s seed
+    ///      `verifyBlock`. Used as `pub.finalRoot` for happy-path tests.
+    uint256 internal seedAnchor;
+
     // Re-declared from AckiNackiBridge for `vm.expectEmit`.
     event WithdrawalByProofExecuted(
         uint256 indexed nullifier,
@@ -96,18 +100,18 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         address submitter
     );
 
+    event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
+
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
-        bridgeEventVerifier = new MockBridgeEventVerifier();
         withdrawalVerifier = new MockBridgeWithdrawalVerifier();
 
         primaryVerifier.setShouldAccept(true);
         fallbackVerifier.setShouldAccept(true);
         layerHashesVerifier.setShouldAccept(true);
-        bridgeEventVerifier.setShouldAccept(true);
         withdrawalVerifier.setShouldAccept(true);
 
         bridge = new AckiNackiBridge(
@@ -122,11 +126,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
                 BK_SET,
                 GENESIS_PREV_ANCHOR
             ),
-            VerifyBlockConfigLib.withBridgeEvent(
-                IBridgeEventVerifier(address(bridgeEventVerifier)), DAPP_FR, ACC_FR
-            ),
             VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier))
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
             )
         );
 
@@ -134,11 +135,39 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.deal(funder, 1000 ether);
         vm.prank(funder);
         bridge.deposit{ value: 50 ether }();
+
+        // Drive one `verifyBlock` so the suite has at least one anchor to
+        // bind withdrawal proofs to (mirrors the production timeline:
+        // every `withdrawByProof` requires a prior `verifyBlock` whose
+        // top-of-chain anchor matches the proof's `finalRoot`).
+        seedAnchor = _seedFirstBlock();
     }
 
     // ─────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
+
+    /// @dev Run one `verifyBlock` with fully-mocked verifiers; return the
+    ///      anchor (top-of-chain layer hash) the bridge then records.
+    function _seedFirstBlock() internal returns (uint256 topAnchor) {
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
+            layers[i] = uint256(keccak256(abi.encode("wd-seed-layer", i)));
+        }
+        topAnchor = layers[ACTIVE_LAYERS - 1];
+
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("seed-attestation-proof")),
+            abi.encodePacked(keccak256("seed-layerHashes-proof")),
+            FIRST_BLOCK_ID,
+            BK_SET,
+            FIRST_SEQ_NO,
+            ACTIVE_LAYERS,
+            layers,
+            bridge.storedPrevMaxLevelLayerHash()
+        );
+    }
 
     /// @dev Pack a 20-byte EVM address into split-α (hi=top 10 bytes, lo=bottom 10).
     function _split(address addr) internal pure returns (uint256 hi, uint256 lo) {
@@ -152,8 +181,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     ///      - dstChainId = current chainid
     ///      - tokenId = 0 (native ETH)
     ///      - recipient split-α from `RECIPIENT`
-    ///      - amount = 1 ether
+    ///      - amount = caller-controlled
     ///      - nullifier = caller-controlled (so callers can vary it for replay tests)
+    ///      - finalRoot = `seedAnchor` (recorded by the setUp `verifyBlock`)
     function _defaultPub(uint256 amount, uint256 nullifier)
         internal
         view
@@ -166,11 +196,11 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             recipientHi: hi,
             recipientLo: lo,
             dstChainId: block.chainid,
-            senderDappFr: uint256(keccak256("senderDapp")),
             senderAccFr: uint256(keccak256("senderAcc")),
             dappFr: DAPP_FR,
             accFr: ACC_FR,
-            nullifier: nullifier
+            nullifier: nullifier,
+            finalRoot: seedAnchor
         });
     }
 
@@ -193,53 +223,87 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
         assertEq(address(plain.bridgeWithdrawalVerifier()), address(0));
+        assertEq(plain.bridgeWithdrawalDappFr(), 0);
+        assertEq(plain.bridgeWithdrawalAccFr(), 0);
     }
 
-    function test_constructor_withdrawEnabled_storesVerifier() public view {
+    function test_constructor_withdrawEnabled_storesVerifierAndIdentity() public view {
         assertEq(address(bridge.bridgeWithdrawalVerifier()), address(withdrawalVerifier));
+        assertEq(bridge.bridgeWithdrawalDappFr(), DAPP_FR);
+        assertEq(bridge.bridgeWithdrawalAccFr(), ACC_FR);
     }
 
-    function test_constructor_withdrawEnabledWithoutIdentity_reverts() public {
-        vm.expectRevert(AckiNackiBridge.InvalidBridgeEventIdentity.selector);
+    function test_constructor_withdrawEnabledWithoutDappFr_reverts() public {
+        vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
         new AckiNackiBridge(
             address(oracle),
             address(0),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier))
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), 0, ACC_FR
             )
         );
     }
 
-    function test_constructor_withdrawEnabledWithIdentityOnly_isLegal() public {
-        // The Phase A verifier is zeroed but identity slots are set →
-        // Phase B should construct cleanly and Phase A's `verifyEvent`
-        // should revert with VerifyEventDisabled.
-        AckiNackiBridge bareB = new AckiNackiBridge(
+    function test_constructor_withdrawEnabledWithoutAccFr_reverts() public {
+        vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
+        new AckiNackiBridge(
             address(oracle),
             address(0),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.bridgeEventIdentityOnly(DAPP_FR, ACC_FR),
             VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier))
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, 0
             )
         );
-        assertEq(address(bareB.bridgeEventVerifier()), address(0));
-        assertEq(bareB.bridgeEventDappFr(), DAPP_FR);
-        assertEq(bareB.bridgeEventAccFr(), ACC_FR);
-        assertEq(address(bareB.bridgeWithdrawalVerifier()), address(withdrawalVerifier));
+    }
 
-        vm.expectRevert(AckiNackiBridge.VerifyEventDisabled.selector);
-        bareB.verifyEvent(_dummyProof(), 0);
+    // ─────────────────────────────────────────────────────────────────────
+    // Anchor recording
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_setUp_recordsSeedAnchor() public view {
+        assertTrue(bridge.isKnownAnchor(seedAnchor), "seed anchor recorded");
+        assertEq(bridge.anchorsRecorded(), 1, "one anchor recorded");
+    }
+
+    function test_verifyBlock_recordsAnchor_andEmitsEvent() public {
+        // Build a second block on top of the seed anchor.
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
+            layers[i] = uint256(keccak256(abi.encode("wd-block2-layer", i)));
+        }
+        uint256 expectedAnchor = layers[ACTIVE_LAYERS - 1];
+
+        vm.expectEmit(true, false, false, true);
+        emit AnchorRecorded(expectedAnchor, 2);
+
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("block2-att")),
+            abi.encodePacked(keccak256("block2-lh")),
+            FIRST_BLOCK_ID + 1,
+            BK_SET,
+            FIRST_SEQ_NO + 1,
+            ACTIVE_LAYERS,
+            layers,
+            bridge.storedPrevMaxLevelLayerHash()
+        );
+
+        assertTrue(bridge.isKnownAnchor(expectedAnchor));
+        assertTrue(bridge.isKnownAnchor(seedAnchor), "seed anchor remains valid");
+        assertEq(bridge.anchorsRecorded(), 2);
+    }
+
+    function test_isKnownAnchor_initiallyFalseForRandomValue() public view {
+        assertFalse(bridge.isKnownAnchor(0xDEAD_BEEF));
+        assertFalse(bridge.isKnownAnchor(0));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -264,14 +328,12 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     function test_withdrawByProof_disabled_reverts() public {
-        // A fresh bridge without Phase B wiring.
         AckiNackiBridge bareA = new AckiNackiBridge(
             address(oracle),
             address(0),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
-            VerifyBlockConfigLib.disabledBridgeEvent(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
 
@@ -299,7 +361,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Identity / chain / token validation
+    // Identity / chain / token / anchor validation
     // ─────────────────────────────────────────────────────────────────────
 
     function test_withdrawByProof_wrongDappFr_reverts() public {
@@ -341,6 +403,48 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, 1));
         bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    function test_withdrawByProof_unknownAnchor_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 ether, uint256(keccak256("unknownAnchor")));
+        uint256 unknownRoot = uint256(keccak256("not-recorded"));
+        pub.finalRoot = unknownRoot;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, unknownRoot)
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    function test_withdrawByProof_anchorRecordedByLaterVerifyBlock_isAccepted() public {
+        // Submit a second block, capture its anchor, and prove a withdrawal
+        // against it. Exercises that *any* anchor in the set works, not just
+        // the most recent.
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
+            layers[i] = uint256(keccak256(abi.encode("later-anchor", i)));
+        }
+        uint256 laterAnchor = layers[ACTIVE_LAYERS - 1];
+
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("later-att")),
+            abi.encodePacked(keccak256("later-lh")),
+            FIRST_BLOCK_ID + 1,
+            BK_SET,
+            FIRST_SEQ_NO + 1,
+            ACTIVE_LAYERS,
+            layers,
+            bridge.storedPrevMaxLevelLayerHash()
+        );
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 ether, uint256(keccak256("later-withdraw")));
+        pub.finalRoot = laterAnchor;
+
+        bool ok = bridge.withdrawByProof(_dummyProof(), pub);
+        assertTrue(ok);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -435,46 +539,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // ─────────────────────────────────────────────────────────────────────
     // Strict-mode plumbing assertions
     // ─────────────────────────────────────────────────────────────────────
-
-    function test_withdrawByProof_forwardsOnChainLayerWindow() public {
-        // Submit one verifyBlock so the on-chain ring buffer has a non-zero anchor.
-        uint256[10] memory layers;
-        for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("wd-layer", i)));
-        }
-        bridge.verifyBlock(
-            AckiNackiBridge.FinalizationType.Primary,
-            abi.encodePacked(keccak256("attestation-proof")),
-            abi.encodePacked(keccak256("layerHashes-proof")),
-            FIRST_BLOCK_ID,
-            BK_SET,
-            FIRST_SEQ_NO,
-            ACTIVE_LAYERS,
-            layers,
-            bridge.storedPrevMaxLevelLayerHash()
-        );
-
-        // Lock the mock to the EXACT window the bridge holds.
-        uint256[LAYER_WINDOW_SIZE] memory window = bridge.getLayerWindow();
-        withdrawalVerifier.setExpectedLayerHashes(window);
-
-        // Submit a withdrawal — should pass because the bridge forwards
-        // the on-chain window byte-for-byte.
-        bridge.withdrawByProof(
-            _dummyProof(), _defaultPub(1 ether, uint256(keccak256("plumb-window")))
-        );
-
-        // Now scramble one slot in the mock's expectation; the next
-        // withdrawal must fail because the bridge still forwards the
-        // on-chain window, which no longer matches.
-        window[0] = uint256(keccak256("garbage"));
-        withdrawalVerifier.setExpectedLayerHashes(window);
-
-        vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
-        bridge.withdrawByProof(
-            _dummyProof(), _defaultPub(1 ether, uint256(keccak256("plumb-window-2")))
-        );
-    }
 
     function test_withdrawByProof_forwardsPublicInputsByteForByte() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =

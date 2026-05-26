@@ -184,3 +184,11 @@ contracts/DepositVerifier.*
 deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
+
+# R15 / M2 bridge-evm-aggregator spike (standalone workspace, lock + target +
+# regenerated KZG SRS + generated Yul/.bin artefacts; only the source tree
+# under src/ + tests/ is committed).
+crates/bridge-evm-aggregator/Cargo.lock
+crates/bridge-evm-aggregator/target/
+crates/bridge-evm-aggregator/params/
+crates/bridge-evm-aggregator/out/

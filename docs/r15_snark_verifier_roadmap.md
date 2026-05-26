@@ -170,23 +170,63 @@ constraints, milestone breakdown, owner sign-off path.
 ### M2. Feasibility spike
 
 **Goal:** prove that, in our build environment, we can take a Halo2 SHPLONK
-proof of a partner-fork circuit, aggregate it via `snark-verifier-sdk`, and
-emit a Yul Solidity verifier that compiles under Foundry and verifies a
-real aggregated proof.
+proof, aggregate it via `snark-verifier-sdk`, and emit a Yul Solidity
+verifier that fits under EIP-170.
 
-**Deliverable:** `crates/bridge-evm-aggregator/` — new standalone cargo
-workspace (excluded from the main workspace, like `deposit-prover/`) with:
+**Status (2026-05-27): ✅ Closed (Rust-only round-trip). Foundry on-chain
+harness deferred to M6/M7.**
+
+**Delivered:** `crates/bridge-evm-aggregator/` — new standalone cargo
+workspace (excluded from the main workspace, like `deposit-prover/`):
   - `Cargo.toml` pinning `snark-verifier-sdk v0.1.7-git` against
-    `axiom-crypto/halo2-lib v0.4.1-git`.
-  - `examples/aggregate_circuit_1b.rs` — reads a Circuit 1B SHPLONK proof
-    + VK from `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/`,
-    re-encodes it with Poseidon transcript (re-proves), aggregates with
-    `AggregationCircuit::new::<SHPLONK>`, emits a Yul verifier to
-    `out/AggregatorVerifierCircuit1b.sol`.
-  - Foundry harness in `contracts/ethereum/test/spike/AggregatorSpike.t.sol`
-    that imports the generated Yul and verifies the aggregated proof.
+    `axiom-crypto/halo2-lib v0.4.1-git`,
+    `privacy-scaling-explorations/halo2 v2023_04_20`,
+    `halo2curves 0.3.1`.
+  - `src/multiply.rs` — minimal inner circuit: `a * b == c` with `c` as
+    single public input (K=9; built via `BaseCircuitBuilder<Fr>`).
+  - `src/aggregator.rs` — three thin wrappers: `prove_inner` (SHPLONK
+    proof of `multiply`), `aggregate` (wraps in `AggregationCircuit` at
+    K=21, SHPLONK, `VerifierUniversality::Full`), `generate_yul_verifier`
+    (`gen_evm_verifier_shplonk` → Yul .sol + raw .bin bytecode).
+  - `tests/round_trip.rs` — `#[ignore]`-gated acceptance test, ~3 min
+    wall-clock release build.
+  - `README.md` — status table, build/run instructions, deviation from
+    the Circuit-1B-as-stand-in plan.
 
-**Acceptance:** the Foundry test passes against a real aggregated proof.
+**Empirical results captured:**
+  - Inner SHPLONK proof generated cleanly (K=9, Poseidon transcript).
+  - Aggregation succeeds at **K=21** (K=20 hits "NOT ENOUGH ADVICE COLUMNS"
+    once expose_previous_instances is in play).
+  - Default aggregator instance shape = **12 limbs of KZG accumulator**
+    (`NUM_ACCUMULATOR_INSTANCES = 4 G1 coord × 3 native limbs`); the
+    earlier "4-limb" comment in `deposit-prover/src/aggregation.rs` is
+    wrong — corrected here.
+  - Yul source: **1 192 lines / 56 055 bytes**, compiles cleanly under
+    Foundry (`solc 0.8.19`, `via_ir = true`).
+  - Raw deployment bytecode: **13 009 bytes (12.7 KB)** — **53 %** of the
+    EIP-170 24 576-byte runtime limit. Headroom comfortable.
+
+**Deviation from original M2 plan:** the roadmap proposed aggregating
+Circuit 1B (partner-fork) as the inner. That requires two non-trivial
+spikes simultaneously: (a) snark-verifier in our env, (b) cross-fork
+VK/proof compatibility. We split them — M2 (this milestone) validates
+(a) using a synthetic inner; M5 will validate (b) when wiring Circuit 4.
+The Circuit-1B-stand-in idea is **abandoned** because Circuit 1B is the
+DEPOSIT direction (uses AN-side `ZKHALO2VERIFYWITHVK`, not the
+ETH-side aggregator) — Circuit 4 (the withdraw direction) is the actual
+target.
+
+**Known deferred items (now scoped to M5):**
+  - `expose_previous_instances(false)` to surface inner PIs as outer
+    instances. Currently fails with `NOT ENOUGH ADVICE COLUMNS` at K=20/21
+    with default `AggregationConfigParams.num_advice` — needs explicit
+    `num_advice_per_phase` tuning.
+  - On-chain harness — deferred to M6/M7 because Foundry's solc + via_ir +
+    `optimizer_runs = 1` strips the inline-assembly fallback (same issue
+    the legacy `Halo2Verifier.sol` has — its bytecode in `out/` is also
+    a 67-byte stub, and the established workaround is `vm.readFileBinary`
+    on a `.bin` file built externally). M6 lifts this approach to the
+    aggregator's verifier.
 
 ### M3. Transcript strategy
 

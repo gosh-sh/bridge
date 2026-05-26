@@ -1,0 +1,63 @@
+# Standalone workspace — excluded from the main bridge workspace because it
+# depends on `axiom-crypto/halo2-lib` while the orchestrator depends on the
+# gosh fork (`halo2-lib-zkevm-sha256-and-bls12-381`); both can't coexist
+# inside one cargo unit. Same pattern as `deposit-prover/`.
+[workspace]
+
+[package]
+name = "bridge-evm-aggregator"
+version = "0.1.0"
+edition = "2021"
+authors = ["Acki Nacki Bridge Team"]
+license = "MIT OR Apache-2.0"
+description = "R15 / M2 feasibility spike — wraps a Halo2 SHPLONK proof in an AggregationCircuit (snark-verifier-sdk) and emits a Yul EVM verifier. See docs/r15_snark_verifier_roadmap.md."
+
+[lib]
+name = "bridge_evm_aggregator"
+path = "src/lib.rs"
+
+[dependencies]
+# snark-verifier-sdk pulls in halo2-base (axiom fork), halo2-ecc, halo2_proofs.
+# Pinning matches deposit-prover/Cargo.toml so the two crates can share git
+# cache and CI knows the dependency graph is internally consistent.
+snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_evm",
+    "loader_halo2",
+    "halo2-pse",
+] }
+snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_evm",
+    "loader_halo2",
+    "halo2-pse",
+] }
+halo2-base = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
+    "halo2-pse",
+    "display",
+] }
+halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2", tag = "v2023_04_20" }
+halo2curves = { package = "halo2curves", git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1" }
+
+ff = "0.13"
+rand = "0.8"
+bincode = "1.3"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+itertools = "0.13"
+
+# Aggregation generates a SNARK whose verifier must be < 24 KB; we exercise it
+# by running through `cargo test --release` so opt-level=3 keeps wall-clock
+# under a few minutes.
+[profile.dev]
+opt-level = 3
+
+# `examples/` produce real artefacts (SRS, Yul, .snark) — they need release
+# perf so they finish in reasonable time on CI runners.
+[profile.release]
+debug = false
+overflow-checks = false

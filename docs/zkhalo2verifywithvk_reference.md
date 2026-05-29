@@ -407,7 +407,7 @@ A `circuit_shape` byte is carried at **offset 10** (the first byte of the old `r
 
 The RLC path pulls `axiom-eth` (and transitively `snark-verifier-sdk`) into `tvm_vm`. This has two consequences the node build must accommodate:
 
-1. **Nightly toolchain for the `gosh` feature.** `snark-verifier-sdk` v0.1.7-git uses the unstable `trait_alias` feature (`NativeKzgAccumulationScheme`), so the axiom-eth RLC stack only builds on nightly. The stable gosh `BaseCircuitBuilder` path is unaffected — only the new RLC capability forces nightly.
+1. **Nightly toolchain for the `gosh` feature.** `snark-verifier-sdk` v0.1.7-git uses the unstable `trait_alias` feature (`NativeKzgAccumulationScheme`), so the axiom-eth RLC stack only builds on nightly. The stable gosh `BaseCircuitBuilder` path is unaffected — only the new RLC capability forces nightly. This is now the agreed toolchain: `tvm-sdk/rust-toolchain.toml` pins `channel = "nightly"` (verified against rustc `1.98.0-nightly (57d06900f 2026-05-27)`), so `cargo build` / CI select it automatically without an explicit `+nightly`. Pin a specific nightly date for fully reproducible CI.
 2. **`[patch]` unification of the halo2 backend.** `halo2-base` reaches the graph through three original git sources (gosh fork via `tvm_vm` + `gosh-zk-snark-halo2-utils`; axiom's `halo2-lib.git` via `axiom-eth` + `snark-verifier-sdk`). They must dedup to **one** package or the `VerifyingKey<G1Affine>` types don't match. The tvm-sdk workspace-root `[patch]` points all three sources (plus `crates.io`) at one git url+rev of the gosh fork (a shared local `path` cannot patch multiple sources — cargo keeps the original for the loser). See the `[patch]` block in `tvm-sdk/Cargo.toml`.
 
 Two supporting fork changes:

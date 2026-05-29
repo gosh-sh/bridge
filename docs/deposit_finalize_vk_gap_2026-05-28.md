@@ -271,10 +271,11 @@ reads. Today `deposit-prover` uses `halo2-pse`. To make its VK byte-compatible:
   **Resolved 2026-05-29 — we did it ourselves** (branch `bump-halo2-lib-v0.4.1`, stable-preserving;
   PR to gosh pending push access). Remaining gosh-side ask: review + merge the bump to the fork's
   `main` so consumers can drop the `file://` patch for a public git rev.
-- **Does the node accept building the `gosh` feature on a nightly toolchain?** The RLC stack
-  (`axiom-eth` → `snark-verifier-sdk`) requires nightly (`trait_alias`). If the node must stay on
-  stable, the alternative is forking `snark-verifier-sdk` to rewrite its 2 trait aliases — heavier
-  and divergent. The stable BaseCircuitBuilder opcode path is unaffected either way.
+- ~~Does the node accept building the `gosh` feature on a nightly toolchain?~~ **Resolved
+  2026-05-29 — nightly accepted.** `tvm-sdk/rust-toolchain.toml` pins `channel = "nightly"`
+  (the RLC stack `axiom-eth` → `snark-verifier-sdk` needs `trait_alias`). The stable
+  BaseCircuitBuilder opcode path is unaffected. Recommend pinning a specific nightly date for
+  reproducible CI once the team agrees one.
 
 ## 7. Artefacts
 - Empirical test: `../vk-compat-check/axiom-reader/` (Blocker 2, real backend, kept as regression fixture).

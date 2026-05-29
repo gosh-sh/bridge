@@ -1,6 +1,6 @@
-/// Configuration for the Acki Nacki Bridge frontend
-/// 
-/// Update these values after deploying contracts to Sepolia
+// Configuration for the Acki Nacki Bridge frontend
+//
+// Update these values after deploying contracts to Sepolia
 
 /// Bridge contract address on Sepolia
 /// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
@@ -31,16 +31,6 @@ pub const BRIDGE_ABI: &str = r#"[
         "type": "function"
     },
     {
-        "inputs": [
-            {"internalType": "bytes", "name": "proof", "type": "bytes"},
-            {"internalType": "uint256[]", "name": "publicInputs", "type": "uint256[]"}
-        ],
-        "name": "withdraw",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
         "inputs": [],
         "name": "depositCount",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
@@ -55,20 +45,6 @@ pub const BRIDGE_ABI: &str = r#"[
         "type": "function"
     },
     {
-        "inputs": [],
-        "name": "totalWithdrawn",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
-        "name": "withdrawals",
-        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
         "anonymous": false,
         "inputs": [
             {"indexed": true, "internalType": "uint256", "name": "depositId", "type": "uint256"},
@@ -78,16 +54,5 @@ pub const BRIDGE_ABI: &str = r#"[
         ],
         "name": "Deposit",
         "type": "event"
-    },
-    {
-        "anonymous": false,
-        "inputs": [
-            {"indexed": true, "internalType": "bytes32", "name": "depositId", "type": "bytes32"},
-            {"indexed": true, "internalType": "address", "name": "recipient", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"}
-        ],
-        "name": "Withdrawal",
-        "type": "event"
     }
 ]"#;
-

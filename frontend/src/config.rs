@@ -56,3 +56,17 @@ pub const BRIDGE_ABI: &str = r#"[
         "type": "event"
     }
 ]"#;
+
+/// Acki Nacki receiver / endpoint (configurable).
+///
+/// The currently deployed Sepolia bridge contract's `deposit()` takes no
+/// arguments and credits funds to `msg.sender` on the Acki Nacki side, so this
+/// value is **not** sent on-chain yet. It is exposed as a configurable
+/// parameter for the E2E test: once the AN side provides a concrete receiving
+/// address / endpoint (test funds are not provisioned yet), set it here (or via
+/// the build-time `AN_RECEIVER` env var). An empty value means "use the
+/// connected wallet address (msg.sender) as the AN recipient".
+pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {
+    Some(v) => v,
+    None => "",
+};

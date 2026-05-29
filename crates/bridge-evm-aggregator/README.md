@@ -5,18 +5,18 @@ This is the **M2** milestone of the R15 roadmap
 snark-verifier-sdk → Yul EVM verifier pipeline in our build environment
 and confirms it produces an EIP-170-fitting Solidity verifier.
 
-## Status (as of 2026-05-27, M2)
+## Status (M2 closed 2026-05-27; M5 instance-exposure de-risked 2026-05-29)
 
 | Step | Status | Evidence |
 |---|---|---|
 | Inner Halo2 SHPLONK proof (K=9) of `a * b == c` | ✅ | `cargo test --release --test round_trip -- --ignored --nocapture` |
 | Wrap in `snark_verifier_sdk::AggregationCircuit` (K=21, SHPLONK, Universality::Full) | ✅ | round-trip test passes |
-| Aggregator instance shape = `[acc_0..acc_11]` (12 KZG accumulator limbs) | ✅ | asserted in round-trip test |
+| **Re-expose inner SNARK public inputs as aggregator instances** | ✅ 2026-05-29 | `expose_previous_instances(false)` on **both** keygen + prover circuits, called **before** `calculate_params` so the auto-tuner sizes `num_advice` for the added copy constraints (this ordering is what previously misfired as `NOT ENOUGH ADVICE COLUMNS`). No hand-pinned `num_advice` needed at K=21. |
+| Aggregator instance shape = `[acc_0..acc_11, inner_pi_0..]` (12 KZG accumulator limbs **+ re-exposed inner PIs**) | ✅ | round-trip asserts `len == 12 + 1` and `instances[0][12] == 77` (the inner `a*b`) |
 | Emit Yul EVM verifier source + raw deployment bytecode | ✅ | `target/spike/AggregatorVerifierSpike.{sol,bin}` |
-| Bytecode under EIP-170 24 576 B runtime limit | ✅ | **13 009 bytes (12.7 KB)** |
-| Solidity source compiles in our Foundry profile (`solc 0.8.19`, `via_ir = true`) | ✅ | `forge build` was clean (validated 2026-05-27; stub artifact then removed) |
-| Re-expose inner SNARK public inputs as aggregator instances | ⏸ deferred | `expose_previous_instances(false)` triggers `NOT ENOUGH ADVICE COLUMNS` at K=20/21 with default `num_advice` — needs custom `AggregationConfigParams` tuning. Will be done when wiring real Circuit 4 (M5). |
-| Foundry on-chain harness (deploy bytecode, call fallback with `instances ‖ proof`) | ⏸ M6/M7 | The legacy `Halo2Verifier.sol` in this repo has the same Solidity-optimizer issue (Solc + `via_ir = true` + `optimizer_runs = 1` strips inline-assembly fallback down to a 67-byte stub); the established workaround is to deploy from `test/halo2_verifier_bytecode.bin` via `vm.readFileBinary`. Same approach will work here. |
+| Bytecode under EIP-170 24 576 B runtime limit | ✅ | **13 172 bytes (12.9 KB)** with 13 instances (was 13 009 B at 12 instances) |
+| Solidity source compiles with `solc 0.8.19` (exact pragma pin emitted by snark-verifier) | ✅ | `compile_solidity` (`solc --bin -`) succeeds; validated 2026-05-29 |
+| Foundry on-chain harness (deploy bytecode, call fallback with `instances ‖ proof`) | ⏸ M6/M7 | Needs Foundry + a persisted EVM proof/instances vector. Deploy from `AggregatorVerifierSpike.bin` via `vm.readFileBinary` (same workaround the legacy `Halo2Verifier.sol` uses to dodge the solc-optimizer inline-assembly stub). |
 
 ## What this crate *is not*
 
@@ -69,8 +69,9 @@ cargo +nightly test --release --test round_trip -- --ignored --nocapture
 Wall-clock ~3 minutes (release profile, M=8 logical cores). Outputs land
 under `target/spike/`:
 
-- `AggregatorVerifierSpike.sol` — 1 192-line Yul-style Solidity verifier.
-- `AggregatorVerifierSpike.bin` — raw deployable bytecode, 13 009 bytes.
+- `AggregatorVerifierSpike.sol` — Yul-style Solidity verifier (~56.7 KB source).
+- `AggregatorVerifierSpike.bin` — raw deployable bytecode, 13 172 bytes
+  (12 accumulator limbs + 1 re-exposed inner PI).
 - `params/kzg_bn254_{9,21}.srs` — KZG params (deterministic test SRS;
   Hermez Perpetual Powers of Tau will replace at M5).
 
@@ -93,10 +94,11 @@ Two reasons:
 - M3 — switch the partner's prover in `bridge-prover-orchestrator` from
   Blake2b to Poseidon transcript, so aggregator can in-circuit verify.
 - M4 — partner finishes Circuit 4, we wire it into orchestrator.
-- M5 — replace `multiply::build_multiply_circuit` with Circuit 4's prover;
-  retune aggregator K + `num_advice_per_phase`; enable
-  `expose_previous_instances(false)` so the bridge can read Circuit 4's
-  10 PIs.
+- M5 — `expose_previous_instances(false)` is **done and validated on the
+  synthetic inner** (2026-05-29): the aggregator now surfaces the inner PIs
+  after the 12 accumulator limbs. The remaining M5 work is purely a data
+  swap — replace `multiply::build_multiply_circuit` with Circuit 4's prover
+  (10 PIs) once M4 lands; re-confirm K=21 still fits (bump if not).
 - M6 — move the generated Yul/bin into `contracts/ethereum/src/` as
   `BridgeWithdrawalAggregatorVerifier.{sol,bin}` and wire
   `BridgeWithdrawalVerifier.sol` (the adapter) to call it.

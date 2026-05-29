@@ -1,7 +1,11 @@
 # R15 — Real on-chain Halo2 verifier via snark-verifier aggregator
 
 **Status:** Roadmap accepted 2026-05-26. **M1 ✅, M2 ✅, M3 ✅** (as of
-2026-05-27). M4 blocked on partner Circuit 4 stability.
+2026-05-27). **M5 instance-exposure de-risked on the synthetic inner
+(2026-05-29)** — `expose_previous_instances` now surfaces the inner PIs as
+outer aggregator instances, validated end-to-end through the Yul verifier.
+M4 (real Circuit 4 prover) blocked on partner Circuit 4 stability; the rest
+of M5 is a data-only swap once M4 lands.
 **Owner:** Bridge team.
 **Audit finding:** R15 — current `circuit-{1a,1b,2,4}` gnark wrappers are **identity stubs**
 (`Define()` body is `for i { api.AssertIsEqual(PI[i], PI[i]) }`). They do **not**
@@ -218,10 +222,15 @@ ETH-side aggregator) — Circuit 4 (the withdraw direction) is the actual
 target.
 
 **Known deferred items (now scoped to M5):**
-  - `expose_previous_instances(false)` to surface inner PIs as outer
+  - ~~`expose_previous_instances(false)` to surface inner PIs as outer
     instances. Currently fails with `NOT ENOUGH ADVICE COLUMNS` at K=20/21
     with default `AggregationConfigParams.num_advice` — needs explicit
-    `num_advice_per_phase` tuning.
+    `num_advice_per_phase` tuning.~~ **RESOLVED 2026-05-29** — see M5
+    progress note below. The `NOT ENOUGH ADVICE COLUMNS` was an *ordering*
+    bug, not a column-budget one: `expose_previous_instances` must be called
+    **before** `calculate_params` (and on both keygen + prover circuits) so
+    the auto-tuner accounts for the extra instance copy constraints. No
+    explicit `num_advice_per_phase` override is required at K=21.
   - On-chain harness — deferred to M6/M7 because Foundry's solc + via_ir +
     `optimizer_runs = 1` strips the inline-assembly fallback (same issue
     the legacy `Halo2Verifier.sol` has — its bytecode in `out/` is also
@@ -317,6 +326,40 @@ real Circuit 4 path:
   - Construct `AggregationCircuit` over it.
   - Produce aggregated SNARK.
   - Acceptance: `aggregator_round_trip` test passes locally.
+
+**Progress (2026-05-29) — instance exposure de-risked on the synthetic
+inner (partner-independent):**
+
+The single hard technical risk in M5 was getting the aggregator to
+**re-expose the inner circuit's public inputs** as outer instances (without
+it, the on-chain verifier only commits to the KZG accumulator and the bridge
+contract cannot read `tokenId`/`amount`/`recipient`/`nullifier`/`finalRoot`).
+This is now implemented and validated against the synthetic `multiply` inner,
+so the only thing left for M5 when M4 lands is a **data swap** (real Circuit 4
+VK + proof + 10 PIs instead of 1).
+
+  - `aggregator::aggregate` and `generate_yul_verifier` now call
+    `AggregationCircuit::expose_previous_instances(false)` on **both** the
+    keygen and prover circuits, **before** `calculate_params`. The earlier
+    `NOT ENOUGH ADVICE COLUMNS` failure was an ordering bug, not a
+    column-budget one — calling it before `calculate_params` lets the
+    auto-tuner size `num_advice` for the added instance copy constraints. No
+    hand-pinned `num_advice_per_phase` needed at K=21.
+  - `generate_yul_verifier` derives `num_instance` from the circuit
+    (`CircuitExt::num_instance`) instead of the hardcoded accumulator-only
+    count, so the Yul calldata layout always matches the proof.
+  - `tests/round_trip.rs` now asserts the aggregator instance column is
+    `[acc(12) ‖ inner_pi]` (len 13) and that `instances[0][12] == 77`
+    (the inner `a*b`).
+  - **Empirical (2026-05-29, nightly + `solc 0.8.19`):** aggregation at
+    K=21 succeeds with the exposed instance; Yul verifier deployment
+    bytecode = **13 172 bytes (12.9 KB)**, 54 % of the EIP-170 limit (was
+    13 009 B with the accumulator-only 12-instance layout). Round-trip
+    test green in ~115 s on a warm SRS cache.
+
+Remaining M5 (blocked on M4): swap `multiply` for the partner's Circuit 4
+prover, re-confirm K=21 fits the larger inner VK + 10 PIs (bump K if not),
+and pin a production SRS in place of the deterministic test SRS.
 
 ### M6. Yul EVM verifier
 

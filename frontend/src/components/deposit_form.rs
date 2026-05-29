@@ -2,7 +2,7 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
-use crate::config::SEPOLIA_CHAIN_ID_HEX;
+use crate::config::{ACKI_NACKI_RECEIVER, SEPOLIA_CHAIN_ID_HEX};
 use crate::web3::{eth_to_wei, get_chain_id, make_deposit, switch_to_sepolia};
 
 #[derive(Properties, PartialEq)]
@@ -85,7 +85,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 let wei_hex = format!("0x{:x}", wei.parse::<u128>().unwrap_or(0));
 
                 // Make deposit (recipient on the Acki Nacki side is msg.sender)
-                match make_deposit(&wei_hex, "").await {
+                match make_deposit(&wei_hex, ACKI_NACKI_RECEIVER).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         // Note: In a real implementation, we'd wait for the transaction

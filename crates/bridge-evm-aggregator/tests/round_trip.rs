@@ -5,10 +5,12 @@
 //!
 //! 1. The inner SHPLONK proof can be aggregated.
 //! 2. The aggregator's emitted Yul source is <= 24 576 bytes (EIP-170).
-//! 3. The aggregator's instance layout is `[acc_0, acc_1, acc_2, acc_3, c]`.
+//! 3. The aggregator re-exposes the inner public input: the instance layout is
+//!    `[acc_0 .. acc_11, c]` — 12 KZG accumulator limbs followed by the inner
+//!    circuit's `c = a * b`.
 //!
-//! This is the M2 acceptance criterion from
-//! `docs/r15_snark_verifier_roadmap.md`.
+//! Item 3 is the M5 advance over the original M2 acceptance (which exposed
+//! only the 12 accumulator limbs). See `docs/r15_snark_verifier_roadmap.md`.
 
 use std::{env, path::PathBuf};
 
@@ -47,6 +49,9 @@ fn aggregator_round_trip() {
         "inner instance must be a*b == 77"
     );
 
+    // The multiply inner circuit exposes exactly one public input (`c`).
+    const INNER_NUM_INSTANCES: usize = 1;
+
     let agg_snark = aggregate(&params_outer, inner_snark.clone()).expect("aggregate");
     assert_eq!(
         agg_snark.instances.len(),
@@ -55,9 +60,17 @@ fn aggregator_round_trip() {
     );
     assert_eq!(
         agg_snark.instances[0].len(),
+        NUM_ACCUMULATOR_INSTANCES + INNER_NUM_INSTANCES,
+        "aggregator instance count = {} acc limbs + {} re-exposed inner PI(s)",
         NUM_ACCUMULATOR_INSTANCES,
-        "spike aggregator instance count = {} (KZG acc only — inner PIs are M5 work)",
-        NUM_ACCUMULATOR_INSTANCES
+        INNER_NUM_INSTANCES,
+    );
+    // The re-exposed inner PI sits immediately after the accumulator limbs and
+    // must equal the inner circuit's public output a*b == 77.
+    assert_eq!(
+        agg_snark.instances[0][NUM_ACCUMULATOR_INSTANCES],
+        Fr::from(77u64),
+        "re-exposed inner public input must be a*b == 77",
     );
 
     let yul_path = workdir.join("AggregatorVerifierSpike.sol");

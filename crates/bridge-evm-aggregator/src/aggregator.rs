@@ -93,17 +93,20 @@ pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 /// Wrap `inner_snark` in an [`AggregationCircuit`] and prove the aggregator.
 ///
 /// `agg_params` is the outer SRS (`k = K_OUTER`). The returned [`Snark`]
-/// has instance layout `[acc_0 .. acc_11]` — exactly
-/// [`NUM_ACCUMULATOR_INSTANCES`] = 12 limbs of the KZG pairing accumulator.
-/// The inner circuit's public inputs are intentionally **not** re-exposed
-/// at this stage of the spike (the bare `expose_previous_instances(false)`
-/// upstream call interacts poorly with the auto-tuned advice column count
-/// — `NOT ENOUGH ADVICE COLUMNS` at K=20 / 21; needs custom
-/// `AggregationConfigParams.num_advice` to fit deterministically).
-/// Re-exposing them is the first real-world task for **M5** when we wire
-/// the partner's Circuit 4 in place of `multiply`; the bridge contract
-/// reads the 10 PIs (`tokenId`, `amount`, …, `finalRoot`) **after** that
-/// step lands.
+/// has instance layout `[acc_0 .. acc_11, inner_pi_0 .. inner_pi_{n-1}]`:
+/// the [`NUM_ACCUMULATOR_INSTANCES`] = 12 limbs of the KZG pairing
+/// accumulator **followed by** the inner SNARK's own public inputs, which
+/// are re-exposed via [`AggregationCircuit::expose_previous_instances`].
+///
+/// Exposing the inner PIs is what lets the bridge contract read the
+/// withdrawal fields (`tokenId`, `amount`, …, `finalRoot`) out of the
+/// aggregated proof. The earlier M2 spike skipped this; doing it correctly
+/// is the core M5 task. The key was ordering: `expose_previous_instances`
+/// must be called **before** `calculate_params` on the keygen circuit (so
+/// the auto-tuner sizes `num_advice` to include the extra instance copy
+/// constraints — that is what previously triggered `NOT ENOUGH ADVICE
+/// COLUMNS`) and **again** on the prover circuit before proving. With this
+/// ordering the K=21 auto-tune fits without a hand-pinned `num_advice`.
 ///
 /// `Universality::Full` means the verifying key of the inner SNARK is
 /// loaded as a witness — same aggregator PK can verify proofs from
@@ -122,20 +125,26 @@ pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::R
         vec![inner_snark.clone()],
         VerifierUniversality::Full,
     );
+    // Re-expose the inner SNARK's public inputs (false = inner is NOT itself
+    // an aggregation, so keep all of its instances). Must precede
+    // `calculate_params` so the advice count covers the added copy
+    // constraints.
+    keygen_circuit.expose_previous_instances(false);
     let calculated = keygen_circuit.calculate_params(Some(10));
     // ORDER MATTERS: gen_pk first (populates break-points), break_points after.
     let pk = gen_pk(agg_params, &keygen_circuit, None);
     let break_points = keygen_circuit.break_points();
     drop(keygen_circuit);
 
-    let prover_circuit = AggregationCircuit::new::<SHPLONK>(
+    let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,
         calculated,
         agg_params,
         vec![inner_snark],
         VerifierUniversality::Full,
-    )
-    .use_break_points(break_points);
+    );
+    prover_circuit.expose_previous_instances(false);
+    let prover_circuit = prover_circuit.use_break_points(break_points);
 
     let agg_snark = gen_snark_shplonk(agg_params, &pk, prover_circuit, None::<&Path>);
     Ok(agg_snark)
@@ -177,13 +186,17 @@ pub fn generate_yul_verifier(
         vec![inner_snark.clone()],
         VerifierUniversality::Full,
     );
+    // Expose the inner PIs (see `aggregate`) so the generated verifier's
+    // calldata layout is `[acc(12) ‖ inner_pi(n)] ‖ proof` — matching the
+    // proof produced by `aggregate`.
+    keygen_circuit.expose_previous_instances(false);
     let _ = keygen_circuit.calculate_params(Some(10));
     let pk = gen_pk(agg_params, &keygen_circuit, None);
     let vk = pk.get_vk();
 
-    // Default aggregator instance shape — see `aggregate` doc for why we
-    // are NOT calling `expose_previous_instances` at this stage.
-    let num_instance = vec![NUM_ACCUMULATOR_INSTANCES];
+    // Instance shape taken from the circuit itself, so it always matches the
+    // accumulator limbs PLUS the exposed inner public inputs.
+    let num_instance = keygen_circuit.num_instance();
 
     let bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
         agg_params,
@@ -201,9 +214,3 @@ pub fn generate_yul_verifier(
 
     Ok(bytecode.len())
 }
-
-// Suppress unused-import warning on CircuitExt — it is brought into scope so
-// downstream callers can call `.instances()` and `.num_instance()` on the
-// AggregationCircuit values they construct.
-#[allow(dead_code)]
-fn _circuit_ext_in_scope<T: CircuitExt<Fr>>(_: &T) {}

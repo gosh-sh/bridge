@@ -10,7 +10,7 @@ pub struct HeaderProps {
 #[function_component(Header)]
 pub fn header(props: &HeaderProps) -> Html {
     let network_name = "Sepolia Testnet";
-    
+
     html! {
         <header class="header">
             <div class="header-content">
@@ -33,7 +33,7 @@ pub fn header(props: &HeaderProps) -> Html {
                         <span class="network-dot"></span>
                         {network_name}
                     </div>
-                    
+
                     {
                         if props.wallet_connected {
                             html! {
@@ -57,4 +57,3 @@ pub fn header(props: &HeaderProps) -> Html {
         </header>
     }
 }
-

@@ -1,9 +1,9 @@
-use yew::prelude::*;
-use web_sys::HtmlInputElement;
 use wasm_bindgen_futures::spawn_local;
+use web_sys::HtmlInputElement;
+use yew::prelude::*;
 
-use crate::web3::{make_deposit, eth_to_wei, get_chain_id, switch_to_sepolia};
-use crate::config::SEPOLIA_CHAIN_ID_HEX;
+use crate::config::{ACKI_NACKI_RECEIVER, SEPOLIA_CHAIN_ID_HEX};
+use crate::web3::{eth_to_wei, get_chain_id, make_deposit, switch_to_sepolia};
 
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
@@ -12,7 +12,7 @@ pub struct DepositFormProps {
 
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
-    let amount = use_state(|| String::new());
+    let amount = use_state(String::new);
     let deposit_id = use_state(|| None::<u64>);
     let is_loading = use_state(|| false);
     let tx_hash = use_state(|| None::<String>);
@@ -78,14 +78,14 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         error_msg.set(Some(format!("Invalid amount: {}", e)));
                         is_loading.set(false);
                         return;
-                    }
+                    },
                 };
 
                 // Format Wei as hex
                 let wei_hex = format!("0x{:x}", wei.parse::<u128>().unwrap_or(0));
 
-                // Make deposit (no acki address needed - withdrawal goes to msg.sender)
-                match make_deposit(&wei_hex, "").await {
+                // Make deposit (recipient on the Acki Nacki side is msg.sender)
+                match make_deposit(&wei_hex, ACKI_NACKI_RECEIVER).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         // Note: In a real implementation, we'd wait for the transaction
@@ -93,13 +93,15 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         deposit_id.set(Some(0)); // Placeholder
                         is_loading.set(false);
 
-                        web_sys::console::log_1(&format!("Deposit successful! TX: {}", hash).into());
-                    }
+                        web_sys::console::log_1(
+                            &format!("Deposit successful! TX: {}", hash).into(),
+                        );
+                    },
                     Err(e) => {
                         error_msg.set(Some(format!("Transaction failed: {}", e)));
                         is_loading.set(false);
                         web_sys::console::error_1(&format!("Deposit error: {}", e).into());
-                    }
+                    },
                 }
             });
         })
@@ -131,7 +133,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"ETH"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Funds will be withdrawable to your connected wallet address"}
+                        {"Funds will be bridged to Acki Nacki for your connected wallet address"}
                     </div>
                 </div>
 
@@ -168,7 +170,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                                 <div class="success-icon">{"✓"}</div>
                                 <div class="success-content">
                                     <h3>{"Deposit Successful!"}</h3>
-                                    <p>{"Deposit ID: "}{id}</p>
+                                    <p>{"Deposit reference: "}{id}</p>
                                     <p class="tx-hash">
                                         {"Transaction: "}
                                         <a href={format!("https://sepolia.etherscan.io/tx/{}", tx_hash.as_ref().unwrap())} target="_blank">
@@ -183,14 +185,14 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 }
 
-                <button 
+                <button
                     type="submit"
                     class="submit-button"
                     disabled={!props.wallet_connected || *is_loading || (*amount).is_empty()}
                 >
                     {
                         if *is_loading {
-                            html! { 
+                            html! {
                                 <>
                                     <span class="spinner"></span>
                                     {"Processing..."}
@@ -206,9 +208,8 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             </form>
 
             <div class="help-text">
-                <p>{"💡 Your deposit will be assigned a unique Deposit ID that you'll need for withdrawal on Acki Nacki."}</p>
+                <p>{"💡 Your deposit will be assigned a unique Deposit ID as a reference for tracking it on Acki Nacki."}</p>
             </div>
         </div>
     }
 }
-

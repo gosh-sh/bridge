@@ -38,4 +38,3 @@ pub fn stats() -> Html {
         </div>
     }
 }
-

@@ -208,9 +208,15 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
 }
 
 /// Make a deposit to the bridge contract
-pub async fn make_deposit(amount_wei: &str, _acki_nacki_address: &str) -> Result<String, String> {
+pub async fn make_deposit(amount_wei: &str, acki_nacki_receiver: &str) -> Result<String, String> {
     let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
     let account = get_current_account().ok_or("No account connected")?;
+
+    // AN receiver is a configurable parameter. The deployed Sepolia contract's
+    // deposit() credits msg.sender on the AN side, so this is tracked off-chain
+    // as a reference until the AN side provides concrete receiving details.
+    let an_receiver = if acki_nacki_receiver.is_empty() { account.clone() } else { acki_nacki_receiver.to_string() };
+    web_sys::console::log_1(&format!("AN receiver (reference): {}", an_receiver).into());
 
     // Ensure we're on Sepolia
     switch_to_sepolia().await?;
@@ -257,14 +263,9 @@ pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
     let total_deposited_data = "0x4e71d92d"; // keccak256("totalDeposited()")[0:4]
     let total_deposited_result = call_contract(total_deposited_data).await?;
 
-    // Call totalWithdrawn()
-    let total_withdrawn_data = "0xc4e2b619"; // keccak256("totalWithdrawn()")[0:4]
-    let total_withdrawn_result = call_contract(total_withdrawn_data).await?;
-
     Ok(BridgeStats {
         deposit_count: parse_uint256(&deposit_count_result)?,
         total_deposited: parse_uint256(&total_deposited_result)?,
-        total_withdrawn: parse_uint256(&total_withdrawn_result)?,
     })
 }
 
@@ -311,7 +312,6 @@ fn parse_uint256(hex: &str) -> Result<String, String> {
 pub struct BridgeStats {
     pub deposit_count: String,
     pub total_deposited: String,
-    pub total_withdrawn: String,
 }
 
 /// Format Wei to ETH string

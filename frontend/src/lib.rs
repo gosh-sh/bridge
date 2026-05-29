@@ -1,19 +1,18 @@
-use yew::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+use yew::prelude::*;
 
 mod components;
+mod config;
 mod hooks;
 mod utils;
-mod config;
 mod web3;
 
-use components::{Header, DepositForm, WithdrawForm, Stats, TransactionHistory};
+use components::{DepositForm, Header, Stats, TransactionHistory};
 use web3::{connect_wallet, is_metamask_installed};
 
 #[derive(Clone, PartialEq)]
 pub enum Tab {
     Deposit,
-    Withdraw,
 }
 
 #[function_component(App)]
@@ -37,12 +36,16 @@ fn app() -> Html {
 
             // Check if MetaMask is installed
             let is_installed = is_metamask_installed();
-            web_sys::console::log_1(&format!("is_metamask_installed() returned: {}", is_installed).into());
+            web_sys::console::log_1(
+                &format!("is_metamask_installed() returned: {}", is_installed).into(),
+            );
 
             if !is_installed {
                 web_sys::console::error_1(&"MetaMask not detected!".into());
-                web_sys::window()
-                    .and_then(|w| w.alert_with_message("Please install MetaMask to use this bridge!").ok());
+                web_sys::window().and_then(|w| {
+                    w.alert_with_message("Please install MetaMask to use this bridge!")
+                        .ok()
+                });
                 return;
             }
 
@@ -57,7 +60,7 @@ fn app() -> Html {
                     Ok(address) => {
                         // Format address for display (0x1234...5678)
                         let formatted = if address.len() > 10 {
-                            format!("{}...{}", &address[0..6], &address[address.len()-4..])
+                            format!("{}...{}", &address[0..6], &address[address.len() - 4..])
                         } else {
                             address.clone()
                         };
@@ -65,13 +68,19 @@ fn app() -> Html {
                         wallet_connected.set(true);
                         wallet_address.set(Some(formatted));
 
-                        web_sys::console::log_1(&format!("Connected to wallet: {}", address).into());
-                    }
+                        web_sys::console::log_1(
+                            &format!("Connected to wallet: {}", address).into(),
+                        );
+                    },
                     Err(e) => {
-                        web_sys::console::error_1(&format!("Failed to connect wallet: {}", e).into());
-                        web_sys::window()
-                            .and_then(|w| w.alert_with_message(&format!("Failed to connect: {}", e)).ok());
-                    }
+                        web_sys::console::error_1(
+                            &format!("Failed to connect wallet: {}", e).into(),
+                        );
+                        web_sys::window().and_then(|w| {
+                            w.alert_with_message(&format!("Failed to connect: {}", e))
+                                .ok()
+                        });
+                    },
                 }
             });
         })
@@ -79,12 +88,12 @@ fn app() -> Html {
 
     html! {
         <div class="app">
-            <Header 
+            <Header
                 wallet_connected={*wallet_connected}
                 wallet_address={(*wallet_address).clone()}
                 on_connect={on_connect_wallet}
             />
-            
+
             <main class="container">
                 <div class="hero">
                     <h1>{"Acki Nacki Bridge"}</h1>
@@ -95,17 +104,11 @@ fn app() -> Html {
 
                 <div class="bridge-card">
                     <div class="tabs">
-                        <button 
+                        <button
                             class={if *active_tab == Tab::Deposit { "tab active" } else { "tab" }}
                             onclick={let tab = on_tab_change.clone(); move |_| tab.emit(Tab::Deposit)}
                         >
                             {"Deposit"}
-                        </button>
-                        <button 
-                            class={if *active_tab == Tab::Withdraw { "tab active" } else { "tab" }}
-                            onclick={let tab = on_tab_change.clone(); move |_| tab.emit(Tab::Withdraw)}
-                        >
-                            {"Withdraw"}
                         </button>
                     </div>
 
@@ -113,7 +116,6 @@ fn app() -> Html {
                         {
                             match *active_tab {
                                 Tab::Deposit => html! { <DepositForm wallet_connected={*wallet_connected} /> },
-                                Tab::Withdraw => html! { <WithdrawForm wallet_connected={*wallet_connected} /> },
                             }
                         }
                     </div>
@@ -141,4 +143,3 @@ pub fn run_app() {
     wasm_logger::init(wasm_logger::Config::default());
     yew::Renderer::<App>::new().render();
 }
-

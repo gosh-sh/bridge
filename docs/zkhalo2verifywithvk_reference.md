@@ -347,8 +347,9 @@ The contract is responsible for assembling `public_inputs_cell` so that its cont
 ## 13. Cross-references
 
 ### `tvm-sdk` side (consumer)
-- `tvm_vm/src/executor/zk_halo2_with_vk.rs` — opcode handler.
-- `tvm_vm/src/executor/zk_halo2_with_vk_bundle.rs` — `VkBlob` decoder + size validators + unit tests.
+- `tvm_vm/src/executor/zk_halo2_with_vk.rs` — opcode handler (Base + Rlc VK-read branches; `rlc_branch_tests`).
+- `tvm_vm/src/executor/zk_halo2_with_vk_bundle.rs` — bundle/`VkBlob` decoder + `circuit_shape` v2 parsing + size validators + unit tests.
+- `Cargo.toml` (workspace root) — `[patch]` block unifying the halo2 backend + `axiom-eth` fork pin (§15.3).
 - `tvm_vm/src/executor/zk_halo2_utils.rs` — embedded KZG points + `build_shared_kzg_params(k)`.
 - `tvm_vm/src/tests/test_halo2_with_vk.rs` — integration tests.
 - `tvm_assembler/src/{simple,lib}.rs` — mnemonic + assembler round-trip test.
@@ -373,3 +374,51 @@ The contract is responsible for assembling `public_inputs_cell` so that its cont
 - **Producer-side proving from inside TVM.** Proving is many orders of magnitude more expensive than verification and is never run on-chain.
 - **VK rotation policy.** When a contract decides to accept proofs against a new VK is application-level, not VM-level. The opcode just verifies whatever operands it's given.
 - **Replay protection.** The opcode doesn't track which proofs it has accepted before. Contracts must maintain their own nullifier / `usedDepositIds` map.
+
+---
+
+## 15. VkBlob v2 — `circuit_shape` byte + RLC / `EthCircuitImpl` support (deposit circuits)
+
+**Status**: implemented 2026-05-29 on `tvm-sdk` branch `serhii/node-3406-vergrth16-with-vk` (single-bundle `HALO2TVM` opcode variant) and on the bridge producer (`VkBlob` `VKBLOB` variant). Built + tested on a **nightly** toolchain (see §15.3).
+
+### 15.1 Why
+
+Everything described above (Variant A / §3) assumes the VK was produced by a `BaseCircuitBuilder<Fr>` circuit (the DarkDex / Circuit-1B family). The **deposit-prover** is an `axiom-eth` `EthCircuitImpl<Fr, DepositEventCircuitV2>` circuit — a multi-phase **RLC + keccak-coprocessor** circuit whose constraint system is rebuilt from `EthCircuitParams`, *not* `BaseCircuitParams`. A `BaseCircuitBuilder`-only `VerifyingKey::read` cannot reconstruct that VK with the right column layout, so `TokenBridge.finalizeDeposit` could never verify a real deposit proof. (Empirically confirmed: a `BaseCircuitBuilder` read of an RLC VK either errors on EOF or silently reads a prefix that round-trips to *different* bytes — see the `base_branch_reads_fewer_points_than_rlc_vk` consumer test.)
+
+v2 adds a one-byte **`circuit_shape`** discriminator so a single opcode covers both circuit families.
+
+### 15.2 Wire change (both format variants)
+
+A `circuit_shape` byte is carried at **offset 10** (the first byte of the old `reserved` region), and the layout version bumps to `0x02` when the byte is non-zero:
+
+| `circuit_shape` | `config_json` is… | VK rebuilt with… | producer |
+|---|---|---|---|
+| `0x00` **Base** | `BaseCircuitParams` | `BaseCircuitBuilder<Fr>` | identical to v1 |
+| `0x01` **Rlc** | `EthCircuitParams` (axiom-eth) | `EthCircuitImpl<Fr, Noop>` | deposit-prover class |
+
+- **Backward compatible**: a v1 blob (`version = 0x01`) pins `circuit_shape = 0` and is read exactly as before. A v1 blob carrying a non-zero shape byte is rejected (a shape-tagged blob must set `version = 0x02`).
+- The `Rlc` `EthCircuitParams` JSON is the value returned by `EthCircuitImpl::calculate_params()` at keygen, serialised with `serde_json`.
+- `EthCircuitImpl<Fr, Noop>` uses an **empty** `EthCircuitInstructions` body: `VerifyingKey::read` rebuilds the constraint system purely from `EthCircuitParams` via `Circuit::configure_with_params`, so the instructions are never invoked on the read path. The same `Noop` type therefore covers *every* RLC/keccak circuit (deposit, future bridge circuits) — only the params differ.
+- This mirrors the producer-side `VK_BLOB_VERSION_V2` / `CircuitShape { Base = 0, Rlc = 1 }` in `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`.
+
+> **Format-variant note.** This `tvm-sdk` branch ships the original **single self-describing `HALO2TVM` bundle** opcode (`config + vk + instances + proof` in one cell — see `zk_halo2_with_vk_bundle.rs`), whereas §2/§3 above and `main`'s PR #243 describe the **3-operand Variant A** (`VKBLOB` `vk_cell` + `public_inputs_cell` + `proof_cell`). The `circuit_shape` byte and the RLC read path are defined **identically** for both; whichever variant the team settles on, the deposit shape support is the same. Reconciling the two opcode ABIs is tracked separately (out of scope for this change).
+
+### 15.3 Build requirements (important)
+
+The RLC path pulls `axiom-eth` (and transitively `snark-verifier-sdk`) into `tvm_vm`. This has two consequences the node build must accommodate:
+
+1. **Nightly toolchain for the `gosh` feature.** `snark-verifier-sdk` v0.1.7-git uses the unstable `trait_alias` feature (`NativeKzgAccumulationScheme`), so the axiom-eth RLC stack only builds on nightly. The stable gosh `BaseCircuitBuilder` path is unaffected — only the new RLC capability forces nightly.
+2. **`[patch]` unification of the halo2 backend.** `halo2-base` reaches the graph through three original git sources (gosh fork via `tvm_vm` + `gosh-zk-snark-halo2-utils`; axiom's `halo2-lib.git` via `axiom-eth` + `snark-verifier-sdk`). They must dedup to **one** package or the `VerifyingKey<G1Affine>` types don't match. The tvm-sdk workspace-root `[patch]` points all three sources (plus `crates.io`) at one git url+rev of the gosh fork (a shared local `path` cannot patch multiple sources — cargo keeps the original for the loser). See the `[patch]` block in `tvm-sdk/Cargo.toml`.
+
+Two supporting fork changes:
+
+- **gosh fork `bump-halo2-lib-v0.4.1`** (`gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`): bumps the fork from axiom v0.4.0 → v0.4.1 / zkevm-hashes 0.2.1 (the version `axiom-eth v0.4.3` builds against), **kept stable-Rust-compatible** — `VirtualRegionManager::Assignment` keeps NO default (the upstream `= ()` default needs nightly `associated_type_defaults`), since every halo2-base impl already names it explicitly.
+- **axiom-eth one-line patch** (branch `gosh-stable-rlcmanager-assignment`): `RlcManager`'s `VirtualRegionManager` impl names `type Assignment = ();` explicitly (it relied on the upstream default that the stable gosh fork drops). Pulled into `tvm_vm` via a `[patch."…/axiom-eth"]` entry.
+
+### 15.4 Consumer-side tests (`tvm-sdk`)
+
+- `zk_halo2_with_vk_bundle.rs::tests` — v2 parse coverage: `parse_v2_rlc_bundle_carries_opaque_eth_params`, `parse_v2_base_bundle_is_base_shape`, `parse_rejects_v1_with_nonzero_shape`, `parse_rejects_unknown_shape`, `parse_rejects_empty_rlc_config` (+ all v1 negatives still green).
+- `zk_halo2_with_vk.rs::rlc_branch_tests` — keygens a real `EthCircuitImpl<Fr, KeygenProbe>` VK on the opcode's own backend, then: `rlc_branch_reconstructs_vk` (byte-for-byte round-trip through the `Rlc` reader), `base_branch_reads_fewer_points_than_rlc_vk` (Base reader does NOT faithfully round-trip an RLC VK), `rlc_branch_rejects_malformed_config_json`.
+- All existing Base fixture tests (`test_halo2_with_vk.rs`, incl. the real DarkDex W=8 L0 proof) stay green.
+
+> **Still pending (o5b / o6).** A full *valid-RLC-proof* end-to-end fixture (real deposit proof bytes + instances + RLC VkBlob) requires the deposit-prover to export on the gosh halo2-axiom backend and an agreed final opcode ABI; the consumer round-trip above proves the VK-reconstruction branch (the genuinely new logic) without it.

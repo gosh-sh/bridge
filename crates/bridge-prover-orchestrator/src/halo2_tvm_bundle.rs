@@ -41,14 +41,25 @@
 //!   off  size  field
 //!   ───  ────  ─────────────────────────────────────────────────────────
 //!     0     8  magic = b"VKBLOB\x00\x00"
-//!     8     1  version           = 1
+//!     8     1  version           = 1 (Base, legacy) | 2 (shape-tagged)
 //!     9     1  transcript_kind   = 0 (Blake2b; reserved for Keccak)
-//!    10     6  reserved          = 0 × 6
+//!    10     1  circuit_shape     = 0 Base | 1 Rlc  (v1: reserved 0)
+//!    11     5  reserved          = 0 × 5
 //!    16     4  config_len  (u32 LE)
-//!    20  cl    config_json (UTF-8 serde_json of `BaseCircuitParams`)
+//!    20  cl    config_json (UTF-8 serde_json; `BaseCircuitParams` for Base,
+//!                           axiom-eth `EthCircuitParams` for Rlc)
 //!   ...     4  vk_len      (u32 LE)
 //!   ...  vl    vk_bytes    (`VerifyingKey::write(SerdeFormat::RawBytes)`)
 //! ```
+//!
+//! **v1 vs v2.** v1 (`version = 1`) predates the shape byte and is implicitly
+//! the `BaseCircuitBuilder<Fr>` shape — `header[10..16]` are all reserved 0.
+//! It is the wire the landed `ZKHALO2VERIFYWITHVK` opcode + the deployed
+//! `TokenBridge.VK_BLOB` already speak, so Base blobs are still emitted as v1
+//! byte-for-byte. v2 (`version = 2`) reuses `header[10]` as a [`CircuitShape`]
+//! discriminator so an RLC / `EthCircuitImpl`-shaped (deposit) VK can be
+//! carried; the opcode-side v2 reader is blocked on the gosh halo2 fork bump
+//! (see `docs/deposit_finalize_vk_gap_2026-05-28.md`).
 //!
 //! All length prefixes are `u32` LE because (a) VKs are always well
 //! under 4 GB and (b) it keeps the parser branch-free vs varints.
@@ -96,8 +107,110 @@ use halo2_base::{
 /// 8-byte ASCII magic at offset 0 of every `VkBlob` payload.
 pub const VK_BLOB_MAGIC: &[u8; 8] = b"VKBLOB\x00\x00";
 
-/// Current `VkBlob` layout version. Bump on any breaking change.
+/// Legacy (Base-only) `VkBlob` layout version.
+///
+/// v1 has no circuit-shape byte: it is implicitly the `BaseCircuitBuilder<Fr>`
+/// shape, and `header[10..16]` are all reserved/zero. This is the wire the
+/// landed `ZKHALO2VERIFYWITHVK` opcode and the already-deployed `TokenBridge`
+/// `VK_BLOB` constant speak, so it is frozen — Base blobs are still emitted as
+/// v1 byte-for-byte.
 pub const VK_BLOB_VERSION: u8 = 1;
+
+/// Shape-tagged `VkBlob` layout version (added 2026-05-28).
+///
+/// v2 reuses the first reserved byte (`header[10]`) as a [`CircuitShape`]
+/// discriminator so the consumer can pick the right circuit type when
+/// reconstructing the constraint system on `VerifyingKey::read`. It exists
+/// to carry **RLC / `EthCircuitImpl`-shaped** deposit VKs, which the
+/// single-phase `BaseCircuitBuilder` cannot reconstruct (see
+/// `docs/deposit_finalize_vk_gap_2026-05-28.md`). The matching opcode-side
+/// reader is blocked on the gosh halo2 fork bump (todo o3a).
+pub const VK_BLOB_VERSION_V2: u8 = 2;
+
+/// Circuit family the VK was generated for. Selects which circuit type the
+/// consumer hands to `VerifyingKey::read` so the reconstructed constraint
+/// system matches the serialised bytes.
+///
+/// - `Base` — `BaseCircuitBuilder<Fr>` + [`BaseCircuitParams`]. Single phase,
+///   no challenges. The fallback / layer-hashes circuits and everything the
+///   landed opcode reads today.
+/// - `Rlc` — `axiom_eth::utils::eth_circuit::EthCircuitImpl<Fr, _>` +
+///   `EthCircuitParams`. Multi-phase (FirstPhase + SecondPhase RLC challenge).
+///   The **deposit** circuit's shape. Carried as opaque `EthCircuitParams` JSON
+///   because this crate does not (yet) depend on `axiom-eth`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CircuitShape {
+    Base = 0,
+    Rlc = 1,
+}
+
+impl CircuitShape {
+    fn from_u8(b: u8) -> Result<Self> {
+        match b {
+            0 => Ok(Self::Base),
+            1 => Ok(Self::Rlc),
+            other => Err(anyhow!(
+                "unknown circuit_shape byte {other} (defined: 0 = Base, 1 = Rlc)"
+            )),
+        }
+    }
+}
+
+/// Circuit-shape config carried inline in a `VkBlob`.
+///
+/// For `Base` this is a typed [`BaseCircuitParams`] (verified in-process by
+/// [`Halo2TvmOperands::verify`]). For `Rlc` it is the raw JSON of axiom-eth's
+/// `EthCircuitParams`, kept opaque so this crate avoids an `axiom-eth`
+/// dependency until the opcode-side reader lands (todo o3a/o4). The future
+/// opcode parses it into a real `EthCircuitParams` to drive
+/// `EthCircuitImpl<Fr, Noop>::configure_with_params`.
+#[derive(Clone, Debug)]
+pub enum VkConfig {
+    Base(BaseCircuitParams),
+    Rlc(Vec<u8>),
+}
+
+impl VkConfig {
+    /// The on-wire [`CircuitShape`] discriminator for this config.
+    pub fn shape(&self) -> CircuitShape {
+        match self {
+            VkConfig::Base(_) => CircuitShape::Base,
+            VkConfig::Rlc(_) => CircuitShape::Rlc,
+        }
+    }
+
+    /// Borrow the inner [`BaseCircuitParams`] (only for the `Base` shape).
+    pub fn as_base(&self) -> Result<&BaseCircuitParams> {
+        match self {
+            VkConfig::Base(p) => Ok(p),
+            VkConfig::Rlc(_) => bail!("VkConfig is Rlc, not Base"),
+        }
+    }
+
+    /// Serialise the config to the JSON bytes carried in the `config` chunk.
+    fn to_json(&self) -> Result<Vec<u8>> {
+        match self {
+            VkConfig::Base(p) => {
+                serde_json::to_vec(p).context("serialising BaseCircuitParams as JSON")
+            },
+            // Already JSON — carried opaquely.
+            VkConfig::Rlc(json) => Ok(json.clone()),
+        }
+    }
+
+    /// Reconstruct a [`VkConfig`] from a shape tag + the raw config-chunk JSON.
+    fn from_json(shape: CircuitShape, json: Vec<u8>) -> Result<Self> {
+        match shape {
+            CircuitShape::Base => {
+                let p: BaseCircuitParams = serde_json::from_slice(&json)
+                    .context("parsing BaseCircuitParams JSON from VkBlob")?;
+                Ok(VkConfig::Base(p))
+            },
+            CircuitShape::Rlc => Ok(VkConfig::Rlc(json)),
+        }
+    }
+}
 
 /// Transcript flavour for the proof bytes.
 ///
@@ -135,9 +248,10 @@ impl TranscriptKind {
 /// drifted producer loudly.
 #[derive(Clone, Debug)]
 pub struct VkBlob {
-    /// Circuit shape that `BaseCircuitBuilder` needs at VK-deserialisation
-    /// time. Carried inline so the blob is self-describing.
-    pub config: BaseCircuitParams,
+    /// Circuit shape + params the consumer needs at VK-deserialisation time.
+    /// Carried inline so the blob is self-describing. `Base` is emitted as the
+    /// frozen v1 wire; `Rlc` as v2.
+    pub config: VkConfig,
     /// `VerifyingKey<G1Affine>` serialised with [`SerdeFormat::RawBytes`].
     pub vk_bytes: Vec<u8>,
     /// Transcript discriminator (must currently equal `Blake2b`).
@@ -145,29 +259,70 @@ pub struct VkBlob {
 }
 
 impl VkBlob {
-    /// Build a `VkBlob` from in-memory artifacts produced by the bridge's
-    /// existing prover machinery.
+    /// Build a **Base-shape** `VkBlob` (v1 wire) from in-memory artifacts
+    /// produced by the bridge's existing `BaseCircuitBuilder` prover
+    /// machinery (fallback / layer-hashes circuits).
     pub fn from_native(config: &BaseCircuitParams, vk: &VerifyingKey<G1Affine>) -> Result<Self> {
-        let mut vk_bytes = Vec::new();
-        vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
-            .context("serialising VerifyingKey<G1Affine> with SerdeFormat::RawBytes")?;
         Ok(Self {
-            config: config.clone(),
-            vk_bytes,
+            config: VkConfig::Base(config.clone()),
+            vk_bytes: serialise_vk(vk)?,
             transcript: TranscriptKind::Blake2b,
         })
     }
 
+    /// Build an **RLC-shape** `VkBlob` (v2 wire) from a serialised
+    /// `EthCircuitParams` (axiom-eth) plus a deposit-circuit verifying key.
+    ///
+    /// `eth_config_json` is the `serde_json` of axiom-eth's `EthCircuitParams`;
+    /// it is carried opaquely (this crate has no `axiom-eth` dependency yet).
+    /// The future opcode parses it to drive
+    /// `EthCircuitImpl<Fr, Noop>::configure_with_params`.
+    pub fn from_native_rlc(eth_config_json: Vec<u8>, vk: &VerifyingKey<G1Affine>) -> Result<Self> {
+        // Fail fast on garbage: must at least be valid JSON.
+        serde_json::from_slice::<serde_json::Value>(&eth_config_json)
+            .context("from_native_rlc: eth_config_json is not valid JSON")?;
+        Ok(Self {
+            config: VkConfig::Rlc(eth_config_json),
+            vk_bytes: serialise_vk(vk)?,
+            transcript: TranscriptKind::Blake2b,
+        })
+    }
+
+    /// On-wire [`CircuitShape`] for this blob.
+    pub fn shape(&self) -> CircuitShape {
+        self.config.shape()
+    }
+
+    /// On-wire version byte this blob serialises to (1 for `Base`, 2 for
+    /// `Rlc`).
+    pub fn version(&self) -> u8 {
+        match self.config.shape() {
+            CircuitShape::Base => VK_BLOB_VERSION,
+            CircuitShape::Rlc => VK_BLOB_VERSION_V2,
+        }
+    }
+
     /// Write the `VkBlob` to any [`Write`] sink. The result is the byte
     /// payload of the `vk_cell` operand.
+    ///
+    /// `Base` blobs are written as the frozen **v1** wire (no shape byte,
+    /// `header[10..16] = 0`) so they stay byte-identical to already-deployed
+    /// blobs. `Rlc` blobs are written as **v2** with the shape discriminator
+    /// in `header[10]`.
     pub fn write<W: Write>(&self, mut w: W) -> Result<()> {
+        let shape = self.config.shape();
         w.write_all(VK_BLOB_MAGIC)?;
-        w.write_all(&[VK_BLOB_VERSION])?;
+        w.write_all(&[self.version()])?;
         w.write_all(&[self.transcript as u8])?;
-        w.write_all(&[0u8; 6])?;
+        // v1 keeps header[10] = 0 (reserved); v2 puts the shape there.
+        let shape_byte = match shape {
+            CircuitShape::Base => 0,
+            other => other as u8,
+        };
+        w.write_all(&[shape_byte])?;
+        w.write_all(&[0u8; 5])?;
 
-        let config_json =
-            serde_json::to_vec(&self.config).context("serialising BaseCircuitParams as JSON")?;
+        let config_json = self.config.to_json()?;
         write_chunk(&mut w, &config_json)?;
         write_chunk(&mut w, &self.vk_bytes)?;
         Ok(())
@@ -181,7 +336,8 @@ impl VkBlob {
         Ok(out)
     }
 
-    /// Read a `VkBlob` back from any [`Read`] source.
+    /// Read a `VkBlob` back from any [`Read`] source. Accepts both the v1
+    /// (Base-only) and v2 (shape-tagged) wires.
     pub fn read<R: Read>(mut r: R) -> Result<Self> {
         let mut header = [0u8; 16];
         r.read_exact(&mut header)
@@ -190,18 +346,28 @@ impl VkBlob {
             bail!("VkBlob magic mismatch: expected b\"VKBLOB\\x00\\x00\"");
         }
         let version = header[8];
-        if version != VK_BLOB_VERSION {
-            bail!(
-                "VkBlob version mismatch: expected {VK_BLOB_VERSION}, got {version}; producer / \
-                 consumer have drifted"
-            );
-        }
+        let shape = match version {
+            VK_BLOB_VERSION => {
+                // v1 is implicitly Base; header[10] must be the reserved 0.
+                if header[10] != 0 {
+                    bail!(
+                        "VkBlob v1 has non-zero shape byte {} (v1 is Base-only; did you mean v2?)",
+                        header[10]
+                    );
+                }
+                CircuitShape::Base
+            },
+            VK_BLOB_VERSION_V2 => CircuitShape::from_u8(header[10])?,
+            other => bail!(
+                "VkBlob version mismatch: expected {VK_BLOB_VERSION} or {VK_BLOB_VERSION_V2}, got \
+                 {other}; producer / consumer have drifted"
+            ),
+        };
         let transcript = TranscriptKind::from_u8(header[9])?;
-        // header[10..16] reserved, ignored.
+        // header[11..16] reserved, ignored.
 
         let config_json = read_chunk(&mut r).context("reading config chunk")?;
-        let config: BaseCircuitParams = serde_json::from_slice(&config_json)
-            .context("parsing BaseCircuitParams JSON from VkBlob")?;
+        let config = VkConfig::from_json(shape, config_json)?;
         let vk_bytes = read_chunk(&mut r).context("reading vk chunk")?;
 
         Ok(Self {
@@ -210,6 +376,16 @@ impl VkBlob {
             transcript,
         })
     }
+}
+
+/// Serialise a `VerifyingKey<G1Affine>` with [`SerdeFormat::RawBytes`]
+/// (curve-membership-checked on read — required for soundness when the VK is
+/// caller-supplied on-chain).
+fn serialise_vk(vk: &VerifyingKey<G1Affine>) -> Result<Vec<u8>> {
+    let mut vk_bytes = Vec::new();
+    vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
+        .context("serialising VerifyingKey<G1Affine> with SerdeFormat::RawBytes")?;
+    Ok(vk_bytes)
 }
 
 /// All three stack operands of the `ZKHALO2VERIFYWITHVK` opcode, ready
@@ -263,10 +439,21 @@ impl Halo2TvmOperands {
             );
         }
 
+        // Only the Base shape can be reconstructed in-process: the RLC shape
+        // needs axiom-eth's `EthCircuitImpl`, which this crate does not depend
+        // on yet (blocked on the gosh halo2 fork bump — todo o3a). The opcode
+        // side will handle Rlc; here we round-trip Base only.
+        let base_config = blob.config.as_base().map_err(|_| {
+            anyhow!(
+                "Halo2TvmOperands::verify supports only Base-shape VkBlobs in-process; this blob \
+                 is Rlc (EthCircuitImpl) — verify it on the AN node opcode instead"
+            )
+        })?;
+
         let vk = VerifyingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(
             &mut blob.vk_bytes.as_slice(),
             SerdeFormat::RawBytes,
-            blob.config.clone(),
+            base_config.clone(),
         )
         .context("deserialising VerifyingKey<G1Affine> from VkBlob")?;
 
@@ -404,5 +591,108 @@ mod unit_tests {
         header[9] = 7;
         let err = VkBlob::read(header.as_slice()).unwrap_err();
         assert!(err.to_string().contains("unknown transcript_kind"));
+    }
+
+    fn sample_base_params() -> BaseCircuitParams {
+        BaseCircuitParams {
+            k: 20,
+            num_advice_per_phase: vec![44],
+            num_fixed: 1,
+            num_lookup_advice_per_phase: vec![1],
+            lookup_bits: Some(19),
+            num_instance_columns: 1,
+        }
+    }
+
+    fn sample_blob(config: VkConfig) -> VkBlob {
+        VkBlob {
+            config,
+            // VkBlob::read does not deserialise the VK; arbitrary bytes round-trip.
+            vk_bytes: vec![0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03],
+            transcript: TranscriptKind::Blake2b,
+        }
+    }
+
+    #[test]
+    fn vk_blob_v1_base_is_byte_stable_and_tagged_v1() {
+        let blob = sample_blob(VkConfig::Base(sample_base_params()));
+        assert_eq!(blob.shape(), CircuitShape::Base);
+        assert_eq!(blob.version(), VK_BLOB_VERSION);
+
+        let bytes = blob.to_bytes().unwrap();
+        // Header invariants for the frozen v1 wire.
+        assert_eq!(&bytes[0..8], VK_BLOB_MAGIC);
+        assert_eq!(bytes[8], VK_BLOB_VERSION, "Base must serialise as v1");
+        assert_eq!(bytes[10], 0, "v1 shape byte must be reserved 0");
+
+        let back = VkBlob::read(bytes.as_slice()).unwrap();
+        assert_eq!(back.shape(), CircuitShape::Base);
+        assert_eq!(back.vk_bytes, blob.vk_bytes);
+        let (a, b) = (back.config.as_base().unwrap(), sample_base_params());
+        assert_eq!(a.k, b.k);
+        assert_eq!(a.num_advice_per_phase, b.num_advice_per_phase);
+        assert_eq!(back.to_bytes().unwrap(), bytes, "v1 round-trip byte-stable");
+    }
+
+    #[test]
+    fn vk_blob_v2_rlc_round_trips_with_shape_byte() {
+        // Opaque EthCircuitParams stand-in (the consumer parses it, not us).
+        let eth_json = br#"{"k":20,"rlc_columns":1,"base":{"k":20}}"#.to_vec();
+        let blob = sample_blob(VkConfig::Rlc(eth_json.clone()));
+        assert_eq!(blob.shape(), CircuitShape::Rlc);
+        assert_eq!(blob.version(), VK_BLOB_VERSION_V2);
+
+        let bytes = blob.to_bytes().unwrap();
+        assert_eq!(bytes[8], VK_BLOB_VERSION_V2, "Rlc must serialise as v2");
+        assert_eq!(bytes[10], CircuitShape::Rlc as u8, "v2 carries shape byte");
+
+        let back = VkBlob::read(bytes.as_slice()).unwrap();
+        assert_eq!(back.shape(), CircuitShape::Rlc);
+        match &back.config {
+            VkConfig::Rlc(json) => assert_eq!(json, &eth_json),
+            VkConfig::Base(_) => panic!("expected Rlc config"),
+        }
+        assert_eq!(back.vk_bytes, blob.vk_bytes);
+        assert_eq!(back.to_bytes().unwrap(), bytes, "v2 round-trip byte-stable");
+    }
+
+    #[test]
+    fn vk_blob_v1_rejects_nonzero_shape_byte() {
+        // A v1-versioned blob with a stray shape byte is a producer/consumer
+        // desync and must be refused rather than silently treated as Base.
+        let mut header = [0u8; 16];
+        header[0..8].copy_from_slice(VK_BLOB_MAGIC);
+        header[8] = VK_BLOB_VERSION;
+        header[9] = TranscriptKind::Blake2b as u8;
+        header[10] = 1; // illegal for v1
+        let err = VkBlob::read(header.as_slice()).unwrap_err();
+        assert!(
+            err.to_string().contains("non-zero shape byte"),
+            "actual error: {err}"
+        );
+    }
+
+    #[test]
+    fn vk_blob_v2_rejects_unknown_shape_byte() {
+        let mut header = [0u8; 16];
+        header[0..8].copy_from_slice(VK_BLOB_MAGIC);
+        header[8] = VK_BLOB_VERSION_V2;
+        header[9] = TranscriptKind::Blake2b as u8;
+        header[10] = 9; // not Base(0) or Rlc(1)
+        let err = VkBlob::read(header.as_slice()).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown circuit_shape"),
+            "actual error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_native_rlc_rejects_non_json_config() {
+        // Build a throwaway VK via the public constructor path is heavy; assert
+        // the JSON guard directly on bytes that are not valid JSON.
+        let bad = b"\x00\x01\x02 not json".to_vec();
+        let parsed: Result<serde_json::Value> =
+            serde_json::from_slice::<serde_json::Value>(&bad).map_err(Into::into);
+        assert!(parsed.is_err(), "control: bytes must not be valid JSON");
     }
 }

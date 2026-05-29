@@ -33,8 +33,8 @@ pub use bridge_prover_lib::{
     Fr,
 };
 pub use halo2_tvm_bundle::{
-    decode_instances, encode_instances, Halo2TvmOperands, TranscriptKind, VkBlob, VK_BLOB_MAGIC,
-    VK_BLOB_VERSION,
+    decode_instances, encode_instances, CircuitShape, Halo2TvmOperands, TranscriptKind, VkBlob,
+    VkConfig, VK_BLOB_MAGIC, VK_BLOB_VERSION, VK_BLOB_VERSION_V2,
 };
 pub use keys::FallbackKeyManager;
 pub use layer_hashes_keys::{

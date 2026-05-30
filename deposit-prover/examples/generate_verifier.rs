@@ -8,15 +8,16 @@
 //!
 //! The verifier will be saved to: ../contracts/DepositVerifier.sol
 
-use deposit_prover::prover::{generate_solidity_verifier, CircuitConfig};
 use std::path::Path;
+
+use deposit_prover::prover::{generate_solidity_verifier, CircuitConfig};
 
 fn main() {
     println!("=== Deposit Prover: Solidity Verifier Generator ===\n");
 
     // Use default circuit configuration
     let config = CircuitConfig::default();
-    
+
     println!("Circuit Configuration:");
     println!("  - Degree (k): {}", config.degree);
     println!("  - Max data byte length: {}", config.max_data_byte_len);
@@ -26,7 +27,7 @@ fn main() {
 
     // Output path for the Solidity verifier
     let output_path = Path::new("../contracts/DepositVerifier.sol");
-    
+
     println!("Generating Solidity verifier...");
     println!("This may take several minutes on first run (generating proving key)...\n");
 
@@ -38,11 +39,10 @@ fn main() {
             println!("1. Review the generated contract");
             println!("2. Deploy it to Ethereum using Hardhat/Foundry");
             println!("3. Update AckiNackiBridge.sol to use the verifier address");
-        }
+        },
         Err(e) => {
             eprintln!("\n❌ ERROR: {}", e);
             std::process::exit(1);
-        }
+        },
     }
 }
-

@@ -228,8 +228,39 @@ reads. Today `deposit-prover` uses `halo2-pse`. To make its VK byte-compatible:
    - **Still pending in this step**: the *deposit VkBlob export path* (producing the
      real `EthCircuitParams` JSON + deposit VK to feed `from_native_rlc`) needs the
      deposit-prover on the gosh backend → blocked on o3a.
-3. **[deposit-prover backend]** Port `deposit-prover` to the gosh `halo2-axiom`
-   backend (patched axiom-eth); regenerate keys; add a deposit-VkBlob export path.
+3. **[deposit-prover backend — DONE 2026-05-30]** Ported `deposit-prover` to the
+   gosh `halo2-axiom` backend and exported the real deposit triple end-to-end.
+   - `deposit-prover/Cargo.toml`: swapped `halo2-pse` → `halo2-axiom`; `axiom-eth`
+     now points at the local fork (`../../axiom-eth/axiom-eth`, branch
+     `gosh-stable-rlcmanager-assignment`); `[patch."…/halo2-lib.git"]` → the bumped
+     gosh fork (`halo2-base`/`halo2-ecc`/`zkevm-hashes`) + `[patch.crates-io]
+     halo2-axiom → gosh-sh/halo2-axiom`; dropped the direct PSE `halo2_proofs` /
+     `halo2curves` deps (provided via the `halo2_base::halo2_proofs` re-export);
+     `rust-toolchain.toml` pins `nightly-2026-02-03`. `cargo check --all-targets`
+     clean (only upstream axiom-eth lifetime warnings). Old PSE manifest/lock kept
+     as `Cargo.toml.pse-backup` / `Cargo.lock.pse-backup`.
+   - **Keys regenerated on the new backend** against the real Sepolia deposit
+     (tx `0xd995…60e1`, bridge `0xeF4B…07Eb7`, depositId 0, 0.002 ETH). MockProver
+     PASSED; full SHPLONK proof generated. SRS from axiom's bucket
+     (`kzg_bn254_18.srs`).
+   - **Deposit VkBlob export path added**: `examples/export_vk_blob.rs` rebuilds the
+     keygen circuit, `calculate_params()` → `EthCircuitParams`, `keygen_vk`, then
+     `VkBlob::from_native_rlc(EthCircuitParams JSON, vk)` (reuses the real
+     `halo2_tvm_bundle.rs` via `#[path]`). Output: 3725-byte **v2 RLC** blob
+     (header `02 00 01`: version 2, Blake2b, shape Rlc). Built-in round-trip reads
+     the VK back via `EthCircuitImpl<Fr, Noop>` + the carried params — the opcode's
+     exact RLC branch.
+   - **Blake2b proof export added**: `examples/export_blake2b_proof.rs`. `gen_snark_shplonk`
+     uses a **Poseidon** transcript (for the EVM aggregation path) which the opcode
+     does NOT accept; this tool runs raw `create_proof::<_, ProverSHPLONK, _,
+     Blake2bWrite, _>` → 8224-byte opcode-consumable proof + 7×32 LE public inputs.
+   - **Conclusive opcode reproduction**: `examples/verify_opcode_triple.rs` runs the
+     `ZKHALO2VERIFYWITHVK` handler in-process on the on-wire bytes
+     (`VkBlob::read` → `EthCircuitImpl<Fr,Noop>` VK → `decode_instances` →
+     `verify_proof::<_, VerifierSHPLONK, _, Blake2bRead, SingleStrategy>`) →
+     **ACCEPTED**, with the 7 public inputs matching the real deposit. The deposit
+     VK + Blake2b proof + public inputs are a self-consistent, opcode-ready triple
+     (`/tmp/deposit_e2e/deposit_{vk_blob,proof_blake2b,public_inputs}.bin`).
 4. **[opcode — DONE 2026-05-29, branch `serhii/node-3406-vergrth16-with-vk`]** Added the
    `axiom-eth` dep + `circuit_shape` branch to `tvm_vm`:
    - `zk_halo2_with_vk_bundle.rs`: v2 `circuit_shape` byte (offset 10) + `BundleConfig
@@ -252,12 +283,31 @@ reads. Today `deposit-prover` uses `halo2-pse`. To make its VK byte-compatible:
      instances + RLC VkBlob) — needs the deposit-prover exported on the gosh backend (step 3)
      and an agreed final opcode ABI (single-bundle vs 3-operand). See
      `zkhalo2verifywithvk_reference.md` §15.
-5. **[partner]** Update `TokenBridge.finalizeDeposit` to the real **7-input** layout
-   `[depositId, sender, amount, contractAddr, blockHashHi, blockHashLo, promiseCommit]`
-   and embed the real deposit `VK_BLOB`. Decide how the contract sources the ETH
-   block hash (AN-side ETH header oracle) and how `promise_commit` is supplied
-   (it is an internal coprocessor artefact — likely passed through from the relayer
-   alongside the proof, since the contract cannot recompute it).
+5. **[partner / contract — WIRED 2026-05-30, runtime-deps pending]** Updated
+   `acki-nacki/contracts/exchange/TokenBridge.sol` (branch `poseidon_dex_with_verify`):
+   - `finalizeDeposit` now takes the proof-binding passthrough args
+     `bytes srcContract, uint256 blockHashHigh, uint256 blockHashLow, uint256 promiseCommit`
+     and builds the real **7-input** layout
+     `[srcDepositId, _srcSenderToFr(srcSender), uint256(amount),
+       _srcSenderToFr(srcContract), blockHashHigh, blockHashLow, promiseCommit]`.
+   - `_buildPublicInputs` extended 4 → 7 inputs (each strict-bounded by `FR_MODULUS`,
+     LE-encoded). `promise_commit` + block-hash halves are relayer passthrough (the
+     contract cannot recompute them); the source-chain bridge address is bound via
+     `srcContract` (public input #3, replacing the old `srcDappId`-in-#3 bug).
+   - `VK_BLOB` constant replaced with the real **3725-byte v2 RLC** deposit blob from
+     `export_vk_blob` (was the wrong 4-input fallback BLS VK). Pre-edit file saved as
+     `TokenBridge.sol.pre7input.bak`.
+   - **Validated**: edited contract reaches semantic analysis under stock `sold`
+     0.79.3 and fails ONLY on the pre-existing `gosh.zkhalo2VerifyWithVK` builtin
+     (absent from stock `sold`; present in the partner's `sold` fork) — i.e. the
+     7-input signature, builder, and constant all type-check.
+   - **Two runtime dependencies remain before this verifies on a live node:**
+     (a) recompile `TokenBridge.tvc` with the partner's `sold` fork that ships the
+     `zkhalo2VerifyWithVK` builtin, and (b) **build the AN node with the v2 RLC
+     opcode reader** — the node-pinned `tvm_vm` rev (`00d00f9`, branch
+     `halo2_circuit_with_vk`) is **v1 Base-only** (no `read_rlc_vk` / `EthCircuitImpl`),
+     so it cannot read the v2 RLC blob. The RLC reader lives on
+     `serhii/node-3406-vergrth16-with-vk` and must be merged into the node's opcode line.
 6. **[e2e]** Relayer → deposit proof → `Halo2TvmBundle` → `finalizeDeposit` on a
    local AN node built from the 3-operand opcode line.
 
@@ -276,6 +326,42 @@ reads. Today `deposit-prover` uses `halo2-pse`. To make its VK byte-compatible:
   (the RLC stack `axiom-eth` → `snark-verifier-sdk` needs `trait_alias`). The stable
   BaseCircuitBuilder opcode path is unaffected. Recommend pinning a specific nightly date for
   reproducible CI once the team agrees one.
+
+## 6.1 GAP CLOSED 2026-05-30 — on-node opcode verifies the real deposit proof
+
+The full EVM→AN deposit triple now verifies **`true`** through the AN node's exact
+`ZKHALO2VERIFYWITHVK` executor (`tvm_vm::executor::zk_halo2_with_vk::execute_zkhalo2_verify_with_vk`,
+v2 `circuit_shape = Rlc`). Green test:
+`tvm-sdk-rlc/tvm_vm/src/tests/test_halo2_with_vk.rs::round_trip_deposit_rlc_real_proof_returns_true`
+(`cargo test -p tvm_vm --features gosh`).
+
+**Root cause of the initial `verifier returned false`: trusted-setup (tau) mismatch.**
+The opcode rebuilds verifier KZG params from three *chain-wide embedded* points
+(`KZG_{G0,G2,S_G2}_BYTES` in `tvm_vm::executor::zk_halo2_utils`). These come from the
+chain's `kzg_bn254_19.srs` ceremony, **not** the Hermez/Polygon ceremony the deposit-prover
+defaulted to (`data/kzg_bn254_18.srs`). `g0` and `g2` (generators) matched across both, but
+`s_g2 = [tau]·G2` did not — different toxic waste → every SHPLONK pairing check failed.
+
+**Fix:** regenerate the deposit VK + Blake2b proof against the chain ceremony. We downsize
+the chain `kzg_bn254_19.srs` to the deposit circuit's `k=18` (tau-preserving — `g2`/`s_g2`
+untouched, G1 powers truncated, `g_lagrange` recomputed) via
+`deposit-prover/examples/downsize_srs.rs`, drop the stale PK cache, then re-run
+`export_vk_blob` + `export_blake2b_proof`. The resulting `s_g2` matches the embedded
+constant byte-for-byte, and the opcode accepts the proof.
+
+**Lesson (load-bearing):** the deposit-prover MUST use the same SRS ceremony the AN node
+embeds. The Hermez `.srs` is the wrong ceremony for this chain. Canonical source:
+`tvm-sdk-rlc/tvm_vm/halo2_test_data/kzg_bn254_19.srs` (downsize to the target `k`).
+
+`TokenBridge.sol`'s `VK_BLOB` constant was re-embedded with the chain-SRS blob
+(sha256 `81fde8c2…04d54d`, 3725 B) and `TokenBridge.tvc` recompiled
+(`sold --tvm-version gosh`).
+
+**Still open:** delivering `finalizeDeposit` over the *live local network* is blocked by
+test-harness networking (nodes redirect to a non-listening `bk_api` port; rapid BP rotation
+strands accepted messages) and an incompatible `tvm-debugger` build (older `zkhalo2`
+variant). The cryptographic core (proof gen → on-node opcode verify) is proven; the
+remaining work is operational message delivery, independent of the opcode.
 
 ## 7. Artefacts
 - Empirical test: `../vk-compat-check/axiom-reader/` (Blocker 2, real backend, kept as regression fixture).

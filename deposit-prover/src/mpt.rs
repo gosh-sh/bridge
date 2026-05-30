@@ -1,15 +1,20 @@
-use anyhow::{anyhow, Context, Result};
-use cita_trie::{MemoryDB, PatriciaTrie, Trie};
-use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{TransactionReceipt, H256};
-use hasher::HasherKeccak;
 use std::sync::Arc;
 
-use crate::rlp_utils::{encode_receipt, encode_tx_index};
-use crate::types::ReceiptProof;
+use anyhow::{anyhow, Context, Result};
+use cita_trie::{MemoryDB, PatriciaTrie, Trie};
+use ethers::{
+    providers::{Http, Middleware, Provider},
+    types::{TransactionReceipt, H256},
+};
+use hasher::HasherKeccak;
+
+use crate::{
+    rlp_utils::{encode_receipt, encode_tx_index},
+    types::ReceiptProof,
+};
 
 /// Generate a Merkle-Patricia Trie proof for a transaction receipt
-/// 
+///
 /// This function:
 /// 1. Fetches all receipts in the block
 /// 2. Builds the receipt trie from scratch
@@ -20,22 +25,25 @@ pub async fn generate_receipt_proof(
     tx_hash: H256,
 ) -> Result<ReceiptProof> {
     println!("🔍 Fetching transaction receipt...");
-    
+
     // Fetch the target receipt
     let receipt = provider
         .get_transaction_receipt(tx_hash)
         .await
         .context("Failed to fetch transaction receipt")?
         .ok_or_else(|| anyhow!("Transaction receipt not found"))?;
-    
+
     let block_number = receipt
         .block_number
         .ok_or_else(|| anyhow!("Block number not found"))?;
-    
+
     let tx_index = receipt.transaction_index.as_u64();
-    
-    println!("📦 Block: {}, Transaction index: {}", block_number, tx_index);
-    
+
+    println!(
+        "📦 Block: {}, Transaction index: {}",
+        block_number, tx_index
+    );
+
     // Fetch the block
     println!("🔍 Fetching block {}...", block_number);
     let block = provider
@@ -43,12 +51,12 @@ pub async fn generate_receipt_proof(
         .await
         .context("Failed to fetch block")?
         .ok_or_else(|| anyhow!("Block not found"))?;
-    
+
     let receipts_root: [u8; 32] = block.receipts_root.into();
     let tx_count = block.transactions.len();
-    
+
     println!("📊 Block has {} transactions", tx_count);
-    
+
     // Fetch all receipts in the block
     println!("🔍 Fetching all {} receipts...", tx_count);
     let mut receipts = Vec::new();
@@ -56,18 +64,18 @@ pub async fn generate_receipt_proof(
         if i % 10 == 0 {
             println!("   Progress: {}/{}", i, tx_count);
         }
-        
+
         let receipt = provider
             .get_transaction_receipt(*tx_hash)
             .await
             .context(format!("Failed to fetch receipt for tx {}", i))?
             .ok_or_else(|| anyhow!("Receipt not found for tx {}", i))?;
-        
+
         receipts.push(receipt);
     }
-    
+
     println!("✅ Fetched all receipts");
-    
+
     // Build the receipt trie
     println!("🌳 Building receipt trie...");
     let mut trie = build_receipt_trie(&receipts)?;
@@ -81,22 +89,22 @@ pub async fn generate_receipt_proof(
             receipts_root
         ));
     }
-    
+
     println!("✅ Trie root verified: 0x{}", hex::encode(&receipts_root));
-    
+
     // Generate proof for our transaction
     println!("🔐 Generating MPT proof for tx index {}...", tx_index);
     let key = encode_tx_index(tx_index);
     let proof = trie.get_proof(&key)?;
 
     println!("✅ Generated proof with {} nodes", proof.len());
-    
+
     // RLP encode the receipt
     let receipt_rlp = encode_receipt(&receipt)?;
-    
+
     // RLP encode the block header
     let block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
-    
+
     Ok(ReceiptProof {
         receipt_rlp,
         proof_nodes: proof,
@@ -106,36 +114,38 @@ pub async fn generate_receipt_proof(
 }
 
 /// Build a receipt trie from a list of receipts
-/// 
+///
 /// The trie uses:
 /// - Key: RLP(transaction_index)
 /// - Value: RLP(receipt)
-fn build_receipt_trie(receipts: &[TransactionReceipt]) -> Result<PatriciaTrie<MemoryDB, HasherKeccak>> {
+fn build_receipt_trie(
+    receipts: &[TransactionReceipt],
+) -> Result<PatriciaTrie<MemoryDB, HasherKeccak>> {
     let memdb = Arc::new(MemoryDB::new(true));
     let hasher = Arc::new(HasherKeccak::new());
     let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::clone(&hasher));
-    
+
     for (i, receipt) in receipts.iter().enumerate() {
         // Encode the key (transaction index)
         let key = encode_tx_index(i as u64);
-        
+
         // Encode the value (receipt)
-        let value = encode_receipt(receipt)
-            .context(format!("Failed to encode receipt {}", i))?;
-        
+        let value = encode_receipt(receipt).context(format!("Failed to encode receipt {}", i))?;
+
         // Insert into trie
         trie.insert(key, value)
             .context(format!("Failed to insert receipt {} into trie", i))?;
     }
-    
+
     Ok(trie)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ethers::types::{Address, Bloom, U256, U64};
-    
+
+    use super::*;
+
     #[test]
     fn test_build_receipt_trie() {
         // Create a simple receipt
@@ -157,20 +167,20 @@ mod tests {
             effective_gas_price: None,
             other: Default::default(),
         };
-        
+
         // Build trie with single receipt
         let trie = build_receipt_trie(&[receipt]).unwrap();
-        
+
         // Verify we can get the receipt back
         let key = encode_tx_index(0);
         let value = trie.get(&key).unwrap();
         assert!(value.is_some());
     }
-    
+
     #[test]
     fn test_build_receipt_trie_multiple() {
         let mut receipts = vec![];
-        
+
         for i in 0..10 {
             let receipt = TransactionReceipt {
                 transaction_hash: H256::zero(),
@@ -192,10 +202,10 @@ mod tests {
             };
             receipts.push(receipt);
         }
-        
+
         // Build trie
         let trie = build_receipt_trie(&receipts).unwrap();
-        
+
         // Verify all receipts are in the trie
         for i in 0..10 {
             let key = encode_tx_index(i);
@@ -204,4 +214,3 @@ mod tests {
         }
     }
 }
-

@@ -14,41 +14,46 @@ name = "deposit_prover"
 path = "src/lib.rs"
 
 [dependencies]
-# Axiom-eth for Ethereum state proofs
-axiom-eth = { git = "https://github.com/axiom-crypto/axiom-eth", default-features = false, features = [
+# Axiom-eth for Ethereum state proofs.
+# Ported 2026-05-30 from the PSE backend to the gosh `halo2-axiom` backend
+# (the one the AN-side `ZKHALO2VERIFYWITHVK` opcode reads). Uses the local
+# axiom-eth fork (branch `gosh-stable-rlcmanager-assignment`) whose RlcManager
+# names `VirtualRegionManager::Assignment` explicitly for the stable gosh
+# halo2-base, and the bumped gosh halo2-lib fork (v0.4.1 / zkevm-hashes 0.2.1).
+axiom-eth = { path = "../../axiom-eth/axiom-eth", default-features = false, features = [
   "providers",
   "display",
   "aggregation",
+  "halo2-axiom",
 ] }
 
-# Halo2 - axiom-crypto ecosystem (required by axiom-eth)
+# Halo2 - gosh halo2-axiom backend (redirected to the local fork via [patch]).
 halo2-base = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-  "halo2-pse",
+  "halo2-axiom",
   "display",
 ] }
 halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-  "halo2-pse",
+  "halo2-axiom",
   "display",
 ] }
-halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2", tag = "v2023_04_20" }
 
-# SNARK verifier - axiom-crypto
+# SNARK verifier - axiom-crypto (halo2-axiom backend).
 snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
-  "halo2-pse",
+  "halo2-axiom",
 ] }
 snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
-  "halo2-pse",
+  "halo2-axiom",
 ] }
 
 
 # Poseidon hash - for commitment computation
 # Use axiom-eth's poseidon implementation
 zkevm-hashes = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
-  "halo2-pse",
+  "halo2-axiom",
 ] }
 
 # Ethereum - using specific version to avoid DepositTransaction issue
@@ -70,7 +75,8 @@ hasher = "0.1"
 
 # Field arithmetic
 ff = "0.13"
-halo2curves = { package = "halo2curves", git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1" }
+# halo2curves is provided transitively by the gosh halo2-axiom backend via the
+# `halo2_base::halo2_proofs::halo2curves` re-export (no direct PSE dep needed).
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -84,7 +90,22 @@ clap = { version = "4.5", features = ["derive"] }
 ppot-rs = { version = "0.1.1", optional = true }
 sha2 = "0.10.9"
 num-bigint = "0.4"
+rand = "0.8"
 
 [features]
 # Optional: .ptau file conversion support
 ppot-rs = ["dep:ppot-rs"]
+
+# Redirect axiom's git halo2-lib (v0.4.1-git) to the local bumped gosh fork so
+# the whole graph (deposit-prover + axiom-eth + snark-verifier-sdk) shares one
+# halo2 backend. Mirrors vk-compat-check/rlc-reader's proven setup.
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+zkevm-hashes = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/hashes/zkevm" }
+
+# Unify on the gosh halo2 backend: snark-verifier-sdk (pulled by zkevm-hashes
+# v0.4.1) would otherwise bring axiom's crates.io halo2-axiom, clashing with
+# gosh-sh/halo2-axiom. This mirrors the [patch] the bumped fork carries.
+[patch.crates-io]
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }

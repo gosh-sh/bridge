@@ -6,12 +6,12 @@
 
 ---
 
-> 🛠️ **This is a command-line guide for developers and advanced testers.** There is
-> **no hosted web app**. You drive the bridge directly with `cast` (Foundry) and the
-> repo's `deposit-relayer` CLI. (A Yew/WASM frontend exists under `frontend/` as
-> source you can build and serve yourself with `trunk serve`, but it is not a deployed
-> product and is out of scope here.) Everything below assumes a checkout of this
-> repository, a funded Sepolia key, and the toolchain from `make setup`.
+> 🛠️ **This is a command-line guide for developers and advanced testers.** You drive
+> the bridge directly with `cast` (Foundry) and the repo's `deposit-relayer` CLI.
+> Everything below assumes a checkout of this repository, a funded Sepolia key, and the
+> toolchain from `make setup`. A browser-based **web frontend** also ships in the repo
+> (`frontend/`) — you run it yourself; see §7. It is not a hosted product, and the CLI
+> below is the source of truth for the current USDT flow.
 
 ---
 
@@ -34,8 +34,8 @@ proofs** to verify that every cross-chain event really happened. In plain terms:
 
 | Direction | What it does | Status |
 | --- | --- | --- |
-| **Ethereum → Acki Nacki** (Deposit) | You send **USDT** on Ethereum; equivalent tokens are minted to you on Acki Nacki after a ZK proof of your deposit is verified. | ✅ **Available** (deposit + prove on a real chain; AN submit is mock-only — see §7) |
-| **Acki Nacki → Ethereum** (Withdraw / burn) | Burn tokens on Acki Nacki and release USDT on Ethereum. | 🚧 **In development** — see §8 |
+| **Ethereum → Acki Nacki** (Deposit) | You send **USDT** on Ethereum; equivalent tokens are minted to you on Acki Nacki after a ZK proof of your deposit is verified. | ✅ **Available** (deposit + prove on a real chain; AN submit is mock-only — see §6) |
+| **Acki Nacki → Ethereum** (Withdraw / burn) | Burn tokens on Acki Nacki and release USDT on Ethereum. | 🚧 **In development** — see §9 |
 
 ---
 
@@ -276,7 +276,34 @@ double-credit a deposit — already-finalized ids are simply skipped.
 
 ---
 
-## 7. Fees, limits and safety
+## 7. Optional: the web frontend (run it yourself)
+
+The repo ships a browser UI under `frontend/` — a **Rust + Yew + WebAssembly** app with
+MetaMask wallet connection, a deposit form, live bridge stats, and transaction history.
+It is **not hosted anywhere**; you build and serve it yourself. See `frontend/README.md`
+for full details.
+
+```bash
+cd frontend
+cargo install trunk                         # one-time (WASM bundler)
+rustup target add wasm32-unknown-unknown    # one-time
+trunk serve                                 # dev server at http://localhost:8080
+# or build a static bundle:  trunk build --release   (output in dist/)
+# or run via Docker:         docker build -t an-bridge-frontend . && docker run -p 8080:80 an-bridge-frontend
+```
+
+Configure contract addresses / RPC in `frontend/src` (see the README's *Configuration*
+section) before connecting a wallet.
+
+> ⚠️ **Heads-up: the frontend currently reflects the older ETH deposit flow**, not the
+> USDT `approve` + `deposit(uint256)` path documented above. Treat it as a UI starting
+> point that still needs updating for USDT (and the withdraw form is a non-functional
+> placeholder). For anything you actually want to bridge today, use the CLI (§4–§6),
+> which is kept in sync with the current contract.
+
+---
+
+## 8. Fees, limits and safety
 
 - **Per-deposit limit:** 100 USDT maximum per `deposit(amount)` call (`MAX_DEPOSIT_AMOUNT`).
   Zero is rejected (`InvalidAmount`); over 100 USDT is rejected (`DepositTooLarge`).
@@ -301,7 +328,7 @@ double-credit a deposit — already-finalized ids are simply skipped.
 
 ---
 
-## 8. Withdrawals (Acki Nacki → Ethereum) — current status
+## 9. Withdrawals (Acki Nacki → Ethereum) — current status
 
 True cross-chain withdrawals (burning tokens on Acki Nacki to release USDT on Ethereum)
 are **not yet available to users**. The legacy refund-style `withdraw` flow from earlier
@@ -323,7 +350,7 @@ This guide will be updated when withdrawals go live.
 
 ---
 
-## 9. How the bridge stays trustworthy (plain-English overview)
+## 10. How the bridge stays trustworthy (plain-English overview)
 
 - **Your deposit is proven, not asserted.** A zero-knowledge proof demonstrates that your
   deposit transaction was included in a real Ethereum block before any tokens are minted.
@@ -336,7 +363,7 @@ This guide will be updated when withdrawals go live.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Problem | Likely cause | What to do |
 | --- | --- | --- |
@@ -351,7 +378,7 @@ This guide will be updated when withdrawals go live.
 
 ---
 
-## 11. Glossary
+## 12. Glossary
 
 - **ZK proof (zero-knowledge proof):** A cryptographic proof that a statement is true
   without revealing extra information. Here, it proves your deposit really happened.

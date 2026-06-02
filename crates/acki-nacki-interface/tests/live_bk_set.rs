@@ -162,7 +162,9 @@ async fn live_bk_set_tracker_two_polls_against_real_node() {
 
     let first = tracker.poll().await.expect("first poll");
     let snap1 = match &first {
-        BkSetChange::FirstObservation { snapshot } => snapshot.clone(),
+        BkSetChange::FirstObservation {
+            snapshot,
+        } => snapshot.clone(),
         other => panic!("expected FirstObservation, got {other:?}"),
     };
     assert!(snap1.current_size() > 0);
@@ -181,7 +183,9 @@ async fn live_bk_set_tracker_two_polls_against_real_node() {
             println!("OK second poll: Unchanged at seq_no={}", observed_seq_no);
         },
         BkSetChange::MembershipChanged {
-            new_seq_no, delta, ..
+            new_seq_no,
+            delta,
+            ..
         } => {
             println!(
                 "OK second poll: MembershipChanged at seq_no={} (+{} -{} mut={})",
@@ -191,7 +195,9 @@ async fn live_bk_set_tracker_two_polls_against_real_node() {
                 delta.pubkey_mutations.len(),
             );
         },
-        BkSetChange::FirstObservation { .. } => {
+        BkSetChange::FirstObservation {
+            ..
+        } => {
             panic!("FirstObservation must not repeat — cache wasn't updated")
         },
     }

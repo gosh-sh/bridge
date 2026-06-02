@@ -1,7 +1,7 @@
 //! USDC deposit flow helpers.
 //!
-//! Users must hold USDC before depositing. Swap ETH → USDC on Uniswap (or another
-//! DEX) in your wallet first — the bridge does not perform the swap.
+//! Users must hold USDC before depositing. Swap ETH → USDC on Uniswap (or
+//! another DEX) in your wallet first — the bridge does not perform the swap.
 
 /// Instruction shown in UIs before the user initiates a deposit.
 pub const PRE_DEPOSIT_USER_INSTRUCTION: &str =

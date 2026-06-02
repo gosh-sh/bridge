@@ -19,8 +19,10 @@ use alloy::{
     sol,
 };
 
-use crate::deposit::sepolia;
-use crate::error::{BridgeError, Result};
+use crate::{
+    deposit::sepolia,
+    error::{BridgeError, Result},
+};
 
 sol! {
     #[sol(rpc)]

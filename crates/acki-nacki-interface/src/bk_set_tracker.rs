@@ -158,7 +158,10 @@ pub struct BkSetTracker {
 
 impl BkSetTracker {
     pub fn new(client: BkSetClient) -> Self {
-        Self { client, last: None }
+        Self {
+            client,
+            last: None,
+        }
     }
 
     /// Take one observation. On the first call returns
@@ -337,14 +340,11 @@ mod tests {
         let mut bad = entry(7, 0x07);
         bad.pubkey = "aa".to_string();
         let err = BkSetSnapshot::from_update(update(42, vec![bad])).unwrap_err();
-        assert!(matches!(
-            err,
-            AckiNackiError::InvalidLength {
-                expected: BLS_PUBKEY_LEN,
-                actual: 1,
-                ..
-            }
-        ));
+        assert!(matches!(err, AckiNackiError::InvalidLength {
+            expected: BLS_PUBKEY_LEN,
+            actual: 1,
+            ..
+        }));
     }
 
     #[test]
@@ -394,7 +394,9 @@ mod tests {
         let b =
             BkSetSnapshot::from_update(update(20, vec![entry(5, 0xaa), entry(7, 0x07)])).unwrap();
         match diff_snapshots(&a, &b) {
-            BkSetChange::MembershipChanged { delta, .. } => {
+            BkSetChange::MembershipChanged {
+                delta, ..
+            } => {
                 assert!(delta.added.is_empty());
                 assert!(delta.removed.is_empty());
                 assert_eq!(delta.pubkey_mutations, BTreeSet::from([5]));
@@ -412,7 +414,9 @@ mod tests {
         let a = BkSetSnapshot::from_update(a_resp).unwrap();
         let b = BkSetSnapshot::from_update(b_resp).unwrap();
         match diff_snapshots(&a, &b) {
-            BkSetChange::Unchanged { future_changed, .. } => {
+            BkSetChange::Unchanged {
+                future_changed, ..
+            } => {
                 assert!(future_changed);
             },
             other => panic!("expected Unchanged with future_changed=true, got {other:?}"),
@@ -421,10 +425,11 @@ mod tests {
 
     #[test]
     fn canonical_bytes_is_deterministic_and_sorted() {
-        let snap = BkSetSnapshot::from_update(update(
-            1,
-            vec![entry(11, 0x0b), entry(3, 0x03), entry(7, 0x07)],
-        ))
+        let snap = BkSetSnapshot::from_update(update(1, vec![
+            entry(11, 0x0b),
+            entry(3, 0x03),
+            entry(7, 0x07),
+        ]))
         .unwrap();
         let bytes = snap.canonical_bytes_current();
         // 3 entries * (4 bytes idx + 48 bytes pubkey) = 156 bytes.

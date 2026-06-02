@@ -54,6 +54,7 @@
 //!   partner branch `poseidon_dex_with_verify` (see
 //!   `docs/zkhalo2verifywithvk_reference.md`).
 
+pub mod an_config;
 pub mod daemon;
 pub mod error;
 pub mod prover;
@@ -63,6 +64,7 @@ pub mod state;
 pub mod submitter;
 pub mod types;
 
+pub use an_config::{AnConfig, AnPreflight, DEFAULT_AN_NODE_URL, DEFAULT_LOCAL_AN_NODE_URL};
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };

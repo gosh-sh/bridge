@@ -25,8 +25,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    BackoffConfig, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
+    AnConfig, BackoffConfig, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
     RelayerConfig, RelayerMetrics, SubprocessProofGenerator, SubprocessProverConfig,
+    DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
 
@@ -116,6 +117,12 @@ enum Cmd {
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
+        /// AN node REST base URL. When set, the daemon runs a live
+        /// connectivity preflight (`/v2/bk_set`) on startup and aborts if the
+        /// node is unreachable. Optional (the submit path is still mocked in
+        /// `--dry-run`), but recommended so a mis-typed endpoint fails fast.
+        #[arg(long, env = "AN_NODE_URL")]
+        an_node_url: Option<String>,
         /// Run the submit stage against an in-memory mock AN. Required until
         /// a live `IAckiNacki` client is available.
         #[arg(long)]
@@ -126,6 +133,14 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+    },
+    /// Probe the AN node's read endpoints (`/v2/bk_set`) and print the
+    /// current BK-set summary. Confirms an AN config points at a reachable
+    /// node before running the daemon.
+    AnPreflight {
+        /// AN node REST base URL.
+        #[arg(long, env = "AN_NODE_URL", default_value = DEFAULT_AN_NODE_URL)]
+        an_node_url: String,
     },
     /// Print the state file path and exit.
     Status,
@@ -190,6 +205,9 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(log_err("prove-one"))
         },
+        Cmd::AnPreflight { an_node_url } => an_preflight(an_node_url)
+            .await
+            .map_err(log_err("an-preflight")),
         Cmd::Daemon {
             rpc_url,
             bridge_address,
@@ -201,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             degree,
             max_data_byte_len,
             max_log_num,
+            an_node_url,
             dry_run,
             backoff_initial_secs,
             backoff_max_secs,
@@ -226,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
                 confirmations,
                 start_deposit_id,
                 prover_cfg,
+                an_node_url,
                 dry_run,
                 backoff,
             )
@@ -233,6 +253,20 @@ async fn main() -> anyhow::Result<()> {
             .map_err(log_err("daemon"))
         },
     }
+}
+
+async fn an_preflight(an_node_url: String) -> anyhow::Result<()> {
+    let cfg = AnConfig::from_node_url(an_node_url);
+    info!(node_url = %cfg.node_url, "probing AN node /v2/bk_set");
+    let pf = cfg.preflight().await?;
+    info!(
+        node_url = %pf.node_url,
+        seq_no = pf.seq_no,
+        bk_count = pf.bk_count,
+        future_bk_count = pf.future_bk_count,
+        "AN node reachable",
+    );
+    Ok(())
 }
 
 fn build_prover_cfg(
@@ -342,6 +376,7 @@ async fn run_daemon(
     confirmations: u64,
     start_deposit_id: u64,
     prover_cfg: SubprocessProverConfig,
+    an_node_url: Option<String>,
     dry_run: bool,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
@@ -351,6 +386,20 @@ async fn run_daemon(
              to exercise the listen→prove pipeline against an in-memory mock AN, or wait for the \
              live tvm-sdk client. See crate docs for the delivery blocker."
         );
+    }
+
+    // Real use of the AN endpoints: confirm the node is reachable before we
+    // start. Fails fast on a mis-typed / unreachable endpoint.
+    if let Some(url) = &an_node_url {
+        let pf = AnConfig::from_node_url(url.clone()).preflight().await?;
+        info!(
+            node_url = %pf.node_url,
+            seq_no = pf.seq_no,
+            bk_count = pf.bk_count,
+            "AN node preflight OK",
+        );
+    } else {
+        warn!("no --an-node-url given; skipping AN connectivity preflight");
     }
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);

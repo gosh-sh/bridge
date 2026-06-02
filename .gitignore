@@ -192,3 +192,18 @@ crates/bridge-evm-aggregator/Cargo.lock
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/
+
+# Local-only scratch / backup artefacts (editor backups, ad-hoc patches,
+# generated binaries, and not-for-commit experiments). Only USER_GUIDE.md and
+# SUMMARY.md are intended to be committed from this batch.
+FIX_TASK_FOR_AGENT.md.bak.*
+acki-nacki_deposit-rlc-e2e.patch
+contracts/ethereum/test/helpers/UsdtTestLib.sol
+contracts/ethereum/test/mocks/MockERC20.sol
+deposit-prover/Cargo.lock.pse-backup
+deposit-prover/Cargo.toml.bak_*
+deposit-prover/Cargo.toml.pse-backup
+deposit-prover/deposit_public_inputs.bin
+deposit-prover/src/bin/an_rlc_verify.rs
+docs/user/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
+docs/user/USER_GUIDE.md.bak.*

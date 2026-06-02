@@ -2,6 +2,8 @@
 
 **A cross-chain bridge between Ethereum and Acki Nacki, secured end-to-end by zero-knowledge proofs.**
 
+*Revision: 31 May 2026 · Test deployment (Sepolia)*
+
 ---
 
 ## 1. What is the Acki Nacki Bridge?
@@ -72,9 +74,11 @@ This is the main user flow. Here is what happens, step by step.
 3. **Switch to Sepolia.** If you're on another network, the app will ask MetaMask to
    switch to Sepolia automatically. Approve it.
 4. **Enter the amount** of ETH you want to bridge in the *Deposit* form.
-   - There is a per-deposit cap of **100 ETH** (`MAX_DEPOSIT_AMOUNT`).
+   - The amount must be **greater than 0** and **at most 100 ETH** per deposit (`MAX_DEPOSIT_AMOUNT`). A zero amount is rejected (`InvalidAmount`); anything above 100 ETH is rejected (`DepositTooLarge`).
 5. **Submit and confirm** the transaction in MetaMask. This calls the bridge's
-   `deposit()` function and sends your ETH to the bridge contract.
+   `deposit()` function (it takes no arguments — the ETH you send is the deposit)
+   and transfers your ETH to the bridge contract. Your **connected wallet address**
+   (`msg.sender`) is recorded as the depositor and is the party credited on Acki Nacki.
 6. **Wait for the transaction to be mined.** Once confirmed, the bridge emits a
    `Deposit` event containing your unique **Deposit ID**, your address, the amount,
    and a timestamp.
@@ -85,8 +89,10 @@ You don't have to do any of this yourself — it's fully automated — but here'
 system does so your tokens appear on Acki Nacki:
 
 1. An **off-chain prover** reads your deposit transaction and its inclusion proof from
-   Ethereum, then builds a **Halo2 ZK proof** that your `Deposit` event was genuinely
-   emitted by the bridge contract in a real Ethereum block.
+   Ethereum, then builds a **Halo2 ZK proof** (Axiom-based circuit backend) that your
+   `Deposit` event was genuinely emitted by the bridge contract in a real Ethereum block.
+   The proof artifacts are exported in a form the Acki Nacki verification opcode can
+   consume directly.
 2. The Acki Nacki side **verifies that proof natively** (via a dedicated TVM verification
    opcode) and checks the public inputs.
 3. Once the proof is accepted, the corresponding **tokens are minted to you on
@@ -101,6 +107,12 @@ Acki Nacki — without trusting any human operator.
   landed on Ethereum.
 - Note your **Deposit ID** from the `Deposit` event — it uniquely identifies your
   bridging operation.
+
+> ℹ️ **Who receives the tokens on Acki Nacki?** In the current deployment, the bridge
+> credits the **same address that made the deposit** (`msg.sender`). A configurable
+> Acki Nacki receiver is being prepared for a future release; until the Acki Nacki side
+> provides concrete receiving details, a custom receiver is tracked off-chain only and
+> is **not** sent on-chain.
 
 ---
 
@@ -142,6 +154,12 @@ True cross-chain withdrawals (burning tokens on Acki Nacki to release ETH on Eth
 are **not yet available to users**. The legacy refund-style `withdraw` flow from earlier
 versions has been **retired**, and the production burn-proof flow is still under active
 development.
+
+Under the hood, the Ethereum contract already carries the proof-verified machinery for
+the reverse channel — a permissionless `verifyBlock` entry point that advances the
+on-chain commitment to Acki Nacki's state after checking ZK attestations, and a
+proof-gated `withdrawByProof` path — but these are protocol/operator-level and are **not**
+exposed as a user action yet.
 
 What this means for you right now:
 
@@ -198,6 +216,10 @@ bridge can be trusted by math rather than by people.
 - **Treasury:** ETH held by the bridge contract from user deposits.
 - **AAVE V3:** A lending protocol where idle treasury ETH may be placed to earn yield
   (operator-managed; does not affect your funds' claimability).
+- **Axiom (halo2-lib):** The Halo2 circuit framework the deposit prover is built on; it
+  produces proofs the Acki Nacki verification opcode can check natively.
+- **verifyBlock:** A permissionless Ethereum-side function that advances the bridge's
+  view of Acki Nacki's chain state after verifying ZK attestation proofs (protocol-level).
 
 ---
 

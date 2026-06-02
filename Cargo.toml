@@ -10,6 +10,7 @@ exclude = [
     "poseidon-proof",
     "crates/bridge-prover-orchestrator",
     "crates/bridge-relayer-daemon",
+    "crates/deposit-relayer-daemon",
 ]
 
 [workspace.package]

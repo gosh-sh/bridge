@@ -1,0 +1,317 @@
+//! [`ProofGenerator`] — abstraction over "how do we turn a `Deposit` event
+//! into the AN-consumable proof triple?".
+//!
+//! The deposit circuit lives in the `deposit-prover` crate, which is its own
+//! cargo workspace (it pins axiom's halo2-lib v0.4.1, incompatible with this
+//! workspace's dependency tree). Rather than force-merge two halo2 backends,
+//! this crate keeps proof generation behind a trait with two backends:
+//!
+//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the seven
+//!   public inputs straight from the event so the relayer + submitter can be
+//!   driven end-to-end in unit tests in microseconds.
+//! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
+//!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
+//!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
+//!   gnark wrappers' on-disk artefacts) and assembles the three operands.
+
+use std::{path::PathBuf, time::Duration};
+
+use alloy::primitives::U256;
+use async_trait::async_trait;
+
+use crate::{
+    error::RelayerError,
+    types::{DepositEvent, DepositProofBundle, DepositPublicInputs},
+};
+
+/// Produces a [`DepositProofBundle`] for a confirmed [`DepositEvent`].
+#[async_trait]
+pub trait ProofGenerator: Send + Sync {
+    async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError>;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MockProofGenerator — deterministic, no halo2
+// ─────────────────────────────────────────────────────────────────────
+
+/// Deterministic proof generator for tests. Derives the seven public
+/// inputs from the event the same way the real circuit binds them (so the
+/// submitter's `finalizeDeposit` args are realistic), and emits canned
+/// `vk_blob` / `proof` bytes.
+#[derive(Clone, Debug, Default)]
+pub struct MockProofGenerator {
+    /// When set, `generate` fails for this `deposit_id` — lets tests
+    /// exercise the proof-generation-error path.
+    pub fail_on: Option<u64>,
+}
+
+impl MockProofGenerator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn failing_on(deposit_id: u64) -> Self {
+        Self {
+            fail_on: Some(deposit_id),
+        }
+    }
+
+    /// The public inputs the real circuit would commit to for this event.
+    pub fn derive_public_inputs(event: &DepositEvent) -> DepositPublicInputs {
+        let addr_to_field = |bytes: &[u8]| {
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(bytes);
+            U256::from_be_bytes::<32>(buf)
+        };
+        let half = |slice: &[u8]| {
+            let mut buf = [0u8; 32];
+            buf[32 - slice.len()..].copy_from_slice(slice);
+            U256::from_be_bytes::<32>(buf)
+        };
+        DepositPublicInputs {
+            deposit_id: U256::from(event.deposit_id),
+            sender: addr_to_field(event.sender.as_slice()),
+            amount: event.amount,
+            contract_address: addr_to_field(event.source_contract.as_slice()),
+            block_hash_high: half(&event.block_hash.as_slice()[0..16]),
+            block_hash_low: half(&event.block_hash.as_slice()[16..32]),
+            promise_commit: U256::ZERO,
+        }
+    }
+}
+
+#[async_trait]
+impl ProofGenerator for MockProofGenerator {
+    async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
+        if self.fail_on == Some(event.deposit_id) {
+            return Err(RelayerError::ProofGeneration(format!(
+                "mock configured to fail on depositId={}",
+                event.deposit_id
+            )));
+        }
+        let parsed = Self::derive_public_inputs(event);
+        Ok(DepositProofBundle {
+            // Canned, non-empty operands — the relayer + submitter only care
+            // about shape and the decoded public inputs in mock scenarios.
+            vk_blob: vec![0x56, 0x4b, 0x00, 0x00].into(),
+            public_inputs: parsed.to_operand().into(),
+            proof: vec![0xAA; 32].into(),
+            parsed,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SubprocessProofGenerator — invokes deposit-prover example binaries
+// ─────────────────────────────────────────────────────────────────────
+
+/// Configuration for the out-of-process `deposit-prover` invocation.
+#[derive(Clone, Debug)]
+pub struct SubprocessProverConfig {
+    /// Path to the `deposit-prover` crate root (its own cargo workspace).
+    pub deposit_prover_dir: PathBuf,
+    /// Ethereum RPC URL passed to `fetch_deposit_data`.
+    pub rpc_url: String,
+    /// Circuit degree (`k`). The `deposit-prover` examples default to 18.
+    pub degree: u32,
+    /// `--max-data-byte-len` for the receipt parser.
+    pub max_data_byte_len: usize,
+    /// `--max-log-num` upper bound on logs in the receipt.
+    pub max_log_num: usize,
+    /// Hard timeout for the whole three-step pipeline. Halo2 proving for a
+    /// fresh proving key can take minutes, so default generously.
+    pub timeout: Duration,
+}
+
+impl SubprocessProverConfig {
+    pub fn new(deposit_prover_dir: impl Into<PathBuf>, rpc_url: impl Into<String>) -> Self {
+        Self {
+            deposit_prover_dir: deposit_prover_dir.into(),
+            rpc_url: rpc_url.into(),
+            degree: 18,
+            max_data_byte_len: 256,
+            max_log_num: 20,
+            timeout: Duration::from_secs(900),
+        }
+    }
+}
+
+/// Production proof generator. Shells out to the `deposit-prover` examples:
+///
+/// 1. `fetch_deposit_data` — RPC → `DepositProofInput` JSON (receipt RLP, MPT
+///    proof, block header, parsed event fields);
+/// 2. `export_vk_blob` — v2 RLC `VkBlob` for the deposit circuit;
+/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 7×32-byte LE
+///    public-input operand.
+///
+/// The three resulting files are read back and assembled into a
+/// [`DepositProofBundle`]. This is intentionally heavyweight (it runs the
+/// halo2 prover); operators typically pre-build the examples in release mode
+/// so step (3) doesn't recompile.
+pub struct SubprocessProofGenerator {
+    config: SubprocessProverConfig,
+}
+
+impl SubprocessProofGenerator {
+    pub fn new(config: SubprocessProverConfig) -> Self {
+        Self { config }
+    }
+
+    async fn run_example(&self, args: &[String]) -> Result<(), RelayerError> {
+        use tokio::process::Command;
+
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&self.config.deposit_prover_dir)
+            .arg("run")
+            .arg("--release")
+            .arg("--example");
+        for a in args {
+            cmd.arg(a);
+        }
+
+        let output = tokio::time::timeout(self.config.timeout, cmd.output())
+            .await
+            .map_err(|_| {
+                RelayerError::ProofGeneration(format!(
+                    "deposit-prover example timed out after {:?}",
+                    self.config.timeout
+                ))
+            })?
+            .map_err(|e| {
+                RelayerError::ProofGeneration(format!("failed to spawn deposit-prover: {e}"))
+            })?;
+
+        if !output.status.success() {
+            return Err(RelayerError::ProofGeneration(format!(
+                "deposit-prover example {:?} exited with {}: {}",
+                args.first(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProofGenerator for SubprocessProofGenerator {
+    async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
+        let workdir = tempfile::tempdir()
+            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir failed: {e}")))?;
+        let input_json = workdir.path().join("deposit_proof_input.json");
+        let vk_blob_path = workdir.path().join("deposit_vk_blob.bin");
+        let proof_path = workdir.path().join("deposit_proof_blake2b.bin");
+        let pubin_path = workdir.path().join("deposit_public_inputs.bin");
+
+        let degree = self.config.degree.to_string();
+        let max_data = self.config.max_data_byte_len.to_string();
+        let max_log = self.config.max_log_num.to_string();
+        let tx_hash = format!("{:#x}", event.tx_hash);
+        let contract = format!("{:#x}", event.source_contract);
+        let log_index = event.log_index.to_string();
+
+        // 1. Fetch witness.
+        self.run_example(&[
+            "fetch_deposit_data".into(),
+            "--".into(),
+            "--rpc-url".into(),
+            self.config.rpc_url.clone(),
+            "--tx-hash".into(),
+            tx_hash,
+            "--contract".into(),
+            contract,
+            "--log-index".into(),
+            log_index,
+            "--output".into(),
+            input_json.display().to_string(),
+        ])
+        .await?;
+
+        // 2. Export the VkBlob.
+        self.run_example(&[
+            "export_vk_blob".into(),
+            "--".into(),
+            "--input".into(),
+            input_json.display().to_string(),
+            "--output".into(),
+            vk_blob_path.display().to_string(),
+            "--degree".into(),
+            degree.clone(),
+            "--max-data-byte-len".into(),
+            max_data.clone(),
+            "--max-log-num".into(),
+            max_log.clone(),
+        ])
+        .await?;
+
+        // 3. Export the Blake2b proof + public inputs.
+        self.run_example(&[
+            "export_blake2b_proof".into(),
+            "--".into(),
+            "--input".into(),
+            input_json.display().to_string(),
+            "--proof-out".into(),
+            proof_path.display().to_string(),
+            "--pubin-out".into(),
+            pubin_path.display().to_string(),
+            "--degree".into(),
+            degree,
+            "--max-data-byte-len".into(),
+            max_data,
+            "--max-log-num".into(),
+            max_log,
+        ])
+        .await?;
+
+        let read = |p: &std::path::Path| -> Result<Vec<u8>, RelayerError> {
+            std::fs::read(p)
+                .map_err(|e| RelayerError::ProofGeneration(format!("reading {}: {e}", p.display())))
+        };
+        let vk_blob = read(&vk_blob_path)?;
+        let public_inputs = read(&pubin_path)?;
+        let proof = read(&proof_path)?;
+
+        let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
+        bundle.check_binds_to(event)?;
+        Ok(bundle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{Address, B256};
+
+    use super::*;
+    use crate::types::DepositEvent;
+
+    fn event(id: u64) -> DepositEvent {
+        DepositEvent {
+            deposit_id: id,
+            sender: Address::repeat_byte(0x11),
+            amount: U256::from(1_000_000u64),
+            timestamp: U256::from(1_700_000_000u64),
+            tx_hash: B256::repeat_byte(0xaa),
+            log_index: 2,
+            block_number: 500,
+            block_hash: B256::repeat_byte(0xcd),
+            source_contract: Address::repeat_byte(0x22),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_generates_bundle_bound_to_event() {
+        let gen = MockProofGenerator::new();
+        let ev = event(9);
+        let bundle = gen.generate(&ev).await.unwrap();
+        bundle.check_binds_to(&ev).unwrap();
+        assert_eq!(bundle.parsed.deposit_id, U256::from(9u64));
+        assert_eq!(bundle.parsed.amount, U256::from(1_000_000u64));
+    }
+
+    #[tokio::test]
+    async fn mock_fail_on_triggers_error() {
+        let gen = MockProofGenerator::failing_on(3);
+        assert!(gen.generate(&event(3)).await.is_err());
+        assert!(gen.generate(&event(4)).await.is_ok());
+    }
+}

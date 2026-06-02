@@ -1,0 +1,42 @@
+[package]
+name = "deposit-relayer-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Relayer for the EVM→Acki Nacki deposit bridge: listens for `Deposit` events on Ethereum, generates the AN-consumable Halo2 proof triple, and submits it to the AN `TokenBridge.finalizeDeposit` entry point."
+
+[dependencies]
+# Core async + alloy (event listening + receipt/log decode — no halo2 here;
+# the heavy deposit-prover circuit lives in its own cargo workspace and is
+# invoked out-of-process by `SubprocessProofGenerator`).
+tokio = { version = "1.42", features = ["full"] }
+async-trait = "0.1"
+alloy = { version = "2.0", features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "signer-local",
+    "signers",
+    "contract",
+    "network",
+    "sol-types",
+    "transport-http",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+acki-nacki-interface = { path = "../acki-nacki-interface" }
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "deposit-relayer"
+path = "src/bin/deposit-relayer.rs"

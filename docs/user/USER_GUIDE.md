@@ -112,24 +112,38 @@ cast call "$USDT" "balanceOf(address)(uint256)" "$ME" --rpc-url "$RPC"
 
 ## 4. Deposit USDT (Ethereum → Acki Nacki)
 
-A USDT deposit is a **two-step ERC-20 flow**: first authorize the bridge to pull your
-USDT (`approve`), then deposit. Both are ordinary Ethereum transactions, so you pay gas
-in **ETH** for each.
+You deposit into the bridge contract — `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9`
+(the `$BRIDGE` address from §2). A USDT deposit is a **two-step ERC-20 flow**: first
+authorize the bridge to pull your USDT (`approve`), then deposit. Both are ordinary
+Ethereum transactions, so you pay gas in **ETH** for each.
+
+Because Acki Nacki uses a **different address system** than Ethereum, a 20-byte EVM
+address cannot be the recipient on AN. So `deposit` takes your **Acki Nacki destination
+explicitly**: a workchain id (`int8`, usually `0`) and a 256-bit account
+(`bytes32`). These are carried all the way through as a ZK public input and are the
+account credited on Acki Nacki.
 
 ```bash
 # 1) Approve the bridge to spend your USDT (here: 100 USDT)
 cast send "$USDT" "approve(address,uint256)" "$BRIDGE" 100000000 \
     --rpc-url "$RPC" --private-key "$PK"
 
-# 2) Deposit (must be > 0 and <= 100 USDT = MAX_DEPOSIT_AMOUNT)
-cast send "$BRIDGE" "deposit(uint256)" 100000000 \
+# 2) Deposit to your Acki Nacki account.
+#    deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
+#      amount      — > 0 and <= 100 USDT (100000000 base units = MAX_DEPOSIT_AMOUNT)
+#      anWorkchain — AN destination workchain id (usually 0)
+#      anAccount   — your 256-bit AN account, as a 32-byte hex value (non-zero)
+export AN_WORKCHAIN=0
+export AN_ACCOUNT=0x<YOUR_64_HEX_ACKI_NACKI_ACCOUNT>
+cast send "$BRIDGE" "deposit(uint256,int8,bytes32)" 100000000 "$AN_WORKCHAIN" "$AN_ACCOUNT" \
     --rpc-url "$RPC" --private-key "$PK"
 ```
 
-The `deposit(amount)` call pulls `amount` USDT from your wallet via `transferFrom` into
-the bridge and emits a `Deposit(uint256 indexed depositId, address indexed sender,
-uint256 amount, uint256 timestamp)` event. Your address (`msg.sender`) is recorded as
-the depositor and is the party credited on Acki Nacki.
+The `deposit(...)` call pulls `amount` USDT from your wallet via `transferFrom` into the
+bridge and emits a `Deposit(uint256 indexed depositId, address indexed sender, uint256
+amount, int8 anWorkchain, bytes32 anAccount, uint256 timestamp)` event. Your Ethereum
+address (`msg.sender`) is recorded for provenance, but the tokens are credited to
+**`anWorkchain:anAccount`** on Acki Nacki — the destination you supplied.
 
 That's all you do on the Ethereum side. **You don't need to note or look up a Deposit
 ID** — the relayer (§6) discovers your deposit on-chain and processes it automatically,
@@ -141,10 +155,10 @@ tracking the id internally as its own cursor.
 > decoded deposits with the relayer's `watch` command (§6.1). The normal `daemon` flow
 > needs none of this.
 
-> ℹ️ **Who receives the tokens on Acki Nacki?** The bridge credits the **same address
-> that made the deposit** (`msg.sender`). A configurable Acki Nacki receiver is planned;
-> until the AN side provides concrete receiving details, a custom receiver is tracked
-> off-chain only and is **not** sent on-chain.
+> ℹ️ **Who receives the tokens on Acki Nacki?** The `anWorkchain:anAccount` you pass to
+> `deposit`. An Ethereum address is **not** a valid AN recipient (the two chains use
+> different address systems), so the AN destination is supplied at deposit time, bound
+> into the proof, and credited on the AN side — there is no implicit "credit msg.sender".
 
 ---
 
@@ -238,12 +252,22 @@ The relayer finds your deposit, runs the `deposit-prover` out-of-process, and wr
 three opcode operands to `./out/`:
 
 - `vk_blob.bin` — the verifying-key blob,
-- `public_inputs.bin` — the 7 public inputs
-  (`depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit`),
+- `public_inputs.bin` — the 10 public inputs
+  (`depositId, sender, amount, contractAddress, anWorkchain, anAccountHigh, anAccountLow,
+  blockHashHigh, blockHashLow, promiseCommit`),
 - `proof.bin` — the Halo2 SHPLONK proof.
 
 These are exactly the bytes Acki Nacki's verification opcode consumes. This step proves
 the full *listen → prove* path works against a real chain, independent of the AN side.
+
+> ℹ️ The Acki Nacki destination (`anWorkchain`, `anAccount`) you supplied at deposit time
+> is **bound inside the proof**: the circuit parses it from the `Deposit` event and
+> exposes it as `anWorkchain` + `anAccountHigh`/`anAccountLow` (the account's two 16-byte
+> halves) in `public_inputs.bin`. The AN side reconstructs the recipient as
+> `anWorkchain:(anAccountHigh<<128 | anAccountLow)` and credits *that* proven account —
+> so a relayer cannot redirect your funds. An EVM address is not a valid AN recipient,
+> which is why the destination is an explicit, proven input rather than derived from
+> `msg.sender`.
 
 ### 6.4 Run the full loop (stages 1 → 3, dry-run submit)
 
@@ -295,12 +319,12 @@ trunk serve                                 # dev server at http://localhost:808
 Configure contract addresses / RPC in `frontend/src` (see the README's *Configuration*
 section) before connecting a wallet.
 
-The deposit form runs the same **USDT `approve` → `deposit(uint256)`** flow as the CLI:
-enter an amount (≤ 100 USDT), and it approves the bridge if needed, then deposits,
-waiting for each transaction to confirm. The **"Get 100 test USDT (faucet)"** button
-mints test USDT from the Aave Sepolia faucet so you can try it with an empty wallet.
-Update the contract / token / faucet addresses in `frontend/src/config.rs` if you're on
-a different deployment.
+The deposit form runs the same **USDT `approve` → `deposit(uint256,int8,bytes32)`** flow
+as the CLI: enter an amount (≤ 100 USDT) plus your **Acki Nacki recipient** (workchain id
++ 256-bit account), and it approves the bridge if needed, then deposits, waiting for each
+transaction to confirm. The **"Get 100 test USDT (faucet)"** button mints test USDT from
+the Aave Sepolia faucet so you can try it with an empty wallet. Update the contract /
+token / faucet addresses in `frontend/src/config.rs` if you're on a different deployment.
 
 > ℹ️ Withdrawals (AN → Ethereum) aren't exposed in the UI yet (see §9), and the
 > deposit-relayer still picks up deposits regardless of how they were submitted — so the
@@ -310,8 +334,9 @@ a different deployment.
 
 ## 8. Fees, limits and safety
 
-- **Per-deposit limit:** 100 USDT maximum per `deposit(amount)` call (`MAX_DEPOSIT_AMOUNT`).
-  Zero is rejected (`InvalidAmount`); over 100 USDT is rejected (`DepositTooLarge`).
+- **Per-deposit limit:** 100 USDT maximum per `deposit(...)` call (`MAX_DEPOSIT_AMOUNT`).
+  Zero is rejected (`InvalidAmount`); over 100 USDT is rejected (`DepositTooLarge`); a
+  zero Acki Nacki account is rejected (`InvalidAnAccount`).
 - **What you bridge vs. what you pay:** You bridge **USDT**; you pay gas in **ETH**.
   A typical deposit costs two Ethereum transactions (an `approve` and a `deposit`).
 - **Treasury & yield:** Idle USDT held by the bridge can optionally be supplied to the
@@ -374,6 +399,7 @@ This guide will be updated when withdrawals go live.
 | --- | --- | --- |
 | `deposit` reverts with `InvalidAmount` | Amount was 0 | Pass a positive amount in base units (e.g. `1000000` = 1 USDT). |
 | `deposit` reverts with `DepositTooLarge` | Amount > 100 USDT | Lower the amount to ≤ `100000000`. |
+| `deposit` reverts with `InvalidAnAccount` | Acki Nacki account was zero / omitted | Pass a non-zero 256-bit `anAccount` (your AN destination) as the 3rd argument (§4). |
 | `deposit` reverts / `transferFrom` failed | No (or too small) `approve`, or insufficient USDT balance | Run the `approve` step (§4) for at least the deposit amount; mint more USDT (§3). |
 | Transaction fails: out of gas / insufficient funds | Not enough Sepolia **ETH** for gas | Top up Sepolia ETH (§3). |
 | `deposit` reverts when paused | Owner paused the contract | Wait until unpaused; deposits/verify/withdraw are blocked while paused. |
@@ -391,6 +417,10 @@ This guide will be updated when withdrawals go live.
   wrapped in compact Groth16 proofs to fit Ethereum's contract size limits.
 - **Deposit ID:** A unique number assigned to each deposit (`depositCounter - 1` right
   after your deposit), emitted in the `Deposit` event.
+- **Acki Nacki recipient (`anWorkchain` / `anAccount`):** Your destination on Acki Nacki —
+  a workchain id (`int8`, usually `0`) plus a 256-bit account (`bytes32`). Supplied to
+  `deposit` because an Ethereum address can't address an AN account; it's bound into the
+  bridge flow and credited on the AN side.
 - **USDT:** A US-dollar stablecoin (Tether) issued as an ERC-20 token with **6 decimals**.
   This is the asset the bridge moves. On Sepolia, the bridge uses the Aave faucet USDT (§2).
 - **ERC-20 approve:** A token permission step. Before the bridge can pull your USDT, you

@@ -15,6 +15,7 @@ import "../src/ILayerHashesMovementVerifier.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockFallbackVerifier.sol";
+import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeVerifyBlockTest
 /// @notice Phase 4 — End-to-end tests for `AckiNackiBridge.verifyBlock`.
@@ -71,6 +72,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     // ─── Test rig ─────────────────────────────────────────────────────────
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
+    MockERC20 internal usdt;
     PrimaryGroth16VerifierGenerated internal primaryGroth16;
     PrimaryVerifier internal primaryVerifier;
     LayerHashesGroth16VerifierGenerated internal layerHashesGroth16;
@@ -86,6 +88,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
+        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
 
         primaryGroth16 = new PrimaryGroth16VerifierGenerated();
         primaryVerifier = new PrimaryVerifier(address(primaryGroth16));
@@ -103,7 +106,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             vb,
@@ -435,7 +438,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     function test_verifyBlock_disabled_revertsOnFreshBridge() public {
         AckiNackiBridge disabled = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -460,7 +463,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
         // Only primary wired; fallback + layer-hashes both zero.
         AckiNackiBridge partialBridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.with(

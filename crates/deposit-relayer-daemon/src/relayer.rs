@@ -269,6 +269,8 @@ mod tests {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(id * 1000 + 1),
+            an_workchain: 0,
+            an_account: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 0,

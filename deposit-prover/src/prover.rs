@@ -440,6 +440,8 @@ pub fn generate_proof(
         input.event_data.deposit_id,
         input.event_data.sender,
         input.event_data.amount,
+        input.event_data.an_workchain,
+        input.event_data.an_account,
         input.event_data.contract_address,
         block_hash,
     ))
@@ -677,6 +679,8 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         deposit_id: 0,
         sender: [0u8; 20],
         amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
+        an_workchain: 0,
+        an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],
     };

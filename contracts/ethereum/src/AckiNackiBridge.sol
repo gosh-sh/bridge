@@ -3,7 +3,6 @@ pragma solidity ^0.8.19;
 
 import "./IBlockHeaderOracle.sol";
 import "./IAavePool.sol";
-import "./IWrappedTokenGatewayV3.sol";
 import "./IERC20.sol";
 import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
@@ -12,9 +11,10 @@ import "./IBridgeWithdrawalVerifier.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
-/// @dev Holds user ETH on deposit and routes idle balance into AAVE V3 for yield.
-///      - `deposit()` stays cheap: funds accumulate in the contract; an owner/keeper
-///        batches supplies to AAVE with `supplyToAave()` to amortise gas.
+/// @dev Holds user USDT (ERC-20, 6 decimals) on deposit and routes idle balance
+///      into AAVE V3 USDT market for yield.
+///      - `deposit(uint256 amount)` stays cheap: funds accumulate in the contract;
+///        an owner/keeper batches supplies to AAVE with `supplyToAave()` to amortise gas.
 ///      - Owner can harvest accrued yield without touching user principal.
 ///      - **Withdraw on ETH side**: deliberately not exposed in this milestone.
 ///        A genuine cross-chain withdrawal will land alongside a burn-proof
@@ -51,13 +51,16 @@ contract AckiNackiBridge {
     // Constants
     // ---------------------------------------------------------------------
 
-    /// @notice Maximum deposit amount (prevents whale deposits)
-    uint256 public constant MAX_DEPOSIT_AMOUNT = 100 ether;
+    /// @notice One USDT base unit (Tether uses 6 decimals on Ethereum).
+    uint256 public constant USDT_UNIT = 10 ** 6;
+
+    /// @notice Maximum deposit amount (100 USDT; prevents whale deposits)
+    uint256 public constant MAX_DEPOSIT_AMOUNT = 100 * USDT_UNIT;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
-    /// @notice Upper bound on the liquid reserve (50% of treasury kept as ETH)
+    /// @notice Upper bound on the liquid reserve (50% of treasury kept as USDT)
     uint256 public constant MAX_LIQUID_RESERVE_BPS = 5_000;
 
     /// @notice Maximum number of layer-hash slots per block (matches
@@ -79,7 +82,7 @@ contract AckiNackiBridge {
     /// @notice Monotonic deposit identifier
     uint256 public depositCounter;
 
-    /// @notice Total user principal currently held by the bridge (ETH + aWETH principal)
+    /// @notice Total user principal currently held by the bridge (USDT + aUSDT principal)
     /// @dev Yield accrued in AAVE is *not* reflected here — see `accruedYield()`.
     uint256 public treasuryBalance;
 
@@ -93,14 +96,14 @@ contract AckiNackiBridge {
     // Storage: AAVE integration
     // ---------------------------------------------------------------------
 
+    /// @notice USDT (or test-USDT) accepted for deposits. Set at construction.
+    IERC20 public immutable usdt;
+
     /// @notice AAVE V3 Pool (set once at construction, immutable thereafter)
     IAavePool public immutable aavePool;
 
-    /// @notice AAVE V3 WrappedTokenGateway (handles ETH<->WETH wrapping)
-    IWrappedTokenGatewayV3 public immutable wethGateway;
-
-    /// @notice aWETH token minted by AAVE to the bridge when supplying ETH
-    IERC20 public immutable aWETH;
+    /// @notice aUSDT token minted by AAVE to the bridge when supplying USDT
+    IERC20 public immutable aUSDT;
 
     /// @notice Whether new supplies to AAVE are permitted (withdrawals always allowed)
     bool public aaveEnabled;
@@ -108,8 +111,8 @@ contract AckiNackiBridge {
     /// @notice Principal currently supplied to AAVE (book value, excludes yield)
     uint256 public suppliedPrincipal;
 
-    /// @notice Fraction of the treasury to keep liquid as ETH, in basis points.
-    ///         e.g. 500 = 5% of `treasuryBalance` stays as plain ETH to serve small
+    /// @notice Fraction of the treasury to keep liquid as USDT, in basis points.
+    ///         e.g. 500 = 5% of `treasuryBalance` stays as plain USDT to serve small
     ///         withdrawals without a round-trip through AAVE.
     uint256 public liquidReserveBps;
 
@@ -229,8 +232,18 @@ contract AckiNackiBridge {
     // Events
     // ---------------------------------------------------------------------
 
+    /// @notice Emitted on every deposit. `anWorkchain` + `anAccount` are the
+    ///         Acki Nacki destination (TVM `workchain:account`) chosen by the
+    ///         depositor; they are carried as ZK public inputs and credited on
+    ///         the AN side (the EVM `sender` is kept only for provenance, since
+    ///         a 20-byte EVM address is not a valid AN recipient).
     event Deposit(
-        uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp
+        uint256 indexed depositId,
+        address indexed sender,
+        uint256 amount,
+        int8 anWorkchain,
+        bytes32 anAccount,
+        uint256 timestamp
     );
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     /// @param by Owner address that triggered the pause (`msg.sender`).
@@ -267,16 +280,16 @@ contract AckiNackiBridge {
 
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
     ///         single-final-root layout). A verified ZK proof releases
-    ///         `amount` ETH to `recipient` exactly once (replay-protected by
+    ///         `amount` USDT to `recipient` exactly once (replay-protected by
     ///         `nullifier`).
     /// @param nullifier The Poseidon-derived nullifier from public input slot [8];
     ///        also the key in the `_nullifiers` mapping.
     /// @param recipient The 20-byte EVM address reconstructed from
     ///        `(recipientHi, recipientLo)`.
-    /// @param amount Amount of ETH transferred to `recipient`.
+    /// @param amount Amount of USDT transferred to `recipient`.
     /// @param tokenId Token id from the event body (only `tokenId == 0` =
-    ///        native ETH is currently supported; non-zero reserved for
-    ///        ERC-20 wiring in a future milestone).
+    ///        bridged USDT is currently supported; non-zero reserved for
+    ///        multi-token wiring in a future milestone).
     /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
     ///        a relayer; the payout goes to `recipient`, not `submitter`).
     event WithdrawalByProofExecuted(
@@ -292,7 +305,12 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     error InvalidAmount();
+    error InvalidUsdt();
+    error TransferFromFailed();
     error DepositTooLarge();
+    /// @notice Acki Nacki destination account was zero. A valid AN recipient
+    ///         (256-bit TVM account) must be supplied at deposit time.
+    error InvalidAnAccount();
     error InsufficientTreasury();
     error InvalidRecipient();
     error InvalidOracle();
@@ -338,12 +356,12 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
     error InvalidBridgeWithdrawalIdentity();
-    /// @notice Only `tokenId == 0` (native ETH) is currently supported.
-    ///         Non-zero token ids are reserved for ERC-20 wiring in a
+    /// @notice Only `tokenId == 0` (bridged USDT) is currently supported.
+    ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
     error UnsupportedTokenId(uint256 tokenId);
     error WithdrawTransferFailed(address recipient, uint256 amount);
-    /// @notice Bridge holds less ETH than the proof asks for. Should be
+    /// @notice Bridge holds less USDT than the proof asks for. Should be
     ///         unreachable in steady state because deposits flow into
     ///         `treasuryBalance` and AAVE-supplied principal is auto-pulled
     ///         on demand. Surfaced as a distinct error to make debugging
@@ -420,9 +438,11 @@ contract AckiNackiBridge {
     ///                            unused by the public surface but required at
     ///                            construction so re-deploys are unnecessary
     ///                            when the burn-proof flow lands.
-    /// @param _aavePool           AAVE V3 Pool address (mainnet: 0x8787...fA4E2).
-    /// @param _wethGateway        AAVE V3 WrappedTokenGatewayV3.
-    /// @param _aWETH              aWETH token minted by AAVE for supplied WETH.
+    /// @param _usdt               USDT (ERC-20, 6 decimals) accepted for deposits.
+    ///                            Sepolia testnet: Aave-faucet USDT
+    ///                            `0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0`.
+    /// @param _aavePool           AAVE V3 Pool address.
+    /// @param _aUSDT              aUSDT token minted by AAVE for supplied USDT.
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
@@ -431,30 +451,29 @@ contract AckiNackiBridge {
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
     ///                            must be non-zero.
-    /// @dev Pass address(0) for `_aavePool`/`_wethGateway`/`_aWETH` to disable AAVE.
-    ///      In that case, the bridge behaves as before (plain ETH custody).
+    /// @dev Pass address(0) for `_aavePool`/`_aUSDT` to disable AAVE.
+    ///      `_usdt` must always be non-zero — deposits pull USDT via `transferFrom`.
     constructor(
         address _blockHeaderOracle,
+        address _usdt,
         address _aavePool,
-        address _wethGateway,
-        address _aWETH,
+        address _aUSDT,
         VerifyBlockConfig memory _vb,
         BridgeWithdrawConfig memory _bw
     ) {
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
+        if (_usdt == address(0)) revert InvalidUsdt();
 
-        // All three AAVE addresses must be provided together — or none at all.
-        bool aaveWired =
-            _aavePool != address(0) || _wethGateway != address(0) || _aWETH != address(0);
-        bool aaveAllSet =
-            _aavePool != address(0) && _wethGateway != address(0) && _aWETH != address(0);
+        // Both AAVE addresses must be provided together — or none at all.
+        bool aaveWired = _aavePool != address(0) || _aUSDT != address(0);
+        bool aaveAllSet = _aavePool != address(0) && _aUSDT != address(0);
         if (aaveWired && !aaveAllSet) revert InvalidAaveAddress();
 
         blockHeaderOracle = IBlockHeaderOracle(_blockHeaderOracle);
 
+        usdt = IERC20(_usdt);
         aavePool = IAavePool(_aavePool);
-        wethGateway = IWrappedTokenGatewayV3(_wethGateway);
-        aWETH = IERC20(_aWETH);
+        aUSDT = IERC20(_aUSDT);
 
         // verifyBlock wiring is all-or-nothing: any zero address disables it.
         primaryVerifier = _vb.primaryVerifier;
@@ -481,13 +500,6 @@ contract AckiNackiBridge {
         liquidReserveBps = 1_000; // default 10% liquid reserve
         _reentrancyStatus = _NOT_ENTERED;
 
-        // Pre-approve the gateway to pull aWETH (once, for max).
-        // AAVE V3's aWETH is a standard ERC-20 approve; rebasing does not
-        // affect the allowance amount.
-        if (aaveAllSet) {
-            aWETH.approve(_wethGateway, type(uint256).max);
-        }
-
         emit OwnershipTransferred(address(0), msg.sender);
     }
 
@@ -495,18 +507,33 @@ contract AckiNackiBridge {
     // User-facing: deposit
     // ---------------------------------------------------------------------
 
-    /// @notice Deposit ETH to be bridged to Acki Nacki.
-    /// @dev Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      Funds stay as ETH in this contract; a keeper supplies them to AAVE
+    /// @notice Deposit USDT to be bridged to Acki Nacki.
+    /// @dev Caller must `approve` this contract for `amount` before calling.
+    ///      Emits a `Deposit` event that is later proven by a ZK circuit.
+    ///      Funds stay as USDT in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
-    function deposit() external payable nonReentrant whenNotPaused {
-        if (msg.value == 0) revert InvalidAmount();
-        if (msg.value > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+    /// @param amount      USDT amount (6 decimals) to bridge.
+    /// @param anWorkchain Acki Nacki destination workchain id (TVM, e.g. 0).
+    /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
+    ///                    Must be non-zero. Carried as ZK public inputs and
+    ///                    credited on the AN side — an EVM address cannot be an
+    ///                    AN recipient, so the destination is supplied explicitly.
+    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if (amount == 0) revert InvalidAmount();
+        if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (anAccount == bytes32(0)) revert InvalidAnAccount();
+        if (!usdt.transferFrom(msg.sender, address(this), amount)) {
+            revert TransferFromFailed();
+        }
 
         uint256 depositId = depositCounter++;
-        treasuryBalance += msg.value;
+        treasuryBalance += amount;
 
-        emit Deposit(depositId, msg.sender, msg.value, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
     }
 
     // ---------------------------------------------------------------------
@@ -703,15 +730,15 @@ contract AckiNackiBridge {
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
     ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId == 0` (only native ETH is currently supported;
-    ///      non-zero token ids reserved for ERC-20 in a future milestone).
+    ///   5. `pub.tokenId == 0` (only bridged USDT is currently supported;
+    ///      non-zero token ids reserved for multi-token in a future milestone).
     ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
     /// State updates (CEI):
     ///   - **Effects**: mark `nullifier` used; decrement `treasuryBalance`.
     ///   - **Interactions**: (optional) `_pullFromAave(shortfall)` to top up
-    ///     liquid ETH; `recipient.call{value: amount}("")` to pay out.
+    ///     liquid USDT; `usdt.transfer(recipient, amount)` to pay out.
     ///
     /// @dev Permissionless. The caller pays gas but the payout goes to
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
@@ -775,18 +802,19 @@ contract AckiNackiBridge {
         treasuryBalance -= pub.amount;
 
         // ---- Interactions ----
-        // Top up liquid ETH from AAVE if the contract's plain ETH balance
-        // is below the requested amount. Mirrors what a future native
-        // `withdraw()` would do.
-        if (address(this).balance < pub.amount && suppliedPrincipal > 0) {
-            uint256 shortfall = pub.amount - address(this).balance;
+        // Top up liquid USDT from AAVE if the contract's plain USDT balance
+        // is below the requested amount.
+        uint256 liquid = usdt.balanceOf(address(this));
+        if (liquid < pub.amount && suppliedPrincipal > 0) {
+            uint256 shortfall = pub.amount - liquid;
             uint256 toPull = shortfall > suppliedPrincipal ? suppliedPrincipal : shortfall;
             _pullFromAave(toPull);
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        (bool txOk,) = payable(recipient).call{ value: pub.amount }("");
-        if (!txOk) revert WithdrawTransferFailed(recipient, pub.amount);
+        if (!usdt.transfer(recipient, pub.amount)) {
+            revert WithdrawTransferFailed(recipient, pub.amount);
+        }
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -814,7 +842,7 @@ contract AckiNackiBridge {
     // AAVE management (owner-only)
     // ---------------------------------------------------------------------
 
-    /// @notice Supply idle ETH from the bridge to AAVE, respecting the liquid reserve.
+    /// @notice Supply idle USDT from the bridge to AAVE, respecting the liquid reserve.
     /// @param amount Exact amount to supply, or `type(uint256).max` to supply
     ///               everything above the liquid reserve.
     function supplyToAave(uint256 amount) external onlyOwner nonReentrant {
@@ -827,12 +855,13 @@ contract AckiNackiBridge {
         if (toSupply == 0 || toSupply > available) revert InvalidAmount();
 
         suppliedPrincipal += toSupply;
-        wethGateway.depositETH{ value: toSupply }(address(aavePool), address(this), 0);
+        usdt.approve(address(aavePool), toSupply);
+        aavePool.supply(address(usdt), toSupply, address(this), 0);
 
         emit SuppliedToAave(toSupply, suppliedPrincipal);
     }
 
-    /// @notice Withdraw ETH from AAVE back into the bridge (preemptively top up liquidity).
+    /// @notice Withdraw USDT from AAVE back into the bridge (preemptively top up liquidity).
     /// @param amount Amount to withdraw, or `type(uint256).max` for the entire principal.
     function withdrawFromAave(uint256 amount) external onlyOwner nonReentrant {
         uint256 principalCap = suppliedPrincipal;
@@ -844,45 +873,39 @@ contract AckiNackiBridge {
         _pullFromAave(target);
     }
 
-    /// @notice Emergency: pull *all* aWETH back into the bridge as ETH and disable supplies.
+    /// @notice Emergency: pull *all* aUSDT back into the bridge as USDT and disable supplies.
     /// @dev Useful if AAVE pauses/depegs. User withdrawals remain available.
     function emergencyWithdrawAll() external onlyOwner nonReentrant {
         aaveEnabled = false;
         emit AaveEnabledSet(false);
 
-        uint256 before = address(this).balance;
-        // max-value signals "withdraw full balance" to the gateway.
-        wethGateway.withdrawETH(address(aavePool), type(uint256).max, address(this));
+        uint256 before = usdt.balanceOf(address(this));
+        aavePool.withdraw(address(usdt), type(uint256).max, address(this));
 
-        uint256 received = address(this).balance - before;
-        // In an emergency the actual received amount drives the book update.
+        uint256 received = usdt.balanceOf(address(this)) - before;
         uint256 principal = suppliedPrincipal;
         suppliedPrincipal = 0;
 
-        // Surplus (yield) stays in the bridge and can be harvested later.
-        // Shortfall (e.g. AAVE insolvency) would reduce headroom — the owner
-        // must top up treasury manually if that happens.
         emit EmergencyWithdrawAll(received);
         emit WithdrawnFromAave(principal, received);
     }
 
-    /// @notice Harvest accrued yield (aWETH balance above principal) to `yieldRecipient`.
+    /// @notice Harvest accrued yield (aUSDT balance above principal) to `yieldRecipient`.
     /// @param amount Amount of yield to harvest (must be <= accruedYield()).
     function harvestYield(uint256 amount) external onlyOwner nonReentrant {
         uint256 yield = accruedYield();
         if (yield == 0 || amount == 0 || amount > yield) revert NoYield();
 
-        // Withdraw the yield amount from AAVE as ETH (do not touch suppliedPrincipal).
-        uint256 before = address(this).balance;
-        wethGateway.withdrawETH(address(aavePool), amount, address(this));
-        uint256 received = address(this).balance - before;
+        uint256 before = usdt.balanceOf(address(this));
+        aavePool.withdraw(address(usdt), amount, address(this));
+        uint256 received = usdt.balanceOf(address(this)) - before;
         if (received < amount) revert AaveWithdrawFailed(amount, received);
 
         emit WithdrawnFromAave(amount, received);
 
-        // Forward ETH to yield recipient.
-        (bool ok,) = payable(yieldRecipient).call{ value: received }("");
-        require(ok, "yield transfer failed");
+        if (!usdt.transfer(yieldRecipient, received)) {
+            revert WithdrawTransferFailed(yieldRecipient, received);
+        }
         emit YieldHarvested(yieldRecipient, received);
     }
 
@@ -938,29 +961,25 @@ contract AckiNackiBridge {
     // Internal helpers
     // ---------------------------------------------------------------------
 
-    /// @dev ETH that may be supplied to AAVE without dipping below the liquid reserve.
+    /// @dev USDT that may be supplied to AAVE without dipping below the liquid reserve.
     function _amountSupplyable() internal view returns (uint256) {
         uint256 reserve = (treasuryBalance * liquidReserveBps) / BPS_DENOMINATOR;
-        uint256 bal = address(this).balance;
+        uint256 bal = usdt.balanceOf(address(this));
         if (bal <= reserve) return 0;
         return bal - reserve;
     }
 
-    /// @dev Pull `amount` ETH from AAVE via the WETH gateway. Reverts if short.
+    /// @dev Pull `amount` USDT from AAVE. Reverts if short.
     function _pullFromAave(uint256 amount) internal {
         if (suppliedPrincipal == 0) revert InsufficientTreasury();
 
-        // Don't over-withdraw principal; any more is yield which needs `harvestYield`.
         uint256 cap = suppliedPrincipal;
         uint256 toPull = amount > cap ? cap : amount;
 
-        uint256 before = address(this).balance;
-        wethGateway.withdrawETH(address(aavePool), toPull, address(this));
-        uint256 received = address(this).balance - before;
+        uint256 before = usdt.balanceOf(address(this));
+        aavePool.withdraw(address(usdt), toPull, address(this));
+        uint256 received = usdt.balanceOf(address(this)) - before;
         if (received < toPull) revert AaveWithdrawFailed(toPull, received);
-
-        // The bridge may need slightly more if yield accrued; the caller can
-        // only spend up to `received`, so require the full amount.
         if (received < amount) revert AaveWithdrawFailed(amount, received);
 
         suppliedPrincipal -= toPull;
@@ -971,33 +990,21 @@ contract AckiNackiBridge {
     // Views
     // ---------------------------------------------------------------------
 
-    /// @notice Current aWETH balance held by the bridge (principal + accrued interest).
-    function aWethBalance() public view returns (uint256) {
-        if (address(aWETH) == address(0)) return 0;
-        return aWETH.balanceOf(address(this));
+    /// @notice Current aUSDT balance held by the bridge (principal + accrued interest).
+    function aUsdtBalance() public view returns (uint256) {
+        if (address(aUSDT) == address(0)) return 0;
+        return aUSDT.balanceOf(address(this));
     }
 
-    /// @notice Unharvested yield = aWETH balance above principal book value.
-    /// @dev Returns 0 if the balance is below principal (shouldn't happen in practice
-    ///      — AAVE only grows the balance — but keeps the function panic-free).
+    /// @notice Unharvested yield = aUSDT balance above principal book value.
     function accruedYield() public view returns (uint256) {
-        uint256 bal = aWethBalance();
+        uint256 bal = aUsdtBalance();
         uint256 principal = suppliedPrincipal;
         return bal > principal ? bal - principal : 0;
     }
 
-    /// @notice Total assets under management: ETH + aWETH (including yield).
+    /// @notice Total assets under management: USDT + aUSDT (including yield).
     function totalAssets() external view returns (uint256) {
-        return address(this).balance + aWethBalance();
+        return usdt.balanceOf(address(this)) + aUsdtBalance();
     }
-
-    // ---------------------------------------------------------------------
-    // ETH receive hook
-    // ---------------------------------------------------------------------
-
-    /// @dev AAVE's WrappedTokenGateway unwraps WETH and sends ETH to the bridge
-    ///      during `withdrawETH`. We must accept it. Direct transfers from any
-    ///      other source are ignored for accounting purposes (they boost
-    ///      `address(this).balance` but do not touch `treasuryBalance`).
-    receive() external payable { }
 }

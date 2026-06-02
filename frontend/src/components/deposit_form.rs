@@ -19,9 +19,30 @@ pub struct DepositFormProps {
     pub wallet_connected: bool,
 }
 
+/// Validate an Acki Nacki account: hex (optionally `0x`-prefixed), 1..=64 hex
+/// chars (a 256-bit account id), and non-zero. Returns the normalised hex.
+fn validate_an_account(raw: &str) -> Result<String, String> {
+    let v = raw.trim().trim_start_matches("0x").to_lowercase();
+    if v.is_empty() {
+        return Err("Acki Nacki account is required".to_string());
+    }
+    if v.len() > 64 {
+        return Err("Account must be at most 64 hex chars (256 bits)".to_string());
+    }
+    if !v.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Account must be hex (0-9, a-f)".to_string());
+    }
+    if v.chars().all(|c| c == '0') {
+        return Err("Account must be non-zero".to_string());
+    }
+    Ok(v)
+}
+
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
     let amount = use_state(String::new);
+    let an_workchain = use_state(|| "0".to_string());
+    let an_account = use_state(String::new);
     let deposit_id = use_state(|| None::<u128>);
     let is_loading = use_state(|| false);
     let status_msg = use_state(|| None::<String>);
@@ -33,6 +54,22 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
             amount.set(input.value());
+        })
+    };
+
+    let on_workchain_change = {
+        let an_workchain = an_workchain.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            an_workchain.set(input.value());
+        })
+    };
+
+    let on_account_change = {
+        let an_account = an_account.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            an_account.set(input.value());
         })
     };
 
@@ -59,9 +96,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 match mint_test_usdt(FAUCET_USDT_UNITS).await {
                     Ok(hash) => match wait_for_receipt(&hash).await {
                         Ok(()) => status_msg.set(Some("Minted 100 test USDT ✓".to_string())),
-                        Err(e) => {
-                            error_msg.set(Some(format!("Faucet mint not confirmed: {}", e)))
-                        },
+                        Err(e) => error_msg.set(Some(format!("Faucet mint not confirmed: {}", e))),
                     },
                     Err(e) => error_msg.set(Some(format!("Faucet mint failed: {}", e))),
                 }
@@ -72,6 +107,8 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
     let on_submit = {
         let amount = amount.clone();
+        let an_workchain = an_workchain.clone();
+        let an_account = an_account.clone();
         let is_loading = is_loading.clone();
         let deposit_id = deposit_id.clone();
         let status_msg = status_msg.clone();
@@ -100,9 +137,29 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 return;
             }
             if units > MAX_USDT_UNITS {
-                error_msg.set(Some("Amount exceeds the 100 USDT per-deposit limit".to_string()));
+                error_msg.set(Some(
+                    "Amount exceeds the 100 USDT per-deposit limit".to_string(),
+                ));
                 return;
             }
+
+            // Acki Nacki destination: workchain (int8) + account (256-bit).
+            let workchain = match (*an_workchain).trim().parse::<i8>() {
+                Ok(w) => w,
+                Err(_) => {
+                    error_msg.set(Some(
+                        "Workchain must be an integer in -128..=127".to_string(),
+                    ));
+                    return;
+                },
+            };
+            let account = match validate_an_account(&an_account) {
+                Ok(a) => a,
+                Err(err) => {
+                    error_msg.set(Some(err));
+                    return;
+                },
+            };
 
             error_msg.set(None);
             deposit_id.set(None);
@@ -140,7 +197,9 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 // allowance is insufficient.
                 let allowance = get_allowance(&account).await.unwrap_or(0);
                 if allowance < units {
-                    status_msg.set(Some("Step 1/2 — approve USDT (confirm in wallet)…".to_string()));
+                    status_msg.set(Some(
+                        "Step 1/2 — approve USDT (confirm in wallet)…".to_string(),
+                    ));
                     match approve_usdt(units).await {
                         Ok(hash) => {
                             status_msg.set(Some("Waiting for approval to confirm…".to_string()));
@@ -158,9 +217,9 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 }
 
-                // Step 2: deposit.
+                // Step 2: deposit to the Acki Nacki destination.
                 status_msg.set(Some("Step 2/2 — deposit (confirm in wallet)…".to_string()));
-                match make_deposit(units).await {
+                match make_deposit(units, workchain, &account).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         status_msg.set(Some("Waiting for deposit to confirm…".to_string()));
@@ -215,7 +274,39 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDT"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Max 100 USDT per deposit. Gas is paid in ETH. Credited to your connected wallet on Acki Nacki."}
+                        {"Max 100 USDT per deposit. Gas is paid in ETH."}
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        {"Acki Nacki recipient"}
+                    </label>
+                    <div class="input-wrapper">
+                        <input
+                            type="text"
+                            class="form-input"
+                            style="max-width: 5rem;"
+                            placeholder="0"
+                            value={(*an_workchain).clone()}
+                            onchange={on_workchain_change}
+                            disabled={!props.wallet_connected || *is_loading}
+                        />
+                        <span class="input-suffix">{"workchain"}</span>
+                    </div>
+                    <div class="input-wrapper">
+                        <input
+                            type="text"
+                            class="form-input"
+                            placeholder="0x… (256-bit AN account)"
+                            value={(*an_account).clone()}
+                            onchange={on_account_change}
+                            disabled={!props.wallet_connected || *is_loading}
+                        />
+                        <span class="input-suffix">{"account"}</span>
+                    </div>
+                    <div class="input-hint">
+                        {"Your destination on Acki Nacki (workchain id + 256-bit account). An Ethereum address is not a valid AN recipient — the funds are credited to this account."}
                     </div>
                 </div>
 
@@ -293,7 +384,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 <button
                     type="submit"
                     class="submit-button"
-                    disabled={!props.wallet_connected || *is_loading || (*amount).is_empty()}
+                    disabled={!props.wallet_connected || *is_loading || (*amount).is_empty() || (*an_account).is_empty()}
                 >
                     {
                         if *is_loading {

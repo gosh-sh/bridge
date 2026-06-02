@@ -15,6 +15,8 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
+import "./mocks/MockERC20.sol";
+import "./helpers/UsdtTestLib.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofTest
 /// @notice Circuit 4 (single-final-root) tests — the unified AN→ETH payout
@@ -62,6 +64,7 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 contract AckiNackiBridgeWithdrawByProofTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
+    MockERC20 internal usdt;
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
@@ -104,6 +107,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
+        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
@@ -116,7 +120,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.with(
@@ -132,9 +136,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
 
         // Seed the bridge with a healthy treasury so withdrawals don't shortfall.
-        vm.deal(funder, 1000 ether);
-        vm.prank(funder);
-        bridge.deposit{ value: 50 ether }();
+        UsdtTestLib.depositUsdt(vm, usdt, bridge, funder, 50 * UsdtTestLib.UNIT);
 
         // Drive one `verifyBlock` so the suite has at least one anchor to
         // bind withdrawal proofs to (mirrors the production timeline:
@@ -219,7 +221,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     function test_constructor_withdrawDisabledByDefault() public {
         AckiNackiBridge plain = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -240,7 +242,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
         new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -254,7 +256,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
         new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -311,9 +313,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function test_withdrawByProof_happyPath_transfersAndMarksNullifier() public {
-        uint256 amount = 2 ether;
+        uint256 amount = 2 * UsdtTestLib.UNIT;
         uint256 nullifier = uint256(keccak256("nul-1"));
-        uint256 recipientBalBefore = RECIPIENT.balance;
+        uint256 recipientBalBefore = usdt.balanceOf(RECIPIENT);
         uint256 treasuryBefore = bridge.treasuryBalance();
 
         vm.expectEmit(true, true, true, true);
@@ -322,7 +324,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bool ok = bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
         assertTrue(ok);
 
-        assertEq(RECIPIENT.balance, recipientBalBefore + amount, "recipient credited");
+        assertEq(usdt.balanceOf(RECIPIENT), recipientBalBefore + amount, "recipient credited");
         assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "treasury decremented");
         assertTrue(bridge.isNullifierUsed(nullifier), "nullifier marked");
     }
@@ -330,7 +332,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     function test_withdrawByProof_disabled_reverts() public {
         AckiNackiBridge bareA = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -338,7 +340,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
 
         vm.expectRevert(AckiNackiBridge.WithdrawByProofDisabled.selector);
-        bareA.withdrawByProof(_dummyProof(), _defaultPub(1 ether, 1));
+        bareA.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, 1));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -348,12 +350,12 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     function test_withdrawByProof_replayRejected() public {
         uint256 nullifier = uint256(keccak256("replay"));
 
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 ether, nullifier));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, nullifier));
 
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
         );
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 ether, nullifier));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, nullifier));
     }
 
     function test_isNullifierUsed_initiallyFalse() public view {
@@ -366,7 +368,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongDappFr_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("idmismatch1")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("idmismatch1")));
         pub.dappFr = uint256(keccak256("evilDapp"));
 
         vm.expectRevert(AckiNackiBridge.WithdrawIdentityMismatch.selector);
@@ -375,7 +377,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongAccFr_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("idmismatch2")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("idmismatch2")));
         pub.accFr = uint256(keccak256("evilAcc"));
 
         vm.expectRevert(AckiNackiBridge.WithdrawIdentityMismatch.selector);
@@ -384,7 +386,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongDstChainId_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("chainmismatch")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("chainmismatch")));
         uint256 wrong = pub.dstChainId + 1;
         pub.dstChainId = wrong;
 
@@ -398,7 +400,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_unsupportedTokenId_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("token")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("token")));
         pub.tokenId = 1;
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, 1));
@@ -407,7 +409,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_unknownAnchor_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("unknownAnchor")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("unknownAnchor")));
         uint256 unknownRoot = uint256(keccak256("not-recorded"));
         pub.finalRoot = unknownRoot;
 
@@ -438,7 +440,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("later-withdraw")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("later-withdraw")));
         pub.finalRoot = laterAnchor;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
@@ -451,7 +453,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_recipientHiOutOfRange_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("hiOOB")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("hiOOB")));
         pub.recipientHi = uint256(1) << 80; // exactly 1 bit too wide
 
         vm.expectRevert(
@@ -464,7 +466,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_recipientLoOutOfRange_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("loOOB")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("loOOB")));
         pub.recipientLo = uint256(1) << 80;
 
         vm.expectRevert(
@@ -481,13 +483,13 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         (uint256 hi, uint256 lo) = _split(weird);
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("weirdRecipient")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("weirdRecipient")));
         pub.recipientHi = hi;
         pub.recipientLo = lo;
 
-        uint256 before = weird.balance;
+        uint256 before = usdt.balanceOf(weird);
         bridge.withdrawByProof(_dummyProof(), pub);
-        assertEq(weird.balance, before + 1 ether, "weird recipient credited");
+        assertEq(usdt.balanceOf(weird), before + 1 * UsdtTestLib.UNIT, "weird recipient credited");
     }
 
     function test_withdrawByProof_zeroRecipientWorks() public {
@@ -496,13 +498,13 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         // so). This test pins the current behaviour so a future deliberate
         // change shows up as a test break.
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("zeroAddr")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("zeroAddr")));
         pub.recipientHi = 0;
         pub.recipientLo = 0;
 
-        uint256 before = address(0).balance;
+        uint256 before = usdt.balanceOf(address(0));
         bridge.withdrawByProof(_dummyProof(), pub);
-        assertEq(address(0).balance, before + 1 ether);
+        assertEq(usdt.balanceOf(address(0)), before + 1 * UsdtTestLib.UNIT);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -510,7 +512,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function test_withdrawByProof_treasuryShortfall_reverts() public {
-        uint256 huge = bridge.treasuryBalance() + 1 ether;
+        uint256 huge = bridge.treasuryBalance() + 1 * UsdtTestLib.UNIT;
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -527,7 +529,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         uint256 nullifier = uint256(keccak256("rejected"));
 
         vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 ether, nullifier));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, nullifier));
 
         // State must be untouched on revert.
         assertEq(bridge.treasuryBalance(), treasuryBefore, "treasury unchanged on revert");
@@ -540,7 +542,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_forwardsPublicInputsByteForByte() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 ether, uint256(keccak256("strictPub")));
+            _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("strictPub")));
         withdrawalVerifier.setExpectedPub(pub);
 
         // Exact match → passes.
@@ -555,8 +557,4 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
         bridge.withdrawByProof(_dummyProof(), wrong);
     }
-
-    // The bridge contract has a `receive()` fallback so ETH from AAVE works.
-    // No corresponding behaviour to test for the unit-test bridge (no AAVE wiring).
-    receive() external payable { }
 }

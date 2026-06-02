@@ -222,6 +222,24 @@ fn encode_address(addr: &str) -> String {
     format!("{:0>64}", a)
 }
 
+/// Encode a Solidity `int8` as a 32-byte two's-complement ABI word.
+fn encode_int8(value: i8) -> String {
+    let fill = if value < 0 { "ff" } else { "00" };
+    let mut s = String::with_capacity(64);
+    for _ in 0..31 {
+        s.push_str(fill);
+    }
+    s.push_str(&format!("{:02x}", value as u8));
+    s
+}
+
+/// Encode a Solidity `bytes32` as a 32-byte ABI word. The Acki Nacki account
+/// is a 256-bit number, so a short hex input is left-padded with zeros.
+fn encode_bytes32(value: &str) -> String {
+    let v = value.trim_start_matches("0x").to_lowercase();
+    format!("{:0>64}", v)
+}
+
 /// Send a contract transaction via MetaMask. Returns the tx hash.
 async fn send_tx(to: &str, data: &str) -> Result<String, String> {
     let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
@@ -264,10 +282,22 @@ pub async fn approve_usdt(amount: u128) -> Result<String, String> {
     send_tx(USDT_CONTRACT_ADDRESS, &data).await
 }
 
-/// Deposit `amount` USDT base units into the bridge (pulls via `transferFrom`).
-pub async fn make_deposit(amount: u128) -> Result<String, String> {
-    // deposit(uint256 amount) = 0xb6b55f25
-    let data = format!("0xb6b55f25{}", encode_uint256(amount));
+/// Deposit `amount` USDT base units into the bridge (pulls via `transferFrom`),
+/// bridging to the Acki Nacki destination `an_workchain:an_account`. The EVM
+/// `msg.sender` is not a valid AN recipient, so the destination is supplied
+/// explicitly and carried as a ZK public input.
+pub async fn make_deposit(
+    amount: u128,
+    an_workchain: i8,
+    an_account: &str,
+) -> Result<String, String> {
+    // deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) = 0xa41d0229
+    let data = format!(
+        "0xa41d0229{}{}{}",
+        encode_uint256(amount),
+        encode_int8(an_workchain),
+        encode_bytes32(an_account)
+    );
     send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
 }
 

@@ -298,6 +298,9 @@ contract TokenBridge {
         uint256 sender,
         uint256 amount,
         uint256 contractAddress,
+        uint256 anWorkchain,        // AN destination workchain (proven, full 32-byte word)
+        uint256 anAccountHigh,      // high 16 bytes of the 256-bit AN account
+        uint256 anAccountLow,       // low  16 bytes of the 256-bit AN account
         uint256 blockHashHigh,
         uint256 blockHashLow,
         uint256 promiseCommit,
@@ -306,14 +309,22 @@ contract TokenBridge {
         require(!usedDepositIds[depositId], "deposit already finalized");
 
         // Build public_inputs_cell on the fly from the call arguments.
+        // Order MUST match the circuit's instance column (10 inputs):
+        //   [depositId, sender, amount, contractAddress,
+        //    anWorkchain, anAccountHigh, anAccountLow,
+        //    blockHashHigh, blockHashLow, promiseCommit]
+        // each packed as a 32-byte little-endian Fr.
         TvmBuilder pi;
-        pi.storeUint(senderFieldLE, 256);          // pack as 32 B LE Fr
+        pi.storeUint(depositIdFieldLE, 256);
+        pi.storeUint(senderFieldLE, 256);
         pi.storeUint(amountFieldLE, 256);
         pi.storeUint(contractAddressFieldLE, 256);
+        pi.storeUint(anWorkchainFieldLE, 256);
+        pi.storeUint(anAccountHighFieldLE, 256);
+        pi.storeUint(anAccountLowFieldLE, 256);
         pi.storeUint(blockHashHighFieldLE, 256);
         pi.storeUint(blockHashLowFieldLE, 256);
         pi.storeUint(promiseCommitFieldLE, 256);
-        pi.storeUint(uint256(depositId), 256);
         TvmCell publicInputsCell = pi.toCell();
 
         require(
@@ -322,12 +333,18 @@ contract TokenBridge {
         );
 
         usedDepositIds[depositId] = true;
-        // ... credit recipient, emit event ...
+
+        // The recipient is a PROVEN public input — reconstruct it from the two
+        // 16-byte halves and credit that AN account. An EVM address is not a
+        // valid AN recipient, so the destination is bound in the proof rather
+        // than trusted from a relayer hint.
+        uint256 anAccount = (anAccountHigh << 128) | anAccountLow;
+        // ... credit (int8(anWorkchain) : anAccount) with `amount`, emit event ...
     }
 }
 ```
 
-The contract is responsible for assembling `public_inputs_cell` so that its content matches the values it intends to act on. The opcode itself only checks that the proof is valid for *whatever* public inputs the cell carries.
+The contract is responsible for assembling `public_inputs_cell` so that its content matches the values it intends to act on, **in the circuit's instance order**. The opcode itself only checks that the proof is valid for *whatever* public inputs the cell carries — and it reads the input *count* from the VkBlob, so the 7→10 expansion (adding the AN recipient) needs no opcode change, only this call site and the VkBlob regen.
 
 ---
 

@@ -21,7 +21,7 @@ The single biggest open question (Q-WIRE-1 below) is *which Halo2 transcript fla
 
 See `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 for the full rationale. In short:
 
-- The Halo2 SHPLONK proof produced by `deposit-prover/` already encodes everything the AN side needs to credit a user (deposit event in a real Ethereum block; 7 public inputs: `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`).
+- The Halo2 SHPLONK proof produced by `deposit-prover/` already encodes everything the AN side needs to credit a user (deposit event in a real Ethereum block; 10 public inputs: `[depositId, sender, amount, contractAddress, anWorkchain, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]` — the AN recipient `anWorkchain`/`anAccount` was bound in-circuit 2026-06-02 so the credited account is proven, not trusted).
 - On Ethereum we previously needed a gnark Groth16 wrapper because of EIP-170's 24 KB contract code limit. **The AN side has no such limit**, so we can verify Halo2 SHPLONK natively and skip the wrapper entirely.
 - Skipping the wrapper eliminates two attack surfaces (R15 no-op `Define` stub; any EIP-170-driven wrapper simplifications) — see `docs/audit_trail_v2.md` R-8.
 
@@ -151,7 +151,9 @@ The cache should not include the proof bytes themselves — we cache *only the d
 // (mirroring gosh.vergrth16WithVK that we landed in the compiler PR for the Groth16 case).
 function finalizeDeposit(
     TvmCell halo2Proof,
-    uint256[7] memory publicInputs,
+    uint256[10] memory publicInputs,   // [depositId, sender, amount, contractAddress,
+                                       //  anWorkchain, anAccountHigh, anAccountLow,
+                                       //  blockHashHigh, blockHashLow, promiseCommit]
     TvmCell vk
 ) public {
     require(
@@ -162,9 +164,12 @@ function finalizeDeposit(
     require(!nullifier[publicInputs[0]], "already credited");
     nullifier[publicInputs[0]] = true;
 
-    address user = address(uint160(publicInputs[1]));
+    // The recipient is a PROVEN public input — credit the AN account bound in
+    // the proof, not an EVM address (which is not a valid AN recipient).
+    int8 anWorkchain = int8(int256(publicInputs[4]));
+    uint256 anAccount = (publicInputs[5] << 128) | publicInputs[6];
     uint256 amount = publicInputs[2];
-    _mintTo(user, amount);
+    _mintTo(anWorkchain, anAccount, amount);
 }
 ```
 

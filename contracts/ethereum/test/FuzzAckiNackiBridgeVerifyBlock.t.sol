@@ -15,6 +15,7 @@ import "../src/ILayerHashesMovementVerifier.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockFallbackVerifier.sol";
+import "./mocks/MockERC20.sol";
 
 /// @title FuzzAckiNackiBridgeVerifyBlockTest
 /// @notice Property-based coverage for the input-validation invariants of
@@ -66,6 +67,7 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
     AckiNackiBridge internal bridge;
     AckiNackiBridge internal disabledBridge;
     MockBlockHeaderOracle internal oracle;
+    MockERC20 internal usdt;
     PrimaryGroth16VerifierGenerated internal primaryGroth16;
     PrimaryVerifier internal primaryVerifier;
     LayerHashesGroth16VerifierGenerated internal layerHashesGroth16;
@@ -74,6 +76,7 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
+        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
 
         primaryGroth16 = new PrimaryGroth16VerifierGenerated();
         primaryVerifier = new PrimaryVerifier(address(primaryGroth16));
@@ -91,7 +94,7 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             vb,
@@ -100,7 +103,7 @@ contract FuzzAckiNackiBridgeVerifyBlockTest is Test {
 
         disabledBridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),

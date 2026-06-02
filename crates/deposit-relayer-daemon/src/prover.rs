@@ -6,9 +6,10 @@
 //! workspace's dependency tree). Rather than force-merge two halo2 backends,
 //! this crate keeps proof generation behind a trait with two backends:
 //!
-//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the seven
-//!   public inputs straight from the event so the relayer + submitter can be
-//!   driven end-to-end in unit tests in microseconds.
+//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the ten
+//!   public inputs (including the AN destination) straight from the event so
+//!   the relayer + submitter can be driven end-to-end in unit tests in
+//!   microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
@@ -34,10 +35,10 @@ pub trait ProofGenerator: Send + Sync {
 // MockProofGenerator — deterministic, no halo2
 // ─────────────────────────────────────────────────────────────────────
 
-/// Deterministic proof generator for tests. Derives the seven public
-/// inputs from the event the same way the real circuit binds them (so the
-/// submitter's `finalizeDeposit` args are realistic), and emits canned
-/// `vk_blob` / `proof` bytes.
+/// Deterministic proof generator for tests. Derives the ten public inputs
+/// (including the AN destination) from the event the same way the real circuit
+/// binds them (so the submitter's `finalizeDeposit` args are realistic), and
+/// emits canned `vk_blob` / `proof` bytes.
 #[derive(Clone, Debug, Default)]
 pub struct MockProofGenerator {
     /// When set, `generate` fails for this `deposit_id` — lets tests
@@ -73,6 +74,11 @@ impl MockProofGenerator {
             sender: addr_to_field(event.sender.as_slice()),
             amount: event.amount,
             contract_address: addr_to_field(event.source_contract.as_slice()),
+            // AN destination, exactly as the circuit binds it: workchain as the
+            // value (non-negative), account split into 16-byte halves.
+            an_workchain: U256::from(event.an_workchain.max(0) as u64),
+            an_account_high: half(&event.an_account.as_slice()[0..16]),
+            an_account_low: half(&event.an_account.as_slice()[16..32]),
             block_hash_high: half(&event.block_hash.as_slice()[0..16]),
             block_hash_low: half(&event.block_hash.as_slice()[16..32]),
             promise_commit: U256::ZERO,
@@ -141,7 +147,7 @@ impl SubprocessProverConfig {
 /// 1. `fetch_deposit_data` — RPC → `DepositProofInput` JSON (receipt RLP, MPT
 ///    proof, block header, parsed event fields);
 /// 2. `export_vk_blob` — v2 RLC `VkBlob` for the deposit circuit;
-/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 7×32-byte LE
+/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 10×32-byte LE
 ///    public-input operand.
 ///
 /// The three resulting files are read back and assembled into a
@@ -289,6 +295,8 @@ mod tests {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(1_000_000u64),
+            an_workchain: 0,
+            an_account: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 2,

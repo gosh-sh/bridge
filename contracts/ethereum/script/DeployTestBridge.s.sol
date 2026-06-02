@@ -12,14 +12,15 @@ import "../src/IBridgeWithdrawalVerifier.sol";
 /**
  * @title DeployTestBridge
  * @notice Deployment script for local/testnet smoke-testing of the bridge.
- * @dev Deposit/withdraw legacy verifier wiring was retired in Phase 4.3
- *      (Decision Log 2026-05-17). This script now only deploys an oracle +
- *      the bridge with `verifyBlock` disabled — enough to exercise `deposit()`
- *      end-to-end on a testnet.
+ * @dev Deploys an oracle + bridge with `verifyBlock` disabled. Set `USDT_ADDRESS`
+ *      env var on Sepolia (defaults to Aave-faucet test USDT).
  */
 contract DeployTestBridge is Script {
+    address constant USDT_SEPOLIA = 0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0;
+
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address usdt = vm.envOr("USDT_ADDRESS", USDT_SEPOLIA);
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -37,20 +38,18 @@ contract DeployTestBridge is Script {
             bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)), dappFr: 0, accFr: 0
         });
         AckiNackiBridge bridge = new AckiNackiBridge(
-            address(oracle), address(0), address(0), address(0), vbDisabled, bwDisabled
+            address(oracle), usdt, address(0), address(0), vbDisabled, bwDisabled
         );
         console.log("AckiNackiBridge deployed at:", address(bridge));
+        console.log("USDT:", usdt);
 
         vm.stopBroadcast();
 
         console.log("\n=== Deployment Complete ===");
         console.log("Network: Sepolia");
         console.log("Bridge:", address(bridge));
-        console.log("\nTo make a test deposit:");
-        console.log(
-            "cast send",
-            address(bridge),
-            "\"deposit()\" --value 0.1ether --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY"
-        );
+        console.log("\nTo make a test deposit (fund USDT from Aave faucet first):");
+        console.log("  mint USDT via faucet 0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D");
+        console.log("  then approve + deposit(uint256 amount) on the bridge");
     }
 }

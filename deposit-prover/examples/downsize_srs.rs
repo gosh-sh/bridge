@@ -12,9 +12,10 @@
 use std::fs;
 
 use clap::Parser;
-use halo2_base::halo2_proofs::halo2curves::bn256::Bn256;
-use halo2_base::halo2_proofs::poly::commitment::Params;
-use halo2_base::halo2_proofs::poly::kzg::commitment::ParamsKZG;
+use halo2_base::halo2_proofs::{
+    halo2curves::bn256::Bn256,
+    poly::{commitment::Params, kzg::commitment::ParamsKZG},
+};
 
 #[derive(Parser)]
 struct Args {
@@ -33,10 +34,18 @@ fn main() -> anyhow::Result<()> {
     let mut params = ParamsKZG::<Bn256>::read(&mut f)?;
     println!("  loaded k={}", params.k());
     if params.k() < args.k {
-        anyhow::bail!("cannot upsize: input k={} < target k={}", params.k(), args.k);
+        anyhow::bail!(
+            "cannot upsize: input k={} < target k={}",
+            params.k(),
+            args.k
+        );
     }
     if params.k() > args.k {
-        println!("Downsizing {} -> {} (tau preserved) ...", params.k(), args.k);
+        println!(
+            "Downsizing {} -> {} (tau preserved) ...",
+            params.k(),
+            args.k
+        );
         params.downsize(args.k);
     }
     let mut out = fs::File::create(&args.output)?;

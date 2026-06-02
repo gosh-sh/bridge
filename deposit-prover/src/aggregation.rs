@@ -172,6 +172,8 @@ pub fn aggregate_proof(
         deposit_proof.deposit_id,
         deposit_proof.sender,
         deposit_proof.amount,
+        deposit_proof.an_workchain,
+        deposit_proof.an_account,
         deposit_proof.contract_address,
         deposit_proof.block_hash,
     ))

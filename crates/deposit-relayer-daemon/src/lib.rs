@@ -5,14 +5,17 @@
 //! bridge:
 //!
 //! 1. **Listen** for `AckiNackiBridge.Deposit(depositId, sender, amount,
-//!    timestamp)` events on Ethereum, surfacing only deposits buried under a
-//!    configurable confirmation depth ([`source::EthLogSource`]).
+//!    anWorkchain, anAccount, timestamp)` events on Ethereum, surfacing only
+//!    deposits buried under a configurable confirmation depth
+//!    ([`source::EthLogSource`]).
 //! 2. **Prove** that the deposit event was emitted — the `deposit-prover`
 //!    Halo2 circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof
-//!    plus the seven public inputs `[depositId, sender, amount,
-//!    contractAddress, blockHashHigh, blockHashLow, promiseCommit]`. Because
-//!    `deposit-prover` is its own cargo workspace, the proof is generated
-//!    out-of-process ([`prover::SubprocessProofGenerator`]).
+//!    plus the ten public inputs `[depositId, sender, amount, contractAddress,
+//!    anWorkchain, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
+//!    promiseCommit]` — the Acki Nacki destination is bound in-circuit so the
+//!    AN side credits a proven account. Because `deposit-prover` is its own
+//!    cargo workspace, the proof is generated out-of-process
+//!    ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
 //!    `proof`) to the AN-side `TokenBridge.finalizeDeposit(...)`, which
 //!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and consumes

@@ -100,7 +100,7 @@ ETH-side (live in `AckiNackiBridge.sol`):
 
 | Property | Statement |
 |---|---|
-| **DEP-1** | Every successful `deposit()` emits a `Deposit(depositId, sender, amount, timestamp)` with a unique monotonic `depositId`. |
+| **DEP-1** | Every successful `deposit()` emits a `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts (`InvalidAnAccount`). |
 | **DEP-2** | `MAX_DEPOSIT_AMOUNT = 100 ether` is enforced; `msg.value` of zero reverts. |
 | **DEP-3** | `treasuryBalance` is incremented by exactly `msg.value` on every successful `deposit()`. |
 | **DEP-4** | `deposit()` is `nonReentrant`; no external calls are made inside it (yield routing to AAVE is owner-triggered separately via `supplyToAave`). |
@@ -109,10 +109,11 @@ AN-side (planned, lands with the future `VERHALO2SHPLONK` opcode + `TokenBridge.
 
 | Property | Statement |
 |---|---|
-| **DEP-N-1** | A successful `finalizeDeposit(halo2Proof, publicInputs, vk)` requires the Halo2 SHPLONK proof to verify natively under the immutable VK, binding `(depositId, sender, amount, bridgeAddr, blockHash, promiseCommit)` to a real `Deposit` event in the receipt trie of an Ethereum block. |
+| **DEP-N-1** | A successful `finalizeDeposit(halo2Proof, publicInputs, vk)` requires the Halo2 SHPLONK proof to verify natively under the immutable VK, binding `(depositId, sender, amount, bridgeAddr, anWorkchain, anAccount, blockHash, promiseCommit)` to a real `Deposit` event in the receipt trie of an Ethereum block. |
 | **DEP-N-2** | `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` — wrong-bridge proofs revert. |
 | **DEP-N-3** | The per-`depositId` nullifier in `TokenBridge` is set before any token mint; replay reverts. |
 | **DEP-N-4** | Producer pipeline waits ≥ 12 finality confirmations before generating the proof, and the ground-truth block hash is cross-checked against ≥ 2 Ethereum RPC providers. |
+| **DEP-N-5** | The AN recipient is a **proven** public input (`anWorkchain`, `anAccountHigh`, `anAccountLow`): `finalizeDeposit` credits `anWorkchain:(anAccountHigh<<128 \| anAccountLow)` reconstructed from the proof, never an EVM address or a relayer-supplied hint. The circuit `constrain_equal`s these to the RLP-parsed `Deposit` event data words. |
 
 ### 4.2 Why each property holds
 
@@ -129,6 +130,7 @@ AN-side (post-`VERHALO2SHPLONK`):
 - **DEP-N-2**: explicit `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR, "wrong bridge contract");` in `TokenBridge.finalizeDeposit`.
 - **DEP-N-3**: `nullifier[depositId] = true` is set before `_mintTo(...)`; second call reverts.
 - **DEP-N-4**: producer responsibility, not contract. Documented in `docs/verifying_eth_proof_on_an.md` §3.
+- **DEP-N-5**: the deposit circuit (`deposit-prover/src/circuit_v2.rs`) exposes `anWorkchain`/`anAccountHigh`/`anAccountLow` as public inputs #4–#6 and constrains them equal to the RLP-parsed `Deposit` data words 1–2 (the same Phase-0/Phase-1 binding used for `amount`). `TokenBridge.finalizeDeposit` therefore credits a destination that is part of the proof, not trusted from the relayer (landed 2026-06-02; `num_instance` 7→10).
 
 ### 4.3 How to verify
 

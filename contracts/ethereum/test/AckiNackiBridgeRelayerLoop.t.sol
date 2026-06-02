@@ -13,6 +13,7 @@ import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
+import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeRelayerLoopTest
 /// @notice Phase 5.1 — On-chain side of the relayer-loop acceptance.
@@ -38,6 +39,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 contract AckiNackiBridgeRelayerLoopTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
+    MockERC20 internal usdt;
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
@@ -57,6 +59,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
+        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
@@ -75,7 +78,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(0),
+            address(usdt),
             address(0),
             address(0),
             vb,

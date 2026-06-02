@@ -26,10 +26,16 @@ pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
 /// Expected event signature:
-/// keccak256("Deposit(uint256,address,uint256,uint256)") This is computed
-/// off-circuit and used as a constant
+/// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
+/// computed off-circuit and used as a constant.
+///
+/// NOTE: the two new non-indexed fields (`int8 anWorkchain`, `bytes32
+/// anAccount`) sit in the log data between `amount` (word 0) and `timestamp`
+/// (now word 3). The circuit's existing parsing of `amount`/`sender`/
+/// `depositId`/`contractAddress`/`blockHash` is unaffected — only `timestamp`
+/// (which the circuit does not expose) moved.
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,uint256)")
+    keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
 }
 
 /// Helper function to convert bytes (big-endian) to field element using
@@ -108,6 +114,13 @@ pub struct Phase0Output {
     pub sender_phase0: AssignedValue<Fr>,
     pub amount_phase0: AssignedValue<Fr>,
     pub contract_address_phase0: AssignedValue<Fr>,
+    // AN-recipient binding (2026-06-02): the Acki Nacki destination carried by
+    // the `Deposit` event (`int8 anWorkchain`, `bytes32 anAccount`). An EVM
+    // address is not a valid AN recipient, so the destination is bound here as
+    // public inputs and credited on the AN side.
+    pub an_workchain_phase0: AssignedValue<Fr>,
+    pub an_account_high_phase0: AssignedValue<Fr>,
+    pub an_account_low_phase0: AssignedValue<Fr>,
     pub block_hash_high_phase0: AssignedValue<Fr>,
     pub block_hash_low_phase0: AssignedValue<Fr>,
 }
@@ -281,25 +294,56 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
-        // 5. blockHashHigh - from block hash (first 16 bytes)
+        // 5. anWorkchain - Acki Nacki destination workchain (int8), ABI-encoded as a
+        //    32-byte sign-extended word (matches log data word 1). We bind the full
+        //    word so the public input equals the canonical encoding.
+        let wc = self.inputs.event_data.an_workchain;
+        let wc_fill = if wc < 0 { 0xffu8 } else { 0x00u8 };
+        let mut an_workchain_bytes_32: Vec<AssignedValue<Fr>> =
+            vec![ctx.load_witness(Fr::from(wc_fill as u64)); 31];
+        an_workchain_bytes_32.push(ctx.load_witness(Fr::from(wc as u8 as u64)));
+        let an_workchain_field = bytes_to_field(ctx, gate, &an_workchain_bytes_32);
+
+        // 6. anAccount - Acki Nacki destination account (256-bit), split into high/low
+        //    16-byte halves (mirrors the block-hash split) so each fits a BN254 field
+        //    element. Matches log data word 2.
+        let an_account_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .event_data
+            .an_account
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
+        let an_account_high = bytes_to_field(ctx, gate, &an_account_bytes[0..16]);
+        let an_account_low = bytes_to_field(ctx, gate, &an_account_bytes[16..32]);
+
+        // 7. blockHashHigh - from block hash (first 16 bytes)
         let block_hash_high = bytes_to_field(ctx, gate, &block_hash_bytes[0..16]);
 
-        // 6. blockHashLow - from block hash (last 16 bytes)
+        // 8. blockHashLow - from block hash (last 16 bytes)
         let block_hash_low = bytes_to_field(ctx, gate, &block_hash_bytes[16..32]);
 
-        // Set public instances BEFORE promise_commit is added
+        // Set public instances BEFORE promise_commit is added.
+        // Layout (9 user values + promise_commit appended by EthCircuitImpl):
+        //   [depositId, sender, amount, contractAddress,
+        //    anWorkchain, anAccountHigh, anAccountLow,
+        //    blockHashHigh, blockHashLow, (promiseCommit)]
+        // Each is verified in Phase 1 against the RLP-parsed event data.
         let public_instances = vec![
             deposit_id_field,
             sender_field,
             amount_field,
             contract_address_field,
+            an_workchain_field,
+            an_account_high,
+            an_account_low,
             block_hash_high,
             block_hash_low,
         ];
 
         builder.base.assigned_instances[0] = public_instances;
 
-        println!("   ✓ Set 6 public instances in Phase 0");
+        println!("   ✓ Set 9 public instances in Phase 0");
         println!("   (promise_commit will be appended automatically)");
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
@@ -315,6 +359,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             sender_phase0: sender_field,
             amount_phase0: amount_field,
             contract_address_phase0: contract_address_field,
+            an_workchain_phase0: an_workchain_field,
+            an_account_high_phase0: an_account_high,
+            an_account_low_phase0: an_account_low,
             block_hash_high_phase0: block_hash_high,
             block_hash_low_phase0: block_hash_low,
         }
@@ -365,9 +412,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // 4. Parse log RLP structure: [address, topics[], data]
 
         // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte
-        // hashes), data (variable) Max lengths: address=20,
-        // topics=4*32+overhead=150, data=64+overhead=70
-        let log_max_field_lens = [20, 150, 70];
+        // hashes), data (variable). Max lengths: address=20,
+        // topics=4*32+overhead=150, data=128 (4 ABI words:
+        // amount + anWorkchain + anAccount + timestamp).
+        let log_max_field_lens = [20, 150, 128];
 
         let log_array = rlp_chip.decompose_rlp_array_phase0(
             ctx_gate,
@@ -437,7 +485,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   Sender: {} bytes", sender_bytes.len());
 
         // 10. Extract data field (field 2)
-        // Data contains: [amount (32 bytes), timestamp (32 bytes)]
+        // Data contains 4 ABI words:
+        //   [amount (32), anWorkchain (32), anAccount (32), timestamp (32)]
         let data_bytes = &log_array.field_witness[2].field_cells;
         println!("   Data: {} bytes", data_bytes.len());
 
@@ -516,11 +565,21 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let sender_field = bytes_to_field(ctx_gate, gate, &sender_bytes);
         println!("   ✓ Converted sender to field element");
 
-        // Convert amount (first 32 bytes of data)
-        // We need to extract the first 32 bytes from data_bytes
+        // Convert amount (data word 0: bytes 0..32)
         let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
         let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
         println!("   ✓ Converted amount to field element");
+
+        // Convert anWorkchain (data word 1: bytes 32..64) — full 32-byte
+        // sign-extended int8 word bound as a single field element.
+        let an_workchain_bytes = &data_bytes[32..64];
+        let an_workchain_field = bytes_to_field(ctx_gate, gate, an_workchain_bytes);
+        println!("   ✓ Converted anWorkchain to field element");
+
+        // Convert anAccount (data word 2: bytes 64..96), split high/low halves.
+        let an_account_high_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[64..80]);
+        let an_account_low_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[80..96]);
+        println!("   ✓ Converted anAccount to field elements");
 
         // Convert contract address (20 bytes)
         let contract_address_field = bytes_to_field(ctx_gate, gate, address_bytes);
@@ -573,13 +632,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             &contract_address_field,
             &phase0_output.contract_address_phase0,
         );
+        ctx_gate.constrain_equal(&an_workchain_field, &phase0_output.an_workchain_phase0);
+        ctx_gate.constrain_equal(
+            &an_account_high_phase1,
+            &phase0_output.an_account_high_phase0,
+        );
+        ctx_gate.constrain_equal(&an_account_low_phase1, &phase0_output.an_account_low_phase0);
         ctx_gate.constrain_equal(
             &block_hash_high_phase1,
             &phase0_output.block_hash_high_phase0,
         );
         ctx_gate.constrain_equal(&block_hash_low_phase1, &phase0_output.block_hash_low_phase0);
 
-        println!("   ✓ Verified all 6 public instances match RLP-verified event data");
+        println!("   ✓ Verified all 9 public instances match RLP-verified event data");
         println!("   ✓ Phase 1 complete!");
     }
 }
@@ -648,15 +713,22 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// This circuit does not use aggregation, so no accumulator
     const HAS_ACCUMULATOR: bool = false;
 
-    /// Number of public instance columns
-    /// FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
-    /// We expose: [depositId, sender, amount, contract_address,
-    /// block_hash_high, block_hash_low, promise_commit]
+    /// Number of public instance columns.
     ///
-    /// Note: The 6 user values are set in Phase 0, then promise_commit is
-    /// automatically appended by EthCircuitImpl at the end of Phase 0.
+    /// We expose 10 public inputs (9 user values + promise_commit, which is
+    /// appended automatically by EthCircuitImpl at the end of Phase 0):
+    /// [depositId, sender, amount, contractAddress,
+    ///  anWorkchain, anAccountHigh, anAccountLow,
+    ///  blockHashHigh, blockHashLow, promiseCommit]
+    ///
+    /// The AN-recipient inputs (`anWorkchain`, `anAccountHigh`, `anAccountLow`)
+    /// were added 2026-06-02 — an EVM address is not a valid AN recipient, so
+    /// the destination is bound into the proof and credited on the AN side. The
+    /// `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
+    /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the
+    /// public-inputs cell from the same 10-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
-        vec![7] // 6 user values + 1 promise_commit
+        vec![10] // 9 user values + 1 promise_commit
     }
 }
 
@@ -679,6 +751,8 @@ mod tests {
             deposit_id: 42,
             sender: [1u8; 20],
             amount,
+            an_workchain: 0,
+            an_account: [3u8; 32],
             timestamp: 1234567890,
             contract_address: [2u8; 20],
         };
@@ -704,11 +778,11 @@ mod tests {
     fn test_deposit_event_signature() {
         let sig = get_deposit_event_signature();
         assert_eq!(sig.len(), 32);
-        // Verify it matches keccak256("Deposit(uint256,address,uint256,uint256)")
+        // keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
         let expected = [
-            0xd3, 0x6a, 0x2f, 0x67, 0xd0, 0x6d, 0x28, 0x57, 0x86, 0xf6, 0x1a, 0x32, 0xb0, 0x52,
-            0xb9, 0xac, 0x6b, 0xce, 0x4c, 0x82, 0x42, 0xc0, 0x61, 0xd9, 0x91, 0x1a, 0xb2, 0xeb,
-            0xc9, 0xa6, 0xc1, 0xf5,
+            0x8d, 0x5d, 0x06, 0x06, 0x73, 0xb2, 0x7f, 0xac, 0x84, 0xd5, 0x6e, 0xe2, 0x62, 0xfe,
+            0x8d, 0xcc, 0xad, 0x60, 0xd1, 0x98, 0xae, 0x11, 0x76, 0x60, 0x63, 0xf1, 0x12, 0xa9,
+            0xbe, 0x3d, 0x37, 0xee,
         ];
         assert_eq!(sig, expected);
     }

@@ -58,19 +58,23 @@ This doc covers the verification *as it will work once the opcode is live* (sect
 
 ## 1. What Each Proof Asserts
 
-A single deposit proof commits to **7 BN254 Fr public inputs**:
+A single deposit proof commits to **10 BN254 Fr public inputs** (the AN
+recipient `anWorkchain`/`anAccount` was bound in-circuit on 2026-06-02):
 
 | # | Field | Type | Source |
 |---|---|---|---|
-| 0 | `depositId` | uint256 | Indexed value from `Deposit(depositId, sender, amount, timestamp)` |
+| 0 | `depositId` | uint256 | Indexed value from `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` |
 | 1 | `sender` | uint256 (uint160 cast) | `msg.sender` of `deposit()` |
-| 2 | `amount` | uint256 | `msg.value` of `deposit()` |
+| 2 | `amount` | uint256 | USDT `amount` argument of `deposit()` |
 | 3 | `contractAddress` | uint256 (uint160 cast) | The bridge contract address itself |
-| 4 | `blockHashHigh` | uint128 | Upper 128 bits of `blockhash(blockNumber)` |
-| 5 | `blockHashLow` | uint128 | Lower 128 bits of `blockhash(blockNumber)` |
-| 6 | `promise_commit` | uint256 | Keccak coprocessor commitment (Poseidon) |
+| 4 | `anWorkchain` | uint256 (sign-extended int8 word) | AN destination workchain from the `Deposit` event |
+| 5 | `anAccountHigh` | uint128 | Upper 128 bits of the 256-bit AN account |
+| 6 | `anAccountLow` | uint128 | Lower 128 bits of the 256-bit AN account |
+| 7 | `blockHashHigh` | uint128 | Upper 128 bits of `blockhash(blockNumber)` |
+| 8 | `blockHashLow` | uint128 | Lower 128 bits of `blockhash(blockNumber)` |
+| 9 | `promise_commit` | uint256 | Keccak coprocessor commitment (Poseidon) |
 
-**Payload format** (Halo2 SHPLONK proof bytes + 7 public-input Fr elements). The native verifier consumes the proof + inputs + VK directly; no auxiliary Groth16 layer.
+**Payload format** (Halo2 SHPLONK proof bytes + 10 public-input Fr elements). The native verifier consumes the proof + inputs + VK directly; no auxiliary Groth16 layer. The AN side reconstructs the recipient as `anWorkchain:(anAccountHigh<<128 | anAccountLow)` and credits that proven account — an EVM address is not a valid AN recipient.
 
 A valid proof certifies, given the witness, that:
 
@@ -134,7 +138,7 @@ Once the opcode lands, AN-side `TokenBridge.finalizeDeposit(...)` will compile t
 ```solidity
 function finalizeDeposit(
     bytes calldata halo2Proof,
-    uint256[7] calldata publicInputs,
+    uint256[10] calldata publicInputs,  // see the 10-input table above
     bytes calldata vk
 ) external {
     // Compile-time: gosh.verHalo2Shplonk(...) → VERHALO2SHPLONK TVM opcode
@@ -143,9 +147,11 @@ function finalizeDeposit(
     require(!nullifier[publicInputs[0]], "already credited");
     nullifier[publicInputs[0]] = true;
 
-    address user = address(uint160(publicInputs[1]));
+    // Credit the PROVEN Acki Nacki recipient (not an EVM address).
+    int8 anWorkchain = int8(int256(publicInputs[4]));
+    uint256 anAccount = (publicInputs[5] << 128) | publicInputs[6];
     uint256 amount = publicInputs[2];
-    _mintTo(user, amount);
+    _mintTo(anWorkchain, anAccount, amount);
 }
 ```
 

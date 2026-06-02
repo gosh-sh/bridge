@@ -5,8 +5,9 @@
 //! - [`InMemoryDepositSource`] — pre-baked map keyed by `deposit_id`, used by
 //!   the unit tests to drive multi-deposit scenarios in microseconds.
 //! - [`EthLogSource`] — production. Polls Ethereum `eth_getLogs` for the
-//!   bridge's `Deposit(depositId, sender, amount, timestamp)` event, honouring
-//!   a confirmation depth so only finalised deposits are surfaced.
+//!   bridge's `Deposit(depositId, sender, amount, anWorkchain, anAccount,
+//!   timestamp)` event, honouring a confirmation depth so only finalised
+//!   deposits are surfaced.
 
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -99,6 +100,8 @@ mod sol_bindings {
                 uint256 indexed depositId,
                 address indexed sender,
                 uint256 amount,
+                int8 anWorkchain,
+                bytes32 anAccount,
                 uint256 timestamp
             );
 
@@ -212,6 +215,8 @@ where
                 deposit_id: id_u64,
                 sender: ev.sender,
                 amount: ev.amount,
+                an_workchain: ev.anWorkchain,
+                an_account: ev.anAccount,
                 timestamp: ev.timestamp,
                 tx_hash: decoded.transaction_hash.unwrap_or_default(),
                 log_index: decoded.log_index.unwrap_or_default(),
@@ -236,6 +241,8 @@ mod tests {
             deposit_id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(deposit_id * 1000),
+            an_workchain: 0,
+            an_account: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 0,

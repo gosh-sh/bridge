@@ -19,6 +19,12 @@ pub struct DepositEventData {
     /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
     /// 18.44 ETH
     pub amount: [u8; 32],
+    /// Acki Nacki destination workchain id (TVM `int8`, from log data).
+    pub an_workchain: i8,
+    /// Acki Nacki destination account (256-bit TVM address, from log data).
+    /// The EVM `sender` is not a valid AN recipient, so the destination is
+    /// supplied explicitly at deposit time and carried as ZK public inputs.
+    pub an_account: [u8; 32],
     /// Timestamp (from log data)
     pub timestamp: u64,
     /// Contract address that emitted the event
@@ -61,6 +67,10 @@ pub struct DepositProofOutput {
     /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
     /// 18.44 ETH
     pub amount: [u8; 32],
+    /// Acki Nacki destination workchain id (TVM `int8`).
+    pub an_workchain: i8,
+    /// Acki Nacki destination account (256-bit TVM address).
+    pub an_account: [u8; 32],
     pub contract_address: [u8; 20],
     /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
     pub block_hash: [u8; 32],
@@ -68,11 +78,14 @@ pub struct DepositProofOutput {
 
 impl DepositProofOutput {
     /// Create a new proof output with hex-encoded proof bytes
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         proof: Vec<u8>,
         deposit_id: u64,
         sender: [u8; 20],
         amount: [u8; 32],
+        an_workchain: i8,
+        an_account: [u8; 32],
         contract_address: [u8; 20],
         block_hash: [u8; 32],
     ) -> Self {
@@ -83,6 +96,8 @@ impl DepositProofOutput {
             deposit_id,
             sender,
             amount,
+            an_workchain,
+            an_account,
             contract_address,
             block_hash,
         }

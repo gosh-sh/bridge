@@ -45,7 +45,8 @@ impl EthereumFetcher {
     /// Parse a Deposit event from a transaction receipt
     ///
     /// Expected event signature: Deposit(uint256 indexed depositId, address
-    /// indexed sender, uint256 amount, uint256 timestamp)
+    /// indexed sender, uint256 amount, int8 anWorkchain, bytes32 anAccount,
+    /// uint256 timestamp)
     pub fn parse_deposit_event(
         &self,
         receipt: &TransactionReceipt,
@@ -95,15 +96,18 @@ impl EthereumFetcher {
             addr
         };
 
-        // Parse non-indexed parameters from data
-        if log.data.len() < 64 {
+        // Parse non-indexed parameters from data.
+        // ABI layout (4 words):
+        // [amount(32)][anWorkchain(32)][anAccount(32)][timestamp(32)]
+        if log.data.len() < 128 {
             return Err(anyhow!(
-                "Log data too short. Expected 64 bytes (amount + timestamp), got {}",
+                "Log data too short. Expected 128 bytes (amount + anWorkchain + anAccount + \
+                 timestamp), got {}",
                 log.data.len()
             ));
         }
 
-        // amount (first 32 bytes of data)
+        // amount (word 0)
         // FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts > 18.44 ETH
         let amount = {
             let mut bytes = [0u8; 32];
@@ -111,10 +115,21 @@ impl EthereumFetcher {
             bytes
         };
 
-        // timestamp (second 32 bytes of data)
+        // anWorkchain (word 1): int8 ABI-encoded as a 32-byte sign-extended word;
+        // the value lives in the last byte.
+        let an_workchain = log.data[63] as i8;
+
+        // anAccount (word 2): 256-bit TVM account address.
+        let an_account = {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&log.data[64..96]);
+            bytes
+        };
+
+        // timestamp (word 3, low 8 bytes)
         let timestamp = {
             let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&log.data[56..64]);
+            bytes.copy_from_slice(&log.data[120..128]);
             u64::from_be_bytes(bytes)
         };
 
@@ -128,6 +143,8 @@ impl EthereumFetcher {
             deposit_id,
             sender,
             amount,
+            an_workchain,
+            an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
         })
@@ -176,9 +193,9 @@ impl EthereumFetcher {
 }
 
 /// Get the Deposit event signature
-/// keccak256("Deposit(uint256,address,uint256,uint256)")
+/// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,uint256)")
+    keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
 }
 
 #[cfg(test)]

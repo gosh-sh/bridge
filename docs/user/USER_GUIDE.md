@@ -131,21 +131,15 @@ the bridge and emits a `Deposit(uint256 indexed depositId, address indexed sende
 uint256 amount, uint256 timestamp)` event. Your address (`msg.sender`) is recorded as
 the depositor and is the party credited on Acki Nacki.
 
-### Find your Deposit ID
+That's all you do on the Ethereum side. **You don't need to note or look up a Deposit
+ID** — the relayer (§6) discovers your deposit on-chain and processes it automatically,
+tracking the id internally as its own cursor.
 
-The **Deposit ID** is the cursor every later step uses. `depositCounter` is incremented
-on each deposit, so the id you just created is `depositCounter - 1`:
-
-```bash
-cast call "$BRIDGE" "depositCounter()(uint256)" --rpc-url "$RPC"
-```
-
-Or list your confirmed deposits (decoded) with the relayer (§6.1), or read the raw event
-from the receipt:
-
-```bash
-cast receipt <YOUR_TX_HASH> --rpc-url "$RPC"
-```
+> 💡 *(Optional)* If you want to prove one specific deposit by hand with `prove-one`
+> (§6.3), the id you just created is `depositCounter - 1`
+> (`cast call "$BRIDGE" "depositCounter()(uint256)" --rpc-url "$RPC"`); you can also list
+> decoded deposits with the relayer's `watch` command (§6.1). The normal `daemon` flow
+> needs none of this.
 
 > ℹ️ **Who receives the tokens on Acki Nacki?** The bridge credits the **same address
 > that made the deposit** (`msg.sender`). A configurable Acki Nacki receiver is planned;
@@ -261,10 +255,12 @@ cargo run --bin deposit-relayer -- \
     --dry-run
 ```
 
-The daemon loops *listen → prove → submit* with exponential backoff and clean
-SIGINT/SIGTERM shutdown, persisting its cursor to `state.json` so a restart resumes from
-the last finalized deposit. In `--dry-run` it proves against the real chain but
-"finalizes" only in an in-memory mock Acki Nacki — so it's safe to run repeatedly.
+This is the normal path. The daemon **automatically discovers new deposits on-chain and
+processes them in order** — you never pass it a Deposit ID. It loops
+*listen → prove → submit* with exponential backoff and clean SIGINT/SIGTERM shutdown,
+persisting its cursor to `state.json` so a restart resumes from the last finalized
+deposit. In `--dry-run` it proves against the real chain but "finalizes" only in an
+in-memory mock Acki Nacki — so it's safe to run repeatedly.
 
 > `--dry-run` is **mandatory** today: the daemon refuses to start without it and tells
 > you why (no live `IAckiNacki` client yet). When the Acki Nacki team ships the live

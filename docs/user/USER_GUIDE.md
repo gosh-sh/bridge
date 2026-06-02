@@ -9,19 +9,24 @@
 ## 1. What is the Acki Nacki Bridge?
 
 The Acki Nacki Bridge lets you move value between the **Ethereum** network and the
-**Acki Nacki** blockchain. Unlike traditional bridges that rely on a trusted group
-of signers, this bridge uses **zero-knowledge (ZK) cryptographic proofs** to verify
-that every cross-chain event really happened. In plain terms:
+**Acki Nacki** blockchain. The bridge moves **USDT** — the ERC-20 stablecoin
+(Tether), which uses **6 decimals** on Ethereum. Unlike traditional bridges that rely
+on a trusted group of signers, this bridge uses **zero-knowledge (ZK) cryptographic
+proofs** to verify that every cross-chain event really happened. In plain terms:
 
 > You don't have to trust an operator. The bridge proves, mathematically, that your
 > deposit was recorded on Ethereum before any tokens are issued on Acki Nacki.
+
+> 💵 **The bridge accepts USDT, not ETH.** You deposit USDT (an ERC-20 token), and
+> you still pay the usual Ethereum **gas in ETH**. If you only have ETH, you first
+> need to get some USDT — see §2.
 
 ### Two directions, two mechanisms
 
 | Direction | What it does | Status for users |
 | --- | --- | --- |
-| **Ethereum → Acki Nacki** (Deposit) | You send ETH on Ethereum; equivalent tokens are minted to you on Acki Nacki after a ZK proof of your deposit is verified. | ✅ **Available** |
-| **Acki Nacki → Ethereum** (Withdraw / burn) | Burn tokens on Acki Nacki and release ETH on Ethereum. | 🚧 **In development** — see §6 |
+| **Ethereum → Acki Nacki** (Deposit) | You send **USDT** on Ethereum; equivalent tokens are minted to you on Acki Nacki after a ZK proof of your deposit is verified. | ✅ **Available** |
+| **Acki Nacki → Ethereum** (Withdraw / burn) | Burn tokens on Acki Nacki and release USDT on Ethereum. | 🚧 **In development** — see §6 |
 
 > ⚠️ **Important:** At the time of writing, only the **Deposit** direction is available
 > to end users. Genuine cross-chain withdrawals are still being built. Any "Withdraw"
@@ -36,10 +41,12 @@ You will need:
 
 1. **A MetaMask wallet** (browser extension or mobile). Other EIP-1193 wallets may work,
    but MetaMask is the supported and tested option.
-2. **Test ETH on the Sepolia network.** The bridge currently runs on Ethereum's
-   **Sepolia testnet**, not on Ethereum mainnet. Sepolia ETH has no real monetary value
-   and is meant for testing.
-3. A few minutes of patience — proof generation and verification happen automatically
+2. **Test ETH on the Sepolia network — for gas.** The bridge currently runs on
+   Ethereum's **Sepolia testnet**, not on Ethereum mainnet. Sepolia ETH has no real
+   monetary value; you only need a little to pay transaction fees.
+3. **Test USDT on Sepolia — this is what you actually bridge.** The bridge accepts
+   USDT (ERC-20, 6 decimals) only. See *Getting test USDT* below.
+4. A few minutes of patience — proof generation and verification happen automatically
    in the background but are not instant.
 
 ### Network details (testnet)
@@ -51,18 +58,39 @@ You will need:
 | Public RPC | `https://rpc.sepolia.org` |
 | Block explorer | https://sepolia.etherscan.io |
 | Bridge contract | `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9` |
+| USDT token (Aave-faucet, Sepolia) | `0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0` |
+| Aave Sepolia faucet | `0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D` |
 
 > 💡 These values are for the current **test deployment** and may change. Always confirm
-> the active contract address with the team before bridging anything you care about.
+> the active contract and token addresses with the team before bridging anything you
+> care about.
 
-### Getting Sepolia test ETH
+### Getting Sepolia test ETH (for gas)
 
 You can obtain free Sepolia ETH from public faucets (search "Sepolia faucet"). You only
-need a small amount to try the bridge — for example, 0.01–0.1 ETH.
+need a small amount to cover gas — for example, 0.01–0.05 ETH.
+
+### Getting test USDT (what you bridge)
+
+Because the bridge moves **USDT**, you need some test USDT in your wallet before you can
+deposit. On Sepolia there are two easy ways:
+
+1. **Aave Sepolia faucet (recommended).** The bridge's test USDT is the Aave V3 Sepolia
+   faucet token (`0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0`). Open the
+   [Aave testnet faucet](https://app.aave.com/faucet/) (select **Ethereum Sepolia**),
+   connect your wallet, and mint USDT. A single mint (≈ 100 USDT) is plenty to try the
+   bridge. This is the same token the bridge contract is wired to accept.
+2. **Swap ETH → USDT on a DEX.** If you already hold Sepolia ETH, you can swap a small
+   amount to USDT on a DEX such as Uniswap (Sepolia). The bridge itself does **not** swap
+   for you — it only accepts USDT you already hold.
+
+> 💡 **Add USDT to MetaMask so you can see your balance.** In MetaMask choose *Import
+> tokens* and paste the USDT address above. You'll then see your USDT balance (remember
+> it's denominated with 6 decimals, so `100.000000` = 100 USDT).
 
 ---
 
-## 3. Depositing ETH (Ethereum → Acki Nacki)
+## 3. Depositing USDT (Ethereum → Acki Nacki)
 
 This is the main user flow. Here is what happens, step by step.
 
@@ -73,15 +101,26 @@ This is the main user flow. Here is what happens, step by step.
    MetaMask prompt.
 3. **Switch to Sepolia.** If you're on another network, the app will ask MetaMask to
    switch to Sepolia automatically. Approve it.
-4. **Enter the amount** of ETH you want to bridge in the *Deposit* form.
-   - The amount must be **greater than 0** and **at most 100 ETH** per deposit (`MAX_DEPOSIT_AMOUNT`). A zero amount is rejected (`InvalidAmount`); anything above 100 ETH is rejected (`DepositTooLarge`).
-5. **Submit and confirm** the transaction in MetaMask. This calls the bridge's
-   `deposit()` function (it takes no arguments — the ETH you send is the deposit)
-   and transfers your ETH to the bridge contract. Your **connected wallet address**
+4. **Make sure you hold USDT** (see §2). The amount you bridge must be
+   **greater than 0** and **at most 100 USDT** per deposit (`MAX_DEPOSIT_AMOUNT`).
+   A zero amount is rejected (`InvalidAmount`); anything above 100 USDT is rejected
+   (`DepositTooLarge`).
+5. **Enter the amount of USDT** you want to bridge in the *Deposit* form.
+6. **Approve the bridge to spend your USDT (first transaction).** Because USDT is an
+   ERC-20 token, the bridge can only move it with your permission. The app will prompt
+   an `approve(bridge, amount)` transaction — confirm it in MetaMask. (You may only need
+   to do this once if you approve enough up front.)
+7. **Submit and confirm the deposit (second transaction).** This calls the bridge's
+   `deposit(amount)` function, which pulls `amount` USDT from your wallet via
+   `transferFrom` into the bridge contract. Your **connected wallet address**
    (`msg.sender`) is recorded as the depositor and is the party credited on Acki Nacki.
-6. **Wait for the transaction to be mined.** Once confirmed, the bridge emits a
+8. **Wait for the transaction to be mined.** Once confirmed, the bridge emits a
    `Deposit` event containing your unique **Deposit ID**, your address, the amount,
    and a timestamp.
+
+> ℹ️ **Two transactions, paid in ETH.** A USDT deposit is normally a two-step flow —
+> an `approve` then a `deposit` — and both are ordinary Ethereum transactions, so you
+> pay gas in **ETH** for each. The USDT amount itself is what gets bridged.
 
 ### What happens behind the scenes
 
@@ -98,7 +137,7 @@ system does so your tokens appear on Acki Nacki:
 3. Once the proof is accepted, the corresponding **tokens are minted to you on
    Acki Nacki**.
 
-The result: your ETH is locked on Ethereum, and you receive matching tokens on
+The result: your USDT is locked on Ethereum, and you receive matching tokens on
 Acki Nacki — without trusting any human operator.
 
 ### Tracking your deposit
@@ -130,27 +169,31 @@ These are informational and never require a signature.
 
 ## 5. Fees, limits and safety
 
-- **Per-deposit limit:** 100 ETH maximum per `deposit()` call.
-- **Gas:** You pay normal Ethereum (Sepolia) gas fees for the deposit transaction.
-- **Treasury & yield:** Idle ETH held by the bridge can optionally be put to work in
-  AAVE V3 for yield by the bridge owner. This is an operator-side feature and does not
-  affect your deposit balance or your claim to bridged tokens.
+- **Per-deposit limit:** 100 USDT maximum per `deposit(amount)` call.
+- **What you bridge vs. what you pay:** You bridge **USDT**; you pay gas in **ETH**.
+  A typical deposit costs two Ethereum transactions (an `approve` and a `deposit`).
+- **Gas:** You pay normal Ethereum (Sepolia) gas fees for each transaction.
+- **Treasury & yield:** Idle USDT held by the bridge can optionally be put to work in
+  the AAVE V3 USDT market for yield by the bridge owner. This is an operator-side
+  feature and does not affect your deposit balance or your claim to bridged tokens.
 - **Non-custodial trust model:** The bridge does not ask you to trust a signer set.
   Cross-chain state is advanced only when valid ZK proofs are verified on-chain.
 
 ### Safety checklist
 
-- ✅ Confirm you are on **Sepolia** (testnet) and using the **correct contract address**.
+- ✅ Confirm you are on **Sepolia** (testnet) and using the **correct contract and USDT
+  addresses** (§2).
+- ✅ Make sure you hold both **USDT** (to bridge) and a little **ETH** (for gas).
 - ✅ Never enter your seed phrase anywhere — MetaMask never asks for it in a dApp.
 - ✅ Double-check the amount before confirming in MetaMask.
-- ⚠️ This is a **testnet deployment**. Do not bridge mainnet ETH or treat test tokens as
+- ⚠️ This is a **testnet deployment**. Do not bridge mainnet funds or treat test USDT as
   having real value.
 
 ---
 
 ## 6. Withdrawals (Acki Nacki → Ethereum) — current status
 
-True cross-chain withdrawals (burning tokens on Acki Nacki to release ETH on Ethereum)
+True cross-chain withdrawals (burning tokens on Acki Nacki to release USDT on Ethereum)
 are **not yet available to users**. The legacy refund-style `withdraw` flow from earlier
 versions has been **retired**, and the production burn-proof flow is still under active
 development.
@@ -163,7 +206,7 @@ exposed as a user action yet.
 
 What this means for you right now:
 
-- You **can** deposit ETH and receive tokens on Acki Nacki.
+- You **can** deposit USDT and receive tokens on Acki Nacki.
 - You **cannot** yet move value back from Acki Nacki to Ethereum through the bridge.
 - If you see a "Withdraw" form in an early build of the app, treat it as a **non-functional
   placeholder**.
@@ -221,8 +264,16 @@ You can also point at the shared public AN test node
 
 ### 7.3 Make a deposit on Ethereum
 
-Either use the web app (§3) or call `deposit()` directly. Note the **Deposit ID**
-emitted in the `Deposit` event — it's the cursor every later step uses.
+First make sure your test wallet holds USDT (mint from the Aave Sepolia faucet, §2).
+Then either use the web app (§3) or call the contracts directly — the deposit is a
+two-step ERC-20 flow:
+
+1. `usdt.approve(<BRIDGE_ADDR>, amount)` — authorize the bridge to pull your USDT.
+2. `bridge.deposit(amount)` — pull the USDT and emit the `Deposit` event.
+
+Remember `amount` is in USDT base units (6 decimals), e.g. `1000000` = 1 USDT, and must
+be ≤ 100 USDT. Note the **Deposit ID** emitted in the `Deposit` event — it's the cursor
+every later step uses.
 
 ### 7.4 Confirm the relayer can see your deposit (read-only)
 
@@ -325,8 +376,9 @@ bridge can be trusted by math rather than by people.
 | --- | --- | --- |
 | "Please connect your wallet first" | MetaMask not connected | Click *Connect Wallet* and approve. |
 | "Please switch to Sepolia network" | Wrong network selected | Approve the network switch in MetaMask, or add Sepolia manually. |
-| "Invalid amount" | Empty or non-numeric amount | Enter a positive number of ETH (≤ 100). |
-| Transaction fails / reverts | Insufficient gas, deposit over 100 ETH, or paused contract | Check your Sepolia ETH balance, lower the amount, and retry. |
+| "Invalid amount" | Empty or non-numeric amount | Enter a positive number of USDT (≤ 100). |
+| Deposit reverts with "transferFrom failed" / "insufficient allowance" | You didn't approve the bridge to spend your USDT, or approved too little | Run the `approve` step (§3) for at least the deposit amount, then retry the deposit. |
+| Transaction fails / reverts | Insufficient gas (ETH), insufficient USDT balance, deposit over 100 USDT, or paused contract | Check your Sepolia **ETH** (gas) and **USDT** balances, lower the amount, and retry. |
 | Deposit confirmed but no tokens on Acki Nacki yet | Proof generation/verification still in progress | Wait — minting happens after the ZK proof is verified. |
 | MetaMask not detected | Extension missing or disabled | Install/enable MetaMask and reload the page. |
 
@@ -342,8 +394,13 @@ bridge can be trusted by math rather than by people.
 - **Sepolia:** An Ethereum test network used for the current deployment.
 - **TVM:** The virtual machine Acki Nacki uses to execute contracts, including native
   proof verification.
-- **Treasury:** ETH held by the bridge contract from user deposits.
-- **AAVE V3:** A lending protocol where idle treasury ETH may be placed to earn yield
+- **USDT:** A US-dollar stablecoin (Tether) issued as an ERC-20 token with **6 decimals**.
+  This is the asset the bridge moves. On Sepolia, the bridge uses the Aave faucet USDT
+  (§2).
+- **ERC-20 approve:** A token permission step. Before the bridge can pull your USDT, you
+  send an `approve` transaction authorizing it to spend up to a set amount on your behalf.
+- **Treasury:** USDT held by the bridge contract from user deposits.
+- **AAVE V3:** A lending protocol where idle treasury USDT may be placed to earn yield
   (operator-managed; does not affect your funds' claimability).
 - **Axiom (halo2-lib):** The Halo2 circuit framework the deposit prover is built on; it
   produces proofs the Acki Nacki verification opcode can check natively.

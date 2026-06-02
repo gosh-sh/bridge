@@ -101,10 +101,7 @@ impl BkSetClient {
             .timeout(Duration::from_secs(10))
             .build()?;
 
-        Ok(Self {
-            http,
-            base_url,
-        })
+        Ok(Self { http, base_url })
     }
 
     /// `GET /v2/bk_set` — compact BK set view.

@@ -154,9 +154,7 @@ pub struct MockTransactionSender {
 impl MockTransactionSender {
     /// Create a new mock transaction sender
     pub fn new(client: MockAckiNacki) -> Self {
-        Self {
-            client,
-        }
+        Self { client }
     }
 }
 

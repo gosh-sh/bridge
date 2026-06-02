@@ -6,7 +6,7 @@
 //!
 //! ABI surface — Phase 4.3 (Decision Log 2026-05-17) retired the legacy
 //! refund-style `withdraw()` plus its `processedDeposits`/`Withdrawal`
-//! surface; this client now exposes the deposit + read-only views only.
+//! surface; this client now exposes the USDT deposit + read-only views only.
 //! The relayer (`crates/bridge-relayer-daemon`) holds the AN→ETH
 //! `verifyBlock` ABI; a future burn-proof flow will reintroduce a real
 //! cross-chain withdrawal once the corresponding circuit lands.
@@ -19,14 +19,28 @@ use alloy::{
     sol,
 };
 
+use crate::deposit::sepolia;
 use crate::error::{BridgeError, Result};
 
 sol! {
     #[sol(rpc)]
+    contract IERC20 {
+        function approve(address spender, uint256 amount) external returns (bool);
+        function allowance(address owner, address spender) external view returns (uint256);
+        function balanceOf(address account) external view returns (uint256);
+    }
+
+    #[sol(rpc)]
+    contract AaveFaucet {
+        function mint(address token, address to, uint256 amount) external returns (uint256);
+    }
+
+    #[sol(rpc)]
     contract AckiNackiBridge {
-        function deposit() external payable;
+        function deposit(uint256 amount) external;
         function treasuryBalance() external view returns (uint256);
         function depositCounter() external view returns (uint256);
+        function usdt() external view returns (address);
 
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
     }
@@ -39,6 +53,8 @@ sol! {
 /// instance, read-only callers can pass a plain HTTP provider.
 pub struct EthereumContract<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
+    usdt: IERC20::IERC20Instance<P, N>,
+    provider: P,
 }
 
 impl<P, N> EthereumContract<P, N>
@@ -46,28 +62,94 @@ where
     P: Provider<N> + Clone,
     N: Network,
 {
-    /// Construct a binding to the deployed bridge.
-    pub fn new(contract_address: Address, provider: P) -> Self {
-        let contract = AckiNackiBridge::new(contract_address, provider);
-        Self {
+    /// Construct a binding to the deployed bridge. Reads `usdt()` from chain.
+    pub async fn new(contract_address: Address, provider: P) -> Result<Self> {
+        let contract = AckiNackiBridge::new(contract_address, provider.clone());
+        let usdt_addr = contract
+            .usdt()
+            .call()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
+        let usdt = IERC20::new(usdt_addr, provider.clone());
+        Ok(Self {
             contract,
-        }
+            usdt,
+            provider,
+        })
     }
 
-    /// Make a deposit to the bridge. Returns the mined transaction receipt.
-    pub async fn deposit(&self, amount: U256) -> Result<N::ReceiptResponse> {
-        let pending = self
-            .contract
-            .deposit()
-            .value(amount)
+    /// USDT token address wired into the bridge.
+    pub fn usdt_address(&self) -> Address {
+        *self.usdt.address()
+    }
+
+    /// Mint test USDT from the Aave Sepolia faucet into `recipient`.
+    /// Use before E2E deposits when the wallet has no USDT.
+    pub async fn fund_usdt_from_aave_faucet(
+        &self,
+        recipient: Address,
+        amount: U256,
+    ) -> Result<N::ReceiptResponse> {
+        let faucet = AaveFaucet::new(sepolia::AAVE_FAUCET, self.provider.clone());
+        let pending = faucet
+            .mint(sepolia::USDT, recipient, amount)
             .send()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))?;
-
         pending
             .get_receipt()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))
+    }
+
+    /// Ensure the signer has approved the bridge for `amount` USDT.
+    pub async fn ensure_usdt_approval(&self, owner: Address, amount: U256) -> Result<bool> {
+        let bridge_addr = *self.contract.address();
+        let current = self
+            .usdt
+            .allowance(owner, bridge_addr)
+            .call()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
+        if current >= amount {
+            return Ok(false);
+        }
+        let pending = self
+            .usdt
+            .approve(bridge_addr, amount)
+            .send()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
+        pending
+            .get_receipt()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
+        Ok(true)
+    }
+
+    /// Approve (if needed) and deposit USDT. Returns the deposit tx receipt.
+    pub async fn deposit(&self, owner: Address, amount: U256) -> Result<N::ReceiptResponse> {
+        self.ensure_usdt_approval(owner, amount).await?;
+        let pending = self
+            .contract
+            .deposit(amount)
+            .send()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))?;
+        pending
+            .get_receipt()
+            .await
+            .map_err(|e| BridgeError::ContractError(e.to_string()))
+    }
+
+    /// E2E helper: faucet → approve → deposit.
+    pub async fn fund_faucet_and_deposit(
+        &self,
+        recipient: Address,
+        amount: U256,
+    ) -> Result<N::ReceiptResponse> {
+        self.fund_usdt_from_aave_faucet(recipient, amount).await?;
+        self.deposit(recipient, amount).await
     }
 
     /// Get the treasury balance.
@@ -89,7 +171,5 @@ where
     }
 }
 
-// Suppress dead-code warnings for the unused parameter `TransactionReceipt`
-// import (kept for downstream consumers reaching for `N::ReceiptResponse`).
 #[allow(dead_code)]
 fn _force_receipt_type_in_scope(_r: Option<TransactionReceipt>) {}

@@ -1,448 +1,261 @@
-# Acki Nacki Bridge — User Guide (CLI)
+# Acki Nacki Bridge — User Guide
 
-**A cross-chain bridge between Ethereum and Acki Nacki, secured end-to-end by zero-knowledge proofs.**
+**Move test funds from Ethereum to the Acki Nacki blockchain, safely and automatically.**
 
-*Revision: 2 June 2026 · Test deployment (Sepolia)*
-
----
-
-> 🛠️ **This is a command-line guide for developers and advanced testers.** You drive
-> the bridge directly with `cast` (Foundry) and the repo's `deposit-relayer` CLI.
-> Everything below assumes a checkout of this repository, a funded Sepolia key, and the
-> toolchain from `make setup`. A browser-based **web frontend** also ships in the repo
-> (`frontend/`) — you run it yourself; see §7. It is not a hosted product, and the CLI
-> below is the source of truth for the current USDT flow.
+*Revision: 2 June 2026 · Test version (Sepolia test network)*
 
 ---
 
-## 1. What is the Acki Nacki Bridge?
-
-The Acki Nacki Bridge lets you move value between the **Ethereum** network and the
-**Acki Nacki** blockchain. The bridge moves **USDT** — the ERC-20 stablecoin
-(Tether), which uses **6 decimals** on Ethereum. Unlike traditional bridges that rely
-on a trusted group of signers, this bridge uses **zero-knowledge (ZK) cryptographic
-proofs** to verify that every cross-chain event really happened. In plain terms:
-
-> You don't have to trust an operator. The bridge proves, mathematically, that your
-> deposit was recorded on Ethereum before any tokens are issued on Acki Nacki.
-
-> 💵 **The bridge accepts USDT, not ETH.** You deposit USDT (an ERC-20 token), and
-> you still pay the usual Ethereum **gas in ETH**. If you only have ETH, mint test
-> USDT first — see §3.
-
-### Two directions, two mechanisms
-
-| Direction | What it does | Status |
-| --- | --- | --- |
-| **Ethereum → Acki Nacki** (Deposit) | You send **USDT** on Ethereum; equivalent tokens are minted to you on Acki Nacki after a ZK proof of your deposit is verified. | ✅ **Available** (deposit + prove on a real chain; AN submit is mock-only — see §6) |
-| **Acki Nacki → Ethereum** (Withdraw / burn) | Burn tokens on Acki Nacki and release USDT on Ethereum. | 🚧 **In development** — see §9 |
+> 👋 **This guide is for everyday users.** You do **not** need to be a developer or use
+> any command-line tools. Everything here is done by opening a webpage and clicking
+> buttons in your browser. If you are a developer and want the technical/command-line
+> version, jump to the last section, [For developers](#9-for-developers-advanced).
 
 ---
 
-## 2. Before you start
+## 1. What does this bridge do?
 
-You will need:
+A **bridge** is a tool that lets you move money from one blockchain to another. Think of
+it like a money-transfer service that connects two different banking systems.
 
-1. **Foundry** (`cast`, `forge`, `anvil`) — install with `curl -L https://foundry.paradigm.xyz | bash && foundryup`, or via `make setup`.
-2. **A Sepolia private key** with a little test ETH for gas (§3). The bridge runs on
-   Ethereum's **Sepolia testnet**, not mainnet.
-3. **Test USDT on Sepolia** — the asset you actually bridge (§3).
-4. **This repository, built** — `make build` (Rust workspace + Solidity). The
-   `deposit-relayer` CLI lives in `crates/deposit-relayer-daemon/`.
-5. A few minutes of patience — ZK proof generation is CPU/memory-heavy and not instant.
+This particular bridge connects two blockchains:
 
-### Network details (testnet)
+- **Ethereum** — a well-known blockchain. (We use its free *test* version, called
+  **Sepolia**, so no real money is involved.)
+- **Acki Nacki** — a newer, fast blockchain.
 
-| Parameter | Value |
+Here is what happens in plain terms:
+
+1. You **deposit** some **USDC** on Ethereum. USDC is a "stablecoin" — a digital dollar,
+   where 1 USDC is meant to be worth about 1 US dollar. (In this test version, the USDC
+   is fake/test money with no real value.)
+2. The bridge then makes the **same amount available to you on Acki Nacki**.
+
+Behind the scenes, the bridge uses a **zero-knowledge proof** to do this safely. A
+zero-knowledge proof is a piece of math that proves your deposit really happened on
+Ethereum — without you having to trust any company or person to confirm it. You don't
+have to understand the math; just know that it's what keeps the bridge honest.
+
+> 💡 **Good to know:** Right now the bridge only moves funds **one way** — from Ethereum
+> to Acki Nacki. Moving funds back (Acki Nacki → Ethereum) is still being built.
+
+---
+
+## 2. What you need before you start
+
+You'll need three things, all free for testing:
+
+1. **A MetaMask wallet.** MetaMask is a free browser extension that acts like a digital
+   wallet for your blockchain funds. If you don't have it, install it from
+   [metamask.io](https://metamask.io) and follow its setup steps. **Keep your secret
+   recovery phrase private** — never share it with anyone.
+
+2. **A little test ETH (for "gas").** Every action on Ethereum has a small network fee
+   called **gas**, paid in ETH (Ethereum's own coin). It's like a postage stamp for your
+   transaction. You only need a tiny amount of *test* ETH — see [Section 3](#3-how-to-get-test-eth-and-test-usdc).
+
+3. **Some test USDC (the money you'll bridge).** This is the actual amount you send
+   across. You can get free test USDC from a faucet — see [Section 3](#3-how-to-get-test-eth-and-test-usdc).
+
+> ⚠️ **This is a test version.** Everything uses the Sepolia *test* network and fake test
+> coins. Do **not** send real money or treat any of these tokens as having real value.
+
+### Make sure MetaMask is on the right network
+
+This bridge runs on **Sepolia**, Ethereum's test network — not the real Ethereum
+network. In MetaMask, switch your network to **Sepolia** before you start. (MetaMask
+sometimes hides test networks by default; if you don't see Sepolia, enable "Show test
+networks" in MetaMask's settings.)
+
+The web app should also help you switch to Sepolia automatically when you connect.
+
+---
+
+## 3. How to get test ETH and test USDC
+
+Because this is a test network, the coins are free. You get them from "faucets" —
+websites that hand out free test coins.
+
+### Test ETH (for gas)
+
+1. Open your web browser and search for **"Sepolia faucet"**.
+2. Pick one of the public faucets in the results.
+3. Paste in **your MetaMask wallet address** (open MetaMask and click your account name
+   to copy it).
+4. Request the test ETH. A small amount (about 0.01–0.05 ETH) is plenty to cover many
+   transactions.
+
+### Test USDC (the money you'll bridge)
+
+The easiest way is the **Aave Sepolia faucet**:
+
+1. Go to the [Aave faucet](https://app.aave.com/faucet/) and connect your MetaMask wallet
+   (make sure it's set to the Sepolia test network).
+2. Find **USDC** in the list and request/mint some test USDC.
+3. It will appear in your wallet on the Sepolia network.
+
+> 💡 The bridge's own web app may also include a **"Get test USDC"** button that does this
+> for you in one click. If you see it, that's the simplest option.
+
+---
+
+## 4. How to make a deposit (step by step)
+
+You do everything in the **web app** — a simple webpage you open in your browser with
+MetaMask installed. Ask the bridge operator (or check the project page) for the link to
+the web app.
+
+A deposit takes a few clicks. Here's the whole flow:
+
+### Step 1 — Open the web app and connect your wallet
+
+1. Open the bridge web app in your browser.
+2. Click **"Connect Wallet"**. MetaMask will pop up asking for permission — click
+   **Connect**.
+3. If MetaMask asks to switch to the **Sepolia** network, approve it.
+
+### Step 2 — Approve the bridge to use your USDC
+
+Before the bridge can move your USDC, you have to give it permission. This is called an
+**approve** step — it's a one-time "yes, you may use up to this much of my USDC" message.
+It does **not** send any money yet; it just unlocks it.
+
+1. Enter the amount you want to deposit (for example, `10` USDC).
+2. Click **Approve** (the app may label it "Approve USDC").
+3. MetaMask pops up — review it and click **Confirm**. This costs a small amount of gas.
+4. Wait a few seconds for it to confirm.
+
+### Step 3 — Choose your Acki Nacki recipient and deposit
+
+Now you tell the bridge **where on Acki Nacki the funds should arrive**, and send the
+deposit.
+
+1. Enter your **Acki Nacki recipient account** — this is your address on the Acki Nacki
+   side, where the funds will appear. (Acki Nacki uses a different kind of address than
+   Ethereum, so you can't just reuse your MetaMask address here. If you're unsure what to
+   put, ask the operator.)
+2. Double-check the **amount**.
+3. Click **Deposit**.
+4. MetaMask pops up again — click **Confirm**. This also costs a little gas.
+5. Wait for the transaction to confirm.
+
+That's it — you're done on the Ethereum side! 🎉
+
+> 💡 **Why two confirmations?** The first (approve) unlocks your USDC; the second
+> (deposit) actually sends it. This two-step pattern is standard for this kind of token
+> on Ethereum.
+
+---
+
+## 5. What happens next
+
+After your deposit confirms, **you don't have to do anything else.** An automated service
+called a **relayer** takes over:
+
+1. The relayer notices your deposit on Ethereum.
+2. It creates the **zero-knowledge proof** (the math that proves your deposit is real).
+3. It sends that proof to Acki Nacki, where your funds are created in your Acki Nacki
+   account.
+
+You don't run or manage any of this — it happens on its own in the background.
+
+> ⏱️ **How long does it take?** Generating the proof is computation-heavy, so it isn't
+> instant. Allow a few minutes (sometimes longer, depending on system load). Once it
+> finishes, your funds appear on the Acki Nacki side.
+
+> 🧪 **Heads-up for this test version:** the final step that delivers funds onto a live
+> Acki Nacki network is still being connected. So in today's test setup you can complete
+> the deposit and watch the proof get generated, but the funds may not yet land on a real
+> Acki Nacki node. The operator can tell you the current status.
+
+---
+
+## 6. Reference details
+
+You usually don't need these, but they're handy to have:
+
+| Item | Value |
 | --- | --- |
-| Network name | Sepolia |
-| Chain ID | `11155111` (`0xaa36a7`) |
-| Public RPC | `https://rpc.sepolia.org` |
-| Block explorer | https://sepolia.etherscan.io |
-| Bridge contract | `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9` |
-| USDT token (Aave-faucet, Sepolia) | `0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0` |
-| Aave Sepolia faucet | `0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D` |
+| Network | **Sepolia** (Ethereum's test network) |
+| Bridge contract address | `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9` |
+| Token you deposit | **USDC** (test version, on Sepolia) |
+| Where to get test USDC | Aave Sepolia faucet |
+| Where to get test ETH | Any public "Sepolia faucet" |
+| Block explorer (to view transactions) | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
 
-> 💡 These values are for the current **test deployment** and may change. Always confirm
-> the active contract and token addresses with the team before bridging.
+> ⚠️ **Always confirm the current addresses.** This is a test deployment and addresses can
+> change. Check the **current bridge contract address** in the web app or with the
+> operator before you deposit, rather than trusting an address copied from a guide.
 
-A handy way to keep the commands below short — export these once per shell:
-
-```bash
-export RPC=https://rpc.sepolia.org
-export PK=0x<YOUR_SEPOLIA_PRIVATE_KEY>
-export ME=$(cast wallet address --private-key "$PK")
-export BRIDGE=0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9
-export USDT=0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-```
+To see your own transactions, copy the transaction link from MetaMask (or paste your
+wallet address into [sepolia.etherscan.io](https://sepolia.etherscan.io)).
 
 ---
 
-## 3. Get test ETH and test USDT
+## 7. Troubleshooting & FAQ
 
-### Sepolia ETH (for gas)
+**My transaction is stuck or pending for a long time.**
+This usually sorts itself out. If it's truly stuck, MetaMask offers a "Speed up" or
+"Cancel" option on the pending transaction. Also make sure you're connected to the
+**Sepolia** network.
 
-Obtain free Sepolia ETH from any public faucet (search "Sepolia faucet"). A small
-amount (0.01–0.05 ETH) is plenty to cover gas.
+**I got an "insufficient funds" or "out of gas" error.**
+You don't have enough test **ETH** to pay the network fee (gas). Get more test ETH from a
+Sepolia faucet (see [Section 3](#3-how-to-get-test-eth-and-test-usdc)). Remember: gas is
+paid in ETH, separately from the USDC you're bridging.
 
-### Test USDT (what you bridge)
+**The deposit button is greyed out, or the deposit fails.**
+Common reasons:
+- You haven't done the **Approve** step yet (Step 2), or you approved less than you're
+  trying to deposit. Approve again for at least the deposit amount.
+- You don't have enough **test USDC** in your wallet. Get more from the faucet.
+- The amount is `0`, or above the per-deposit limit. Try a smaller, positive amount.
+- You left the **Acki Nacki recipient** blank or it's invalid. Enter a valid recipient.
 
-The bridge's test USDT is the Aave V3 Sepolia faucet token. Mint some straight from the
-CLI — the faucet's `mint(address token, address to, uint256 amount)` sends test USDT to
-any address:
+**I'm on the wrong network.**
+Open MetaMask and switch the network to **Sepolia**. The web app may also prompt you to
+switch automatically.
 
-```bash
-# Mint 100 USDT (100 * 10^6, because USDT has 6 decimals) to yourself
-cast send "$FAUCET" "mint(address,address,uint256)" "$USDT" "$ME" 100000000 \
-    --rpc-url "$RPC" --private-key "$PK"
-```
+**Where did my funds go? I don't see them yet.**
+After the deposit, the automated relayer needs a few minutes to generate the proof and
+deliver your funds to Acki Nacki (see [Section 5](#5-what-happens-next)). Your Ethereum
+deposit transaction is always viewable on
+[sepolia.etherscan.io](https://sepolia.etherscan.io). If funds still don't appear after a
+reasonable wait, contact the operator (next question).
 
-Check your balance any time:
+**Can I move funds back from Acki Nacki to Ethereum?**
+Not yet — that direction is still being built. For now, the bridge only moves funds from
+Ethereum to Acki Nacki.
 
-```bash
-cast call "$USDT" "balanceOf(address)(uint256)" "$ME" --rpc-url "$RPC"
-# prints base units; divide by 1e6 for USDT (100000000 = 100 USDT)
-```
-
-> 💡 Amounts are always in **base units** (6 decimals): `1000000` = 1 USDT,
-> `100000000` = 100 USDT.
-
----
-
-## 4. Deposit USDT (Ethereum → Acki Nacki)
-
-You deposit into the bridge contract — `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9`
-(the `$BRIDGE` address from §2). A USDT deposit is a **two-step ERC-20 flow**: first
-authorize the bridge to pull your USDT (`approve`), then deposit. Both are ordinary
-Ethereum transactions, so you pay gas in **ETH** for each.
-
-Because Acki Nacki uses a **different address system** than Ethereum, a 20-byte EVM
-address cannot be the recipient on AN. So `deposit` takes your **Acki Nacki destination
-explicitly**: a workchain id (`int8`, usually `0`) and a 256-bit account
-(`bytes32`). These are carried all the way through as a ZK public input and are the
-account credited on Acki Nacki.
-
-```bash
-# 1) Approve the bridge to spend your USDT (here: 100 USDT)
-cast send "$USDT" "approve(address,uint256)" "$BRIDGE" 100000000 \
-    --rpc-url "$RPC" --private-key "$PK"
-
-# 2) Deposit to your Acki Nacki account.
-#    deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-#      amount      — > 0 and <= 100 USDT (100000000 base units = MAX_DEPOSIT_AMOUNT)
-#      anWorkchain — AN destination workchain id (usually 0)
-#      anAccount   — your 256-bit AN account, as a 32-byte hex value (non-zero)
-export AN_WORKCHAIN=0
-export AN_ACCOUNT=0x<YOUR_64_HEX_ACKI_NACKI_ACCOUNT>
-cast send "$BRIDGE" "deposit(uint256,int8,bytes32)" 100000000 "$AN_WORKCHAIN" "$AN_ACCOUNT" \
-    --rpc-url "$RPC" --private-key "$PK"
-```
-
-The `deposit(...)` call pulls `amount` USDT from your wallet via `transferFrom` into the
-bridge and emits a `Deposit(uint256 indexed depositId, address indexed sender, uint256
-amount, int8 anWorkchain, bytes32 anAccount, uint256 timestamp)` event. Your Ethereum
-address (`msg.sender`) is recorded for provenance, but the tokens are credited to
-**`anWorkchain:anAccount`** on Acki Nacki — the destination you supplied.
-
-That's all you do on the Ethereum side. **You don't need to note or look up a Deposit
-ID** — the relayer (§6) discovers your deposit on-chain and processes it automatically,
-tracking the id internally as its own cursor.
-
-> 💡 *(Optional)* If you want to prove one specific deposit by hand with `prove-one`
-> (§6.3), the id you just created is `depositCounter - 1`
-> (`cast call "$BRIDGE" "depositCounter()(uint256)" --rpc-url "$RPC"`); you can also list
-> decoded deposits with the relayer's `watch` command (§6.1). The normal `daemon` flow
-> needs none of this.
-
-> ℹ️ **Who receives the tokens on Acki Nacki?** The `anWorkchain:anAccount` you pass to
-> `deposit`. An Ethereum address is **not** a valid AN recipient (the two chains use
-> different address systems), so the AN destination is supplied at deposit time, bound
-> into the proof, and credited on the AN side — there is no implicit "credit msg.sender".
+**Something else is wrong / who do I contact?**
+Reach out to the bridge operator or project team for help. Have your **transaction hash**
+ready (you can copy it from MetaMask or Etherscan) — it helps them find your deposit
+quickly.
 
 ---
 
-## 5. Checking bridge status
+## 8. A few safety reminders
 
-Read-only views, no key or signature needed:
-
-```bash
-# How many deposits have been made
-cast call "$BRIDGE" "depositCounter()(uint256)" --rpc-url "$RPC"
-
-# USDT principal currently held by the bridge (treasury), in base units
-cast call "$BRIDGE" "treasuryBalance()(uint256)" --rpc-url "$RPC"
-```
-
-For decoded, human-readable deposit listings use the relayer's read-only `watch`
-command (§6.1). Your own transactions are visible on https://sepolia.etherscan.io.
+- ✅ Make sure MetaMask is on the **Sepolia** test network.
+- ✅ Keep a little **test ETH** for gas and some **test USDC** to bridge.
+- ✅ Confirm the **current bridge address** in the app before depositing.
+- ✅ **Never share your MetaMask secret recovery phrase** with anyone — not even support
+  staff. No legitimate operator will ever ask for it.
+- ⚠️ This is a **test version**. The coins are not real money.
 
 ---
 
-## 6. The full Ethereum → Acki Nacki route, end-to-end
+## 9. For developers (advanced)
 
-A deposit travels through three stages. The repo ships a dedicated relayer,
-`deposit-relayer` (crate `crates/deposit-relayer-daemon/`), that automates all three:
-
-| Stage | What runs | Tooling |
-| --- | --- | --- |
-| **1. Listen** | Watch the bridge contract for `Deposit` events and wait for confirmations. | `EthLogSource` (alloy `eth_getLogs`) |
-| **2. Prove** | Build the Halo2 ZK proof of the deposit (the `vk_blob` + `public_inputs` + `proof` triple the AN verification opcode consumes). | `deposit-prover`, run out-of-process |
-| **3. Submit** | Call `TokenBridge.finalizeDeposit(...)` on Acki Nacki, which verifies the proof natively and credits your tokens. | `AnSubmitter` over `IAckiNacki` |
-
-> ⚠️ **Current limitation (stage 3).** A live Acki Nacki transaction-submission client
-> (`IAckiNacki` over the `tvm-sdk`) is **not wired up yet**, and the on-chain
-> `finalizeDeposit` message ABI isn't frozen. So today you can drive **stages 1 and 2
-> against a real chain end-to-end**, and exercise stage 3 against an **in-memory mock
-> Acki Nacki** (the `--dry-run` mode below). No transaction reaches a real Acki Nacki
-> node yet. The relayer's *read-side* AN connectivity (BK-set queries) **is** live and
-> is what the preflight checks.
-
-### Prerequisites for stage 3 / a local AN node
-
-The `deposit-prover` proving artefacts must be available in `deposit-prover/` (SRS /
-proving key — see that crate's README). For an end-to-end run against a real,
-locally-controlled chain, bring up the 5-node Acki Nacki cluster from the sibling
-`acki-nacki` checkout:
-
-```bash
-cd ../acki-nacki/nock && docker-compose build && docker-compose up -d
-# Node0 REST API is then reachable at http://127.0.0.1:11000
-```
-
-You can also point at the shared public AN test node (`http://94.156.178.19:8600`) for
-read-only connectivity checks.
-
-All commands below run from `crates/deposit-relayer-daemon/`.
-
-### 6.1 Confirm the relayer can see your deposit (read-only)
-
-```bash
-cargo run --bin deposit-relayer -- \
-    watch --rpc-url "$RPC" --bridge-address "$BRIDGE" \
-    --start 0 --count 16
-```
-
-Prints `depositCounter()` and lists each confirmed `Deposit` (id, sender, amount, tx
-hash, block). Nothing is proven or submitted — it just verifies visibility and
-confirmation depth.
-
-### 6.2 Check Acki Nacki connectivity (read-only)
-
-```bash
-cargo run --bin deposit-relayer -- \
-    an-preflight --an-node-url http://127.0.0.1:11000   # or the public test node
-```
-
-Hits the AN node's `/v2/bk_set` endpoint and prints the current BK-set summary
-(sequence number + committee sizes). If this fails, fix your AN node URL before going
-further — the daemon runs the same check on startup so a mis-typed endpoint fails fast.
-
-### 6.3 Generate the proof for one deposit (stages 1 + 2, real chain)
-
-```bash
-cargo run --bin deposit-relayer -- \
-    prove-one --rpc-url "$RPC" --bridge-address "$BRIDGE" \
-    --deposit-id <YOUR_DEPOSIT_ID> \
-    --deposit-prover-dir ../../deposit-prover \
-    --out-dir ./out
-```
-
-The relayer finds your deposit, runs the `deposit-prover` out-of-process, and writes the
-three opcode operands to `./out/`:
-
-- `vk_blob.bin` — the verifying-key blob,
-- `public_inputs.bin` — the 10 public inputs
-  (`depositId, sender, amount, contractAddress, anWorkchain, anAccountHigh, anAccountLow,
-  blockHashHigh, blockHashLow, promiseCommit`),
-- `proof.bin` — the Halo2 SHPLONK proof.
-
-These are exactly the bytes Acki Nacki's verification opcode consumes. This step proves
-the full *listen → prove* path works against a real chain, independent of the AN side.
-
-> ℹ️ The Acki Nacki destination (`anWorkchain`, `anAccount`) you supplied at deposit time
-> is **bound inside the proof**: the circuit parses it from the `Deposit` event and
-> exposes it as `anWorkchain` + `anAccountHigh`/`anAccountLow` (the account's two 16-byte
-> halves) in `public_inputs.bin`. The AN side reconstructs the recipient as
-> `anWorkchain:(anAccountHigh<<128 | anAccountLow)` and credits *that* proven account —
-> so a relayer cannot redirect your funds. An EVM address is not a valid AN recipient,
-> which is why the destination is an explicit, proven input rather than derived from
-> `msg.sender`.
-
-### 6.4 Run the full loop (stages 1 → 3, dry-run submit)
-
-```bash
-cargo run --bin deposit-relayer -- \
-    daemon --rpc-url "$RPC" --bridge-address "$BRIDGE" \
-    --deposit-prover-dir ../../deposit-prover \
-    --an-node-url http://127.0.0.1:11000 \
-    --dry-run
-```
-
-This is the normal path. The daemon **automatically discovers new deposits on-chain and
-processes them in order** — you never pass it a Deposit ID. It loops
-*listen → prove → submit* with exponential backoff and clean SIGINT/SIGTERM shutdown,
-persisting its cursor to `state.json` so a restart resumes from the last finalized
-deposit. In `--dry-run` it proves against the real chain but "finalizes" only in an
-in-memory mock Acki Nacki — so it's safe to run repeatedly.
-
-> `--dry-run` is **mandatory** today: the daemon refuses to start without it and tells
-> you why (no live `IAckiNacki` client yet). When the Acki Nacki team ships the live
-> `tvm-sdk` client and the `finalizeDeposit` ABI is frozen, dropping `--dry-run` will
-> make stage 3 send real transactions.
-
-### 6.5 Why running it twice is safe (idempotency)
-
-The relayer uses the **Deposit ID** as a monotonic cursor, and Acki Nacki keeps a
-**nullifier set** (`usedDepositIds`) so a given deposit can be finalized at most once.
-Re-running the daemon, restarting it, or retrying a failed submit will never
-double-credit a deposit — already-finalized ids are simply skipped.
+Prefer to drive the bridge from the command line, run the relayer yourself, or host the
+web frontend? That's all documented separately. See the developer documentation in this
+repository — start with the project's main docs and the
+`crates/deposit-relayer-daemon/` and `frontend/` READMEs — for the `cast`/Foundry deposit
+flow, the `deposit-relayer` CLI, proof generation, and self-hosting instructions.
 
 ---
 
-## 7. Optional: the web frontend (run it yourself)
-
-The repo ships a browser UI under `frontend/` — a **Rust + Yew + WebAssembly** app with
-MetaMask wallet connection, a USDT deposit form (with a built-in faucet button), bridge
-stats, and transaction history. It is **not hosted anywhere**; you build and serve it
-yourself. See `frontend/README.md` for full details.
-
-```bash
-cd frontend
-cargo install trunk                         # one-time (WASM bundler)
-rustup target add wasm32-unknown-unknown    # one-time
-trunk serve                                 # dev server at http://localhost:8080
-# or build a static bundle:  trunk build --release   (output in dist/)
-# or run via Docker:         docker build -t an-bridge-frontend . && docker run -p 8080:80 an-bridge-frontend
-```
-
-Configure contract addresses / RPC in `frontend/src` (see the README's *Configuration*
-section) before connecting a wallet.
-
-The deposit form runs the same **USDT `approve` → `deposit(uint256,int8,bytes32)`** flow
-as the CLI: enter an amount (≤ 100 USDT) plus your **Acki Nacki recipient** (workchain id
-+ 256-bit account), and it approves the bridge if needed, then deposits, waiting for each
-transaction to confirm. The **"Get 100 test USDT (faucet)"** button mints test USDT from
-the Aave Sepolia faucet so you can try it with an empty wallet. Update the contract /
-token / faucet addresses in `frontend/src/config.rs` if you're on a different deployment.
-
-> ℹ️ Withdrawals (AN → Ethereum) aren't exposed in the UI yet (see §9), and the
-> deposit-relayer still picks up deposits regardless of how they were submitted — so the
-> web app and the CLI (§4–§6) are interchangeable for the deposit step.
-
----
-
-## 8. Fees, limits and safety
-
-- **Per-deposit limit:** 100 USDT maximum per `deposit(...)` call (`MAX_DEPOSIT_AMOUNT`).
-  Zero is rejected (`InvalidAmount`); over 100 USDT is rejected (`DepositTooLarge`); a
-  zero Acki Nacki account is rejected (`InvalidAnAccount`).
-- **What you bridge vs. what you pay:** You bridge **USDT**; you pay gas in **ETH**.
-  A typical deposit costs two Ethereum transactions (an `approve` and a `deposit`).
-- **Treasury & yield:** Idle USDT held by the bridge can optionally be supplied to the
-  AAVE V3 USDT market for yield by the bridge owner. This is operator-side and does not
-  affect your deposit balance or your claim to bridged tokens.
-- **Non-custodial trust model:** The bridge does not ask you to trust a signer set.
-  Cross-chain state is advanced only when valid ZK proofs are verified on-chain.
-
-### Safety checklist
-
-- ✅ Confirm you are on **Sepolia** (testnet) and using the **correct contract and USDT
-  addresses** (§2).
-- ✅ Make sure you hold both **USDT** (to bridge) and a little **ETH** (for gas).
-- ✅ Keep your private key out of shell history (`HISTCONTROL=ignorespace`, or use a
-  keystore / hardware wallet). Never paste it into untrusted tooling.
-- ✅ Double-check the amount (in 6-decimal base units) before sending.
-- ⚠️ This is a **testnet deployment**. Do not bridge mainnet funds or treat test USDT as
-  having real value.
-
----
-
-## 9. Withdrawals (Acki Nacki → Ethereum) — current status
-
-True cross-chain withdrawals (burning tokens on Acki Nacki to release USDT on Ethereum)
-are **not yet available to users**. The legacy refund-style `withdraw` flow from earlier
-versions has been **retired**, and the production burn-proof flow is still under active
-development.
-
-Under the hood, the Ethereum contract already carries the proof-verified machinery for
-the reverse channel — a permissionless `verifyBlock` entry point that advances the
-on-chain commitment to Acki Nacki's state after checking ZK attestations, and a
-proof-gated `withdrawByProof` path — but these are protocol/operator-level and are
-**not** exposed as a user action yet.
-
-What this means for you right now:
-
-- You **can** deposit USDT and (with the relayer) prove it end-to-end.
-- You **cannot** yet move value back from Acki Nacki to Ethereum through the bridge.
-
-This guide will be updated when withdrawals go live.
-
----
-
-## 10. How the bridge stays trustworthy (plain-English overview)
-
-- **Your deposit is proven, not asserted.** A zero-knowledge proof demonstrates that your
-  deposit transaction was included in a real Ethereum block before any tokens are minted.
-- **Acki Nacki's own state is attested with proofs too.** The reverse channel checks
-  cryptographic attestations of Acki Nacki blocks (validator signatures, block identity,
-  and chain progression) using ZK proofs verified on Ethereum.
-- **Strict on-chain rules.** Every state update enforces invariants such as monotonic
-  block sequence numbers and chain-anchor consistency, so the bridge can't be tricked into
-  accepting out-of-order or forged state.
-
----
-
-## 11. Troubleshooting
-
-| Problem | Likely cause | What to do |
-| --- | --- | --- |
-| `deposit` reverts with `InvalidAmount` | Amount was 0 | Pass a positive amount in base units (e.g. `1000000` = 1 USDT). |
-| `deposit` reverts with `DepositTooLarge` | Amount > 100 USDT | Lower the amount to ≤ `100000000`. |
-| `deposit` reverts with `InvalidAnAccount` | Acki Nacki account was zero / omitted | Pass a non-zero 256-bit `anAccount` (your AN destination) as the 3rd argument (§4). |
-| `deposit` reverts / `transferFrom` failed | No (or too small) `approve`, or insufficient USDT balance | Run the `approve` step (§4) for at least the deposit amount; mint more USDT (§3). |
-| Transaction fails: out of gas / insufficient funds | Not enough Sepolia **ETH** for gas | Top up Sepolia ETH (§3). |
-| `deposit` reverts when paused | Owner paused the contract | Wait until unpaused; deposits/verify/withdraw are blocked while paused. |
-| `prove-one` says "not visible / not confirmed yet" | Deposit not mined or not enough confirmations | Wait for confirmations (default 12), or lower `--confirmations`. |
-| `an-preflight` fails | AN node URL wrong/unreachable | Fix `--an-node-url`; bring up the local cluster (§6) or use the public node. |
-| `daemon` refuses to start | `--dry-run` missing | Add `--dry-run` — live AN submit isn't wired yet (§6). |
-
----
-
-## 12. Glossary
-
-- **ZK proof (zero-knowledge proof):** A cryptographic proof that a statement is true
-  without revealing extra information. Here, it proves your deposit really happened.
-- **Halo2 / Groth16:** ZK proof systems used by the bridge. Halo2 proofs are sometimes
-  wrapped in compact Groth16 proofs to fit Ethereum's contract size limits.
-- **Deposit ID:** A unique number assigned to each deposit (`depositCounter - 1` right
-  after your deposit), emitted in the `Deposit` event.
-- **Acki Nacki recipient (`anWorkchain` / `anAccount`):** Your destination on Acki Nacki —
-  a workchain id (`int8`, usually `0`) plus a 256-bit account (`bytes32`). Supplied to
-  `deposit` because an Ethereum address can't address an AN account; it's bound into the
-  bridge flow and credited on the AN side.
-- **USDT:** A US-dollar stablecoin (Tether) issued as an ERC-20 token with **6 decimals**.
-  This is the asset the bridge moves. On Sepolia, the bridge uses the Aave faucet USDT (§2).
-- **ERC-20 approve:** A token permission step. Before the bridge can pull your USDT, you
-  send an `approve` transaction authorizing it to spend up to a set amount on your behalf.
-- **Treasury (`treasuryBalance`):** USDT principal held by the bridge from user deposits.
-- **AAVE V3:** A lending protocol where idle treasury USDT may be placed to earn yield
-  (operator-managed; does not affect your funds' claimability).
-- **Sepolia:** An Ethereum test network used for the current deployment.
-- **TVM:** The virtual machine Acki Nacki uses to execute contracts, including native
-  proof verification.
-- **Axiom (halo2-lib):** The Halo2 circuit framework the deposit prover is built on; it
-  produces proofs the Acki Nacki verification opcode can check natively.
-- **deposit-relayer:** The CLI tool (crate `crates/deposit-relayer-daemon/`) that
-  automates the deposit pipeline — listen for `Deposit` events, generate the ZK proof,
-  and finalize on Acki Nacki. See §6.
-- **verifyBlock:** A permissionless Ethereum-side function that advances the bridge's
-  view of Acki Nacki's chain state after verifying ZK attestation proofs (protocol-level).
-- **Nullifier (`usedDepositIds`):** An Acki Nacki–side record of which deposits have
-  already been finalized, guaranteeing each deposit is credited at most once.
-
----
-
-*This document describes the current test deployment of the Acki Nacki Bridge and will
-evolve as features such as withdrawals become available. Always verify network and
-contract details with the team before bridging.*
+*This document describes the current test version of the Acki Nacki Bridge and will be
+updated as new features (such as moving funds back from Acki Nacki to Ethereum) become
+available. Always confirm network and contract details with the operator before
+depositing.*

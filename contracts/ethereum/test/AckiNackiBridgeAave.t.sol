@@ -7,16 +7,16 @@ import "../src/MockBlockHeaderOracle.sol";
 import "./mocks/MockAave.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
-import "./helpers/UsdtTestLib.sol";
+import "./helpers/UsdcTestLib.sol";
 
 /// @title AckiNackiBridgeAaveTest
-/// @notice Exercises the AAVE USDT integration surface of AckiNackiBridge.
+/// @notice Exercises the AAVE USDC integration surface of AckiNackiBridge.
 contract AckiNackiBridgeAaveTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
 
-    MockERC20 internal usdt;
-    MockAUSDT internal aUSDT;
+    MockERC20 internal usdc;
+    MockAUSDC internal aUSDC;
     MockAavePool internal pool;
 
     address internal owner = address(this);
@@ -33,15 +33,15 @@ contract AckiNackiBridgeAaveTest is Test {
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
 
-        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
-        aUSDT = new MockAUSDT();
-        pool = new MockAavePool(address(usdt), address(aUSDT));
+        usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        aUSDC = new MockAUSDC();
+        pool = new MockAavePool(address(usdc), address(aUSDC));
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(pool),
-            address(aUSDT),
+            address(aUSDC),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -51,22 +51,22 @@ contract AckiNackiBridgeAaveTest is Test {
     // Constructor / config
     // -----------------------------------------------------------------
 
-    function test_constructor_wiresAaveAndUsdt() public view {
-        assertEq(address(bridge.usdt()), address(usdt), "usdt wired");
+    function test_constructor_wiresAaveAndUsdc() public view {
+        assertEq(address(bridge.usdc()), address(usdc), "usdc wired");
         assertEq(address(bridge.aavePool()), address(pool), "pool wired");
-        assertEq(address(bridge.aUSDT()), address(aUSDT), "aUSDT wired");
+        assertEq(address(bridge.aUSDC()), address(aUSDC), "aUSDC wired");
         assertTrue(bridge.aaveEnabled(), "aave enabled by default when wired");
         assertEq(bridge.owner(), owner, "owner");
         assertEq(bridge.yieldRecipient(), owner, "yield recipient defaults to owner");
         assertEq(bridge.liquidReserveBps(), 1_000, "default 10% reserve");
-        assertEq(bridge.MAX_DEPOSIT_AMOUNT(), 100 * UsdtTestLib.UNIT, "100 USDT cap");
+        assertEq(bridge.MAX_DEPOSIT_AMOUNT(), 100 * UsdcTestLib.UNIT, "100 USDC cap");
     }
 
     function test_constructor_partialAaveWiringReverts() public {
         vm.expectRevert(AckiNackiBridge.InvalidAaveAddress.selector);
         new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(pool),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -74,8 +74,8 @@ contract AckiNackiBridgeAaveTest is Test {
         );
     }
 
-    function test_constructor_zeroUsdtReverts() public {
-        vm.expectRevert(AckiNackiBridge.InvalidUsdt.selector);
+    function test_constructor_zeroUsdcReverts() public {
+        vm.expectRevert(AckiNackiBridge.InvalidUsdc.selector);
         new AckiNackiBridge(
             address(oracle),
             address(0),
@@ -89,7 +89,7 @@ contract AckiNackiBridgeAaveTest is Test {
     function test_constructor_noAaveIsLegal() public {
         AckiNackiBridge plain = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -104,30 +104,30 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function test_supplyToAave_respectsLiquidReserve() public {
-        uint256 depositAmount = 10 * UsdtTestLib.UNIT;
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, depositAmount);
+        uint256 depositAmount = 10 * UsdcTestLib.UNIT;
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, depositAmount);
 
-        uint256 reserve = 1 * UsdtTestLib.UNIT;
-        uint256 supplyable = 9 * UsdtTestLib.UNIT;
+        uint256 reserve = 1 * UsdcTestLib.UNIT;
+        uint256 supplyable = 9 * UsdcTestLib.UNIT;
         vm.expectEmit(false, false, false, true);
         emit SuppliedToAave(supplyable, supplyable);
         bridge.supplyToAave(type(uint256).max);
 
         assertEq(bridge.suppliedPrincipal(), supplyable, "principal");
-        assertEq(bridge.aUsdtBalance(), supplyable, "aUSDT balance");
-        assertEq(usdt.balanceOf(address(bridge)), reserve, "liquid reserve kept");
+        assertEq(bridge.aUsdcBalance(), supplyable, "aUSDC balance");
+        assertEq(usdc.balanceOf(address(bridge)), reserve, "liquid reserve kept");
         assertEq(bridge.treasuryBalance(), depositAmount, "treasury unchanged");
     }
 
     function test_supplyToAave_explicitAmount() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
-        bridge.supplyToAave(5 * UsdtTestLib.UNIT);
-        assertEq(bridge.suppliedPrincipal(), 5 * UsdtTestLib.UNIT);
-        assertEq(usdt.balanceOf(address(bridge)), 5 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(5 * UsdcTestLib.UNIT);
+        assertEq(bridge.suppliedPrincipal(), 5 * UsdcTestLib.UNIT);
+        assertEq(usdc.balanceOf(address(bridge)), 5 * UsdcTestLib.UNIT);
     }
 
     function test_supplyToAave_onlyOwner() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         vm.prank(user1);
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
         bridge.supplyToAave(type(uint256).max);
@@ -135,7 +135,7 @@ contract AckiNackiBridgeAaveTest is Test {
 
     function test_supplyToAave_whenDisabledReverts() public {
         bridge.setAaveEnabled(false);
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         vm.expectRevert(AckiNackiBridge.AaveDisabled.selector);
         bridge.supplyToAave(type(uint256).max);
     }
@@ -146,9 +146,9 @@ contract AckiNackiBridgeAaveTest is Test {
     }
 
     function test_supplyToAave_amountExceedsAvailableReverts() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
-        bridge.supplyToAave(10 * UsdtTestLib.UNIT);
+        bridge.supplyToAave(10 * UsdcTestLib.UNIT);
     }
 
     // -----------------------------------------------------------------
@@ -156,20 +156,20 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function test_withdrawFromAave_preemptivelyTopsUp() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        bridge.withdrawFromAave(3 * UsdtTestLib.UNIT);
-        assertEq(bridge.suppliedPrincipal(), 6 * UsdtTestLib.UNIT);
-        assertEq(usdt.balanceOf(address(bridge)), 4 * UsdtTestLib.UNIT);
+        bridge.withdrawFromAave(3 * UsdcTestLib.UNIT);
+        assertEq(bridge.suppliedPrincipal(), 6 * UsdcTestLib.UNIT);
+        assertEq(usdc.balanceOf(address(bridge)), 4 * UsdcTestLib.UNIT);
     }
 
     function test_withdrawFromAave_onlyOwner() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
         vm.prank(user1);
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        bridge.withdrawFromAave(1 * UsdtTestLib.UNIT);
+        bridge.withdrawFromAave(1 * UsdcTestLib.UNIT);
     }
 
     // -----------------------------------------------------------------
@@ -177,53 +177,53 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function test_accruedYield_reflectsAaveGrowth() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        aUSDT.accrueYield(address(bridge), 500_000);
+        aUSDC.accrueYield(address(bridge), 500_000);
 
         assertEq(bridge.accruedYield(), 500_000, "accrued yield visible");
-        assertEq(bridge.suppliedPrincipal(), 9 * UsdtTestLib.UNIT, "principal unchanged");
+        assertEq(bridge.suppliedPrincipal(), 9 * UsdcTestLib.UNIT, "principal unchanged");
     }
 
     function test_harvestYield_sendsToRecipient() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        aUSDT.accrueYield(address(bridge), 300_000);
+        aUSDC.accrueYield(address(bridge), 300_000);
 
         bridge.setYieldRecipient(yieldSink);
 
-        uint256 sinkBefore = usdt.balanceOf(yieldSink);
+        uint256 sinkBefore = usdc.balanceOf(yieldSink);
         vm.expectEmit(true, false, false, true);
         emit YieldHarvested(yieldSink, 300_000);
         bridge.harvestYield(300_000);
 
-        assertEq(usdt.balanceOf(yieldSink), sinkBefore + 300_000, "yield paid");
-        assertEq(bridge.suppliedPrincipal(), 9 * UsdtTestLib.UNIT, "principal intact");
+        assertEq(usdc.balanceOf(yieldSink), sinkBefore + 300_000, "yield paid");
+        assertEq(bridge.suppliedPrincipal(), 9 * UsdcTestLib.UNIT, "principal intact");
         assertEq(bridge.accruedYield(), 0, "yield consumed");
     }
 
     function test_harvestYield_partialHarvest() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        aUSDT.accrueYield(address(bridge), 400_000);
+        aUSDC.accrueYield(address(bridge), 400_000);
 
         bridge.setYieldRecipient(yieldSink);
         bridge.harvestYield(100_000);
         assertEq(bridge.accruedYield(), 300_000, "remaining yield");
-        assertEq(usdt.balanceOf(yieldSink), 100_000, "recipient paid");
+        assertEq(usdc.balanceOf(yieldSink), 100_000, "recipient paid");
     }
 
     function test_harvestYield_amountExceedsYieldReverts() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        aUSDT.accrueYield(address(bridge), 100_000);
+        aUSDC.accrueYield(address(bridge), 100_000);
 
         vm.expectRevert(AckiNackiBridge.NoYield.selector);
-        bridge.harvestYield(1 * UsdtTestLib.UNIT);
+        bridge.harvestYield(1 * UsdcTestLib.UNIT);
     }
 
     function test_harvestYield_onlyOwner() public {
@@ -237,12 +237,12 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function test_emergencyWithdrawAll_pullsEverything() public {
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, 10 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
 
-        aUSDT.accrueYield(address(bridge), 700_000);
-        // Back the synthetic yield with underlying USDT in the pool.
-        usdt.mint(address(pool), 700_000);
+        aUSDC.accrueYield(address(bridge), 700_000);
+        // Back the synthetic yield with underlying USDC in the pool.
+        usdc.mint(address(pool), 700_000);
 
         vm.expectEmit(false, false, false, true);
         emit AaveEnabledSet(false);
@@ -250,8 +250,8 @@ contract AckiNackiBridgeAaveTest is Test {
 
         assertFalse(bridge.aaveEnabled(), "aave disabled");
         assertEq(bridge.suppliedPrincipal(), 0, "principal zeroed");
-        assertEq(bridge.aUsdtBalance(), 0, "aUSDT drained");
-        assertEq(usdt.balanceOf(address(bridge)), 10_700_000, "all USDT home");
+        assertEq(bridge.aUsdcBalance(), 0, "aUSDC drained");
+        assertEq(usdc.balanceOf(address(bridge)), 10_700_000, "all USDC home");
     }
 
     // -----------------------------------------------------------------
@@ -280,11 +280,11 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function testFuzz_totalAssetsCoversTreasury(uint96 depositAmt, uint16 bps) public {
-        vm.assume(depositAmt > 0 && depositAmt <= 100 * UsdtTestLib.UNIT);
+        vm.assume(depositAmt > 0 && depositAmt <= 100 * UsdcTestLib.UNIT);
         vm.assume(bps <= bridge.MAX_LIQUID_RESERVE_BPS());
 
         bridge.setLiquidReserveBps(bps);
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, user1, depositAmt);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, depositAmt);
 
         uint256 reserve = (uint256(depositAmt) * bps) / bridge.BPS_DENOMINATOR();
         uint256 supplyable = depositAmt > reserve ? uint256(depositAmt) - reserve : 0;

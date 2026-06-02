@@ -271,18 +271,18 @@ async fn send_tx(to: &str, data: &str) -> Result<String, String> {
     from_value(result).map_err(|e| format!("Failed to parse transaction hash: {:?}", e))
 }
 
-/// Approve the bridge to spend `amount` USDT base units on the caller's behalf.
-pub async fn approve_usdt(amount: u128) -> Result<String, String> {
+/// Approve the bridge to spend `amount` USDC base units on the caller's behalf.
+pub async fn approve_usdc(amount: u128) -> Result<String, String> {
     // approve(address spender, uint256 amount) = 0x095ea7b3
     let data = format!(
         "0x095ea7b3{}{}",
         encode_address(BRIDGE_CONTRACT_ADDRESS),
         encode_uint256(amount)
     );
-    send_tx(USDT_CONTRACT_ADDRESS, &data).await
+    send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
-/// Deposit `amount` USDT base units into the bridge (pulls via `transferFrom`),
+/// Deposit `amount` USDC base units into the bridge (pulls via `transferFrom`),
 /// bridging to the Acki Nacki destination `an_workchain:an_account`. The EVM
 /// `msg.sender` is not a valid AN recipient, so the destination is supplied
 /// explicitly and carried as a ZK public input.
@@ -301,20 +301,20 @@ pub async fn make_deposit(
     send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
 }
 
-/// Mint `amount` test USDT base units to the connected account from the Aave faucet.
-pub async fn mint_test_usdt(amount: u128) -> Result<String, String> {
+/// Mint `amount` test USDC base units to the connected account from the Aave faucet.
+pub async fn mint_test_usdc(amount: u128) -> Result<String, String> {
     let account = get_current_account().ok_or("No account connected")?;
     // mint(address token, address to, uint256 amount) = 0xc6c3bbe6
     let data = format!(
         "0xc6c3bbe6{}{}{}",
-        encode_address(USDT_CONTRACT_ADDRESS),
+        encode_address(USDC_CONTRACT_ADDRESS),
         encode_address(&account),
         encode_uint256(amount)
     );
     send_tx(AAVE_FAUCET_ADDRESS, &data).await
 }
 
-/// Current USDT allowance (base units) the owner has granted the bridge.
+/// Current USDC allowance (base units) the owner has granted the bridge.
 pub async fn get_allowance(owner: &str) -> Result<u128, String> {
     // allowance(address owner, address spender) = 0xdd62ed3e
     let data = format!(
@@ -322,15 +322,15 @@ pub async fn get_allowance(owner: &str) -> Result<u128, String> {
         encode_address(owner),
         encode_address(BRIDGE_CONTRACT_ADDRESS)
     );
-    let raw = call_to(USDT_CONTRACT_ADDRESS, &data).await?;
+    let raw = call_to(USDC_CONTRACT_ADDRESS, &data).await?;
     parse_uint128(&raw)
 }
 
-/// Connected account's USDT balance in base units.
-pub async fn get_usdt_balance(owner: &str) -> Result<u128, String> {
+/// Connected account's USDC balance in base units.
+pub async fn get_usdc_balance(owner: &str) -> Result<u128, String> {
     // balanceOf(address) = 0x70a08231
     let data = format!("0x70a08231{}", encode_address(owner));
-    let raw = call_to(USDT_CONTRACT_ADDRESS, &data).await?;
+    let raw = call_to(USDC_CONTRACT_ADDRESS, &data).await?;
     parse_uint128(&raw)
 }
 
@@ -384,7 +384,7 @@ async fn sleep(ms: i32) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// Get bridge statistics (deposit count + treasury principal in USDT base units).
+/// Get bridge statistics (deposit count + treasury principal in USDC base units).
 pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
     // depositCounter() = 0xecb3dc88
     let deposit_count_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
@@ -446,15 +446,15 @@ pub struct BridgeStats {
     pub treasury_balance: String,
 }
 
-/// Format USDT base units (6 decimals) to a human string, e.g. 100000000 → "100.000000".
-pub fn units_to_usdt(units: u128) -> String {
-    let whole = units / USDT_UNIT;
-    let frac = units % USDT_UNIT;
+/// Format USDC base units (6 decimals) to a human string, e.g. 100000000 → "100.000000".
+pub fn units_to_usdc(units: u128) -> String {
+    let whole = units / USDC_UNIT;
+    let frac = units % USDC_UNIT;
     format!("{}.{:06}", whole, frac)
 }
 
-/// Parse a human USDT amount (e.g. "12.5") into base units (6 decimals).
-pub fn usdt_to_units(amount: &str) -> Result<u128, String> {
+/// Parse a human USDC amount (e.g. "12.5") into base units (6 decimals).
+pub fn usdc_to_units(amount: &str) -> Result<u128, String> {
     let amount = amount.trim();
     if amount.is_empty() {
         return Err("empty amount".to_string());
@@ -465,9 +465,9 @@ pub fn usdt_to_units(amount: &str) -> Result<u128, String> {
 
     let whole: u128 = whole_str
         .parse()
-        .map_err(|_| "Invalid USDT amount".to_string())?;
-    if frac_str.len() > USDT_DECIMALS as usize {
-        return Err("USDT supports at most 6 decimal places".to_string());
+        .map_err(|_| "Invalid USDC amount".to_string())?;
+    if frac_str.len() > USDC_DECIMALS as usize {
+        return Err("USDC supports at most 6 decimal places".to_string());
     }
     let frac_padded = format!("{:0<6}", frac_str);
     let frac: u128 = if frac_padded.is_empty() {
@@ -475,7 +475,7 @@ pub fn usdt_to_units(amount: &str) -> Result<u128, String> {
     } else {
         frac_padded
             .parse()
-            .map_err(|_| "Invalid USDT amount".to_string())?
+            .map_err(|_| "Invalid USDC amount".to_string())?
     };
-    Ok(whole * USDT_UNIT + frac)
+    Ok(whole * USDC_UNIT + frac)
 }

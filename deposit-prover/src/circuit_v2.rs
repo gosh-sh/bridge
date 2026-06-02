@@ -25,6 +25,22 @@ pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: u
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
+/// Fixed maximum block-header RLP length, in bytes.
+///
+/// UNIVERSAL-VK INVARIANT: the block header is the only input the circuit loads
+/// at its *natural* length. Different blocks have different header lengths (the
+/// `number` / `gasUsed` / `baseFeePerGas` fields use a variable number of bytes),
+/// so loading it raw made the constraint system — and therefore the verifying
+/// key — witness-dependent. We instead load a FIXED-size, zero-padded witness
+/// vector of this length so `keccak_var_len` and `decompose_rlp_array_*` emit an
+/// identical number of cells / copy-constraints for every block. The true header
+/// length is still bound cryptographically via the `keccak_var_len` length
+/// witness. Post-Shanghai mainnet headers (17 fields, through `withdrawalsRoot`)
+/// are ~540-640 bytes; 640 covers them with margin and matches the 17-entry
+/// `block_header_max_field_lens` table below. The receipt + MPT proof are already
+/// fixed-size (axiom-eth pads them to `value_max_byte_len` / `max_depth`).
+pub const MAX_BLOCK_HEADER_BYTES: usize = 640;
+
 /// Expected event signature:
 /// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
 /// computed off-circuit and used as a constant.
@@ -114,11 +130,12 @@ pub struct Phase0Output {
     pub sender_phase0: AssignedValue<Fr>,
     pub amount_phase0: AssignedValue<Fr>,
     pub contract_address_phase0: AssignedValue<Fr>,
-    // AN-recipient binding (2026-06-02): the Acki Nacki destination carried by
-    // the `Deposit` event (`int8 anWorkchain`, `bytes32 anAccount`). An EVM
-    // address is not a valid AN recipient, so the destination is bound here as
-    // public inputs and credited on the AN side.
-    pub an_workchain_phase0: AssignedValue<Fr>,
+    // AN-recipient binding (2026-06-02): the Acki Nacki destination account
+    // carried by the `Deposit` event (`bytes32 anAccount`). An EVM address is
+    // not a valid AN recipient, so the destination account is bound here as
+    // public inputs and credited on the AN side. The `dappId` public input
+    // (which replaced `anWorkchain` on 2026-06-02) is a config-supplied tag and
+    // is NOT verified against event data in Phase 1, so it is not stored here.
     pub an_account_high_phase0: AssignedValue<Fr>,
     pub an_account_low_phase0: AssignedValue<Fr>,
     pub block_hash_high_phase0: AssignedValue<Fr>,
@@ -174,20 +191,30 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         //    Keccak)
         println!("🔧 Parsing block header and computing block hash...");
 
-        // Load block header RLP bytes
-        let block_header_rlp_bytes: Vec<AssignedValue<Fr>> = self
-            .inputs
-            .receipt_proof
-            .block_header_rlp
-            .iter()
-            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+        // Load block header RLP bytes into a FIXED-size, zero-padded witness
+        // vector (see `MAX_BLOCK_HEADER_BYTES`). This is what makes the verifying
+        // key universal: the number of witness cells, keccak rounds and RLP
+        // decode constraints no longer depends on the block's natural header
+        // length. The true length is bound via `keccak_var_len` below.
+        let actual_header = &self.inputs.receipt_proof.block_header_rlp;
+        assert!(
+            actual_header.len() <= MAX_BLOCK_HEADER_BYTES,
+            "block header RLP is {} bytes, exceeds MAX_BLOCK_HEADER_BYTES ({})",
+            actual_header.len(),
+            MAX_BLOCK_HEADER_BYTES
+        );
+        let block_header_rlp_bytes: Vec<AssignedValue<Fr>> = (0..MAX_BLOCK_HEADER_BYTES)
+            .map(|i| {
+                let byte = actual_header.get(i).copied().unwrap_or(0u8);
+                ctx.load_witness(Fr::from(byte as u64))
+            })
             .collect();
 
-        // Compute block hash using Keccak (MUST be in Phase 0)
+        // Compute block hash using Keccak (MUST be in Phase 0). The length
+        // witness is the TRUE header length, so the keccak output binds only the
+        // real header bytes even though the input vector is fixed-size.
         let keccak_chip = chip.keccak();
-        let block_header_len = ctx.load_witness(Fr::from(
-            self.inputs.receipt_proof.block_header_rlp.len() as u64,
-        ));
+        let block_header_len = ctx.load_witness(Fr::from(actual_header.len() as u64));
         let block_hash_query = keccak_chip.keccak_var_len(
             ctx,
             block_header_rlp_bytes.clone(),
@@ -294,15 +321,22 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
-        // 5. anWorkchain - Acki Nacki destination workchain (int8), ABI-encoded as a
-        //    32-byte sign-extended word (matches log data word 1). We bind the full
-        //    word so the public input equals the canonical encoding.
-        let wc = self.inputs.event_data.an_workchain;
-        let wc_fill = if wc < 0 { 0xffu8 } else { 0x00u8 };
-        let mut an_workchain_bytes_32: Vec<AssignedValue<Fr>> =
-            vec![ctx.load_witness(Fr::from(wc_fill as u64)); 31];
-        an_workchain_bytes_32.push(ctx.load_witness(Fr::from(wc as u8 as u64)));
-        let an_workchain_field = bytes_to_field(ctx, gate, &an_workchain_bytes_32);
+        // 5. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
+        //    from the bridge config (NOT from the Ethereum event). It replaced
+        //    `anWorkchain` on 2026-06-02. A full UInt256 dappId can exceed the
+        //    BN254 scalar modulus, so it is split into high/low 16-byte halves
+        //    (mirrors the anAccount/block-hash split). These are witness values
+        //    promoted to public instances; they are NOT constrained against
+        //    event data — the AN-side `TokenBridge` checks them against its
+        //    configured dappId, which is what binds the proof to a dApp.
+        let dapp_id_bytes: Vec<AssignedValue<Fr>> = self
+            .inputs
+            .dapp_id
+            .iter()
+            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .collect();
+        let dapp_id_high = bytes_to_field(ctx, gate, &dapp_id_bytes[0..16]);
+        let dapp_id_low = bytes_to_field(ctx, gate, &dapp_id_bytes[16..32]);
 
         // 6. anAccount - Acki Nacki destination account (256-bit), split into high/low
         //    16-byte halves (mirrors the block-hash split) so each fits a BN254 field
@@ -324,17 +358,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let block_hash_low = bytes_to_field(ctx, gate, &block_hash_bytes[16..32]);
 
         // Set public instances BEFORE promise_commit is added.
-        // Layout (9 user values + promise_commit appended by EthCircuitImpl):
+        // Layout (10 user values + promise_commit appended by EthCircuitImpl):
         //   [depositId, sender, amount, contractAddress,
-        //    anWorkchain, anAccountHigh, anAccountLow,
+        //    dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
         //    blockHashHigh, blockHashLow, (promiseCommit)]
-        // Each is verified in Phase 1 against the RLP-parsed event data.
+        // All except dappId{High,Low} are verified in Phase 1 against the
+        // RLP-parsed event data; dappId is a config-supplied tag (see above).
         let public_instances = vec![
             deposit_id_field,
             sender_field,
             amount_field,
             contract_address_field,
-            an_workchain_field,
+            dapp_id_high,
+            dapp_id_low,
             an_account_high,
             an_account_low,
             block_hash_high,
@@ -343,7 +379,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         builder.base.assigned_instances[0] = public_instances;
 
-        println!("   ✓ Set 9 public instances in Phase 0");
+        println!("   ✓ Set 10 public instances in Phase 0");
         println!("   (promise_commit will be appended automatically)");
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
@@ -359,7 +395,6 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             sender_phase0: sender_field,
             amount_phase0: amount_field,
             contract_address_phase0: contract_address_field,
-            an_workchain_phase0: an_workchain_field,
             an_account_high_phase0: an_account_high,
             an_account_low_phase0: an_account_low,
             block_hash_high_phase0: block_hash_high,
@@ -570,11 +605,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
         println!("   ✓ Converted amount to field element");
 
-        // Convert anWorkchain (data word 1: bytes 32..64) — full 32-byte
-        // sign-extended int8 word bound as a single field element.
-        let an_workchain_bytes = &data_bytes[32..64];
-        let an_workchain_field = bytes_to_field(ctx_gate, gate, an_workchain_bytes);
-        println!("   ✓ Converted anWorkchain to field element");
+        // Data word 1 (bytes 32..64) is the event's `anWorkchain` field. As of
+        // 2026-06-02 the circuit no longer binds it (the `dappId` config tag
+        // took its public-input slot), so it is intentionally not parsed here.
 
         // Convert anAccount (data word 2: bytes 64..96), split high/low halves.
         let an_account_high_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[64..80]);
@@ -632,7 +665,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             &contract_address_field,
             &phase0_output.contract_address_phase0,
         );
-        ctx_gate.constrain_equal(&an_workchain_field, &phase0_output.an_workchain_phase0);
+        // dappId is config-supplied (not in the event) and therefore not
+        // constrained against RLP-parsed data here.
         ctx_gate.constrain_equal(
             &an_account_high_phase1,
             &phase0_output.an_account_high_phase0,
@@ -644,7 +678,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         ctx_gate.constrain_equal(&block_hash_low_phase1, &phase0_output.block_hash_low_phase0);
 
-        println!("   ✓ Verified all 9 public instances match RLP-verified event data");
+        println!("   ✓ Verified event-bound public instances match RLP-verified event data");
         println!("   ✓ Phase 1 complete!");
     }
 }
@@ -715,20 +749,22 @@ impl CircuitMetadata for DepositEventCircuitV2 {
 
     /// Number of public instance columns.
     ///
-    /// We expose 10 public inputs (9 user values + promise_commit, which is
+    /// We expose 11 public inputs (10 user values + promise_commit, which is
     /// appended automatically by EthCircuitImpl at the end of Phase 0):
     /// [depositId, sender, amount, contractAddress,
-    ///  anWorkchain, anAccountHigh, anAccountLow,
+    ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
     ///  blockHashHigh, blockHashLow, promiseCommit]
     ///
-    /// The AN-recipient inputs (`anWorkchain`, `anAccountHigh`, `anAccountLow`)
-    /// were added 2026-06-02 — an EVM address is not a valid AN recipient, so
-    /// the destination is bound into the proof and credited on the AN side. The
-    /// `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
-    /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the
-    /// public-inputs cell from the same 10-scalar layout.
+    /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier) replaced
+    /// the single `anWorkchain` slot on 2026-06-02. dappId is a config-supplied
+    /// tag — it is not bound to event data in-circuit; the AN-side
+    /// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
+    /// `anAccountHigh`/`anAccountLow` remain the event-bound AN recipient account.
+    /// The `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
+    /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the public-inputs
+    /// cell from the same 11-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
-        vec![10] // 9 user values + 1 promise_commit
+        vec![11] // 10 user values + 1 promise_commit
     }
 }
 
@@ -767,6 +803,7 @@ mod tests {
         let input = DepositProofInput {
             event_data,
             receipt_proof,
+            dapp_id: [7u8; 32],
         };
 
         let circuit = DepositEventCircuitV2::new_with_defaults(input, Chain::Sepolia);
@@ -829,16 +866,16 @@ mod tests {
 
         println!("  Column 0: {} instances", snark.instances[0].len());
 
-        // FIXED BC-CIRCUIT-004: Now we have 7 instances
-        // [depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow,
-        // promise_commit]
+        // 11-input layout: [depositId, sender, amount, contractAddress,
+        // dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh,
+        // blockHashLow, promise_commit]
         assert_eq!(
             snark.instances[0].len(),
-            7,
-            "Should have 7 instances: [depositId, sender, amount, contractAddress, blockHashHigh, \
-             blockHashLow, promise_commit]"
+            11,
+            "Should have 11 instances: [depositId, sender, amount, contractAddress, dappIdHigh, \
+             dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promise_commit]"
         );
 
-        println!("✅ BC-CIRCUIT-004 FIX VERIFIED: Proof contains all 7 instances!");
+        println!("✅ Proof contains all 11 instances!");
     }
 }

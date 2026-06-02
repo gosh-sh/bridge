@@ -2,18 +2,19 @@
 //! Nacki and finalise the deposit?".
 //!
 //! The AN-side entry point is `TokenBridge.finalizeDeposit(depositId, sender,
-//! amount, contractAddress, anWorkchain, anAccountHigh, anAccountLow,
+//! amount, contractAddress, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 //! blockHashHigh, blockHashLow, promiseCommit, proofCell)` (partner branch
-//! `poseidon_dex_with_verify`). The contract builds the `public_inputs` cell
-//! from the ten scalar arguments — which now *include* the Acki Nacki
-//! destination (`anWorkchain`, `anAccountHigh`, `anAccountLow`) bound in the
-//! proof — calls `ZKHALO2VERIFYWITHVK(vkBlob, publicInputsCell, proofCell)`
-//! (opcode `0xC7 0x4A`), and on success reconstructs the recipient as
-//! `anWorkchain:(anAccountHigh << 128 | anAccountLow)`, consumes the
+//! `halo2_circuit_with_vk`). The contract builds the `public_inputs` cell from
+//! the eleven scalar arguments — which include the Acki Nacki destination
+//! account (`anAccountHigh`, `anAccountLow`) bound in the proof and the
+//! config-supplied `dappId` (`dappIdHigh`, `dappIdLow`) tag — calls
+//! `ZKHALO2VERIFYWITHVK(vkBlob, publicInputsCell, proofCell)` (opcode
+//! `0xC7 0x4A`), checks `dappId` against its configured value, reconstructs the
+//! recipient account as `(anAccountHigh << 128 | anAccountLow)`, consumes the
 //! `usedDepositIds[depositId]` nullifier, and credits that proven account. An
-//! EVM address is not a valid AN recipient, so binding the destination in the
-//! proof (rather than trusting an off-circuit relayer hint) is what makes the
-//! credit trust-minimised.
+//! EVM address is not a valid AN recipient, so binding the destination account
+//! in the proof (rather than trusting an off-circuit relayer hint) is what makes
+//! the credit trust-minimised.
 //!
 //! Two implementations:
 //!
@@ -89,18 +90,20 @@ pub trait AnSubmitter: Send + Sync {
 /// ```text
 ///   NUM_PUBLIC_INPUTS × 32-byte big-endian scalars (the proof's public inputs):
 ///     depositId, sender, amount, contractAddress,
-///     anWorkchain, anAccountHigh, anAccountLow,
+///     dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 ///     blockHashHigh, blockHashLow, promiseCommit
 ///   u32 BE proof length
 ///   proof bytes (raw Blake2b SHPLONK)
 /// ```
 ///
-/// The AN destination (`anWorkchain`, `anAccountHigh`, `anAccountLow`) is now
-/// part of the proof's public inputs — the deposit circuit binds it (see
+/// The AN destination account (`anAccountHigh`, `anAccountLow`) is part of the
+/// proof's public inputs — the deposit circuit binds it (see
 /// `deposit-prover/src/circuit_v2.rs`), so there is no separate out-of-circuit
-/// destination side-channel: the AN side reconstructs the recipient from these
-/// proven scalars. The `vk_blob` is deploy-time configuration on the AN
-/// contract and is therefore **not** part of the per-call body.
+/// destination side-channel: the AN side reconstructs the recipient account
+/// from these proven scalars. `dappIdHigh`/`dappIdLow` carry the config-supplied
+/// AN dApp identifier the AN side checks. The `vk_blob` is deploy-time
+/// configuration on the AN contract and is therefore **not** part of the
+/// per-call body.
 pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
     let pi = &bundle.parsed;
     let mut out = Vec::with_capacity(NUM_PUBLIC_INPUTS * 32 + 4 + bundle.proof.len());
@@ -109,7 +112,8 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
         pi.sender,
         pi.amount,
         pi.contract_address,
-        pi.an_workchain,
+        pi.dapp_id_high,
+        pi.dapp_id_low,
         pi.an_account_high,
         pi.an_account_low,
         pi.block_hash_high,
@@ -128,7 +132,7 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
 const FINALIZE_HEADER_LEN: usize = NUM_PUBLIC_INPUTS * 32 + 4;
 
 /// Decoded `finalizeDeposit` body: the public-input scalars and the raw proof
-/// bytes. The AN destination is reconstructed from `scalars[4..7]`.
+/// bytes. dappId is `scalars[4..6]`; the AN account is `scalars[6..8]`.
 pub type DecodedFinalize = ([U256; NUM_PUBLIC_INPUTS], Vec<u8>);
 
 /// Decode a body produced by [`encode_finalize_deposit`] back into the
@@ -377,7 +381,7 @@ mod tests {
     }
 
     fn bundle(ev: &DepositEvent) -> DepositProofBundle {
-        let pi = MockProofGenerator::derive_public_inputs(ev);
+        let pi = MockProofGenerator::derive_public_inputs(ev, U256::from(0xD499u64));
         DepositProofBundle {
             vk_blob: vec![1, 2, 3].into(),
             public_inputs: pi.to_operand().into(),
@@ -395,10 +399,11 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-                                                   // AN destination is now bound in the public inputs: workchain (scalar 4)
-                                                   // and the account high/low halves (scalars 5/6) reconstruct the account.
-        assert_eq!(scalars[4], U256::from(ev.an_workchain.max(0) as u64));
-        let reconstructed = (scalars[5] << 128) | scalars[6];
+        // dappId is the config tag (scalars 4/5); the AN account high/low halves
+        // (scalars 6/7) reconstruct the proven recipient account.
+        let dapp_id = (scalars[4] << 128) | scalars[5];
+        assert_eq!(dapp_id, b.parsed.dapp_id());
+        let reconstructed = (scalars[6] << 128) | scalars[7];
         assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
         assert_eq!(proof, b.proof.to_vec());
     }

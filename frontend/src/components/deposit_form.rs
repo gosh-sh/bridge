@@ -2,17 +2,17 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
-use crate::config::{SEPOLIA_CHAIN_ID_HEX, USDT_UNIT};
+use crate::config::{SEPOLIA_CHAIN_ID_HEX, USDC_UNIT};
 use crate::web3::{
-    approve_usdt, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
-    make_deposit, mint_test_usdt, switch_to_sepolia, usdt_to_units, wait_for_receipt,
+    approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
+    make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
 };
 
-/// Maximum deposit (100 USDT in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
-const MAX_USDT_UNITS: u128 = 100 * USDT_UNIT;
+/// Maximum deposit (100 USDC in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
+const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
 
-/// Default faucet mint amount (100 USDT).
-const FAUCET_USDT_UNITS: u128 = 100 * USDT_UNIT;
+/// Default faucet mint amount (100 USDC).
+const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
 
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
@@ -73,7 +73,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         })
     };
 
-    // "Get test USDT" — mint from the Aave Sepolia faucet to the connected wallet.
+    // "Get test USDC" — mint from the Aave Sepolia faucet to the connected wallet.
     let on_faucet = {
         let is_loading = is_loading.clone();
         let status_msg = status_msg.clone();
@@ -92,10 +92,10 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             let status_msg = status_msg.clone();
             let error_msg = error_msg.clone();
             spawn_local(async move {
-                status_msg.set(Some("Minting 100 test USDT from the faucet…".to_string()));
-                match mint_test_usdt(FAUCET_USDT_UNITS).await {
+                status_msg.set(Some("Minting 100 test USDC from the faucet…".to_string()));
+                match mint_test_usdc(FAUCET_USDC_UNITS).await {
                     Ok(hash) => match wait_for_receipt(&hash).await {
-                        Ok(()) => status_msg.set(Some("Minted 100 test USDT ✓".to_string())),
+                        Ok(()) => status_msg.set(Some("Minted 100 test USDC ✓".to_string())),
                         Err(e) => error_msg.set(Some(format!("Faucet mint not confirmed: {}", e))),
                     },
                     Err(e) => error_msg.set(Some(format!("Faucet mint failed: {}", e))),
@@ -125,7 +125,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             }
 
             let amount_val = (*amount).clone();
-            let units = match usdt_to_units(&amount_val) {
+            let units = match usdc_to_units(&amount_val) {
                 Ok(u) => u,
                 Err(err) => {
                     error_msg.set(Some(format!("Invalid amount: {}", err)));
@@ -136,9 +136,9 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 error_msg.set(Some("Amount must be greater than 0".to_string()));
                 return;
             }
-            if units > MAX_USDT_UNITS {
+            if units > MAX_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the 100 USDT per-deposit limit".to_string(),
+                    "Amount exceeds the 100 USDC per-deposit limit".to_string(),
                 ));
                 return;
             }
@@ -193,14 +193,14 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     },
                 };
 
-                // Step 1: approve the bridge for `units` USDT if the current
+                // Step 1: approve the bridge for `units` USDC if the current
                 // allowance is insufficient.
                 let allowance = get_allowance(&account).await.unwrap_or(0);
                 if allowance < units {
                     status_msg.set(Some(
-                        "Step 1/2 — approve USDT (confirm in wallet)…".to_string(),
+                        "Step 1/2 — approve USDC (confirm in wallet)…".to_string(),
                     ));
-                    match approve_usdt(units).await {
+                    match approve_usdc(units).await {
                         Ok(hash) => {
                             status_msg.set(Some("Waiting for approval to confirm…".to_string()));
                             if let Err(e) = wait_for_receipt(&hash).await {
@@ -253,14 +253,14 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             <div class="form-header">
                 <h2>{"Deposit to Acki Nacki"}</h2>
                 <p class="form-description">
-                    {"Bridge your USDT from Ethereum to the Acki Nacki blockchain"}
+                    {"Bridge your USDC from Ethereum to the Acki Nacki blockchain"}
                 </p>
             </div>
 
             <form onsubmit={on_submit}>
                 <div class="form-group">
                     <label class="form-label">
-                        {"Amount (USDT)"}
+                        {"Amount (USDC)"}
                     </label>
                     <div class="input-wrapper">
                         <input
@@ -271,10 +271,10 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                             onchange={on_amount_change}
                             disabled={!props.wallet_connected || *is_loading}
                         />
-                        <span class="input-suffix">{"USDT"}</span>
+                        <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Max 100 USDT per deposit. Gas is paid in ETH."}
+                        {"Max 100 USDC per deposit. Gas is paid in ETH."}
                     </div>
                 </div>
 
@@ -408,12 +408,12 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     onclick={on_faucet}
                     disabled={!props.wallet_connected || *is_loading}
                 >
-                    { "Get 100 test USDT (faucet)" }
+                    { "Get 100 test USDC (faucet)" }
                 </button>
             </form>
 
             <div class="help-text">
-                <p>{"💡 No test USDT? Use the faucet button above, then approve and deposit. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}</p>
+                <p>{"💡 No test USDC? Use the faucet button above, then approve and deposit. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}</p>
             </div>
         </div>
     }

@@ -65,7 +65,7 @@ recipient `anWorkchain`/`anAccount` was bound in-circuit on 2026-06-02):
 |---|---|---|---|
 | 0 | `depositId` | uint256 | Indexed value from `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` |
 | 1 | `sender` | uint256 (uint160 cast) | `msg.sender` of `deposit()` |
-| 2 | `amount` | uint256 | USDT `amount` argument of `deposit()` |
+| 2 | `amount` | uint256 | USDC `amount` argument of `deposit()` |
 | 3 | `contractAddress` | uint256 (uint160 cast) | The bridge contract address itself |
 | 4 | `anWorkchain` | uint256 (sign-extended int8 word) | AN destination workchain from the `Deposit` event |
 | 5 | `anAccountHigh` | uint128 | Upper 128 bits of the 256-bit AN account |

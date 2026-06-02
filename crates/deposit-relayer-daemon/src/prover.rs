@@ -6,10 +6,10 @@
 //! workspace's dependency tree). Rather than force-merge two halo2 backends,
 //! this crate keeps proof generation behind a trait with two backends:
 //!
-//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the ten
-//!   public inputs (including the AN destination) straight from the event so
-//!   the relayer + submitter can be driven end-to-end in unit tests in
-//!   microseconds.
+//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the eleven
+//!   public inputs (including the AN destination account and the config dappId
+//!   tag) straight from the event so the relayer + submitter can be driven
+//!   end-to-end in unit tests in microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
@@ -35,15 +35,18 @@ pub trait ProofGenerator: Send + Sync {
 // MockProofGenerator — deterministic, no halo2
 // ─────────────────────────────────────────────────────────────────────
 
-/// Deterministic proof generator for tests. Derives the ten public inputs
-/// (including the AN destination) from the event the same way the real circuit
-/// binds them (so the submitter's `finalizeDeposit` args are realistic), and
-/// emits canned `vk_blob` / `proof` bytes.
+/// Deterministic proof generator for tests. Derives the eleven public inputs
+/// (the AN destination account from the event the same way the real circuit
+/// binds it, plus the config dappId tag) so the submitter's `finalizeDeposit`
+/// args are realistic, and emits canned `vk_blob` / `proof` bytes.
 #[derive(Clone, Debug, Default)]
 pub struct MockProofGenerator {
     /// When set, `generate` fails for this `deposit_id` — lets tests
     /// exercise the proof-generation-error path.
     pub fail_on: Option<u64>,
+    /// Config-supplied AN dApp identifier (UInt256) bound as the dappId public
+    /// inputs. Defaults to zero.
+    pub dapp_id: U256,
 }
 
 impl MockProofGenerator {
@@ -54,11 +57,21 @@ impl MockProofGenerator {
     pub fn failing_on(deposit_id: u64) -> Self {
         Self {
             fail_on: Some(deposit_id),
+            dapp_id: U256::ZERO,
         }
     }
 
-    /// The public inputs the real circuit would commit to for this event.
-    pub fn derive_public_inputs(event: &DepositEvent) -> DepositPublicInputs {
+    /// Build a mock generator that stamps a given config dappId into the proof.
+    pub fn with_dapp_id(dapp_id: U256) -> Self {
+        Self {
+            fail_on: None,
+            dapp_id,
+        }
+    }
+
+    /// The public inputs the real circuit would commit to for this event, given
+    /// the config-supplied `dapp_id` tag (not part of the event).
+    pub fn derive_public_inputs(event: &DepositEvent, dapp_id: U256) -> DepositPublicInputs {
         let addr_to_field = |bytes: &[u8]| {
             let mut buf = [0u8; 32];
             buf[12..].copy_from_slice(bytes);
@@ -69,14 +82,16 @@ impl MockProofGenerator {
             buf[32 - slice.len()..].copy_from_slice(slice);
             U256::from_be_bytes::<32>(buf)
         };
+        let dapp_be = dapp_id.to_be_bytes::<32>();
         DepositPublicInputs {
             deposit_id: U256::from(event.deposit_id),
             sender: addr_to_field(event.sender.as_slice()),
             amount: event.amount,
             contract_address: addr_to_field(event.source_contract.as_slice()),
-            // AN destination, exactly as the circuit binds it: workchain as the
-            // value (non-negative), account split into 16-byte halves.
-            an_workchain: U256::from(event.an_workchain.max(0) as u64),
+            // dappId is the config tag, split into 16-byte halves (not from the
+            // event). The AN account is bound from the event, split likewise.
+            dapp_id_high: half(&dapp_be[0..16]),
+            dapp_id_low: half(&dapp_be[16..32]),
             an_account_high: half(&event.an_account.as_slice()[0..16]),
             an_account_low: half(&event.an_account.as_slice()[16..32]),
             block_hash_high: half(&event.block_hash.as_slice()[0..16]),
@@ -95,7 +110,7 @@ impl ProofGenerator for MockProofGenerator {
                 event.deposit_id
             )));
         }
-        let parsed = Self::derive_public_inputs(event);
+        let parsed = Self::derive_public_inputs(event, self.dapp_id);
         Ok(DepositProofBundle {
             // Canned, non-empty operands — the relayer + submitter only care
             // about shape and the decoded public inputs in mock scenarios.
@@ -124,6 +139,9 @@ pub struct SubprocessProverConfig {
     pub max_data_byte_len: usize,
     /// `--max-log-num` upper bound on logs in the receipt.
     pub max_log_num: usize,
+    /// Config-supplied Acki Nacki dApp identifier (UInt256), hex string. Passed
+    /// to `fetch_deposit_data --dapp-id`; bound as the dappId public inputs.
+    pub dapp_id: String,
     /// Hard timeout for the whole three-step pipeline. Halo2 proving for a
     /// fresh proving key can take minutes, so default generously.
     pub timeout: Duration,
@@ -137,6 +155,7 @@ impl SubprocessProverConfig {
             degree: 18,
             max_data_byte_len: 256,
             max_log_num: 20,
+            dapp_id: "0".to_string(),
             timeout: Duration::from_secs(900),
         }
     }
@@ -147,7 +166,7 @@ impl SubprocessProverConfig {
 /// 1. `fetch_deposit_data` — RPC → `DepositProofInput` JSON (receipt RLP, MPT
 ///    proof, block header, parsed event fields);
 /// 2. `export_vk_blob` — v2 RLC `VkBlob` for the deposit circuit;
-/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 10×32-byte LE
+/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 11×32-byte LE
 ///    public-input operand.
 ///
 /// The three resulting files are read back and assembled into a
@@ -228,6 +247,8 @@ impl ProofGenerator for SubprocessProofGenerator {
             contract,
             "--log-index".into(),
             log_index,
+            "--dapp-id".into(),
+            self.config.dapp_id.clone(),
             "--output".into(),
             input_json.display().to_string(),
         ])

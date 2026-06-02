@@ -72,7 +72,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     // ─── Test rig ─────────────────────────────────────────────────────────
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
-    MockERC20 internal usdt;
+    MockERC20 internal usdc;
     PrimaryGroth16VerifierGenerated internal primaryGroth16;
     PrimaryVerifier internal primaryVerifier;
     LayerHashesGroth16VerifierGenerated internal layerHashesGroth16;
@@ -88,7 +88,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
-        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
+        usdc = new MockERC20("Mock USDC", "mUSDC", 6);
 
         primaryGroth16 = new PrimaryGroth16VerifierGenerated();
         primaryVerifier = new PrimaryVerifier(address(primaryGroth16));
@@ -106,7 +106,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             vb,
@@ -438,7 +438,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
     function test_verifyBlock_disabled_revertsOnFreshBridge() public {
         AckiNackiBridge disabled = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -463,7 +463,7 @@ contract AckiNackiBridgeVerifyBlockTest is Test {
         // Only primary wired; fallback + layer-hashes both zero.
         AckiNackiBridge partialBridge = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             VerifyBlockConfigLib.with(

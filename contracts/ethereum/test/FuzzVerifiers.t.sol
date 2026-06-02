@@ -5,7 +5,7 @@ import "forge-std/Test.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/MockBlockHeaderOracle.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
-import "./helpers/UsdtTestLib.sol";
+import "./helpers/UsdcTestLib.sol";
 import "./mocks/MockERC20.sol";
 
 /**
@@ -166,7 +166,7 @@ contract FuzzHalo2VerifierTest is Test {
 contract FuzzAckiNackiBridgeDepositTest is Test {
     AckiNackiBridge public bridge;
     MockBlockHeaderOracle public oracle;
-    MockERC20 public usdt;
+    MockERC20 public usdc;
 
     event Deposit(
         uint256 indexed depositId,
@@ -179,10 +179,10 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
-        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
+        usdc = new MockERC20("Mock USDC", "mUSDC", 6);
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             VerifyBlockConfigLib.disabled(),
@@ -192,17 +192,17 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     /// @notice Any valid deposit amount should succeed and update state correctly
     function testFuzz_DepositAmountInvariants(uint256 amount) public {
-        amount = bound(amount, 1, 100 * UsdtTestLib.UNIT);
+        amount = bound(amount, 1, 100 * UsdcTestLib.UNIT);
 
         address user = address(uint160(uint256(keccak256(abi.encodePacked(amount)))));
-        usdt.mint(user, amount);
+        usdc.mint(user, amount);
 
         uint256 counterBefore = bridge.depositCounter();
         uint256 treasuryBefore = bridge.treasuryBalance();
-        uint256 bridgeBalBefore = usdt.balanceOf(address(bridge));
+        uint256 bridgeBalBefore = usdc.balanceOf(address(bridge));
 
         vm.startPrank(user);
-        usdt.approve(address(bridge), amount);
+        usdc.approve(address(bridge), amount);
         bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
@@ -211,17 +211,17 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
             bridge.treasuryBalance(), treasuryBefore + amount, "Treasury must increase by amount"
         );
         assertEq(
-            usdt.balanceOf(address(bridge)), bridgeBalBefore + amount, "Bridge USDT must increase"
+            usdc.balanceOf(address(bridge)), bridgeBalBefore + amount, "Bridge USDC must increase"
         );
     }
 
     /// @notice Amounts outside valid range must revert
     function testFuzz_DepositInvalidAmountReverts(uint256 amount) public {
-        vm.assume(amount == 0 || amount > 100 * UsdtTestLib.UNIT);
+        vm.assume(amount == 0 || amount > 100 * UsdcTestLib.UNIT);
         address user = address(0xBEEF);
-        usdt.mint(user, type(uint256).max);
+        usdc.mint(user, type(uint256).max);
         vm.startPrank(user);
-        usdt.approve(address(bridge), amount);
+        usdc.approve(address(bridge), amount);
 
         if (amount == 0) {
             vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
@@ -240,18 +240,18 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         for (uint256 i = 0; i < count; i++) {
             address user = address(uint160(uint256(keccak256(abi.encodePacked(seed, i)))));
             uint256 amount = bound(
-                uint256(keccak256(abi.encodePacked(seed, i, "amount"))), 1, 10 * UsdtTestLib.UNIT
+                uint256(keccak256(abi.encodePacked(seed, i, "amount"))), 1, 10 * UsdcTestLib.UNIT
             );
-            UsdtTestLib.depositUsdt(vm, usdt, bridge, user, amount);
+            UsdcTestLib.depositUsdc(vm, usdc, bridge, user, amount);
             totalDeposited += amount;
         }
 
         assertEq(bridge.depositCounter(), count, "Counter must match deposit count");
         assertEq(bridge.treasuryBalance(), totalDeposited, "Treasury must equal total deposited");
         assertEq(
-            usdt.balanceOf(address(bridge)),
+            usdc.balanceOf(address(bridge)),
             totalDeposited,
-            "Bridge USDT must equal total deposited"
+            "Bridge USDC must equal total deposited"
         );
     }
 }

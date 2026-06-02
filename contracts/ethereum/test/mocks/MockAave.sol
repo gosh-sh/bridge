@@ -5,10 +5,10 @@ import "../../src/IAavePool.sol";
 import "../../src/IERC20.sol";
 import "./MockERC20.sol";
 
-/// @title MockAUSDT
+/// @title MockAUSDC
 /// @notice Minimal 6-decimal aToken with test-only mint/burn hooks.
-contract MockAUSDT is MockERC20 {
-    constructor() MockERC20("Mock aUSDT", "maUSDT", 6) { }
+contract MockAUSDC is MockERC20 {
+    constructor() MockERC20("Mock aUSDC", "maUSDC", 6) { }
 
     function mintTo(address to, uint256 amount) external {
         mint(to, amount);
@@ -25,14 +25,14 @@ contract MockAUSDT is MockERC20 {
 }
 
 /// @title MockAavePool
-/// @notice Test-only AAVE V3 Pool that proxies ERC-20 `supply`/`withdraw` to MockAUSDT.
+/// @notice Test-only AAVE V3 Pool that proxies ERC-20 `supply`/`withdraw` to MockAUSDC.
 contract MockAavePool is IAavePool {
     IERC20 public immutable underlying;
-    MockAUSDT public immutable aToken;
+    MockAUSDC public immutable aToken;
 
     constructor(address _underlying, address _aToken) {
         underlying = IERC20(_underlying);
-        aToken = MockAUSDT(_aToken);
+        aToken = MockAUSDC(_aToken);
     }
 
     function supply(address, uint256 amount, address onBehalfOf, uint16) external override {
@@ -43,7 +43,7 @@ contract MockAavePool is IAavePool {
     function withdraw(address, uint256 amount, address to) external override returns (uint256) {
         uint256 bal = aToken.balanceOf(msg.sender);
         uint256 payout = amount == type(uint256).max ? bal : amount;
-        require(bal >= payout, "pool: insufficient aUSDT");
+        require(bal >= payout, "pool: insufficient aUSDC");
         aToken.burnFrom(msg.sender, payout);
         require(underlying.transfer(to, payout), "pool: push");
         return payout;

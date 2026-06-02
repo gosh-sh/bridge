@@ -6,18 +6,18 @@
 /// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
 pub const BRIDGE_CONTRACT_ADDRESS: &str = "0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9";
 
-/// USDT (ERC-20, 6 decimals) accepted for deposits.
-/// Sepolia testnet: the Aave V3 faucet USDT underlying.
-pub const USDT_CONTRACT_ADDRESS: &str = "0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0";
+/// USDC (ERC-20, 6 decimals) accepted for deposits.
+/// Sepolia testnet: the Aave V3 faucet USDC underlying.
+pub const USDC_CONTRACT_ADDRESS: &str = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8";
 
-/// Aave V3 Sepolia permissionless faucet — mints test USDT for dev wallets.
+/// Aave V3 Sepolia permissionless faucet — mints test USDC for dev wallets.
 pub const AAVE_FAUCET_ADDRESS: &str = "0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D";
 
-/// USDT decimals (Tether uses 6 on Ethereum).
-pub const USDT_DECIMALS: u32 = 6;
+/// USDC decimals (USD Coin uses 6 on Ethereum).
+pub const USDC_DECIMALS: u32 = 6;
 
-/// One whole USDT expressed in base units (10^6).
-pub const USDT_UNIT: u128 = 1_000_000;
+/// One whole USDC expressed in base units (10^6).
+pub const USDC_UNIT: u128 = 1_000_000;
 
 /// Sepolia Chain ID
 pub const SEPOLIA_CHAIN_ID: u32 = 11155111;
@@ -34,7 +34,7 @@ pub const NETWORK_NAME: &str = "Sepolia";
 /// Block explorer URL
 pub const BLOCK_EXPLORER_URL: &str = "https://sepolia.etherscan.io";
 
-/// Bridge + USDT contract ABI (minimal — just the functions the UI calls).
+/// Bridge + USDC contract ABI (minimal — just the functions the UI calls).
 pub const BRIDGE_ABI: &str = r#"[
     {
         "inputs": [

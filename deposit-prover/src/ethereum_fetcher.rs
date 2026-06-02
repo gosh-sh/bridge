@@ -188,6 +188,10 @@ impl EthereumFetcher {
         Ok(DepositProofInput {
             event_data,
             receipt_proof,
+            // dappId is a config tag, not part of the event. Defaults to zero
+            // here; callers (CLI / prover config) overwrite `input.dapp_id`
+            // with the operator-configured Acki Nacki dApp identifier.
+            dapp_id: [0u8; 32],
         })
     }
 }

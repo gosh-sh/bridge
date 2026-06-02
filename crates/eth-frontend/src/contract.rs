@@ -6,7 +6,7 @@
 //!
 //! ABI surface — Phase 4.3 (Decision Log 2026-05-17) retired the legacy
 //! refund-style `withdraw()` plus its `processedDeposits`/`Withdrawal`
-//! surface; this client now exposes the USDT deposit + read-only views only.
+//! surface; this client now exposes the USDC deposit + read-only views only.
 //! The relayer (`crates/bridge-relayer-daemon`) holds the AN→ETH
 //! `verifyBlock` ABI; a future burn-proof flow will reintroduce a real
 //! cross-chain withdrawal once the corresponding circuit lands.
@@ -40,7 +40,7 @@ sol! {
         function deposit(uint256 amount) external;
         function treasuryBalance() external view returns (uint256);
         function depositCounter() external view returns (uint256);
-        function usdt() external view returns (address);
+        function usdc() external view returns (address);
 
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
     }
@@ -53,7 +53,7 @@ sol! {
 /// instance, read-only callers can pass a plain HTTP provider.
 pub struct EthereumContract<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
-    usdt: IERC20::IERC20Instance<P, N>,
+    usdc: IERC20::IERC20Instance<P, N>,
     provider: P,
 }
 
@@ -62,37 +62,37 @@ where
     P: Provider<N> + Clone,
     N: Network,
 {
-    /// Construct a binding to the deployed bridge. Reads `usdt()` from chain.
+    /// Construct a binding to the deployed bridge. Reads `usdc()` from chain.
     pub async fn new(contract_address: Address, provider: P) -> Result<Self> {
         let contract = AckiNackiBridge::new(contract_address, provider.clone());
-        let usdt_addr = contract
-            .usdt()
+        let usdc_addr = contract
+            .usdc()
             .call()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))?;
-        let usdt = IERC20::new(usdt_addr, provider.clone());
+        let usdc = IERC20::new(usdc_addr, provider.clone());
         Ok(Self {
             contract,
-            usdt,
+            usdc,
             provider,
         })
     }
 
-    /// USDT token address wired into the bridge.
-    pub fn usdt_address(&self) -> Address {
-        *self.usdt.address()
+    /// USDC token address wired into the bridge.
+    pub fn usdc_address(&self) -> Address {
+        *self.usdc.address()
     }
 
-    /// Mint test USDT from the Aave Sepolia faucet into `recipient`.
-    /// Use before E2E deposits when the wallet has no USDT.
-    pub async fn fund_usdt_from_aave_faucet(
+    /// Mint test USDC from the Aave Sepolia faucet into `recipient`.
+    /// Use before E2E deposits when the wallet has no USDC.
+    pub async fn fund_usdc_from_aave_faucet(
         &self,
         recipient: Address,
         amount: U256,
     ) -> Result<N::ReceiptResponse> {
         let faucet = AaveFaucet::new(sepolia::AAVE_FAUCET, self.provider.clone());
         let pending = faucet
-            .mint(sepolia::USDT, recipient, amount)
+            .mint(sepolia::USDC, recipient, amount)
             .send()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))?;
@@ -102,11 +102,11 @@ where
             .map_err(|e| BridgeError::ContractError(e.to_string()))
     }
 
-    /// Ensure the signer has approved the bridge for `amount` USDT.
-    pub async fn ensure_usdt_approval(&self, owner: Address, amount: U256) -> Result<bool> {
+    /// Ensure the signer has approved the bridge for `amount` USDC.
+    pub async fn ensure_usdc_approval(&self, owner: Address, amount: U256) -> Result<bool> {
         let bridge_addr = *self.contract.address();
         let current = self
-            .usdt
+            .usdc
             .allowance(owner, bridge_addr)
             .call()
             .await
@@ -115,7 +115,7 @@ where
             return Ok(false);
         }
         let pending = self
-            .usdt
+            .usdc
             .approve(bridge_addr, amount)
             .send()
             .await
@@ -127,9 +127,9 @@ where
         Ok(true)
     }
 
-    /// Approve (if needed) and deposit USDT. Returns the deposit tx receipt.
+    /// Approve (if needed) and deposit USDC. Returns the deposit tx receipt.
     pub async fn deposit(&self, owner: Address, amount: U256) -> Result<N::ReceiptResponse> {
-        self.ensure_usdt_approval(owner, amount).await?;
+        self.ensure_usdc_approval(owner, amount).await?;
         let pending = self
             .contract
             .deposit(amount)
@@ -148,7 +148,7 @@ where
         recipient: Address,
         amount: U256,
     ) -> Result<N::ReceiptResponse> {
-        self.fund_usdt_from_aave_faucet(recipient, amount).await?;
+        self.fund_usdc_from_aave_faucet(recipient, amount).await?;
         self.deposit(recipient, amount).await
     }
 

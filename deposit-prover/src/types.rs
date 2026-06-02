@@ -51,6 +51,13 @@ pub struct DepositProofInput {
     pub event_data: DepositEventData,
     /// Receipt proof (private - proves event exists in Ethereum state)
     pub receipt_proof: ReceiptProof,
+    /// Acki Nacki destination dApp identifier (`UInt256`, 32 bytes big-endian).
+    /// Config-supplied (not part of the Ethereum `Deposit` event): the bridge
+    /// operator sets which AN dApp a deposit credits. Bound as the
+    /// `dappIdHigh`/`dappIdLow` public inputs (replaced `anWorkchain` on
+    /// 2026-06-02) and checked by `TokenBridge.finalizeDeposit` on the AN side.
+    #[serde(default)]
+    pub dapp_id: [u8; 32],
 }
 
 /// Output of deposit proof generation
@@ -67,8 +74,10 @@ pub struct DepositProofOutput {
     /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
     /// 18.44 ETH
     pub amount: [u8; 32],
-    /// Acki Nacki destination workchain id (TVM `int8`).
-    pub an_workchain: i8,
+    /// Acki Nacki destination dApp identifier (`UInt256`, 32 bytes big-endian).
+    /// Config-supplied tag bound as `dappIdHigh`/`dappIdLow` public inputs
+    /// (replaced `anWorkchain` on 2026-06-02).
+    pub dapp_id: [u8; 32],
     /// Acki Nacki destination account (256-bit TVM address).
     pub an_account: [u8; 32],
     pub contract_address: [u8; 20],
@@ -84,7 +93,7 @@ impl DepositProofOutput {
         deposit_id: u64,
         sender: [u8; 20],
         amount: [u8; 32],
-        an_workchain: i8,
+        dapp_id: [u8; 32],
         an_account: [u8; 32],
         contract_address: [u8; 20],
         block_hash: [u8; 32],
@@ -96,7 +105,7 @@ impl DepositProofOutput {
             deposit_id,
             sender,
             amount,
-            an_workchain,
+            dapp_id,
             an_account,
             contract_address,
             block_hash,

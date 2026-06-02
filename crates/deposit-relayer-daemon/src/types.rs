@@ -7,15 +7,15 @@
 //! 1. A [`DepositEvent`] — the parsed on-chain `Deposit(depositId, sender,
 //!    amount, anWorkchain, anAccount, timestamp)` log plus the
 //!    receipt-locating metadata the prover needs (`tx_hash`, `log_index`,
-//!    `block_number`). `anWorkchain`/`anAccount` are the Acki Nacki
-//!    destination (an EVM address cannot be an AN recipient).
+//!    `block_number`). `anAccount` is the Acki Nacki destination account (an
+//!    EVM address cannot be an AN recipient).
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
-//! 3. The [`DepositPublicInputs`] — the ten field elements the proof commits
-//!    to (including the Acki Nacki destination), decoded from the
-//!    `public_inputs` operand so the submitter can build the
-//!    `finalizeDeposit(...)` call arguments.
+//! 3. The [`DepositPublicInputs`] — the eleven field elements the proof commits
+//!    to (including the Acki Nacki destination account and the config-supplied
+//!    `dappId` tag), decoded from the `public_inputs` operand so the submitter
+//!    can build the `finalizeDeposit(...)` call arguments.
 
 use alloy::primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -23,14 +23,16 @@ use serde::{Deserialize, Serialize};
 use crate::error::RelayerError;
 
 /// Number of public inputs the deposit circuit commits to. Matches
-/// `deposit-prover`'s `num_instance() == vec![10]`:
-/// `[depositId, sender, amount, contractAddress, anWorkchain, anAccountHigh,
-/// anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
+/// `deposit-prover`'s `num_instance() == vec![11]`:
+/// `[depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow,
+/// anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
 ///
-/// `anWorkchain`/`anAccount{High,Low}` bind the Acki Nacki destination into the
-/// proof (an EVM address is not a valid AN recipient), so the AN side credits a
-/// proven account rather than trusting an off-circuit relayer hint.
-pub const NUM_PUBLIC_INPUTS: usize = 10;
+/// `anAccount{High,Low}` bind the Acki Nacki destination account into the proof
+/// (an EVM address is not a valid AN recipient). `dappId{High,Low}` (the UInt256
+/// AN dApp identifier, replaced `anWorkchain` on 2026-06-02) is a config-supplied
+/// tag — it is not bound to event data in-circuit; `TokenBridge.finalizeDeposit`
+/// checks it against its configured dappId.
+pub const NUM_PUBLIC_INPUTS: usize = 11;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
 pub const PUBLIC_INPUT_BYTES: usize = NUM_PUBLIC_INPUTS * 32;
@@ -51,15 +53,16 @@ pub struct DepositEvent {
     /// Deposited amount (event data word 0).
     pub amount: U256,
     /// Acki Nacki destination workchain id (TVM `int8`, event data word 1).
+    /// Still emitted by the event; no longer bound in-circuit (the dappId tag
+    /// took its public-input slot on 2026-06-02). Kept for logging / recipient
+    /// reconstruction on the AN side.
     pub an_workchain: i8,
     /// Acki Nacki destination account (256-bit TVM address, event data word 2).
     ///
     /// The EVM `sender` is not a valid AN recipient (different address system),
-    /// so the destination is chosen by the depositor and carried here. Until the
-    /// deposit circuit binds it as public inputs (see the `TODO(an-recipient)` in
-    /// `deposit-prover/src/circuit_v2.rs`), the relayer forwards it to
-    /// `finalizeDeposit` out-of-circuit — trusted only insofar as the relayer
-    /// faithfully relays the on-chain event it already proved the core fields of.
+    /// so the destination is chosen by the depositor and carried here. The
+    /// deposit circuit binds it as the `anAccountHigh`/`anAccountLow` public
+    /// inputs (2026-06-02), so the AN side credits a proven account.
     pub an_account: B256,
     /// Block timestamp recorded in the event (event data word 3).
     pub timestamp: U256,
@@ -77,23 +80,23 @@ pub struct DepositEvent {
     pub source_contract: Address,
 }
 
-/// The ten public inputs the deposit proof commits to, decoded from the
+/// The eleven public inputs the deposit proof commits to, decoded from the
 /// `public_inputs` opcode operand. Each is a full `U256` (the field element
 /// re-interpreted as an integer); the submitter forwards these as the
 /// `finalizeDeposit(...)` scalar arguments.
 ///
-/// `an_workchain` is the full 32-byte ABI word of the `int8` workchain (so a
-/// non-negative workchain `w` decodes to `U256::from(w)`); `an_account_high` /
-/// `an_account_low` are the high/low 16-byte halves of the 256-bit AN account,
-/// matching the circuit's split. The AN side reconstructs the account as
-/// `(an_account_high << 128) | an_account_low`.
+/// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
+/// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
+/// `an_account_low` are the high/low halves of the 256-bit AN account, matching
+/// the circuit's split. The AN side reconstructs each as `(high << 128) | low`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DepositPublicInputs {
     pub deposit_id: U256,
     pub sender: U256,
     pub amount: U256,
     pub contract_address: U256,
-    pub an_workchain: U256,
+    pub dapp_id_high: U256,
+    pub dapp_id_low: U256,
     pub an_account_high: U256,
     pub an_account_low: U256,
     pub block_hash_high: U256,
@@ -124,12 +127,13 @@ impl DepositPublicInputs {
             sender: field(1),
             amount: field(2),
             contract_address: field(3),
-            an_workchain: field(4),
-            an_account_high: field(5),
-            an_account_low: field(6),
-            block_hash_high: field(7),
-            block_hash_low: field(8),
-            promise_commit: field(9),
+            dapp_id_high: field(4),
+            dapp_id_low: field(5),
+            an_account_high: field(6),
+            an_account_low: field(7),
+            block_hash_high: field(8),
+            block_hash_low: field(9),
+            promise_commit: field(10),
         })
     }
 
@@ -143,7 +147,8 @@ impl DepositPublicInputs {
             self.sender,
             self.amount,
             self.contract_address,
-            self.an_workchain,
+            self.dapp_id_high,
+            self.dapp_id_low,
             self.an_account_high,
             self.an_account_low,
             self.block_hash_high,
@@ -159,6 +164,11 @@ impl DepositPublicInputs {
     pub fn an_account(&self) -> U256 {
         (self.an_account_high << 128) | self.an_account_low
     }
+
+    /// Reconstruct the full 256-bit Acki Nacki dApp identifier from its halves.
+    pub fn dapp_id(&self) -> U256 {
+        (self.dapp_id_high << 128) | self.dapp_id_low
+    }
 }
 
 /// The three operands the AN-side `ZKHALO2VERIFYWITHVK` opcode consumes,
@@ -168,7 +178,7 @@ impl DepositPublicInputs {
 ///
 /// ```text
 /// bottom: vk_cell            ← `vk_blob`        (VkBlob v2 RLC for deposit)
-/// middle: public_inputs_cell ← `public_inputs`  (10 × 32-byte LE Fr, no header)
+/// middle: public_inputs_cell ← `public_inputs`  (11 × 32-byte LE Fr, no header)
 /// top:    proof_cell         ← `proof`          (raw Blake2b SHPLONK bytes)
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -226,9 +236,11 @@ impl DepositProofBundle {
                 self.parsed.sender, event.sender
             )));
         }
-        // The AN destination is bound in-circuit; it must match the event we
-        // read from chain. The 16-byte account halves are below the field
-        // modulus so they're exact; workchain is exact for the common w >= 0.
+        // The AN destination account is bound in-circuit; it must match the
+        // event we read from chain. The 16-byte account halves are below the
+        // field modulus so they're exact. dappId is a config tag (not in the
+        // event), so it is not checked against the event here — the AN-side
+        // TokenBridge verifies it against its configured dappId.
         let exp_acc_hi = U256::from_be_slice(&event.an_account.as_slice()[0..16]);
         let exp_acc_lo = U256::from_be_slice(&event.an_account.as_slice()[16..32]);
         if self.parsed.an_account_high != exp_acc_hi || self.parsed.an_account_low != exp_acc_lo {
@@ -237,15 +249,6 @@ impl DepositProofBundle {
                 self.parsed.an_account(),
                 U256::from_be_slice(event.an_account.as_slice())
             )));
-        }
-        if event.an_workchain >= 0 {
-            let expected_wc = U256::from(event.an_workchain as u64);
-            if self.parsed.an_workchain != expected_wc {
-                return Err(RelayerError::ProofGeneration(format!(
-                    "proof anWorkchain {:#x} != event anWorkchain {}",
-                    self.parsed.an_workchain, event.an_workchain
-                )));
-            }
         }
         Ok(())
     }
@@ -262,7 +265,8 @@ mod tests {
             sender: U256::from(0x1234u64),
             amount: U256::from(1_000_000u64),
             contract_address: U256::from(0xabcdu64),
-            an_workchain: U256::from(0u64),
+            dapp_id_high: U256::from(0xaaaa_bbbbu64),
+            dapp_id_low: U256::from(0xcccc_ddddu64),
             an_account_high: U256::from(0x1111_2222u64),
             an_account_low: U256::from(0x3333_4444u64),
             block_hash_high: U256::from(0xdead_beefu64),
@@ -273,10 +277,14 @@ mod tests {
         assert_eq!(operand.len(), PUBLIC_INPUT_BYTES);
         let back = DepositPublicInputs::from_operand(&operand).unwrap();
         assert_eq!(pi, back);
-        // High/low halves reconstruct the full account.
+        // High/low halves reconstruct the full account and dappId.
         assert_eq!(
             pi.an_account(),
             (U256::from(0x1111_2222u64) << 128) | U256::from(0x3333_4444u64)
+        );
+        assert_eq!(
+            pi.dapp_id(),
+            (U256::from(0xaaaa_bbbbu64) << 128) | U256::from(0xcccc_ddddu64)
         );
     }
 
@@ -297,7 +305,8 @@ mod tests {
             }),
             amount: U256::from(5u64),
             contract_address: U256::ZERO,
-            an_workchain: U256::ZERO,
+            dapp_id_high: U256::from_be_slice(&[0x77u8; 16]),
+            dapp_id_low: U256::from_be_slice(&[0x88u8; 16]),
             an_account_high: U256::from_be_slice(&[0x55u8; 16]),
             an_account_low: U256::from_be_slice(&[0x55u8; 16]),
             block_hash_high: U256::ZERO,

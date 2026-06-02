@@ -8,7 +8,7 @@ pub fn stats() -> Html {
                 <div class="stat-icon">{"💰"}</div>
                 <div class="stat-content">
                     <div class="stat-value">{"1,234.56"}</div>
-                    <div class="stat-label">{"Total Value Locked (USDT)"}</div>
+                    <div class="stat-label">{"Total Value Locked (USDC)"}</div>
                 </div>
             </div>
 

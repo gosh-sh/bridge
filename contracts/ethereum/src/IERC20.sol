@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 /// @title IERC20 (minimal)
-/// @notice Trimmed ERC-20 interface — only the calls the bridge needs for USDT / aToken custody.
+/// @notice Trimmed ERC-20 interface — only the calls the bridge needs for USDC / aToken custody.
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);

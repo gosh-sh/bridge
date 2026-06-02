@@ -16,7 +16,7 @@ import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
-import "./helpers/UsdtTestLib.sol";
+import "./helpers/UsdcTestLib.sol";
 
 /// @title AckiNackiBridgePauseTest
 /// @notice Tests for the global pause / unpause flag (incident-response control).
@@ -38,7 +38,7 @@ import "./helpers/UsdtTestLib.sol";
 contract AckiNackiBridgePauseTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
-    MockERC20 internal usdt;
+    MockERC20 internal usdc;
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
@@ -66,7 +66,7 @@ contract AckiNackiBridgePauseTest is Test {
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
-        usdt = new MockERC20("Mock USDT", "mUSDT", 6);
+        usdc = new MockERC20("Mock USDC", "mUSDC", 6);
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
@@ -79,7 +79,7 @@ contract AckiNackiBridgePauseTest is Test {
 
         bridge = new AckiNackiBridge(
             address(oracle),
-            address(usdt),
+            address(usdc),
             address(0),
             address(0),
             VerifyBlockConfigLib.with(
@@ -94,7 +94,7 @@ contract AckiNackiBridgePauseTest is Test {
             )
         );
 
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, funder, 50 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
 
         seedAnchor = _seedFirstBlock();
     }
@@ -207,11 +207,11 @@ contract AckiNackiBridgePauseTest is Test {
 
     function test_deposit_blockedWhilePaused() public {
         bridge.pause();
-        usdt.mint(funder, 1 * UsdtTestLib.UNIT);
+        usdc.mint(funder, 1 * UsdcTestLib.UNIT);
         vm.startPrank(funder);
-        usdt.approve(address(bridge), 1 * UsdtTestLib.UNIT);
+        usdc.approve(address(bridge), 1 * UsdcTestLib.UNIT);
         vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
-        bridge.deposit(1 * UsdtTestLib.UNIT, int8(0), bytes32(uint256(uint160(funder))));
+        bridge.deposit(1 * UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(funder))));
         vm.stopPrank();
     }
 
@@ -240,7 +240,7 @@ contract AckiNackiBridgePauseTest is Test {
         bridge.pause();
         vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
         bridge.withdrawByProof(
-            _dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("paused-w")))
+            _dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("paused-w")))
         );
     }
 
@@ -253,7 +253,7 @@ contract AckiNackiBridgePauseTest is Test {
         bridge.unpause();
 
         // Deposit works again.
-        UsdtTestLib.depositUsdt(vm, usdt, bridge, funder, 1 * UsdtTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 1 * UsdcTestLib.UNIT);
 
         // verifyBlock works again.
         uint256[10] memory layers = _block2Layers();
@@ -271,7 +271,7 @@ contract AckiNackiBridgePauseTest is Test {
 
         // withdrawByProof works again.
         bool ok = bridge.withdrawByProof(
-            _dummyProof(), _defaultPub(1 * UsdtTestLib.UNIT, uint256(keccak256("resume-w")))
+            _dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("resume-w")))
         );
         assertTrue(ok);
     }

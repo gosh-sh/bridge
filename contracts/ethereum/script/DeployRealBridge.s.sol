@@ -84,13 +84,13 @@ contract DeployRealBridge is Script {
 
     // AAVE V3 Ethereum mainnet addresses (https://github.com/bgd-labs/aave-address-book)
     address constant AAVE_V3_POOL_MAINNET = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
-    address constant USDT_MAINNET = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
-    address constant AAVE_V3_aUSDT_MAINNET = 0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a;
+    address constant USDC_MAINNET = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant AAVE_V3_aUSDC_MAINNET = 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c;
 
     // AAVE V3 Sepolia addresses (https://github.com/bgd-labs/aave-address-book)
     address constant AAVE_V3_POOL_SEPOLIA = 0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951;
-    address constant USDT_SEPOLIA = 0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0;
-    address constant AAVE_V3_aUSDT_SEPOLIA = 0xAF0F6e8b0Dc5c913bbF4d14c22B4E78Dd14310B6;
+    address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
+    address constant AAVE_V3_aUSDC_SEPOLIA = 0x16dA4541aD1807f4443d92D26044C1147406EB80;
 
     function run() external {
         bool useAxiomOracle = vm.envOr("USE_AXIOM_ORACLE", false);
@@ -134,8 +134,8 @@ contract DeployRealBridge is Script {
         address layerHashesVerifierAddr;
         address bridgeAddr;
         {
-            // Step 2: USDT + AAVE addresses.
-            (address usdtAddr, address aavePool, address aUSDT) = _resolveTokenAddresses(useAave);
+            // Step 2: USDC + AAVE addresses.
+            (address usdcAddr, address aavePool, address aUSDC) = _resolveTokenAddresses(useAave);
 
             // Step 3: optional AN→ETH verifier triple. Extracted into a
             //         helper so the six per-contract locals don't pile up
@@ -158,9 +158,9 @@ contract DeployRealBridge is Script {
             console.log("Deploying AckiNackiBridge...");
             AckiNackiBridge bridge = new AckiNackiBridge(
                 oracleAddr,
-                usdtAddr,
+                usdcAddr,
                 aavePool,
-                aUSDT,
+                aUSDC,
                 vb,
                 AckiNackiBridge.BridgeWithdrawConfig({
                     bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
@@ -261,43 +261,43 @@ contract DeployRealBridge is Script {
         console.log(string(abi.encodePacked(oracleType, " deployed at:")), oracleAddr);
     }
 
-    /// Resolve USDT + optional AAVE V3 addresses for the bridge constructor.
+    /// Resolve USDC + optional AAVE V3 addresses for the bridge constructor.
     function _resolveTokenAddresses(bool useAave)
         internal
         view
-        returns (address usdtAddr, address aavePool, address aUSDT)
+        returns (address usdcAddr, address aavePool, address aUSDC)
     {
         if (block.chainid == 1) {
-            usdtAddr = USDT_MAINNET;
+            usdcAddr = USDC_MAINNET;
             if (useAave) {
                 aavePool = AAVE_V3_POOL_MAINNET;
-                aUSDT = AAVE_V3_aUSDT_MAINNET;
-                console.log("AAVE integration: ENABLED (mainnet USDT market)");
-                console.log("  USDT:", usdtAddr);
+                aUSDC = AAVE_V3_aUSDC_MAINNET;
+                console.log("AAVE integration: ENABLED (mainnet USDC market)");
+                console.log("  USDC:", usdcAddr);
                 console.log("  Pool:", aavePool);
-                console.log("  aUSDT:", aUSDT);
+                console.log("  aUSDC:", aUSDC);
             } else {
                 console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable)");
             }
-            return (usdtAddr, aavePool, aUSDT);
+            return (usdcAddr, aavePool, aUSDC);
         }
 
         if (block.chainid == 11155111) {
-            usdtAddr = USDT_SEPOLIA;
+            usdcAddr = USDC_SEPOLIA;
             if (useAave) {
                 aavePool = AAVE_V3_POOL_SEPOLIA;
-                aUSDT = AAVE_V3_aUSDT_SEPOLIA;
-                console.log("AAVE integration: ENABLED (Sepolia USDT market)");
-                console.log("  USDT:", usdtAddr);
+                aUSDC = AAVE_V3_aUSDC_SEPOLIA;
+                console.log("AAVE integration: ENABLED (Sepolia USDC market)");
+                console.log("  USDC:", usdcAddr);
                 console.log("  Pool:", aavePool);
-                console.log("  aUSDT:", aUSDT);
+                console.log("  aUSDC:", aUSDC);
             } else {
                 console.log("AAVE integration: DISABLED (set USE_AAVE=true to enable on Sepolia)");
             }
-            return (usdtAddr, aavePool, aUSDT);
+            return (usdcAddr, aavePool, aUSDC);
         }
 
-        revert("USDT/AAVE wiring only supported on mainnet (1) or Sepolia (11155111)");
+        revert("USDC/AAVE wiring only supported on mainnet (1) or Sepolia (11155111)");
     }
 
     /// Build the `VerifyBlockConfig` struct, deploying the Primary /

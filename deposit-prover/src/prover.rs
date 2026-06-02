@@ -440,7 +440,7 @@ pub fn generate_proof(
         input.event_data.deposit_id,
         input.event_data.sender,
         input.event_data.amount,
-        input.event_data.an_workchain,
+        input.dapp_id,
         input.event_data.an_account,
         input.event_data.contract_address,
         block_hash,
@@ -751,6 +751,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
     DepositProofInput {
         event_data,
         receipt_proof,
+        dapp_id: [0u8; 32],
     }
 }
 

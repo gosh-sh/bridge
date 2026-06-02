@@ -38,6 +38,33 @@ struct Args {
     /// Output file for the proof input (JSON)
     #[arg(long, default_value = "deposit_proof_input.json")]
     output: String,
+
+    /// Acki Nacki destination dApp identifier (UInt256), hex (with or without
+    /// 0x), big-endian. Config-supplied tag bound as the dappId public inputs
+    /// (not part of the Ethereum event). Defaults to zero.
+    #[arg(long, default_value = "0")]
+    dapp_id: String,
+}
+
+/// Parse a UInt256 hex/decimal string into a 32-byte big-endian array.
+fn parse_dapp_id(s: &str) -> anyhow::Result<[u8; 32]> {
+    let s = s.trim();
+    let bytes = if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        let padded = format!("{:0>64}", hex_str);
+        hex::decode(&padded).map_err(|e| anyhow::anyhow!("invalid --dapp-id hex: {e}"))?
+    } else if s == "0" {
+        vec![0u8; 32]
+    } else {
+        // Treat as hex without 0x prefix.
+        let padded = format!("{:0>64}", s);
+        hex::decode(&padded).map_err(|e| anyhow::anyhow!("invalid --dapp-id hex: {e}"))?
+    };
+    let mut out = [0u8; 32];
+    if bytes.len() != 32 {
+        anyhow::bail!("--dapp-id must be 32 bytes (64 hex chars), got {}", bytes.len());
+    }
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 #[tokio::main]
@@ -70,9 +97,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Fetch deposit proof
     println!("Fetching deposit proof...");
-    let proof_input = fetcher
+    let mut proof_input = fetcher
         .fetch_deposit_proof(tx_hash, contract, args.log_index)
         .await?;
+
+    // dappId is a config tag (not part of the event); set it from the CLI.
+    proof_input.dapp_id = parse_dapp_id(&args.dapp_id)?;
+    println!("  dappId: 0x{}", hex::encode(proof_input.dapp_id));
 
     println!("\n✅ Deposit proof fetched successfully!\n");
     println!("Event Data:");

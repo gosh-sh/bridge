@@ -9,7 +9,7 @@
 //! prover circuit + PK, emitting:
 //!   * `--proof-out`    : raw SHPLONK proof bytes (Blake2b, no header) — the
 //!     `proof_cell` operand.
-//!   * `--pubin-out`    : the 10 public inputs as `N × 32` LE `Fr` — the
+//!   * `--pubin-out`    : the 11 public inputs as `N × 32` LE `Fr` — the
 //!     `public_inputs_cell` operand.
 //!
 //! It then verifies the (vk, instances, proof) triple in-process with
@@ -110,8 +110,8 @@ fn main() -> anyhow::Result<()> {
 
     let instances: Vec<Vec<Fr>> = circuit.instances();
     anyhow::ensure!(
-        instances.len() == 1 && instances[0].len() == 10,
-        "expected 1 instance column of 10 inputs, got {:?}",
+        instances.len() == 1 && instances[0].len() == 11,
+        "expected 1 instance column of 11 inputs, got {:?}",
         instances.iter().map(|c| c.len()).collect::<Vec<_>>()
     );
     let inst0 = instances[0].clone();

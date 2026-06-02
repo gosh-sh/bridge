@@ -90,6 +90,10 @@ enum Cmd {
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
+        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
+        /// bound as the dappId public inputs (not part of the deposit event).
+        #[arg(long, default_value = "0")]
+        dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
         #[arg(long)]
         out_dir: PathBuf,
@@ -117,6 +121,10 @@ enum Cmd {
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
+        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
+        /// bound as the dappId public inputs (not part of the deposit event).
+        #[arg(long, default_value = "0")]
+        dapp_id: String,
         /// AN node REST base URL. When set, the daemon runs a live
         /// connectivity preflight (`/v2/bk_set`) on startup and aborts if the
         /// node is unreachable. Optional (the submit path is still mocked in
@@ -184,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             degree,
             max_data_byte_len,
             max_log_num,
+            dapp_id,
             out_dir,
         } => {
             let prover_cfg = build_prover_cfg(
@@ -192,6 +201,7 @@ async fn main() -> anyhow::Result<()> {
                 degree,
                 max_data_byte_len,
                 max_log_num,
+                dapp_id,
             );
             prove_one(
                 rpc_url,
@@ -219,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
             degree,
             max_data_byte_len,
             max_log_num,
+            dapp_id,
             an_node_url,
             dry_run,
             backoff_initial_secs,
@@ -231,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
                 degree,
                 max_data_byte_len,
                 max_log_num,
+                dapp_id,
             );
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -269,17 +281,20 @@ async fn an_preflight(an_node_url: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_prover_cfg(
     deposit_prover_dir: PathBuf,
     rpc_url: String,
     degree: u32,
     max_data_byte_len: usize,
     max_log_num: usize,
+    dapp_id: String,
 ) -> SubprocessProverConfig {
     let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, rpc_url);
     cfg.degree = degree;
     cfg.max_data_byte_len = max_data_byte_len;
     cfg.max_log_num = max_log_num;
+    cfg.dapp_id = dapp_id;
     cfg
 }
 

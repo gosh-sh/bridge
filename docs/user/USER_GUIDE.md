@@ -279,9 +279,9 @@ double-credit a deposit — already-finalized ids are simply skipped.
 ## 7. Optional: the web frontend (run it yourself)
 
 The repo ships a browser UI under `frontend/` — a **Rust + Yew + WebAssembly** app with
-MetaMask wallet connection, a deposit form, live bridge stats, and transaction history.
-It is **not hosted anywhere**; you build and serve it yourself. See `frontend/README.md`
-for full details.
+MetaMask wallet connection, a USDT deposit form (with a built-in faucet button), bridge
+stats, and transaction history. It is **not hosted anywhere**; you build and serve it
+yourself. See `frontend/README.md` for full details.
 
 ```bash
 cd frontend
@@ -295,11 +295,16 @@ trunk serve                                 # dev server at http://localhost:808
 Configure contract addresses / RPC in `frontend/src` (see the README's *Configuration*
 section) before connecting a wallet.
 
-> ⚠️ **Heads-up: the frontend currently reflects the older ETH deposit flow**, not the
-> USDT `approve` + `deposit(uint256)` path documented above. Treat it as a UI starting
-> point that still needs updating for USDT (and the withdraw form is a non-functional
-> placeholder). For anything you actually want to bridge today, use the CLI (§4–§6),
-> which is kept in sync with the current contract.
+The deposit form runs the same **USDT `approve` → `deposit(uint256)`** flow as the CLI:
+enter an amount (≤ 100 USDT), and it approves the bridge if needed, then deposits,
+waiting for each transaction to confirm. The **"Get 100 test USDT (faucet)"** button
+mints test USDT from the Aave Sepolia faucet so you can try it with an empty wallet.
+Update the contract / token / faucet addresses in `frontend/src/config.rs` if you're on
+a different deployment.
+
+> ℹ️ Withdrawals (AN → Ethereum) aren't exposed in the UI yet (see §9), and the
+> deposit-relayer still picks up deposits regardless of how they were submitted — so the
+> web app and the CLI (§4–§6) are interchangeable for the deposit step.
 
 ---
 

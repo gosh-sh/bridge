@@ -207,28 +207,31 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
     Ok(())
 }
 
-/// Make a deposit to the bridge contract
-pub async fn make_deposit(amount_wei: &str, acki_nacki_receiver: &str) -> Result<String, String> {
+// ---------------------------------------------------------------------------
+// ABI encoding helpers (minimal, for the few calls the UI makes)
+// ---------------------------------------------------------------------------
+
+/// Left-pad a uint to a 32-byte (64 hex char) ABI word.
+fn encode_uint256(value: u128) -> String {
+    format!("{:064x}", value)
+}
+
+/// Encode an address as a 32-byte ABI word (right-aligned, 12-byte zero pad).
+fn encode_address(addr: &str) -> String {
+    let a = addr.trim_start_matches("0x").to_lowercase();
+    format!("{:0>64}", a)
+}
+
+/// Send a contract transaction via MetaMask. Returns the tx hash.
+async fn send_tx(to: &str, data: &str) -> Result<String, String> {
     let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
     let account = get_current_account().ok_or("No account connected")?;
 
-    // AN receiver is a configurable parameter. The deployed Sepolia contract's
-    // deposit() credits msg.sender on the AN side, so this is tracked off-chain
-    // as a reference until the AN side provides concrete receiving details.
-    let an_receiver = if acki_nacki_receiver.is_empty() { account.clone() } else { acki_nacki_receiver.to_string() };
-    web_sys::console::log_1(&format!("AN receiver (reference): {}", an_receiver).into());
-
-    // Ensure we're on Sepolia
     switch_to_sepolia().await?;
-
-    // Encode the function call: deposit()
-    // Function selector: keccak256("deposit()")[0:4] = 0xd0e30db0
-    let data = "0xd0e30db0";
 
     let tx_param = to_value(&serde_json::json!({
         "from": account,
-        "to": BRIDGE_CONTRACT_ADDRESS,
-        "value": amount_wei,
+        "to": to,
         "data": data,
     }))
     .map_err(|e| format!("Serialization error: {:?}", e))?;
@@ -247,34 +250,135 @@ pub async fn make_deposit(amount_wei: &str, acki_nacki_receiver: &str) -> Result
         .await
         .map_err(|e| format!("Transaction failed: {:?}", e))?;
 
-    let tx_hash: String =
-        from_value(result).map_err(|e| format!("Failed to parse transaction hash: {:?}", e))?;
-
-    Ok(tx_hash)
+    from_value(result).map_err(|e| format!("Failed to parse transaction hash: {:?}", e))
 }
 
-/// Get bridge statistics
-pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
-    // Call depositCount()
-    let deposit_count_data = "0x2dfdf0b5"; // keccak256("depositCount()")[0:4]
-    let deposit_count_result = call_contract(deposit_count_data).await?;
+/// Approve the bridge to spend `amount` USDT base units on the caller's behalf.
+pub async fn approve_usdt(amount: u128) -> Result<String, String> {
+    // approve(address spender, uint256 amount) = 0x095ea7b3
+    let data = format!(
+        "0x095ea7b3{}{}",
+        encode_address(BRIDGE_CONTRACT_ADDRESS),
+        encode_uint256(amount)
+    );
+    send_tx(USDT_CONTRACT_ADDRESS, &data).await
+}
 
-    // Call totalDeposited()
-    let total_deposited_data = "0x4e71d92d"; // keccak256("totalDeposited()")[0:4]
-    let total_deposited_result = call_contract(total_deposited_data).await?;
+/// Deposit `amount` USDT base units into the bridge (pulls via `transferFrom`).
+pub async fn make_deposit(amount: u128) -> Result<String, String> {
+    // deposit(uint256 amount) = 0xb6b55f25
+    let data = format!("0xb6b55f25{}", encode_uint256(amount));
+    send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
+}
+
+/// Mint `amount` test USDT base units to the connected account from the Aave faucet.
+pub async fn mint_test_usdt(amount: u128) -> Result<String, String> {
+    let account = get_current_account().ok_or("No account connected")?;
+    // mint(address token, address to, uint256 amount) = 0xc6c3bbe6
+    let data = format!(
+        "0xc6c3bbe6{}{}{}",
+        encode_address(USDT_CONTRACT_ADDRESS),
+        encode_address(&account),
+        encode_uint256(amount)
+    );
+    send_tx(AAVE_FAUCET_ADDRESS, &data).await
+}
+
+/// Current USDT allowance (base units) the owner has granted the bridge.
+pub async fn get_allowance(owner: &str) -> Result<u128, String> {
+    // allowance(address owner, address spender) = 0xdd62ed3e
+    let data = format!(
+        "0xdd62ed3e{}{}",
+        encode_address(owner),
+        encode_address(BRIDGE_CONTRACT_ADDRESS)
+    );
+    let raw = call_to(USDT_CONTRACT_ADDRESS, &data).await?;
+    parse_uint128(&raw)
+}
+
+/// Connected account's USDT balance in base units.
+pub async fn get_usdt_balance(owner: &str) -> Result<u128, String> {
+    // balanceOf(address) = 0x70a08231
+    let data = format!("0x70a08231{}", encode_address(owner));
+    let raw = call_to(USDT_CONTRACT_ADDRESS, &data).await?;
+    parse_uint128(&raw)
+}
+
+/// Poll for a transaction receipt until it is mined. Returns Ok on success
+/// status, Err on revert or timeout. Used to sequence approve → deposit.
+pub async fn wait_for_receipt(tx_hash: &str) -> Result<(), String> {
+    let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
+    for _ in 0..40 {
+        let params = js_sys::Array::new();
+        params.push(&JsValue::from_str(tx_hash));
+
+        let request = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &request,
+            &"method".into(),
+            &"eth_getTransactionReceipt".into(),
+        )
+        .map_err(|_| "Failed to build request")?;
+        js_sys::Reflect::set(&request, &"params".into(), &params)
+            .map_err(|_| "Failed to build request")?;
+
+        let result = ethereum
+            .request(request.into())
+            .await
+            .map_err(|e| format!("Receipt poll failed: {:?}", e))?;
+
+        if !result.is_null() && !result.is_undefined() {
+            let status = js_sys::Reflect::get(&result, &"status".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            if status == "0x1" {
+                return Ok(());
+            } else {
+                return Err("Transaction reverted".to_string());
+            }
+        }
+        sleep(3000).await;
+    }
+    Err("Timed out waiting for transaction to be mined".to_string())
+}
+
+/// Sleep for `ms` milliseconds (setTimeout wrapped in a Promise).
+async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(win) = window() {
+            let resolve_fn: &js_sys::Function = resolve.unchecked_ref();
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(resolve_fn, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// Get bridge statistics (deposit count + treasury principal in USDT base units).
+pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
+    // depositCounter() = 0xecb3dc88
+    let deposit_count_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    // treasuryBalance() = 0x313dab20
+    let treasury_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0x313dab20").await?;
 
     Ok(BridgeStats {
-        deposit_count: parse_uint256(&deposit_count_result)?,
-        total_deposited: parse_uint256(&total_deposited_result)?,
+        deposit_count: parse_uint128(&deposit_count_result)?.to_string(),
+        treasury_balance: parse_uint128(&treasury_result)?.to_string(),
     })
 }
 
-/// Call a contract view function
-async fn call_contract(data: &str) -> Result<String, String> {
+/// Read `depositCounter()`. The id of the most recent deposit is this minus 1.
+pub async fn get_deposit_counter() -> Result<u128, String> {
+    let raw = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    parse_uint128(&raw)
+}
+
+/// Call a contract view function on an arbitrary `to` address.
+async fn call_to(to: &str, data: &str) -> Result<String, String> {
     let ethereum = get_ethereum().ok_or("MetaMask not installed")?;
 
     let call_param = to_value(&serde_json::json!({
-        "to": BRIDGE_CONTRACT_ADDRESS,
+        "to": to,
         "data": data,
     }))
     .map_err(|e| format!("Serialization error: {:?}", e))?;
@@ -294,36 +398,54 @@ async fn call_contract(data: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Contract call failed: {:?}", e))?;
 
-    let result_str: String =
-        from_value(result).map_err(|e| format!("Failed to parse result: {:?}", e))?;
-
-    Ok(result_str)
+    from_value(result).map_err(|e| format!("Failed to parse result: {:?}", e))
 }
 
-/// Parse a uint256 from hex string
-fn parse_uint256(hex: &str) -> Result<String, String> {
+/// Parse a uint from a 0x-prefixed hex string (sufficient range for our values).
+fn parse_uint128(hex: &str) -> Result<u128, String> {
     let hex = hex.trim_start_matches("0x");
-    let value =
-        u128::from_str_radix(hex, 16).map_err(|e| format!("Failed to parse uint256: {:?}", e))?;
-    Ok(value.to_string())
+    let hex = if hex.is_empty() { "0" } else { hex };
+    // Take the low 32 hex chars (16 bytes) to fit u128 — our values are small.
+    let start = hex.len().saturating_sub(32);
+    u128::from_str_radix(&hex[start..], 16).map_err(|e| format!("Failed to parse uint: {:?}", e))
 }
 
 #[derive(Debug, Clone)]
 pub struct BridgeStats {
     pub deposit_count: String,
-    pub total_deposited: String,
+    pub treasury_balance: String,
 }
 
-/// Format Wei to ETH string
-pub fn wei_to_eth(wei: &str) -> String {
-    let wei_value: u128 = wei.parse().unwrap_or(0);
-    let eth_value = wei_value as f64 / 1_000_000_000_000_000_000.0;
-    format!("{:.4}", eth_value)
+/// Format USDT base units (6 decimals) to a human string, e.g. 100000000 → "100.000000".
+pub fn units_to_usdt(units: u128) -> String {
+    let whole = units / USDT_UNIT;
+    let frac = units % USDT_UNIT;
+    format!("{}.{:06}", whole, frac)
 }
 
-/// Format ETH to Wei string
-pub fn eth_to_wei(eth: &str) -> Result<String, String> {
-    let eth_value: f64 = eth.parse().map_err(|_| "Invalid ETH amount")?;
-    let wei_value = (eth_value * 1_000_000_000_000_000_000.0) as u128;
-    Ok(wei_value.to_string())
+/// Parse a human USDT amount (e.g. "12.5") into base units (6 decimals).
+pub fn usdt_to_units(amount: &str) -> Result<u128, String> {
+    let amount = amount.trim();
+    if amount.is_empty() {
+        return Err("empty amount".to_string());
+    }
+    let mut parts = amount.splitn(2, '.');
+    let whole_str = parts.next().unwrap_or("0");
+    let frac_str = parts.next().unwrap_or("");
+
+    let whole: u128 = whole_str
+        .parse()
+        .map_err(|_| "Invalid USDT amount".to_string())?;
+    if frac_str.len() > USDT_DECIMALS as usize {
+        return Err("USDT supports at most 6 decimal places".to_string());
+    }
+    let frac_padded = format!("{:0<6}", frac_str);
+    let frac: u128 = if frac_padded.is_empty() {
+        0
+    } else {
+        frac_padded
+            .parse()
+            .map_err(|_| "Invalid USDT amount".to_string())?
+    };
+    Ok(whole * USDT_UNIT + frac)
 }

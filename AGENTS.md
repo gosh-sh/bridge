@@ -15,7 +15,8 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── deposit-prover/         ← Rust Halo2 circuit: proves Ethereum deposit events. Halo2 SHPLONK proof is consumed natively on the AN side (no gnark wrapper — retired in Phase 4.3 2026-05-17).
 ├── crates/bridge-prover-orchestrator/  ← Wraps the partner's 4-circuit pipeline (Halo2 1A/1B/2[/3]) for prover/relayer use
 │   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-1b, circuit-2[, circuit-3]) producing 256-byte Groth16 proofs (AN→ETH side only; EIP-170 forces gnark wrap on this direction)
-├── crates/bridge-relayer-daemon/       ← Phase 5.1 relayer skeleton: Relayer::tick() / run_loop() + BlockSource/BridgeClient traits + abigen!-generated AckiNackiBridge bindings + state.json persistence + CLI
+├── crates/bridge-relayer-daemon/       ← Phase 5.1 relayer skeleton (AN→ETH direction): Relayer::tick() / run_loop() + BlockSource/BridgeClient traits + abigen!-generated AckiNackiBridge bindings + state.json persistence + CLI
+├── crates/deposit-relayer-daemon/      ← EVM→AN deposit relayer (mirror of bridge-relayer-daemon): listen for `Deposit` events (EthLogSource over alloy) → generate the AN-consumable Halo2 proof triple (SubprocessProofGenerator over deposit-prover) → submit to `TokenBridge.finalizeDeposit` (AnSubmitter). `AnConfig` drives the live `BkSetClient` (read-side endpoints wired; `finalizeDeposit` write gated on the upstream `IAckiNacki`/tvm-sdk client). `deposit-relayer` CLI: watch / prove-one / an-preflight / daemon
 ├── crates/bridge-evm-aggregator/       ← R15 / M2 spike (standalone cargo workspace): snark-verifier-sdk → AggregationCircuit → Yul EVM verifier. ~13 KB bytecode @ K=21, well under EIP-170. Trivial inner circuit (`a*b==c`) until partner ships Circuit 4 (M4)
 │
 │   The orchestrator's `poseidon_transcript.rs` (M3, 2026-05-27) is the Poseidon Fiat–Shamir transcript that bridges these two cargo trees — it produces proofs in a flavour the aggregator can consume.
@@ -133,12 +134,13 @@ Test: `cd contracts/ethereum && forge test`
 ## Rust Workspace
 
 **Workspace members** (in `Cargo.toml`): `crates/eth-frontend`, `crates/acki-nacki-interface`
-**Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`
+**Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`
 
 - `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://94.156.178.19:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
 - `eth-frontend`: Ethereum client using alloy-rs (migrated 2026-05-17 from ethers-rs). Interacts with bridge contracts.
 - `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures. Since R15/M3 (2026-05-27) also exports `poseidon_transcript::{PoseidonRead, PoseidonWrite}` and `generate_fallback_proof_with_transcript(.., TranscriptKind::{Blake2b, Poseidon})` — Blake2b stays the AN-side default for `ZKHALO2VERIFYWITHVK`; Poseidon is the ETH-side inner-SNARK flavour the `crates/bridge-evm-aggregator/` aggregator consumes.
 - `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
+- `deposit-relayer-daemon`: **EVM→AN deposit relayer** (mirror of `bridge-relayer-daemon` for the deposit direction). Three trait seams keep the loop testable and let the heavy / not-yet-built pieces swap independently: `source` (`DepositSource` async trait + `EthLogSource` — alloy `eth_getLogs`, confirmation-gated — + `InMemoryDepositSource` for tests), `prover` (`ProofGenerator` async trait + `SubprocessProofGenerator` invoking `deposit-prover`'s `fetch_deposit_data`→`export_vk_blob`→`export_blake2b_proof` examples out-of-process + `MockProofGenerator`), `submitter` (`AnSubmitter` async trait + `AnInterfaceSubmitter` over `acki_nacki_interface::IAckiNacki` with interim `encode_finalize_deposit` + `MockAnSubmitter` mirroring the `usedDepositIds` nullifier), plus `relayer` (`Relayer::tick()`/`run_loop()`), `daemon` (`BackoffConfig`/`RelayerMetrics`/`run_until_shutdown` with SIGINT/SIGTERM), `state` (atomic `state.json`, `depositId` cursor), and `an_config` (`AnConfig` — holds AN `node_url`/`token_bridge`/`sender`, builds the live `BkSetClient`, and `preflight()`s `GET /v2/bk_set`). CLI binary `deposit-relayer` with `watch` / `prove-one` / `an-preflight` / `daemon`. **28 unit tests** (loop happy-path + nullifier-skip + proof-failure + AN-rejection + restart + run_loop, daemon backoff + shutdown, submitter nullifier + finalize-call round-trip, AnConfig parse/convert, source/state/types round-trips) + 1 `#[ignore]`-gated live AN preflight test. Read-side AN endpoints are wired/verifiable today (incl. against the local cluster `http://127.0.0.1:11000`); the `finalizeDeposit` write stays gated on the upstream live `IAckiNacki`/tvm-sdk client + frozen TVM message ABI (daemon requires `--dry-run` until then).
 - `deposit-prover`: Standalone Halo2 circuit crate. Uses axiom-crypto's halo2-lib (different from partner's gosh fork).
 - `poseidon-proof`: Halo2 circuit with Blake2b transcript for Poseidon commitment proofs.
 
@@ -317,6 +319,23 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon \
     --backoff-initial-secs 2 --backoff-max-secs 60 --backoff-multiplier 2                # long-running operator entry (B5)
 cd crates/bridge-relayer-daemon && cargo test --test live_bk_set_sentry -- --ignored     # live BK-set sentry against AN testnet
 
+# Deposit relayer (EVM→AN direction, standalone)
+cd crates/deposit-relayer-daemon && cargo test                                           # 28 unit tests (+1 ignored live AN preflight)
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- --help            # CLI surface
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
+    watch --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --start 0 --count 16            # read-only: list confirmed Deposit events
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
+    prove-one --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --deposit-id 0 \
+    --deposit-prover-dir ../../deposit-prover --out-dir ./out                            # listen→prove one deposit, write vk_blob/public_inputs/proof
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
+    an-preflight --an-node-url http://127.0.0.1:11000                                    # probe AN read endpoints (/v2/bk_set); local cluster or testnet
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
+    daemon --rpc-url <SEPOLIA_RPC> --bridge-address 0x... \
+    --deposit-prover-dir ../../deposit-prover --an-node-url http://127.0.0.1:11000 \
+    --dry-run                                                                            # listen→prove→submit loop; --dry-run mandatory until live IAckiNacki client lands
+cd crates/deposit-relayer-daemon && AN_NODE_URL=http://127.0.0.1:11000 \
+    cargo test --test live_an_preflight -- --ignored                                     # live AN preflight against a reachable cluster
+
 # Cross-circuit-bound proof generation (Phase 4.1 fixture builder)
 cd crates/bridge-prover-orchestrator
 cargo run --bin export-bound-block-proofs --release        # writes proofs/bound/{primary,layer-hashes}/*
@@ -436,6 +455,8 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 |------|------|------|
 | `bridge-relayer-daemon` | 29 | state persistence (2), `BlockSource` (2), `MockBridgeClient` (4), `Relayer` loop end-to-end (5), `BkSetSentry` Bootstrapped/Quiet/RotationDetected classification + metrics counters + `run_until_stop` orchestration (6), `SentryGuardedRelayer` rotation-pause + manual-resume + pass-through + error-propagation (5), **daemon** exponential-backoff + shutdown-aware sleep + `RelayerMetrics` atomic counters + `BackoffConfig::bump` cap (5) |
 | `bridge-relayer-daemon` (live) | 1 | `#[ignore]`-gated `live_sentry_bootstraps_then_quiet_or_rotation` — two-tick sequence against the public AN testnet `/v2/bk_set_update` |
+| `deposit-relayer-daemon` (EVM→AN) | 28 | `types`/`state`/`source` round-trips (7), `MockProofGenerator`/`SubprocessProverConfig` (2), `submitter` nullifier-skip + `encode/decode_finalize_deposit` round-trip + accept/reject (4), `Relayer` loop end-to-end: in-order finalize / nullifier-already-used skip / proof-failure / AN-rejection / restart-from-state / run_loop should_stop (7), **daemon** finalize-then-shutdown + exponential-backoff-on-NotYetAvailable (2), `AnConfig` parse/convert/`bk_set_client` build/preflight shape (4), `RelayerMetrics` (2) |
+| `deposit-relayer-daemon` (live) | 1 | `#[ignore]`-gated `live_an_preflight_succeeds` — `GET /v2/bk_set` against a reachable AN cluster (`AN_NODE_URL`, defaults to the local cluster) |
 
 **Remaining (Phase 5.2/5.3, 6, 7)**:
 - Phase 5.2: `LiveBlockSource` impl over partner's `gql_client` + `boc_parser` + relayer-side halo2+gnark (blocked on Q1 + Q2).

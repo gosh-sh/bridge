@@ -111,7 +111,6 @@ mod sol_bindings {
 }
 
 pub use sol_bindings::AckiNackiBridge;
-
 // Re-export at module scope so the `sol!` event type is reachable as
 // `Deposit` for callers that want the signature hash.
 use sol_bindings::AckiNackiBridge::Deposit;

@@ -5,10 +5,10 @@
 //! pipeline:
 //!
 //! 1. A [`DepositEvent`] — the parsed on-chain `Deposit(depositId, sender,
-//!    amount, anWorkchain, anAccount, timestamp)` log plus the
-//!    receipt-locating metadata the prover needs (`tx_hash`, `log_index`,
-//!    `block_number`). `anAccount` is the Acki Nacki destination account (an
-//!    EVM address cannot be an AN recipient).
+//!    amount, anWorkchain, anAccount, timestamp)` log plus the receipt-locating
+//!    metadata the prover needs (`tx_hash`, `log_index`, `block_number`).
+//!    `anAccount` is the Acki Nacki destination account (an EVM address cannot
+//!    be an AN recipient).
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
@@ -28,10 +28,10 @@ use crate::error::RelayerError;
 /// anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
 ///
 /// `anAccount{High,Low}` bind the Acki Nacki destination account into the proof
-/// (an EVM address is not a valid AN recipient). `dappId{High,Low}` (the UInt256
-/// AN dApp identifier, replaced `anWorkchain` on 2026-06-02) is a config-supplied
-/// tag — it is not bound to event data in-circuit; `TokenBridge.finalizeDeposit`
-/// checks it against its configured dappId.
+/// (an EVM address is not a valid AN recipient). `dappId{High,Low}` (the
+/// UInt256 AN dApp identifier, replaced `anWorkchain` on 2026-06-02) is a
+/// config-supplied tag — it is not bound to event data in-circuit;
+/// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
 pub const NUM_PUBLIC_INPUTS: usize = 11;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
@@ -160,7 +160,8 @@ impl DepositPublicInputs {
         out
     }
 
-    /// Reconstruct the full 256-bit Acki Nacki account from its high/low halves.
+    /// Reconstruct the full 256-bit Acki Nacki account from its high/low
+    /// halves.
     pub fn an_account(&self) -> U256 {
         (self.an_account_high << 128) | self.an_account_low
     }

@@ -179,7 +179,9 @@ pub struct SubprocessProofGenerator {
 
 impl SubprocessProofGenerator {
     pub fn new(config: SubprocessProverConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+        }
     }
 
     async fn run_example(&self, args: &[String]) -> Result<(), RelayerError> {

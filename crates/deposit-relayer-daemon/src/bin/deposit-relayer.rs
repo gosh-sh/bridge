@@ -4,13 +4,13 @@
 //!
 //! - `watch` — read-only. Connects to an Ethereum RPC, reads the bridge's
 //!   `depositCounter()`, and lists the confirmed `Deposit` events from a
-//!   starting id. No proving, no AN side. Handy for confirming the relayer
-//!   can see the deposits before running it in earnest.
+//!   starting id. No proving, no AN side. Handy for confirming the relayer can
+//!   see the deposits before running it in earnest.
 //!
 //! - `prove-one` — listens for a single `depositId`, runs the `deposit-prover`
-//!   pipeline out-of-process, and writes the three opcode operands
-//!   (`vk_blob`, `public_inputs`, `proof`) to an output directory. Exercises
-//!   the full listen→prove path without an AN node.
+//!   pipeline out-of-process, and writes the three opcode operands (`vk_blob`,
+//!   `public_inputs`, `proof`) to an output directory. Exercises the full
+//!   listen→prove path without an AN node.
 //!
 //! - `daemon` — long-running loop: listen → prove → submit, with exponential
 //!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
@@ -20,22 +20,22 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
-use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use deposit_relayer_daemon::{
     AnConfig, AnInterfaceSubmitter, AnSubmitter, BackoffConfig, DepositSource, EthLogSource,
-    MockAnSubmitter,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, SubprocessProofGenerator,
-    SubprocessProverConfig, DEFAULT_AN_NODE_URL,
+    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
+    SubprocessProofGenerator, SubprocessProverConfig, DEFAULT_AN_NODE_URL,
 };
-use tvm_client::crypto::KeyPair;
 use tracing::{error, info, warn};
+use tvm_client::crypto::KeyPair;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "deposit-relayer",
-    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, finalize on AN."
+    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, \
+             finalize on AN."
 )]
 struct Args {
     /// Where to persist `state.json` (used by `daemon`).
@@ -148,7 +148,8 @@ enum Cmd {
         /// ECC token id for `finalizeDeposit`.
         #[arg(long, default_value_t = 1)]
         an_token_id: u32,
-        /// Run the submit stage against an in-memory mock AN instead of tvm_client.
+        /// Run the submit stage against an in-memory mock AN instead of
+        /// tvm_client.
         #[arg(long)]
         dry_run: bool,
         #[arg(long, default_value_t = 5)]
@@ -231,7 +232,9 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(log_err("prove-one"))
         },
-        Cmd::AnPreflight { an_node_url } => an_preflight(an_node_url)
+        Cmd::AnPreflight {
+            an_node_url,
+        } => an_preflight(an_node_url)
             .await
             .map_err(log_err("an-preflight")),
         Cmd::Daemon {
@@ -476,8 +479,8 @@ async fn run_daemon(
         if !an_cfg.is_live_submit_ready() {
             anyhow::bail!(
                 "live submit requires --an-graphql-url, --an-keys-path, --an-bridge-abi-path, \
-                 --an-token-bridge, and --an-sender (all in dapp_id::account_id form). \
-                 Or pass --dry-run to exercise listen→prove only."
+                 --an-token-bridge, and --an-sender (all in dapp_id::account_id form). Or pass \
+                 --dry-run to exercise listen→prove only."
             );
         }
         let keys_json = std::fs::read_to_string(&an_cfg.keys_path)?;

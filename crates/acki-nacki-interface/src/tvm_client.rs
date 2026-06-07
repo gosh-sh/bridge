@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tvm_client::{
-    abi::{encode_message, Abi, CallSet, ParamsOfEncodeMessage, Signer},
+    abi::{Abi, CallSet, ParamsOfEncodeMessage, Signer},
     account::{get_account, ParamsOfGetAccount},
     crypto::KeyPair,
     net::NetworkConfig,

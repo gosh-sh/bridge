@@ -231,7 +231,8 @@ mod tests {
     fn to_submit_config_maps_sender_to_from() {
         let dapp = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         let bridge = format!("{dapp}::{dapp}");
-        let sender = format!("{dapp}::dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        let sender =
+            format!("{dapp}::dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
         let cfg = AnConfig {
             node_url: DEFAULT_AN_NODE_URL.to_string(),
             token_bridge: bridge.clone(),

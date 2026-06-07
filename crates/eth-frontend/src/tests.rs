@@ -10,7 +10,7 @@ fn test_deposit_manager_creation() {
 
 #[test]
 fn test_deposit_manager_default() {
-    let manager = DepositManager::default();
+    let manager = DepositManager;
     assert!(std::mem::size_of_val(&manager) == 0);
 }
 

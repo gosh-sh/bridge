@@ -1,0 +1,38 @@
+---
+description: Commit and push acki-nacki-bridge to GitLab + GitHub without asking
+alwaysApply: true
+---
+
+# Dual-remote git (GitLab + GitHub)
+
+When the user asks to commit/push (or to save work to remotes), **do it immediately** — no confirmation prompts.
+
+## Remotes
+
+| Remote | URL | Role |
+|--------|-----|------|
+| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | Canonical GitLab |
+| `github` | `git@github.com:gosh-sh/bridge-EVM.git` | Mirror / PRs (`main` may be protected) |
+
+## Workflow
+
+1. **Return to the previous branch** when leaving exploratory work: `git checkout -` (or the named feature branch from reflog).
+2. **Stage and commit** all relevant changes with a concise message (why, not what).
+3. **Push both remotes** for the active branch:
+   ```bash
+   git push origin HEAD
+   git push github HEAD
+   ```
+4. If `github main` is protected, push a branch and open/update a PR — do not stop to ask unless push is impossible.
+5. For feature landings already merged locally: ensure `main` is pushed to **both** remotes:
+   ```bash
+   git checkout main
+   git push origin main
+   git push github main   # or branch + PR if protected
+   ```
+
+## Do not
+
+- Ask whether to push — user intent is explicit.
+- Force-push `main`/`master`.
+- Commit secrets (`.env`, keys, credentials).

@@ -35,8 +35,8 @@ ssh -p 22488 gosh@94.156.178.14   # hostname: n14
 ## Remote workspace layout
 
 ```bash
-/mnt/data/gosh/sergey-bridge/     # preferred scratch root (create per session)
-  acki-nacki/
+/mnt/data/gosh/acki-nacki/        # AN node cluster (poseidon_dex); docker compose via make run
+/mnt/data/gosh/sergey-bridge/     # prover scratch root
   acki-nacki-to-eth-bridge-halo2-prover/
   acki-nacki-to-eth-bridge-halo2-circuits/
   acki-nacki-bridge/
@@ -70,7 +70,8 @@ rsync -avz -e "ssh -p 22488" \
 **Gotchas (2026-06-07):**
 - Wipe `proofs/proof_*.json` + `proofs/result_*.json` before a clean run — verifier skips seqnos it already processed.
 - Rebuild binaries **on n14** (`cargo build --release`); rsync'd `target/release/*` from local may fail with `GLIBC_2.38 not found`.
-- GraphQL tunnel: `ssh -fN -R 127.0.0.1:18080:127.0.0.1:80 -p 22488 gosh@94.156.178.14`
+- `make run` on n14 needs `source ~/.cargo/env` and `CMD_PREFIX=sudo` (root-owned `docker/ton-live/web/storage/node*`).
+- **Full E2E on n14**: cluster GraphQL is local on n14 — run prover with `BRIDGE_GQL_ENDPOINT=http://localhost/graphql` (no reverse tunnel). Tunnel (`127.0.0.1:18080`) only when the cluster runs locally and prover on n14.
 
 ## Cleanup after sessions
 

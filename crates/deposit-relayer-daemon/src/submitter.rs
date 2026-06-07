@@ -34,9 +34,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use acki_nacki_interface::{AckiNackiTransaction, IAckiNacki, TransactionStatus};
+use acki_nacki_interface::{
+    ContractCallRequest, ExtendedAddress, IAckiNacki, TransactionStatus,
+};
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::{
     error::RelayerError,
@@ -262,14 +265,40 @@ impl AnSubmitter for MockAnSubmitter {
 /// Static configuration for the live submitter.
 #[derive(Clone, Debug)]
 pub struct AnSubmitConfig {
-    /// Relayer's AN account address (the `from` of the finalize tx).
+    /// Relayer signer in SDK 3.0 `dapp_id::account_id` form.
     pub from: String,
-    /// The AN `TokenBridge` contract address (the `to`).
+    /// Bridge contract in SDK 3.0 `dapp_id::account_id` form.
     pub token_bridge: String,
+    /// ECC token id for `finalizeDeposit` (USDC on shellnet).
+    pub token_id: u32,
     /// Gas limit for the `finalizeDeposit` call.
     pub gas_limit: u64,
     /// Seconds to wait for the finalize tx to confirm.
     pub confirm_timeout_secs: u64,
+}
+
+/// Build JSON parameters for `USDCBridge.finalizeDeposit` from a proof bundle.
+pub fn build_finalize_deposit_params(
+    event: &DepositEvent,
+    bundle: &DepositProofBundle,
+    token_id: u32,
+) -> serde_json::Value {
+    let pi = &bundle.parsed;
+    let amount_u128 = pi.amount.to::<u128>();
+    json!({
+        "proof": base64_encode(&bundle.proof),
+        "srcDappId": format!("0x{:064x}", pi.dapp_id()),
+        "srcSender": format!("0x{}", hex::encode(event.sender.as_slice())),
+        "recipient_an": format!("0x{:064x}", pi.an_account()),
+        "amount": amount_u128.to_string(),
+        "tokenId": token_id,
+        "srcDepositId": pi.deposit_id.to_string(),
+    })
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    STANDARD.encode(bytes)
 }
 
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
@@ -284,23 +313,11 @@ pub struct AnSubmitConfig {
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
-    nonce: Mutex<u64>,
 }
 
 impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
-    pub fn new(client: Arc<C>, config: AnSubmitConfig, start_nonce: u64) -> Self {
-        Self {
-            client,
-            config,
-            nonce: Mutex::new(start_nonce),
-        }
-    }
-
-    fn next_nonce(&self) -> u64 {
-        let mut n = self.nonce.lock().expect("poisoned lock");
-        let cur = *n;
-        *n = n.saturating_add(1);
-        cur
+    pub fn new(client: Arc<C>, config: AnSubmitConfig) -> Self {
+        Self { client, config }
     }
 }
 
@@ -318,22 +335,17 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     ) -> Result<SubmitOutcome, RelayerError> {
         bundle.check_binds_to(event)?;
 
-        let data = encode_finalize_deposit(bundle);
-        // Derive a deterministic local tx id from the deposit id; the live
-        // client overwrites this with the real hash on send.
-        let mut tx_hash = [0u8; 32];
-        tx_hash[24..].copy_from_slice(&event.deposit_id.to_be_bytes());
+        let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
+        let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
+        let params = build_finalize_deposit_params(event, bundle, self.config.token_id);
+        let call = ContractCallRequest {
+            from,
+            to,
+            function: "finalizeDeposit".to_string(),
+            params,
+        };
 
-        let tx = AckiNackiTransaction::new(
-            tx_hash,
-            self.config.from.clone(),
-            self.config.token_bridge.clone(),
-            data,
-            self.config.gas_limit,
-            self.next_nonce(),
-        );
-
-        let sent = self.client.send_transaction(tx).await?;
+        let sent = self.client.call_contract(call).await?;
         let receipt = self
             .client
             .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
@@ -443,13 +455,15 @@ mod tests {
         use acki_nacki_interface::MockAckiNacki;
 
         let client = Arc::new(MockAckiNacki::new());
+        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         let cfg = AnSubmitConfig {
-            from: "0:relayer".to_string(),
-            token_bridge: "0:tokenbridge".to_string(),
+            from: format!("{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            token_bridge: format!("{dapp}::{dapp}"),
+            token_id: 1,
             gas_limit: 1_000_000,
             confirm_timeout_secs: 5,
         };
-        let sub = AnInterfaceSubmitter::new(client, cfg, 0);
+        let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
         let b = bundle(&ev);
         // MockAckiNacki confirms transactions, so this should finalize.

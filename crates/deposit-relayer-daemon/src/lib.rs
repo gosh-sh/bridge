@@ -81,8 +81,8 @@ pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource};
 pub use state::RelayerState;
 pub use submitter::{
-    decode_finalize_deposit, encode_finalize_deposit, AnInterfaceSubmitter, AnSubmitConfig,
-    AnSubmitter, MockAnSubmitter, SubmitOutcome,
+    build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
+    AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
     DepositEvent, DepositProofBundle, DepositPublicInputs, NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,

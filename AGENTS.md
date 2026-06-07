@@ -4,6 +4,23 @@
 
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based, multi-threaded blockchain). The bridge enables deposits on Ethereum to be proven on Acki Nacki, and Acki Nacki state (layer hashes) to be verified on Ethereum — both via ZK proofs.
 
+## Git remotes
+
+| Remote | URL | Role |
+|--------|-----|------|
+| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | **Canonical** — CI, merge target `main` |
+| `github` | `git@github.com:gosh-sh/bridge-EVM.git` | GitHub mirror — open PRs here |
+
+```bash
+# one-time local setup (if `github` is missing or wrong)
+git remote add github git@github.com:gosh-sh/bridge-EVM.git
+# or fix an existing remote:
+git remote set-url github git@github.com:gosh-sh/bridge-EVM.git
+
+git push origin main
+git push github main
+```
+
 ## Repository Layout
 
 ```

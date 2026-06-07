@@ -398,6 +398,19 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
+    /// @dev Mainnet-destined proof must not replay on Arbitrum (or any other chain).
+    function test_withdrawByProof_mainnetDstChainId_reverts_on_arbitrum() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("arbitrumReplay")));
+        pub.dstChainId = 1; // Ethereum mainnet
+
+        vm.chainId(42_161);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.DstChainIdMismatch.selector, 1, 42_161)
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
     function test_withdrawByProof_unsupportedTokenId_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("token")));

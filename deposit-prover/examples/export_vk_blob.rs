@@ -43,7 +43,7 @@ use axiom_eth::{
 use clap::Parser;
 use deposit_prover::{
     circuit_v2::DepositEventCircuitV2,
-    prover::{get_default_params, CircuitConfig},
+    prover::{get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig},
     types::DepositProofInput,
 };
 use halo2_base::{
@@ -136,13 +136,10 @@ fn main() -> anyhow::Result<()> {
         k, eth_params.rlc.num_rlc_columns
     );
 
-    // 3. Load the SRS and keygen the VK.
-    let srs_path = format!("data/kzg_bn254_{}.srs", k);
-    println!("Loading SRS from {}...", srs_path);
-    let mut srs_file = fs::File::open(&srs_path)
-        .map_err(|e| anyhow::anyhow!("open SRS {srs_path}: {e} (run download_trusted_setup)"))?;
-    let srs = ParamsKZG::<Bn256>::read(&mut srs_file)
-        .map_err(|e| anyhow::anyhow!("read SRS {srs_path}: {e}"))?;
+    // 3. Load the SRS and keygen the VK (`data/kzg_params_{k}.srs` from
+    // `download_trusted_setup.sh`).
+    let srs = load_kzg_params_from_trusted_setup(k)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     println!("Running keygen_vk (this may take a minute)...");
     let vk = keygen_vk(&srs, &circuit).map_err(|e| anyhow::anyhow!("keygen_vk failed: {e:?}"))?;

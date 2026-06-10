@@ -127,7 +127,7 @@ impl IAckiNacki for TvmAckiNacki {
         };
         let result = process_message(self.context.clone(), process_params, |_| async {})
             .await
-            .map_err(|e| AckiNackiError::TransactionFailed(e.to_string()))?;
+            .map_err(format_tvm_client_error)?;
 
         let aborted = result
             .transaction
@@ -186,6 +186,38 @@ impl IAckiNacki for TvmAckiNacki {
         // Balance decoding is deployment-specific; return non-zero when account exists.
         Ok(1)
     }
+}
+
+fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError {
+    let mut msg = e.message().to_string();
+    let data = e.data();
+    if let Some(code) = data.get("exit_code").and_then(|v| v.as_i64()) {
+        msg.push_str(&format!(" (exit_code={code})"));
+    }
+    if let Some(local) = data.get("local_error") {
+        if let Some(local_code) = local
+            .get("data")
+            .and_then(|d| d.get("exit_code"))
+            .and_then(|v| v.as_i64())
+        {
+            msg.push_str(&format!(" (local_exit_code={local_code})"));
+        }
+        if let Some(local_msg) = local.get("message").and_then(|v| v.as_str()) {
+            msg.push_str(&format!(" [{local_msg}]"));
+        }
+    }
+    if let Some(addr) = data.get("account_address").and_then(|v| v.as_str()) {
+        msg.push_str(&format!(" (account={addr})"));
+    }
+    // `process_message` often nests the actionable exit code under `data` only.
+    if !data.as_object().is_none_or(|o| o.len() <= 1) {
+        if let Ok(extra) = serde_json::to_string(data) {
+            if extra.len() < 512 {
+                msg.push_str(&format!(" data={extra}"));
+            }
+        }
+    }
+    AckiNackiError::TransactionFailed(msg)
 }
 
 fn parse_tx_hash(id: Option<&str>) -> Result<TxHash> {

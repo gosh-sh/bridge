@@ -177,7 +177,7 @@ You usually don't need these, but they're handy to have:
 | Item | Value |
 | --- | --- |
 | Network | **Sepolia** (Ethereum's test network) |
-| Bridge contract address | `0xDE8180911Ab2EbC9A6c1F5526bCE4c8242C061d9` |
+| Bridge contract address | `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` |
 | Token you deposit | **USDC** (test version, on Sepolia) |
 | Where to get test USDC | Aave Sepolia faucet |
 | Where to get test ETH | Any public "Sepolia faucet" |

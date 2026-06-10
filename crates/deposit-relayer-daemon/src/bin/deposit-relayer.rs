@@ -93,7 +93,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        #[arg(long, default_value = "0")]
+        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
         #[arg(long)]
@@ -124,7 +124,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        #[arg(long, default_value = "0")]
+        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// AN node REST base URL for BK-set preflight (`/v2/bk_set`).
         #[arg(long, env = "AN_NODE_URL")]
@@ -146,7 +146,7 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: Option<String>,
         /// ECC token id for `finalizeDeposit`.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, env = "AN_TOKEN_ID", default_value_t = 1)]
         an_token_id: u32,
         /// Run the submit stage against an in-memory mock AN instead of
         /// tvm_client.

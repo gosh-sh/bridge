@@ -277,6 +277,16 @@ pub struct AnSubmitConfig {
     pub confirm_timeout_secs: u64,
 }
 
+/// Left-pad a 20-byte EVM address to 32 bytes for `USDCBridge._srcSenderToFr`.
+///
+/// The on-chain helper reads exactly 32 big-endian bytes (`require(length >=
+/// 32)`); a bare 20-byte `srcSender` reverts before ZK verification runs.
+pub fn eth_address_to_src_sender_hex(sender: &[u8; 20]) -> String {
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(sender);
+    hex::encode(padded)
+}
+
 /// Build JSON parameters for `USDCBridge.finalizeDeposit` from a proof bundle.
 pub fn build_finalize_deposit_params(
     event: &DepositEvent,
@@ -286,19 +296,15 @@ pub fn build_finalize_deposit_params(
     let pi = &bundle.parsed;
     let amount_u128 = pi.amount.to::<u128>();
     json!({
-        "proof": base64_encode(&bundle.proof),
-        "srcDappId": format!("0x{:064x}", pi.dapp_id()),
-        "srcSender": format!("0x{}", hex::encode(event.sender.as_slice())),
-        "recipient_an": format!("0x{:064x}", pi.an_account()),
+        // `bytes` → plain hex; `uint256` → decimal strings (tvm_client ABI JSON).
+        "proof": hex::encode(&bundle.proof),
+        "srcDappId": pi.dapp_id().to_string(),
+        "srcSender": eth_address_to_src_sender_hex(&event.sender.into_array()),
+        "recipient_an": pi.an_account().to_string(),
         "amount": amount_u128.to_string(),
         "tokenId": token_id,
         "srcDepositId": pi.deposit_id.to_string(),
     })
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.encode(bytes)
 }
 
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
@@ -453,6 +459,22 @@ mod tests {
             } => assert!(reason.contains("ZKHALO2VERIFYWITHVK")),
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finalize_params_encode_proof_as_hex() {
+        let ev = event(1);
+        let b = bundle(&ev);
+        let params = build_finalize_deposit_params(&ev, &b, 3);
+        let proof = params["proof"].as_str().unwrap();
+        assert!(!proof.starts_with("0x"), "proof must be plain hex");
+        assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
+        assert_eq!(params["srcDappId"].as_str().unwrap(), b.parsed.dapp_id().to_string());
+        assert_eq!(
+            params["srcSender"].as_str().unwrap(),
+            eth_address_to_src_sender_hex(&ev.sender.into_array())
+        );
+        assert_eq!(hex::decode(params["srcSender"].as_str().unwrap()).unwrap().len(), 32);
     }
 
     #[tokio::test]

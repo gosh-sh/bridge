@@ -12,7 +12,8 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
 use alloy::{
-    network::Network,
+    consensus::TxReceipt,
+    network::{Ethereum, Network},
     primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::Filter,
@@ -115,6 +116,10 @@ pub use sol_bindings::AckiNackiBridge;
 // `Deposit` for callers that want the signature hash.
 use sol_bindings::AckiNackiBridge::Deposit;
 
+/// Maximum `eth_getLogs` block span per request. Alchemy's free tier caps this
+/// at 10 blocks; chunking keeps wide scans working on any RPC.
+const GET_LOGS_CHUNK_BLOCKS: u64 = 10;
+
 /// Production deposit source — scans `eth_getLogs` for the bridge's
 /// `Deposit` event.
 ///
@@ -164,10 +169,9 @@ where
 }
 
 #[async_trait]
-impl<P, N> DepositSource for EthLogSource<P, N>
+impl<P> DepositSource for EthLogSource<P, Ethereum>
 where
-    P: Provider<N> + Send + Sync,
-    N: Network,
+    P: Provider<Ethereum> + Send + Sync,
 {
     async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError> {
         let head = self
@@ -182,20 +186,29 @@ where
         }
 
         // `depositId` is the first indexed topic; filter on it directly so
-        // the node only returns the single matching log.
+        // the node only returns the single matching log. Scan in small chunks
+        // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
-        let filter = Filter::new()
-            .address(self.address)
-            .event_signature(Deposit::SIGNATURE_HASH)
-            .topic1(topic1)
-            .from_block(self.from_block)
-            .to_block(safe_head);
-
-        let logs = self
-            .provider
-            .get_logs(&filter)
-            .await
-            .map_err(|e| RelayerError::eth(format!("get_logs failed: {e}")))?;
+        let mut logs = Vec::new();
+        let mut chunk_start = self.from_block;
+        while chunk_start <= safe_head {
+            let chunk_end = chunk_start
+                .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
+                .min(safe_head);
+            let filter = Filter::new()
+                .address(self.address)
+                .event_signature(Deposit::SIGNATURE_HASH)
+                .topic1(topic1)
+                .from_block(chunk_start)
+                .to_block(chunk_end);
+            let chunk = self
+                .provider
+                .get_logs(&filter)
+                .await
+                .map_err(|e| RelayerError::eth(format!("get_logs failed: {e}")))?;
+            logs.extend(chunk);
+            chunk_start = chunk_end.saturating_add(1);
+        }
 
         for log in logs {
             let decoded = match log.log_decode::<Deposit>() {
@@ -210,6 +223,26 @@ where
             if id_u64 != deposit_id {
                 continue;
             }
+            let tx_hash = decoded.transaction_hash.unwrap_or_default();
+            // `deposit-prover` indexes logs by position inside the tx receipt,
+            // not the block-global `logIndex` that `eth_getLogs` returns.
+            let receipt = self
+                .provider
+                .get_transaction_receipt(tx_hash)
+                .await
+                .map_err(|e| RelayerError::eth(format!("get_transaction_receipt failed: {e}")))?
+                .ok_or_else(|| RelayerError::eth("deposit tx receipt not found"))?;
+            let block_log_index = decoded.log_index.unwrap_or_default();
+            let receipt_log_index = receipt
+                .inner
+                .logs()
+                .iter()
+                .position(|l| l.log_index == Some(block_log_index))
+                .ok_or_else(|| {
+                    RelayerError::eth(format!(
+                        "deposit log index {block_log_index} not found in receipt"
+                    ))
+                })? as u64;
             return Ok(Some(DepositEvent {
                 deposit_id: id_u64,
                 sender: ev.sender,
@@ -217,8 +250,8 @@ where
                 an_workchain: ev.anWorkchain,
                 an_account: ev.anAccount,
                 timestamp: ev.timestamp,
-                tx_hash: decoded.transaction_hash.unwrap_or_default(),
-                log_index: decoded.log_index.unwrap_or_default(),
+                tx_hash,
+                log_index: receipt_log_index,
                 block_number: decoded.block_number.unwrap_or_default(),
                 block_hash: decoded.block_hash.unwrap_or_default(),
                 source_contract: self.address,

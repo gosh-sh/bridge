@@ -14,31 +14,31 @@ description: >-
 The deposit flow spans **four repos** (siblings under `/home/sergey/Pruvendo/gosh/`).
 Touching the public-input layout means changing all of them in lock-step.
 
-## Public inputs (10, since 2026-06-02)
+## Public inputs (11, since 2026-06-02)
 
 Instance column order — every producer/consumer MUST agree:
 
 ```
 [ depositId, sender, amount, contractAddress,
-  anWorkchain, anAccountHigh, anAccountLow,
+  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
   blockHashHigh, blockHashLow, promiseCommit ]
 ```
 
-- `anWorkchain` = full 32-byte sign-extended `int8` word.
-- `anAccountHigh`/`anAccountLow` = the 256-bit AN account's two 16-byte halves;
+- `dappIdHigh`/`dappIdLow` = the 256-bit AN dApp identifier tag (config-supplied).
+- `anAccountHigh`/`anAccountLow` = the 256-bit AN recipient's two 16-byte halves;
   reconstruct as `anAccountHigh << 128 | anAccountLow`.
-- The AN recipient is **bound in-circuit** (not a relayer hint). It was 7 inputs
-  before 2026-06-02; `+[anWorkchain, anAccountHigh, anAccountLow]` made it 10.
+- The AN recipient is **bound in-circuit** (not a relayer hint). `dappId` replaced
+  the earlier `anWorkchain` slot; total count is **11** (not 7 or 10).
 
 ## Where each piece lives
 
 | Piece | Location | Notes |
 |---|---|---|
-| Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![10]`; Phase0 sets instances, Phase1 RLP-parses + `constrain_equal`. `MAX_DATA_BYTE_LEN=128` (4 ABI words). |
-| Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=10`; `DepositPublicInputs`, `encode_finalize_deposit` (10 scalars + proof). |
-| TokenBridge (AN-side consumer) | `acki-nacki/contracts/exchange/TokenBridge.sol` | TVM-Solidity. `finalizeDeposit` builds the public-inputs cell + calls `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Embeds `VK_BLOB` constant. Branch `pruvendo/deposit-rlc-e2e` on `gosh-sh/acki-nacki`. |
-| Compiled TokenBridge | `acki-nacki/contracts/0.79.3_compiled/exchange/TokenBridge.tvc` + `.abi.json` | Recompile after editing the `.sol` (see below). |
-| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2.rs` | **VK-driven**: reads instance count from the VkBlob, so 7→10 needs NO opcode change. Branch `pruvendo/full-dex-rlc-e2e` on `tvmlabs/tvm-sdk`. |
+| Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![11]`; RLC `EthCircuitImpl` + Blake2b SHPLONK proof (NOT Groth16). |
+| Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=11`; `export_vk_blob` + `export_blake2b_proof` (raw Halo2, no gnark wrap). |
+| USDCBridge / TokenBridge (AN) | `acki-nacki/contracts/exchange/USDCBridge.sol` | `finalizeDeposit` → `gosh.zkHalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Branch **`halo2_circuit_with_vk`** on `gosh-sh/acki-nacki`. |
+| Compiled bridge | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.tvc` + `.abi.json` | Recompile with `sold --tvm-version gosh`. |
+| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` | VkBlob-driven; RLC `circuit_shape=1`. Branch **`halo2_circuit_with_vk`** on `tvmlabs/tvm-sdk`. Do **not** use `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
 | tvm-sdk e2e test | `tvm-sdk/tvm_executor/src/transaction_executor.rs::athens_finalize_deposit_reaches_mint` | Loads `TokenBridge.tvc` + `/tmp/deposit_e2e/live_finalize_msg.boc`, drives finalize → opcode → mint. Skips if artifacts missing. |
 
 ## e2e artifacts (machine-local, in `/tmp/deposit_e2e/`)

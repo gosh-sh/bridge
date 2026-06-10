@@ -13,9 +13,9 @@
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
-//!   gnark wrappers' on-disk artefacts) and assembles the three operands.
+//!   Blake2b SHPLONK proof operands) and assembles the three opcode operands.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use alloy::primitives::U256;
 use async_trait::async_trait;
@@ -178,23 +178,56 @@ pub struct SubprocessProofGenerator {
 }
 
 impl SubprocessProofGenerator {
-    pub fn new(config: SubprocessProverConfig) -> Self {
-        Self {
-            config,
+    pub fn new(mut config: SubprocessProverConfig) -> Self {
+        // Subprocess spawn requires absolute paths when combined with
+        // `current_dir`; operators often pass a relative `--deposit-prover-dir`.
+        if let Ok(abs) = config.deposit_prover_dir.canonicalize() {
+            config.deposit_prover_dir = abs;
+        }
+        Self { config }
+    }
+
+    fn release_example_bin(&self, example: &str) -> Option<PathBuf> {
+        let bin = self
+            .config
+            .deposit_prover_dir
+            .join("target/release/examples")
+            .join(example);
+        if bin.is_file() {
+            Some(bin)
+        } else {
+            None
         }
     }
 
     async fn run_example(&self, args: &[String]) -> Result<(), RelayerError> {
         use tokio::process::Command;
 
-        let mut cmd = Command::new("cargo");
-        cmd.current_dir(&self.config.deposit_prover_dir)
-            .arg("run")
-            .arg("--release")
-            .arg("--example");
-        for a in args {
-            cmd.arg(a);
-        }
+        let example = args
+            .first()
+            .ok_or_else(|| RelayerError::ProofGeneration("empty example args".into()))?;
+        let passthrough: &[String] = match args.get(1).map(String::as_str) {
+            Some("--") => &args[2..],
+            _ => &args[1..],
+        };
+
+        let mut cmd = if let Some(bin) = self.release_example_bin(example) {
+            let mut c = Command::new(bin);
+            c.current_dir(&self.config.deposit_prover_dir)
+                .args(passthrough);
+            c
+        } else {
+            let mut c = Command::new("cargo");
+            c.current_dir(&self.config.deposit_prover_dir)
+                .arg("run")
+                .arg("--release")
+                .arg("--example");
+            for a in args {
+                c.arg(a);
+            }
+            c
+        };
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await

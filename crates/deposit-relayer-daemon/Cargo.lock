@@ -2358,7 +2358,6 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
- "base64",
  "clap",
  "hex",
  "serde",

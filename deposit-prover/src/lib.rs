@@ -16,6 +16,7 @@ pub use aggregation::{aggregate_proof, generate_aggregation_verifier, Aggregatio
 pub use circuit_v2::DepositEventCircuitV2;
 pub use ethereum_fetcher::EthereumFetcher;
 pub use prover::{
-    generate_proof, generate_solidity_verifier, test_circuit_mock, verify_proof, CircuitConfig,
+    generate_proof, generate_solidity_verifier, load_kzg_params_from_trusted_setup,
+    test_circuit_mock, verify_proof, CircuitConfig,
 };
 pub use types::{DepositEventData, DepositProofInput, DepositProofOutput, ReceiptProof};

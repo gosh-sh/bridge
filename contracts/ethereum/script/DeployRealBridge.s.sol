@@ -167,6 +167,7 @@ contract DeployRealBridge is Script {
                     dappFr: 0,
                     accFr: 0,
                     altDstChainId: 0,
+                    altDstHostChainId: 0,
                     altTokenId: 0
                 })
             );

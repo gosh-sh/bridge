@@ -36,6 +36,7 @@ contract DeployShellnetE2EBridge is Script {
         uint256 dappFr;
         uint256 accFr;
         uint256 altDstChainId;
+        uint256 altDstHostChainId;
         uint256 altTokenId;
     }
 
@@ -52,6 +53,7 @@ contract DeployShellnetE2EBridge is Script {
             dappFr: vm.envOr("WITHDRAW_DAPP_FR", uint256(0)),
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
+            altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
         });
 
@@ -73,6 +75,7 @@ contract DeployShellnetE2EBridge is Script {
         console.log("withdraw dappFr:", wd.dappFr);
         console.log("withdraw accFr:", wd.accFr);
         console.log("altDstChainId:", wd.altDstChainId);
+        console.log("altDstHostChainId:", wd.altDstHostChainId);
         console.log("altTokenId:", wd.altTokenId);
     }
 
@@ -121,6 +124,7 @@ contract DeployShellnetE2EBridge is Script {
                 dappFr: wd.dappFr,
                 accFr: wd.accFr,
                 altDstChainId: wd.altDstChainId,
+                altDstHostChainId: wd.altDstHostChainId,
                 altTokenId: wd.altTokenId
             })
         );

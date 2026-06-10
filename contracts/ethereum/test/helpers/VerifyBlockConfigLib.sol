@@ -56,6 +56,7 @@ library VerifyBlockConfigLib {
             dappFr: 0,
             accFr: 0,
             altDstChainId: 0,
+            altDstHostChainId: 0,
             altTokenId: 0
         });
     }
@@ -74,7 +75,29 @@ library VerifyBlockConfigLib {
             dappFr: dappFr,
             accFr: accFr,
             altDstChainId: 0,
+            altDstHostChainId: 0,
             altTokenId: 0
         });
+    }
+
+    /// @notice Shellnet E2E wiring: logical `altDstChainId` accepted only on
+    ///         `altDstHostChainId` (e.g. Sepolia accepts AN proofs with
+    ///         `dstChainId = 1`).
+    function withWithdrawShellnet(
+        IBridgeWithdrawalVerifier verifier,
+        uint256 dappFr,
+        uint256 accFr,
+        uint256 altDstChainId,
+        uint256 altDstHostChainId,
+        uint256 altTokenId
+    ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
+        return AckiNackiBridge.BridgeWithdrawConfig({
+                bridgeWithdrawalVerifier: verifier,
+                dappFr: dappFr,
+                accFr: accFr,
+                altDstChainId: altDstChainId,
+                altDstHostChainId: altDstHostChainId,
+                altTokenId: altTokenId
+            });
     }
 }

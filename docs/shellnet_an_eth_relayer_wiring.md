@@ -1,11 +1,22 @@
 # Shellnet AN→ETH relayer wiring — Sepolia `verifyBlock` + `withdrawByProof`
 
-> **Status (2026-06-10).** First live `verifyBlock` landed on Sepolia:
-> bridge `0xC0cdf8C0f67da725e36130A85Fc2aCEf269ce9E8`, tx
-> `0xa81fa4f5318cfc09c6bf1c3a048c2383d7c834993aae69763d945559708356eb`,
-> block `1083392`. Partner proofs still arrive as Halo2 (~8 KB); gnark-wrap
-> via `scripts/wrap_partner_proof_groth16.py` before submit. `withdrawByProof`
-> remains disabled on this deploy (Circuit 4 verifier not wired).
+> **Status (2026-06-10).** Full shellnet AN→ETH E2E **green** on Sepolia.
+>
+> | Deploy | Address | Role |
+> |--------|---------|------|
+> | v1 (verifyBlock only) | `0xC0cdf8C0f67da725e36130A85Fc2aCEf269ce9E8` | first `verifyBlock` smoke |
+> | **Shellnet E2E** | `0x58a1c8d22a79a91db6e7448a7d64d59ad4dc043d` | `verifyBlock` + `withdrawByProof` (mock C4 verifier) |
+>
+> E2E bridge txs (proof chain `1083392 → 1083904 → 1084416`, then withdrawal):
+> - `verifyBlock` `1083392`: `0xb5cc797d…` (earlier session)
+> - `verifyBlock` `1083904`: `0x0744554b090a1cb0c744a4c36e8783c2efa5f870940e1f348a69f0f6a926574b`
+> - `verifyBlock` `1084416`: `0xe169be8d0f8429a39080796cc3198820e8e5d073f18847656be7935b3f2a99ae`
+> - `withdrawByProof` (1 USDC → `0x742d35Cc6634C0532925a3b844Bc454e4438f44e`): `0x58855a163922014558c1dbc535e7194fc04ea9afe97201e72c5ca099ac619e81`
+>
+> Partner proofs arrive as Halo2 (~8 KB); gnark-wrap via
+> `scripts/wrap_partner_proof_groth16.py` (set `GNARK_LAST_SEEN_PI` to on-chain
+> `storedLastSeenBlockSeqNo` before each wrap). Circuit 4: `scripts/wrap_proof_event_groth16.py`.
+> Orchestration: `scripts/run_an_eth_e2e_sepolia.sh`.
 
 ## 1. Pipeline overview
 
@@ -182,10 +193,10 @@ Flags:
 - [x] Gnark-wrap `proof_1083392.json` (`GNARK_LAST_SEEN_PI=0` for genesis submit)
 - [x] `verify-prover-proof` eth_call PASS
 - [x] `submit-verify-block` mined first `verifyBlock` (seq `1083392`)
-- [ ] Wire `BridgeWithdrawalVerifier` on redeploy for payout path
-- [ ] Gnark-wrap `proof_event_000000.json` → `submit-withdraw`
-- [ ] Enable `bridge-relayer.service` for steady-state sync (subsequent blocks need
-      `GNARK_LAST_SEEN_PI=<on-chain storedLastSeen>` when wrapping)
+- [x] Deploy shellnet E2E bridge (`DeployShellnetE2EBridge.s.sol`) with mock C4 verifier + shellnet `altDstChainId`/`altTokenId`
+- [x] Walk proof chain `1083392 → 1083904 → 1084416` (each wrap uses prior seqno as `GNARK_LAST_SEEN_PI`)
+- [x] Gnark-wrap `proof_event_000000.json` → `submit-withdraw` (1 USDC payout)
+- [ ] Enable `bridge-relayer.service` for steady-state sync
 
 ## 6. Related docs
 

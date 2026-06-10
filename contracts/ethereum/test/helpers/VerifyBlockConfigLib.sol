@@ -52,21 +52,29 @@ library VerifyBlockConfigLib {
         returns (AckiNackiBridge.BridgeWithdrawConfig memory)
     {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)), dappFr: 0, accFr: 0
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
+            dappFr: 0,
+            accFr: 0,
+            altDstChainId: 0,
+            altTokenId: 0
         });
     }
 
     /// @notice `BridgeWithdrawConfig` wired with an explicit verifier and
-    ///         AN-side `(dappFr, accFr)` identity. Both Fr values must be
-    ///         non-zero when the verifier is non-zero (enforced by the
-    ///         constructor — `InvalidBridgeWithdrawalIdentity`).
+    ///         AN-side `(dappFr, accFr)` identity. `accFr` must be non-zero
+    ///         when the verifier is non-zero (`InvalidBridgeWithdrawalIdentity`);
+    ///         `dappFr` may be zero on shellnet (zero `dapp_id` deployments).
     function withWithdraw(IBridgeWithdrawalVerifier verifier, uint256 dappFr, uint256 accFr)
         internal
         pure
         returns (AckiNackiBridge.BridgeWithdrawConfig memory)
     {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: verifier, dappFr: dappFr, accFr: accFr
+            bridgeWithdrawalVerifier: verifier,
+            dappFr: dappFr,
+            accFr: accFr,
+            altDstChainId: 0,
+            altTokenId: 0
         });
     }
 }

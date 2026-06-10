@@ -35,7 +35,11 @@ contract GenDepositSetup is Script {
             genesisPrevMaxLevelLayerHash: 0
         });
         AckiNackiBridge.BridgeWithdrawConfig memory bwDisabled = AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)), dappFr: 0, accFr: 0
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
+            dappFr: 0,
+            accFr: 0,
+            altDstChainId: 0,
+            altTokenId: 0
         });
 
         AckiNackiBridge bridge = new AckiNackiBridge(

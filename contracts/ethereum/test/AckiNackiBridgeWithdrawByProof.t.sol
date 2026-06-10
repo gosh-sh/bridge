@@ -238,9 +238,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(bridge.bridgeWithdrawalAccFr(), ACC_FR);
     }
 
-    function test_constructor_withdrawEnabledWithoutDappFr_reverts() public {
-        vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
-        new AckiNackiBridge(
+    function test_constructor_withdrawEnabledWithZeroDappFr_succeeds() public {
+        // Shellnet uses dapp_id=0; accFr must still be non-zero.
+        AckiNackiBridge shellnet = new AckiNackiBridge(
             address(oracle),
             address(usdc),
             address(0),
@@ -250,6 +250,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
                 IBridgeWithdrawalVerifier(address(withdrawalVerifier)), 0, ACC_FR
             )
         );
+        assertEq(shellnet.bridgeWithdrawalDappFr(), 0);
+        assertEq(shellnet.bridgeWithdrawalAccFr(), ACC_FR);
     }
 
     function test_constructor_withdrawEnabledWithoutAccFr_reverts() public {

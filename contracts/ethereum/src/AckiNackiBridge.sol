@@ -195,6 +195,12 @@ contract AckiNackiBridge {
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
     uint256 public immutable bridgeWithdrawalAccFr;
 
+    /// @notice See `BridgeWithdrawConfig.altDstChainId`.
+    uint256 public immutable bridgeWithdrawalAltDstChainId;
+
+    /// @notice See `BridgeWithdrawConfig.altTokenId`.
+    uint256 public immutable bridgeWithdrawalAltTokenId;
+
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4
     ///         single-final-root nullifier is
@@ -425,12 +431,19 @@ contract AckiNackiBridge {
     ///      pin the AN-side identity the Circuit 4 proof must bind to.
     struct BridgeWithdrawConfig {
         IBridgeWithdrawalVerifier bridgeWithdrawalVerifier;
-        /// @notice Fr-encoded AN-side bridge dApp identifier. Must be
-        ///         non-zero when `bridgeWithdrawalVerifier` is non-zero.
+        /// @notice Fr-encoded AN-side bridge dApp identifier. May be zero on
+        ///         shellnet (zero `dapp_id` deployments) when `accFr` is set.
         uint256 dappFr;
         /// @notice Fr-encoded AN-side bridge account identifier. Must be
         ///         non-zero when `bridgeWithdrawalVerifier` is non-zero.
         uint256 accFr;
+        /// @notice Optional shellnet/testnet alias for `pub.dstChainId` when
+        ///         the AN orchestrator uses a logical id (e.g. `1`) distinct
+        ///         from `block.chainid`. Zero disables the alias.
+        uint256 altDstChainId;
+        /// @notice Optional shellnet alias for `pub.tokenId` (e.g. AN
+        ///         `USDC_ECC_ID = 3`). Zero accepts only `tokenId == 0`.
+        uint256 altTokenId;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -486,13 +499,15 @@ contract AckiNackiBridge {
         // Verifier address is the toggle; if non-zero, both Fr identifiers
         // must also be non-zero (otherwise no real proof could ever bind).
         if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
-            if (_bw.dappFr == 0 || _bw.accFr == 0) {
+            if (_bw.accFr == 0) {
                 revert InvalidBridgeWithdrawalIdentity();
             }
         }
         bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
         bridgeWithdrawalDappFr = _bw.dappFr;
         bridgeWithdrawalAccFr = _bw.accFr;
+        bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
+        bridgeWithdrawalAltTokenId = _bw.altTokenId;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -759,10 +774,14 @@ contract AckiNackiBridge {
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
         }
-        if (pub.dstChainId != block.chainid) {
+        bool dstOk = pub.dstChainId == block.chainid
+            || (bridgeWithdrawalAltDstChainId != 0 && pub.dstChainId == bridgeWithdrawalAltDstChainId);
+        if (!dstOk) {
             revert DstChainIdMismatch(pub.dstChainId, block.chainid);
         }
-        if (pub.tokenId != 0) {
+        bool tokenOk = pub.tokenId == 0
+            || (bridgeWithdrawalAltTokenId != 0 && pub.tokenId == bridgeWithdrawalAltTokenId);
+        if (!tokenOk) {
             revert UnsupportedTokenId(pub.tokenId);
         }
         if (pub.recipientHi > RECIPIENT_HALF_MASK) {

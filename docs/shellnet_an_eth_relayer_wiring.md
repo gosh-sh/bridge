@@ -1,11 +1,11 @@
 # Shellnet AN→ETH relayer wiring — Sepolia `verifyBlock` + `withdrawByProof`
 
-> **Status (2026-06-09).** Partner `bridge-prover-daemon` + shellnet orchestrator
-> produce Halo2 proofs on `ubuntu@ursus-tools.dev`. The bridge repo now ships
-> `crates/bridge-relayer-daemon` CLI commands to read those artefacts and submit
-> to Sepolia. **Blocked today:** Sepolia bridge has verifiers disabled at deploy,
-> and partner `proof_*.json` carries ~8 KB Halo2 bytes — Ethereum expects **256-byte
-> Groth16** (gnark wrap required).
+> **Status (2026-06-10).** First live `verifyBlock` landed on Sepolia:
+> bridge `0xC0cdf8C0f67da725e36130A85Fc2aCEf269ce9E8`, tx
+> `0xa81fa4f5318cfc09c6bf1c3a048c2383d7c834993aae69763d945559708356eb`,
+> block `1083392`. Partner proofs still arrive as Halo2 (~8 KB); gnark-wrap
+> via `scripts/wrap_partner_proof_groth16.py` before submit. `withdrawByProof`
+> remains disabled on this deploy (Circuit 4 verifier not wired).
 
 ## 1. Pipeline overview
 
@@ -77,20 +77,17 @@ Partner `proof_<seqno>.json` fields:
 
 `ProverProofsBlockSource` rejects non-256-byte proofs unless diagnostics flags are set.
 
-Wrap with the orchestrator gnark binaries (run on a host with Go + cached keys):
+Use the helper script (requires Go + cached `proving.key` under each wrapper dir):
 
 ```bash
-# Export partner JSON → halo2_proof.json shape expected by gnark wrapper, then:
-cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a
-./circuit-1a prove /path/to/primary_halo2_export.json
-
-cd ../circuit-2
-./circuit-2 prove /path/to/layer_halo2_export.json
+# First block after genesis deploy: on-chain storedLastSeenBlockSeqNo is 0,
+# but partner JSON may carry a non-zero last_seen_block_seqno — override PI[3]:
+GNARK_LAST_SEEN_PI=0 python3 scripts/wrap_partner_proof_groth16.py proof_1083392.json
 ```
 
-Replace `primary_proof_hex` / `layer_proof_hex` in `proof_<seqno>.json` with the
-256-byte Groth16 hex from the wrapper output (or write sidecar `proof_<seqno>.groth16.json`
-— automation TBD).
+The script patches `primary_proof_hex` / `layer_proof_hex` in-place (`.bak` backup).
+It already maps Circuit 2 PI `[0]` to `block_id_hex` (the single `verifyBlock`
+`blockId`), not `layer_block_id_hex`.
 
 Circuit 4 (`proof_event_000000.json`) needs the same treatment via
 `gnark-wrappers/circuit-4/` before `submit-withdraw`.
@@ -181,14 +178,14 @@ Flags:
 
 ## 5. Unblock checklist
 
-- [ ] Redeploy Sepolia bridge with `WIRE_VERIFY_BLOCK=true` + genesis from `proof_1083392.json`
-- [ ] Fund `RELAYER_PRIVATE_KEY` EOA with Sepolia ETH
-- [ ] Gnark-wrap at least one `proof_<seqno>.json` bundle (1A + 2)
-- [ ] `verify-prover-proof` eth_call PASS on wrapped bundle
-- [ ] `submit-verify-block` mines first `verifyBlock`
-- [ ] Wire `BridgeWithdrawalVerifier` (or mock) on redeploy for payout path
+- [x] Redeploy Sepolia bridge with `WIRE_VERIFY_BLOCK=true` + genesis from `proof_1083392.json`
+- [x] Gnark-wrap `proof_1083392.json` (`GNARK_LAST_SEEN_PI=0` for genesis submit)
+- [x] `verify-prover-proof` eth_call PASS
+- [x] `submit-verify-block` mined first `verifyBlock` (seq `1083392`)
+- [ ] Wire `BridgeWithdrawalVerifier` on redeploy for payout path
 - [ ] Gnark-wrap `proof_event_000000.json` → `submit-withdraw`
-- [ ] Enable `bridge-relayer.service` for steady-state sync
+- [ ] Enable `bridge-relayer.service` for steady-state sync (subsequent blocks need
+      `GNARK_LAST_SEEN_PI=<on-chain storedLastSeen>` when wrapping)
 
 ## 6. Related docs
 

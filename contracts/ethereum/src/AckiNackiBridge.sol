@@ -775,7 +775,8 @@ contract AckiNackiBridge {
             revert WithdrawIdentityMismatch();
         }
         bool dstOk = pub.dstChainId == block.chainid
-            || (bridgeWithdrawalAltDstChainId != 0 && pub.dstChainId == bridgeWithdrawalAltDstChainId);
+            || (bridgeWithdrawalAltDstChainId != 0
+                && pub.dstChainId == bridgeWithdrawalAltDstChainId);
         if (!dstOk) {
             revert DstChainIdMismatch(pub.dstChainId, block.chainid);
         }

@@ -15,7 +15,11 @@
 //! Phase 5.2 scaffolding also ships [`ProverProofsBlockSource`], which reads
 //! the partner `bridge-prover-daemon` JSON under `proofs/proof_<seqno>.json`.
 
-use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use alloy::primitives::{Bytes, U256};
 use async_trait::async_trait;
@@ -283,17 +287,15 @@ impl ProverProofsBlockSource {
                     .unwrap_or(false);
                 if !(primary && layer) {
                     return Err(RelayerError::other(format!(
-                        "result_{seq_no}.json exists but verification failed \
-                         (primary={primary}, layer={layer})"
+                        "result_{seq_no}.json exists but verification failed (primary={primary}, \
+                         layer={layer})"
                     )));
                 }
             }
         }
 
-        let req: PartnerProofRequest =
-            serde_json::from_slice(&std::fs::read(&path)?).map_err(|e| {
-                RelayerError::other(format!("parse {}: {e}", path.display()))
-            })?;
+        let req: PartnerProofRequest = serde_json::from_slice(&std::fs::read(&path)?)
+            .map_err(|e| RelayerError::other(format!("parse {}: {e}", path.display())))?;
 
         if req.block_seq_no as u64 != seq_no {
             return Err(RelayerError::other(format!(
@@ -352,8 +354,8 @@ fn decode_proof_bytes(hex_str: &str, accept_halo2: bool) -> Result<Vec<u8>, Rela
         return Ok(raw);
     }
     Err(RelayerError::other(format!(
-        "proof is {} bytes; Ethereum `verifyBlock` expects {}-byte Groth16 proofs. \
-         Wrap the partner Halo2 export via gnark-wrappers/circuit-{{1a,2}} before submitting.",
+        "proof is {} bytes; Ethereum `verifyBlock` expects {}-byte Groth16 proofs. Wrap the \
+         partner Halo2 export via gnark-wrappers/circuit-{{1a,2}} before submitting.",
         raw.len(),
         GROTH16_PROOF_SIZE
     )))

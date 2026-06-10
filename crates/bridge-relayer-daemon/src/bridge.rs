@@ -366,10 +366,9 @@ where
         proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<DryRunOutcome, RelayerError> {
-        let call = self.contract.withdrawByProof(
-            proof.clone(),
-            to_sol_withdrawal_pub(pub_inputs),
-        );
+        let call = self
+            .contract
+            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
         match call.call().await {
             Ok(_) => Ok(DryRunOutcome::WouldSucceed),
             Err(e) => Ok(DryRunOutcome::WouldRevert {
@@ -384,10 +383,9 @@ where
         proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-        let call = self.contract.withdrawByProof(
-            proof.clone(),
-            to_sol_withdrawal_pub(pub_inputs),
-        );
+        let call = self
+            .contract
+            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {
                 Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {

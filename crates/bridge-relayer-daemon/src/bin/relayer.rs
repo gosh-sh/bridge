@@ -869,9 +869,8 @@ async fn run_prover_daemon(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(
-        ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate),
-    );
+    let source =
+        Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
     let metrics = RelayerMetrics::new();
@@ -910,8 +909,7 @@ async fn submit_verify_block(
     dry_run: bool,
     skip_verified_gate: bool,
 ) -> anyhow::Result<()> {
-    let source =
-        ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate);
+    let source = ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate);
     let block = source
         .fetch(block_seq_no)
         .await?
@@ -922,7 +920,9 @@ async fn submit_verify_block(
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_block(&block).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: verifyBlock would succeed"),
-            DryRunOutcome::WouldRevert { reason } => {
+            DryRunOutcome::WouldRevert {
+                reason,
+            } => {
                 anyhow::bail!("dry-run reverted: {reason}");
             },
         }
@@ -939,10 +939,15 @@ async fn submit_verify_block(
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_block(&block).await? {
-        bridge_relayer_daemon::SubmitOutcome::Verified { tx_hash, new_state } => {
+        bridge_relayer_daemon::SubmitOutcome::Verified {
+            tx_hash,
+            new_state,
+        } => {
             info!(?tx_hash, ?new_state, "verifyBlock submitted");
         },
-        bridge_relayer_daemon::SubmitOutcome::Reverted { reason } => {
+        bridge_relayer_daemon::SubmitOutcome::Reverted {
+            reason,
+        } => {
             anyhow::bail!("verifyBlock reverted: {reason}");
         },
     }
@@ -1002,7 +1007,9 @@ async fn verify_prover_proof(
             info!("verify-prover-proof: eth_call PASS");
             Ok(())
         },
-        DryRunOutcome::WouldRevert { reason } => anyhow::bail!("eth_call reverted: {reason}"),
+        DryRunOutcome::WouldRevert {
+            reason,
+        } => anyhow::bail!("eth_call reverted: {reason}"),
     }
 }
 
@@ -1022,7 +1029,9 @@ async fn submit_withdraw(
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
-            DryRunOutcome::WouldRevert { reason } => {
+            DryRunOutcome::WouldRevert {
+                reason,
+            } => {
                 anyhow::bail!("dry-run reverted: {reason}");
             },
         }
@@ -1039,8 +1048,12 @@ async fn submit_withdraw(
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_withdraw(&proof, &pub_inputs).await? {
-        WithdrawSubmitOutcome::Paid { tx_hash } => info!(?tx_hash, "withdrawByProof paid out"),
-        WithdrawSubmitOutcome::Reverted { reason } => {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Reverted {
+            reason,
+        } => {
             anyhow::bail!("withdrawByProof reverted: {reason}");
         },
     }

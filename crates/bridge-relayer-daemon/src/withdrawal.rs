@@ -57,8 +57,8 @@ impl PartnerWithdrawalProof {
         let raw = decode_hex(&self.proof_hex)?;
         if raw.len() != GROTH16_PROOF_SIZE {
             return Err(RelayerError::other(format!(
-                "withdrawal proof is {} bytes; Ethereum bridge expects {}-byte Groth16 \
-                 (run gnark-wrappers/circuit-4 prove on the Halo2 export first)",
+                "withdrawal proof is {} bytes; Ethereum bridge expects {}-byte Groth16 (run \
+                 gnark-wrappers/circuit-4 prove on the Halo2 export first)",
                 raw.len(),
                 GROTH16_PROOF_SIZE
             )));

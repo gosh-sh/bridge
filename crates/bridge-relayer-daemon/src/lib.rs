@@ -85,6 +85,6 @@ pub use live_source::{
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{BlockSource, FixturesBlockSource, InMemoryBlockSource, ProverProofsBlockSource};
-pub use withdrawal::{PartnerWithdrawalProof, WithdrawalPublicInputs, GROTH16_PROOF_SIZE};
 pub use state::RelayerState;
 pub use types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES};
+pub use withdrawal::{PartnerWithdrawalProof, WithdrawalPublicInputs, GROTH16_PROOF_SIZE};

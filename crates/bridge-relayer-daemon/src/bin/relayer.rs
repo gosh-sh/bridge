@@ -43,8 +43,9 @@ use alloy::{
 };
 use bridge_relayer_daemon::{
     BackoffConfig, BkSetSentry, BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient,
-    FixturesBlockSource, GuardedOutcome, Relayer, RelayerConfig, RelayerMetrics,
-    SentryGuardedRelayer, SentryStatus, TickOutcome,
+    FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer,
+    RelayerConfig, RelayerMetrics, SentryGuardedRelayer, SentryStatus, TickOutcome,
+    WithdrawSubmitOutcome,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -179,6 +180,79 @@ enum Cmd {
         #[arg(long)]
         no_simulate: bool,
     },
+    /// Long-running daemon reading partner `proof_<seqno>.json` bundles
+    /// from `bridge-prover-daemon` and submitting `verifyBlock` on Ethereum.
+    DaemonProver {
+        /// Directory containing `proof_*.json` + `result_*.json` (partner
+        /// prover daemon `proofs/` folder).
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        #[arg(long, env = "AN_NODE_URL")]
+        an_node_url: Option<String>,
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Skip the partner `result_*.json` verification gate.
+        #[arg(long)]
+        skip_verified_gate: bool,
+    },
+    /// Submit one `verifyBlock` for a specific partner proof bundle.
+    SubmitVerifyBlock {
+        #[arg(long)]
+        proofs_dir: PathBuf,
+        #[arg(long)]
+        block_seq_no: u64,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        skip_verified_gate: bool,
+    },
+    /// Read-only pre-flight for a partner `proof_<seqno>.json` bundle.
+    VerifyProverProof {
+        #[arg(long)]
+        proofs_dir: PathBuf,
+        #[arg(long)]
+        block_seq_no: u64,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long)]
+        no_simulate: bool,
+        #[arg(long)]
+        skip_verified_gate: bool,
+        /// Allow ~8 KB Halo2 proof bytes through load (anchor checks only).
+        #[arg(long)]
+        accept_halo2_proofs: bool,
+    },
+    /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
+    SubmitWithdraw {
+        #[arg(long)]
+        proof_event: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
 }
@@ -265,6 +339,94 @@ async fn main() -> anyhow::Result<()> {
                 e
             })
         },
+        Cmd::DaemonProver {
+            proofs_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            an_node_url,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            skip_verified_gate,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_prover_daemon(
+                args.state,
+                proofs_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                an_node_url,
+                backoff,
+                skip_verified_gate,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-prover failed");
+                e
+            })
+        },
+        Cmd::SubmitVerifyBlock {
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+            skip_verified_gate,
+        } => submit_verify_block(
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+            skip_verified_gate,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "submit-verify-block failed");
+            e
+        }),
+        Cmd::VerifyProverProof {
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            no_simulate,
+            skip_verified_gate,
+            accept_halo2_proofs,
+        } => verify_prover_proof(
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            !no_simulate,
+            skip_verified_gate,
+            accept_halo2_proofs,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "verify-prover-proof failed");
+            e
+        }),
+        Cmd::SubmitWithdraw {
+            proof_event,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+        } => submit_withdraw(proof_event, rpc_url, bridge_address, private_key, dry_run)
+            .await
+            .map_err(|e| {
+                error!(?e, "submit-withdraw failed");
+                e
+            }),
     }
 }
 
@@ -685,6 +847,204 @@ async fn verify_fixture(
             std::process::exit(1);
         },
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prover_daemon(
+    state_path: PathBuf,
+    proofs_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    an_node_url: Option<String>,
+    backoff: BackoffConfig,
+    skip_verified_gate: bool,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe_provider.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let source = Arc::new(
+        ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate),
+    );
+    let cfg = RelayerConfig::new(state_path);
+    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let metrics = RelayerMetrics::new();
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("shutdown signal received");
+    };
+
+    info!(?backoff, proofs_dir = %proofs_dir.display(), "daemon-prover starting");
+    let summary = match an_node_url {
+        None => {
+            relayer
+                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+                .await?
+        },
+        Some(url) => {
+            let sentry = BkSetSentry::from_node_url(url)?;
+            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
+            guarded
+                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+                .await?
+        },
+    };
+    info!(?summary, snapshot = ?metrics.snapshot(), "daemon-prover stopped");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_verify_block(
+    proofs_dir: PathBuf,
+    block_seq_no: u64,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    dry_run: bool,
+    skip_verified_gate: bool,
+) -> anyhow::Result<()> {
+    let source =
+        ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate);
+    let block = source
+        .fetch(block_seq_no)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
+
+    if dry_run {
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let bridge = EthBridgeClient::new(bridge_address, provider);
+        match bridge.dry_run_block(&block).await? {
+            DryRunOutcome::WouldSucceed => info!("dry-run: verifyBlock would succeed"),
+            DryRunOutcome::WouldRevert { reason } => {
+                anyhow::bail!("dry-run reverted: {reason}");
+            },
+        }
+        return Ok(());
+    }
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    match bridge.submit_block(&block).await? {
+        bridge_relayer_daemon::SubmitOutcome::Verified { tx_hash, new_state } => {
+            info!(?tx_hash, ?new_state, "verifyBlock submitted");
+        },
+        bridge_relayer_daemon::SubmitOutcome::Reverted { reason } => {
+            anyhow::bail!("verifyBlock reverted: {reason}");
+        },
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_prover_proof(
+    proofs_dir: PathBuf,
+    block_seq_no: u64,
+    rpc_url: String,
+    bridge_address: Address,
+    simulate: bool,
+    skip_verified_gate: bool,
+    accept_halo2_proofs: bool,
+) -> anyhow::Result<()> {
+    let source = ProverProofsBlockSource::new(&proofs_dir)
+        .skip_verified_gate(skip_verified_gate)
+        .accept_halo2_proofs(accept_halo2_proofs);
+    let block = source
+        .fetch(block_seq_no)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
+
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let on_chain = bridge.read_state().await?;
+
+    if block.bk_set_commitment != on_chain.bk_set_commitment {
+        anyhow::bail!(
+            "bk_set mismatch: proof={} chain={}",
+            block.bk_set_commitment,
+            on_chain.bk_set_commitment
+        );
+    }
+    if block.block_seq_no <= on_chain.last_seen_block_seq_no {
+        anyhow::bail!(
+            "seq_no not monotonic: proof={} chain_last_seen={}",
+            block.block_seq_no,
+            on_chain.last_seen_block_seq_no
+        );
+    }
+    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+        anyhow::bail!(
+            "prev anchor mismatch: proof={} chain={}",
+            block.prev_max_level_layer_hash,
+            on_chain.prev_max_level_layer_hash
+        );
+    }
+
+    info!("verify-prover-proof: anchor checks PASS");
+    if !simulate {
+        return Ok(());
+    }
+    match bridge.dry_run_block(&block).await? {
+        DryRunOutcome::WouldSucceed => {
+            info!("verify-prover-proof: eth_call PASS");
+            Ok(())
+        },
+        DryRunOutcome::WouldRevert { reason } => anyhow::bail!("eth_call reverted: {reason}"),
+    }
+}
+
+async fn submit_withdraw(
+    proof_event: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let bundle = PartnerWithdrawalProof::from_json_bytes(&std::fs::read(&proof_event)?)?;
+    let proof = bundle.proof_bytes()?;
+    let pub_inputs = bundle.public_inputs()?;
+
+    if dry_run {
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let bridge = EthBridgeClient::new(bridge_address, provider);
+        match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
+            DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
+            DryRunOutcome::WouldRevert { reason } => {
+                anyhow::bail!("dry-run reverted: {reason}");
+            },
+        }
+        return Ok(());
+    }
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    match bridge.submit_withdraw(&proof, &pub_inputs).await? {
+        WithdrawSubmitOutcome::Paid { tx_hash } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Reverted { reason } => {
+            anyhow::bail!("withdrawByProof reverted: {reason}");
+        },
+    }
+    Ok(())
 }
 
 fn init_tracing() {

@@ -11,8 +11,11 @@
 //!
 //! Phase 5.2 will add `LiveBlockSource` backed by GraphQL + BOC parsing
 //! + halo2 + gnark.
+//!
+//! Phase 5.2 scaffolding also ships [`ProverProofsBlockSource`], which reads
+//! the partner `bridge-prover-daemon` JSON under `proofs/proof_<seqno>.json`.
 
-use std::{collections::BTreeMap, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
 
 use alloy::primitives::{Bytes, U256};
 use async_trait::async_trait;
@@ -21,6 +24,7 @@ use serde::Deserialize;
 use crate::{
     error::RelayerError,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
+    withdrawal::{fr_hex_to_u256, GROTH16_PROOF_SIZE},
 };
 
 /// Asynchronous source of AN block payloads.
@@ -197,6 +201,165 @@ impl BlockSource for FixturesBlockSource {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Partner prover daemon proofs — `proofs/proof_<seqno>.json`
+// ─────────────────────────────────────────────────────────────────────
+
+/// JSON written by `acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-daemon`
+/// (`bridge-prover-lib::ipc::ProofRequest`).
+#[derive(Deserialize)]
+struct PartnerProofRequest {
+    #[serde(default, rename = "schema_version")]
+    _schema_version: u32,
+    block_seq_no: u32,
+    #[serde(default, rename = "last_seen_block_seqno")]
+    _last_seen_block_seqno: u32,
+    block_id_hex: String,
+    primary_proof_hex: String,
+    layer_proof_hex: String,
+    bk_set_poseidon_hash_hex: String,
+    num_layers: u8,
+    layer_hash_frs_hex: Vec<String>,
+    prev_max_level_layer_hash_hex: String,
+}
+
+/// Reads proof bundles from the partner prover's `proofs/` directory.
+///
+/// By default expects **256-byte Groth16** proofs in the JSON (post-gnark
+/// wrap). Set `accept_halo2_proofs` only for dry-runs against a local mock
+/// bridge — Sepolia production verifiers reject non-256-byte proofs.
+pub struct ProverProofsBlockSource {
+    proofs_dir: PathBuf,
+    /// When true, skip `result_<seqno>.json` verification gate.
+    skip_verified_gate: bool,
+    /// When true, allow non-256-byte proofs (Halo2) through — for diagnostics.
+    accept_halo2_proofs: bool,
+}
+
+impl ProverProofsBlockSource {
+    pub fn new(proofs_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            proofs_dir: proofs_dir.into(),
+            skip_verified_gate: false,
+            accept_halo2_proofs: false,
+        }
+    }
+
+    pub fn skip_verified_gate(mut self, skip: bool) -> Self {
+        self.skip_verified_gate = skip;
+        self
+    }
+
+    pub fn accept_halo2_proofs(mut self, accept: bool) -> Self {
+        self.accept_halo2_proofs = accept;
+        self
+    }
+
+    fn proof_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir.join(format!("proof_{seq_no}.json"))
+    }
+
+    fn result_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir.join(format!("result_{seq_no}.json"))
+    }
+
+    fn load_block(&self, seq_no: u64) -> Result<Option<AnBlockData>, RelayerError> {
+        let path = self.proof_path(seq_no);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        if !self.skip_verified_gate {
+            let result_path = self.result_path(seq_no);
+            if result_path.exists() {
+                let result: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&result_path)?)?;
+                let primary = result
+                    .get("primary_verified")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let layer = result
+                    .get("layer_verified")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !(primary && layer) {
+                    return Err(RelayerError::other(format!(
+                        "result_{seq_no}.json exists but verification failed \
+                         (primary={primary}, layer={layer})"
+                    )));
+                }
+            }
+        }
+
+        let req: PartnerProofRequest =
+            serde_json::from_slice(&std::fs::read(&path)?).map_err(|e| {
+                RelayerError::other(format!("parse {}: {e}", path.display()))
+            })?;
+
+        if req.block_seq_no as u64 != seq_no {
+            return Err(RelayerError::other(format!(
+                "proof file seq mismatch: path={seq_no}, json={}",
+                req.block_seq_no
+            )));
+        }
+
+        let primary = decode_proof_bytes(&req.primary_proof_hex, self.accept_halo2_proofs)?;
+        let layer = decode_proof_bytes(&req.layer_proof_hex, self.accept_halo2_proofs)?;
+
+        if req.num_layers == 0 || req.num_layers as usize > MAX_LAYER_HASHES {
+            return Err(RelayerError::other(format!(
+                "num_layers {} out of 1..=10",
+                req.num_layers
+            )));
+        }
+
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
+        for (i, hex_fr) in req.layer_hash_frs_hex.iter().enumerate() {
+            if i >= MAX_LAYER_HASHES {
+                break;
+            }
+            layer_hashes[i] = fr_hex_to_u256(hex_fr)?;
+        }
+
+        let block = AnBlockData {
+            fin_type: FinalizationType::Primary,
+            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            bk_set_commitment: fr_hex_to_u256(&req.bk_set_poseidon_hash_hex)?,
+            block_seq_no: seq_no,
+            num_layers: req.num_layers,
+            layer_hashes,
+            prev_max_level_layer_hash: fr_hex_to_u256(&req.prev_max_level_layer_hash_hex)?,
+            attestation_proof: Bytes::from(primary),
+            layer_hashes_proof: Bytes::from(layer),
+        };
+        block.validate_shape()?;
+        Ok(Some(block))
+    }
+}
+
+#[async_trait]
+impl BlockSource for ProverProofsBlockSource {
+    async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError> {
+        self.load_block(target_seq_no)
+    }
+}
+
+fn decode_proof_bytes(hex_str: &str, accept_halo2: bool) -> Result<Vec<u8>, RelayerError> {
+    let raw = decode_hex(hex_str)?;
+    if raw.len() == GROTH16_PROOF_SIZE {
+        return Ok(raw);
+    }
+    if accept_halo2 {
+        return Ok(raw);
+    }
+    Err(RelayerError::other(format!(
+        "proof is {} bytes; Ethereum `verifyBlock` expects {}-byte Groth16 proofs. \
+         Wrap the partner Halo2 export via gnark-wrappers/circuit-{{1a,2}} before submitting.",
+        raw.len(),
+        GROTH16_PROOF_SIZE
+    )))
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 
@@ -283,5 +446,50 @@ mod tests {
         assert_eq!(b.block_id, U256::from(42));
         assert_eq!(b.layer_hashes[0], U256::from(111));
         assert!(src.fetch(2).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn prover_proofs_source_loads_groth16_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let proof = serde_json::json!({
+            "schema_version": 2,
+            "block_seq_no": 512,
+            "block_height": 512,
+            "last_seen_block_seqno": 0,
+            "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
+            "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
+            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
+            "num_layers": 1,
+            "layer_hash_frs_hex": [
+                "0500000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "prev_max_level_layer_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        std::fs::write(
+            dir.path().join("proof_512.json"),
+            serde_json::to_string(&proof).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("result_512.json"),
+            r#"{"block_seq_no":512,"primary_verified":true,"layer_verified":true,"error":null}"#,
+        )
+        .unwrap();
+
+        let src = ProverProofsBlockSource::new(dir.path());
+        let b = src.fetch(512).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 512);
+        assert_eq!(b.attestation_proof.len(), 256);
     }
 }

@@ -43,6 +43,7 @@ use async_trait::async_trait;
 use crate::{
     error::RelayerError,
     types::{AnBlockData, MAX_LAYER_HASHES},
+    withdrawal::WithdrawalPublicInputs,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -259,6 +260,26 @@ mod sol_bindings {
             function storedBkSetCommitment() external view returns (uint256);
             function storedPrevMaxLevelLayerHash() external view returns (uint256);
 
+            struct WithdrawalPublicInputs {
+                uint256 tokenId;
+                uint256 amount;
+                uint256 recipientHi;
+                uint256 recipientLo;
+                uint256 dstChainId;
+                uint256 senderAccFr;
+                uint256 dappFr;
+                uint256 accFr;
+                uint256 nullifier;
+                uint256 finalRoot;
+            }
+
+            function withdrawByProof(
+                bytes calldata proof,
+                WithdrawalPublicInputs calldata pub
+            ) external returns (bool success);
+
+            function isNullifierUsed(uint256 nullifier) external view returns (bool);
+
             event BlockVerified(
                 uint256 indexed blockId,
                 uint64 indexed blockSeqNo,
@@ -337,6 +358,81 @@ where
                 reason: format!("{e}"),
             }),
         }
+    }
+
+    /// Simulate `withdrawByProof(...)` via `eth_call`.
+    pub async fn dry_run_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<DryRunOutcome, RelayerError> {
+        let call = self.contract.withdrawByProof(
+            proof.clone(),
+            to_sol_withdrawal_pub(pub_inputs),
+        );
+        match call.call().await {
+            Ok(_) => Ok(DryRunOutcome::WouldSucceed),
+            Err(e) => Ok(DryRunOutcome::WouldRevert {
+                reason: format!("{e}"),
+            }),
+        }
+    }
+
+    /// Submit Circuit 4 `withdrawByProof` to Sepolia/mainnet.
+    pub async fn submit_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+        let call = self.contract.withdrawByProof(
+            proof.clone(),
+            to_sol_withdrawal_pub(pub_inputs),
+        );
+        match call.send().await {
+            Ok(pending) => match pending.get_receipt().await {
+                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: receipt.transaction_hash(),
+                }),
+                Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
+                    reason: format!("tx confirmation error: {e}"),
+                }),
+            },
+            Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
+                reason: format!("withdrawByProof send failed: {e}"),
+            }),
+        }
+    }
+
+    pub async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
+        self.contract
+            .isNullifierUsed(nullifier)
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+}
+
+/// Outcome of [`EthBridgeClient::submit_withdraw`].
+#[derive(Clone, Debug)]
+pub enum WithdrawSubmitOutcome {
+    Paid { tx_hash: B256 },
+    Reverted { reason: String },
+}
+
+fn to_sol_withdrawal_pub(
+    pub_inputs: &WithdrawalPublicInputs,
+) -> AckiNackiBridge::WithdrawalPublicInputs {
+    AckiNackiBridge::WithdrawalPublicInputs {
+        tokenId: pub_inputs.token_id,
+        amount: pub_inputs.amount,
+        recipientHi: pub_inputs.recipient_hi,
+        recipientLo: pub_inputs.recipient_lo,
+        dstChainId: pub_inputs.dst_chain_id,
+        senderAccFr: pub_inputs.sender_acc_fr,
+        dappFr: pub_inputs.dapp_fr,
+        accFr: pub_inputs.acc_fr,
+        nullifier: pub_inputs.nullifier,
+        finalRoot: pub_inputs.final_root,
     }
 }
 

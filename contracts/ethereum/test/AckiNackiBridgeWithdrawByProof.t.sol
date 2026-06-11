@@ -83,6 +83,11 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     /// @dev Foundry's default `block.chainid` in unit tests is 31337 (Anvil).
     uint256 internal constant DEFAULT_CHAIN_ID = 31337;
+    uint256 internal constant SEPOLIA_CHAIN_ID = 11_155_111;
+    uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42_161;
+    uint256 internal constant MAINNET_CHAIN_ID = 1;
+    uint256 internal constant SHELLNET_LOGICAL_DST_CHAIN_ID = 1;
+    uint256 internal constant SHELLNET_USDC_TOKEN_ID = 3;
 
     /// @dev Sample recipient — 0x1111...1111
     address internal constant RECIPIENT = address(0x1111111111111111111111111111111111111111);
@@ -238,9 +243,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(bridge.bridgeWithdrawalAccFr(), ACC_FR);
     }
 
-    function test_constructor_withdrawEnabledWithoutDappFr_reverts() public {
-        vm.expectRevert(AckiNackiBridge.InvalidBridgeWithdrawalIdentity.selector);
-        new AckiNackiBridge(
+    function test_constructor_withdrawEnabledWithZeroDappFr_succeeds() public {
+        // Shellnet uses dapp_id=0; accFr must still be non-zero.
+        AckiNackiBridge shellnet = new AckiNackiBridge(
             address(oracle),
             address(usdc),
             address(0),
@@ -250,6 +255,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
                 IBridgeWithdrawalVerifier(address(withdrawalVerifier)), 0, ACC_FR
             )
         );
+        assertEq(shellnet.bridgeWithdrawalDappFr(), 0);
+        assertEq(shellnet.bridgeWithdrawalAccFr(), ACC_FR);
     }
 
     function test_constructor_withdrawEnabledWithoutAccFr_reverts() public {
@@ -396,6 +403,109 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             )
         );
         bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @dev Mainnet-destined proof must not replay on Arbitrum (production wiring:
+    ///      no `altDstChainId` alias).
+    function test_withdrawByProof_mainnetDstChainId_reverts_on_arbitrum() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("arbitrumReplay")));
+        pub.dstChainId = MAINNET_CHAIN_ID;
+
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.DstChainIdMismatch.selector, MAINNET_CHAIN_ID, ARBITRUM_ONE_CHAIN_ID
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @dev Sepolia USDC payout cannot be replayed on Arbitrum: `dstChainId` is
+    ///      bound to the chain where the proof was destined.
+    function test_withdrawByProof_sepoliaPayoutCannotReplayOnArbitrum() public {
+        uint256 nullifier = uint256(keccak256("sepoliaToArbitrum"));
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+
+        vm.chainId(SEPOLIA_CHAIN_ID);
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(amount, nullifier);
+        assertEq(pub.dstChainId, SEPOLIA_CHAIN_ID);
+
+        bridge.withdrawByProof(_dummyProof(), pub);
+
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.DstChainIdMismatch.selector, SEPOLIA_CHAIN_ID, ARBITRUM_ONE_CHAIN_ID
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @dev Shellnet logical `dstChainId = 1` is accepted on Sepolia only when
+    ///      the alias is scoped to `altDstHostChainId = 11155111`.
+    function test_withdrawByProof_shellnetAliasAcceptedOnSepoliaOnly() public {
+        MockBridgeWithdrawalVerifier shellnetVerifier = new MockBridgeWithdrawalVerifier();
+        shellnetVerifier.setShouldAccept(true);
+
+        AckiNackiBridge shellnetBridge = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.withWithdrawShellnet(
+                IBridgeWithdrawalVerifier(address(shellnetVerifier)),
+                0,
+                ACC_FR,
+                SHELLNET_LOGICAL_DST_CHAIN_ID,
+                SEPOLIA_CHAIN_ID,
+                SHELLNET_USDC_TOKEN_ID
+            )
+        );
+
+        UsdcTestLib.depositUsdc(vm, usdc, shellnetBridge, funder, 10 * UsdcTestLib.UNIT);
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
+            layers[i] = uint256(keccak256(abi.encode("shellnet-alias-layer", i)));
+        }
+        shellnetBridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("shellnet-att")),
+            abi.encodePacked(keccak256("shellnet-lh")),
+            FIRST_BLOCK_ID,
+            BK_SET,
+            FIRST_SEQ_NO,
+            ACTIVE_LAYERS,
+            layers,
+            shellnetBridge.storedPrevMaxLevelLayerHash()
+        );
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("shellnetAlias")));
+        pub.dappFr = 0;
+        pub.dstChainId = SHELLNET_LOGICAL_DST_CHAIN_ID;
+        pub.tokenId = SHELLNET_USDC_TOKEN_ID;
+        pub.finalRoot = layers[ACTIVE_LAYERS - 1];
+
+        vm.chainId(SEPOLIA_CHAIN_ID);
+        shellnetBridge.withdrawByProof(_dummyProof(), pub);
+
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.DstChainIdMismatch.selector,
+                SHELLNET_LOGICAL_DST_CHAIN_ID,
+                ARBITRUM_ONE_CHAIN_ID
+            )
+        );
+        shellnetBridge.withdrawByProof(_dummyProof(), pub);
     }
 
     function test_withdrawByProof_unsupportedTokenId_reverts() public {

@@ -4,7 +4,9 @@ use async_trait::async_trait;
 
 use crate::{
     error::Result,
-    types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus, TxHash},
+    types::{
+        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+    },
 };
 
 /// Main interface for interacting with Acki Nacki blockchain
@@ -12,6 +14,10 @@ use crate::{
 pub trait IAckiNacki: Send + Sync {
     /// Send a transaction to the blockchain
     async fn send_transaction(&self, tx: AckiNackiTransaction) -> Result<TxHash>;
+
+    /// ABI-encode and deliver a contract call (tvm-sdk 3.0 `dapp_id` wire
+    /// format).
+    async fn call_contract(&self, call: ContractCallRequest) -> Result<TxHash>;
 
     /// Get transaction status
     async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus>;

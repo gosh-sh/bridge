@@ -66,6 +66,10 @@ pub enum AckiNackiError {
         expected: usize,
         actual: usize,
     },
+
+    /// Address string is not in the SDK 3.0 `dapp_id::account_id` form.
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
 }
 
 impl From<reqwest::Error> for AckiNackiError {

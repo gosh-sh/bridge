@@ -33,6 +33,7 @@ use axiom_eth::{
     Field,
 };
 use clap::Parser;
+use deposit_prover::prover::load_kzg_params_from_trusted_setup;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
     plonk::{verify_proof, VerifyingKey},
@@ -117,9 +118,7 @@ fn main() -> anyhow::Result<()> {
     println!("[3] proof: {} bytes.", proof.len());
 
     // 5. verify_proof — the opcode's core check.
-    let srs_path = format!("data/kzg_bn254_{}.srs", args.degree);
-    let mut srs_file = fs::File::open(&srs_path)?;
-    let srs = ParamsKZG::<Bn256>::read(&mut srs_file)?;
+    let srs = load_kzg_params_from_trusted_setup(args.degree).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let strategy = SingleStrategy::new(&srs);
     let mut transcript = Blake2bRead::<_, G1Affine, Challenge255<_>>::init(proof.as_slice());

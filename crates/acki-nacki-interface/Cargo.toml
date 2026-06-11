@@ -5,6 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Live GraphQL client backed by tvm_client 3.0.0 (dapp_id API).
+tvm-sdk = ["dep:tvm_client"]
+
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true
@@ -15,6 +20,10 @@ hex.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
+tvm_client = { workspace = true, optional = true, default-features = false, features = [
+    "std",
+    "rustls-tls-webpki-roots",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

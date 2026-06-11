@@ -1,0 +1,25 @@
+[Unit]
+Description=AN to ETH bridge relayer (Sepolia verifyBlock)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bridge-e2e
+EnvironmentFile=/home/ubuntu/bridge-e2e/config/bridge-relayer.env
+Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/bridge-e2e/bin/relayer daemon-prover \
+  --state ${RELAYER_STATE} \
+  --proofs-dir ${PROVER_PROOFS_DIR} \
+  --rpc-url ${RPC_URL} \
+  --bridge-address ${BRIDGE_ADDRESS} \
+  --private-key ${RELAYER_PRIVATE_KEY} \
+  --an-node-url ${AN_NODE_URL} \
+  --backoff-initial-secs 30 \
+  --backoff-max-secs 600 \
+  --backoff-multiplier 2
+Restart=on-failure
+RestartSec=120
+
+[Install]
+WantedBy=multi-user.target

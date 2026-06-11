@@ -13,14 +13,14 @@
 //! recipient account as `(anAccountHigh << 128 | anAccountLow)`, consumes the
 //! `usedDepositIds[depositId]` nullifier, and credits that proven account. An
 //! EVM address is not a valid AN recipient, so binding the destination account
-//! in the proof (rather than trusting an off-circuit relayer hint) is what makes
-//! the credit trust-minimised.
+//! in the proof (rather than trusting an off-circuit relayer hint) is what
+//! makes the credit trust-minimised.
 //!
 //! Two implementations:
 //!
-//! - [`MockAnSubmitter`] — an in-memory mirror of the nullifier semantics,
-//!   used by the unit tests to drive the relayer through many deposits
-//!   without a live AN node.
+//! - [`MockAnSubmitter`] — an in-memory mirror of the nullifier semantics, used
+//!   by the unit tests to drive the relayer through many deposits without a
+//!   live AN node.
 //! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
 //!   client: it ABI-encodes the `finalizeDeposit` call into an
 //!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. Today only
@@ -34,9 +34,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use acki_nacki_interface::{AckiNackiTransaction, IAckiNacki, TransactionStatus};
+use acki_nacki_interface::{ContractCallRequest, ExtendedAddress, IAckiNacki, TransactionStatus};
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::{
     error::RelayerError,
@@ -100,10 +101,10 @@ pub trait AnSubmitter: Send + Sync {
 /// proof's public inputs — the deposit circuit binds it (see
 /// `deposit-prover/src/circuit_v2.rs`), so there is no separate out-of-circuit
 /// destination side-channel: the AN side reconstructs the recipient account
-/// from these proven scalars. `dappIdHigh`/`dappIdLow` carry the config-supplied
-/// AN dApp identifier the AN side checks. The `vk_blob` is deploy-time
-/// configuration on the AN contract and is therefore **not** part of the
-/// per-call body.
+/// from these proven scalars. `dappIdHigh`/`dappIdLow` carry the
+/// config-supplied AN dApp identifier the AN side checks. The `vk_blob` is
+/// deploy-time configuration on the AN contract and is therefore **not** part
+/// of the per-call body.
 pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
     let pi = &bundle.parsed;
     let mut out = Vec::with_capacity(NUM_PUBLIC_INPUTS * 32 + 4 + bundle.proof.len());
@@ -251,7 +252,9 @@ impl AnSubmitter for MockAnSubmitter {
         }
         inner.nullifiers.insert(event.deposit_id);
         inner.finalized_log.push(event.deposit_id);
-        Ok(SubmitOutcome::Finalized { tx_hash: None })
+        Ok(SubmitOutcome::Finalized {
+            tx_hash: None,
+        })
     }
 }
 
@@ -262,14 +265,46 @@ impl AnSubmitter for MockAnSubmitter {
 /// Static configuration for the live submitter.
 #[derive(Clone, Debug)]
 pub struct AnSubmitConfig {
-    /// Relayer's AN account address (the `from` of the finalize tx).
+    /// Relayer signer in SDK 3.0 `dapp_id::account_id` form.
     pub from: String,
-    /// The AN `TokenBridge` contract address (the `to`).
+    /// Bridge contract in SDK 3.0 `dapp_id::account_id` form.
     pub token_bridge: String,
+    /// ECC token id for `finalizeDeposit` (USDC on shellnet).
+    pub token_id: u32,
     /// Gas limit for the `finalizeDeposit` call.
     pub gas_limit: u64,
     /// Seconds to wait for the finalize tx to confirm.
     pub confirm_timeout_secs: u64,
+}
+
+/// Left-pad a 20-byte EVM address to 32 bytes for `USDCBridge._srcSenderToFr`.
+///
+/// The on-chain helper reads exactly 32 big-endian bytes (`require(length >=
+/// 32)`); a bare 20-byte `srcSender` reverts before ZK verification runs.
+pub fn eth_address_to_src_sender_hex(sender: &[u8; 20]) -> String {
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(sender);
+    hex::encode(padded)
+}
+
+/// Build JSON parameters for `USDCBridge.finalizeDeposit` from a proof bundle.
+pub fn build_finalize_deposit_params(
+    event: &DepositEvent,
+    bundle: &DepositProofBundle,
+    token_id: u32,
+) -> serde_json::Value {
+    let pi = &bundle.parsed;
+    let amount_u128 = pi.amount.to::<u128>();
+    json!({
+        // `bytes` → plain hex; `uint256` → decimal strings (tvm_client ABI JSON).
+        "proof": hex::encode(&bundle.proof),
+        "srcDappId": pi.dapp_id().to_string(),
+        "srcSender": eth_address_to_src_sender_hex(&event.sender.into_array()),
+        "recipient_an": pi.an_account().to_string(),
+        "amount": amount_u128.to_string(),
+        "tokenId": token_id,
+        "srcDepositId": pi.deposit_id.to_string(),
+    })
 }
 
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
@@ -284,23 +319,14 @@ pub struct AnSubmitConfig {
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
-    nonce: Mutex<u64>,
 }
 
 impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
-    pub fn new(client: Arc<C>, config: AnSubmitConfig, start_nonce: u64) -> Self {
+    pub fn new(client: Arc<C>, config: AnSubmitConfig) -> Self {
         Self {
             client,
             config,
-            nonce: Mutex::new(start_nonce),
         }
-    }
-
-    fn next_nonce(&self) -> u64 {
-        let mut n = self.nonce.lock().expect("poisoned lock");
-        let cur = *n;
-        *n = n.saturating_add(1);
-        cur
     }
 }
 
@@ -318,22 +344,17 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     ) -> Result<SubmitOutcome, RelayerError> {
         bundle.check_binds_to(event)?;
 
-        let data = encode_finalize_deposit(bundle);
-        // Derive a deterministic local tx id from the deposit id; the live
-        // client overwrites this with the real hash on send.
-        let mut tx_hash = [0u8; 32];
-        tx_hash[24..].copy_from_slice(&event.deposit_id.to_be_bytes());
+        let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
+        let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
+        let params = build_finalize_deposit_params(event, bundle, self.config.token_id);
+        let call = ContractCallRequest {
+            from,
+            to,
+            function: "finalizeDeposit".to_string(),
+            params,
+        };
 
-        let tx = AckiNackiTransaction::new(
-            tx_hash,
-            self.config.from.clone(),
-            self.config.token_bridge.clone(),
-            data,
-            self.config.gas_limit,
-            self.next_nonce(),
-        );
-
-        let sent = self.client.send_transaction(tx).await?;
+        let sent = self.client.call_contract(call).await?;
         let receipt = self
             .client
             .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
@@ -399,8 +420,8 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-        // dappId is the config tag (scalars 4/5); the AN account high/low halves
-        // (scalars 6/7) reconstruct the proven recipient account.
+                                                   // dappId is the config tag (scalars 4/5); the AN account high/low halves
+                                                   // (scalars 6/7) reconstruct the proven recipient account.
         let dapp_id = (scalars[4] << 128) | scalars[5];
         assert_eq!(dapp_id, b.parsed.dapp_id());
         let reconstructed = (scalars[6] << 128) | scalars[7];
@@ -433,9 +454,27 @@ mod tests {
         let ev = event(2);
         let b = bundle(&ev);
         match sub.submit(&ev, &b).await.unwrap() {
-            SubmitOutcome::Rejected { reason } => assert!(reason.contains("ZKHALO2VERIFYWITHVK")),
+            SubmitOutcome::Rejected {
+                reason,
+            } => assert!(reason.contains("ZKHALO2VERIFYWITHVK")),
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finalize_params_encode_proof_as_hex() {
+        let ev = event(1);
+        let b = bundle(&ev);
+        let params = build_finalize_deposit_params(&ev, &b, 3);
+        let proof = params["proof"].as_str().unwrap();
+        assert!(!proof.starts_with("0x"), "proof must be plain hex");
+        assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
+        assert_eq!(params["srcDappId"].as_str().unwrap(), b.parsed.dapp_id().to_string());
+        assert_eq!(
+            params["srcSender"].as_str().unwrap(),
+            eth_address_to_src_sender_hex(&ev.sender.into_array())
+        );
+        assert_eq!(hex::decode(params["srcSender"].as_str().unwrap()).unwrap().len(), 32);
     }
 
     #[tokio::test]
@@ -443,18 +482,24 @@ mod tests {
         use acki_nacki_interface::MockAckiNacki;
 
         let client = Arc::new(MockAckiNacki::new());
+        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         let cfg = AnSubmitConfig {
-            from: "0:relayer".to_string(),
-            token_bridge: "0:tokenbridge".to_string(),
+            from: format!(
+                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
+            token_bridge: format!("{dapp}::{dapp}"),
+            token_id: 1,
             gas_limit: 1_000_000,
             confirm_timeout_secs: 5,
         };
-        let sub = AnInterfaceSubmitter::new(client, cfg, 0);
+        let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
         let b = bundle(&ev);
         // MockAckiNacki confirms transactions, so this should finalize.
         match sub.submit(&ev, &b).await.unwrap() {
-            SubmitOutcome::Finalized { tx_hash } => assert!(tx_hash.is_some()),
+            SubmitOutcome::Finalized {
+                tx_hash,
+            } => assert!(tx_hash.is_some()),
             other => panic!("expected Finalized, got {other:?}"),
         }
     }

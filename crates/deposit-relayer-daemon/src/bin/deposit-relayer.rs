@@ -4,37 +4,38 @@
 //!
 //! - `watch` — read-only. Connects to an Ethereum RPC, reads the bridge's
 //!   `depositCounter()`, and lists the confirmed `Deposit` events from a
-//!   starting id. No proving, no AN side. Handy for confirming the relayer
-//!   can see the deposits before running it in earnest.
+//!   starting id. No proving, no AN side. Handy for confirming the relayer can
+//!   see the deposits before running it in earnest.
 //!
 //! - `prove-one` — listens for a single `depositId`, runs the `deposit-prover`
-//!   pipeline out-of-process, and writes the three opcode operands
-//!   (`vk_blob`, `public_inputs`, `proof`) to an output directory. Exercises
-//!   the full listen→prove path without an AN node.
+//!   pipeline out-of-process, and writes the three opcode operands (`vk_blob`,
+//!   `public_inputs`, `proof`) to an output directory. Exercises the full
+//!   listen→prove path without an AN node.
 //!
 //! - `daemon` — long-running loop: listen → prove → submit, with exponential
-//!   backoff and SIGINT/SIGTERM-aware shutdown. Until the AN team ships a live
-//!   `IAckiNacki` client, the submit stage runs in `--dry-run` mode against an
-//!   in-memory mock AN (so the listen+prove pipeline can be exercised against
-//!   a real chain). Drop `--dry-run` only once a live AN client is wired.
+//!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
+//!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
 //!
 //! - `status` — print the state file path.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    AnConfig, BackoffConfig, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, SubprocessProofGenerator, SubprocessProverConfig,
-    DEFAULT_AN_NODE_URL,
+    AnConfig, AnInterfaceSubmitter, AnSubmitter, BackoffConfig, DepositSource, EthLogSource,
+    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
+    SubprocessProofGenerator, SubprocessProverConfig, DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
+use tvm_client::crypto::KeyPair;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "deposit-relayer",
-    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, finalize on AN."
+    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, \
+             finalize on AN."
 )]
 struct Args {
     /// Where to persist `state.json` (used by `daemon`).
@@ -92,7 +93,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        #[arg(long, default_value = "0")]
+        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
         #[arg(long)]
@@ -123,16 +124,32 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        #[arg(long, default_value = "0")]
+        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
-        /// AN node REST base URL. When set, the daemon runs a live
-        /// connectivity preflight (`/v2/bk_set`) on startup and aborts if the
-        /// node is unreachable. Optional (the submit path is still mocked in
-        /// `--dry-run`), but recommended so a mis-typed endpoint fails fast.
+        /// AN node REST base URL for BK-set preflight (`/v2/bk_set`).
         #[arg(long, env = "AN_NODE_URL")]
         an_node_url: Option<String>,
-        /// Run the submit stage against an in-memory mock AN. Required until
-        /// a live `IAckiNacki` client is available.
+        /// GraphQL endpoint for tvm_client 3.0 (live submit). Example:
+        /// `http://127.0.0.1:11000/graphql`.
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: Option<String>,
+        /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: Option<String>,
+        /// Path to `USDCBridge.abi.json` on the AN side.
+        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
+        an_bridge_abi_path: Option<String>,
+        /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
+        #[arg(long, env = "AN_TOKEN_BRIDGE")]
+        an_token_bridge: Option<String>,
+        /// Relayer signer address (`dapp_id::account_id`, SDK 3.0 form).
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: Option<String>,
+        /// ECC token id for `finalizeDeposit`.
+        #[arg(long, env = "AN_TOKEN_ID", default_value_t = 1)]
+        an_token_id: u32,
+        /// Run the submit stage against an in-memory mock AN instead of
+        /// tvm_client.
         #[arg(long)]
         dry_run: bool,
         #[arg(long, default_value_t = 5)]
@@ -215,7 +232,9 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(log_err("prove-one"))
         },
-        Cmd::AnPreflight { an_node_url } => an_preflight(an_node_url)
+        Cmd::AnPreflight {
+            an_node_url,
+        } => an_preflight(an_node_url)
             .await
             .map_err(log_err("an-preflight")),
         Cmd::Daemon {
@@ -231,6 +250,12 @@ async fn main() -> anyhow::Result<()> {
             max_log_num,
             dapp_id,
             an_node_url,
+            an_graphql_url,
+            an_keys_path,
+            an_bridge_abi_path,
+            an_token_bridge,
+            an_sender,
+            an_token_id,
             dry_run,
             backoff_initial_secs,
             backoff_max_secs,
@@ -249,6 +274,26 @@ async fn main() -> anyhow::Result<()> {
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
             };
+            let mut an_cfg = AnConfig::default();
+            if let Some(url) = an_node_url {
+                an_cfg.node_url = url;
+            }
+            if let Some(url) = an_graphql_url {
+                an_cfg.graphql_url = url;
+            }
+            if let Some(path) = an_keys_path {
+                an_cfg.keys_path = path;
+            }
+            if let Some(path) = an_bridge_abi_path {
+                an_cfg.bridge_abi_path = path;
+            }
+            if let Some(addr) = an_token_bridge {
+                an_cfg.token_bridge = addr;
+            }
+            if let Some(addr) = an_sender {
+                an_cfg.sender = addr;
+            }
+            an_cfg.token_id = an_token_id;
             run_daemon(
                 args.state,
                 rpc_url,
@@ -257,7 +302,7 @@ async fn main() -> anyhow::Result<()> {
                 confirmations,
                 start_deposit_id,
                 prover_cfg,
-                an_node_url,
+                an_cfg,
                 dry_run,
                 backoff,
             )
@@ -391,22 +436,12 @@ async fn run_daemon(
     confirmations: u64,
     start_deposit_id: u64,
     prover_cfg: SubprocessProverConfig,
-    an_node_url: Option<String>,
+    an_cfg: AnConfig,
     dry_run: bool,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
-    if !dry_run {
-        anyhow::bail!(
-            "live AN submission is not wired yet (no IAckiNacki client). Re-run with --dry-run \
-             to exercise the listen→prove pipeline against an in-memory mock AN, or wait for the \
-             live tvm-sdk client. See crate docs for the delivery blocker."
-        );
-    }
-
-    // Real use of the AN endpoints: confirm the node is reachable before we
-    // start. Fails fast on a mis-typed / unreachable endpoint.
-    if let Some(url) = &an_node_url {
-        let pf = AnConfig::from_node_url(url.clone()).preflight().await?;
+    if !an_cfg.node_url.is_empty() {
+        let pf = an_cfg.preflight().await?;
         info!(
             node_url = %pf.node_url,
             seq_no = pf.seq_no,
@@ -414,7 +449,7 @@ async fn run_daemon(
             "AN node preflight OK",
         );
     } else {
-        warn!("no --an-node-url given; skipping AN connectivity preflight");
+        warn!("no AN node_url configured; skipping /v2/bk_set preflight");
     }
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -425,13 +460,70 @@ async fn run_daemon(
         confirmations,
     ));
     let prover = Arc::new(SubprocessProofGenerator::new(prover_cfg));
-    let submitter = Arc::new(MockAnSubmitter::accepting());
 
-    warn!(
-        "running in --dry-run mode: deposits are proven against the real chain but 'finalized' \
-         only in an in-memory mock AN. No transaction reaches Acki Nacki."
-    );
+    if dry_run {
+        warn!(
+            "running in --dry-run mode: deposits are proven against the real chain but \
+             'finalized' only in an in-memory mock AN"
+        );
+        run_daemon_loop(
+            state_path,
+            start_deposit_id,
+            backoff,
+            source,
+            prover,
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .await
+    } else {
+        if !an_cfg.is_live_submit_ready() {
+            anyhow::bail!(
+                "live submit requires --an-graphql-url, --an-keys-path, --an-bridge-abi-path, \
+                 --an-token-bridge, and --an-sender (all in dapp_id::account_id form). Or pass \
+                 --dry-run to exercise listen→prove only."
+            );
+        }
+        let keys_json = std::fs::read_to_string(&an_cfg.keys_path)?;
+        let keys: KeyPair = serde_json::from_str(&keys_json)?;
+        let bridge_abi = TvmAckiNacki::load_abi(&an_cfg.bridge_abi_path)
+            .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
+        let tvm = TvmAckiNacki::connect(TvmClientConfig {
+            graphql_endpoints: vec![an_cfg.graphql_url.clone()],
+            keys,
+            bridge_abi,
+        })
+        .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
+        if tvm.supports_dapp_id().await? {
+            info!("AN node supports SDK 3.0 dapp_id wire format");
+        } else {
+            warn!("AN node is pre-1.0.0; empty dapp_id is allowed on the wire");
+        }
+        let submit_cfg = an_cfg.to_submit_config();
+        run_daemon_loop(
+            state_path,
+            start_deposit_id,
+            backoff,
+            source,
+            prover,
+            Arc::new(AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg)),
+        )
+        .await
+    }
+}
 
+async fn run_daemon_loop<S, P, A>(
+    state_path: PathBuf,
+    start_deposit_id: u64,
+    backoff: BackoffConfig,
+    source: Arc<S>,
+    prover: Arc<P>,
+    submitter: Arc<A>,
+) -> anyhow::Result<()>
+where
+    S: DepositSource,
+    P: ProofGenerator,
+    A: AnSubmitter,
+{
     let cfg = RelayerConfig {
         state_path,
         start_deposit_id,

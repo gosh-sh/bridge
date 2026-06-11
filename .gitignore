@@ -202,6 +202,8 @@ deposit-prover/Cargo.lock.pse-backup
 deposit-prover/Cargo.toml.bak_*
 deposit-prover/Cargo.toml.pse-backup
 deposit-prover/deposit_public_inputs.bin
+deposit-prover/deposit_eth_circuit_params.json
 deposit-prover/src/bin/an_rlc_verify.rs
 docs/user/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
+docs/user/USER_GUIDE.pdf
 docs/user/USER_GUIDE.md.bak.*

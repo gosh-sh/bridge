@@ -1,9 +1,26 @@
 //! Types for Acki Nacki transactions and data structures
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::address::ExtendedAddress;
 
 /// Transaction hash type (32 bytes)
 pub type TxHash = [u8; 32];
+
+/// ABI-encoded contract call routed through tvm_client 3.0 (`dapp_id` on the
+/// wire).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ContractCallRequest {
+    /// Sender in extended `dapp_id::account_id` form.
+    pub from: ExtendedAddress,
+    /// Destination contract in extended `dapp_id::account_id` form.
+    pub to: ExtendedAddress,
+    /// Contract function name (e.g. `finalizeDeposit`).
+    pub function: String,
+    /// JSON function arguments matching the contract ABI.
+    pub params: Value,
+}
 
 /// Transaction on Acki Nacki blockchain
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

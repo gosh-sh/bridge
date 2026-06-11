@@ -23,7 +23,7 @@
 //! `IAckiNacki`. [`AnConfig::to_submit_config`] produces the submitter config
 //! so the two halves share one source of truth.
 
-use acki_nacki_interface::BkSetClient;
+use acki_nacki_interface::{BkSetClient, ExtendedAddress};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RelayerError, submitter::AnSubmitConfig};
@@ -49,6 +49,9 @@ fn default_gas_limit() -> u64 {
 fn default_confirm_timeout_secs() -> u64 {
     60
 }
+fn default_token_id() -> u32 {
+    1
+}
 
 /// Endpoint + account configuration for the Acki Nacki side of the bridge.
 ///
@@ -60,13 +63,25 @@ pub struct AnConfig {
     /// slash optional).
     #[serde(default = "default_node_url")]
     pub node_url: String,
-    /// TVM address of the AN-side `TokenBridge` contract (the
-    /// `finalizeDeposit` target), e.g. `0:<hex>`. Empty until known.
+    /// GraphQL endpoint for tvm_client 3.0 (e.g. `http://127.0.0.1:11000/graphql`).
+    /// Required for live submission; distinct from the REST `node_url`.
+    #[serde(default)]
+    pub graphql_url: String,
+    /// Path to the relayer's tvm-cli keys JSON (signer for `finalizeDeposit`).
+    #[serde(default)]
+    pub keys_path: String,
+    /// Path to the AN-side bridge contract ABI (`USDCBridge.abi.json`).
+    #[serde(default)]
+    pub bridge_abi_path: String,
+    /// AN-side bridge contract in SDK 3.0 `dapp_id::account_id` form.
     #[serde(default)]
     pub token_bridge: String,
-    /// The relayer's AN account address (the `from` of the finalize tx).
+    /// Relayer signer account in SDK 3.0 `dapp_id::account_id` form.
     #[serde(default)]
     pub sender: String,
+    /// ECC token id passed to `finalizeDeposit` (USDC on shellnet).
+    #[serde(default = "default_token_id")]
+    pub token_id: u32,
     /// Gas limit for the `finalizeDeposit` call.
     #[serde(default = "default_gas_limit")]
     pub gas_limit: u64,
@@ -79,8 +94,12 @@ impl Default for AnConfig {
     fn default() -> Self {
         Self {
             node_url: default_node_url(),
+            graphql_url: String::new(),
+            keys_path: String::new(),
+            bridge_abi_path: String::new(),
             token_bridge: String::new(),
             sender: String::new(),
+            token_id: default_token_id(),
             gas_limit: default_gas_limit(),
             confirm_timeout_secs: default_confirm_timeout_secs(),
         }
@@ -135,11 +154,41 @@ impl AnConfig {
         })
     }
 
+    /// Parse `token_bridge` as an SDK 3.0 extended address.
+    pub fn token_bridge_address(&self) -> Result<ExtendedAddress, RelayerError> {
+        if self.token_bridge.is_empty() {
+            return Err(RelayerError::other(
+                "token_bridge is required (dapp_id::account_id form)",
+            ));
+        }
+        ExtendedAddress::parse(&self.token_bridge).map_err(RelayerError::from)
+    }
+
+    /// Parse `sender` as an SDK 3.0 extended address.
+    pub fn sender_address(&self) -> Result<ExtendedAddress, RelayerError> {
+        if self.sender.is_empty() {
+            return Err(RelayerError::other(
+                "sender is required (dapp_id::account_id form)",
+            ));
+        }
+        ExtendedAddress::parse(&self.sender).map_err(RelayerError::from)
+    }
+
+    /// Whether the config has enough fields for live tvm_client submission.
+    pub fn is_live_submit_ready(&self) -> bool {
+        !self.graphql_url.is_empty()
+            && !self.keys_path.is_empty()
+            && !self.bridge_abi_path.is_empty()
+            && !self.token_bridge.is_empty()
+            && !self.sender.is_empty()
+    }
+
     /// Produce the submitter configuration (maps `sender → from`).
     pub fn to_submit_config(&self) -> AnSubmitConfig {
         AnSubmitConfig {
             from: self.sender.clone(),
             token_bridge: self.token_bridge.clone(),
+            token_id: self.token_id,
             gas_limit: self.gas_limit,
             confirm_timeout_secs: self.confirm_timeout_secs,
         }
@@ -160,29 +209,41 @@ mod tests {
     #[test]
     fn parses_from_json_with_partial_fields() {
         // Only the fields the operator cares about; the rest default.
-        let json = r#"{
+        let dapp = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let bridge_acc = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let sender_acc = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let json = format!(
+            r#"{{
             "node_url": "http://127.0.0.1:11000",
-            "token_bridge": "0:abc",
-            "sender": "0:relayer"
-        }"#;
-        let cfg: AnConfig = serde_json::from_str(json).unwrap();
+            "graphql_url": "http://127.0.0.1:11000/graphql",
+            "token_bridge": "{dapp}::{bridge_acc}",
+            "sender": "{dapp}::{sender_acc}"
+        }}"#
+        );
+        let cfg: AnConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.node_url, "http://127.0.0.1:11000");
-        assert_eq!(cfg.token_bridge, "0:abc");
+        assert_eq!(cfg.graphql_url, "http://127.0.0.1:11000/graphql");
+        assert_eq!(cfg.token_bridge, format!("{dapp}::{bridge_acc}"));
         assert_eq!(cfg.confirm_timeout_secs, 60); // defaulted
     }
 
     #[test]
     fn to_submit_config_maps_sender_to_from() {
+        let dapp = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let bridge = format!("{dapp}::{dapp}");
+        let sender =
+            format!("{dapp}::dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
         let cfg = AnConfig {
             node_url: DEFAULT_AN_NODE_URL.to_string(),
-            token_bridge: "0:bridge".to_string(),
-            sender: "0:me".to_string(),
+            token_bridge: bridge.clone(),
+            sender: sender.clone(),
             gas_limit: 42,
             confirm_timeout_secs: 7,
+            ..AnConfig::default()
         };
         let sc = cfg.to_submit_config();
-        assert_eq!(sc.from, "0:me");
-        assert_eq!(sc.token_bridge, "0:bridge");
+        assert_eq!(sc.from, sender);
+        assert_eq!(sc.token_bridge, bridge);
         assert_eq!(sc.gas_limit, 42);
         assert_eq!(sc.confirm_timeout_secs, 7);
     }

@@ -1,5 +1,11 @@
 # Deposit `finalizeDeposit` ↔ `ZKHALO2VERIFYWITHVK` VK gap + Option 2 plan
 
+> **Branch correction (2026-06-08).** The canonical Halo2 opcode + contract line is
+> `halo2_circuit_with_vk` on `tvm-sdk` and `acki-nacki`. References below to
+> `serhii/node-3406-vergrth16-with-vk` are **historical** — that was a superseded
+> umbrella branch from the Groth16 (`VERGRTH16*`) era, not the current shellnet
+> target. Deposit proofs are **Halo2 RLC Blake2b SHPLONK**, never Groth16.
+>
 > **Status (2026-05-28).** The partner's updated `TokenBridge` (acki-nacki branch
 > `poseidon_dex_with_verify`, `contracts/exchange/TokenBridge.sol`) wires
 > `finalizeDeposit` to verify a deposit proof natively via

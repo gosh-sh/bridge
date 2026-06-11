@@ -1,0 +1,86 @@
+---
+description: Offload heavy builds, Docker, and proving to external SSH host
+alwaysApply: true
+---
+
+# External SSH for heavy work
+
+Default to the external build host for anything disk- or CPU-heavy. Local machine stays for editing, small tests, and git.
+
+## Host
+
+```bash
+ssh -p 22488 gosh@94.156.178.14   # hostname: n14
+```
+
+- Home: `/home/gosh` (98G root FS)
+- Large scratch: `/mnt/data/gosh/` (3.3T data volume)
+- Passwordless `sudo` available
+- No secrets or irreplaceable data — wipe scratch dirs freely after sessions
+
+## Use remote for
+
+- `cargo build --release` on acki-nacki, prover, circuits, tvm-sdk
+- Docker 5-node AN cluster (`acki-nacki/nock/docker-compose`)
+- Prover/verifier daemons, long Halo2 proving runs
+- Cached `params/` keys, `target/release`, proof artefacts
+- E2E runbook steps (Circuit 4 withdrawal, verifyBlock bundles)
+
+## Keep local
+
+- Source edits and git commits
+- Foundry `forge test` (fast contract tests)
+- Small unit tests that finish in seconds
+
+## Remote workspace layout
+
+```bash
+/mnt/data/gosh/acki-nacki/        # AN node cluster (poseidon_dex); docker compose via make run
+/mnt/data/gosh/sergey-bridge/     # prover scratch root
+  acki-nacki-to-eth-bridge-halo2-prover/
+  acki-nacki-to-eth-bridge-halo2-circuits/
+  acki-nacki-bridge/
+  params/
+  proofs/
+  logs/
+```
+
+Clone or `rsync` only what the task needs. Do not touch other users' dirs under `/mnt/data/gosh/{nikita,alina,misha,...}`.
+
+## Sync pattern
+
+```bash
+# one-shot: tunnel + sync + bk_set + wipe stale proofs + start daemons
+acki-nacki-to-eth-bridge-halo2-prover/scripts/run_n14_prover_stack.sh
+
+# manual sync
+rsync -avz --exclude target --exclude params -e "ssh -p 22488" \
+  /home/sergey/Pruvendo/gosh/acki-nacki-to-eth-bridge-halo2-prover/ \
+  gosh@94.156.178.14:/mnt/data/gosh/sergey-bridge/acki-nacki-to-eth-bridge-halo2-prover/
+
+# BK set must match the running docker cluster (after every fresh compose up)
+acki-nacki-to-eth-bridge-halo2-prover/scripts/extract_bk_set_from_docker.sh
+
+# pull proofs/logs back
+rsync -avz -e "ssh -p 22488" \
+  gosh@94.156.178.14:/mnt/data/gosh/sergey-bridge/acki-nacki-to-eth-bridge-halo2-prover/proofs/ \
+  ./proofs/
+```
+
+**Gotchas (2026-06-07):**
+- Wipe `proofs/proof_*.json` + `proofs/result_*.json` before a clean run — verifier skips seqnos it already processed.
+- Rebuild binaries **on n14** (`cargo build --release`); rsync'd `target/release/*` from local may fail with `GLIBC_2.38 not found`.
+- `make run` on n14 needs `source ~/.cargo/env` and `CMD_PREFIX=sudo` (root-owned `docker/ton-live/web/storage/node*`).
+- **Full E2E on n14**: cluster GraphQL is local on n14 — run prover with `BRIDGE_GQL_ENDPOINT=http://localhost/graphql` (no reverse tunnel). Tunnel (`127.0.0.1:18080`) only when the cluster runs locally and prover on n14.
+
+## Cleanup after sessions
+
+```bash
+ssh -p 22488 gosh@94.156.178.14 'sudo rm -rf /mnt/data/gosh/sergey-bridge/target /mnt/data/gosh/sergey-bridge/*/target'
+docker compose down -v   # in cluster dir; sudo rm if root-owned volumes remain
+docker volume prune -f && docker builder prune -af
+```
+
+## SSH in commands
+
+Use `ssh -o BatchMode=yes -p 22488 gosh@94.156.178.14 '...'` for non-interactive runs. Long jobs: `nohup` or `tmux` on remote.

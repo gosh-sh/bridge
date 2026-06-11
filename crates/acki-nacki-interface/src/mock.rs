@@ -11,7 +11,9 @@ use tokio::time::{sleep, Duration};
 use crate::{
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
-    types::{AckiNackiTransaction, TransactionReceipt, TransactionStatus, TxHash},
+    types::{
+        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+    },
 };
 
 /// Mock Acki Nacki blockchain for testing
@@ -94,6 +96,21 @@ impl IAckiNacki for MockAckiNacki {
         self.receipts.lock().unwrap().insert(tx_hash, receipt);
 
         Ok(tx_hash)
+    }
+
+    async fn call_contract(&self, call: ContractCallRequest) -> Result<TxHash> {
+        let mut tx_hash = [0u8; 32];
+        tx_hash[0] = 0xCC;
+        let tx = AckiNackiTransaction::new(
+            tx_hash,
+            call.from.to_string(),
+            call.to.to_string(),
+            serde_json::to_vec(&call.params)
+                .map_err(|e| AckiNackiError::SerializationError(e.to_string()))?,
+            1_000_000,
+            0,
+        );
+        self.send_transaction(tx).await
     }
 
     async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus> {

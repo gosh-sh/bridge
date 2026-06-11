@@ -8,8 +8,8 @@
 //! 2. asks the [`DepositSource`] for the confirmed `Deposit` event;
 //! 3. generates the AN-consumable proof triple via the [`ProofGenerator`];
 //! 4. submits it to AN via the [`AnSubmitter`] (`finalizeDeposit`);
-//! 5. on success — advances [`RelayerState`] and persists it; otherwise
-//!    records the attempt.
+//! 5. on success — advances [`RelayerState`] and persists it; otherwise records
+//!    the attempt.
 //!
 //! [`Relayer::run_loop`] calls `tick` in a loop with a configurable delay and
 //! a "max ticks" budget for tests; [`crate::daemon`] adds the long-running
@@ -136,7 +136,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             );
             self.state.record_progress(target);
             self.persist_state()?;
-            return Ok(TickOutcome::AlreadyFinalized { deposit_id: target });
+            return Ok(TickOutcome::AlreadyFinalized {
+                deposit_id: target,
+            });
         }
 
         // 2. Fetch the confirmed deposit event.
@@ -153,7 +155,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         "no confirmed deposit yet; relayer is idle",
                     );
                 }
-                return Ok(TickOutcome::NotYetAvailable { deposit_id: target });
+                return Ok(TickOutcome::NotYetAvailable {
+                    deposit_id: target,
+                });
             },
         };
 
@@ -182,7 +186,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // 4. Submit + finalise on AN.
         match self.submitter.submit(&event, &bundle).await? {
-            SubmitOutcome::Finalized { tx_hash } => {
+            SubmitOutcome::Finalized {
+                tx_hash,
+            } => {
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -203,9 +209,13 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     deposit_id = target,
                     "AN reports already finalized; advancing"
                 );
-                Ok(TickOutcome::AlreadyFinalized { deposit_id: target })
+                Ok(TickOutcome::AlreadyFinalized {
+                    deposit_id: target,
+                })
             },
-            SubmitOutcome::Rejected { reason } => {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
                 self.state.record_attempt(target);
                 self.persist_state()?;
                 warn!(
@@ -316,7 +326,9 @@ mod tests {
 
         for id in 0..5 {
             match relayer.tick().await.unwrap() {
-                TickOutcome::Finalized { deposit_id, .. } => assert_eq!(deposit_id, id),
+                TickOutcome::Finalized {
+                    deposit_id, ..
+                } => assert_eq!(deposit_id, id),
                 other => panic!("expected Finalized at {id}, got {other:?}"),
             }
         }
@@ -340,7 +352,9 @@ mod tests {
         );
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::NotYetAvailable { deposit_id } => assert_eq!(deposit_id, 0),
+            TickOutcome::NotYetAvailable {
+                deposit_id,
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected NotYetAvailable, got {other:?}"),
         }
         assert_eq!(relayer.state().last_processed_deposit_id, None);
@@ -348,7 +362,9 @@ mod tests {
 
         source.insert(deposit(0));
         match relayer.tick().await.unwrap() {
-            TickOutcome::Finalized { deposit_id, .. } => assert_eq!(deposit_id, 0),
+            TickOutcome::Finalized {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected Finalized, got {other:?}"),
         }
         assert_eq!(relayer.state().attempts_since_progress, 0);
@@ -373,12 +389,16 @@ mod tests {
         );
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::AlreadyFinalized { deposit_id } => assert_eq!(deposit_id, 0),
+            TickOutcome::AlreadyFinalized {
+                deposit_id,
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected AlreadyFinalized, got {other:?}"),
         }
         // Cursor advanced; next tick finalises deposit 1.
         match relayer.tick().await.unwrap() {
-            TickOutcome::Finalized { deposit_id, .. } => assert_eq!(deposit_id, 1),
+            TickOutcome::Finalized {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 1),
             other => panic!("expected Finalized, got {other:?}"),
         }
         // Only deposit 1 was actually proven + submitted.
@@ -400,7 +420,9 @@ mod tests {
         );
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::ProofFailed { deposit_id, .. } => assert_eq!(deposit_id, 0),
+            TickOutcome::ProofFailed {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected ProofFailed, got {other:?}"),
         }
         assert_eq!(relayer.state().last_processed_deposit_id, None);
@@ -418,7 +440,9 @@ mod tests {
         let mut relayer = make_relayer(source, prover, submitter, dir.path().join("state.json"));
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::AnRejected { deposit_id, .. } => assert_eq!(deposit_id, 0),
+            TickOutcome::AnRejected {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected AnRejected, got {other:?}"),
         }
         assert_eq!(relayer.state().attempts_since_progress, 1);
@@ -442,26 +466,26 @@ mod tests {
                 submitter.clone(),
                 state_path.clone(),
             );
-            assert!(matches!(
-                r.tick().await.unwrap(),
-                TickOutcome::Finalized { deposit_id: 0, .. }
-            ));
-            assert!(matches!(
-                r.tick().await.unwrap(),
-                TickOutcome::Finalized { deposit_id: 1, .. }
-            ));
+            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Finalized {
+                deposit_id: 0,
+                ..
+            }));
+            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }));
         }
 
         let mut r2 = make_relayer(source, prover, submitter.clone(), state_path);
         assert_eq!(r2.state().last_processed_deposit_id, Some(1));
-        assert!(matches!(
-            r2.tick().await.unwrap(),
-            TickOutcome::Finalized { deposit_id: 2, .. }
-        ));
-        assert!(matches!(
-            r2.tick().await.unwrap(),
-            TickOutcome::Finalized { deposit_id: 3, .. }
-        ));
+        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Finalized {
+            deposit_id: 2,
+            ..
+        }));
+        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Finalized {
+            deposit_id: 3,
+            ..
+        }));
         assert_eq!(submitter.finalized_count(), 4);
     }
 
@@ -478,7 +502,10 @@ mod tests {
 
         let history = r
             .run_loop(10, |o| {
-                matches!(o, TickOutcome::Finalized { deposit_id: 2, .. })
+                matches!(o, TickOutcome::Finalized {
+                    deposit_id: 2,
+                    ..
+                })
             })
             .await
             .unwrap();

@@ -67,11 +67,12 @@ pub mod relayer;
 pub mod source;
 pub mod state;
 pub mod types;
+pub mod withdrawal;
 
 pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
-    SubmitOutcome,
+    SubmitOutcome, WithdrawSubmitOutcome,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
@@ -83,6 +84,7 @@ pub use live_source::{
     RawBlockProvider, RawBlockWitness, StubBoundProofGenerator,
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
-pub use source::{BlockSource, FixturesBlockSource, InMemoryBlockSource};
+pub use source::{BlockSource, FixturesBlockSource, InMemoryBlockSource, ProverProofsBlockSource};
 pub use state::RelayerState;
 pub use types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES};
+pub use withdrawal::{PartnerWithdrawalProof, WithdrawalPublicInputs, GROTH16_PROOF_SIZE};

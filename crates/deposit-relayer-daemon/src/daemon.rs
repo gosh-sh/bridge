@@ -175,7 +175,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
 
             let (success, last_tag) = match outcome_or_err {
-                Ok(TickOutcome::Finalized { deposit_id, .. }) => {
+                Ok(TickOutcome::Finalized {
+                    deposit_id, ..
+                }) => {
                     if let Some(m) = &metrics {
                         m.finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
@@ -183,9 +185,13 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     }
                     summary.finalized += 1;
                     info!(deposit_id, "daemon: finalized");
-                    (true, LastOutcome::Finalized { deposit_id })
+                    (true, LastOutcome::Finalized {
+                        deposit_id,
+                    })
                 },
-                Ok(TickOutcome::AlreadyFinalized { deposit_id }) => {
+                Ok(TickOutcome::AlreadyFinalized {
+                    deposit_id,
+                }) => {
                     if let Some(m) = &metrics {
                         m.already_finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
@@ -193,30 +199,46 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     }
                     summary.already_finalized += 1;
                     // A nullifier skip is "progress" — reset backoff.
-                    (true, LastOutcome::AlreadyFinalized { deposit_id })
+                    (true, LastOutcome::AlreadyFinalized {
+                        deposit_id,
+                    })
                 },
-                Ok(TickOutcome::NotYetAvailable { deposit_id }) => {
+                Ok(TickOutcome::NotYetAvailable {
+                    deposit_id,
+                }) => {
                     if let Some(m) = &metrics {
                         m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.not_yet_available += 1;
-                    (false, LastOutcome::NotYetAvailable { deposit_id })
+                    (false, LastOutcome::NotYetAvailable {
+                        deposit_id,
+                    })
                 },
-                Ok(TickOutcome::ProofFailed { deposit_id, reason }) => {
+                Ok(TickOutcome::ProofFailed {
+                    deposit_id,
+                    reason,
+                }) => {
                     if let Some(m) = &metrics {
                         m.proof_failed_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.proof_failed += 1;
                     warn!(deposit_id, reason = %reason, "daemon: proof generation failed");
-                    (false, LastOutcome::ProofFailed { deposit_id })
+                    (false, LastOutcome::ProofFailed {
+                        deposit_id,
+                    })
                 },
-                Ok(TickOutcome::AnRejected { deposit_id, reason }) => {
+                Ok(TickOutcome::AnRejected {
+                    deposit_id,
+                    reason,
+                }) => {
                     if let Some(m) = &metrics {
                         m.an_rejected_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.an_rejected += 1;
                     warn!(deposit_id, reason = %reason, "daemon: AN rejected finalizeDeposit");
-                    (false, LastOutcome::AnRejected { deposit_id })
+                    (false, LastOutcome::AnRejected {
+                        deposit_id,
+                    })
                 },
                 Err(e) => {
                     if let Some(m) = &metrics {

@@ -165,7 +165,10 @@ contract DeployRealBridge is Script {
                 AckiNackiBridge.BridgeWithdrawConfig({
                     bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
                     dappFr: 0,
-                    accFr: 0
+                    accFr: 0,
+                    altDstChainId: 0,
+                    altDstHostChainId: 0,
+                    altTokenId: 0
                 })
             );
             bridgeAddr = address(bridge);

@@ -549,7 +549,7 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 | File | Size | Shape | PI count | Use |
 |------|------|-------|----------|-----|
 | `deposit_10proofs/deposit_vk_blob.bin` | 3597 B | VkBlob v2 RLC | **11** | **Target for USDCBridge redeploy** — byte-identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (SHA-256 `147efe14…068abaf`) |
-| `deposit_10proofs/proof_00..09/` | 352 B PI each | — | 11 | Unit tests `test_zkhalo2_with_vk_deposit_10_real_proofs` |
+| `deposit_10proofs/proof_00..09/{public_inputs,proof}.bin` | 352 B + ~8 KB each | — | 11 | Unit tests `test_zkhalo2_with_vk_deposit_10_real_proofs` — **no** `input.json` or `.srs` here (producer-only; sync via `scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`) |
 | `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 11-PI layout |
 | `fallback_vk_blob.bin` | 6308 B | Base v1 | 4 | **Currently on shellnet** — Circuit 1B fallback; copy also in `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/` |
 | `dark_dex_w128_L{0,1,2}_*.bin` | — | — | — | Legacy `ZKHALO2VERIFY` opcode only (different KZG ceremony than deposit) |

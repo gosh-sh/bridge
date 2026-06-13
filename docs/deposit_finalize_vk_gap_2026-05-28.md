@@ -356,8 +356,11 @@ untouched, G1 powers truncated, `g_lagrange` recomputed) via
 constant byte-for-byte, and the opcode accepts the proof.
 
 **Lesson (load-bearing):** the deposit-prover MUST use the same SRS ceremony the AN node
-embeds. The Hermez `.srs` is the wrong ceremony for this chain. Canonical source:
-`tvm-sdk-rlc/tvm_vm/halo2_test_data/kzg_bn254_19.srs` (downsize to the target `k`).
+embeds. The Hermez `.srs` is the wrong ceremony for this chain. Canonical SRS for
+keygen/prove: chain ceremony file used by `deposit-prover` (downsize via
+`deposit-prover/examples/downsize_srs.rs` to the circuit's `k`). The opcode embeds
+only `g[0]`, `g2`, `s_g2` in `tvm_vm/src/executor/zk_halo2_utils.rs` — do **not**
+commit `.srs` blobs into `tvm-sdk` git.
 
 `TokenBridge.sol`'s `VK_BLOB` constant was re-embedded with the chain-SRS blob
 (sha256 `81fde8c2…04d54d`, 3725 B) and `TokenBridge.tvc` recompiled

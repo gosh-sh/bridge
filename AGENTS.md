@@ -157,7 +157,7 @@ Test: `cd contracts/ethereum && forge test`
 - `eth-frontend`: Ethereum client using alloy-rs (migrated 2026-05-17 from ethers-rs). Interacts with bridge contracts.
 - `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures. Since R15/M3 (2026-05-27) also exports `poseidon_transcript::{PoseidonRead, PoseidonWrite}` and `generate_fallback_proof_with_transcript(.., TranscriptKind::{Blake2b, Poseidon})` — Blake2b stays the AN-side default for `ZKHALO2VERIFYWITHVK`; Poseidon is the ETH-side inner-SNARK flavour the `crates/bridge-evm-aggregator/` aggregator consumes.
 - `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
-- `deposit-relayer-daemon`: **EVM→AN deposit relayer** (mirror of `bridge-relayer-daemon` for the deposit direction). Three trait seams keep the loop testable and let the heavy / not-yet-built pieces swap independently: `source` (`DepositSource` async trait + `EthLogSource` — alloy `eth_getLogs`, confirmation-gated — + `InMemoryDepositSource` for tests), `prover` (`ProofGenerator` async trait + `SubprocessProofGenerator` invoking `deposit-prover`'s `fetch_deposit_data`→`export_vk_blob`→`export_blake2b_proof` examples out-of-process + `MockProofGenerator`), `submitter` (`AnSubmitter` async trait + `AnInterfaceSubmitter` over `acki_nacki_interface::IAckiNacki` with interim `encode_finalize_deposit` + `MockAnSubmitter` mirroring the `usedDepositIds` nullifier), plus `relayer` (`Relayer::tick()`/`run_loop()`), `daemon` (`BackoffConfig`/`RelayerMetrics`/`run_until_shutdown` with SIGINT/SIGTERM), `state` (atomic `state.json`, `depositId` cursor), and `an_config` (`AnConfig` — holds AN `node_url`/`token_bridge`/`sender`, builds the live `BkSetClient`, and `preflight()`s `GET /v2/bk_set`). CLI binary `deposit-relayer` with `watch` / `prove-one` / `an-preflight` / `daemon`. **28 unit tests** (loop happy-path + nullifier-skip + proof-failure + AN-rejection + restart + run_loop, daemon backoff + shutdown, submitter nullifier + finalize-call round-trip, AnConfig parse/convert, source/state/types round-trips) + 1 `#[ignore]`-gated live AN preflight test. Read-side AN endpoints are wired/verifiable today (incl. against the local cluster `http://127.0.0.1:11000`); the `finalizeDeposit` write stays gated on the upstream live `IAckiNacki`/tvm-sdk client + frozen TVM message ABI (daemon requires `--dry-run` until then).
+- `deposit-relayer-daemon`: **EVM→AN deposit relayer** (mirror of `bridge-relayer-daemon` for the deposit direction). Three trait seams keep the loop testable and let the heavy / not-yet-built pieces swap independently: `source` (`DepositSource` async trait + `EthLogSource` — alloy `eth_getLogs` with 10-block chunking + 429 retry/backoff, confirmation-gated, `BRIDGE_DEPLOY_BLOCK` env when `--from-block 0` — + `fetch_deposit_from_receipt` fast path for known tx hashes + `InMemoryDepositSource` for tests), `prover` (`ProofGenerator` async trait + `SubprocessProofGenerator` invoking `deposit-prover`'s `fetch_deposit_data`→`export_vk_blob`→`export_blake2b_proof` examples out-of-process + `MockProofGenerator`), `submitter` (`AnSubmitter` async trait + `AnInterfaceSubmitter` over `acki_nacki_interface::IAckiNacki` with interim `encode_finalize_deposit` + `MockAnSubmitter` mirroring the `usedDepositIds` nullifier), plus `relayer` (`Relayer::tick()`/`run_loop()`), `daemon` (`BackoffConfig`/`RelayerMetrics`/`run_until_shutdown` with SIGINT/SIGTERM), `state` (atomic `state.json`, `depositId` cursor), and `an_config` (`AnConfig` — holds AN `node_url`/`token_bridge`/`sender`, builds the live `BkSetClient`, and `preflight()`s `GET /v2/bk_set`). CLI binary `deposit-relayer` with `watch` / `prove-one` / `an-preflight` / `daemon`. **Production discovery** (`daemon`, `prove-one` without `--tx-hash`): `eth_getLogs` filtered by `depositId` → block-global `logIndex` mapped to receipt-local index via `receipt_log_index_from_block_log` (fixture-tested). **Operator fast path** (`prove-one --tx-hash --log-index`): skips `eth_getLogs` when the deposit tx is already known — does **not** substitute for production-path sign-off. **32 lib tests** + **1 fixture integration test** (`tests/log_index_mapping.rs`, Sepolia `depositId=0`) + **2 `#[ignore]` live tests** (`live_an_preflight`, `live_log_discovery`). Env template: `scripts/ursus/deposit-relayer.env.example` (`BRIDGE_DEPLOY_BLOCK=11025180` for shellnet Sepolia bridge). Read-side AN endpoints are wired/verifiable today (incl. against the local cluster `http://127.0.0.1:11000`); the `finalizeDeposit` write stays gated on shellnet `USDCBridge` VkBlob redeploy + partner node rebuild.
 - `deposit-prover`: Standalone Halo2 circuit crate. Uses axiom-crypto's halo2-lib (different from partner's gosh fork).
 - `poseidon-proof`: Halo2 circuit with Blake2b transcript for Poseidon commitment proofs.
 
@@ -337,21 +337,28 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon \
 cd crates/bridge-relayer-daemon && cargo test --test live_bk_set_sentry -- --ignored     # live BK-set sentry against AN testnet
 
 # Deposit relayer (EVM→AN direction, standalone)
-cd crates/deposit-relayer-daemon && cargo test                                           # 28 unit tests (+1 ignored live AN preflight)
+cd crates/deposit-relayer-daemon && cargo test                                           # 32 lib + 1 fixture (+2 ignored live)
+cd crates/deposit-relayer-daemon && cargo test --test log_index_mapping                  # block logIndex → receipt-local index (Sepolia fixture)
 cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- --help            # CLI surface
 cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
-    watch --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --start 0 --count 16            # read-only: list confirmed Deposit events
+    watch --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --from-block <DEPLOY_BLOCK> --start 0 --count 16
+cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=11025180 cargo run --bin deposit-relayer -- \
+    prove-one --rpc-url <SEPOLIA_RPC> --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+    --deposit-id 0 --deposit-prover-dir ../../deposit-prover --out-dir ./out             # production path: eth_getLogs discovery
+cd crates/deposit-relayer-daemon && AN_DAPP_ID=0x1a1a1a1a1a cargo run --bin deposit-relayer -- \
+    prove-one --rpc-url <SEPOLIA_RPC> --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+    --deposit-id 0 --tx-hash 0x9ac341666f70d55780f289187c11a0537a52f7381e5c4b1ebe6f671314552adf \
+    --log-index 2 --deposit-prover-dir ../../deposit-prover --out-dir ./out               # operator fast path (known tx; skips getLogs)
 cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
-    prove-one --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --deposit-id 0 \
-    --deposit-prover-dir ../../deposit-prover --out-dir ./out                            # listen→prove one deposit, write vk_blob/public_inputs/proof
+    an-preflight --an-node-url http://127.0.0.1:11000                                    # probe AN read endpoints (/v2/bk_set)
 cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
-    an-preflight --an-node-url http://127.0.0.1:11000                                    # probe AN read endpoints (/v2/bk_set); local cluster or testnet
-cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- \
-    daemon --rpc-url <SEPOLIA_RPC> --bridge-address 0x... \
+    daemon --rpc-url <SEPOLIA_RPC> --bridge-address 0x... --from-block <DEPLOY_BLOCK> \
     --deposit-prover-dir ../../deposit-prover --an-node-url http://127.0.0.1:11000 \
-    --dry-run                                                                            # listen→prove→submit loop; --dry-run mandatory until live IAckiNacki client lands
+    --dry-run                                                                            # listen→prove→submit loop; --dry-run until shellnet VK redeploy
 cd crates/deposit-relayer-daemon && AN_NODE_URL=http://127.0.0.1:11000 \
-    cargo test --test live_an_preflight -- --ignored                                     # live AN preflight against a reachable cluster
+    cargo test --test live_an_preflight -- --ignored                                     # live AN preflight
+cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=11025180 SEPOLIA_RPC_URL=<RPC> \
+    cargo test --test live_log_discovery -- --ignored --nocapture                        # live eth_getLogs discovery (production path)
 
 # Cross-circuit-bound proof generation (Phase 4.1 fixture builder)
 cd crates/bridge-prover-orchestrator
@@ -472,8 +479,156 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 |------|------|------|
 | `bridge-relayer-daemon` | 29 | state persistence (2), `BlockSource` (2), `MockBridgeClient` (4), `Relayer` loop end-to-end (5), `BkSetSentry` Bootstrapped/Quiet/RotationDetected classification + metrics counters + `run_until_stop` orchestration (6), `SentryGuardedRelayer` rotation-pause + manual-resume + pass-through + error-propagation (5), **daemon** exponential-backoff + shutdown-aware sleep + `RelayerMetrics` atomic counters + `BackoffConfig::bump` cap (5) |
 | `bridge-relayer-daemon` (live) | 1 | `#[ignore]`-gated `live_sentry_bootstraps_then_quiet_or_rotation` — two-tick sequence against the public AN testnet `/v2/bk_set_update` |
-| `deposit-relayer-daemon` (EVM→AN) | 28 | `types`/`state`/`source` round-trips (7), `MockProofGenerator`/`SubprocessProverConfig` (2), `submitter` nullifier-skip + `encode/decode_finalize_deposit` round-trip + accept/reject (4), `Relayer` loop end-to-end: in-order finalize / nullifier-already-used skip / proof-failure / AN-rejection / restart-from-state / run_loop should_stop (7), **daemon** finalize-then-shutdown + exponential-backoff-on-NotYetAvailable (2), `AnConfig` parse/convert/`bk_set_client` build/preflight shape (4), `RelayerMetrics` (2) |
-| `deposit-relayer-daemon` (live) | 1 | `#[ignore]`-gated `live_an_preflight_succeeds` — `GET /v2/bk_set` against a reachable AN cluster (`AN_NODE_URL`, defaults to the local cluster) |
+| `deposit-relayer-daemon` (EVM→AN) | 32 | lib: `types`/`state`/`source` (incl. `resolve_from_block`, 429 retry, log-index mapping) round-trips, `MockProofGenerator`/`SubprocessProverConfig`, `submitter` nullifier + `encode/decode_finalize_deposit`, `Relayer` loop (in-order / nullifier-skip / proof-failure / AN-rejection / restart / `run_loop`), **daemon** backoff + shutdown, `AnConfig`, `RelayerMetrics` |
+| `deposit-relayer-daemon` (integration) | 1 | `log_index_mapping` — Sepolia `depositId=0` fixture: block `logIndex` 271 → receipt position 2 |
+| `deposit-relayer-daemon` (live) | 2 | `#[ignore]` `live_an_preflight_succeeds` (`GET /v2/bk_set`); `live_eth_log_source_finds_deposit_id0` (production `eth_getLogs` discovery; needs `BRIDGE_DEPLOY_BLOCK` + paid RPC) |
+
+### Shellnet E2E — EVM↔AN deposit path (updated 2026-06-13)
+
+**Partner updates (2026-06-11 chat)**
+
+| Topic | Detail |
+|-------|--------|
+| **AN→ETH shellnet test** | Unified in `acki-nacki-to-eth-bridge-halo2-prover/python/generate_withdrawals_with_live_event_proving.py` (local node + shellnet); runbook: `TECHNICAL_README.md` in same repo |
+| **Fork pins (use gosh-sh, not SergeSPb)** | `halo2-lib-zkevm-sha256-and-bls12-381` → `github.com/gosh-sh/…` branch `bump-halo2-lib-v0.4.1`; `axiom-eth` → `github.com/gosh-sh/…` branch `gosh-stable-rlcmanager-assignment` (Alina cherry-picked + repointed tvm-sdk `Cargo.toml`) |
+| **`ZKHALO2VERIFYWITHVK` ABI** | **Frozen Variant A: 3 stack operands** (`vk_cell`, `public_inputs_cell`, `proof_cell`). Merge `c249fb11` accidentally reverted to 1-operand `Halo2TvmBundle`; **fixed `1b9502cd` (2026-06-13)** per Alina/Serhii |
+| **tvm-sdk release tag** | Alina pointed to `v3.0.0.an`; branch tip for shellnet: `full_dex_and_bridge_test_with_final_halo2_circuit` @ `1b9502cd` |
+
+**Direction status**
+
+| Direction | Status | Notes |
+|-----------|--------|-------|
+| **AN→ETH** | ✅ Green (2026-06) | Sepolia bridge `verifyBlock` + `withdrawByProof` mined on Ursus stand |
+| **ETH→AN** | 🔴 Blocked on shellnet VK | Relayer on `ubuntu@ursus-tools.dev` proves Sepolia deposits; `finalizeDeposit` fails at `ZKHALO2VERIFYWITHVK` because deployed `USDCBridge` embeds wrong VK |
+
+**Why shellnet rejects real deposit proofs today**
+
+| Layer | Shellnet now | Required |
+|-------|--------------|----------|
+| **USDCBridge `VK_BLOB`** | Circuit 1B fallback, Base v1, **4 PI**, 6308 B | Deposit RLC VkBlob v2, **11 PI**, 3597 B |
+| **`finalizeDeposit`** | `_buildPublicInputs` returns 4 scalars | Must passthrough all 11 proof-binding fields (see below) |
+| **AN node `tvm_vm`** | Base-only or pre-merge opcode | RLC reader (`circuit_shape=1`, `read_rlc_vk`) + nightly `gosh` feature |
+| **Smoke that works** | `fallback_vk_blob.bin` (4 PI) via `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` | Proves relayer keys / gas / ABI — **not** deposit proofs |
+
+**11 public inputs** (canonical for `deposit-prover` / `deposit-relayer-daemon` / shellnet redeploy; 11 × 32 B LE `Fr`):
+
+```
+[0] depositId  [1] sender  [2] amount  [3] contractAddress
+[4] dappIdHigh  [5] dappIdLow  [6] anAccountHigh  [7] anAccountLow
+[8] blockHashHigh  [9] blockHashLow  [10] promiseCommit
+```
+
+Partner checklist (full redeploy steps): `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. VK gap analysis: `docs/deposit_finalize_vk_gap_2026-05-28.md`.
+
+#### `tvm-sdk` merge + ABI fix (2026-06-11 → 2026-06-13)
+
+Merged `pruvendo/deposit-rlc-vkblob-v2` (`027610d7`) into `full_dex_and_bridge_test_with_final_halo2_circuit`. **No new opcode** — same `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`); merge adds VkBlob **v2** RLC reader inside the **3-operand** handler.
+
+| Item | Value |
+|------|-------|
+| **Branch** | `full_dex_and_bridge_test_with_final_halo2_circuit` |
+| **Tip (2026-06-13)** | `1b9502cd` — **restore 3-operand ABI** + VkBlob v2 RLC + deposit 10×11-PI tests green |
+| **Prior** | `c0aca1e0` (Alina: gosh-sh fork pins); `95055e85` (W128 VK + deposit tests); `c249fb11` (RLC merge — **introduced 1-operand regression**) |
+| **GitHub PR** | [#251](https://github.com/tvmlabs/tvm-sdk/pull/251) OPEN, CI ✅, `MERGEABLE`, blocked on `REVIEW_REQUIRED` |
+| **Merge to `main`?** | Nice-to-have; **not required for shellnet** — `acki-nacki` `Cargo.toml` pins the branch |
+| **CI verify** | `cd ../tvm-sdk && cargo test -p tvm_vm --features gosh` (141 pass, 3 `#[ignore]` fallback positive) |
+
+**Assembly (frozen Variant A):**
+
+```text
+PUSHREF vk_cell              ← VkBlob (v1 Base or v2 Rlc)
+PUSHREF public_inputs_cell   ← N × 32 B LE Fr (no header)
+PUSHREF proof_cell           ← raw SHPLONK bytes
+ZKHALO2VERIFYWITHVK
+```
+
+`Halo2TvmBundle` (single self-describing byte stream) remains in `zk_halo2_with_vk_bundle.rs` for producer round-trip tests only — **not** consumed by the opcode handler.
+
+Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIFY`; `1b9502cd` reverted the accidental 1-operand ABI from `c249fb11` while keeping RLC `circuit_shape=1` reader. Circuit 1B fallback **positive** integration tests are `#[ignore]` pending fixture regen after gosh halo2-lib bump (negative ABI tests still run).
+
+**Superseded branches (do not pin for deposit E2E):**
+
+- `halo2_circuit_with_vk` — **does not exist on GitHub** (was a doc typo)
+- `serhii/node-3406-vergrth16-with-vk` — Groth16-era umbrella; deposit path is native Halo2 only
+- `pruvendo/deposit-rlc-vkblob-v2` — merged into `full_dex`; tip `027610d7` (2026-05-30)
+
+#### VK / proof fixtures in `tvm-sdk` (`tvm_vm/halo2_test_data/`)
+
+| File | Size | Shape | PI count | Use |
+|------|------|-------|----------|-----|
+| `deposit_10proofs/deposit_vk_blob.bin` | 3597 B | VkBlob v2 RLC | **11** | **Target for USDCBridge redeploy** — byte-identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (SHA-256 `147efe14…068abaf`) |
+| `deposit_10proofs/proof_00..09/{public_inputs,proof}.bin` | 352 B + ~8 KB each | — | 11 | Unit tests `test_zkhalo2_with_vk_deposit_10_real_proofs` — **no** `input.json` or `.srs` here (producer-only; sync via `scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`) |
+| `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 11-PI layout |
+| `fallback_vk_blob.bin` | 6308 B | Base v1 | 4 | **Currently on shellnet** — Circuit 1B fallback; copy also in `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/` |
+| `dark_dex_w128_L{0,1,2}_*.bin` | — | — | — | Legacy `ZKHALO2VERIFY` opcode only (different KZG ceremony than deposit) |
+
+#### E2E readiness checklist (ETH→AN)
+
+```
+[✅] tvm-sdk @1b9502cd: 3-operand ABI + RLC reader + deposit_10proofs (141 tests pass)
+[✅] deposit-prover: 11-PI RLC proofs + VkBlob export
+[✅] deposit-relayer: prove Sepolia deposits (production + fast-path CLI; fixture covers log-index mapping)
+[✅] AN→ETH withdraw path on Sepolia (orthogonal)
+[⏳] tvm-sdk PR #251 merge to main (optional; needs 1 GitHub approving review)
+[🔴] acki-nacki: USDCBridge.sol — embed 11-PI VkBlob + extend finalizeDeposit + redeploy .tvc
+[🔴] shellnet: rebuild AN nodes from tvm-sdk @1b9502cd (--features gosh, nightly toolchain)
+[🔴] SRS alignment: deposit proofs keyed on chain ceremony (kzg_bn254_19.srs → k=18), not Hermez
+[🔴] deposit-relayer: live finalizeDeposit (remove --dry-run once contract + IAckiNacki send land)
+[⏳] Circuit 1B fallback WITHVK fixtures: regen via bridge-prover `EXPORT_HALO2_FIXTURE_DIR` (positive tests #[ignore])
+```
+
+**Partner message template** (after tvm-sdk push): branch tip SHA, `deposit_vk_blob.bin` SHA-256, `cargo test -p tvm_vm test_zkhalo2_with_vk --features gosh`, pointer to `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
+
+#### Ursus operator host (`ubuntu@ursus-tools.dev`, updated 2026-06-11)
+
+Shellnet E2E operator box. SSH: `ssh ubuntu@ursus-tools.dev` (passwordless from dev machine). Root layout: `/home/ubuntu/bridge-e2e/`. Live manifest: `DEPLOYED_VERSION.json` on the host.
+
+| Path | Role |
+|------|------|
+| `acki-nacki-bridge/` | rsync'd from local (no git on host); **tip `15ea747`** (2026-06-11) |
+| `acki-nacki-to-eth-bridge-halo2-prover/` | partner AN→ETH prover + `proofs/` |
+| `bin/deposit-relayer` | EVM→AN daemon (rebuilt 2026-06-11) |
+| `bin/relayer` | AN→ETH `verifyBlock` / `withdrawByProof` CLI |
+| `config/deposit-relayer.env` | Sepolia + shellnet GraphQL + `AN_SENDER` msig |
+| `config/bridge-relayer.env` | Sepolia E2E bridge `0x58a1…043d` (AN→ETH) |
+| `tvm-sdk/` | `v3.0.0.an` tag build for `tvm-cli` (prover python tests) |
+
+**systemd**
+
+| Unit | State | Purpose |
+|------|-------|---------|
+| `deposit-relayer.service` | **active** | EVM→AN loop → `finalizeDeposit` on shellnet |
+| `bridge-relayer.service` | inactive | long-running AN→ETH (manual `relayer` CLI used for E2E) |
+
+**Redeploy recipe** (from dev machine — build on ursus for GLIBC safety):
+
+```bash
+# sync source
+rsync -avz --delete --exclude target --exclude .git \
+  acki-nacki-bridge/ ubuntu@ursus-tools.dev:/home/ubuntu/bridge-e2e/acki-nacki-bridge/
+
+# rebuild + install
+ssh ubuntu@ursus-tools.dev '
+  source ~/.cargo/env
+  cd /home/ubuntu/bridge-e2e/acki-nacki-bridge/crates/deposit-relayer-daemon
+  cargo build --release --locked && install -m 755 target/release/deposit-relayer /home/ubuntu/bridge-e2e/bin/
+  cd ../bridge-relayer-daemon
+  cargo build --release --locked && install -m 755 target/release/relayer /home/ubuntu/bridge-e2e/bin/
+  sudo systemctl restart deposit-relayer.service
+'
+```
+
+Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `scripts/ursus/bridge-relayer.{service,env.example}`. Set `BRIDGE_DEPLOY_BLOCK` in deposit-relayer env (not genesis). AN→ETH wiring: `docs/shellnet_an_eth_relayer_wiring.md`.
+
+**GitHub (bridge-EVM):** active docs/integration PR [#5](https://github.com/gosh-sh/bridge-EVM/pull/5) (`pruvendo/shellnet-e2e-landing` → `main`).
+
+**Key config (deposit, non-secret)**
+
+- Sepolia bridge (deposits): `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82`
+- Sepolia E2E bridge (withdraw): `0x58a1c8d22a79a91db6e7448a7d64d59ad4dc043d`
+- Shellnet GraphQL: `https://shellnet.ackinacki.org/graphql`
+- `AN_SENDER`: `20c2db9c…::20c2db9c…` (relayer msig, deployed 2026-06)
+- RPC: Alchemy Sepolia (switched from publicnode 2026-06-11 — was hitting HTTP 429)
 
 ### Shellnet E2E — EVM↔AN deposit path (updated 2026-06-13)
 

@@ -9,14 +9,13 @@
 //!   timestamp)` event, honouring a confirmation depth so only finalised
 //!   deposits are surfaced.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 
 use alloy::{
-    consensus::TxReceipt,
     network::{Ethereum, Network},
     primitives::{Address, B256, U256},
     providers::Provider,
-    rpc::types::Filter,
+    rpc::types::{Filter, Log},
     sol_types::SolEvent,
 };
 use async_trait::async_trait;
@@ -120,6 +119,54 @@ use sol_bindings::AckiNackiBridge::Deposit;
 /// at 10 blocks; chunking keeps wide scans working on any RPC.
 const GET_LOGS_CHUNK_BLOCKS: u64 = 10;
 
+/// Retry `eth_getLogs` on transient RPC rate limits (HTTP 429 / CU/sec caps).
+const GET_LOGS_MAX_ATTEMPTS: u32 = 5;
+const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
+const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
+
+/// Environment variable read by [`resolve_from_block`] when `--from-block` is
+/// left at zero.
+pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
+
+/// Lower bound for log scans: explicit CLI `--from-block` wins; otherwise
+/// `BRIDGE_DEPLOY_BLOCK`. Returns `0` when neither is set (scans from genesis —
+/// avoid on mainnet; operators should set the deploy block).
+pub fn resolve_from_block(cli_from_block: u64) -> u64 {
+    if cli_from_block != 0 {
+        return cli_from_block;
+    }
+    std::env::var(BRIDGE_DEPLOY_BLOCK_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Map a block-global `logIndex` (from `eth_getLogs`) to the receipt-local
+/// position `deposit-prover` indexes by.
+pub fn receipt_log_index_from_block_log(
+    logs: &[Log],
+    block_log_index: u64,
+) -> Result<u64, RelayerError> {
+    logs.iter()
+        .position(|l| l.log_index == Some(block_log_index))
+        .map(|i| i as u64)
+        .ok_or_else(|| {
+            RelayerError::eth(format!(
+                "deposit log index {block_log_index} not found in receipt ({} logs)",
+                logs.len()
+            ))
+        })
+}
+
+/// Whether an Ethereum RPC error is likely transient (429 / throughput).
+pub fn is_retryable_eth_rpc_error(err: &impl std::fmt::Display) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("compute units per second")
+        || msg.contains("too many requests")
+}
+
 /// Production deposit source — scans `eth_getLogs` for the bridge's
 /// `Deposit` event.
 ///
@@ -168,6 +215,90 @@ where
     }
 }
 
+/// Locate a deposit via `eth_getTransactionReceipt` only — no `eth_getLogs`.
+///
+/// `log_index` is the **receipt-local** index (the position inside
+/// `receipt.logs[]`), matching what `deposit-prover`'s `fetch_deposit_data`
+/// expects. This avoids wide log scans that free-tier RPCs (e.g. Alchemy)
+/// rate-limit.
+pub async fn fetch_deposit_from_receipt<P>(
+    provider: &P,
+    bridge_address: Address,
+    tx_hash: B256,
+    log_index: u64,
+    expected_deposit_id: u64,
+    confirmations: u64,
+) -> Result<Option<DepositEvent>, RelayerError>
+where
+    P: Provider<Ethereum> + Send + Sync,
+{
+    let receipt = provider
+        .get_transaction_receipt(tx_hash)
+        .await
+        .map_err(|e| RelayerError::eth(format!("get_transaction_receipt failed: {e}")))?
+        .ok_or_else(|| RelayerError::eth("deposit tx receipt not found"))?;
+
+    let block_number = receipt
+        .block_number
+        .ok_or_else(|| RelayerError::eth("deposit tx receipt missing block_number"))?;
+
+    let head = provider
+        .get_block_number()
+        .await
+        .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
+    let safe_head = head.saturating_sub(confirmations);
+    if block_number > safe_head {
+        return Ok(None);
+    }
+
+    let log = receipt
+        .inner
+        .logs()
+        .get(log_index as usize)
+        .ok_or_else(|| {
+            RelayerError::eth(format!(
+                "receipt log index {log_index} out of range ({} logs in tx {tx_hash:#x})",
+                receipt.inner.logs().len()
+            ))
+        })?;
+
+    if log.address() != bridge_address {
+        return Err(RelayerError::eth(format!(
+            "log at index {log_index} emitted by {} != bridge {}",
+            log.address(),
+            bridge_address
+        )));
+    }
+
+    let decoded = log
+        .log_decode::<Deposit>()
+        .map_err(|e| RelayerError::eth(format!("log at index {log_index} is not Deposit: {e}")))?;
+    let ev = &decoded.inner.data;
+    let id_u64: u64 = ev
+        .depositId
+        .try_into()
+        .map_err(|_| RelayerError::eth("depositId does not fit in u64"))?;
+    if id_u64 != expected_deposit_id {
+        return Err(RelayerError::eth(format!(
+            "receipt depositId {id_u64} != expected {expected_deposit_id}"
+        )));
+    }
+
+    Ok(Some(DepositEvent {
+        deposit_id: id_u64,
+        sender: ev.sender,
+        amount: ev.amount,
+        an_workchain: ev.anWorkchain,
+        an_account: ev.anAccount,
+        timestamp: ev.timestamp,
+        tx_hash,
+        log_index,
+        block_number,
+        block_hash: receipt.block_hash.unwrap_or_default(),
+        source_contract: bridge_address,
+    }))
+}
+
 #[async_trait]
 impl<P> DepositSource for EthLogSource<P, Ethereum>
 where
@@ -201,11 +332,7 @@ where
                 .topic1(topic1)
                 .from_block(chunk_start)
                 .to_block(chunk_end);
-            let chunk = self
-                .provider
-                .get_logs(&filter)
-                .await
-                .map_err(|e| RelayerError::eth(format!("get_logs failed: {e}")))?;
+            let chunk = get_logs_with_retry(&self.provider, &filter).await?;
             logs.extend(chunk);
             chunk_start = chunk_end.saturating_add(1);
         }
@@ -233,16 +360,8 @@ where
                 .map_err(|e| RelayerError::eth(format!("get_transaction_receipt failed: {e}")))?
                 .ok_or_else(|| RelayerError::eth("deposit tx receipt not found"))?;
             let block_log_index = decoded.log_index.unwrap_or_default();
-            let receipt_log_index = receipt
-                .inner
-                .logs()
-                .iter()
-                .position(|l| l.log_index == Some(block_log_index))
-                .ok_or_else(|| {
-                    RelayerError::eth(format!(
-                        "deposit log index {block_log_index} not found in receipt"
-                    ))
-                })? as u64;
+            let receipt_log_index =
+                receipt_log_index_from_block_log(receipt.inner.logs(), block_log_index)?;
             return Ok(Some(DepositEvent {
                 deposit_id: id_u64,
                 sender: ev.sender,
@@ -258,6 +377,32 @@ where
             }));
         }
         Ok(None)
+    }
+}
+
+async fn get_logs_with_retry<P>(
+    provider: &P,
+    filter: &Filter,
+) -> Result<Vec<Log>, RelayerError>
+where
+    P: Provider<Ethereum> + Send + Sync,
+{
+    let mut attempt = 0u32;
+    let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+    loop {
+        attempt += 1;
+        match provider.get_logs(filter).await {
+            Ok(logs) => return Ok(logs),
+            Err(e) if is_retryable_eth_rpc_error(&e) && attempt < GET_LOGS_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+            },
+            Err(e) => {
+                return Err(RelayerError::eth(format!(
+                    "get_logs failed after {attempt} attempt(s): {e}"
+                )));
+            },
+        }
     }
 }
 
@@ -291,5 +436,18 @@ mod tests {
         src.insert(dummy(1));
         assert!(src.fetch(0).await.unwrap().is_none());
         assert_eq!(src.fetch(1).await.unwrap().unwrap().deposit_id, 1);
+    }
+
+    #[test]
+    fn resolve_from_block_prefers_cli() {
+        assert_eq!(resolve_from_block(42), 42);
+    }
+
+    #[test]
+    fn is_retryable_detects_429() {
+        assert!(is_retryable_eth_rpc_error(
+            &"HTTP error 429 with body: compute units per second"
+        ));
+        assert!(!is_retryable_eth_rpc_error(&"invalid params"));
     }
 }

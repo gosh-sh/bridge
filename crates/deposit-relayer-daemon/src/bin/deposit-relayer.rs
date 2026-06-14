@@ -10,7 +10,8 @@
 //! - `prove-one` — listens for a single `depositId`, runs the `deposit-prover`
 //!   pipeline out-of-process, and writes the three opcode operands (`vk_blob`,
 //!   `public_inputs`, `proof`) to an output directory. Exercises the full
-//!   listen→prove path without an AN node.
+//!   listen→prove path without an AN node. Pass `--tx-hash` + `--log-index` to
+//!   skip `eth_getLogs` and locate the deposit via receipt only.
 //!
 //! - `daemon` — long-running loop: listen → prove → submit, with exponential
 //!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
@@ -18,15 +19,16 @@
 //!
 //! - `status` — print the state file path.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    AnConfig, AnInterfaceSubmitter, AnSubmitter, BackoffConfig, DepositSource, EthLogSource,
-    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
-    SubprocessProofGenerator, SubprocessProverConfig, DEFAULT_AN_NODE_URL,
+    fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitter,
+    BackoffConfig, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
+    RelayerConfig, RelayerMetrics, SubprocessProofGenerator, SubprocessProverConfig,
+    DEFAULT_AN_NODE_URL, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -54,7 +56,8 @@ enum Cmd {
         rpc_url: String,
         #[arg(long)]
         bridge_address: Address,
-        /// Lower bound for the log scan (bridge deploy block).
+        /// Lower bound for the log scan (bridge deploy block). When `0`, falls
+        /// back to `BRIDGE_DEPLOY_BLOCK`.
         #[arg(long, default_value_t = 0)]
         from_block: u64,
         /// Confirmation depth before a deposit is surfaced.
@@ -75,10 +78,19 @@ enum Cmd {
         bridge_address: Address,
         #[arg(long)]
         deposit_id: u64,
+        /// Lower bound for the log scan (bridge deploy block). When `0`, falls
+        /// back to `BRIDGE_DEPLOY_BLOCK`. Ignored when `--tx-hash` is set.
         #[arg(long, default_value_t = 0)]
         from_block: u64,
         #[arg(long, default_value_t = 12)]
         confirmations: u64,
+        /// Deposit transaction hash. With `--log-index`, skips `eth_getLogs`.
+        #[arg(long, requires = "log_index")]
+        tx_hash: Option<String>,
+        /// Receipt-local log index (position in `receipt.logs[]`). Required
+        /// with `--tx-hash`.
+        #[arg(long, requires = "tx_hash")]
+        log_index: Option<u64>,
         /// Path to the `deposit-prover` crate root.
         #[arg(long)]
         deposit_prover_dir: PathBuf,
@@ -105,6 +117,8 @@ enum Cmd {
         rpc_url: String,
         #[arg(long)]
         bridge_address: Address,
+        /// Lower bound for the log scan (bridge deploy block). When `0`, falls
+        /// back to `BRIDGE_DEPLOY_BLOCK`.
         #[arg(long, default_value_t = 0)]
         from_block: u64,
         #[arg(long, default_value_t = 12)]
@@ -191,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
         } => watch(
             rpc_url,
             bridge_address,
-            from_block,
+            resolve_from_block(from_block),
             confirmations,
             start,
             count,
@@ -204,6 +218,8 @@ async fn main() -> anyhow::Result<()> {
             deposit_id,
             from_block,
             confirmations,
+            tx_hash,
+            log_index,
             deposit_prover_dir,
             prover_rpc_url,
             degree,
@@ -224,8 +240,10 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url,
                 bridge_address,
                 deposit_id,
-                from_block,
+                resolve_from_block(from_block),
                 confirmations,
+                tx_hash,
+                log_index,
                 prover_cfg,
                 out_dir,
             )
@@ -298,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
                 args.state,
                 rpc_url,
                 bridge_address,
-                from_block,
+                resolve_from_block(from_block),
                 confirmations,
                 start_deposit_id,
                 prover_cfg,
@@ -380,17 +398,55 @@ async fn prove_one(
     deposit_id: u64,
     from_block: u64,
     confirmations: u64,
+    tx_hash: Option<String>,
+    log_index: Option<u64>,
     prover_cfg: SubprocessProverConfig,
     out_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let source = EthLogSource::new(provider, bridge_address, from_block, confirmations);
+    if tx_hash.is_none() && from_block == 0 {
+        warn!(
+            "from_block is 0 and no --tx-hash supplied; eth_getLogs will scan from genesis. \
+             Set {BRIDGE_DEPLOY_BLOCK_ENV} or pass --from-block to the bridge deploy block.",
+        );
+    }
 
-    let event = match source.fetch(deposit_id).await? {
-        Some(e) => e,
-        None => {
-            anyhow::bail!("depositId {deposit_id} not visible / not confirmed yet");
-        },
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+
+    let event = if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
+        let tx_hash = alloy::primitives::B256::from_str(&tx_hash)
+            .map_err(|e| anyhow::anyhow!("invalid --tx-hash: {e}"))?;
+        info!(
+            deposit_id,
+            tx = %tx_hash,
+            log_index,
+            "fast path: locating deposit via receipt (skipping eth_getLogs)",
+        );
+        match fetch_deposit_from_receipt(
+            &provider,
+            bridge_address,
+            tx_hash,
+            log_index,
+            deposit_id,
+            confirmations,
+        )
+        .await?
+        {
+            Some(e) => e,
+            None => {
+                anyhow::bail!(
+                    "depositId {deposit_id} in tx {tx_hash:#x} not confirmed yet \
+                     (needs {confirmations} confirmations)"
+                );
+            },
+        }
+    } else {
+        let source = EthLogSource::new(provider, bridge_address, from_block, confirmations);
+        match source.fetch(deposit_id).await? {
+            Some(e) => e,
+            None => {
+                anyhow::bail!("depositId {deposit_id} not visible / not confirmed yet");
+            },
+        }
     };
     info!(
         deposit_id = event.deposit_id,

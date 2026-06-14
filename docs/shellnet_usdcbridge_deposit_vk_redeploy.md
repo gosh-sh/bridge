@@ -257,9 +257,35 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | Step | Command / check | Expected |
 |------|-----------------|----------|
 | 1 | Sepolia `Deposit` already mined (`depositId=0`) | Event visible |
-| 2 | `deposit-relayer prove-one --deposit-id 0` on ursus | `proof` + `public_inputs` written |
-| 3 | `deposit-relayer daemon` (no `--dry-run`) | `finalizeDeposit` **exit_code 0** |
+| 2a | **Production path:** `BRIDGE_DEPLOY_BLOCK=11025180 deposit-relayer prove-one --deposit-id 0 …` on Ursus | `eth_getLogs` discovery → `proof` + `public_inputs` written |
+| 2b | **Operator fast path** (known tx; skips `getLogs`): `--tx-hash 0x9ac34…2adf --log-index 2` | Same operands; use for reprove only, not sign-off |
+| 3 | `deposit-relayer daemon` (no `--dry-run`, `BRIDGE_DEPLOY_BLOCK` set) | `finalizeDeposit` **exit_code 0** |
 | 4 | Query recipient ECC balance on shellnet | +1 USDC (token id `3`) |
+
+**prove-one examples** (env from `scripts/ursus/deposit-relayer.env.example`):
+
+```bash
+# Production discovery (acceptance gate — needs production/paid Sepolia RPC)
+BRIDGE_DEPLOY_BLOCK=11025180 AN_DAPP_ID=0x1a1a1a1a1a \
+  deposit-relayer prove-one \
+  --rpc-url "$RPC_URL" \
+  --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+  --deposit-id 0 \
+  --deposit-prover-dir "$DEPOSIT_PROVER_DIR" \
+  --out-dir /tmp/deposit-prove-one-0
+
+# Operator fast path (rate-limited RPCs; does not exercise getLogs)
+AN_DAPP_ID=0x1a1a1a1a1a deposit-relayer prove-one \
+  --rpc-url "$RPC_URL" \
+  --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+  --deposit-id 0 \
+  --tx-hash 0x9ac341666f70d55780f289187c11a0537a52f7381e5c4b1ebe6f671314552adf \
+  --log-index 2 \
+  --deposit-prover-dir "$DEPOSIT_PROVER_DIR" \
+  --out-dir /tmp/deposit-prove-one-0
+```
+
+**Offline regression** (no RPC): `cargo test -p deposit-relayer-daemon --test log_index_mapping` — Sepolia fixture asserts block `logIndex` 271 → receipt position 2.
 
 **Pending test vectors:**
 
@@ -271,10 +297,14 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | AN recipient | `beef504cfac7c8a8728d9c0a00deca826fd4e8168e5cc9c5f49fd066b5e2a5b1` |
 | `AN_DAPP_ID` | `0x1a1a1a1a1a` |
 | `AN_TOKEN_ID` | `3` |
+| `BRIDGE_DEPLOY_BLOCK` | `11025180` (shellnet Sepolia bridge; required for production `eth_getLogs` scans) |
+| Receipt log index | `2` (receipt-local; block-global `logIndex` = 271) |
 
 ## 9. Acceptance criteria (sign-off)
 
 - [ ] `verify_opcode_triple` **ACCEPTED** on chain-SRS artefacts (§4 step 4).
+- [ ] `cargo test -p deposit-relayer-daemon --test log_index_mapping` green (block → receipt log-index mapping).
+- [ ] `live_log_discovery` green on Ursus/production RPC with `BRIDGE_DEPLOY_BLOCK` set (production `eth_getLogs` path).
 - [ ] On-node executor test green (`round_trip_deposit_rlc_real_proof_returns_true` or
       equivalent on the shellnet node build).
 - [ ] `USDCBridge.tvc` embeds the new VkBlob (SHA-256 recorded).
@@ -295,6 +325,8 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | `deposit-prover/examples/export_blake2b_proof.rs` | Blake2b proof producer |
 | `deposit-prover/examples/verify_opcode_triple.rs` | Pre-flight opcode check |
 | `crates/deposit-relayer-daemon/src/types.rs` | `NUM_PUBLIC_INPUTS = 11` |
+| `crates/deposit-relayer-daemon/src/source.rs` | `EthLogSource`, `receipt_log_index_from_block_log`, `BRIDGE_DEPLOY_BLOCK` |
+| `scripts/ursus/deposit-relayer.env.example` | Ursus env template (`BRIDGE_DEPLOY_BLOCK`, shellnet GraphQL) |
 | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` | Shellnet finalize harness (fallback fixtures today) |
 
 ## 11. Open questions for partner

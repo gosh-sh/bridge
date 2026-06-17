@@ -35,3 +35,18 @@ So on-chain `AckiNackiBridge.verifyBlock` / `withdrawByProof` accept a Groth16 p
 3. Do circuits 1A/1B/2 also migrate to the aggregator path (Yul), or are they staying on gnark and getting a real `Define()` later? If gnark, what's the plan and timeline?
 4. Transcript: do you need us to switch the Circuit 4 prover from Blake2b to Poseidon, or will you add a Blake2b loader to `snark-verifier`? Please confirm which side owns the change.
 5. Until R15 closes, please confirm in writing that the intended trust model for Sepolia is relayer-rooted attestation, and that mainnet is explicitly gated on R15 (no `v2.0.0` tag before).
+
+---
+
+## Q2 — gnark-wrapper PI docstrings drift from upstream circuit sources
+
+Cross-checked `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2,4}/circuit.go` against `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits`. Counts are all correct; only the comment labels drift. Wrappers themselves are PI-shape opaque (`AssertIsEqual(PI[i], PI[i])`), so this is a documentation/contract-clarity issue, not a soundness bug — but it will mislead anyone reading the wrapper to understand the public-input meaning.
+
+| # | Wrapper says (slot → name) | Upstream source returns | Action |
+|---|---|---|---|
+| **1A** | `[0] envelope_hash_fr`, `[1] bk_set_commitment_fr` | `primary_circuit.rs:48,170,352`: `(block_id_fr, old_bk_set_commitment, block_seq_no_fr, last_seen_seqno)` | rename `envelope_hash_fr` → `block_id_fr` |
+| **1B** | `[0] envelope_hash`, `[1] bk_set_poseidon` | `fallback_circuit.rs` pushes `block_id_fr` at `assigned_instances[0]` | rename `envelope_hash` → `block_id` |
+| **2**  | `[0] block_id`, `[1] bk_set_poseidon`, `[2] num_layers`, `[3..=12] layer_hash_frs[0..10]`, `[13] prev_max_level_layer_hash` — 14 PIs | `historical-layer-hashes-movement-checker-circuit/src/circuit.rs:290-296` matches (source label is `bk_set_hash_cell`, semantically the BK-set Poseidon commitment) | OK; optional: align label to `bk_set_poseidon_hash` |
+| **4**  | 10 PIs, names per `PUB_*` constants | `bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs:113-123` — `TOTAL_PUBLIC_INPUTS = 10`, identical ordering | OK ✅ |
+
+**Question.** Please confirm we should (a) re-label the 1A/1B wrapper comments to `block_id*` to match the actual values pushed into `assigned_instances[0]` upstream, and (b) leave Circuit 2's `bk_set_poseidon` label as-is or rename to `bk_set_poseidon_hash`. No `circuit.go` *code* changes — only comments — are implied by this; the wrappers' identity-stub `Define()` will still be replaced wholesale under R15.

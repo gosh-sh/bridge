@@ -15,7 +15,9 @@ gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto
 sha2 = "0.10"
 
 # Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
-bridge-prover-lib = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-prover" }
+# Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
+# the sibling `crates/an-bridge-prover/` sub-workspace.
+bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
 
 # Halo2 backend — must match the partner's fork; pinned to the `bump-halo2-lib-v0.4.1` branch.
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }

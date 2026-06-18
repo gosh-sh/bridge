@@ -1,0 +1,35 @@
+[package]
+name = "bridge-prover-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bridge-prover-daemon"
+path = "src/main.rs"
+
+[features]
+# Default: paired with `bridge-verifier-daemon`. Each generated bundle is
+# written to `proofs/proof_NNN.json` and the prover waits for the verifier
+# to drop `proofs/result_NNN.json` before advancing. Used by the standard
+# E2E orchestrator (`python/generate_withdrawals_with_live_event_proving.py`).
+default = []
+# Standalone mode (CI smoke test `bridge_e2e_self_contained.py`): no
+# verifier daemon. The prover inline-verifies both proofs itself, records
+# the verdict to `state/prover_state.json::recent_bundles[]`, and aborts
+# (non-zero exit, state not advanced) if a bundle fails to self-verify.
+self-verify = []
+
+[dependencies]
+bridge-prover-lib = { workspace = true }
+gosh-dense-balanced-tree = { workspace = true }
+bincode = { workspace = true }
+tvm_block = { workspace = true }
+halo2-base = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

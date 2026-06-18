@@ -1,0 +1,60 @@
+[package]
+name = "bridge-event-witness"
+version = "0.1.0"
+edition = "2021"
+
+# Circuit 4 (event proof) witness assembly — both halves of the per-event
+# witness pipeline live here:
+#
+#   * library: `PrivateWitness` JSON schema (schema_version-pinned) + the
+#     hermetic exporter `export_from_event_boc_base64` that turns an
+#     ExtOut `Message` BOC + caller-supplied block context into a *partial*
+#     `PrivateWitness` JSON (Track B in the Circuit 4 integration plan).
+#
+#   * binary `bridge-event-private-witness-export` (src/bin/export.rs):
+#     thin CLI wrapper around the hermetic library function. Hermetic —
+#     no GraphQL, no daemon state, just BOC parsing.
+#
+#   * binary `bridge-event-witness-builder` (src/bin/build.rs):
+#     enriches a partial PrivateWitness JSON with the three daemon-side
+#     fields (`events_tree_proof`, `block_tree_proof`, `anchor`) by
+#     querying GraphQL + reading the bridge state JSON. Track D1.
+#
+# The two binaries are always invoked sequentially by the Python
+# orchestrator (`generate_withdrawals_with_live_event_proving.py`):
+# exporter writes a partial JSON, builder reads it and writes an enriched
+# JSON that `bridge-event-halo2-prover --fixture` consumes.
+
+[lib]
+name = "bridge_event_witness"
+path = "src/lib.rs"
+
+# --- Hermetic exporter CLI (no GQL, no state file) ---------------------
+[[bin]]
+name = "bridge-event-private-witness-export"
+path = "src/bin/export.rs"
+
+# --- Daemon-side enrichment CLI (GQL + state file) ---------------------
+[[bin]]
+name = "bridge-event-witness-builder"
+path = "src/bin/build.rs"
+
+[dependencies]
+# Schema + hermetic exporter
+tvm_block = { workspace = true }
+tvm_types = { workspace = true }
+
+# Daemon-side enrichment (only the `build` binary uses these)
+bridge-prover-lib = { workspace = true }
+gosh-dense-balanced-tree = { workspace = true }
+tokio = { workspace = true }
+
+# Shared
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

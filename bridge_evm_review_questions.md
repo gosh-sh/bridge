@@ -29,6 +29,8 @@ Circuit 4 (`circuit-4/circuit.go:29-34`):
 
 So on-chain `AckiNackiBridge.verifyBlock` / `withdrawByProof` accept a Groth16 proof that the wrapper PK holder can mint for any PI tuple — the Halo2 layer is not cryptographically attested.
 
+**Branch audit (2026-06-18).** Verified that `Define()` bodies are byte-for-byte identical identity-stubs across **every** open branch on `gosh-sh/bridge-EVM` (`main`, `pruvendo/shellnet-e2e-landing`, `deposit-rlc-vkblob-v2`, `feat/usdt-deposits`, `test/arbitrum-replay-and-n14-runbook`, `docs/agents-git-remotes`, `feature/integrate-all-bridge-prover-code`). No branch has an in-flight real `Define()` for any of the four circuits — R15 is uniformly open repo-wide, not just on `main`.
+
 **Roadmap.** `docs/r15_snark_verifier_roadmap.md` (accepted 2026-05-26) chooses `snark-verifier-sdk::AggregationCircuit` + `gen_evm_verifier_shplonk` → Yul `BridgeWithdrawalAggregatorVerifier.sol`, spiked in `crates/bridge-evm-aggregator/`. Status: M1–M3 ✅, M5 de-risked on a synthetic inner (2026-05-29); M4 (real Circuit 4 inner) blocked on Circuit 4 stability + Blake2b-vs-Poseidon transcript mismatch.
 
 **Questions.**

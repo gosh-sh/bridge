@@ -62,4 +62,4 @@ All four additions are additive (no breaking changes to lib's existing public AP
 - `proof_export.rs` — gnark wrapper IO glue.
 - `bound_test_data.rs`, `layer_hashes_test_data.rs` — cross-circuit fixtures for the bin binaries; may eventually graduate into `bridge-prover-lib` test helpers, but not blocking.
 
-**Request.** After we ship the lib accessors + transcript-kind overload, please refactor `src/bin/{export_fallback_proof,export_layer_hashes_proof,export_bound_block_proofs}.rs` to import from `bridge_prover_lib` and delete the five files above. Net effect: orchestrator `src/` shrinks from ~2.9 kLoC to ~1.7 kLoC of code that is genuinely orchestrator-only.
+**Request.** The lib additions are already shipped (see `acki-nacki-to-eth-bridge-halo2-prover@main` commit `e4d083d9`). Please refactor `src/bin/{export_fallback_proof,export_layer_hashes_proof,export_bound_block_proofs}.rs` to import from `bridge_prover_lib` and delete the five files above. Net effect: orchestrator `src/` shrinks from ~2.9 kLoC to ~1.7 kLoC of code that is genuinely orchestrator-only.

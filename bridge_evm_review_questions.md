@@ -50,3 +50,31 @@ Cross-checked `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2
 | **4**  | 10 PIs, names per `PUB_*` constants | `bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs:113-123` — `TOTAL_PUBLIC_INPUTS = 10`, identical ordering | OK ✅ |
 
 **Question.** Please confirm we should (a) re-label the 1A/1B wrapper comments to `block_id*` to match the actual values pushed into `assigned_instances[0]` upstream, and (b) leave Circuit 2's `bk_set_poseidon` label as-is or rename to `bk_set_poseidon_hash`. No `circuit.go` *code* changes — only comments — are implied by this; the wrappers' identity-stub `Define()` will still be replaced wholesale under R15.
+
+---
+
+## Q3 — `bridge-prover-orchestrator/src/` largely duplicates `bridge-prover-lib`; please refactor
+
+The orchestrator's four `src/bin/` binaries are the only product here, yet only `export_primary_proof.rs` actually imports from `bridge_prover_lib` (`generate_primary_proof`, `KeyManager`). The other three (`export_fallback_proof.rs`, `export_layer_hashes_proof.rs`, `export_bound_block_proofs.rs`) reach for orchestrator-local re-implementations. Roughly **~65% of `src/*.rs` is duplicated logic** — three of the four binaries can move to `bridge_prover_lib` imports with small upstream additions.
+
+**Delete after small lib additions (Circuit 1B + Circuit 2 paths):**
+
+| File | Replace with | Lib addition (status) |
+|---|---|---|
+| `keys.rs` | `bridge_prover_lib::keys::KeyManager` (`fallback_vk/pk/config()` accessors) | ✅ already present in lib (`keys.rs:294-304`) |
+| `layer_hashes_keys.rs` | same `KeyManager` (`layer_vk/pk/config()`, `layer_k/num_unusable_rows/lookup_bits()`) | ✅ already present in lib (`keys.rs:391-413`) |
+| `prover.rs` (Blake2b) | `bridge_prover_lib::prover::generate_fallback_proof` | ✅ already present in lib |
+| `prover.rs` (Poseidon transcript) | `bridge_prover_lib::prover::create_proof_with_transcript<E, T, C>` driven with orchestrator's `PoseidonWrite` | ✅ **landed** in `acki-nacki-to-eth-bridge-halo2-prover@main` — generic transcript helper exposing the underlying KZG/SHPLONK `create_proof` call |
+| `verifier.rs` (Blake2b) | `bridge_prover_lib::verifier::verify_fallback_proof` | ✅ already present in lib |
+| `verifier.rs` (Poseidon transcript) | `bridge_prover_lib::verifier::verify_proof_with_transcript<E, T>` driven with `PoseidonRead` | ✅ **landed** in `acki-nacki-to-eth-bridge-halo2-prover@main` — generic transcript helper for the verify path |
+| `layer_hashes_prover.rs` | `bridge_prover_lib::layer_prover::generate_layer_proof_with_input` accepting `LayerHashesProofInput<'a>`; returns `LayerHashesProofOutput` | ✅ **landed** in `acki-nacki-to-eth-bridge-halo2-prover@main` — `LAYER_HASHES_NUM_PUBLIC_INPUTS = 14`, struct + wrapper added next to existing `generate_layer_proof` |
+
+All four additions are additive (no breaking changes to lib's existing public API) and live next to the existing primitives in `bridge-prover-lib/src/{prover,verifier,layer_prover}.rs`. Built clean (`cargo build -p bridge-prover-lib`). The orchestrator's `Cargo.toml` already pins the lib by git URL — just `cargo update` to pick them up.
+
+**Keep — genuinely orchestrator-specific:**
+- `poseidon_transcript.rs` — vendored Poseidon FS transcript, only used by the gnark export path.
+- `halo2_tvm_bundle.rs` — `ZKHALO2VERIFYWITHVK` TVM opcode payload (AN-side TVM, not relevant to lib consumers).
+- `proof_export.rs` — gnark wrapper IO glue.
+- `bound_test_data.rs`, `layer_hashes_test_data.rs` — cross-circuit fixtures for the bin binaries; may eventually graduate into `bridge-prover-lib` test helpers, but not blocking.
+
+**Request.** After we ship the lib accessors + transcript-kind overload, please refactor `src/bin/{export_fallback_proof,export_layer_hashes_proof,export_bound_block_proofs}.rs` to import from `bridge_prover_lib` and delete the five files above. Net effect: orchestrator `src/` shrinks from ~2.9 kLoC to ~1.7 kLoC of code that is genuinely orchestrator-only.

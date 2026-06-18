@@ -11,7 +11,7 @@ import (
 // `historical-layer-hashes-movement-checker-circuit/src/circuit.rs`:
 //
 //	[0]      block_id
-//	[1]      bk_set_poseidon
+//	[1]      bk_set_poseidon_hash
 //	[2]      num_layers
 //	[3..=12] layer_hash_frs[0..MAX_LAYERS=10]
 //	[13]     prev_max_level_layer_hash

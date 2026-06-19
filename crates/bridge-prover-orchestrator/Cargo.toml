@@ -10,6 +10,7 @@ attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-ha
 bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
 bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
 historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
 gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
 sha2 = "0.10"
@@ -63,6 +64,7 @@ attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-ha
 bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
 bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
 historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
 bk-set-update-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bk-set-update-checker-circuit" }
 

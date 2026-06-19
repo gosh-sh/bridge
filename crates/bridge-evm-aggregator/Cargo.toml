@@ -47,6 +47,10 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[[bin]]
+name = "export-spike-artifacts"
+path = "src/bin/export_spike_artifacts.rs"
+
 [dev-dependencies]
 itertools = "0.13"
 

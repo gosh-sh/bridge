@@ -74,14 +74,31 @@ impl LayerHashesProofOutput {
     }
 }
 
-/// Generate a Circuit 2 proof.
+/// Generate a Circuit 2 proof (Blake2b transcript — AN-side default).
 pub fn generate_layer_hashes_proof(
     key_manager: &LayerHashesKeyManager,
     input: LayerHashesProofInput<'_>,
 ) -> anyhow::Result<LayerHashesProofOutput> {
+    generate_layer_hashes_proof_with_transcript(
+        key_manager,
+        input,
+        crate::halo2_tvm_bundle::TranscriptKind::Blake2b,
+    )
+}
+
+/// Generate a Circuit 2 proof with the chosen Fiat–Shamir transcript.
+pub fn generate_layer_hashes_proof_with_transcript(
+    key_manager: &LayerHashesKeyManager,
+    input: LayerHashesProofInput<'_>,
+    transcript: crate::halo2_tvm_bundle::TranscriptKind,
+) -> anyhow::Result<LayerHashesProofOutput> {
+    use crate::halo2_tvm_bundle::TranscriptKind;
+    use crate::poseidon_transcript::PoseidonWrite;
+
     info!(
         num_chain_steps = input.num_prev_chain_steps,
         chain_links = input.prev_chain_proofs.len(),
+        ?transcript,
         "generating layer-hashes proof"
     );
 
@@ -99,24 +116,49 @@ pub fn generate_layer_hashes_proof(
     circuit.override_base_circuit_params(key_manager.config().clone());
 
     let instance_refs: &[&[Fr]] = &[&input.expected_instances];
-    let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        _,
-        Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
-        _,
-    >(
-        &key_manager.srs,
-        key_manager.pk(),
-        &[circuit],
-        &[instance_refs],
-        OsRng,
-        &mut transcript,
-    )
-    .context("layer-hashes proof generation failed")?;
-    let proof_bytes = transcript.finalize();
+
+    let proof_bytes = match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("layer-hashes proof generation failed (Blake2b transcript)")?;
+            t.finalize()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("layer-hashes proof generation failed (Poseidon transcript)")?;
+            t.finalize()
+        },
+    };
 
     Ok(LayerHashesProofOutput {
         proof_bytes,

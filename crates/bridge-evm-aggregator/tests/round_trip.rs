@@ -15,7 +15,7 @@
 use std::{env, path::PathBuf};
 
 use bridge_evm_aggregator::aggregator::{
-    aggregate, generate_yul_verifier, prove_inner, K_OUTER, NUM_ACCUMULATOR_INSTANCES,
+    aggregate, generate_yul_verifier_gated, prove_inner, K_OUTER, NUM_ACCUMULATOR_INSTANCES,
 };
 use halo2_base::{halo2_proofs::halo2curves::bn256::Fr, utils::fs::gen_srs};
 
@@ -75,7 +75,7 @@ fn aggregator_round_trip() {
 
     let yul_path = workdir.join("AggregatorVerifierSpike.sol");
     env::set_current_dir(&prev_cwd).expect("chdir back");
-    let bytecode_size = generate_yul_verifier(&params_outer, &inner_snark, &yul_path)
+    let bytecode_size = generate_yul_verifier_gated(&params_outer, &inner_snark, &yul_path)
         .expect("generate Yul verifier");
 
     println!(

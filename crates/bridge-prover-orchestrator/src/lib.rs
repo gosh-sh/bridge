@@ -11,16 +11,22 @@
 //! consumer can drive both Circuit 1A and 1B with one set of types.
 
 pub mod bound_test_data;
+pub mod circuit4_prover;
 pub mod halo2_tvm_bundle;
 pub mod keys;
 pub mod layer_hashes_keys;
 pub mod layer_hashes_prover;
 pub mod layer_hashes_test_data;
 pub mod poseidon_transcript;
+pub mod primary_prover;
 pub mod proof_export;
 pub mod prover;
 pub mod verifier;
 
+pub use circuit4_prover::{
+    generate_circuit4_proof, generate_circuit4_proof_with_transcript, Circuit4ProofOutput,
+    CIRCUIT4_NUM_PUBLIC_INPUTS,
+};
 pub use bound_test_data::{
     build_bound_test_data, compose_layer_hashes_input, promote_bridge_test_data, BoundBlockTestData,
 };
@@ -42,14 +48,18 @@ pub use layer_hashes_keys::{
     LAYER_HASHES_NUM_UNUSABLE_ROWS,
 };
 pub use layer_hashes_prover::{
-    generate_layer_hashes_proof, verify_layer_hashes_proof, LayerHashesProofInput,
-    LayerHashesProofOutput, LAYER_HASHES_NUM_PUBLIC_INPUTS,
+    generate_layer_hashes_proof, generate_layer_hashes_proof_with_transcript,
+    verify_layer_hashes_proof, LayerHashesProofInput, LayerHashesProofOutput,
+    LAYER_HASHES_NUM_PUBLIC_INPUTS,
 };
 pub use layer_hashes_test_data::{build_synthetic_layer_hashes_input, SyntheticLayerHashesInput};
 pub use poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite};
 pub use proof_export::{
     build_proof_data, format_field_element, load_instances_binary, save_instances_binary,
     save_proof_data_json, Halo2ProofData, ProtocolData,
+};
+pub use primary_prover::{
+    generate_primary_proof, generate_primary_proof_with_transcript, PrimaryProofOutput,
 };
 pub use prover::{
     generate_fallback_proof, generate_fallback_proof_with_transcript, FallbackProofOutput,

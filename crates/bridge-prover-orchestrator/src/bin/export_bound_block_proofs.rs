@@ -162,6 +162,9 @@ fn main() -> anyhow::Result<()> {
     primary_km
         .ensure_primary_keys(&bound.bk_set)
         .context("ensure_primary_keys failed")?;
+    primary_km
+        .load_primary_pk()
+        .context("load_primary_pk failed")?;
 
     let primary_proof = generate_primary_proof(
         &primary_km,
@@ -186,6 +189,7 @@ fn main() -> anyhow::Result<()> {
         bytes = primary_proof.proof_bytes.len(),
         "wrote Circuit 1A proof"
     );
+    primary_km.unload_primary_pk();
 
     // ------------------------------------------------------------------
     // 3. Circuit 1B (Fallback attestation) — K=20, same SRS as 1A.

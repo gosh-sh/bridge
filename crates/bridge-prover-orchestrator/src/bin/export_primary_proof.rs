@@ -99,6 +99,8 @@ fn main() -> anyhow::Result<()> {
 
     km.ensure_primary_keys(&test_data.bk_set)
         .context("failed to ensure primary keys")?;
+    km.load_primary_pk()
+        .context("failed to load primary PK")?;
 
     let block_seq_no = extract_block_seq_no(&test_data.attestation_bytes);
     let last_seen = block_seq_no

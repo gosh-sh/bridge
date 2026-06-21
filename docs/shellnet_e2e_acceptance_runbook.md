@@ -40,7 +40,32 @@ Verify EIP-170:
 
 ## 3. Deploy Sepolia bridge (Shplonk adapters)
 
-Wire `PrimaryAggregatorVerifier`, `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`, `BridgeWithdrawalAggregatorVerifier` with deployed `ShplonkHalo2Verifier` bytecode from `.bin` files.
+```bash
+cd contracts/ethereum
+
+# Generate four .bin files into verifiers/ first (see §2)
+./scripts/check_eip170_verifier_bins.sh verifiers
+
+export WIRE_VERIFY_BLOCK=true
+export WIRE_WITHDRAW_BY_PROOF=true
+export GENESIS_BK_SET_COMMITMENT=0x...
+export GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+export WITHDRAW_ACC_FR=0x...
+export START_PAUSED=true   # default; owner unpause() after sign-off
+
+forge script script/DeployRealBridge.s.sol:DeployRealBridge \
+  --rpc-url $SEPOLIA_RPC --broadcast
+```
+
+Shellnet E2E variant (always wires verifyBlock + withdraw):
+
+```bash
+forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+  --rpc-url $SEPOLIA_RPC --broadcast
+```
+
+Deploy scripts load `verifiers/*.bin` via `ShplonkDeployLib` — no stub Groth16, no mocks.
+Override paths with `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
 
 ## 4. Acceptance sequence
 

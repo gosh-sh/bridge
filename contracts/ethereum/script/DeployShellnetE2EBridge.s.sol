@@ -8,18 +8,13 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
-import "../src/PrimaryGroth16VerifierGenerated.sol";
-import "../src/FallbackGroth16VerifierGenerated.sol";
-import "../src/LayerHashesGroth16VerifierGenerated.sol";
-import "../src/PrimaryVerifier.sol";
-import "../src/FallbackVerifier.sol";
-import "../src/LayerHashesMovementVerifier.sol";
-import "../test/mocks/MockBridgeWithdrawalVerifier.sol";
+import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
-/// @notice Sepolia deploy for the shellnet AN→ETH E2E: `verifyBlock` wired +
-///         mock Circuit 4 verifier with shellnet `(dappFr, accFr, dstChainId,
-///         tokenId)` aliases.
+/// @notice Sepolia deploy for shellnet AN→ETH E2E: R15 SHPLONK aggregators only
+///         (no stub Groth16, no mock withdrawal verifier).
+/// @dev Requires four `.bin` files under `verifiers/` (or `SHPLONK_BIN_*` overrides).
+///      Bridge starts paused unless `START_PAUSED=false`.
 contract DeployShellnetE2EBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -56,6 +51,9 @@ contract DeployShellnetE2EBridge is Script {
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
         });
+        require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
+
+        bool startPaused = vm.envOr("START_PAUSED", true);
 
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
@@ -63,10 +61,19 @@ contract DeployShellnetE2EBridge is Script {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         console.log("MockBlockHeaderOracle:", address(oracle));
 
-        (vb.primary, vb.fallback_, vb.layerHashes) = _deployVerifyBlockVerifiers();
-        wd.verifier = _deployMockWithdrawVerifier();
+        (vb.primary, vb.fallback_, vb.layerHashes) = _deployShplonkVerifyBlockTriple();
+        wd.verifier = ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
+        console.log("PrimaryAggregatorVerifier:", address(vb.primary));
+        console.log("FallbackAggregatorVerifier:", address(vb.fallback_));
+        console.log("LayerHashesAggregatorVerifier:", address(vb.layerHashes));
+        console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
 
         AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
+
+        if (startPaused) {
+            bridge.pause();
+            console.log("Bridge deployed PAUSED - unpause after forgery + E2E sign-off");
+        }
 
         vm.stopBroadcast();
 
@@ -77,30 +84,16 @@ contract DeployShellnetE2EBridge is Script {
         console.log("altDstChainId:", wd.altDstChainId);
         console.log("altDstHostChainId:", wd.altDstHostChainId);
         console.log("altTokenId:", wd.altTokenId);
+        console.log("startPaused:", startPaused);
     }
 
-    function _deployVerifyBlockVerifiers()
+    function _deployShplonkVerifyBlockTriple()
         internal
         returns (IPrimaryVerifier, IFallbackVerifier, ILayerHashesMovementVerifier)
     {
-        PrimaryGroth16VerifierGenerated pG = new PrimaryGroth16VerifierGenerated();
-        PrimaryVerifier pv = new PrimaryVerifier(address(pG));
-        FallbackGroth16VerifierGenerated fG = new FallbackGroth16VerifierGenerated();
-        FallbackVerifier fv = new FallbackVerifier(address(fG));
-        LayerHashesGroth16VerifierGenerated lG = new LayerHashesGroth16VerifierGenerated();
-        LayerHashesMovementVerifier lv = new LayerHashesMovementVerifier(address(lG));
-        return (
-            IPrimaryVerifier(address(pv)),
-            IFallbackVerifier(address(fv)),
-            ILayerHashesMovementVerifier(address(lv))
-        );
-    }
-
-    function _deployMockWithdrawVerifier() internal returns (IBridgeWithdrawalVerifier) {
-        MockBridgeWithdrawalVerifier mockWithdraw = new MockBridgeWithdrawalVerifier();
-        mockWithdraw.setShouldAccept(true);
-        console.log("MockBridgeWithdrawalVerifier:", address(mockWithdraw));
-        return IBridgeWithdrawalVerifier(address(mockWithdraw));
+        ShplonkDeployLib.VerifyBlockVerifiers memory v =
+            ShplonkDeployLib.deployVerifyBlockTripleFromEnv();
+        return (v.primary, v.fallback_, v.layerHashes);
     }
 
     function _deployBridge(address oracle, VerifyBlockWiring memory vb, WithdrawWiring memory wd)

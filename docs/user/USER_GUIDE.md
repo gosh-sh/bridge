@@ -1,261 +1,216 @@
 # Acki Nacki Bridge — User Guide
 
-**Move test funds from Ethereum to the Acki Nacki blockchain, safely and automatically.**
+**Move test USDC from Ethereum (Sepolia) to Acki Nacki.**
 
-*Revision: 2 June 2026 · Test version (Sepolia test network)*
-
----
-
-> 👋 **This guide is for everyday users.** You do **not** need to be a developer or use
-> any command-line tools. Everything here is done by opening a webpage and clicking
-> buttons in your browser. If you are a developer and want the technical/command-line
-> version, jump to the last section, [For developers](#9-for-developers-advanced).
+*Revision: June 2026 · Sepolia testnet*
 
 ---
 
-## 1. What does this bridge do?
+> This guide is for **testers and reviewers** who want to make a deposit with
+> **MetaMask only** — no custom website, no command line. You interact with the
+> bridge **on [Sepolia Etherscan](https://sepolia.etherscan.io)** and sign
+> transactions in MetaMask.
 
-A **bridge** is a tool that lets you move money from one blockchain to another. Think of
-it like a money-transfer service that connects two different banking systems.
-
-This particular bridge connects two blockchains:
-
-- **Ethereum** — a well-known blockchain. (We use its free *test* version, called
-  **Sepolia**, so no real money is involved.)
-- **Acki Nacki** — a newer, fast blockchain.
-
-Here is what happens in plain terms:
-
-1. You **deposit** some **USDC** on Ethereum. USDC is a "stablecoin" — a digital dollar,
-   where 1 USDC is meant to be worth about 1 US dollar. (In this test version, the USDC
-   is fake/test money with no real value.)
-2. The bridge then makes the **same amount available to you on Acki Nacki**.
-
-Behind the scenes, the bridge uses a **zero-knowledge proof** to do this safely. A
-zero-knowledge proof is a piece of math that proves your deposit really happened on
-Ethereum — without you having to trust any company or person to confirm it. You don't
-have to understand the math; just know that it's what keeps the bridge honest.
-
-> 💡 **Good to know:** Right now the bridge only moves funds **one way** — from Ethereum
-> to Acki Nacki. Moving funds back (Acki Nacki → Ethereum) is still being built.
+Developers: see [Section 8](#for-developers).
 
 ---
 
-## 2. What you need before you start
+## 1. What this bridge does
 
-You'll need three things, all free for testing:
+The bridge connects two blockchains:
 
-1. **A MetaMask wallet.** MetaMask is a free browser extension that acts like a digital
-   wallet for your blockchain funds. If you don't have it, install it from
-   [metamask.io](https://metamask.io) and follow its setup steps. **Keep your secret
-   recovery phrase private** — never share it with anyone.
+- **Ethereum Sepolia** — where you send test **USDC**.
+- **Acki Nacki** — where matching funds can appear after an automated relayer
+  proves your deposit.
 
-2. **A little test ETH (for "gas").** Every action on Ethereum has a small network fee
-   called **gas**, paid in ETH (Ethereum's own coin). It's like a postage stamp for your
-   transaction. You only need a tiny amount of *test* ETH — see [Section 3](#3-how-to-get-test-eth-and-test-usdc).
+Flow in plain terms:
 
-3. **Some test USDC (the money you'll bridge).** This is the actual amount you send
-   across. You can get free test USDC from a faucet — see [Section 3](#3-how-to-get-test-eth-and-test-usdc).
+1. You **approve** then **deposit** USDC into the bridge contract on Sepolia.
+2. A **relayer** watches for your `Deposit` event, builds a zero-knowledge proof,
+   and submits it to Acki Nacki (`finalizeDeposit`).
 
-> ⚠️ **This is a test version.** Everything uses the Sepolia *test* network and fake test
-> coins. Do **not** send real money or treat any of these tokens as having real value.
-
-### Make sure MetaMask is on the right network
-
-This bridge runs on **Sepolia**, Ethereum's test network — not the real Ethereum
-network. In MetaMask, switch your network to **Sepolia** before you start. (MetaMask
-sometimes hides test networks by default; if you don't see Sepolia, enable "Show test
-networks" in MetaMask's settings.)
-
-The web app should also help you switch to Sepolia automatically when you connect.
+Only **Ethereum → Acki Nacki** is supported in this test setup. The reverse
+direction is still in development.
 
 ---
 
-## 3. How to get test ETH and test USDC
+## 2. Before you start
 
-Because this is a test network, the coins are free. You get them from "faucets" —
-websites that hand out free test coins.
+You need:
 
-### Test ETH (for gas)
+1. **MetaMask** on **Sepolia** ([metamask.io](https://metamask.io)). Enable test
+   networks in MetaMask settings if Sepolia is hidden.
+2. **Test ETH** on Sepolia (for gas) — any public “Sepolia faucet”.
+3. **Test USDC** on Sepolia — mint from the [Aave Sepolia faucet](https://app.aave.com/faucet/)
+   (connect MetaMask, select Sepolia, mint USDC).
+4. An **Acki Nacki recipient account** (where funds should land on the AN side).
+   This is **not** your MetaMask address. Use the account id your operator or
+   wallet gives you (64 hex characters, optionally with a `0x` prefix).
 
-1. Open your web browser and search for **"Sepolia faucet"**.
-2. Pick one of the public faucets in the results.
-3. Paste in **your MetaMask wallet address** (open MetaMask and click your account name
-   to copy it).
-4. Request the test ETH. A small amount (about 0.01–0.05 ETH) is plenty to cover many
-   transactions.
-
-### Test USDC (the money you'll bridge)
-
-The easiest way is the **Aave Sepolia faucet**:
-
-1. Go to the [Aave faucet](https://app.aave.com/faucet/) and connect your MetaMask wallet
-   (make sure it's set to the Sepolia test network).
-2. Find **USDC** in the list and request/mint some test USDC.
-3. It will appear in your wallet on the Sepolia network.
-
-> 💡 The bridge's own web app may also include a **"Get test USDC"** button that does this
-> for you in one click. If you see it, that's the simplest option.
+> Test tokens have **no real value**. Do not use mainnet Ethereum or real USDC.
 
 ---
 
-## 4. How to make a deposit (step by step)
+## 3. Reference addresses (Sepolia)
 
-You do everything in the **web app** — a simple webpage you open in your browser with
-MetaMask installed. Ask the bridge operator (or check the project page) for the link to
-the web app.
+Confirm these with your operator before depositing — test deployments can change.
 
-A deposit takes a few clicks. Here's the whole flow:
-
-### Step 1 — Open the web app and connect your wallet
-
-1. Open the bridge web app in your browser.
-2. Click **"Connect Wallet"**. MetaMask will pop up asking for permission — click
-   **Connect**.
-3. If MetaMask asks to switch to the **Sepolia** network, approve it.
-
-### Step 2 — Approve the bridge to use your USDC
-
-Before the bridge can move your USDC, you have to give it permission. This is called an
-**approve** step — it's a one-time "yes, you may use up to this much of my USDC" message.
-It does **not** send any money yet; it just unlocks it.
-
-1. Enter the amount you want to deposit (for example, `10` USDC).
-2. Click **Approve** (the app may label it "Approve USDC").
-3. MetaMask pops up — review it and click **Confirm**. This costs a small amount of gas.
-4. Wait a few seconds for it to confirm.
-
-### Step 3 — Choose your Acki Nacki recipient and deposit
-
-Now you tell the bridge **where on Acki Nacki the funds should arrive**, and send the
-deposit.
-
-1. Enter your **Acki Nacki recipient account** — this is your address on the Acki Nacki
-   side, where the funds will appear. (Acki Nacki uses a different kind of address than
-   Ethereum, so you can't just reuse your MetaMask address here. If you're unsure what to
-   put, ask the operator.)
-2. Double-check the **amount**.
-3. Click **Deposit**.
-4. MetaMask pops up again — click **Confirm**. This also costs a little gas.
-5. Wait for the transaction to confirm.
-
-That's it — you're done on the Ethereum side! 🎉
-
-> 💡 **Why two confirmations?** The first (approve) unlocks your USDC; the second
-> (deposit) actually sends it. This two-step pattern is standard for this kind of token
-> on Ethereum.
-
----
-
-## 5. What happens next
-
-After your deposit confirms, **you don't have to do anything else.** An automated service
-called a **relayer** takes over:
-
-1. The relayer notices your deposit on Ethereum.
-2. It creates the **zero-knowledge proof** (the math that proves your deposit is real).
-3. It sends that proof to Acki Nacki, where your funds are created in your Acki Nacki
-   account.
-
-You don't run or manage any of this — it happens on its own in the background.
-
-> ⏱️ **How long does it take?** Generating the proof is computation-heavy, so it isn't
-> instant. Allow a few minutes (sometimes longer, depending on system load). Once it
-> finishes, your funds appear on the Acki Nacki side.
-
-> 🧪 **Heads-up for this test version:** the final step that delivers funds onto a live
-> Acki Nacki network is still being connected. So in today's test setup you can complete
-> the deposit and watch the proof get generated, but the funds may not yet land on a real
-> Acki Nacki node. The operator can tell you the current status.
-
----
-
-## 6. Reference details
-
-You usually don't need these, but they're handy to have:
-
-| Item | Value |
+| Item | Address |
 | --- | --- |
-| Network | **Sepolia** (Ethereum's test network) |
-| Bridge contract address | `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` |
-| Token you deposit | **USDC** (test version, on Sepolia) |
-| Where to get test USDC | Aave Sepolia faucet |
-| Where to get test ETH | Any public "Sepolia faucet" |
-| Block explorer (to view transactions) | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| **Bridge** (`AckiNackiBridge`) | `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` |
+| **USDC** (6 decimals) | `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` |
+| **Aave faucet** (mint test USDC) | `0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D` |
+| **Block explorer** | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
 
-> ⚠️ **Always confirm the current addresses.** This is a test deployment and addresses can
-> change. Check the **current bridge contract address** in the web app or with the
-> operator before you deposit, rather than trusting an address copied from a guide.
+**Limits:** minimum deposit > 0; maximum **100 USDC** per deposit.
 
-To see your own transactions, copy the transaction link from MetaMask (or paste your
-wallet address into [sepolia.etherscan.io](https://sepolia.etherscan.io)).
+**USDC amounts on Etherscan** use **6 decimal places** (not 18 like ETH):
 
----
-
-## 7. Troubleshooting & FAQ
-
-**My transaction is stuck or pending for a long time.**
-This usually sorts itself out. If it's truly stuck, MetaMask offers a "Speed up" or
-"Cancel" option on the pending transaction. Also make sure you're connected to the
-**Sepolia** network.
-
-**I got an "insufficient funds" or "out of gas" error.**
-You don't have enough test **ETH** to pay the network fee (gas). Get more test ETH from a
-Sepolia faucet (see [Section 3](#3-how-to-get-test-eth-and-test-usdc)). Remember: gas is
-paid in ETH, separately from the USDC you're bridging.
-
-**The deposit button is greyed out, or the deposit fails.**
-Common reasons:
-- You haven't done the **Approve** step yet (Step 2), or you approved less than you're
-  trying to deposit. Approve again for at least the deposit amount.
-- You don't have enough **test USDC** in your wallet. Get more from the faucet.
-- The amount is `0`, or above the per-deposit limit. Try a smaller, positive amount.
-- You left the **Acki Nacki recipient** blank or it's invalid. Enter a valid recipient.
-
-**I'm on the wrong network.**
-Open MetaMask and switch the network to **Sepolia**. The web app may also prompt you to
-switch automatically.
-
-**Where did my funds go? I don't see them yet.**
-After the deposit, the automated relayer needs a few minutes to generate the proof and
-deliver your funds to Acki Nacki (see [Section 5](#5-what-happens-next)). Your Ethereum
-deposit transaction is always viewable on
-[sepolia.etherscan.io](https://sepolia.etherscan.io). If funds still don't appear after a
-reasonable wait, contact the operator (next question).
-
-**Can I move funds back from Acki Nacki to Ethereum?**
-Not yet — that direction is still being built. For now, the bridge only moves funds from
-Ethereum to Acki Nacki.
-
-**Something else is wrong / who do I contact?**
-Reach out to the bridge operator or project team for help. Have your **transaction hash**
-ready (you can copy it from MetaMask or Etherscan) — it helps them find your deposit
-quickly.
+| You want to deposit | Enter as `amount` (uint256) |
+| --- | --- |
+| 1 USDC | `1000000` |
+| 10 USDC | `10000000` |
+| 100 USDC | `100000000` |
 
 ---
 
-## 8. A few safety reminders
+## 4. Deposit step by step (MetaMask + Etherscan)
 
-- ✅ Make sure MetaMask is on the **Sepolia** test network.
-- ✅ Keep a little **test ETH** for gas and some **test USDC** to bridge.
-- ✅ Confirm the **current bridge address** in the app before depositing.
-- ✅ **Never share your MetaMask secret recovery phrase** with anyone — not even support
-  staff. No legitimate operator will ever ask for it.
-- ⚠️ This is a **test version**. The coins are not real money.
+You will make **two** transactions: **approve**, then **deposit**.
+
+### Step 1 — Connect MetaMask to Etherscan
+
+1. Open [Sepolia Etherscan](https://sepolia.etherscan.io).
+2. Click **Connect Wallet** (top right) and choose MetaMask.
+3. Ensure MetaMask is on **Sepolia** (chain id `11155111`).
+
+### Step 2 — Approve USDC for the bridge
+
+1. Open the USDC contract:
+   [0x94a9…E4C8 on Sepolia](https://sepolia.etherscan.io/address/0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8#writeContract).
+2. Go to the **Contract** tab → **Write Contract** → **Connect to Web3**.
+3. Find **`approve`** and fill in:
+   - **`spender`**: `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` (bridge address)
+   - **`amount`**: at least the USDC base units you plan to deposit (see table
+     above), e.g. `10000000` for 10 USDC. On a testnet you may instead approve
+     the maximum `uint256` value once so repeat deposits do not need another
+     approve transaction.
+4. Click **Write**, confirm in MetaMask, wait until the transaction succeeds.
+
+This only **allows** the bridge to pull USDC; it does not deposit yet.
+
+### Step 3 — Call `deposit` on the bridge
+
+1. Open the bridge contract:
+   [0x99c37…e82 on Sepolia](https://sepolia.etherscan.io/address/0x99c37fb75326ae6953ebbbdcd261ec331df4ce82#writeContract).
+2. **Contract** → **Write Contract** → connect MetaMask if needed.
+3. Find **`deposit`** and fill in:
+
+   | Field | What to enter |
+   | --- | --- |
+   | **`amount`** | USDC base units (6 decimals), e.g. `10000000` for 10 USDC |
+   | **`anWorkchain`** | Usually `0` (ask your operator if unsure) |
+   | **`anAccount`** | Your Acki Nacki account as **bytes32**: exactly **64 hex
+   characters** (32 bytes), with optional `0x` prefix. If your account id is
+   shorter, pad with leading zeros on the left. Example:
+   `0x00000000000000000000000000000000000000000000000000000000000000ab` for
+   account byte `0xab`. **Must not be all zeros.** |
+
+   The **`amount`** here must be less than or equal to the USDC you approved in Step 2.
+
+4. Click **Write**, confirm in MetaMask, wait for confirmation.
+
+You are done on Ethereum. Save the **transaction hash** from Etherscan or
+MetaMask — the relayer and support staff use it to trace your deposit.
+
+### Step 4 — Confirm the event (optional)
+
+Open your deposit **transaction** on Etherscan (from MetaMask or the bridge
+**Transactions** tab) and check **Logs**. You should see a **`Deposit`** event
+with `depositId`, `sender`, `amount`, `anWorkchain`, and `anAccount`. Note the
+**`depositId`** — the relayer uses it as the cursor when processing deposits.
 
 ---
 
-## 9. For developers (advanced)
+## 5. What happens after you deposit
 
-Prefer to drive the bridge from the command line, run the relayer yourself, or host the
-web frontend? That's all documented separately. See the developer documentation in this
-repository — start with the project's main docs and the
-`crates/deposit-relayer-daemon/` and `frontend/` READMEs — for the `cast`/Foundry deposit
-flow, the `deposit-relayer` CLI, proof generation, and self-hosting instructions.
+You do not need to run anything yourself:
+
+1. The **deposit relayer** scans Sepolia for `Deposit` events.
+2. It generates a **Halo2 proof** binding your deposit to the block, bridge
+   address, amount, and Acki Nacki recipient.
+3. It calls **`finalizeDeposit`** on Acki Nacki so test USDC can be credited on
+   your AN account (when the operator’s relayer and AN contract are configured).
+
+**Timing:** proof generation takes **minutes**, not seconds.
+
+**Testnet caveat (June 2026):** Sepolia deposits can be **proved** end-to-end,
+but **live crediting on shellnet** may still fail until the AN-side
+`USDCBridge` contract is redeployed with the correct deposit verifying key
+(11 public inputs). Your Ethereum deposit is still valid and visible on
+Etherscan; ask the operator whether `finalizeDeposit` on shellnet is enabled for
+your test window. Technical details:
+`docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
 
 ---
 
-*This document describes the current test version of the Acki Nacki Bridge and will be
-updated as new features (such as moving funds back from Acki Nacki to Ethereum) become
-available. Always confirm network and contract details with the operator before
-depositing.*
+## 6. Troubleshooting
+
+**“Insufficient funds” / out of gas**  
+You need **Sepolia ETH** for gas (separate from USDC).
+
+**`transferFrom` failed / deposit reverts**  
+You skipped **approve**, approved too little USDC, or have insufficient USDC
+balance. Repeat Step 2 with a large enough `amount`.
+
+**`InvalidAnAccount`**  
+`anAccount` was zero or wrong format. Use a non-zero 256-bit Acki Nacki account
+id (64 hex chars as bytes32).
+
+**`DepositTooLarge`**  
+Maximum is 100 USDC per deposit (`100000000` base units).
+
+**Deposit reverts with no clear token error / bridge paused**  
+On the bridge **Read Contract** tab, check **`paused`**. If `true`, deposits are
+disabled until the operator unpauses the bridge.
+
+**Wrong network**  
+All steps must be on **Sepolia**, not Ethereum mainnet.
+
+**Funds not on Acki Nacki yet**  
+Wait several minutes. If still missing, send your **deposit transaction hash**
+and **depositId** (from the event) to the operator. The relayer or AN contract
+may be mid-upgrade.
+
+**Can I withdraw back to Ethereum?**  
+Not via this user path yet. AN → ETH is a separate bridge direction under
+development.
+
+---
+
+## 7. Safety reminders
+
+- Use **Sepolia** only; confirm the bridge address before approving USDC.
+- Never share your MetaMask **secret recovery phrase**.
+- Test USDC is not real money.
+
+---
+
+## 8. For developers
+
+| Task | Where to look |
+| --- | --- |
+| Relayer (listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch`, `prove-one`, `daemon` |
+| Shellnet / VK redeploy checklist | `docs/shellnet_usdcbridge_deposit_vk_redeploy.md` |
+| 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
+| Optional local UI (not required for testing) | `frontend/` — `trunk serve` → `http://localhost:8080` |
+| `cast` / Foundry scripts | `contracts/ethereum/script/DeployTestBridge.s.sol` |
+
+Example env template for a hosted relayer:
+`scripts/ursus/deposit-relayer.env.example`.
+
+---
+
+*Confirm network and contract addresses with the operator before each test
+campaign. This document describes the Sepolia MetaMask + Etherscan deposit path
+only.*

@@ -154,14 +154,14 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @dev Run one `verifyBlock` with fully-mocked verifiers; return the
-    ///      anchor (top-of-chain layer hash) the bridge then records.
-    function _seedFirstBlock() internal returns (uint256 topAnchor) {
+    /// @dev Run one `verifyBlock` with fully-mocked verifiers; return the L1
+    ///      anchor (`layerHashes[0]`) used by the partner witness builder.
+    function _seedFirstBlock() internal returns (uint256 l1Anchor) {
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
             layers[i] = uint256(keccak256(abi.encode("wd-seed-layer", i)));
         }
-        topAnchor = layers[ACTIVE_LAYERS - 1];
+        l1Anchor = layers[0];
 
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -278,20 +278,16 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function test_setUp_recordsSeedAnchor() public view {
-        assertTrue(bridge.isKnownAnchor(seedAnchor), "seed anchor recorded");
-        assertEq(bridge.anchorsRecorded(), 1, "one anchor recorded");
+        assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "L1 seed anchor recorded");
+        assertEq(bridge.anchorsRecorded(), ACTIVE_LAYERS, "one append per active layer");
     }
 
     function test_verifyBlock_recordsAnchor_andEmitsEvent() public {
-        // Build a second block on top of the seed anchor.
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
             layers[i] = uint256(keccak256(abi.encode("wd-block2-layer", i)));
         }
-        uint256 expectedAnchor = layers[ACTIVE_LAYERS - 1];
-
-        vm.expectEmit(true, false, false, true);
-        emit AnchorRecorded(expectedAnchor, 2);
+        uint256 expectedL1 = layers[0];
 
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -305,9 +301,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             bridge.storedPrevMaxLevelLayerHash()
         );
 
-        assertTrue(bridge.isKnownAnchor(expectedAnchor));
-        assertTrue(bridge.isKnownAnchor(seedAnchor), "seed anchor remains valid");
-        assertEq(bridge.anchorsRecorded(), 2);
+        assertTrue(bridge.isKnownLayerAnchor(1, expectedL1));
+        assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "seed L1 remains valid");
+        assertEq(bridge.anchorsRecorded(), ACTIVE_LAYERS * 2);
     }
 
     function test_isKnownAnchor_initiallyFalseForRandomValue() public view {
@@ -492,7 +488,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         pub.dappFr = 0;
         pub.dstChainId = SHELLNET_LOGICAL_DST_CHAIN_ID;
         pub.tokenId = SHELLNET_USDC_TOKEN_ID;
-        pub.finalRoot = layers[ACTIVE_LAYERS - 1];
+        pub.finalRoot = layers[0];
 
         vm.chainId(SEPOLIA_CHAIN_ID);
         shellnetBridge.withdrawByProof(_dummyProof(), pub);
@@ -528,14 +524,12 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     function test_withdrawByProof_anchorRecordedByLaterVerifyBlock_isAccepted() public {
-        // Submit a second block, capture its anchor, and prove a withdrawal
-        // against it. Exercises that *any* anchor in the set works, not just
-        // the most recent.
+        // Submit a second block and prove withdrawal against its L1 root.
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
             layers[i] = uint256(keccak256(abi.encode("later-anchor", i)));
         }
-        uint256 laterAnchor = layers[ACTIVE_LAYERS - 1];
+        uint256 laterL1 = layers[0];
 
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -551,7 +545,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("later-withdraw")));
-        pub.finalRoot = laterAnchor;
+        pub.finalRoot = laterL1;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
         assertTrue(ok);

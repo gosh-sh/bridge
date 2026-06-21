@@ -80,6 +80,9 @@ gosh-sha256-chip = { path = "../../../gosh-halo2-crypto-lib/sha256-chip" }
 gosh-bls-verification = { path = "../../../gosh-halo2-crypto-lib/bls-verification" }
 gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
 
+[patch."https://github.com/gosh-sh/dense-balanced-tree"]
+dense-balanced-tree = { path = "../../../dense-balanced-tree" }
+
 [patch.crates-io]
 halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
 

@@ -48,17 +48,62 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
 
     let params_inner = halo2_base::utils::fs::gen_srs(K_INNER_SPIKE);
     let config = AggregatorConfig::default();
-    let params_outer = halo2_base::utils::fs::gen_srs(config.k_outer);
 
     let a = Fr::from(7u64);
     let b = Fr::from(11u64);
     let inner_snark = prove_inner(&params_inner, a, b)?;
     let c = inner_snark.instances[0][0];
 
-    let agg_snark = aggregate_inner(&params_outer, inner_snark.clone(), config)?;
-    let _ = agg_snark; // native snark path validated by aggregate_inner
+    let export = export_aggregated_snark(workdir, "MultiplierSpikeVerifier", inner_snark, config)?;
+    std::fs::write(workdir.join("multiplier_spike_calldata.bin"), &export.evm_calldata)?;
 
-    // --- Keygen aggregation circuit (must mirror `aggregate_inner` + expose) ---
+    let meta = serde_json::json!({
+        "inner_a": format!("{a:?}"),
+        "inner_b": format!("{b:?}"),
+        "inner_c": format!("{c:?}"),
+        "num_accumulator_instances": NUM_ACCUMULATOR_INSTANCES,
+        "total_instances": export.total_instances,
+        "k_outer": export.k_outer,
+        "verifier_bytes": export.verifier_size,
+        "calldata_bytes": export.evm_calldata.len(),
+    });
+    std::fs::write(
+        workdir.join("multiplier_spike_meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )?;
+
+    Ok(SpikeArtifacts {
+        inner_a: a,
+        inner_b: b,
+        inner_c: c,
+        agg_instances: Vec::new(),
+        evm_calldata: export.evm_calldata,
+        verifier_bytecode: export.verifier_bytecode,
+        verifier_size: export.verifier_size,
+        k_outer: export.k_outer,
+    })
+}
+
+/// Result of exporting a real inner [`Snark`] through the aggregator pipeline.
+pub struct AggregatorExportResult {
+    pub verifier_bytecode: Vec<u8>,
+    pub verifier_size: usize,
+    pub k_outer: u32,
+    pub total_instances: usize,
+    pub evm_calldata: Vec<u8>,
+}
+
+/// Aggregate `inner_snark`, emit Yul + `.bin` + calldata under `workdir`.
+pub fn export_aggregated_snark(
+    workdir: &Path,
+    base_name: &str,
+    inner_snark: Snark,
+    config: AggregatorConfig,
+) -> anyhow::Result<AggregatorExportResult> {
+    std::fs::create_dir_all(workdir)?;
+
+    let params_outer = halo2_base::utils::fs::gen_srs(config.k_outer);
+
     let agg_config = AggregationConfigParams {
         degree: config.k_outer,
         lookup_bits: config.lookup_bits_outer,
@@ -78,7 +123,6 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
     let num_instance = keygen_circuit.num_instance();
     drop(keygen_circuit);
 
-    // --- EVM proof (Keccak transcript — required by on-chain verifier) ---
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,
         calculated,
@@ -93,7 +137,7 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
 
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
-    let sol_path = workdir.join("MultiplierSpikeVerifier.sol");
+    let sol_path = workdir.join(format!("{base_name}.sol"));
     let verifier_bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
         &params_outer,
         pk.get_vk(),
@@ -106,33 +150,14 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
     let verifier_size = eip170::assert_eip170(&verifier_bytecode, &bin_path.display().to_string())?;
 
     let evm_calldata = encode_calldata(&instances, &evm_proof);
-    std::fs::write(workdir.join("multiplier_spike_calldata.bin"), &evm_calldata)?;
+    std::fs::write(workdir.join(format!("{base_name}_calldata.bin")), &evm_calldata)?;
 
-    let meta = serde_json::json!({
-        "inner_a": format!("{a:?}"),
-        "inner_b": format!("{b:?}"),
-        "inner_c": format!("{c:?}"),
-        "num_accumulator_instances": NUM_ACCUMULATOR_INSTANCES,
-        "total_instances": flat.len(),
-        "k_outer": config.k_outer,
-        "verifier_bytes": verifier_size,
-        "calldata_bytes": evm_calldata.len(),
-        "evm_proof_bytes": evm_proof.len(),
-    });
-    std::fs::write(
-        workdir.join("multiplier_spike_meta.json"),
-        serde_json::to_string_pretty(&meta)?,
-    )?;
-
-    Ok(SpikeArtifacts {
-        inner_a: a,
-        inner_b: b,
-        inner_c: c,
-        agg_instances: flat,
-        evm_calldata,
+    Ok(AggregatorExportResult {
         verifier_bytecode,
         verifier_size,
         k_outer: config.k_outer,
+        total_instances: flat.len(),
+        evm_calldata,
     })
 }
 

@@ -67,6 +67,12 @@ contract AckiNackiBridge {
     ///         partner Circuit 2's MAX_LAYERS).
     uint256 public constant MAX_LAYER_HASHES = 10;
 
+    /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
+    uint256 public constant HISTORY_PROOF_WINDOW = 128;
+
+    /// @notice L1-only anchor layer for Circuit 4 until `anchorLayer` PI lands.
+    uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;
+
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
     ///         binary split: Primary (>= 2/3 quorum) or Fallback (>1/2 split).
@@ -219,28 +225,24 @@ contract AckiNackiBridge {
     ///         the mapping to reject *re-submission* of an already-paid proof.
     mapping(bytes32 => bool) private _nullifiers;
 
-    /// @notice Set of anchors (Fr) observed via successful `verifyBlock`
-    ///         calls. Each `withdrawByProof` proof exposes one `finalRoot`
-    ///         (slot [9]) and the bridge requires `_knownAnchors[finalRoot]`
-    ///         to be `true` before accepting the proof.
+    /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
+    ///         Each `withdrawByProof` checks `finalRoot` against the L1
+    ///         window (`WITHDRAW_ANCHOR_LAYER`) — matching the partner
+    ///         event-witness builder (`layer_idx = 0`).
     ///
-    /// @dev This replaces the legacy `_layerWindow[100]` ring-buffer +
-    ///      private-index design from Circuit 4 v1/v2. v3
-    ///      (`circuit4-single-final-root`) exposes the anchor as a single
-    ///      public input rather than as a 1-of-N private selection, so the
-    ///      on-chain check is a flat set membership.
-    ///
-    ///      Anchors stay valid forever once recorded — partner's dense-chain
-    ///      construction makes each `finalRoot` unique per (layer, block-
-    ///      height range), and a withdrawal proven against any *previously
-    ///      observed* `finalRoot` is by definition a valid withdrawal that
-    ///      we missed paying out earlier (re-org-resistant by virtue of AN's
-    ///      finalization model).
-    mapping(uint256 => bool) private _knownAnchors;
+    /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
+    struct HistoryWindow {
+        uint256[HISTORY_PROOF_WINDOW] data;
+        uint64[HISTORY_PROOF_WINDOW] heights;
+        uint16 dataLen;
+        uint16 writeCursor;
+        uint64 lastHeight;
+    }
 
-    /// @notice Monotonic counter of distinct anchors recorded by
-    ///         `verifyBlock` calls (never reset; useful for off-chain
-    ///         tooling to detect new state).
+    mapping(uint8 => HistoryWindow) private _layerWindows;
+
+    /// @notice Monotonic counter of layer anchors appended by `verifyBlock`
+    ///         (never reset; useful for off-chain tooling).
     uint256 public anchorsRecorded;
 
     // ---------------------------------------------------------------------
@@ -287,11 +289,15 @@ contract AckiNackiBridge {
         uint8 numLayers
     );
 
-    /// @notice Emitted whenever a new top-of-chain anchor is recorded by a
-    ///         successful `verifyBlock` call. `anchor` is the new
-    ///         `storedPrevMaxLevelLayerHash`; `totalAnchors` is the new
-    ///         value of `anchorsRecorded` (monotonic, never resets).
+    /// @notice Emitted whenever a layer anchor is appended by `verifyBlock`.
+    ///         `totalAnchors` is the new value of `anchorsRecorded`.
     event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
+
+    /// @notice Richer anchor event (layer + height). Emitted alongside
+    ///         `AnchorRecorded` for indexers migrating to spec §8.3 layout.
+    event LayerAnchorAppended(
+        uint8 indexed layer, uint256 hashValue, uint64 blockHeight, uint256 totalAnchors
+    );
 
     /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
     event BkSetUpdated(
@@ -380,6 +386,8 @@ contract AckiNackiBridge {
     ///         for the matching `verifyBlock` to land), or the anchor is
     ///         forged.
     error UnknownAnchor(uint256 finalRoot);
+    error LayerOutOfRange(uint8 layer);
+    error NonMonotonicLayerHeight(uint64 supplied, uint64 last);
     /// @notice Withdrawal verifier was wired but the AN-side
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
@@ -707,7 +715,7 @@ contract AckiNackiBridge {
         // this function's stack frame small enough to compile cleanly under
         // `forge coverage`, which runs without `--via-ir`).
         storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
-        _recordAnchor(layerHashes[numLayers - 1]);
+        _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
     }
@@ -783,20 +791,69 @@ contract AckiNackiBridge {
         emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
     }
 
-    /// @dev Record `anchor` in the `_knownAnchors` set and bump the
-    ///      monotonic `anchorsRecorded` counter. Extracted from
-    ///      `verifyBlock` so the latter compiles without `--via-ir`
-    ///      (needed for `forge coverage`). Cost: one SSTORE for the
-    ///      mapping (new key) and one for the counter. The same anchor
-    ///      may be recorded multiple times safely (re-write to true is a
-    ///      no-op in terms of correctness; the counter still bumps so
-    ///      off-chain tooling sees every `verifyBlock` event).
-    function _recordAnchor(uint256 anchor) internal {
-        _knownAnchors[anchor] = true;
+    /// @dev Append each non-zero layer hash from a successful `verifyBlock`
+    ///      into the per-layer rolling windows (spec §8.3–8.4).
+    function _appendLayerHashes(
+        uint8 numLayers,
+        uint256[MAX_LAYER_HASHES] calldata layerHashes,
+        uint64 blockHeight
+    ) internal {
+        for (uint8 L = 1; L <= numLayers; L++) {
+            uint256 hashValue = layerHashes[L - 1];
+            if (hashValue != 0) {
+                _appendLayer(L, hashValue, blockHeight);
+            }
+        }
+    }
+
+    /// @dev Append `hashValue` into layer `L`'s circular buffer.
+    function _appendLayer(uint8 layer, uint256 hashValue, uint64 blockHeight) internal {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            revert LayerOutOfRange(layer);
+        }
+        HistoryWindow storage w = _layerWindows[layer];
+        if (blockHeight < w.lastHeight) {
+            revert NonMonotonicLayerHeight(blockHeight, w.lastHeight);
+        }
+
+        w.data[w.writeCursor] = hashValue;
+        w.heights[w.writeCursor] = blockHeight;
+        w.writeCursor = uint16((uint256(w.writeCursor) + 1) % HISTORY_PROOF_WINDOW);
+        if (w.dataLen < HISTORY_PROOF_WINDOW) {
+            w.dataLen = w.dataLen + 1;
+        }
+        w.lastHeight = blockHeight;
+
         unchecked {
             anchorsRecorded = anchorsRecorded + 1;
         }
-        emit AnchorRecorded(anchor, anchorsRecorded);
+        emit AnchorRecorded(hashValue, anchorsRecorded);
+        emit LayerAnchorAppended(layer, hashValue, blockHeight, anchorsRecorded);
+    }
+
+    /// @dev O(W) membership test against layer `L`'s window.
+    function _isKnownLayerAnchor(uint8 layer, uint256 hashValue) internal view returns (bool) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            return false;
+        }
+        HistoryWindow storage w = _layerWindows[layer];
+        uint256 n = w.dataLen;
+        for (uint256 i = 0; i < n; i++) {
+            if (w.data[i] == hashValue) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @dev Legacy flat membership — true if `anchor` appears in any layer window.
+    function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
+        for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
+            if (_isKnownLayerAnchor(L, anchor)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// @notice View helper: returns the full `storedLayerHashes` array as a
@@ -813,7 +870,12 @@ contract AckiNackiBridge {
     /// @notice O(1) helper: is `anchor` in the bridge's set of known anchors?
     ///         Cheap to call off-chain; mirrored inside `withdrawByProof`.
     function isKnownAnchor(uint256 anchor) external view returns (bool) {
-        return _knownAnchors[anchor];
+        return _isKnownAnchor(anchor);
+    }
+
+    /// @notice View helper: is `anchor` present in layer `L`'s rolling window?
+    function isKnownLayerAnchor(uint8 layer, uint256 anchor) external view returns (bool) {
+        return _isKnownLayerAnchor(layer, anchor);
     }
 
     // ---------------------------------------------------------------------
@@ -901,13 +963,9 @@ contract AckiNackiBridge {
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // Off-circuit anchor check. The proof exposes `finalRoot` as a
-        // public input (slot [9]) — we accept it only if we have previously
-        // observed it through a successful `verifyBlock` extension. This
-        // replaces the legacy `_layerWindow[100]` private-index design with
-        // an O(1) set lookup that matches the v3 circuit's single-final-root
-        // layout.
-        if (!_knownAnchors[pub.finalRoot]) {
+        // L1-only witness builder (`layer_idx = 0`). Future: read `anchorLayer`
+        // from Circuit 4 public input slot [10] when partner extends the layout.
+        if (!_isKnownLayerAnchor(WITHDRAW_ANCHOR_LAYER, pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 

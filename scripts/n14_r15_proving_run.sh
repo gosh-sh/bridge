@@ -81,19 +81,19 @@ do_start() {
 
     # --- Phase A: bound block proofs (1A + 1B + 2, Blake2b; ~3-30 min depending on keygen cache) ---
     cd crates/bridge-prover-orchestrator
-    echo \"--- cargo build --release export-bound-block-proofs ---\"
-    cargo build --release --locked --bin export-bound-block-proofs
+    echo \"--- cargo +nightly build --release export-bound-block-proofs ---\"
+    cargo +nightly build --release --locked --bin export-bound-block-proofs
     echo \"--- export-bound-block-proofs ---\"
-    cargo run --release --locked --bin export-bound-block-proofs -- \
+    cargo +nightly run --release --locked --bin export-bound-block-proofs -- \
       --params-dir ../../params \
       --out-dir ../../proofs/bound
 
     # --- Phase B: aggregator crate (M2 spike sanity + export-inner-aggregator binary) ---
     cd ../bridge-evm-aggregator
-    echo \"--- cargo build --release export-inner-aggregator export-spike-artifacts ---\"
-    cargo build --release --locked --bin export-inner-aggregator --bin export-spike-artifacts
+    echo \"--- cargo +nightly build --release export-inner-aggregator export-spike-artifacts ---\"
+    cargo +nightly build --release --locked --bin export-inner-aggregator --bin export-spike-artifacts
     echo \"--- export-spike-artifacts (sanity) ---\"
-    cargo run --release --locked --bin export-spike-artifacts
+    cargo +nightly run --release --locked --bin export-spike-artifacts
 
     # --- Phase C: per-circuit .bin (requires inner Snark bincode — see logs) ---
     OUT=${REMOTE_ROOT}/contracts/ethereum/verifiers
@@ -105,7 +105,7 @@ do_start() {
       local snark=\"\$1\" name=\"\$2\" n=\"\$3\"
       if [[ -f \"\${snark}\" ]]; then
         echo \"--- export-inner-aggregator \${name} ---\"
-        cargo run --release --locked --bin export-inner-aggregator -- \
+        cargo +nightly run --release --locked --bin export-inner-aggregator -- \
           --inner-snark \"\${snark}\" \
           --out-dir \"\${OUT}\" \
           --name \"\${name}\" \

@@ -29,7 +29,7 @@ pub struct Circuit4ProofOutput {
 /// Generate a Circuit 4 proof (Blake2b transcript).
 pub fn generate_circuit4_proof(
     key_manager: &mut KeyManager,
-    circuit: BridgeEventProveCircuit<Fr>,
+    circuit: BridgeEventProveCircuit,
     instances: [Fr; CIRCUIT4_NUM_PUBLIC_INPUTS],
 ) -> anyhow::Result<Circuit4ProofOutput> {
     generate_circuit4_proof_with_transcript(
@@ -43,14 +43,12 @@ pub fn generate_circuit4_proof(
 /// Generate a Circuit 4 proof with the chosen transcript.
 pub fn generate_circuit4_proof_with_transcript(
     key_manager: &mut KeyManager,
-    mut circuit: BridgeEventProveCircuit<Fr>,
+    circuit: BridgeEventProveCircuit,
     instances: [Fr; CIRCUIT4_NUM_PUBLIC_INPUTS],
     transcript: TranscriptKind,
 ) -> anyhow::Result<Circuit4ProofOutput> {
     key_manager.ensure_event_keys()?;
     key_manager.load_event_pk()?;
-
-    circuit.override_base_circuit_params(key_manager.event_config().clone());
 
     info!(?transcript, "generating circuit-4 withdrawal proof");
 

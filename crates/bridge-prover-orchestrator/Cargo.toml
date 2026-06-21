@@ -85,6 +85,15 @@ dense-balanced-tree = { path = "../../../dense-balanced-tree" }
 
 [patch.crates-io]
 halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/axiom-eth"]
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment" }
 
 # Performance: keygen & proof gen require optimized debug builds.
 [profile.dev]

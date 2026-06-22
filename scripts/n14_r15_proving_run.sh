@@ -53,7 +53,7 @@ do_sync() {
   done
   echo "==> rsync bridge repo to n14"
   rsync -avz --delete \
-    --exclude target --exclude params --exclude .git --exclude 'contracts/ethereum/out' \
+    --exclude target --exclude params --exclude proofs --exclude .git --exclude 'contracts/ethereum/out' \
     -e "ssh -p 22488" \
     "${LOCAL_ROOT}/" \
     "${N14}:${REMOTE_ROOT}/"
@@ -69,9 +69,10 @@ do_sync() {
   done
   if [[ -f "${SOLC_LOCAL}" ]]; then
     echo "    solc -> n14 ~/bin/solc"
-    ${SSH} "mkdir -p ~/bin"
-    rsync -avz -e "ssh -p 22488" "${SOLC_LOCAL}" "${N14}:~/bin/solc"
-    ${SSH} "chmod +x ~/bin/solc"
+    ${SSH} "mkdir -p ~/bin && rm -f ~/bin/solc"
+    SOLC_REAL="$(readlink -f "${SOLC_LOCAL}" 2>/dev/null || realpath "${SOLC_LOCAL}")"
+    rsync -avz -e "ssh -p 22488" "${SOLC_REAL}" "${N14}:~/bin/solc"
+    ${SSH} "chmod +x ~/bin/solc && ~/bin/solc --version | head -1"
   else
     echo "    WARN: ${SOLC_LOCAL} not found — Phase B spike/.bin export needs solc on n14"
   fi

@@ -11,9 +11,10 @@ import "../src/IBridgeWithdrawalVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
-/// @notice Sepolia deploy for shellnet AN→ETH E2E: R15 SHPLONK aggregators only
-///         (no stub Groth16, no mock withdrawal verifier).
-/// @dev Requires four `.bin` files under `verifiers/` (or `SHPLONK_BIN_*` overrides).
+/// @notice Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators for 1A/2,
+///         gnark Groth16 for 1B fallback, SHPLONK for C4 when `.bin` exists.
+/// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
+///      `verifiers/LayerHashesAggregatorVerifier.bin` (or `SHPLONK_BIN_*` overrides).
 ///      Bridge starts paused unless `START_PAUSED=false`.
 contract DeployShellnetE2EBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
@@ -61,10 +62,10 @@ contract DeployShellnetE2EBridge is Script {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         console.log("MockBlockHeaderOracle:", address(oracle));
 
-        (vb.primary, vb.fallback_, vb.layerHashes) = _deployShplonkVerifyBlockTriple();
+        (vb.primary, vb.fallback_, vb.layerHashes) = _deployHybridVerifyBlockTriple();
         wd.verifier = ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
         console.log("PrimaryAggregatorVerifier:", address(vb.primary));
-        console.log("FallbackAggregatorVerifier:", address(vb.fallback_));
+        console.log("FallbackVerifier (Groth16):", address(vb.fallback_));
         console.log("LayerHashesAggregatorVerifier:", address(vb.layerHashes));
         console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
 
@@ -87,12 +88,12 @@ contract DeployShellnetE2EBridge is Script {
         console.log("startPaused:", startPaused);
     }
 
-    function _deployShplonkVerifyBlockTriple()
+    function _deployHybridVerifyBlockTriple()
         internal
         returns (IPrimaryVerifier, IFallbackVerifier, ILayerHashesMovementVerifier)
     {
         ShplonkDeployLib.VerifyBlockVerifiers memory v =
-            ShplonkDeployLib.deployVerifyBlockTripleFromEnv();
+            ShplonkDeployLib.deployVerifyBlockHybridFromEnv();
         return (v.primary, v.fallback_, v.layerHashes);
     }
 

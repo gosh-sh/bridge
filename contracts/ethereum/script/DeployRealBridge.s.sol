@@ -14,8 +14,7 @@ import "./ShplonkDeployLib.sol";
 /**
  * @title DeployRealBridge
  * @notice Deployment script for the production bridge contract.
- * @dev AN→ETH verifiers: R15 SHPLONK aggregators only (`.bin` under `verifiers/`).
- *      Identity-stub Groth16 wrappers are not deployed by this script.
+ * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 2; gnark Groth16 for 1B fallback.
  *
  * Oracle mode:
  *   - USE_AXIOM_ORACLE=true → AxiomBlockHeaderOracle (production)
@@ -24,8 +23,9 @@ import "./ShplonkDeployLib.sol";
  * verifyBlock wiring:
  *   - WIRE_VERIFY_BLOCK=true → deploy Primary/Fallback/LayerHashes Shplonk adapters.
  *     Requires GENESIS_BK_SET_COMMITMENT (non-zero) and GENESIS_PREV_MAX_LEVEL_LAYER_HASH.
- *     Requires `verifiers/PrimaryAggregatorVerifier.bin` (+ fallback + layer hashes)
- *     or SHPLONK_BIN_* overrides.
+ *     Requires `verifiers/PrimaryAggregatorVerifier.bin` + `LayerHashesAggregatorVerifier.bin`
+ *     (or SHPLONK_BIN_PRIMARY / SHPLONK_BIN_LAYER_HASHES). Fallback 1B uses checked-in
+ *     `FallbackGroth16VerifierGenerated.sol` via `FallbackVerifier`.
  *
  * withdrawByProof wiring:
  *   - WIRE_WITHDRAW_BY_PROOF=true → BridgeWithdrawalAggregatorVerifier + identity env vars.
@@ -190,7 +190,7 @@ contract DeployRealBridge is Script {
         console.log("startPaused:", w.startPaused);
         if (w.wireVerifyBlock) {
             console.log("PrimaryAggregatorVerifier:", r.primaryVerifierAddr);
-            console.log("FallbackAggregatorVerifier:", r.fallbackVerifierAddr);
+            console.log("FallbackVerifier (Groth16):", r.fallbackVerifierAddr);
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
         if (w.wireWithdraw) {
@@ -268,9 +268,9 @@ contract DeployRealBridge is Script {
             });
         }
 
-        console.log("Deploying Shplonk verifyBlock triple...");
+        console.log("Deploying hybrid verifyBlock triple (1A/2 Shplonk, 1B Groth16)...");
         ShplonkDeployLib.VerifyBlockVerifiers memory v =
-            ShplonkDeployLib.deployVerifyBlockTripleFromEnv();
+            ShplonkDeployLib.deployVerifyBlockHybridFromEnv();
 
         vb = AckiNackiBridge.VerifyBlockConfig({
             primaryVerifier: v.primary,
@@ -280,7 +280,7 @@ contract DeployRealBridge is Script {
             genesisPrevMaxLevelLayerHash: genesisPrevAnchor
         });
         console.log("  PrimaryAggregatorVerifier:", address(v.primary));
-        console.log("  FallbackAggregatorVerifier:", address(v.fallback_));
+        console.log("  FallbackVerifier (Groth16):", address(v.fallback_));
         console.log("  LayerHashesAggregatorVerifier:", address(v.layerHashes));
     }
 

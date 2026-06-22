@@ -21,19 +21,16 @@ Rule of thumb from spike: ~160 B per re-exposed instance column beyond accumulat
 | M2 spike (multiply) | 9 | 1 | 21 | Full | **PASS** | 13 172 |
 | 1A (primary) | 20 | 4 | 21 | Full | **PASS** | 21 493 |
 | 2 (layer hashes) | 17 | 14 | 22 | Full | **PASS** | 19 100 |
-| 1B (fallback) | 20 | 4 | 21 | None / Preprocessed / Full | **FAIL** | ~28 432 (EIP-170) |
+| 1B (fallback) | 20 | 4 | — | — | **PASS (Groth16)** | ~7 KB runtime (`FallbackGroth16VerifierGenerated.sol`) |
 | 4 (withdraw) | ~20 (partner) | 10 | 21 | Full | **TBD** | — |
 
-## Circuit 1B (fallback) risk
+## Circuit 1B (fallback) — hybrid Groth16 path
 
-Measured 2026-06-22 on bound Poseidon snarks: aggregator Yul for Circuit 1B stays
-~28.4 KB regardless of `VerifierUniversality` (`None`, `PreprocessedAsWitness`, `Full`)
-at `K_outer ∈ {20,21,22,23}` — the inner VK shape (44 advice columns, BLS+SHA) dominates.
-Mitigations under investigation:
-
-1. Partner circuit shape reduction (unlikely for shellnet).
-2. Split-bytecode / library linker for the Yul verifier (engineering).
-3. Retain gnark Groth16 wrapper for 1B only until a sub-24 KB aggregator path exists.
+Measured 2026-06-22: SHPLONK aggregator Yul for Circuit 1B stays ~28.4 KB (EIP-170 fail)
+regardless of `VerifierUniversality` or `K_outer`. **Production uses the existing gnark
+Groth16 wrapper** (`gnark-wrappers/circuit-1b` → `FallbackVerifier` +
+`FallbackGroth16VerifierGenerated.sol`). Primary (1A) and layer hashes (2) remain on the
+R15 SHPLONK aggregator path.
 
 ## CI gate
 
@@ -54,7 +51,7 @@ Rust unit tests: `cd crates/bridge-evm-aggregator && cargo test --release` → `
 |----------|----------|----------|
 | Withdrawal (C4) | `contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.sol` | `.bin` sibling |
 | Primary (1A) | `contracts/ethereum/verifiers/PrimaryAggregatorVerifier.sol` | `.bin` |
-| Fallback (1B) | `contracts/ethereum/verifiers/FallbackAggregatorVerifier.sol` | `.bin` |
+| Fallback (1B) | `contracts/ethereum/src/FallbackGroth16VerifierGenerated.sol` | deploy-time (~7 KB) |
 | Layer hashes (2) | `contracts/ethereum/verifiers/LayerHashesAggregatorVerifier.sol` | `.bin` |
 
 Generated verifiers are checked into `contracts/ethereum/verifiers/` once partner inner VKs are pinned for shellnet.

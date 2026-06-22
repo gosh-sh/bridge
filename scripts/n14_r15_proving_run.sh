@@ -162,9 +162,18 @@ do_start() {
     }
 
     export_one \"\${SNARK_DIR}/primary.snark\" PrimaryAggregatorVerifier
-    export_one \"\${SNARK_DIR}/fallback.snark\" FallbackAggregatorVerifier
     export_one \"\${SNARK_DIR}/layer_hashes.snark\" LayerHashesAggregatorVerifier
     export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier
+
+    FALLBACK_JSON=${REMOTE_ROOT}/proofs/bound/fallback/halo2_proof.json
+    if [[ -f \"\${FALLBACK_JSON}\" ]]; then
+      echo \"--- Phase C-fb: gnark Groth16 wrap Circuit 1B (EIP-170 fallback path) ---\"
+      cd ${REMOTE_ROOT}
+      chmod +x scripts/install_fallback_groth16_verifier.sh
+      ./scripts/install_fallback_groth16_verifier.sh \"\${FALLBACK_JSON}\"
+    else
+      echo \"SKIP fallback Groth16: missing \${FALLBACK_JSON}\"
+    fi
 
     echo \"--- EIP-170 check ---\"
     cd ${REMOTE_ROOT}

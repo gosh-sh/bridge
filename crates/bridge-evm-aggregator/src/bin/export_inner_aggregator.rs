@@ -5,8 +5,7 @@
 //! cargo run --release --bin export-inner-aggregator -- \
 //!   --inner-snark /path/to/primary_poseidon.snark \
 //!   --out-dir ../../contracts/ethereum/verifiers \
-//!   --name PrimaryAggregatorVerifier \
-//!   --inner-instances 4
+//!   --name PrimaryAggregatorVerifier
 //! ```
 
 use std::path::PathBuf;
@@ -24,15 +23,22 @@ fn main() -> anyhow::Result<()> {
     let mut inner_path = None;
     let mut out_dir = PathBuf::from("../../contracts/ethereum/verifiers");
     let mut name = None;
-    let mut inner_instances = None;
+    let mut k_outer = None;
+    let mut universality = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--inner-snark" => inner_path = args.next().map(PathBuf::from),
             "--out-dir" => out_dir = args.next().map(PathBuf::from).unwrap_or(out_dir),
             "--name" => name = args.next(),
+            "--k-outer" => k_outer = args.next().and_then(|s| s.parse().ok()),
+            "--universality" => {
+                universality = Some(AggregatorConfig::parse_universality(
+                    &args.next().ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
+                )?)
+            }
             "--inner-instances" => {
-                inner_instances = args.next().and_then(|s| s.parse().ok())
+                let _ = args.next();
             }
             other => anyhow::bail!("unknown arg: {other}"),
         }
@@ -40,22 +46,21 @@ fn main() -> anyhow::Result<()> {
 
     let inner_path = inner_path.ok_or_else(|| anyhow::anyhow!("--inner-snark required"))?;
     let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
-    let num_inner: usize = inner_instances
-        .ok_or_else(|| anyhow::anyhow!("--inner-instances required (inner PI count)"))?;
 
     let inner_bytes = std::fs::read(&inner_path)?;
     let inner_snark: Snark = bincode::deserialize(&inner_bytes)?;
-    let config = AggregatorConfig::for_inner_instances(num_inner);
+    let config = AggregatorConfig::for_verifier_name_with_overrides(&name, k_outer, universality);
     let export = export_aggregated_snark(&out_dir, &name, inner_snark, config)?;
 
     println!(
-        "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={})",
+        "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?})",
         inner_path.display(),
         out_dir.display(),
         name,
         export.verifier_size,
         export.total_instances,
         export.k_outer,
+        config.universality,
     );
     Ok(())
 }

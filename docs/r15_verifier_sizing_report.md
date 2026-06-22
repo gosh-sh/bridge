@@ -16,20 +16,24 @@ Rule of thumb from spike: ~160 B per re-exposed instance column beyond accumulat
 
 ## Matrix
 
-| Circuit | Inner K | Inner PIs | K_outer (target) | Aggregator instances (12+N) | Status | Bytes (.bin) |
-|---------|---------|-----------|------------------|----------------------------|--------|--------------|
-| M2 spike (multiply) | 9 | 1 | 21 | 13 | **PASS** | 13 172 |
-| 4 (withdraw) | ~20 (partner) | 10 | 21 | 22 | **PROJECTED PASS** | TBD — run `export-circuit4-aggregator` |
-| 1A (primary) | ~20 | 4 | 21 | 16 | **PROJECTED PASS** | TBD |
-| 1B (fallback) | ~20 | 4 | 21 | 16 | **PROJECTED PASS** | TBD |
-| 2 (layer hashes) | ~17 | 14 | 22 | 26 | **WATCH** — may need K=22 | TBD |
+| Circuit | Inner K | Inner PIs | K_outer | Universality | Status | Bytes (.bin) |
+|---------|---------|-----------|---------|--------------|--------|--------------|
+| M2 spike (multiply) | 9 | 1 | 21 | Full | **PASS** | 13 172 |
+| 1A (primary) | 20 | 4 | 21 | Full | **PASS** | 21 493 |
+| 2 (layer hashes) | 17 | 14 | 22 | Full | **PASS** | 19 100 |
+| 1B (fallback) | 20 | 4 | 21 | None / Preprocessed / Full | **FAIL** | ~28 432 (EIP-170) |
+| 4 (withdraw) | ~20 (partner) | 10 | 21 | Full | **TBD** | — |
 
-## Circuit 2 risk
+## Circuit 1B (fallback) risk
 
-26 total instance scalars (12 acc + 14 inner) is the tightest layout. If K=22 exceeds 24 KB, mitigations (in order):
+Measured 2026-06-22 on bound Poseidon snarks: aggregator Yul for Circuit 1B stays
+~28.4 KB regardless of `VerifierUniversality` (`None`, `PreprocessedAsWitness`, `Full`)
+at `K_outer ∈ {20,21,22,23}` — the inner VK shape (44 advice columns, BLS+SHA) dominates.
+Mitigations under investigation:
 
-1. Minimize exposed instances (bridge reads only PIs, not duplicate acc limbs in adapter calldata).
-2. K_outer=23 last resort before deferring Groth16 outer wrap (out of shellnet v1 scope).
+1. Partner circuit shape reduction (unlikely for shellnet).
+2. Split-bytecode / library linker for the Yul verifier (engineering).
+3. Retain gnark Groth16 wrapper for 1B only until a sub-24 KB aggregator path exists.
 
 ## CI gate
 

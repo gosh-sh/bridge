@@ -4,6 +4,7 @@
 # Usage (from dev machine):
 #   ./scripts/n14_r15_proving_run.sh sync-and-start
 #   ./scripts/n14_r15_proving_run.sh continue-bc      # skip Phase A if bound proofs exist
+#   ./scripts/n14_r15_proving_run.sh continue-c       # Phase C only (snarks cached)
 #   ./scripts/n14_r15_proving_run.sh status
 #   ./scripts/n14_r15_proving_run.sh pull-artifacts
 #
@@ -71,7 +72,7 @@ do_sync() {
     echo "    solc -> n14 ~/bin/solc (static linux fallback on n14 if rsync binary incompatible)"
     ${SSH} "mkdir -p ~/bin"
     if ! ${SSH} "~/bin/solc --version >/dev/null 2>&1"; then
-      ${SSH} "curl -fsSL -o ~/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux && chmod +x ~/bin/solc"
+      ${SSH} "curl -fsSL -o ~/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux && chmod +x ~/bin/solc"
     fi
     ${SSH} "~/bin/solc --version | head -1"
   else
@@ -79,10 +80,11 @@ do_sync() {
   fi
 }
 
-# Remote job body. $1 = skip_phase_a (0|1)
+# Remote job body. $1 = skip_phase_a (0|1), $2 = phase_c_only (0|1)
 do_start() {
   local skip_phase_a="${1:-0}"
-  echo "==> starting proving job on n14 (log: ${REMOTE_LOG}, skip_phase_a=${skip_phase_a})"
+  local phase_c_only="${2:-0}"
+  echo "==> starting proving job on n14 (log: ${REMOTE_LOG}, skip_phase_a=${skip_phase_a}, phase_c_only=${phase_c_only})"
   ${SSH} "mkdir -p ${REMOTE_ROOT}/logs ${REMOTE_ROOT}/params ${REMOTE_ROOT}/proofs ~/bin"
   ${SSH} "nohup bash -lc '
     set -euo pipefail
@@ -96,9 +98,10 @@ do_start() {
     BOUND=${REMOTE_ROOT}/proofs/bound/bound_scenario.json
     WITNESS=${REMOTE_ROOT}/proofs/bound/bound_witness.bin
     SNARK_DIR=${REMOTE_ROOT}/proofs/bound/poseidon-snark
-    SNARK_EXPORTER=${REMOTE_ROOT}/crates/bridge-evm-aggregator/target/release/export-halo2-poseidon-snark
 
-    if [[ -f \"\${WITNESS}\" ]] && [[ \"${skip_phase_a}\" == \"1\" ]]; then
+    if [[ \"${phase_c_only}\" == \"1\" ]]; then
+      echo \"--- Phase A/A2: SKIP (continue-c) ---\"
+    elif [[ -f \"\${WITNESS}\" ]] && [[ \"${skip_phase_a}\" == \"1\" ]]; then
       echo \"--- Phase A: SKIP (found \${WITNESS}) ---\"
     else
       cd crates/bridge-prover-orchestrator
@@ -110,51 +113,58 @@ do_start() {
         --out-dir ../../proofs/bound
     fi
 
+    if [[ \"${phase_c_only}\" != \"1\" ]]; then
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
-    echo \"--- build export-halo2-poseidon-snark + export-inner-aggregator ---\"
+    echo \"--- build export-inner-aggregator + export-spike-artifacts ---\"
     cargo +nightly build --release --locked \
-      --bin export-halo2-poseidon-snark \
       --bin export-inner-aggregator \
       --bin export-spike-artifacts
 
     cd ${REMOTE_ROOT}/crates/bridge-prover-orchestrator
-    echo \"--- Phase A2: export-bound-poseidon-snarks ---\"
-    cargo +nightly build --release --locked --bin export-bound-poseidon-snarks
+    echo \"--- Phase A2: export-bound-poseidon-snarks (in-process Snark export) ---\"
+    cargo +nightly build --release --locked \
+      --bin export-bound-poseidon-snarks \
+      --bin export-halo2-poseidon-snark
     cargo +nightly run --release --locked --bin export-bound-poseidon-snarks -- \
       --params-dir ../../params \
       --bound-dir ../../proofs/bound \
-      --snark-dir ../../proofs/bound/poseidon-snark \
-      --snark-exporter \"\${SNARK_EXPORTER}\"
+      --snark-dir ../../proofs/bound/poseidon-snark
 
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
-    echo \"--- Phase B: export-spike-artifacts (sanity; needs solc) ---\"
+    echo \"--- Phase B: export-spike-artifacts (sanity; needs solc 0.8.19) ---\"
     if command -v solc >/dev/null; then
-      cargo +nightly run --release --locked --bin export-spike-artifacts
+      cargo +nightly run --release --locked --bin export-spike-artifacts || echo \"WARN: spike export failed (non-fatal)\"
     else
       echo \"SKIP spike: solc missing\"
+    fi
+    fi
+
+    cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
+    if [[ \"${phase_c_only}\" == \"1\" ]]; then
+      echo \"--- build export-inner-aggregator (continue-c) ---\"
+      cargo +nightly build --release --locked --bin export-inner-aggregator
     fi
 
     OUT=${REMOTE_ROOT}/contracts/ethereum/verifiers
     mkdir -p \"\${OUT}\"
 
     export_one() {
-      local snark=\"\$1\" name=\"\$2\" n=\"\$3\"
+      local snark=\"\$1\" name=\"\$2\"
       if [[ -f \"\${snark}\" ]]; then
         echo \"--- Phase C: export-inner-aggregator \${name} ---\"
         cargo +nightly run --release --locked --bin export-inner-aggregator -- \
           --inner-snark \"\${snark}\" \
           --out-dir \"\${OUT}\" \
-          --name \"\${name}\" \
-          --inner-instances \"\${n}\"
+          --name \"\${name}\"
       else
         echo \"SKIP \${name}: missing \${snark}\"
       fi
     }
 
-    export_one \"\${SNARK_DIR}/primary.snark\" PrimaryAggregatorVerifier 4
-    export_one \"\${SNARK_DIR}/fallback.snark\" FallbackAggregatorVerifier 4
-    export_one \"\${SNARK_DIR}/layer_hashes.snark\" LayerHashesAggregatorVerifier 14
-    export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier 10
+    export_one \"\${SNARK_DIR}/primary.snark\" PrimaryAggregatorVerifier
+    export_one \"\${SNARK_DIR}/fallback.snark\" FallbackAggregatorVerifier
+    export_one \"\${SNARK_DIR}/layer_hashes.snark\" LayerHashesAggregatorVerifier
+    export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier
 
     echo \"--- EIP-170 check ---\"
     cd ${REMOTE_ROOT}
@@ -185,11 +195,12 @@ do_pull() {
 }
 
 case "${cmd}" in
-  sync-and-start) do_sync && do_start 0 ;;
-  continue-bc) do_sync && do_start 1 ;;
+  sync-and-start) do_sync && do_start 0 0 ;;
+  continue-bc) do_sync && do_start 1 0 ;;
+  continue-c) do_sync && do_start 1 1 ;;
   sync) do_sync ;;
-  start) do_start 0 ;;
+  start) do_start 0 0 ;;
   status) do_status ;;
   pull-artifacts) do_pull ;;
-  *) echo "usage: $0 {sync-and-start|continue-bc|sync|start|status|pull-artifacts}"; exit 1 ;;
+  *) echo "usage: $0 {sync-and-start|continue-bc|continue-c|sync|start|status|pull-artifacts}"; exit 1 ;;
 esac

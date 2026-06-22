@@ -15,7 +15,7 @@ use snark_verifier_sdk::{
     evm::{encode_calldata, gen_evm_proof_shplonk, gen_evm_verifier_shplonk},
     gen_pk,
     halo2::{
-        aggregation::{AggregationCircuit, AggregationConfigParams, VerifierUniversality},
+        aggregation::{AggregationCircuit, AggregationConfigParams},
         gen_snark_shplonk,
     },
     CircuitExt, Snark, SHPLONK,
@@ -114,7 +114,7 @@ pub fn export_aggregated_snark(
         agg_config,
         &params_outer,
         vec![inner_snark.clone()],
-        VerifierUniversality::Full,
+        config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
     let calculated = keygen_circuit.calculate_params(Some(10));
@@ -128,7 +128,7 @@ pub fn export_aggregated_snark(
         calculated,
         &params_outer,
         vec![inner_snark],
-        VerifierUniversality::Full,
+        config.universality,
     );
     prover_circuit.expose_previous_instances(false);
     let prover_circuit = prover_circuit.use_break_points(break_points);

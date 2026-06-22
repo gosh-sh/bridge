@@ -12,6 +12,7 @@
 
 pub mod bound_test_data;
 pub mod circuit4_prover;
+pub mod halo2_snark;
 pub mod halo2_tvm_bundle;
 pub mod keys;
 pub mod layer_hashes_keys;

@@ -1,20 +1,15 @@
 //! Re-prove the bound block scenario with Poseidon transcript and emit
 //! snark-verifier [`Snark`] files for the R15 aggregator pipeline.
-//!
-//! Instances are identical to the Blake2b export (reuse `instances.bin` from
-//! `proofs/bound/{primary,fallback,layer-hashes}/`). Proof bytes differ
-//! (Poseidon Fiat–Shamir).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_prover_lib::{
-    keys::{KeyManager as PrimaryKeyManager},
-};
+use bridge_prover_lib::keys::KeyManager as PrimaryKeyManager;
 use bridge_prover_orchestrator::{
-    build_bound_test_data, compose_layer_hashes_input,
+    compose_layer_hashes_input,
     generate_fallback_proof_with_transcript, generate_layer_hashes_proof_with_transcript,
     generate_primary_proof_with_transcript,
+    halo2_snark::export_poseidon_snark,
     halo2_tvm_bundle::TranscriptKind,
     layer_hashes_keys::{LayerHashesKeyManager, LayerHashesReferenceWitness},
     load_bound_witness_cache, proof_export::save_instances_binary,
@@ -26,7 +21,7 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(
     name = "export-bound-poseidon-snarks",
-    about = "Poseidon re-prove of bound 1A/1B/2 + subprocess snark export for aggregator"
+    about = "Poseidon re-prove of bound 1A/1B/2 + Snark export for aggregator"
 )]
 struct Args {
     #[arg(long, default_value = "../../params")]
@@ -35,23 +30,12 @@ struct Args {
     bound_dir: String,
     #[arg(long, default_value = "../../proofs/bound/poseidon-snark")]
     snark_dir: String,
-    /// Path to built `export-halo2-poseidon-snark` (default: sibling aggregator target).
-    #[arg(long)]
-    snark_exporter: Option<PathBuf>,
-    #[arg(long, default_value_t = 10)]
-    signers: usize,
-    #[arg(long, default_value_t = 5)]
-    num_layers: usize,
-    #[arg(long, default_value_t = 3)]
-    num_chain_steps: usize,
 }
 
 struct CircuitExport<'a> {
     name: &'a str,
     vk_key: &'a str,
     config_key: &'a str,
-    instances_rel: &'a str,
-    num_instances: usize,
 }
 
 const CIRCUITS: &[CircuitExport<'static>] = &[
@@ -59,29 +43,18 @@ const CIRCUITS: &[CircuitExport<'static>] = &[
         name: "primary",
         vk_key: "primary_vk.bin",
         config_key: "primary_config_params.json",
-        instances_rel: "primary/instances.bin",
-        num_instances: 4,
     },
     CircuitExport {
         name: "fallback",
         vk_key: "fallback_vk.bin",
         config_key: "fallback_config_params.json",
-        instances_rel: "fallback/instances.bin",
-        num_instances: 4,
     },
     CircuitExport {
         name: "layer_hashes",
         vk_key: "layer_hashes_vk.bin",
         config_key: "layer_hashes_config_params.json",
-        instances_rel: "layer-hashes/instances.bin",
-        num_instances: 14,
     },
 ];
-
-fn default_snark_exporter() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../bridge-evm-aggregator/target/release/export-halo2-poseidon-snark")
-}
 
 fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
@@ -97,25 +70,14 @@ fn main() -> anyhow::Result<()> {
     let snark_dir = PathBuf::from(&args.snark_dir);
     std::fs::create_dir_all(&snark_dir)?;
 
-    let exporter = args.snark_exporter.unwrap_or_else(default_snark_exporter);
-    if !exporter.is_file() {
-        anyhow::bail!(
-            "snark exporter not found at {} — build bridge-evm-aggregator first",
-            exporter.display()
-        );
-    }
-
     let witness_path = bound_dir.join("bound_witness.bin");
-    let bound = if witness_path.is_file() {
-        load_bound_witness_cache(&witness_path).context("load bound_witness.bin")?
-    } else {
-        anyhow::bail!(
-            "missing {} — run export-bound-block-proofs first (Phase A)",
+    let bound = load_bound_witness_cache(&witness_path).with_context(|| {
+        format!(
+            "load {} (run export-bound-block-proofs first)",
             witness_path.display()
-        );
-    };
+        )
+    })?;
 
-    // --- 1A Poseidon ---
     let mut primary_km = PrimaryKeyManager::new(&params_dir);
     primary_km.ensure_primary_keys(&bound.bk_set)?;
     primary_km.load_primary_pk()?;
@@ -130,7 +92,6 @@ fn main() -> anyhow::Result<()> {
     let primary_proof_path = snark_dir.join("primary.proof.bin");
     std::fs::write(&primary_proof_path, &primary.proof_bytes)?;
 
-    // --- 1B Poseidon ---
     let fallback_bytes = bound
         .attestation_fallback_bytes
         .as_ref()
@@ -148,7 +109,6 @@ fn main() -> anyhow::Result<()> {
     let fallback_proof_path = snark_dir.join("fallback.proof.bin");
     std::fs::write(&fallback_proof_path, &fallback.proof_bytes)?;
 
-    // --- Circuit 2 Poseidon ---
     let mut layer_km = LayerHashesKeyManager::new(&params_dir);
     layer_km.ensure_keys(&LayerHashesReferenceWitness {
         layer_hashes_preimage: bound.layer_hashes_preimage,
@@ -166,39 +126,29 @@ fn main() -> anyhow::Result<()> {
     let layer_proof_path = snark_dir.join("layer_hashes.proof.bin");
     std::fs::write(&layer_proof_path, &layer.proof_bytes)?;
 
-    let proof_paths = [
-        ("primary", primary_proof_path),
-        ("fallback", fallback_proof_path),
-        ("layer_hashes", layer_proof_path),
+    let outputs: [(&str, &PathBuf, Vec<_>); 3] = [
+        ("primary", &primary_proof_path, primary.instances().to_vec()),
+        ("fallback", &fallback_proof_path, fallback.instances().to_vec()),
+        ("layer_hashes", &layer_proof_path, layer.instances().to_vec()),
     ];
 
     for spec in CIRCUITS {
-        let proof_path = proof_paths
+        let (_, proof_path, instances) = outputs
             .iter()
-            .find(|(n, _)| *n == spec.name)
-            .map(|(_, p)| p)
+            .find(|(n, _, _)| *n == spec.name)
             .context("internal circuit list mismatch")?;
+
         let instances_path = snark_dir.join(format!("{}.instances.bin", spec.name));
-        let instances: Vec<_> = match spec.name {
-            "primary" => primary.instances().to_vec(),
-            "fallback" => fallback.instances().to_vec(),
-            "layer_hashes" => layer.instances().to_vec(),
-            _ => unreachable!(),
-        };
-        save_instances_binary(&instances, &instances_path)?;
+        save_instances_binary(instances, &instances_path)?;
         let out_snark = snark_dir.join(format!("{}.snark", spec.name));
-        let vk_path = params_dir.join(spec.vk_key);
-        let config_path = params_dir.join(spec.config_key);
 
         info!(circuit = spec.name, "exporting Poseidon Snark");
-        run_snark_exporter(
-            &exporter,
-            &vk_path,
-            &config_path,
+        export_poseidon_snark(
+            &params_dir.join(spec.vk_key),
+            &params_dir.join(spec.config_key),
             proof_path,
-            &instances_path,
+            instances,
             &out_snark,
-            spec.num_instances,
         )?;
         println!(
             "OK: {} -> {} ({} B)",
@@ -209,35 +159,5 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("OK: Poseidon snarks in {}", snark_dir.display());
-    Ok(())
-}
-
-fn run_snark_exporter(
-    exporter: &Path,
-    vk: &Path,
-    config: &Path,
-    proof: &Path,
-    instances: &Path,
-    out: &Path,
-    num_instances: usize,
-) -> anyhow::Result<()> {
-    let status = std::process::Command::new(exporter)
-        .arg("--vk")
-        .arg(vk)
-        .arg("--config")
-        .arg(config)
-        .arg("--proof")
-        .arg(proof)
-        .arg("--instances")
-        .arg(instances)
-        .arg("--out")
-        .arg(out)
-        .arg("--num-instances")
-        .arg(num_instances.to_string())
-        .status()
-        .with_context(|| format!("run {}", exporter.display()))?;
-    if !status.success() {
-        anyhow::bail!("{} failed with {status}", exporter.display());
-    }
     Ok(())
 }

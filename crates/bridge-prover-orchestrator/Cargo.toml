@@ -32,6 +32,17 @@ serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# snark-verifier for gosh-VK → PlonkProtocol → bincode Snark (R15 aggregator input).
+# Patched to gosh halo2-base via [patch] below — must NOT live in bridge-evm-aggregator.
+snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }
+snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }
+
 [dev-dependencies]
 # Already available via [dependencies] above; integration tests need them re-listed.
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
@@ -56,6 +67,10 @@ path = "src/bin/export_bound_block_proofs.rs"
 [[bin]]
 name = "export-bound-poseidon-snarks"
 path = "src/bin/export_bound_poseidon_snarks.rs"
+
+[[bin]]
+name = "export-halo2-poseidon-snark"
+path = "src/bin/export_halo2_poseidon_snark.rs"
 
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.

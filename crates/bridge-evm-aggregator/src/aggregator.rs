@@ -44,6 +44,7 @@ pub const LOOKUP_BITS_OUTER: usize = LOOKUP_BITS_OUTER_DEFAULT;
 pub struct AggregatorConfig {
     pub k_outer: u32,
     pub lookup_bits_outer: usize,
+    pub universality: VerifierUniversality,
 }
 
 impl Default for AggregatorConfig {
@@ -51,6 +52,7 @@ impl Default for AggregatorConfig {
         Self {
             k_outer: K_OUTER_DEFAULT,
             lookup_bits_outer: LOOKUP_BITS_OUTER_DEFAULT,
+            universality: VerifierUniversality::Full,
         }
     }
 }
@@ -66,6 +68,62 @@ impl AggregatorConfig {
         Self {
             k_outer,
             lookup_bits_outer: k_outer.saturating_sub(1) as usize,
+            universality: VerifierUniversality::Full,
+        }
+    }
+
+    /// Production R15 verifier presets (empirical on bound Poseidon snarks, 2026-06-22).
+    pub fn for_verifier_name(name: &str) -> Self {
+        Self::for_verifier_name_with_overrides(name, None, None)
+    }
+
+    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`, universality tag).
+    pub fn for_verifier_name_with_overrides(
+        name: &str,
+        k_outer: Option<u32>,
+        universality: Option<VerifierUniversality>,
+    ) -> Self {
+        let mut config = match name {
+            "PrimaryAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::Full,
+            },
+            "FallbackAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::PreprocessedAsWitness,
+            },
+            "LayerHashesAggregatorVerifier" => Self {
+                k_outer: 22,
+                lookup_bits_outer: 21,
+                universality: VerifierUniversality::Full,
+            },
+            "BridgeWithdrawalAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::Full,
+            },
+            _ => Self::for_inner_instances(4),
+        };
+        if let Some(k) = k_outer {
+            config.k_outer = k;
+            config.lookup_bits_outer = k.saturating_sub(1) as usize;
+        }
+        if let Some(u) = universality {
+            config.universality = u;
+        }
+        config
+    }
+
+    pub fn parse_universality(s: &str) -> anyhow::Result<VerifierUniversality> {
+        match s {
+            "none" => Ok(VerifierUniversality::None),
+            "preprocessed" | "preprocessed-as-witness" => {
+                Ok(VerifierUniversality::PreprocessedAsWitness)
+            }
+            "full" => Ok(VerifierUniversality::Full),
+            other => anyhow::bail!("unknown universality {other} (none|preprocessed|full)"),
         }
     }
 }
@@ -108,7 +166,7 @@ pub fn aggregate_inner(
         agg_config,
         agg_params,
         vec![inner_snark.clone()],
-        VerifierUniversality::Full,
+        config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
     let calculated = keygen_circuit.calculate_params(Some(10));
@@ -121,7 +179,7 @@ pub fn aggregate_inner(
         calculated,
         agg_params,
         vec![inner_snark],
-        VerifierUniversality::Full,
+        config.universality,
     );
     prover_circuit.expose_previous_instances(false);
     let prover_circuit = prover_circuit.use_break_points(break_points);
@@ -155,7 +213,7 @@ pub fn generate_yul_verifier(
         agg_config,
         agg_params,
         vec![inner_snark.clone()],
-        VerifierUniversality::Full,
+        config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
     let _ = keygen_circuit.calculate_params(Some(10));

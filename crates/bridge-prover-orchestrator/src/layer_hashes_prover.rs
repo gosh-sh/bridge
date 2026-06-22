@@ -166,28 +166,108 @@ pub fn generate_layer_hashes_proof_with_transcript(
     })
 }
 
-/// Native (off-chain) Halo2 SHPLONK verification for a Circuit 2 proof.
+/// Run `MockProver` on the layer-hashes circuit for `input`, returning the
+/// per-constraint failures (if any). Diagnostic: pinpoints exactly which gate /
+/// region the witness violates, independent of keygen/transcript/aggregation.
+pub fn mock_prove_layer_hashes(
+    key_manager: &LayerHashesKeyManager,
+    input: LayerHashesProofInput<'_>,
+) -> Result<(), String> {
+    use halo2_base::halo2_proofs::dev::MockProver;
+
+    let mut circuit = LayerHashesMovementCheckerCircuit::new(
+        input.layer_hashes_preimage,
+        input.merkle_siblings,
+        input.prev_max_level_layer_hash,
+        input.num_prev_chain_steps,
+        input.prev_chain_proofs.to_vec(),
+        input.bk_set_poseidon_hash,
+        LAYER_HASHES_K as usize,
+        LAYER_HASHES_NUM_UNUSABLE_ROWS,
+        LAYER_HASHES_LOOKUP_BITS,
+    );
+    circuit.override_base_circuit_params(key_manager.config().clone());
+
+    let prover = MockProver::run(
+        LAYER_HASHES_K,
+        &circuit,
+        vec![input.expected_instances.to_vec()],
+    )
+    .map_err(|e| format!("MockProver::run error: {e:?}"))?;
+    prover.verify().map_err(|errs| {
+        let n = errs.len();
+        let shown: Vec<String> = errs.iter().take(20).map(|e| format!("{e}")).collect();
+        format!("{n} constraint failure(s):\n{}", shown.join("\n"))
+    })
+}
+
+/// Native (off-chain) Halo2 SHPLONK verification for a Circuit 2 proof
+/// (Blake2b transcript — AN-side default).
 pub fn verify_layer_hashes_proof(
     key_manager: &LayerHashesKeyManager,
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
+    verify_layer_hashes_proof_with_transcript(
+        key_manager,
+        proof_bytes,
+        instances,
+        crate::halo2_tvm_bundle::TranscriptKind::Blake2b,
+    )
+}
+
+/// Native (off-chain) Halo2 SHPLONK verification for a Circuit 2 proof with the
+/// chosen Fiat–Shamir transcript. The transcript must match the prover's or
+/// verification will silently fail. Used to localise aggregator failures: a
+/// `false` here means the inner snark itself is invalid (proof/keygen/witness),
+/// independent of the snark-verifier aggregation step.
+pub fn verify_layer_hashes_proof_with_transcript(
+    key_manager: &LayerHashesKeyManager,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: crate::halo2_tvm_bundle::TranscriptKind,
+) -> bool {
+    use crate::halo2_tvm_bundle::TranscriptKind;
+    use crate::poseidon_transcript::PoseidonRead;
+
     let instance_refs: &[&[Fr]] = &[instances];
     let verifier_params = key_manager.srs.verifier_params();
     let strategy = SingleStrategy::new(&key_manager.srs);
-    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof_bytes);
-    verify_proof::<
-        KZGCommitmentScheme<Bn256>,
-        VerifierSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
-        SingleStrategy<'_, Bn256>,
-    >(
-        verifier_params,
-        key_manager.vk(),
-        strategy,
-        &[instance_refs],
-        &mut transcript,
-    )
-    .is_ok()
+
+    match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bRead::<_, _, Challenge255<_>>::init(proof_bytes);
+            verify_proof::<
+                KZGCommitmentScheme<Bn256>,
+                VerifierSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
+                SingleStrategy<'_, Bn256>,
+            >(
+                verifier_params,
+                key_manager.vk(),
+                strategy,
+                &[instance_refs],
+                &mut t,
+            )
+            .is_ok()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonRead::init(proof_bytes);
+            verify_proof::<
+                KZGCommitmentScheme<Bn256>,
+                VerifierSHPLONK<'_, Bn256>,
+                _,
+                PoseidonRead<&[u8]>,
+                SingleStrategy<'_, Bn256>,
+            >(
+                verifier_params,
+                key_manager.vk(),
+                strategy,
+                &[instance_refs],
+                &mut t,
+            )
+            .is_ok()
+        },
+    }
 }

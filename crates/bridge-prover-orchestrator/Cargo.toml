@@ -10,6 +10,7 @@ attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki
 bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
@@ -68,6 +69,10 @@ path = "src/bin/export_bound_block_proofs.rs"
 [[bin]]
 name = "export-bound-poseidon-snarks"
 path = "src/bin/export_bound_poseidon_snarks.rs"
+
+[[bin]]
+name = "mock-prove-bound-layer"
+path = "src/bin/mock_prove_bound_layer.rs"
 
 [[bin]]
 name = "export-halo2-poseidon-snark"

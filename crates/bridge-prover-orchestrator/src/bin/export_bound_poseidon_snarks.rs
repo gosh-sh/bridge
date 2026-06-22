@@ -108,6 +108,22 @@ fn main() -> anyhow::Result<()> {
     )?;
     let fallback_proof_path = snark_dir.join("fallback.proof.bin");
     std::fs::write(&fallback_proof_path, &fallback.proof_bytes)?;
+    {
+        use bridge_prover_orchestrator::verify_fallback_proof_with_transcript;
+        let ok = verify_fallback_proof_with_transcript(
+            &fallback_km,
+            &fallback.proof_bytes,
+            &fallback.instances(),
+            TranscriptKind::Poseidon,
+        );
+        println!("SELF_VERIFY fallback (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+        anyhow::ensure!(
+            ok,
+            "fallback Poseidon inner snark failed native verification — refusing to export an \
+             invalid snark (stale/ mismatched keys?). Regenerate fallback keys against the \
+             current bound witness."
+        );
+    }
 
     let mut layer_km = LayerHashesKeyManager::new(&params_dir);
     layer_km.ensure_keys(&LayerHashesReferenceWitness {
@@ -118,6 +134,21 @@ fn main() -> anyhow::Result<()> {
         prev_chain_proofs: bound.prev_chain_proofs.clone(),
         bk_set_poseidon_hash: bound.bk_set_poseidon_fr,
     })?;
+    {
+        // Diagnostic: prove + verify the SAME bound layer witness under Blake2b.
+        // If this PASSES while Poseidon FAILS → transcript-specific bug.
+        // If this also FAILS → the bound witness/keygen is the problem (not the
+        // transcript and not the snark-verifier aggregator).
+        use bridge_prover_orchestrator::{
+            generate_layer_hashes_proof, verify_layer_hashes_proof,
+        };
+        let blake = generate_layer_hashes_proof(&layer_km, compose_layer_hashes_input(&bound))?;
+        let ok_blake = verify_layer_hashes_proof(&layer_km, &blake.proof_bytes, &blake.instances());
+        println!(
+            "DIAG layer_hashes (Blake2b round-trip, fresh keys + bound witness): {}",
+            if ok_blake { "PASS" } else { "FAIL" }
+        );
+    }
     let layer = generate_layer_hashes_proof_with_transcript(
         &layer_km,
         compose_layer_hashes_input(&bound),
@@ -125,6 +156,24 @@ fn main() -> anyhow::Result<()> {
     )?;
     let layer_proof_path = snark_dir.join("layer_hashes.proof.bin");
     std::fs::write(&layer_proof_path, &layer.proof_bytes)?;
+    {
+        use bridge_prover_orchestrator::verify_layer_hashes_proof_with_transcript;
+        let ok = verify_layer_hashes_proof_with_transcript(
+            &layer_km,
+            &layer.proof_bytes,
+            &layer.instances(),
+            TranscriptKind::Poseidon,
+        );
+        println!("SELF_VERIFY layer_hashes (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+        anyhow::ensure!(
+            ok,
+            "layer-hashes Poseidon inner snark failed native verification — refusing to export an \
+             invalid snark. This is almost always stale/mismatched layer keys: \
+             `ensure_keys` short-circuits on cached vk/pk, so a bound witness regenerated after \
+             the keys is proved against the wrong VK. Delete params/layer_hashes_{{vk,pk}}.bin + \
+             layer_hashes_config_params.json and re-run to keygen against the current witness."
+        );
+    }
 
     let outputs: [(&str, &PathBuf, Vec<_>); 3] = [
         ("primary", &primary_proof_path, primary.instances().to_vec()),

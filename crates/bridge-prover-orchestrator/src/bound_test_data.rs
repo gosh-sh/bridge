@@ -259,7 +259,19 @@ pub fn promote_bridge_test_data(
     with_fallback: bool,
 ) -> anyhow::Result<BoundBlockTestData> {
     let block_id_bytes = td.block_id;
-    let block_id_fr = bytes_le_to_fr(&block_id_bytes);
+    // `td.block_id` is the raw SHA-256 envelope-tree root (big-endian byte
+    // string). Both Circuit 1A/1B and Circuit 2 emit the block id as the
+    // integer value of that BE digest, i.e. `bytes_le_to_fr(reverse(root))`
+    // (see the synthetic builder in `layer_hashes_test_data.rs`, which mirrors
+    // the circuit and reverses before `bytes_le_to_fr`). Interpreting the raw
+    // BE bytes as little-endian (no reverse) yields a byte-reversed scalar that
+    // fails the circuit's `block_id` instance equality. Reverse here so the
+    // single shared `block_id_fr` matches what both circuits reconstruct.
+    let block_id_fr = {
+        let mut le = block_id_bytes;
+        le.reverse();
+        bytes_le_to_fr(&le)
+    };
 
     // BK-set Poseidon commitment (matches what Circuit 1A/1B and Circuit 2
     // emit as public input [1]). The partner's `compute_bk_set_poseidon`
@@ -296,7 +308,29 @@ pub fn promote_bridge_test_data(
     }
 
     let prev_max_level_layer_hash = bytes_le_to_fr(&td.layer_hash_chain.prev_max_level_layer_hash);
-    let num_prev_chain_steps = td.layer_hash_chain.num_prev_chain_steps as u8;
+    // Off-by-one bridge between partner-generator and circuit semantics.
+    //
+    // The partner's `generate_layer_hash_chain(num_layers, num_prev_chain_steps)`
+    // builds `num_prev_chain_steps + 1` ACTIVE trees (the trailing `+1` is the
+    // current block's tree, whose root *is* `root_hashes[num_layers-1]`) but
+    // records only the count of *previous* steps in
+    // `LayerHashChainData.num_prev_chain_steps`.
+    //
+    // The circuit, however, treats this value as `num_active_steps` and inside
+    // `verify_chain_of_dense_proofs` marks links `0..num_active_steps` active
+    // (`active = is_less_than(j, num_active_steps)`), folding exactly that many
+    // Merkle roots before comparing the result to `layer_hash_frs[num_layers-1]`.
+    // Its own unit test (`build_test_chain(num_steps)` → pass `num_steps`) and
+    // the synthetic builder both put the TOTAL active count in this slot.
+    //
+    // So we must hand the circuit the total active count (`+1`); copying the
+    // partner's "previous" count verbatim folds one tree too few and the chain
+    // result never reaches the target layer hash, producing a witness that
+    // satisfies `MockProver`-free `create_proof` but fails verification under
+    // every transcript. `num_prev_chain_steps + 1 <= MAX_CHAIN_LEN` is already
+    // guaranteed by the generator, so the circuit's `[1, MAX_CHAIN_LEN]` range
+    // check still holds.
+    let num_prev_chain_steps = (td.layer_hash_chain.num_prev_chain_steps + 1) as u8;
 
     let prev_chain_proofs = td
         .layer_hash_chain

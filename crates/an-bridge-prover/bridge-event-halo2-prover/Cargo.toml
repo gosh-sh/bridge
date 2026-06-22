@@ -1,0 +1,31 @@
+[package]
+name = "bridge-event-halo2-prover"
+version = "0.1.0"
+edition = "2021"
+
+# One-shot CLI (dex tooling style, not a long-running daemon) that:
+#   * reads a `PrivateWitness` JSON fixture (or `--selftest` mode that
+#     synthesises one via `test_helpers::build_synthetic_event_keygen_inputs`),
+#   * ensures the event circuit keys exist (keygen on first run),
+#   * generates a Circuit 4 proof,
+#   * self-verifies it,
+#   * prints a JSON summary to stdout (last non-empty line, dex-style),
+#   * optionally writes `proof_event_NNN.json` to `--out-dir`.
+#
+# Invoked by `python/generate_withdrawals_with_live_event_proving.py` (bundled in this repo).
+
+[[bin]]
+name = "bridge-event-halo2-prover"
+path = "src/main.rs"
+
+[dependencies]
+bridge-event-prover-lib = { workspace = true }
+bridge-prover-lib = { workspace = true }
+bridge-event-prove-circuit = { workspace = true }
+halo2-base = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

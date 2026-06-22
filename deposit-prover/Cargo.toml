@@ -16,18 +16,20 @@ path = "src/lib.rs"
 [dependencies]
 # Axiom-eth for Ethereum state proofs.
 # Ported 2026-05-30 from the PSE backend to the gosh `halo2-axiom` backend
-# (the one the AN-side `ZKHALO2VERIFYWITHVK` opcode reads). Uses the local
+# (the one the AN-side `ZKHALO2VERIFYWITHVK` opcode reads). Uses the gosh
 # axiom-eth fork (branch `gosh-stable-rlcmanager-assignment`) whose RlcManager
 # names `VirtualRegionManager::Assignment` explicitly for the stable gosh
 # halo2-base, and the bumped gosh halo2-lib fork (v0.4.1 / zkevm-hashes 0.2.1).
-axiom-eth = { path = "../../axiom-eth/axiom-eth", default-features = false, features = [
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment", default-features = false, features = [
   "providers",
   "display",
   "aggregation",
   "halo2-axiom",
 ] }
 
-# Halo2 - gosh halo2-axiom backend (redirected to the local fork via [patch]).
+# Halo2 — declared against the upstream axiom-crypto/halo2-lib URL so the
+# [patch] block below can redirect *all* references (including the ones
+# axiom-eth pulls transitively) to the gosh bumped fork in one place.
 halo2-base = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
   "halo2-axiom",
   "display",
@@ -37,21 +39,33 @@ halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4
   "display",
 ] }
 
-# SNARK verifier - axiom-crypto (halo2-axiom backend).
-snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+# SNARK verifier — gosh fork. Must use the gosh fork because axiom-eth
+# (gosh-stable-rlcmanager-assignment) already pulls snark-verifier from
+# gosh-sh/snark-verifier transitively; mixing axiom-crypto's v0.1.7 with
+# that would yield two snark-verifier crates in the graph and break
+# type unification in src/aggregation.rs + src/prover.rs.
+#
+# Pinned to ccdb510 to match the rev that gosh-sh/axiom-eth (branch
+# gosh-stable-rlcmanager-assignment) pins. axiom-eth's
+# src/utils/snark_verifier.rs (compiled under `aggregation` feature) still
+# uses the pre-PR-#71 `Halo2KzgAccumulationScheme` name. Tracking
+# `branch = "main"` here would split snark-verifier-sdk into two copies
+# (axiom-eth's pin vs. our HEAD) and break type unification with
+# `CircuitExt`.
+snark-verifier = { git = "https://github.com/gosh-sh/snark-verifier", rev = "ccdb510f60c577f2b683e1f77e1faa91a95f8c5c", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
   "halo2-axiom",
 ] }
-snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+snark-verifier-sdk = { git = "https://github.com/gosh-sh/snark-verifier", rev = "ccdb510f60c577f2b683e1f77e1faa91a95f8c5c", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
   "halo2-axiom",
 ] }
 
 
-# Poseidon hash - for commitment computation
-# Use axiom-eth's poseidon implementation
+# Poseidon hash for commitment computation. Same redirect-via-[patch] pattern
+# as halo2-base/halo2-ecc above.
 zkevm-hashes = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4.1-git", default-features = false, features = [
   "halo2-axiom",
 ] }
@@ -96,13 +110,14 @@ rand = "0.8"
 # Optional: .ptau file conversion support
 ppot-rs = ["dep:ppot-rs"]
 
-# Redirect axiom's git halo2-lib (v0.4.1-git) to the local bumped gosh fork so
-# the whole graph (deposit-prover + axiom-eth + snark-verifier-sdk) shares one
-# halo2 backend. Mirrors vk-compat-check/rlc-reader's proven setup.
+# Redirect axiom's git halo2-lib (any tag — v0.4.1-git here directly, v0.5.0-git
+# pulled transitively by gosh-sh/snark-verifier@main) to the gosh bumped fork
+# so the whole graph (deposit-prover + axiom-eth + snark-verifier-sdk) shares
+# one halo2 backend. Mirrors acki-nacki-to-eth-bridge-halo2-prover's setup.
 [patch."https://github.com/axiom-crypto/halo2-lib.git"]
-halo2-base = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
-halo2-ecc = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
-zkevm-hashes = { path = "../../halo2-lib-zkevm-sha256-and-bls12-381/hashes/zkevm" }
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
 
 # Unify on the gosh halo2 backend: snark-verifier-sdk (pulled by zkevm-hashes
 # v0.4.1) would otherwise bring axiom's crates.io halo2-axiom, clashing with

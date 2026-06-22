@@ -11,6 +11,11 @@ exclude = [
     "crates/bridge-prover-orchestrator",
     "crates/bridge-relayer-daemon",
     "crates/deposit-relayer-daemon",
+    # Sub-workspace migrated from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover
+    # 2026-06-18. Uses gosh-fork halo2-base (bump-halo2-lib-v0.4.1); cannot
+    # coexist with the root workspace's halo2 backend. Build standalone via
+    # `cd crates/an-bridge-prover && cargo build`.
+    "crates/an-bridge-prover",
 ]
 
 [workspace.package]

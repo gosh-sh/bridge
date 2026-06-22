@@ -9,7 +9,7 @@ import (
 // NumPublicInputs matches Circuit 1B (Fallback attestation) public-input layout
 // from `bridge_prover_orchestrator::FallbackProofOutput::instances`:
 //
-//	[0] envelope_hash
+//	[0] block_id
 //	[1] bk_set_poseidon
 //	[2] block_seq_no
 //	[3] last_seen_block_seqno

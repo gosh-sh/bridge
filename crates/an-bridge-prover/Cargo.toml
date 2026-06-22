@@ -1,0 +1,87 @@
+[workspace]
+members = [
+    "bridge-prover-lib",
+    "bridge-prover-daemon",
+    "bridge-verifier-daemon",
+    "bridge-event-witness",
+    "bridge-event-prover-lib",
+    "bridge-event-halo2-prover",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Halo2 ecosystem
+# Pinned to bump-halo2-lib-v0.4.1 so the prover's halo2-base/halo2-ecc match
+# tvm-sdk's `full_dex_and_bridge_test_with_final_halo2_circuit` (which pins the
+# same branch). Without this alignment two halo2-axiom versions land in the
+# graph and `tvm_vm` fails to compile.
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+
+# Circuit and crypto libs
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+gosh-zk-snark-halo2-utils = { git = "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils", branch = "bump-halo2-lib-v0.4.1" }
+pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
+
+# Tracks the same branch of tvm-sdk that acki-nacki uses
+tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit", features = ["gosh"] }
+tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit" }
+tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit" }
+
+# Async + networking
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1"
+hex = "0.4"
+base64 = "0.22"
+num-bigint = "0.4"
+
+# Hashing
+sha2 = "0.10"
+
+# Utilities
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+
+# Local crates
+bridge-prover-lib = { path = "bridge-prover-lib" }
+bridge-event-prover-lib = { path = "bridge-event-prover-lib" }
+
+# --- Halo2 backend unification (collapse to ONE halo2-base instance) ---
+#
+# The workspace direct deps already pin halo2-base / halo2-ecc to gosh-sh
+# fork on `bump-halo2-lib-v0.4.1`, and circuits-repo + gosh-* helpers were
+# bumped onto the same branch, so the only remaining duplicates come from
+# DIFFERENT git sources (axiom-crypto/halo2-lib.git, crates.io) reached
+# transitively via axiom-eth + snark-verifier-sdk. Those are cross-org
+# patches — no "same source" issue.
+[patch.crates-io]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+
+[patch."https://github.com/axiom-crypto/axiom-eth"]
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment" }
+
+[profile.dev]
+opt-level = 3

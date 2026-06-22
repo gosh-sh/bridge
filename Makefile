@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push relayer-test relayer-fmt relayer-clippy
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -186,6 +186,10 @@ relayer-fmt: ## Check bridge-relayer-daemon formatting
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon
 	@cd crates/bridge-relayer-daemon && cargo clippy --all-targets -- -D warnings
+
+production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (see docs/production_plan.md)
+	@chmod +x scripts/production_preflight.sh
+	@./scripts/production_preflight.sh
 
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"

@@ -1,8 +1,8 @@
 # Shellnet E2E Acceptance Runbook
 
-**Target:** local 5-node AN cluster + Sepolia bridge with **R15 SHPLONK aggregators** (no identity-stub Groth16).
+**Target:** local 5-node AN cluster + Sepolia bridge with **R15 hybrid verifiers** (SHPLONK 1A+2, Groth16 1B fallback).
 
-**Prerequisite:** read `docs/testnet_security_status.md` — do not run against legacy stub deployments for sign-off.
+**Prerequisite:** read `docs/production_plan.md` and `docs/testnet_security_status.md` — run `make production-preflight` before deploy.
 
 ## 1. Cluster + relayers
 

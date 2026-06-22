@@ -1,0 +1,32 @@
+# Production deploy environment (copy to .env.production — gitignored)
+# Used by DeployRealBridge / DeployShellnetE2EBridge and relayer smoke.
+
+# --- Ethereum ---
+SEPOLIA_RPC=https://ethereum-sepolia-rpc.publicnode.com
+PRIVATE_KEY=0x...                    # deployer EOA (forge script)
+RELAYER_PRIVATE_KEY=0x...            # relayer EOA (smoke-fixture / daemon)
+
+# --- Bridge wiring ---
+WIRE_VERIFY_BLOCK=true
+WIRE_WITHDRAW_BY_PROOF=false         # Phase 2 only — requires BridgeWithdrawalAggregatorVerifier.bin
+START_PAUSED=true
+
+# Genesis anchors (must match first block you will verify)
+GENESIS_BK_SET_COMMITMENT=0x...
+GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+
+# Optional: override SHPLONK artefact paths (relative to contracts/ethereum/)
+# SHPLONK_BIN_PRIMARY=verifiers/PrimaryAggregatorVerifier.bin
+# SHPLONK_BIN_LAYER_HASHES=verifiers/LayerHashesAggregatorVerifier.bin
+# SHPLONK_BIN_WITHDRAWAL=verifiers/BridgeWithdrawalAggregatorVerifier.bin
+
+# --- Withdraw (Phase 2) ---
+# WITHDRAW_ACC_FR=0x...
+# WITHDRAW_DAPP_FR=0x...
+
+# --- Oracle ---
+USE_AXIOM_ORACLE=false               # true for mainnet-style deploy
+
+# --- AN (Phase 3–4) ---
+AN_NODE_URL=http://127.0.0.1:11000
+BRIDGE_ADDRESS=0x...                 # after deploy

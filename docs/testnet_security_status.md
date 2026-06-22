@@ -47,4 +47,4 @@ ETH→AN deposits are verified natively on Acki Nacki via `ZKHALO2VERIFYWITHVK` 
 - Foundry forgery suite: tampered inner proofs revert; random stub proofs revert.
 - Documented shellnet acceptance run: `docs/shellnet_e2e_acceptance_runbook.md`.
 
-See also: `docs/r15_snark_verifier_roadmap.md`, `docs/r15_verifier_sizing_report.md`.
+See also: `docs/production_plan.md`, `docs/r15_snark_verifier_roadmap.md`, `docs/r15_verifier_sizing_report.md`.

@@ -5,22 +5,23 @@ edition = "2021"
 description = "Wraps the partner's halo2 circuits with key/prover/verifier helpers for the AN→ETH bridge. Phase 1.A: Circuit 1B (Fallback attestation)."
 
 [dependencies]
-# Partner circuits / parsers / test-data-gen — direct local paths (private repos use SSH).
-attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
-bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
-bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
-bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
-bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
-historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
-gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
+# Partner circuits / parsers / test-data-gen — fetched from public GitHub.
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
 
 # Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
-bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
+# Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
+# the sibling `crates/an-bridge-prover/` sub-workspace.
+bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
 
-# Halo2 backend — must match the partner's fork; direct path.
-halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base", default-features = false, features = ["halo2-axiom"] }
-halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc", default-features = false, features = ["halo2-axiom"] }
+# Halo2 backend — must match the partner's fork; pinned to the `bump-halo2-lib-v0.4.1` branch.
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+halo2-ecc  = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 
 anyhow = "1"
 bincode = "1.3"
@@ -45,8 +46,8 @@ snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git
 
 [dev-dependencies]
 # Already available via [dependencies] above; integration tests need them re-listed.
-bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
-bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 
 [[bin]]
 name = "export-fallback-proof"

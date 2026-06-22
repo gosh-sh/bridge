@@ -7,7 +7,7 @@ import (
 )
 
 // NumPublicInputs matches Circuit 1A (Primary attestation) public-input layout
-// from `bridge_prover_lib::prover::ProofOutput`'s `[envelope_hash_fr,
+// from `bridge_prover_lib::prover::ProofOutput`'s `[block_id_fr,
 // bk_set_commitment_fr, block_seq_no, last_seen_block_seqno]` ordering. This
 // is the same 4-element layout as Circuit 1B (Fallback) — by design, so the
 // bridge contract sees a uniform public-input shape regardless of finalization

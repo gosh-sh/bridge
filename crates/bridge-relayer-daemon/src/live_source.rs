@@ -197,18 +197,8 @@ where
         raw.validate_shape()?;
 
         let proofs = self.prover.prove(&raw).await?;
-        if proofs.attestation_proof.len() != 256 {
-            return Err(RelayerError::other(format!(
-                "BoundProofGenerator: attestation proof must be 256 bytes, got {}",
-                proofs.attestation_proof.len()
-            )));
-        }
-        if proofs.layer_hashes_proof.len() != 256 {
-            return Err(RelayerError::other(format!(
-                "BoundProofGenerator: layer-hashes proof must be 256 bytes, got {}",
-                proofs.layer_hashes_proof.len()
-            )));
-        }
+        crate::proof_validation::validate_attestation_proof(raw.fin_type, &proofs.attestation_proof)?;
+        crate::proof_validation::validate_layer_hashes_proof(&proofs.layer_hashes_proof)?;
 
         let block = AnBlockData {
             fin_type: raw.fin_type,
@@ -382,14 +372,14 @@ mod tests {
         let raw = InMemoryRawBlockProvider::new();
         raw.insert(raw_block(1));
         let prover = StubBoundProofGenerator::with_bytes(
-            Bytes::from(vec![0xAA; 100]), // wrong size
+            Bytes::from(vec![0xAA; 100]), // too short for primary SHPLONK or Groth16
             Bytes::from(vec![0xBB; 256]),
         );
         let src = LiveBlockSource::new(raw, prover);
         let err = src.fetch(1).await.expect_err("bad proof length");
         match err {
             RelayerError::Other(msg) => assert!(
-                msg.contains("attestation proof must be 256 bytes"),
+                msg.contains("primary attestation proof too short"),
                 "unexpected: {msg}"
             ),
             other => panic!("expected Other, got {other:?}"),

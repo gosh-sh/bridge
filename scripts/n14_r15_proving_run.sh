@@ -170,7 +170,12 @@ do_start() {
       echo \"--- Phase C-fb: gnark Groth16 wrap Circuit 1B (EIP-170 fallback path) ---\"
       cd ${REMOTE_ROOT}
       chmod +x scripts/install_fallback_groth16_verifier.sh
-      ./scripts/install_fallback_groth16_verifier.sh \"\${FALLBACK_JSON}\"
+      if command -v go >/dev/null; then
+        ./scripts/install_fallback_groth16_verifier.sh \"\${FALLBACK_JSON}\" || \\
+          echo \"WARN: fallback Groth16 failed (non-fatal; run locally and rsync FallbackGroth16VerifierGenerated.sol)\"
+      else
+        echo \"WARN: go not in PATH on n14 — skip C-fb; run scripts/install_fallback_groth16_verifier.sh locally\"
+      fi
     else
       echo \"SKIP fallback Groth16: missing \${FALLBACK_JSON}\"
     fi
@@ -191,6 +196,7 @@ do_status() {
 do_pull() {
   echo "==> pull proofs + verifiers + logs"
   mkdir -p "${LOCAL_ROOT}/crates/bridge-prover-orchestrator/proofs/bound"
+  mkdir -p "${LOCAL_ROOT}/contracts/ethereum/verifiers"
   mkdir -p "${LOCAL_ROOT}/logs"
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/proofs/bound/" \
@@ -198,6 +204,9 @@ do_pull() {
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/contracts/ethereum/verifiers/" \
     "${LOCAL_ROOT}/contracts/ethereum/verifiers/" || true
+  rsync -avz -e "ssh -p 22488" \
+    "${N14}:${REMOTE_ROOT}/contracts/ethereum/src/FallbackGroth16VerifierGenerated.sol" \
+    "${LOCAL_ROOT}/contracts/ethereum/src/" 2>/dev/null || true
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/logs/r15_proving_"*.log \
     "${LOCAL_ROOT}/logs/" 2>/dev/null || true

@@ -63,6 +63,7 @@ pub mod daemon;
 pub mod error;
 pub mod guarded_relayer;
 pub mod live_source;
+pub mod proof_validation;
 pub mod relayer;
 pub mod source;
 pub mod state;

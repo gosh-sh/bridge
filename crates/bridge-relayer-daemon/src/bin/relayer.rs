@@ -73,6 +73,10 @@ enum Cmd {
         /// `primary/groth16_output.json` + `layer-hashes/groth16_output.json`.
         #[arg(long)]
         fixtures_dir: PathBuf,
+        /// Optional `contracts/ethereum/verifiers` with `*_calldata.bin` for
+        /// hybrid R15 deploys. Auto-detected when omitted.
+        #[arg(long)]
+        verifiers_dir: Option<PathBuf>,
         /// Ethereum RPC URL (HTTP).
         #[arg(long)]
         rpc_url: String,
@@ -121,6 +125,9 @@ enum Cmd {
         /// will pass a `--source live` flag in Phase 5.2.
         #[arg(long)]
         fixtures_dir: PathBuf,
+        /// Optional `contracts/ethereum/verifiers` with `*_calldata.bin`.
+        #[arg(long)]
+        verifiers_dir: Option<PathBuf>,
         /// Ethereum RPC URL (HTTP).
         #[arg(long)]
         rpc_url: String,
@@ -168,6 +175,9 @@ enum Cmd {
         /// `primary/groth16_output.json` + `layer-hashes/groth16_output.json`.
         #[arg(long)]
         fixtures_dir: PathBuf,
+        /// Optional `contracts/ethereum/verifiers` with `*_calldata.bin`.
+        #[arg(long)]
+        verifiers_dir: Option<PathBuf>,
         /// Ethereum RPC URL (HTTP). Read-only — no signer needed.
         #[arg(long)]
         rpc_url: String,
@@ -286,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::SmokeFixture {
             fixtures_dir,
+            verifiers_dir,
             rpc_url,
             bridge_address,
             private_key,
@@ -294,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         } => smoke_fixture(
             args.state,
             fixtures_dir,
+            verifiers_dir,
             rpc_url,
             bridge_address,
             private_key,
@@ -317,10 +329,11 @@ async fn main() -> anyhow::Result<()> {
             }),
         Cmd::VerifyFixture {
             fixtures_dir,
+            verifiers_dir,
             rpc_url,
             bridge_address,
             no_simulate,
-        } => verify_fixture(fixtures_dir, rpc_url, bridge_address, !no_simulate)
+        } => verify_fixture(fixtures_dir, verifiers_dir, rpc_url, bridge_address, !no_simulate)
             .await
             .map_err(|e| {
                 error!(?e, "verify-fixture failed");
@@ -328,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         Cmd::Daemon {
             fixtures_dir,
+            verifiers_dir,
             rpc_url,
             bridge_address,
             private_key,
@@ -344,6 +358,7 @@ async fn main() -> anyhow::Result<()> {
             run_daemon(
                 args.state,
                 fixtures_dir,
+                verifiers_dir,
                 rpc_url,
                 bridge_address,
                 private_key,
@@ -473,6 +488,7 @@ async fn main() -> anyhow::Result<()> {
 async fn smoke_fixture(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
+    verifiers_dir: Option<PathBuf>,
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
@@ -493,7 +509,7 @@ async fn smoke_fixture(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(FixturesBlockSource::from_dir(&fixtures_dir)?);
+    let source = Arc::new(FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?);
 
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
@@ -651,6 +667,7 @@ async fn sentry_watch(node_url: String, ticks: u64, interval_secs: u64) -> anyho
 async fn run_daemon(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
+    verifiers_dir: Option<PathBuf>,
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
@@ -666,7 +683,7 @@ async fn run_daemon(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(FixturesBlockSource::from_dir(&fixtures_dir)?);
+    let source = Arc::new(FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?);
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
     let metrics = RelayerMetrics::new();
@@ -740,13 +757,14 @@ async fn run_daemon(
 /// `daemon` submit and is logged as a `Reverted` outcome.
 async fn verify_fixture(
     fixtures_dir: PathBuf,
+    verifiers_dir: Option<PathBuf>,
     rpc_url: String,
     bridge_address: Address,
     simulate: bool,
 ) -> anyhow::Result<()> {
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
-    let source = FixturesBlockSource::from_dir(&fixtures_dir)?;
+    let source = FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?;
 
     let on_chain = bridge.read_state().await?;
     // FixturesBlockSource holds exactly one block (seqNo = scenario's

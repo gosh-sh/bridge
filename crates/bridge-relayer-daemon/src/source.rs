@@ -27,8 +27,9 @@ use serde::Deserialize;
 
 use crate::{
     error::RelayerError,
+    proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::{fr_hex_to_u256, GROTH16_PROOF_SIZE},
+    withdrawal::fr_hex_to_u256,
 };
 
 /// Asynchronous source of AN block payloads.
@@ -129,19 +130,73 @@ struct Groth16OutputJson {
 }
 
 impl FixturesBlockSource {
-    /// Build from a directory layout produced by Phase 4.1:
+    /// Prefer R15 SHPLONK calldata from `verifiers_dir` when both `*_calldata.bin`
+    /// files exist; otherwise fall back to legacy Groth16 JSON under `fixtures_dir`.
+    pub fn open(
+        fixtures_dir: impl AsRef<Path>,
+        verifiers_dir: Option<impl AsRef<Path>>,
+    ) -> Result<Self, RelayerError> {
+        let fixtures_dir = fixtures_dir.as_ref();
+        if let Some(vdir) = verifiers_dir {
+            return Self::from_hybrid_dirs(fixtures_dir, vdir);
+        }
+        if let Some(root) = fixtures_dir.ancestors().find(|p| {
+            p.join("contracts/ethereum/verifiers/PrimaryAggregatorVerifier_calldata.bin")
+                .is_file()
+        }) {
+            let vdir = root.join("contracts/ethereum/verifiers");
+            if vdir
+                .join("LayerHashesAggregatorVerifier_calldata.bin")
+                .is_file()
+            {
+                return Self::from_hybrid_dirs(fixtures_dir, &vdir);
+            }
+        }
+        Self::from_dir(fixtures_dir)
+    }
+
+    /// Build from Phase 4.1 bound artefacts + R15 SHPLONK calldata under
+    /// `verifiers_dir` (hybrid production layout).
+    pub fn from_hybrid_dirs(
+        bound_dir: impl AsRef<Path>,
+        verifiers_dir: impl AsRef<Path>,
+    ) -> Result<Self, RelayerError> {
+        let bound_dir = bound_dir.as_ref();
+        let verifiers_dir = verifiers_dir.as_ref();
+        let scenario_path = bound_dir.join("bound_scenario.json");
+        let scenario: BoundScenarioJson = serde_json::from_slice(&std::fs::read(&scenario_path)?)?;
+
+        let primary_calldata = verifiers_dir.join("PrimaryAggregatorVerifier_calldata.bin");
+        let lh_calldata = verifiers_dir.join("LayerHashesAggregatorVerifier_calldata.bin");
+
+        let primary_proof_bytes = if primary_calldata.is_file() {
+            std::fs::read(&primary_calldata)?
+        } else {
+            let primary_proof_path = bound_dir.join("primary").join("groth16_output.json");
+            let primary_out: Groth16OutputJson =
+                serde_json::from_slice(&std::fs::read(&primary_proof_path)?)?;
+            decode_hex(&primary_out.proof)?
+        };
+
+        let lh_proof_bytes = if lh_calldata.is_file() {
+            std::fs::read(&lh_calldata)?
+        } else {
+            let lh_proof_path = bound_dir.join("layer-hashes").join("groth16_output.json");
+            let lh_out: Groth16OutputJson =
+                serde_json::from_slice(&std::fs::read(&lh_proof_path)?)?;
+            decode_hex(&lh_out.proof)?
+        };
+
+        proof_validation::validate_attestation_proof(FinalizationType::Primary, &primary_proof_bytes)?;
+        proof_validation::validate_layer_hashes_proof(&lh_proof_bytes)?;
+
+        Self::block_from_scenario(scenario, primary_proof_bytes, lh_proof_bytes)
+    }
+
+    /// Legacy layout: `primary/groth16_output.json` + `layer-hashes/groth16_output.json`.
     ///
-    /// ```text
-    ///   <dir>/bound_scenario.json
-    ///   <dir>/primary/groth16_output.json
-    ///   <dir>/layer-hashes/groth16_output.json
-    /// ```
-    ///
-    /// The scenario is unconditionally tagged as Primary (the Phase 4.1
-    /// fixture binary doesn't generate a Fallback wrap). For Fallback
-    /// smoke testing, swap the proof file at runtime via
-    /// `with_fin_type` / `with_attestation_proof` — kept off for now to
-    /// avoid cargo-culting an API ahead of Phase 5.2.
+    /// The scenario is tagged Primary (Phase 4.1 fixture). For hybrid R15 deploys
+    /// use [`Self::open`] or [`Self::from_hybrid_dirs`].
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self, RelayerError> {
         let dir = dir.as_ref();
         let scenario_path = dir.join("bound_scenario.json");
@@ -155,6 +210,15 @@ impl FixturesBlockSource {
 
         let primary_proof_bytes = decode_hex(&primary_out.proof)?;
         let lh_proof_bytes = decode_hex(&lh_out.proof)?;
+
+        Self::block_from_scenario(scenario, primary_proof_bytes, lh_proof_bytes)
+    }
+
+    fn block_from_scenario(
+        scenario: BoundScenarioJson,
+        primary_proof_bytes: Vec<u8>,
+        lh_proof_bytes: Vec<u8>,
+    ) -> Result<Self, RelayerError> {
 
         if scenario.num_layers == 0 || scenario.num_layers > MAX_LAYER_HASHES {
             return Err(RelayerError::other(format!(
@@ -304,8 +368,18 @@ impl ProverProofsBlockSource {
             )));
         }
 
-        let primary = decode_proof_bytes(&req.primary_proof_hex, self.accept_halo2_proofs)?;
-        let layer = decode_proof_bytes(&req.layer_proof_hex, self.accept_halo2_proofs)?;
+        let primary = proof_validation::decode_verify_block_proof(
+            &req.primary_proof_hex,
+            FinalizationType::Primary,
+            false,
+            self.accept_halo2_proofs,
+        )?;
+        let layer = proof_validation::decode_verify_block_proof(
+            &req.layer_proof_hex,
+            FinalizationType::Primary,
+            true,
+            self.accept_halo2_proofs,
+        )?;
 
         if req.num_layers == 0 || req.num_layers as usize > MAX_LAYER_HASHES {
             return Err(RelayerError::other(format!(
@@ -456,7 +530,12 @@ impl BkUpdateProofsSource {
             }
         };
 
-        let attestation_proof = decode_proof_bytes(&req.primary_proof_hex, self.accept_halo2_proofs)?;
+        let attestation_proof = proof_validation::decode_verify_block_proof(
+            &req.primary_proof_hex,
+            fin_type,
+            false,
+            self.accept_halo2_proofs,
+        )?;
 
         fn hex32_to_array(hex_str: &str, label: &str) -> Result<[u8; 32], RelayerError> {
             let raw = decode_hex(hex_str)?;
@@ -501,26 +580,6 @@ impl BkUpdateSource for BkUpdateProofsSource {
         self.load_update(target_seq_no)
     }
 }
-
-fn decode_proof_bytes(hex_str: &str, accept_halo2: bool) -> Result<Vec<u8>, RelayerError> {
-    let raw = decode_hex(hex_str)?;
-    if raw.len() == GROTH16_PROOF_SIZE {
-        return Ok(raw);
-    }
-    if accept_halo2 {
-        return Ok(raw);
-    }
-    Err(RelayerError::other(format!(
-        "proof is {} bytes; Ethereum `verifyBlock` expects {}-byte Groth16 proofs. Wrap the \
-         partner Halo2 export via gnark-wrappers/circuit-{{1a,2}} before submitting.",
-        raw.len(),
-        GROTH16_PROOF_SIZE
-    )))
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, RelayerError> {
     let trimmed = s.trim();

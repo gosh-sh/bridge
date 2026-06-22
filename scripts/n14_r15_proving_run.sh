@@ -3,6 +3,7 @@
 #
 # Usage (from dev machine):
 #   ./scripts/n14_r15_proving_run.sh sync-and-start
+#   ./scripts/n14_r15_proving_run.sh continue-bc      # skip Phase A if bound proofs exist
 #   ./scripts/n14_r15_proving_run.sh status
 #   ./scripts/n14_r15_proving_run.sh pull-artifacts
 #
@@ -28,8 +29,8 @@ SIBLING_REPOS=(
   bk-set-stub
 )
 
-# Local path for private dense-balanced-tree (cargo git cache on dev machine).
 DENSE_TREE_LOCAL="${DENSE_TREE_LOCAL:-${HOME}/.cargo/git/checkouts/dense-balanced-tree-62b64667ab66462f/0b600eb}"
+SOLC_LOCAL="${SOLC_LOCAL:-${HOME}/.local/bin/solc}"
 
 do_sync() {
   echo "==> rsync sibling repos to n14"
@@ -56,7 +57,6 @@ do_sync() {
     -e "ssh -p 22488" \
     "${LOCAL_ROOT}/" \
     "${N14}:${REMOTE_ROOT}/"
-  # Cargo.lock is gitignored but required on n14 (--locked) so patches win over stale git pins.
   for lock in \
     crates/bridge-prover-orchestrator/Cargo.lock \
     crates/bridge-evm-aggregator/Cargo.lock; do
@@ -67,51 +67,84 @@ do_sync() {
         "${N14}:${REMOTE_ROOT}/${lock}"
     fi
   done
+  if [[ -f "${SOLC_LOCAL}" ]]; then
+    echo "    solc -> n14 ~/bin/solc"
+    ${SSH} "mkdir -p ~/bin"
+    rsync -avz -e "ssh -p 22488" "${SOLC_LOCAL}" "${N14}:~/bin/solc"
+    ${SSH} "chmod +x ~/bin/solc"
+  else
+    echo "    WARN: ${SOLC_LOCAL} not found — Phase B spike/.bin export needs solc on n14"
+  fi
 }
 
+# Remote job body. $1 = skip_phase_a (0|1)
 do_start() {
-  echo "==> starting proving job on n14 (log: ${REMOTE_LOG})"
-  ${SSH} "mkdir -p ${REMOTE_ROOT}/logs ${REMOTE_ROOT}/params ${REMOTE_ROOT}/proofs"
+  local skip_phase_a="${1:-0}"
+  echo "==> starting proving job on n14 (log: ${REMOTE_LOG}, skip_phase_a=${skip_phase_a})"
+  ${SSH} "mkdir -p ${REMOTE_ROOT}/logs ${REMOTE_ROOT}/params ${REMOTE_ROOT}/proofs ~/bin"
   ${SSH} "nohup bash -lc '
     set -euo pipefail
+    export PATH=\"\$HOME/bin:\$PATH\"
     cd ${REMOTE_ROOT}
     exec > ${REMOTE_LOG} 2>&1
     echo \"=== R15 n14 proving started \$(date -Is) ===\"
     echo \"Host: \$(hostname)\"
+    command -v solc && solc --version | head -1 || echo \"WARN: solc not in PATH\"
 
-    # --- Phase A: bound block proofs (1A + 1B + 2, Blake2b; ~3-30 min depending on keygen cache) ---
-    cd crates/bridge-prover-orchestrator
-    echo \"--- cargo +nightly build --release export-bound-block-proofs ---\"
-    cargo +nightly build --release --locked --bin export-bound-block-proofs
-    echo \"--- export-bound-block-proofs ---\"
-    cargo +nightly run --release --locked --bin export-bound-block-proofs -- \
+    BOUND=${REMOTE_ROOT}/proofs/bound/bound_scenario.json
+    SNARK_DIR=${REMOTE_ROOT}/proofs/bound/poseidon-snark
+    SNARK_EXPORTER=${REMOTE_ROOT}/crates/bridge-evm-aggregator/target/release/export-halo2-poseidon-snark
+
+    if [[ \"${skip_phase_a}\" == \"0\" ]] || [[ ! -f \"\${BOUND}\" ]]; then
+      cd crates/bridge-prover-orchestrator
+      echo \"--- Phase A: cargo +nightly build export-bound-block-proofs ---\"
+      cargo +nightly build --release --locked --bin export-bound-block-proofs
+      echo \"--- Phase A: export-bound-block-proofs ---\"
+      cargo +nightly run --release --locked --bin export-bound-block-proofs -- \
+        --params-dir ../../params \
+        --out-dir ../../proofs/bound
+    else
+      echo \"--- Phase A: SKIP (found \${BOUND}) ---\"
+    fi
+
+    cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
+    echo \"--- build export-halo2-poseidon-snark + export-inner-aggregator ---\"
+    cargo +nightly build --release --locked \
+      --bin export-halo2-poseidon-snark \
+      --bin export-inner-aggregator \
+      --bin export-spike-artifacts
+
+    cd ${REMOTE_ROOT}/crates/bridge-prover-orchestrator
+    echo \"--- Phase A2: export-bound-poseidon-snarks ---\"
+    cargo +nightly build --release --locked --bin export-bound-poseidon-snarks
+    cargo +nightly run --release --locked --bin export-bound-poseidon-snarks -- \
       --params-dir ../../params \
-      --out-dir ../../proofs/bound
+      --bound-dir ../../proofs/bound \
+      --snark-dir ../../proofs/bound/poseidon-snark \
+      --snark-exporter \"\${SNARK_EXPORTER}\"
 
-    # --- Phase B: aggregator crate (M2 spike sanity + export-inner-aggregator binary) ---
-    cd ../bridge-evm-aggregator
-    echo \"--- cargo +nightly build --release export-inner-aggregator export-spike-artifacts ---\"
-    cargo +nightly build --release --locked --bin export-inner-aggregator --bin export-spike-artifacts
-    echo \"--- export-spike-artifacts (sanity) ---\"
-    cargo +nightly run --release --locked --bin export-spike-artifacts
+    cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
+    echo \"--- Phase B: export-spike-artifacts (sanity; needs solc) ---\"
+    if command -v solc >/dev/null; then
+      cargo +nightly run --release --locked --bin export-spike-artifacts
+    else
+      echo \"SKIP spike: solc missing\"
+    fi
 
-    # --- Phase C: per-circuit .bin (requires inner Snark bincode — see logs) ---
     OUT=${REMOTE_ROOT}/contracts/ethereum/verifiers
     mkdir -p \"\${OUT}\"
-    SNARK_DIR=${REMOTE_ROOT}/proofs/bound/poseidon-snark
-    mkdir -p \"\${SNARK_DIR}\"
 
     export_one() {
       local snark=\"\$1\" name=\"\$2\" n=\"\$3\"
       if [[ -f \"\${snark}\" ]]; then
-        echo \"--- export-inner-aggregator \${name} ---\"
+        echo \"--- Phase C: export-inner-aggregator \${name} ---\"
         cargo +nightly run --release --locked --bin export-inner-aggregator -- \
           --inner-snark \"\${snark}\" \
           --out-dir \"\${OUT}\" \
           --name \"\${name}\" \
           --inner-instances \"\${n}\"
       else
-        echo \"SKIP \${name}: missing \${snark} (run export-poseidon-inner-snarks first)\"
+        echo \"SKIP \${name}: missing \${snark}\"
       fi
     }
 
@@ -135,6 +168,8 @@ do_status() {
 
 do_pull() {
   echo "==> pull proofs + verifiers + logs"
+  mkdir -p "${LOCAL_ROOT}/crates/bridge-prover-orchestrator/proofs/bound"
+  mkdir -p "${LOCAL_ROOT}/logs"
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/proofs/bound/" \
     "${LOCAL_ROOT}/crates/bridge-prover-orchestrator/proofs/bound/" || true
@@ -143,14 +178,15 @@ do_pull() {
     "${LOCAL_ROOT}/contracts/ethereum/verifiers/" || true
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/logs/r15_proving_"*.log \
-    "${LOCAL_ROOT}/logs/" 2>/dev/null || mkdir -p "${LOCAL_ROOT}/logs"
+    "${LOCAL_ROOT}/logs/" 2>/dev/null || true
 }
 
 case "${cmd}" in
-  sync-and-start) do_sync && do_start ;;
+  sync-and-start) do_sync && do_start 0 ;;
+  continue-bc) do_sync && do_start 1 ;;
   sync) do_sync ;;
-  start) do_start ;;
+  start) do_start 0 ;;
   status) do_status ;;
   pull-artifacts) do_pull ;;
-  *) echo "usage: $0 {sync-and-start|sync|start|status|pull-artifacts}"; exit 1 ;;
+  *) echo "usage: $0 {sync-and-start|continue-bc|sync|start|status|pull-artifacts}"; exit 1 ;;
 esac

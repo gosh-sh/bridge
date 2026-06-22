@@ -53,6 +53,10 @@ path = "src/bin/export_layer_hashes_proof.rs"
 name = "export-bound-block-proofs"
 path = "src/bin/export_bound_block_proofs.rs"
 
+[[bin]]
+name = "export-bound-poseidon-snarks"
+path = "src/bin/export_bound_poseidon_snarks.rs"
+
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.
 # The partner crates declare these via git URLs in their Cargo.toml; without

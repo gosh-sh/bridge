@@ -44,6 +44,7 @@ hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -54,6 +55,10 @@ path = "src/bin/export_spike_artifacts.rs"
 [[bin]]
 name = "export-inner-aggregator"
 path = "src/bin/export_inner_aggregator.rs"
+
+[[bin]]
+name = "export-halo2-poseidon-snark"
+path = "src/bin/export_halo2_poseidon_snark.rs"
 
 [dev-dependencies]
 itertools = "0.13"

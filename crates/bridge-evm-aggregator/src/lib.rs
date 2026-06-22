@@ -38,4 +38,5 @@
 pub mod aggregator;
 pub mod eip170;
 pub mod evm_export;
+pub mod halo2_snark;
 pub mod multiply;

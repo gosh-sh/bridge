@@ -1,7 +1,10 @@
-//! `verifyBlock` proof shape checks for hybrid production wiring.
+//! `verifyBlock` proof shape checks for the production all-SHPLONK wiring.
 //!
-//! - Circuit 1A + 2: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
-//! - Circuit 1B fallback: 256-byte gnark Groth16 marshal-solidity blob.
+//! Circuit 1A, 1B, and 2 are all R15 SHPLONK aggregator calldata
+//! (`instances ‖ proof`). Circuit 1B is keygen'd at K=21 so its aggregated Yul
+//! fits EIP-170 — the gnark Groth16 fallback hybrid is retired. A legacy
+//! 256-byte Groth16 blob is still accepted for back-compat with the per-circuit
+//! Groth16 adapters retained for test coverage.
 
 use crate::{
     error::RelayerError,
@@ -9,8 +12,9 @@ use crate::{
     withdrawal::GROTH16_PROOF_SIZE,
 };
 
-/// Minimum instance prefix for a primary attestation SHPLONK bundle (12 acc + 4 inner).
-pub const SHPLONK_MIN_PRIMARY_INSTANCES: usize = (12 + 4) * 32;
+/// Minimum instance prefix for an attestation SHPLONK bundle (12 acc + 4 inner).
+/// Both Circuit 1A (primary) and Circuit 1B (fallback) expose 4 public inputs.
+pub const SHPLONK_MIN_ATTESTATION_INSTANCES: usize = (12 + 4) * 32;
 
 /// Minimum instance prefix for layer-hashes SHPLONK bundle (12 acc + 14 inner).
 pub const SHPLONK_MIN_LAYER_INSTANCES: usize = (12 + 14) * 32;
@@ -19,27 +23,19 @@ pub fn validate_attestation_proof(
     fin_type: FinalizationType,
     proof: &[u8],
 ) -> Result<(), RelayerError> {
-    match fin_type {
-        FinalizationType::Fallback => {
-            if proof.len() != GROTH16_PROOF_SIZE {
-                return Err(RelayerError::other(format!(
-                    "fallback attestation proof must be {GROTH16_PROOF_SIZE} bytes (Groth16), got {}",
-                    proof.len()
-                )));
-            }
-        },
-        FinalizationType::Primary => {
-            if proof.len() == GROTH16_PROOF_SIZE {
-                return Ok(());
-            }
-            if proof.len() < SHPLONK_MIN_PRIMARY_INSTANCES {
-                return Err(RelayerError::other(format!(
-                    "primary attestation proof too short for SHPLONK aggregator calldata: {} bytes \
-                     (need >= {SHPLONK_MIN_PRIMARY_INSTANCES} or {GROTH16_PROOF_SIZE} Groth16)",
-                    proof.len()
-                )));
-            }
-        },
+    if proof.len() == GROTH16_PROOF_SIZE {
+        return Ok(());
+    }
+    if proof.len() < SHPLONK_MIN_ATTESTATION_INSTANCES {
+        let circuit = match fin_type {
+            FinalizationType::Primary => "primary (1A)",
+            FinalizationType::Fallback => "fallback (1B)",
+        };
+        return Err(RelayerError::other(format!(
+            "{circuit} attestation proof too short for SHPLONK aggregator calldata: {} bytes \
+             (need >= {SHPLONK_MIN_ATTESTATION_INSTANCES} or {GROTH16_PROOF_SIZE} Groth16)",
+            proof.len()
+        )));
     }
     Ok(())
 }
@@ -87,17 +83,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groth16_fallback_ok() {
+    fn groth16_attestation_ok() {
         validate_attestation_proof(FinalizationType::Fallback, &[0u8; 256]).unwrap();
+        validate_attestation_proof(FinalizationType::Primary, &[0u8; 256]).unwrap();
     }
 
     #[test]
-    fn shplonk_primary_ok() {
+    fn shplonk_attestation_ok() {
         validate_attestation_proof(FinalizationType::Primary, &[0u8; 3840]).unwrap();
+        validate_attestation_proof(FinalizationType::Fallback, &[0u8; 3840]).unwrap();
     }
 
     #[test]
-    fn fallback_rejects_shplonk_size() {
-        assert!(validate_attestation_proof(FinalizationType::Fallback, &[0u8; 3840]).is_err());
+    fn attestation_rejects_short_blob() {
+        assert!(validate_attestation_proof(FinalizationType::Fallback, &[0u8; 300]).is_err());
+        assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 300]).is_err());
     }
 }

@@ -42,10 +42,10 @@ impl FinalizationType {
 /// `AckiNackiBridge.verifyBlock`.
 ///
 /// Both proofs are opaque byte strings passed to `verifyBlock`:
-/// - Primary path + layer hashes: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
-/// - Fallback attestation: 256-byte gnark Groth16 marshal-solidity layout.
-/// fields are the cross-circuit-bound public inputs the contract checks
-/// against its stored anchors.
+/// - Circuit 1A / 1B / 2: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
+///   Circuit 1B is keygen'd at K=21 so its aggregated Yul fits EIP-170.
+/// The remaining fields are the cross-circuit-bound public inputs the contract
+/// checks against its stored anchors.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnBlockData {
     pub fin_type: FinalizationType,
@@ -61,9 +61,9 @@ pub struct AnBlockData {
     /// Anchors `prev_max_level_layer_hash` from the previously verified
     /// block (must equal the contract's `storedPrevMaxLevelLayerHash`).
     pub prev_max_level_layer_hash: U256,
-    /// Attestation proof bytes (Circuit 1A SHPLONK calldata or 1B Groth16).
+    /// Attestation proof bytes (Circuit 1A or 1B SHPLONK calldata).
     pub attestation_proof: Bytes,
-    /// Layer-hashes proof bytes (Circuit 2 SHPLONK calldata or legacy Groth16).
+    /// Layer-hashes proof bytes (Circuit 2 SHPLONK calldata).
     pub layer_hashes_proof: Bytes,
 }
 

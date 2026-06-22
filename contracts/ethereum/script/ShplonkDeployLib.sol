@@ -11,14 +11,15 @@ import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/PrimaryAggregatorVerifier.sol";
 import "../src/LayerHashesAggregatorVerifier.sol";
 import "../src/BridgeWithdrawalAggregatorVerifier.sol";
-import "../src/FallbackVerifier.sol";
-import "../src/FallbackGroth16VerifierGenerated.sol";
+import "../src/FallbackAggregatorVerifier.sol";
 
 /// @title ShplonkDeployLib
 /// @notice Deploy R15 SHPLONK Yul bytecode + aggregator adapters for production scripts.
-/// @dev Hybrid verifyBlock wiring (2026-06-22): Primary + LayerHashes use SHPLONK
-///      aggregators; Fallback 1B uses the gnark Groth16 wrapper (~7 KB runtime)
-///      because the 1B inner VK exceeds EIP-170 when aggregated to Yul (~28 KB).
+/// @dev Production verifyBlock wiring (2026-06-22): Primary, Fallback, and
+///      LayerHashes all use SHPLONK aggregators. Circuit 1B is keygen'd at K=21
+///      (vs the K=20 primary path), which halves its auto-configured advice
+///      columns (44 → 22) so the aggregated Yul fits EIP-170 at 21,493 bytes —
+///      identical to Primary. The earlier gnark Groth16 hybrid for 1B is retired.
 library ShplonkDeployLib {
     Vm private constant VM = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
@@ -34,6 +35,10 @@ library ShplonkDeployLib {
     /// @dev Default paths relative to `contracts/ethereum/` when running `forge script`.
     function primaryBinPath() internal view returns (string memory) {
         return VM.envOr("SHPLONK_BIN_PRIMARY", string("verifiers/PrimaryAggregatorVerifier.bin"));
+    }
+
+    function fallbackBinPath() internal view returns (string memory) {
+        return VM.envOr("SHPLONK_BIN_FALLBACK", string("verifiers/FallbackAggregatorVerifier.bin"));
     }
 
     function layerHashesBinPath() internal view returns (string memory) {
@@ -66,10 +71,10 @@ library ShplonkDeployLib {
         return IPrimaryVerifier(address(new PrimaryAggregatorVerifier(wrapper)));
     }
 
-    /// @notice Circuit 1B fallback attestation — gnark Groth16 (EIP-170-safe).
-    function deployFallbackGroth16Adapter() internal returns (IFallbackVerifier) {
-        address groth16 = address(new FallbackGroth16VerifierGenerated());
-        return IFallbackVerifier(address(new FallbackVerifier(groth16)));
+    /// @notice Circuit 1B fallback attestation — SHPLONK aggregator (K=21 inner).
+    function deployFallbackAdapter(string memory binPath) internal returns (IFallbackVerifier) {
+        address wrapper = deployShplonkWrapper(deployYulFromBin(binPath));
+        return IFallbackVerifier(address(new FallbackAggregatorVerifier(wrapper)));
     }
 
     function deployLayerHashesAdapter(string memory binPath)
@@ -88,17 +93,21 @@ library ShplonkDeployLib {
         return IBridgeWithdrawalVerifier(address(new BridgeWithdrawalAggregatorVerifier(wrapper)));
     }
 
-    /// @notice SHPLONK for 1A + 2; Groth16 for 1B fallback.
-    function deployVerifyBlockHybrid(
+    /// @notice Production verifyBlock triple — SHPLONK aggregators for 1A, 1B, and 2.
+    function deployVerifyBlockProduction(
         string memory primaryBin,
+        string memory fallbackBin,
         string memory layerBin
     ) internal returns (VerifyBlockVerifiers memory out) {
         out.primary = deployPrimaryAdapter(primaryBin);
-        out.fallback_ = deployFallbackGroth16Adapter();
+        out.fallback_ = deployFallbackAdapter(fallbackBin);
         out.layerHashes = deployLayerHashesAdapter(layerBin);
     }
 
-    function deployVerifyBlockHybridFromEnv() internal returns (VerifyBlockVerifiers memory out) {
-        return deployVerifyBlockHybrid(primaryBinPath(), layerHashesBinPath());
+    function deployVerifyBlockProductionFromEnv()
+        internal
+        returns (VerifyBlockVerifiers memory out)
+    {
+        return deployVerifyBlockProduction(primaryBinPath(), fallbackBinPath(), layerHashesBinPath());
     }
 }

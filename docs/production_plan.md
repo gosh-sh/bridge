@@ -1,4 +1,4 @@
-# Production Plan — Acki Nacki Bridge (R15 Hybrid)
+# Production Plan — Acki Nacki Bridge (R15 SHPLONK)
 
 **Last updated:** 2026-06-22  
 **Status:** Phase 1 gates implementable; Phase 2–4 blocked on partner / AN wiring.
@@ -11,9 +11,14 @@ This document is the operator-facing production checklist. Automated gates live 
 | Circuit | On-chain verifier | Proof submitted by relayer |
 |---------|-------------------|----------------------------|
 | 1A Primary | `PrimaryAggregatorVerifier` (SHPLONK `.bin`) | `PrimaryAggregatorVerifier_calldata.bin` shape (~3.8 KB) |
-| 1B Fallback | `FallbackVerifier` + `FallbackGroth16VerifierGenerated` | 256-byte Groth16 (Halo2 verified **before** gnark wrap) |
+| 1B Fallback | `FallbackAggregatorVerifier` (SHPLONK `.bin`, K=21 inner) | `FallbackAggregatorVerifier_calldata.bin` shape (~3.8 KB) |
 | 2 Layer hashes | `LayerHashesAggregatorVerifier` (SHPLONK `.bin`) | `LayerHashesAggregatorVerifier_calldata.bin` shape (~3 KB) |
 | 4 Withdrawal | `BridgeWithdrawalAggregatorVerifier` (SHPLONK `.bin`) | C4 aggregator calldata — **not ready** |
+
+All three `verifyBlock` circuits use the R15 SHPLONK aggregator path. Circuit 1B is
+keygen'd at inner `K=21` (one degree above the `K=20` primary path) so its aggregated Yul
+fits EIP-170 at 21 493 B — the gnark Groth16 fallback hybrid is retired (see
+`docs/r15_verifier_sizing_report.md`).
 
 **Never deploy:** identity-stub Groth16 for 1A/2, `MockBridgeWithdrawalVerifier`, legacy
 `PrimaryGroth16VerifierGenerated` / `LayerHashesGroth16VerifierGenerated` in production
@@ -33,7 +38,7 @@ Checks:
 
 1. `verifiers/PrimaryAggregatorVerifier.bin` + `LayerHashesAggregatorVerifier.bin` exist and ≤ 24 576 B
 2. Matching `*_calldata.bin` fixtures present (bound smoke)
-3. `forge test --match-contract 'ShplonkAggregatorForgery|AckiNackiBridgeHybridVerifyBlock|ShplonkDeployLib'`
+3. `forge test --match-contract 'ShplonkAggregatorForgery|AckiNackiBridgeProductionVerifyBlock|ShplonkDeployLib'`
 4. `cargo test` in `bridge-relayer-daemon`
 5. SHA-256 manifest of verifier artefacts
 
@@ -43,29 +48,27 @@ Checks:
 
 ## Phase 1 — `verifyBlock` on Sepolia / shellnet (ready)
 
-**Goal:** Hybrid bridge deployed, paused, smoke-verified, then unpaused for state sync only.
+**Goal:** All-SHPLONK bridge deployed, paused, smoke-verified, then unpaused for state sync only.
 
-**Known issue (2026-06-22):** Primary (1A) SHPLONK calldata verifies in Foundry; full
-`verifyBlock` E2E fails at Circuit 2 (K=22 layer aggregator, `ecpairing` false). Primary-only
-gate: `forge test --match-test test_hybridPrimaryAttestation_isolated`. Layer aggregation
-debug is in progress (`scripts/reexport_layer_verifier.sh` must run from `bridge-evm-aggregator/`
-so `params/kzg_bn254_22.srs` is used). **Do not unpause for production traffic** until full
-hybrid E2E is green.
+**Known issue (2026-06-22):** Primary (1A) and Fallback (1B) SHPLONK calldata both verify in
+Foundry (`test_productionPrimaryAttestation_isolated` / `test_productionFallbackAttestation_isolated`).
+The full `verifyBlock` E2E is still gated on Circuit 2: the layer-hashes SHPLONK proof fails its
+KZG pairing in isolation regardless of `K_outer` (21 or 22), so the issue is in the Circuit 2
+aggregation itself, not the verifier size. `test_productionVerifyBlock_boundCalldata_advancesState`
+skips with a logged note until this is resolved. **Do not unpause for production traffic** until the
+full E2E is green.
 
 ### 1.1 Generate artefacts (n14 or local)
 
 ```bash
-# Full pipeline (A → A2 → C) or resume:
+# Full pipeline (A → A2 → C, exports all three SHPLONK aggregators incl. 1B) or resume:
 ./scripts/n14_r15_proving_run.sh continue-c
 ./scripts/n14_r15_proving_run.sh pull-artifacts
-
-# If hybrid E2E fails on layer calldata, re-pair layer .bin + calldata:
-./scripts/reexport_layer_verifier.sh
-
-# Fallback 1B Groth16 (local — n14 has no Go):
-./scripts/install_fallback_groth16_verifier.sh \
-  crates/bridge-prover-orchestrator/proofs/bound/fallback/halo2_proof.json
 ```
+
+The fallback 1B inner snark keygens at `K=21` (`FALLBACK_K` in
+`crates/bridge-prover-orchestrator/src/keys.rs`); delete `params/fallback_*.bin` to force a
+re-keygen if the degree ever changes.
 
 ### 1.2 Preflight
 
@@ -150,8 +153,7 @@ Keep `withdrawByProof` disabled until this phase completes.
 
 | Step | Owner |
 |------|-------|
-| Partner prover emits SHPLONK calldata for 1A + 2 (not 256-byte Groth16) | Partner |
-| gnark wrap pipeline for 1B fallback blocks | Bridge / operator |
+| Partner prover emits SHPLONK calldata for 1A + 1B + 2 (not 256-byte Groth16) | Partner |
 | `relayer daemon-prover` on n14 + Sepolia signer | Ops |
 | 10-block shellnet acceptance (runbook §4 step A) | Bridge team |
 
@@ -170,7 +172,7 @@ Keep `withdrawByProof` disabled until this phase completes.
 
 ## Phase 6 — Mainnet readiness
 
-- External audit sign-off on hybrid trust model (especially 1B fallback)
+- External audit sign-off on the all-SHPLONK trust model (1A/1B/2 aggregator verifiers)
 - Treasury / pause / multisig runbooks
 - Monitoring: relayer metrics, `storedLastSeenBlockSeqNo`, nullifier set
 - Incident: `pause()` + rotate keys if proving material leaks

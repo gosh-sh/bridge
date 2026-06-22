@@ -162,23 +162,9 @@ do_start() {
     }
 
     export_one \"\${SNARK_DIR}/primary.snark\" PrimaryAggregatorVerifier
+    export_one \"\${SNARK_DIR}/fallback.snark\" FallbackAggregatorVerifier
     export_one \"\${SNARK_DIR}/layer_hashes.snark\" LayerHashesAggregatorVerifier
     export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier
-
-    FALLBACK_JSON=${REMOTE_ROOT}/proofs/bound/fallback/halo2_proof.json
-    if [[ -f \"\${FALLBACK_JSON}\" ]]; then
-      echo \"--- Phase C-fb: gnark Groth16 wrap Circuit 1B (EIP-170 fallback path) ---\"
-      cd ${REMOTE_ROOT}
-      chmod +x scripts/install_fallback_groth16_verifier.sh
-      if command -v go >/dev/null; then
-        ./scripts/install_fallback_groth16_verifier.sh \"\${FALLBACK_JSON}\" || \\
-          echo \"WARN: fallback Groth16 failed (non-fatal; run locally and rsync FallbackGroth16VerifierGenerated.sol)\"
-      else
-        echo \"WARN: go not in PATH on n14 — skip C-fb; run scripts/install_fallback_groth16_verifier.sh locally\"
-      fi
-    else
-      echo \"SKIP fallback Groth16: missing \${FALLBACK_JSON}\"
-    fi
 
     echo \"--- EIP-170 check ---\"
     cd ${REMOTE_ROOT}
@@ -204,9 +190,6 @@ do_pull() {
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/contracts/ethereum/verifiers/" \
     "${LOCAL_ROOT}/contracts/ethereum/verifiers/" || true
-  rsync -avz -e "ssh -p 22488" \
-    "${N14}:${REMOTE_ROOT}/contracts/ethereum/src/FallbackGroth16VerifierGenerated.sol" \
-    "${LOCAL_ROOT}/contracts/ethereum/src/" 2>/dev/null || true
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/logs/r15_proving_"*.log \
     "${LOCAL_ROOT}/logs/" 2>/dev/null || true

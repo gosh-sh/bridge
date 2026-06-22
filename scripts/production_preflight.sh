@@ -43,54 +43,47 @@ warn_missing() {
   fi
 }
 
-echo "--- [1/6] EIP-170 verifier sizes ---"
+echo "--- [1/5] EIP-170 verifier sizes ---"
 chmod +x scripts/check_eip170_verifier_bins.sh
 if ! ./scripts/check_eip170_verifier_bins.sh "${VERIFIERS}"; then
   fail=1
 fi
 
-echo "--- [2/6] Required hybrid verifyBlock artefacts ---"
+echo "--- [2/5] Required production verifyBlock artefacts (all SHPLONK) ---"
 require_file "${VERIFIERS}/PrimaryAggregatorVerifier.bin" "Primary SHPLONK runtime"
+require_file "${VERIFIERS}/FallbackAggregatorVerifier.bin" "Fallback SHPLONK runtime (K=21)"
 require_file "${VERIFIERS}/LayerHashesAggregatorVerifier.bin" "LayerHashes SHPLONK runtime"
 require_file "${VERIFIERS}/PrimaryAggregatorVerifier_calldata.bin" "Primary smoke calldata"
+require_file "${VERIFIERS}/FallbackAggregatorVerifier_calldata.bin" "Fallback smoke calldata"
 require_file "${VERIFIERS}/LayerHashesAggregatorVerifier_calldata.bin" "LayerHashes smoke calldata"
-require_file "${ROOT}/contracts/ethereum/src/FallbackGroth16VerifierGenerated.sol" "Fallback Groth16 verifier"
 
 warn_missing "${VERIFIERS}/BridgeWithdrawalAggregatorVerifier.bin" "C4 withdrawal SHPLONK (Phase 2)"
 
-echo "--- [3/6] Artefact manifest ---"
+echo "--- [3/5] Artefact manifest ---"
 (
   cd "${VERIFIERS}"
   sha256sum *.bin 2>/dev/null || true
 ) | tee "${LOG_DIR}/verifiers.sha256"
 
-echo "--- [4/6] Foundry production gate tests ---"
+echo "--- [4/5] Foundry production gate tests ---"
 (
   cd contracts/ethereum
   forge test --match-contract "ShplonkAggregatorForgery|ShplonkDeployLib" -vv
-  forge test --match-test test_hybridPrimaryAttestation_isolated -vv
-  if forge test --match-test test_hybridVerifyBlock_boundCalldata_advancesState -vv; then
-    echo "OK: full hybrid verifyBlock E2E"
+  forge test --match-test test_productionPrimaryAttestation_isolated -vv
+  forge test --match-test test_productionFallbackAttestation_isolated -vv
+  if forge test --match-test test_productionVerifyBlock_boundCalldata_advancesState -vv; then
+    echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
   else
-    echo "WARN: full hybrid verifyBlock E2E failed (layer K=22) — primary path OK; see docs/production_plan.md" >&2
+    echo "WARN: full verifyBlock E2E failed (layer K=22) — attestation paths OK; see docs/production_plan.md" >&2
     warn=1
   fi
 )
 
-echo "--- [5/6] Relayer unit tests ---"
+echo "--- [5/5] Relayer unit tests ---"
 (
   cd crates/bridge-relayer-daemon
   cargo test --quiet
 )
-
-echo "--- [6/6] Fallback bound Groth16 (optional local wrap) ---"
-FB="${ROOT}/crates/bridge-prover-orchestrator/proofs/bound/fallback/groth16_proof.hex"
-if [[ -f "${FB}" ]]; then
-  echo "OK: fallback groth16_proof.hex present"
-else
-  echo "WARN: run scripts/install_fallback_groth16_verifier.sh for bound fallback smoke" >&2
-  warn=1
-fi
 
 echo "=== Preflight summary ==="
 if (( fail )); then

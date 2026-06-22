@@ -11,8 +11,8 @@ import "../src/IBridgeWithdrawalVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
-/// @notice Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators for 1A/2,
-///         gnark Groth16 for 1B fallback, SHPLONK for C4 when `.bin` exists.
+/// @notice Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators for 1A/1B/2,
+///         SHPLONK for C4 when `.bin` exists.
 /// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
 ///      `verifiers/LayerHashesAggregatorVerifier.bin` (or `SHPLONK_BIN_*` overrides).
 ///      Bridge starts paused unless `START_PAUSED=false`.
@@ -62,10 +62,10 @@ contract DeployShellnetE2EBridge is Script {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         console.log("MockBlockHeaderOracle:", address(oracle));
 
-        (vb.primary, vb.fallback_, vb.layerHashes) = _deployHybridVerifyBlockTriple();
+        (vb.primary, vb.fallback_, vb.layerHashes) = _deployProductionVerifyBlockTriple();
         wd.verifier = ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
         console.log("PrimaryAggregatorVerifier:", address(vb.primary));
-        console.log("FallbackVerifier (Groth16):", address(vb.fallback_));
+        console.log("FallbackAggregatorVerifier:", address(vb.fallback_));
         console.log("LayerHashesAggregatorVerifier:", address(vb.layerHashes));
         console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
 
@@ -88,12 +88,12 @@ contract DeployShellnetE2EBridge is Script {
         console.log("startPaused:", startPaused);
     }
 
-    function _deployHybridVerifyBlockTriple()
+    function _deployProductionVerifyBlockTriple()
         internal
         returns (IPrimaryVerifier, IFallbackVerifier, ILayerHashesMovementVerifier)
     {
         ShplonkDeployLib.VerifyBlockVerifiers memory v =
-            ShplonkDeployLib.deployVerifyBlockHybridFromEnv();
+            ShplonkDeployLib.deployVerifyBlockProductionFromEnv();
         return (v.primary, v.fallback_, v.layerHashes);
     }
 

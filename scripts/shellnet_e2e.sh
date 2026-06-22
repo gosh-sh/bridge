@@ -24,7 +24,7 @@ if command -v cargo >/dev/null; then
     echo "  (skip: deposit-relayer an-preflight unavailable or AN unreachable)"
 fi
 
-echo "[3/4] Bridge-relayer verify-fixture (hybrid calldata auto-detected)"
+echo "[3/4] Bridge-relayer verify-fixture (SHPLONK calldata auto-detected)"
 if [[ -n "$RPC_URL" && -n "$BRIDGE" ]]; then
   (cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
     --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \

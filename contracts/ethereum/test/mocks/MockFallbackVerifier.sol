@@ -6,10 +6,10 @@ import "../../src/IFallbackVerifier.sol";
 /// @title MockFallbackVerifier
 /// @notice Configurable mock for `IFallbackVerifier`. Used by Phase 4
 ///         `AckiNackiBridge.verifyBlock` tests to exercise the Fallback
-///         finalization branch without spinning up another real Halo2 →
-///         gnark wrap pipeline. The real Fallback verifier itself is
-///         exercised in `FallbackVerifier.t.sol` against the production
-///         `FallbackGroth16VerifierGenerated.sol`.
+///         finalization branch without generating a real Circuit 1B proof.
+///         The real Fallback verifier itself is exercised end-to-end in
+///         `AckiNackiBridgeProductionVerifyBlock.t.sol` against the production
+///         `FallbackAggregatorVerifier.sol` (SHPLONK, K=21 inner).
 ///
 /// @dev `IFallbackVerifier.verifyFallbackAttestation` is declared `view`;
 ///      this mock keeps that mutability and reads `shouldAccept` from

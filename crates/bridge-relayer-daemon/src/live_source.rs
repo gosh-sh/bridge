@@ -379,7 +379,7 @@ mod tests {
         let err = src.fetch(1).await.expect_err("bad proof length");
         match err {
             RelayerError::Other(msg) => assert!(
-                msg.contains("primary attestation proof too short"),
+                msg.contains("attestation proof too short"),
                 "unexpected: {msg}"
             ),
             other => panic!("expected Other, got {other:?}"),

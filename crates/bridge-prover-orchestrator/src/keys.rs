@@ -1,14 +1,17 @@
 //! Fallback (Circuit 1B) key management.
 //!
 //! Mirrors `bridge_prover_lib::keys::KeyManager` but for
-//! `FallbackAttestationBlsCheckerCircuit`. Uses the same K, lookup bits, limb
-//! sizes, and SerdeFormat as the partner's primary path so
-//! a single `kzg_bn254_20.srs` file is shared.
+//! `FallbackAttestationBlsCheckerCircuit`. Uses the same lookup bits, limb
+//! sizes, and SerdeFormat as the partner's primary path, but keygens at
+//! [`FALLBACK_K`] (= 21, one degree above the primary path's K = 20) so the
+//! R15 SHPLONK aggregator Yul fits under EIP-170 — see the [`FALLBACK_K`] doc.
+//! The degree-21 SRS shares tau with the degree-20 slice, so a single Hermez
+//! ceremony file backs both.
 //!
 //! On disk (under `params_dir`):
-//! - `kzg_bn254_{K}.srs` — **Hermez Perpetual Powers of Tau (BN254, K=20
-//!   slice)** SRS, loaded by `halo2_base::utils::fs::gen_srs` (shared with
-//!   primary). Provenance: `powersOfTau28_hez_final.ptau` →
+//! - `kzg_bn254_{FALLBACK_K}.srs` — **Hermez Perpetual Powers of Tau (BN254,
+//!   K=21 slice)** SRS, loaded by `halo2_base::utils::fs::gen_srs` (tau-shared
+//!   with the primary/layer K=20 slice). Provenance: `powersOfTau28_hez_final.ptau` →
 //!   `han0110/halo2-kzg-srs` `convert-from-snarkjs` → raw halo2 canonical
 //!   format, validated via `same_ratio` (`e(g[1], g2) == e(g[0], s_g2)`).
 //!   SHA-256: `80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608`.
@@ -40,12 +43,30 @@ use halo2_base::{
 use tracing::info;
 
 use crate::{
-    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
+    circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
     circuit_num_unusable_rows,
 };
 
 const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
 const PREFIX: &str = "fallback";
+
+/// Keygen degree for Circuit 1B.
+///
+/// The fallback circuit verifies **two** attestation envelopes (the primary
+/// `attestation_bytes` plus the fallback `attestation_2_bytes`), so at the
+/// primary path's `K = 20` halo2-lib auto-configures it to ~44 advice columns
+/// — nearly double the primary circuit's 24. The R15 SHPLONK aggregator's Yul
+/// verifier size scales with the inner circuit's column count, which pushed
+/// `FallbackAggregatorVerifier.bin` to ~28.4 KB, over the 24,576-byte EIP-170
+/// limit (see `docs/r15_verifier_sizing_report.md`).
+///
+/// Proving at `K = 21` spreads the same gates over twice the rows, halving the
+/// auto-configured advice columns to a primary-like ~22 and shrinking the
+/// aggregator Yul under EIP-170 — letting Circuit 1B use the production SHPLONK
+/// adapter instead of the gnark Groth16 hybrid. The degree-21 KZG SRS shares
+/// tau with the degree-20 slice used by the primary/layer snarks, so on-chip
+/// aggregation stays consistent.
+const FALLBACK_K: u32 = 21;
 
 /// Holds SRS, VK, PK, and the cached `BaseCircuitParams` for Circuit 1B.
 pub struct FallbackKeyManager {
@@ -67,7 +88,7 @@ impl FallbackKeyManager {
         // gen_srs reads PARAMS_DIR for caching; mirror partner's pattern exactly.
         let prev_dir = std::env::current_dir().unwrap();
         std::env::set_var("PARAMS_DIR", params_dir.to_str().unwrap());
-        let srs = gen_srs(circuit_k());
+        let srs = gen_srs(FALLBACK_K);
         std::env::set_current_dir(&prev_dir).ok();
 
         let mut mgr = Self {
@@ -121,7 +142,7 @@ impl FallbackKeyManager {
             attestation_2_bytes,
             test_data.bk_set,
             last_seen,
-            circuit_k() as usize,
+            FALLBACK_K as usize,
             circuit_num_unusable_rows(),
             circuit_lookup_bits(),
             circuit_limb_bits(),

@@ -28,7 +28,8 @@ pub use circuit4_prover::{
     CIRCUIT4_NUM_PUBLIC_INPUTS,
 };
 pub use bound_test_data::{
-    build_bound_test_data, compose_layer_hashes_input, promote_bridge_test_data, BoundBlockTestData,
+    build_bound_test_data, compose_layer_hashes_input, load_bound_witness_cache,
+    promote_bridge_test_data, save_bound_witness_cache, BoundBlockTestData,
 };
 pub use bridge_prover_lib::{
     keys::{

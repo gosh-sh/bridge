@@ -25,8 +25,15 @@
 //! the data is non-deterministic across runs. The export binary captures the
 //! generated public inputs in JSON and reuses them in Foundry fixtures; we
 //! never need byte-level reproducibility, only same-process consistency.
+//!
+//! For the Poseidon re-prove pass (R15 aggregator), [`save_bound_witness_cache`]
+//! / [`load_bound_witness_cache`] persist the exact witness so Phase A2 does
+//! not regenerate a different random scenario.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::Path,
+};
 
 use anyhow::Context;
 use bridge_test_data_gen::{
@@ -39,12 +46,130 @@ use bridge_test_data_gen::{
     types::AttestationTargetType,
 };
 use gosh_dense_balanced_tree::DenseChainLink;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
+use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, ff::PrimeField};
 use historical_layer_hashes_movement_checker_circuit::{
     test_helpers::bytes_le_to_fr, LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
 };
 
 use crate::layer_hashes_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DenseChainLinkCache {
+    active: bool,
+    siblings: Vec<[u8; 32]>,
+    position: usize,
+    leaf_native: [u8; 32],
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct BoundWitnessCache {
+    block_id_bytes: [u8; 32],
+    block_id_fr: [u8; 32],
+    bk_set: HashMap<SignerIndex, Vec<u8>>,
+    bk_set_poseidon_fr: [u8; 32],
+    block_seq_no: u32,
+    last_seen_block_seqno: u32,
+    attestation_primary_bytes: Vec<u8>,
+    attestation_fallback_bytes: Option<Vec<u8>>,
+    layer_hashes_preimage: Vec<u8>,
+    merkle_siblings: [[u8; 32]; NUM_MERKLE_SIBLINGS],
+    prev_max_level_layer_hash: [u8; 32],
+    num_prev_chain_steps: u8,
+    prev_chain_proofs: Vec<DenseChainLinkCache>,
+    layer_hash_frs: [[u8; 32]; MAX_LAYERS],
+    num_layers: u32,
+    layer_hashes_expected_instances: [[u8; 32]; LAYER_HASHES_NUM_PUBLIC_INPUTS],
+}
+
+fn fr_to_bytes(fr: Fr) -> [u8; 32] {
+    let repr = fr.to_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(repr.as_ref());
+    out
+}
+
+fn bytes_to_fr(bytes: [u8; 32]) -> Fr {
+    let mut repr = <Fr as PrimeField>::Repr::default();
+    repr.as_mut().copy_from_slice(&bytes);
+    Fr::from_repr(repr).expect("invalid Fr in bound witness cache")
+}
+
+impl BoundWitnessCache {
+    pub fn from_bound(bound: &BoundBlockTestData) -> Self {
+        Self {
+            block_id_bytes: bound.block_id_bytes,
+            block_id_fr: fr_to_bytes(bound.block_id_fr),
+            bk_set: bound.bk_set.clone(),
+            bk_set_poseidon_fr: fr_to_bytes(bound.bk_set_poseidon_fr),
+            block_seq_no: bound.block_seq_no,
+            last_seen_block_seqno: bound.last_seen_block_seqno,
+            attestation_primary_bytes: bound.attestation_primary_bytes.clone(),
+            attestation_fallback_bytes: bound.attestation_fallback_bytes.clone(),
+            layer_hashes_preimage: bound.layer_hashes_preimage.to_vec(),
+            merkle_siblings: bound.merkle_siblings,
+            prev_max_level_layer_hash: fr_to_bytes(bound.prev_max_level_layer_hash),
+            num_prev_chain_steps: bound.num_prev_chain_steps,
+            prev_chain_proofs: bound
+                .prev_chain_proofs
+                .iter()
+                .map(|link| DenseChainLinkCache {
+                    active: link.active,
+                    siblings: link.siblings.clone(),
+                    position: link.position,
+                    leaf_native: link.leaf_native,
+                })
+                .collect(),
+            layer_hash_frs: bound.layer_hash_frs.map(fr_to_bytes),
+            num_layers: bound.num_layers,
+            layer_hashes_expected_instances: bound.layer_hashes_expected_instances.map(fr_to_bytes),
+        }
+    }
+
+    pub fn into_bound(self) -> BoundBlockTestData {
+        BoundBlockTestData {
+            block_id_bytes: self.block_id_bytes,
+            block_id_fr: bytes_to_fr(self.block_id_fr),
+            bk_set: self.bk_set,
+            bk_set_poseidon_fr: bytes_to_fr(self.bk_set_poseidon_fr),
+            block_seq_no: self.block_seq_no,
+            last_seen_block_seqno: self.last_seen_block_seqno,
+            attestation_primary_bytes: self.attestation_primary_bytes,
+            attestation_fallback_bytes: self.attestation_fallback_bytes,
+            layer_hashes_preimage: {
+                let mut a = [0u8; LAYER_PREIMAGE_SIZE];
+                a.copy_from_slice(&self.layer_hashes_preimage);
+                a
+            },
+            merkle_siblings: self.merkle_siblings,
+            prev_max_level_layer_hash: bytes_to_fr(self.prev_max_level_layer_hash),
+            num_prev_chain_steps: self.num_prev_chain_steps,
+            prev_chain_proofs: self
+                .prev_chain_proofs
+                .into_iter()
+                .map(|link| DenseChainLink {
+                    active: link.active,
+                    siblings: link.siblings,
+                    position: link.position,
+                    leaf_native: link.leaf_native,
+                })
+                .collect(),
+            layer_hash_frs: self.layer_hash_frs.map(bytes_to_fr),
+            num_layers: self.num_layers,
+            layer_hashes_expected_instances: self.layer_hashes_expected_instances.map(bytes_to_fr),
+        }
+    }
+}
+
+pub fn save_bound_witness_cache(bound: &BoundBlockTestData, path: &Path) -> anyhow::Result<()> {
+    let bytes = bincode::serialize(&BoundWitnessCache::from_bound(bound))?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+pub fn load_bound_witness_cache(path: &Path) -> anyhow::Result<BoundBlockTestData> {
+    let bytes = std::fs::read(path)?;
+    Ok(bincode::deserialize::<BoundWitnessCache>(&bytes)?.into_bound())
+}
 
 /// Cross-circuit bound block test data.
 ///

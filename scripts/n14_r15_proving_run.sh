@@ -30,7 +30,7 @@ SIBLING_REPOS=(
 )
 
 DENSE_TREE_LOCAL="${DENSE_TREE_LOCAL:-${HOME}/.cargo/git/checkouts/dense-balanced-tree-62b64667ab66462f/0b600eb}"
-SOLC_LOCAL="${SOLC_LOCAL:-${HOME}/.local/bin/solc}"
+SOLC_LOCAL="${SOLC_LOCAL:-/usr/bin/solc}"
 
 do_sync() {
   echo "==> rsync sibling repos to n14"
@@ -68,11 +68,12 @@ do_sync() {
     fi
   done
   if [[ -f "${SOLC_LOCAL}" ]]; then
-    echo "    solc -> n14 ~/bin/solc"
-    ${SSH} "mkdir -p ~/bin && rm -f ~/bin/solc"
-    SOLC_REAL="$(readlink -f "${SOLC_LOCAL}" 2>/dev/null || realpath "${SOLC_LOCAL}")"
-    rsync -avz -e "ssh -p 22488" "${SOLC_REAL}" "${N14}:~/bin/solc"
-    ${SSH} "chmod +x ~/bin/solc && ~/bin/solc --version | head -1"
+    echo "    solc -> n14 ~/bin/solc (static linux fallback on n14 if rsync binary incompatible)"
+    ${SSH} "mkdir -p ~/bin"
+    if ! ${SSH} "~/bin/solc --version >/dev/null 2>&1"; then
+      ${SSH} "curl -fsSL -o ~/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux && chmod +x ~/bin/solc"
+    fi
+    ${SSH} "~/bin/solc --version | head -1"
   else
     echo "    WARN: ${SOLC_LOCAL} not found — Phase B spike/.bin export needs solc on n14"
   fi
@@ -93,10 +94,13 @@ do_start() {
     command -v solc && solc --version | head -1 || echo \"WARN: solc not in PATH\"
 
     BOUND=${REMOTE_ROOT}/proofs/bound/bound_scenario.json
+    WITNESS=${REMOTE_ROOT}/proofs/bound/bound_witness.bin
     SNARK_DIR=${REMOTE_ROOT}/proofs/bound/poseidon-snark
     SNARK_EXPORTER=${REMOTE_ROOT}/crates/bridge-evm-aggregator/target/release/export-halo2-poseidon-snark
 
-    if [[ \"${skip_phase_a}\" == \"0\" ]] || [[ ! -f \"\${BOUND}\" ]]; then
+    if [[ -f \"\${WITNESS}\" ]] && [[ \"${skip_phase_a}\" == \"1\" ]]; then
+      echo \"--- Phase A: SKIP (found \${WITNESS}) ---\"
+    else
       cd crates/bridge-prover-orchestrator
       echo \"--- Phase A: cargo +nightly build export-bound-block-proofs ---\"
       cargo +nightly build --release --locked --bin export-bound-block-proofs
@@ -104,8 +108,6 @@ do_start() {
       cargo +nightly run --release --locked --bin export-bound-block-proofs -- \
         --params-dir ../../params \
         --out-dir ../../proofs/bound
-    else
-      echo \"--- Phase A: SKIP (found \${BOUND}) ---\"
     fi
 
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator

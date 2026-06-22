@@ -45,6 +45,7 @@ use bridge_prover_orchestrator::{
     generate_fallback_proof, generate_layer_hashes_proof,
     layer_hashes_keys::LayerHashesReferenceWitness,
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
+    save_bound_witness_cache,
     BoundBlockTestData, FallbackKeyManager, Fr, LayerHashesKeyManager, LAYER_HASHES_K,
 };
 use clap::Parser;
@@ -141,6 +142,9 @@ fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     let bound = build_bound_test_data(args.signers, args.num_layers, args.num_chain_steps, true)
         .context("building bound test data failed")?;
+
+    save_bound_witness_cache(&bound, &out_dir.join("bound_witness.bin"))
+        .context("save bound_witness.bin")?;
 
     let attestation_instances = bound.attestation_instances();
     // 1A and 1B share the same public-instance layout; reuse the vector.

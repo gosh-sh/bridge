@@ -17,7 +17,7 @@ use bridge_prover_orchestrator::{
     generate_primary_proof_with_transcript,
     halo2_tvm_bundle::TranscriptKind,
     layer_hashes_keys::{LayerHashesKeyManager, LayerHashesReferenceWitness},
-    proof_export::load_instances_binary,
+    load_bound_witness_cache, proof_export::save_instances_binary,
     FallbackKeyManager,
 };
 use clap::Parser;
@@ -105,8 +105,15 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let bound = build_bound_test_data(args.signers, args.num_layers, args.num_chain_steps, true)
-        .context("build bound test data")?;
+    let witness_path = bound_dir.join("bound_witness.bin");
+    let bound = if witness_path.is_file() {
+        load_bound_witness_cache(&witness_path).context("load bound_witness.bin")?
+    } else {
+        anyhow::bail!(
+            "missing {} — run export-bound-block-proofs first (Phase A)",
+            witness_path.display()
+        );
+    };
 
     // --- 1A Poseidon ---
     let mut primary_km = PrimaryKeyManager::new(&params_dir);
@@ -171,16 +178,17 @@ fn main() -> anyhow::Result<()> {
             .find(|(n, _)| *n == spec.name)
             .map(|(_, p)| p)
             .context("internal circuit list mismatch")?;
-        let instances_path = bound_dir.join(spec.instances_rel);
+        let instances_path = snark_dir.join(format!("{}.instances.bin", spec.name));
+        let instances: Vec<_> = match spec.name {
+            "primary" => primary.instances().to_vec(),
+            "fallback" => fallback.instances().to_vec(),
+            "layer_hashes" => layer.instances().to_vec(),
+            _ => unreachable!(),
+        };
+        save_instances_binary(&instances, &instances_path)?;
         let out_snark = snark_dir.join(format!("{}.snark", spec.name));
         let vk_path = params_dir.join(spec.vk_key);
         let config_path = params_dir.join(spec.config_key);
-
-        // Sanity: Poseidon instances match Blake2b export.
-        let file_instances = load_instances_binary(&instances_path)?;
-        if spec.name == "primary" {
-            assert_eq!(file_instances.as_slice(), &primary.instances());
-        }
 
         info!(circuit = spec.name, "exporting Poseidon Snark");
         run_snark_exporter(

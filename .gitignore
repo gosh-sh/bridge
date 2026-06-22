@@ -62,6 +62,7 @@ crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit.r1cs
 crates/bridge-prover-orchestrator/gnark-wrappers/*/Groth16Verifier.sol
+contracts/ethereum/test/fixtures/r15_spike/MultiplierSpikeVerifier.sol
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_proof.hex
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_public_inputs.hex
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_output.json

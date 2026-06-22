@@ -42,10 +42,10 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BackoffConfig, BkSetSentry, BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient,
-    FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer,
-    RelayerConfig, RelayerMetrics, SentryGuardedRelayer, SentryStatus, TickOutcome,
-    WithdrawSubmitOutcome,
+    BackoffConfig, BkSetUpdateSubmitOutcome, BkSetSentry, BkUpdateProofsSource, BkUpdateSource,
+    BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
+    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics,
+    SentryGuardedRelayer, SentryStatus, TickOutcome, WithdrawSubmitOutcome,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -253,6 +253,23 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Submit one `applyBkSetUpdate` from partner `bkupd_<seqno>.json`.
+    SubmitBkUpdate {
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long)]
+        block_seq_no: u64,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        #[arg(long)]
+        skip_verified_gate: bool,
+        #[arg(long)]
+        accept_halo2_proofs: bool,
+    },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
 }
@@ -427,6 +444,28 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "submit-withdraw failed");
                 e
             }),
+        Cmd::SubmitBkUpdate {
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            skip_verified_gate,
+            accept_halo2_proofs,
+        } => submit_bk_update(
+            proofs_dir,
+            block_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            skip_verified_gate,
+            accept_halo2_proofs,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "submit-bk-update failed");
+            e
+        }),
     }
 }
 
@@ -1056,6 +1095,43 @@ async fn submit_withdraw(
         } => {
             anyhow::bail!("withdrawByProof reverted: {reason}");
         },
+    }
+    Ok(())
+}
+
+async fn submit_bk_update(
+    proofs_dir: PathBuf,
+    block_seq_no: u64,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    skip_verified_gate: bool,
+    accept_halo2_proofs: bool,
+) -> anyhow::Result<()> {
+    let source = BkUpdateProofsSource::new(&proofs_dir)
+        .skip_verified_gate(skip_verified_gate)
+        .accept_halo2_proofs(accept_halo2_proofs);
+    let update = source
+        .fetch_bk_update(block_seq_no)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no bkupd bundle for seq_no={block_seq_no}"))?;
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    match bridge.submit_bk_set_update(&update).await? {
+        BkSetUpdateSubmitOutcome::Applied {
+            tx_hash,
+        } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
+        BkSetUpdateSubmitOutcome::Reverted {
+            reason,
+        } => anyhow::bail!("applyBkSetUpdate reverted: {reason}"),
     }
     Ok(())
 }

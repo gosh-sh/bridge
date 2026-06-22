@@ -36,4 +36,6 @@
 //! `tests/round_trip.rs` for the Rust-only acceptance check.
 
 pub mod aggregator;
+pub mod eip170;
+pub mod evm_export;
 pub mod multiply;

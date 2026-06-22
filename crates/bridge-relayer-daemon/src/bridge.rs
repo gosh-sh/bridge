@@ -42,7 +42,7 @@ use async_trait::async_trait;
 
 use crate::{
     error::RelayerError,
-    types::{AnBlockData, MAX_LAYER_HASHES},
+    types::{AnBlockData, BkSetUpdateData, MAX_LAYER_HASHES},
     withdrawal::WithdrawalPublicInputs,
 };
 
@@ -256,8 +256,20 @@ mod sol_bindings {
                 uint256 prevMaxLevelLayerHash
             ) external;
 
+            function applyBkSetUpdate(
+                uint8 finType,
+                bytes calldata attestationProof,
+                uint256 blockId,
+                uint64 blockSeqNo,
+                uint256 oldCommitmentL2,
+                uint256 newCommitmentL3,
+                bytes32 siblingH0,
+                bytes32 siblingH23
+            ) external;
+
             function storedLastSeenBlockSeqNo() external view returns (uint64);
             function storedBkSetCommitment() external view returns (uint256);
+            function storedLastBkSetUpdateSeqNo() external view returns (uint64);
             function storedPrevMaxLevelLayerHash() external view returns (uint256);
 
             struct WithdrawalPublicInputs {
@@ -401,6 +413,36 @@ where
         }
     }
 
+    /// Submit `applyBkSetUpdate` for a BK-set rotation bundle (`bkupd_*.json`).
+    pub async fn submit_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        let call = self.contract.applyBkSetUpdate(
+            update.fin_type.tag(),
+            update.attestation_proof.clone(),
+            update.block_id,
+            update.block_seq_no,
+            update.old_commitment_l2,
+            update.new_commitment_l3,
+            B256::from(update.sibling_h0),
+            B256::from(update.sibling_h23),
+        );
+        match call.send().await {
+            Ok(pending) => match pending.get_receipt().await {
+                Ok(receipt) => Ok(BkSetUpdateSubmitOutcome::Applied {
+                    tx_hash: receipt.transaction_hash(),
+                }),
+                Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!("tx confirmation error: {e}"),
+                }),
+            },
+            Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!("applyBkSetUpdate send failed: {e}"),
+            }),
+        }
+    }
+
     pub async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
         self.contract
             .isNullifierUsed(nullifier)
@@ -414,6 +456,13 @@ where
 #[derive(Clone, Debug)]
 pub enum WithdrawSubmitOutcome {
     Paid { tx_hash: B256 },
+    Reverted { reason: String },
+}
+
+/// Outcome of [`EthBridgeClient::submit_bk_set_update`].
+#[derive(Clone, Debug)]
+pub enum BkSetUpdateSubmitOutcome {
+    Applied { tx_hash: B256 },
     Reverted { reason: String },
 }
 

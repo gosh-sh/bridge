@@ -14,14 +14,10 @@
 //! ## Scope boundary
 //!
 //! The AN `/v2/` REST surface is **read-only** (BK-set views only); there is
-//! no transaction-submission endpoint there, and no live
-//! [`acki_nacki_interface::IAckiNacki`] implementation exists yet (only the
-//! mock — the AN team ships the `tvm-sdk`-backed client). So this config wires
-//! and verifies the *read* path against real endpoints; the actual
-//! `finalizeDeposit` *send* still flows through
-//! [`crate::submitter::AnInterfaceSubmitter`] over a (currently mock)
-//! `IAckiNacki`. [`AnConfig::to_submit_config`] produces the submitter config
-//! so the two halves share one source of truth.
+//! no transaction-submission endpoint there. Live submission uses
+//! [`acki_nacki_interface::TvmAckiNacki`] (tvm-sdk feature) via
+//! [`crate::submitter::AnInterfaceSubmitter`] when the daemon runs without
+//! `--dry-run` and `AnConfig::is_live_submit_ready()` is satisfied.
 
 use acki_nacki_interface::{BkSetClient, ExtendedAddress};
 use serde::{Deserialize, Serialize};

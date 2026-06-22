@@ -66,6 +66,19 @@ pub struct AnBlockData {
     pub layer_hashes_proof: Bytes,
 }
 
+/// Data for `AckiNackiBridge.applyBkSetUpdate` (BK-set rotation without Circuit 3 ZK).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BkSetUpdateData {
+    pub fin_type: FinalizationType,
+    pub block_id: U256,
+    pub block_seq_no: u64,
+    pub old_commitment_l2: U256,
+    pub new_commitment_l3: U256,
+    pub sibling_h0: [u8; 32],
+    pub sibling_h23: [u8; 32],
+    pub attestation_proof: Bytes,
+}
+
 impl AnBlockData {
     /// Validates the structural invariants the contract enforces (cheap
     /// checks; runs before we pay gas).

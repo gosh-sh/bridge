@@ -152,9 +152,14 @@ contract AckiNackiBridge {
     ILayerHashesMovementVerifier public immutable layerHashesVerifier;
 
     /// @notice Active Acki Nacki BK-set Poseidon commitment.
-    ///         Updated only by future Circuit 3 (BK-set rotation, Phase 1.C);
+    ///         Updated by `applyBkSetUpdate` after attestation + Merkle checks;
     ///         seeded from the constructor's `_genesisBkSetCommitment`.
     uint256 public storedBkSetCommitment;
+
+    /// @notice Highest AN block sequence number whose BK-set rotation has been
+    ///         applied on-chain via `applyBkSetUpdate`. Independent from
+    ///         `storedLastSeenBlockSeqNo` (layer-bundle cursor).
+    uint64 public storedLastBkSetUpdateSeqNo;
 
     /// @notice Highest AN block sequence number whose attestation has been
     ///         verified on-chain. Strictly monotonic via `verifyBlock`.
@@ -288,6 +293,13 @@ contract AckiNackiBridge {
     ///         value of `anchorsRecorded` (monotonic, never resets).
     event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
 
+    /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
+    event BkSetUpdated(
+        uint256 indexed oldCommitment,
+        uint256 indexed newCommitment,
+        uint64 indexed blockSeqNo
+    );
+
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
     ///         single-final-root layout). A verified ZK proof releases
     ///         `amount` USDC to `recipient` exactly once (replay-protected by
@@ -348,6 +360,12 @@ contract AckiNackiBridge {
     error PrevAnchorMismatch(uint256 supplied, uint256 stored);
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
+
+    // applyBkSetUpdate errors
+    error BkUpdateDisabled();
+    error StaleBkSetCommitment(uint256 supplied, uint256 stored);
+    error BkUpdateSeqNoNotMonotonic(uint64 supplied, uint64 stored);
+    error BkUpdateMerkleMismatch(uint256 computedRoot, uint256 blockId);
 
     // withdrawByProof (Circuit 4, single-final-root) errors
     error WithdrawByProofDisabled();
@@ -692,6 +710,77 @@ contract AckiNackiBridge {
         _recordAnchor(layerHashes[numLayers - 1]);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
+    }
+
+    /// @notice Apply an Acki Nacki BK-set rotation on Ethereum after verifying
+    ///         a Circuit 1A/1B attestation and an open SHA-256 Merkle binding
+    ///         `blockId == SHA256(SHA256(H0 ‖ SHA256(L2 ‖ L3)) ‖ H23)`.
+    ///
+    /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
+    ///      the full pubkey table stays off-chain (prover working set).
+    ///
+    /// @param finType Primary or Fallback attestation path for the update block.
+    /// @param attestationProof SHPLONK/Groth16 attestation proof bytes.
+    /// @param blockId Block identifier shared with the attestation public inputs.
+    /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
+    /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
+    /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
+    /// @param siblingH0 Merkle sibling at level 0 (from prover `bkupd_*.json`).
+    /// @param siblingH23 Merkle sibling combining levels 2–3.
+    function applyBkSetUpdate(
+        FinalizationType finType,
+        bytes calldata attestationProof,
+        uint256 blockId,
+        uint64 blockSeqNo,
+        uint256 oldCommitmentL2,
+        uint256 newCommitmentL3,
+        bytes32 siblingH0,
+        bytes32 siblingH23
+    ) external nonReentrant whenNotPaused {
+        if (
+            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
+        ) {
+            revert BkUpdateDisabled();
+        }
+
+        if (oldCommitmentL2 != storedBkSetCommitment) {
+            revert StaleBkSetCommitment(oldCommitmentL2, storedBkSetCommitment);
+        }
+        if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
+            revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
+        }
+
+        bool attOk;
+        if (finType == FinalizationType.Primary) {
+            attOk = primaryVerifier.verifyPrimaryAttestation(
+                attestationProof,
+                blockId,
+                oldCommitmentL2,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        } else {
+            attOk = fallbackVerifier.verifyFallbackAttestation(
+                attestationProof,
+                blockId,
+                oldCommitmentL2,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        }
+        if (!attOk) revert AttestationProofRejected();
+
+        bytes32 h1 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
+        bytes32 h01 = sha256(abi.encodePacked(siblingH0, h1));
+        bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
+        if (uint256(root) != blockId) {
+            revert BkUpdateMerkleMismatch(uint256(root), blockId);
+        }
+
+        storedBkSetCommitment = newCommitmentL3;
+        storedLastBkSetUpdateSeqNo = blockSeqNo;
+
+        emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
     }
 
     /// @dev Record `anchor` in the `_knownAnchors` set and bump the

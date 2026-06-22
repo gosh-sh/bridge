@@ -149,6 +149,21 @@ build:rust:relayer:
     - cd crates/bridge-relayer-daemon
     - cargo build --locked --all-targets
 
+# bridge-evm-aggregator is excluded from the workspace (axiom halo2-lib vs gosh
+# fork in the orchestrator). Dedicated build/test keeps R15 regressions visible.
+build:rust:aggregator:
+  extends: .rust_base
+  stage: build
+  cache:
+    key: rust-aggregator-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-evm-aggregator/target/
+    policy: pull-push
+  script:
+    - cd crates/bridge-evm-aggregator
+    - cargo build --release --locked --all-targets
+
 build:solidity:
   extends: .foundry_base
   stage: build
@@ -196,6 +211,23 @@ test:rust:relayer:
   script:
     - cd crates/bridge-relayer-daemon
     - cargo test --locked
+
+test:rust:aggregator:
+  extends: .rust_base
+  stage: test
+  cache:
+    key: rust-aggregator-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-evm-aggregator/target/
+    policy: pull
+  needs:
+    - build:rust:aggregator
+  script:
+    - cd crates/bridge-evm-aggregator
+    - cargo test --release --locked
+    - chmod +x ../../scripts/check_eip170_verifier_bins.sh
+    - ../../scripts/check_eip170_verifier_bins.sh ../../contracts/ethereum/test/fixtures/r15_spike || true
 
 test:solidity:
   extends: .foundry_base

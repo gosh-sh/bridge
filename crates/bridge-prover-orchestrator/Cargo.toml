@@ -54,9 +54,33 @@ path = "src/bin/export_layer_hashes_proof.rs"
 name = "export-bound-block-proofs"
 path = "src/bin/export_bound_block_proofs.rs"
 
-# Unify `halo2-axiom` across the graph: tvm_vm pulls it from crates.io v0.4.5,
-# while the gosh halo2-base fork pulls it from git. Without this patch Cargo
-# resolves two distinct copies and the `Circuit<F>` trait mismatches.
+# ---------------------------------------------------------------------------
+# Patches: redirect every TRANSITIVE git dependency to a local sibling path.
+# The partner crates declare these via git URLs in their Cargo.toml; without
+# these patches Cargo would try to fetch from private GitHub repos.
+# ---------------------------------------------------------------------------
+
+[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
+attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
+bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
+bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
+bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
+historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
+bk-set-update-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bk-set-update-checker-circuit" }
+
+[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-prover"]
+bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
+
+[patch."https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381"]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+
+[patch."https://github.com/gosh-sh/gosh-halo2-crypto-lib"]
+gosh-sha256-chip = { path = "../../../gosh-halo2-crypto-lib/sha256-chip" }
+gosh-bls-verification = { path = "../../../gosh-halo2-crypto-lib/bls-verification" }
+gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
+
 [patch.crates-io]
 halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
 

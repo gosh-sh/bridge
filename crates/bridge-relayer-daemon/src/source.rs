@@ -345,6 +345,163 @@ impl BlockSource for ProverProofsBlockSource {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Partner prover bk-update bundles — `proofs/bkupd_<seqno>.json`
+// ─────────────────────────────────────────────────────────────────────
+
+/// JSON written by `acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-daemon`
+/// (`bridge-prover-lib::ipc::BkUpdateRequest`).
+#[derive(Deserialize)]
+struct PartnerBkUpdateRequest {
+    #[serde(default, rename = "schema_version")]
+    _schema_version: u32,
+    block_seq_no: u32,
+    #[serde(default, rename = "block_height")]
+    _block_height: u64,
+    #[serde(default, rename = "last_seen_bk_update_seqno")]
+    _last_seen_bk_update_seqno: u32,
+    block_id_hex: String,
+    #[serde(default, rename = "block_id_hash_hex")]
+    _block_id_hash_hex: String,
+    #[serde(default = "default_attestation_primary")]
+    attestation_circuit: String,
+    primary_proof_hex: String,
+    old_bk_set_poseidon_hash_hex: String,
+    new_bk_set_poseidon_hash_hex: String,
+    merkle_sibling_h0_hex: String,
+    merkle_sibling_h23_hex: String,
+}
+
+fn default_attestation_primary() -> String {
+    "primary".to_string()
+}
+
+/// Reads BK-set rotation bundles from the partner prover's `proofs/` directory.
+pub struct BkUpdateProofsSource {
+    proofs_dir: PathBuf,
+    skip_verified_gate: bool,
+    accept_halo2_proofs: bool,
+}
+
+impl BkUpdateProofsSource {
+    pub fn new(proofs_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            proofs_dir: proofs_dir.into(),
+            skip_verified_gate: false,
+            accept_halo2_proofs: false,
+        }
+    }
+
+    pub fn skip_verified_gate(mut self, skip: bool) -> Self {
+        self.skip_verified_gate = skip;
+        self
+    }
+
+    pub fn accept_halo2_proofs(mut self, accept: bool) -> Self {
+        self.accept_halo2_proofs = accept;
+        self
+    }
+
+    fn bkupd_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir
+            .join(format!("bkupd_{seq_no:06}.json"))
+    }
+
+    fn bkupd_result_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir
+            .join(format!("bkupd_result_{seq_no:06}.json"))
+    }
+
+    /// Load a single bk-update bundle keyed by `block_seq_no`.
+    pub fn load_update(&self, seq_no: u64) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        let path = self.bkupd_path(seq_no);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        if !self.skip_verified_gate {
+            let result_path = self.bkupd_result_path(seq_no);
+            if result_path.exists() {
+                let result: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&result_path)?)?;
+                let verify_ok = result
+                    .get("verify_ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !verify_ok {
+                    return Err(RelayerError::other(format!(
+                        "bkupd_result_{seq_no:06}.json exists but verify_ok=false"
+                    )));
+                }
+            }
+        }
+
+        let req: PartnerBkUpdateRequest = serde_json::from_slice(&std::fs::read(&path)?)
+            .map_err(|e| RelayerError::other(format!("parse {}: {e}", path.display())))?;
+
+        if req.block_seq_no as u64 != seq_no {
+            return Err(RelayerError::other(format!(
+                "bkupd file seq mismatch: path={seq_no}, json={}",
+                req.block_seq_no
+            )));
+        }
+
+        let fin_type = match req.attestation_circuit.as_str() {
+            "primary" | "Primary" | "1a" => FinalizationType::Primary,
+            "fallback" | "Fallback" | "1b" => FinalizationType::Fallback,
+            other => {
+                return Err(RelayerError::other(format!(
+                    "unknown attestation_circuit {other:?}; expected primary|fallback"
+                )));
+            }
+        };
+
+        let attestation_proof = decode_proof_bytes(&req.primary_proof_hex, self.accept_halo2_proofs)?;
+
+        fn hex32_to_array(hex_str: &str, label: &str) -> Result<[u8; 32], RelayerError> {
+            let raw = decode_hex(hex_str)?;
+            if raw.len() != 32 {
+                return Err(RelayerError::other(format!(
+                    "{label} must be 32 bytes, got {}",
+                    raw.len()
+                )));
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&raw);
+            Ok(out)
+        }
+
+        Ok(Some(crate::types::BkSetUpdateData {
+            fin_type,
+            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            block_seq_no: seq_no,
+            old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
+            new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
+            sibling_h0: hex32_to_array(&req.merkle_sibling_h0_hex, "merkle_sibling_h0")?,
+            sibling_h23: hex32_to_array(&req.merkle_sibling_h23_hex, "merkle_sibling_h23")?,
+            attestation_proof: Bytes::from(attestation_proof),
+        }))
+    }
+}
+
+#[async_trait]
+pub trait BkUpdateSource: Send + Sync {
+    async fn fetch_bk_update(
+        &self,
+        target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError>;
+}
+
+#[async_trait]
+impl BkUpdateSource for BkUpdateProofsSource {
+    async fn fetch_bk_update(
+        &self,
+        target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        self.load_update(target_seq_no)
+    }
+}
+
 fn decode_proof_bytes(hex_str: &str, accept_halo2: bool) -> Result<Vec<u8>, RelayerError> {
     let raw = decode_hex(hex_str)?;
     if raw.len() == GROTH16_PROOF_SIZE {
@@ -493,5 +650,39 @@ mod tests {
         let b = src.fetch(512).await.unwrap().unwrap();
         assert_eq!(b.block_seq_no, 512);
         assert_eq!(b.attestation_proof.len(), 256);
+    }
+
+    #[tokio::test]
+    async fn bkupd_source_parses_partner_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let proof_hex = "0x".to_string() + &"ab".repeat(256);
+        let bkupd = serde_json::json!({
+            "schema_version": 4,
+            "block_seq_no": 24,
+            "attestation_circuit": "primary",
+            "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+            "primary_proof_hex": proof_hex,
+            "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "merkle_sibling_h0_hex": "0x".to_string() + &"aa".repeat(32),
+            "merkle_sibling_h23_hex": "0x".to_string() + &"bb".repeat(32),
+        });
+        std::fs::write(
+            dir.path().join("bkupd_000024.json"),
+            serde_json::to_string(&bkupd).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("bkupd_result_000024.json"),
+            r#"{"block_seq_no":24,"verify_ok":true}"#,
+        )
+        .unwrap();
+
+        let src = BkUpdateProofsSource::new(dir.path());
+        let u = src.fetch_bk_update(24).await.unwrap().unwrap();
+        assert_eq!(u.block_seq_no, 24);
+        assert_eq!(u.fin_type, FinalizationType::Primary);
+        assert_eq!(u.attestation_proof.len(), 256);
+        assert_eq!(u.sibling_h0[0], 0xaa);
     }
 }

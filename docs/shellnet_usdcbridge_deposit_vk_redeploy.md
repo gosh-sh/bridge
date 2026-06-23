@@ -1,11 +1,37 @@
 # Shellnet `USDCBridge` deposit VK redeploy — partner checklist
 
-> **Status (2026-06-08).** EVM→AN deposit relayer is deployed on
-> `ubuntu@ursus-tools.dev` and can prove Sepolia deposits end-to-end. The
-> **shellnet `USDCBridge` contract still embeds the wrong VK** (Circuit 1B
-> fallback, 4 public inputs). Real deposit proofs fail at `compute phase` /
-> `ZKHALO2VERIFYWITHVK`. This checklist is the minimum partner work to unblock
-> the live Sepolia→shellnet E2E.
+> **⚠️ STATUS UPDATE (2026-06-23): the redeploy described below is DONE.**
+> We verified it ourselves (no partner ping needed) by comparing the deployed
+> shellnet account code-hash against the compiled `.tvc` on `gosh-sh/acki-nacki`
+> branch `poseidon_dex`:
+>
+> - Deployed bridge (`0:1a1a…1a1a`, dapp_id `00…00`) code-hash =
+>   `b38e934a3c1e23d42c158dd9dbdb785a3739a449d6059646c391f4d93898e154` —
+>   **byte-identical** to `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`
+>   (branch `poseidon_dex`, updated 2026-06-22).
+> - That contract embeds the **correct 11-PI deposit VkBlob** (`circuit_shape=1`
+>   RLC, 3597 B, SHA-256 `147efe1425709ade5792469a87eaebc6f0c97dd105e5a4f1633ce7ed1068abaf`)
+>   — identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin`.
+> - The **ABI changed** to `finalizeDeposit(bytes proof, bytes publicInputs)`
+>   (the contract parses every field out of the operand; §3/§5 below describing a
+>   12-arg signature and `_buildPublicInputs` are SUPERSEDED). Canonical ABI:
+>   `scripts/ursus/USDCBridge.abi.json`. The relayer submitter forwards the two
+>   raw blobs (`crates/deposit-relayer-daemon/src/submitter.rs`).
+> - Canonical branches: contract = `poseidon_dex` (NOT the never-existent
+>   `halo2_circuit_with_vk`); `tvm_vm` opcode = `tvm-sdk` branch
+>   `full_dex_and_bridge_test_with_final_halo2_circuit`.
+>
+> **Remaining unknown:** live `finalize-one` against shellnet currently returns
+> `Message queue is full. Please try to send the message later.` on every attempt
+> (node-side queue backpressure, returned *before* execution — not a VK/opcode
+> rejection), so opcode-level ACCEPT is not yet confirmed. Retry when shellnet is
+> less congested, or raise the bridge-thread queue state with AN ops. The bridge
+> account shows `last_trans_lt = 0x0` (no transaction has ever executed on it).
+>
+> ---
+>
+> *Original checklist below (pre-redeploy, 2026-06-08) retained for the artefact
+> generation + acceptance-criteria recipes, which are still valid.*
 
 ## 1. Executive summary
 

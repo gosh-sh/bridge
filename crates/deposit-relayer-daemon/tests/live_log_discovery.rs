@@ -3,7 +3,8 @@
 //!
 //! Run with:
 //!   SEPOLIA_RPC_URL=... BRIDGE_DEPLOY_BLOCK=11025180 \
-//!     cargo test -p deposit-relayer-daemon --test live_log_discovery -- --ignored --nocapture
+//!     cargo test -p deposit-relayer-daemon --test live_log_discovery --
+//! --ignored --nocapture
 
 use std::str::FromStr;
 
@@ -26,8 +27,7 @@ async fn live_eth_log_source_finds_deposit_id0() {
         "set BRIDGE_DEPLOY_BLOCK (e.g. 11025180 for the shellnet Sepolia bridge)",
     );
 
-    let provider = ProviderBuilder::new()
-        .connect_http(rpc_url.parse().expect("valid RPC URL"));
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse().expect("valid RPC URL"));
     let bridge = Address::from_str(SEPOLIA_BRIDGE).unwrap();
     let source = EthLogSource::new(provider, bridge, from_block, 12);
 

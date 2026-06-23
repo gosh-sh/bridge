@@ -36,9 +36,9 @@ Instance column order — every producer/consumer MUST agree:
 |---|---|---|
 | Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![11]`; RLC `EthCircuitImpl` + Blake2b SHPLONK proof (NOT Groth16). |
 | Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=11`; `export_vk_blob` + `export_blake2b_proof` (raw Halo2, no gnark wrap). |
-| USDCBridge / TokenBridge (AN) | `acki-nacki/contracts/exchange/USDCBridge.sol` | `finalizeDeposit` → `gosh.zkHalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Branch **`halo2_circuit_with_vk`** on `gosh-sh/acki-nacki`. |
-| Compiled bridge | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.tvc` + `.abi.json` | Recompile with `sold --tvm-version gosh`. |
-| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` | VkBlob-driven; RLC `circuit_shape=1`. Branch **`halo2_circuit_with_vk`** on `tvmlabs/tvm-sdk`. Do **not** use `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
+| USDCBridge / TokenBridge (AN) | `acki-nacki/contracts/exchange/USDCBridge.sol` | ABI is **`finalizeDeposit(bytes proof, bytes publicInputs)`** — the contract parses all deposit fields out of the operand itself and calls `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Branch **`poseidon_dex`** on `gosh-sh/acki-nacki` (NOT `halo2_circuit_with_vk`, which never existed). **Deployed to shellnet 2026-06-22** (code-hash `b38e934a…898e154` verified against the compiled `.tvc`; embedded `VK_BLOB` = 11-PI deposit VkBlob `147efe14…068abaf`). |
+| Compiled bridge | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.tvc` + `.abi.json` | Recompile with `sold --tvm-version gosh`. Canonical ABI snapshot mirrored at `acki-nacki-bridge/scripts/ursus/USDCBridge.abi.json`. |
+| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` | VkBlob-driven; RLC `circuit_shape=1`. Branch **`full_dex_and_bridge_test_with_final_halo2_circuit`** on `tvmlabs/tvm-sdk` (the branch `acki-nacki`'s `Cargo.toml` pins for `tvm_vm`). Do **not** use `halo2_circuit_with_vk` (never existed) or `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
 | tvm-sdk e2e test | `tvm-sdk/tvm_executor/src/transaction_executor.rs::athens_finalize_deposit_reaches_mint` | Loads `TokenBridge.tvc` + `/tmp/deposit_e2e/live_finalize_msg.boc`, drives finalize → opcode → mint. Skips if artifacts missing. |
 
 ## e2e artifacts (machine-local, in `/tmp/deposit_e2e/`)

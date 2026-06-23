@@ -25,10 +25,10 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitter,
-    BackoffConfig, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, SubprocessProofGenerator, SubprocessProverConfig,
-    DEFAULT_AN_NODE_URL, BRIDGE_DEPLOY_BLOCK_ENV,
+    fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
+    AnSubmitter, BackoffConfig, DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -159,9 +159,6 @@ enum Cmd {
         /// Relayer signer address (`dapp_id::account_id`, SDK 3.0 form).
         #[arg(long, env = "AN_SENDER")]
         an_sender: Option<String>,
-        /// ECC token id for `finalizeDeposit`.
-        #[arg(long, env = "AN_TOKEN_ID", default_value_t = 1)]
-        an_token_id: u32,
         /// Run the submit stage against an in-memory mock AN instead of
         /// tvm_client.
         #[arg(long)]
@@ -172,6 +169,37 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+    },
+    /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
+    /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
+    ///
+    /// Reads `public_inputs.bin` + `proof.bin` (the layout `prove-one` writes;
+    /// `vk_blob.bin` is optional — the deployed contract uses its embedded
+    /// `VK_BLOB`) from `--bundle-dir` and fires the live `(proof,
+    /// publicInputs)` call. This is the operator path for finalising a
+    /// specific deposit and the contract/node readiness self-test (does
+    /// shellnet's `ZKHALO2VERIFYWITHVK` accept a real deposit proof?).
+    FinalizeOne {
+        /// Directory holding `public_inputs.bin`, `proof.bin` (and optionally
+        /// `vk_blob.bin`) — e.g. a `prove-one --out-dir`.
+        #[arg(long)]
+        bundle_dir: PathBuf,
+        /// GraphQL endpoint for tvm_client 3.0 (e.g. shellnet
+        /// `https://shellnet.ackinacki.org/graphql`).
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        /// Path to the deployed `USDCBridge.abi.json`.
+        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
+        an_bridge_abi_path: String,
+        /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
+        #[arg(long, env = "AN_TOKEN_BRIDGE")]
+        an_token_bridge: String,
+        /// Relayer signer address (`dapp_id::account_id`, SDK 3.0 form).
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
     },
     /// Probe the AN node's read endpoints (`/v2/bk_set`) and print the
     /// current BK-set summary. Confirms an AN config points at a reachable
@@ -250,6 +278,23 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(log_err("prove-one"))
         },
+        Cmd::FinalizeOne {
+            bundle_dir,
+            an_graphql_url,
+            an_keys_path,
+            an_bridge_abi_path,
+            an_token_bridge,
+            an_sender,
+        } => finalize_one(
+            bundle_dir,
+            an_graphql_url,
+            an_keys_path,
+            an_bridge_abi_path,
+            an_token_bridge,
+            an_sender,
+        )
+        .await
+        .map_err(log_err("finalize-one")),
         Cmd::AnPreflight {
             an_node_url,
         } => an_preflight(an_node_url)
@@ -273,7 +318,6 @@ async fn main() -> anyhow::Result<()> {
             an_bridge_abi_path,
             an_token_bridge,
             an_sender,
-            an_token_id,
             dry_run,
             backoff_initial_secs,
             backoff_max_secs,
@@ -311,7 +355,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(addr) = an_sender {
                 an_cfg.sender = addr;
             }
-            an_cfg.token_id = an_token_id;
             run_daemon(
                 args.state,
                 rpc_url,
@@ -327,6 +370,74 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(log_err("daemon"))
         },
+    }
+}
+
+async fn finalize_one(
+    bundle_dir: PathBuf,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_bridge_abi_path: String,
+    an_token_bridge: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    // `vk_blob.bin` is optional: the deployed contract verifies against its own
+    // embedded `VK_BLOB`, so the bundle's copy is informational only.
+    let vk_blob = std::fs::read(bundle_dir.join("vk_blob.bin")).unwrap_or_default();
+    let public_inputs = std::fs::read(bundle_dir.join("public_inputs.bin"))
+        .map_err(|e| anyhow::anyhow!("read {}/public_inputs.bin: {e}", bundle_dir.display()))?;
+    let proof = std::fs::read(bundle_dir.join("proof.bin"))
+        .map_err(|e| anyhow::anyhow!("read {}/proof.bin: {e}", bundle_dir.display()))?;
+
+    let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
+    let pi = &bundle.parsed;
+    info!(
+        deposit_id = %pi.deposit_id,
+        sender = %pi.sender,
+        amount = %pi.amount,
+        contract_address = %pi.contract_address,
+        an_account = %pi.an_account(),
+        dapp_id = %pi.dapp_id(),
+        proof_len = bundle.proof.len(),
+        public_inputs_len = bundle.public_inputs.len(),
+        "submitting finalizeDeposit(proof, publicInputs) to AN",
+    );
+
+    let keys_json = std::fs::read_to_string(&an_keys_path)?;
+    let keys: KeyPair = serde_json::from_str(&keys_json)?;
+    let bridge_abi = TvmAckiNacki::load_abi(&an_bridge_abi_path)
+        .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi,
+    })
+    .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
+
+    let submit_cfg = AnSubmitConfig {
+        from: an_sender,
+        token_bridge: an_token_bridge,
+        confirm_timeout_secs: 60,
+    };
+    let submitter = AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg);
+
+    match submitter.submit_bundle(&bundle).await? {
+        SubmitOutcome::Finalized {
+            tx_hash,
+        } => {
+            info!(
+                tx = tx_hash.map(hex::encode).unwrap_or_default(),
+                "finalizeDeposit ACCEPTED — deposit finalised on AN",
+            );
+            Ok(())
+        },
+        SubmitOutcome::AlreadyFinalized => {
+            info!("deposit already finalised on AN (nullifier set)");
+            Ok(())
+        },
+        SubmitOutcome::Rejected {
+            reason,
+        } => anyhow::bail!("finalizeDeposit rejected by AN: {reason}"),
     }
 }
 
@@ -405,8 +516,8 @@ async fn prove_one(
 ) -> anyhow::Result<()> {
     if tx_hash.is_none() && from_block == 0 {
         warn!(
-            "from_block is 0 and no --tx-hash supplied; eth_getLogs will scan from genesis. \
-             Set {BRIDGE_DEPLOY_BLOCK_ENV} or pass --from-block to the bridge deploy block.",
+            "from_block is 0 and no --tx-hash supplied; eth_getLogs will scan from genesis. Set \
+             {BRIDGE_DEPLOY_BLOCK_ENV} or pass --from-block to the bridge deploy block.",
         );
     }
 
@@ -434,8 +545,8 @@ async fn prove_one(
             Some(e) => e,
             None => {
                 anyhow::bail!(
-                    "depositId {deposit_id} in tx {tx_hash:#x} not confirmed yet \
-                     (needs {confirmations} confirmations)"
+                    "depositId {deposit_id} in tx {tx_hash:#x} not confirmed yet (needs \
+                     {confirmations} confirmations)"
                 );
             },
         }

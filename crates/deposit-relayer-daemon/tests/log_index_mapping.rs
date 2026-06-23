@@ -20,13 +20,13 @@ struct Fixture {
 
 #[test]
 fn sepolia_deposit_id0_block_log_index_maps_to_receipt_local_index() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sepolia_deposit_id0.json");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sepolia_deposit_id0.json");
     let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!("read {}: {e}", path.display());
     });
-    let fixture: Fixture = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let fixture: Fixture =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
 
     let got = receipt_log_index_from_block_log(&fixture.receipt_logs, fixture.block_log_index)
         .unwrap_or_else(|e| panic!("mapping failed: {e}"));

@@ -59,7 +59,7 @@ chmod +x scripts/check_eip170_verifier_bins.sh
 
 Foundry on-chain acceptance (M7 spike): `forge test --match-contract ShplonkSpikeOnChain` — deploys `MultiplierSpikeVerifier.bin` + calls exported calldata (~406 k gas verify).
 
-Production verifyBlock acceptance: `forge test --match-contract AckiNackiBridgeProductionVerifyBlock` — deploys the Primary/Fallback/LayerHashes SHPLONK adapters and verifies the bound calldata (Primary + Fallback isolated paths green; full E2E gated on the tracked Circuit 2 pairing).
+Production verifyBlock acceptance: `forge test --match-contract AckiNackiBridgeProductionVerifyBlock` — deploys the Primary/Fallback/LayerHashes SHPLONK adapters and verifies the bound calldata. All four cases green as of 2026-06-23, including the full `verifyBlock` E2E (Primary 1A + Circuit 2) after the bound-witness fix (Circuit 2 chain-step off-by-one + canonical block_id endianness); the earlier "Circuit 2 pairing limitation" was an invalid layer inner snark, not a verifier-size issue.
 
 Rust unit tests: `cd crates/bridge-evm-aggregator && cargo test --release` → `eip170::tests` + `aggregator_round_trip` (`--ignored`).
 

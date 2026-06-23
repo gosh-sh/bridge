@@ -349,9 +349,17 @@ pub fn promote_bridge_test_data(
     let layer_hashes_expected_instances: [Fr; LAYER_HASHES_NUM_PUBLIC_INPUTS] =
         instances.try_into().expect("instance count mismatch");
 
-    // ---- Optional fallback attestation ----
+    // ---- Re-sign the Primary attestation over the LE block_id ----
+    // The generator-built `td.attestation_bytes` store the raw big-endian root,
+    // which makes Circuit 1A emit a byte-reversed block_id (see
+    // `build_attestation_envelope`). Re-sign over the LE root with the original
+    // signers so Circuit 1A's block_id matches Circuit 2 + the on-chain anchor.
+    let attestation_primary_bytes =
+        build_attestation_envelope(&td, AttestationTargetType::Primary)?;
+
+    // ---- Optional fallback attestation (same LE block_id) ----
     let attestation_fallback_bytes = if with_fallback {
-        Some(build_fallback_attestation_envelope(&td)?)
+        Some(build_attestation_envelope(&td, AttestationTargetType::Fallback)?)
     } else {
         None
     };
@@ -363,7 +371,7 @@ pub fn promote_bridge_test_data(
         bk_set_poseidon_fr,
         block_seq_no,
         last_seen_block_seqno,
-        attestation_primary_bytes: td.attestation_bytes,
+        attestation_primary_bytes,
         attestation_fallback_bytes,
         layer_hashes_preimage: preimage,
         merkle_siblings,
@@ -376,15 +384,31 @@ pub fn promote_bridge_test_data(
     })
 }
 
-/// Build a Fallback attestation envelope (`target_type = Fallback`) signed by
-/// every BK-set keypair over the same `block_id` carried by
-/// `td.attestation_bytes`.
+/// Re-sign an attestation envelope over the **little-endian** block_id with the
+/// given target type, reusing `td.keypairs` (the original signers; the
+/// partner's generator appends one extra keypair after the BK set was modified,
+/// which we must skip here so we sign with exactly the *current* set).
 ///
-/// Mirrors the Primary attestation construction in `generate_bridge_test_data`
-/// step 12 — reuses `td.keypairs` (the original signers; the partner's
-/// generator appends one extra keypair after the BK set was modified, which we
-/// must skip here so the fallback signs with exactly the *current* set).
-fn build_fallback_attestation_envelope(td: &BridgeTestData) -> anyhow::Result<Vec<u8>> {
+/// Why re-sign and reverse the block_id? Circuit 1A/1B extract the block_id as
+/// `LE-pack(raw attestation bytes)` (no reverse — see `primary_circuit.rs`
+/// `build_primary_constraints` §A), whereas Circuit 2 reconstructs the SHA-256
+/// envelope root and reverses BE→LE before packing
+/// (`circuit.rs` §C: `LE-pack(reverse(root))`), which is also the value the
+/// on-chain `uint256(sha256_root)` Merkle binding in `applyBkSetUpdate`
+/// produces. The partner's generator stores the *raw* big-endian root in the
+/// attestation, so a generator-built Circuit 1A proof emits a byte-reversed
+/// block_id that can never equal Circuit 2's — `verifyBlock` feeds a single
+/// `blockId` to both verifiers and requires equality. We therefore store the
+/// block_id little-endian here so all three circuits emit the canonical
+/// big-endian-digest integer. `td.block_id` keeps the raw root so Circuit 2's
+/// sibling reconstruction and the shared `block_id_fr` stay consistent.
+fn build_attestation_envelope(
+    td: &BridgeTestData,
+    target_type: AttestationTargetType,
+) -> anyhow::Result<Vec<u8>> {
+    let mut block_id_le = td.block_id;
+    block_id_le.reverse();
+
     // td.keypairs has one extra entry at the end (the new signer for the BK
     // change scenario). Use only the original `bk_set.len()` signers.
     let original_signer_count = td.bk_set.len();
@@ -395,10 +419,10 @@ fn build_fallback_attestation_envelope(td: &BridgeTestData) -> anyhow::Result<Ve
         .map(|(secret, _, idx)| (*idx, secret))
         .collect();
 
-    let attestation_data = create_attestation_data(td.block_id, AttestationTargetType::Fallback);
+    let attestation_data = create_attestation_data(block_id_le, target_type);
     let envelope = sign_attestation_multi(attestation_data, &signers)
-        .context("signing fallback attestation failed")?;
-    let bytes = bincode::serialize(&envelope).context("bincoding fallback envelope failed")?;
+        .context("signing attestation failed")?;
+    let bytes = bincode::serialize(&envelope).context("bincoding attestation envelope failed")?;
     Ok(bytes)
 }
 

@@ -50,13 +50,25 @@ Checks:
 
 **Goal:** All-SHPLONK bridge deployed, paused, smoke-verified, then unpaused for state sync only.
 
-**Known issue (2026-06-22):** Primary (1A) and Fallback (1B) SHPLONK calldata both verify in
-Foundry (`test_productionPrimaryAttestation_isolated` / `test_productionFallbackAttestation_isolated`).
-The full `verifyBlock` E2E is still gated on Circuit 2: the layer-hashes SHPLONK proof fails its
-KZG pairing in isolation regardless of `K_outer` (21 or 22), so the issue is in the Circuit 2
-aggregation itself, not the verifier size. `test_productionVerifyBlock_boundCalldata_advancesState`
-skips with a logged note until this is resolved. **Do not unpause for production traffic** until the
-full E2E is green.
+**Resolved (2026-06-23):** the full `verifyBlock` E2E is now green. The earlier "Circuit 2 KZG
+pairing limitation" was a misdiagnosis — the layer-hashes inner snark was itself *invalid* (so its
+aggregator pairing could never pass), caused by two bound-witness drifts vs the partner's
+`branch=main` circuits, both fixed in `bound_test_data.rs::promote_bridge_test_data`:
+1. **Circuit 2 chain-step off-by-one** — the partner generator builds `num_prev_chain_steps + 1`
+   active Merkle trees but records only the previous count; the circuit treats the value as the
+   total active count, so we hand it `+1`.
+2. **block_id endianness** — Circuit 1A/1B LE-pack the raw attestation bytes (no reverse) while
+   Circuit 2 reverses BE→LE before packing (the canonical `uint256(sha256_root)` integer, matching
+   the on-chain `applyBkSetUpdate` anchor). The generator stored the raw BE root, so 1A's block_id
+   was a byte-reversal of Circuit 2's and the single `blockId` fed to both verifiers in `verifyBlock`
+   could never match both. We now re-sign both attestations over the LE block_id so all three
+   circuits emit the canonical value.
+
+`test_productionVerifyBlock_boundCalldata_advancesState` now runs the full E2E (Primary 1A +
+Circuit 2 real SHPLONK aggregator proofs) and asserts the cross-circuit binding + state advance.
+All four `AckiNackiBridgeProductionVerifyBlockTest` cases pass; the full Foundry suite is green
+(163 passed). The bound witness is guarded against this drift class by
+`cargo run -p bridge-prover-orchestrator --bin mock-prove-bound-layer` (~30 s MockProver).
 
 ### 1.1 Generate artefacts (n14 or local)
 

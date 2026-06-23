@@ -140,10 +140,10 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         );
     }
 
-    /// @dev Helper: does the layer-hashes SHPLONK proof verify in isolation? The
-    ///      Circuit 2 aggregator has a tracked KZG-pairing limitation (see
-    ///      `docs/production_plan.md`) independent of the attestation paths; the
-    ///      full `verifyBlock` E2E is gated on this until it is resolved.
+    /// @dev Helper: does the layer-hashes SHPLONK proof verify in isolation?
+    ///      The Circuit 2 aggregator KZG pairing is green as of the bound-witness
+    ///      fix (Circuit 2 chain-step off-by-one + canonical block_id endianness),
+    ///      so this must return true for a well-formed scenario.
     function _layerProofVerifies(ShplonkDeployLib.VerifyBlockVerifiers memory v)
         internal
         view
@@ -159,9 +159,9 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         );
     }
 
-    /// Full `verifyBlock` needs both proofs. Skips while the Circuit 2 aggregator
-    /// pairing limitation (tracked in the production plan) is open; the attestation
-    /// SHPLONK paths are covered by the isolated tests above.
+    /// Full `verifyBlock` E2E with both real SHPLONK aggregator proofs (Primary
+    /// 1A + Circuit 2). Exercises the cross-circuit `block_id` / `bkSetCommitment`
+    /// binding on-chain — green since the bound-witness fix.
     function test_productionVerifyBlock_boundCalldata_advancesState() public {
         if (!_artefactsPresent()) {
             emit log("SKIP: bound_scenario.json + verifiers/*_calldata.bin required");
@@ -169,10 +169,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         }
 
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
-        if (!_layerProofVerifies(v)) {
-            emit log("SKIP: layer-hashes SHPLONK pairing not yet green (tracked)");
-            return;
-        }
+        assertTrue(_layerProofVerifies(v), "layer-hashes SHPLONK pairing must be green");
 
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);
         bytes memory proofLayer = vm.readFileBinary(LAYER_CALLDATA);

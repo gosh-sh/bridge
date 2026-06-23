@@ -57,7 +57,8 @@ forge script script/DeployRealBridge.s.sol:DeployRealBridge \
   --rpc-url $SEPOLIA_RPC --broadcast
 ```
 
-Shellnet E2E variant (always wires verifyBlock + withdraw):
+Shellnet E2E variant (wires verifyBlock; withdraw is opt-in via `WIRE_WITHDRAW_BY_PROOF=true`,
+default off so it does not need the C4 `.bin` before partner M4):
 
 ```bash
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \

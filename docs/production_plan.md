@@ -104,7 +104,10 @@ forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
   --rpc-url "$SEPOLIA_RPC" --broadcast
 ```
 
-Withdraw wiring stays off until Phase 2 (`WIRE_WITHDRAW_BY_PROOF=false` or omit C4 `.bin`).
+Withdraw wiring stays off until Phase 2: `WIRE_WITHDRAW_BY_PROOF` defaults to `false`, so the
+script deploys a verifyBlock-only (paused) bridge and does **not** require the C4
+`BridgeWithdrawalAggregatorVerifier.bin` (which only exists after partner M4). Set
+`WIRE_WITHDRAW_BY_PROOF=true` (+ `WITHDRAW_ACC_FR` + the C4 `.bin`) once M4 lands.
 
 ### 1.4 Post-deploy smoke (read-only + one tx)
 

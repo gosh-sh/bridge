@@ -12,10 +12,15 @@ import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
 /// @notice Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators for 1A/1B/2,
-///         SHPLONK for C4 when `.bin` exists.
+///         SHPLONK for C4 when wired.
 /// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
-///      `verifiers/LayerHashesAggregatorVerifier.bin` (or `SHPLONK_BIN_*` overrides).
-///      Bridge starts paused unless `START_PAUSED=false`.
+///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
+///      (or `SHPLONK_BIN_*` overrides). Bridge starts paused unless `START_PAUSED=false`.
+///
+///      withdrawByProof (Circuit 4) wiring is OFF by default — set `WIRE_WITHDRAW_BY_PROOF=true`
+///      (and provide `WITHDRAW_ACC_FR` + `verifiers/BridgeWithdrawalAggregatorVerifier.bin`) once
+///      partner M4 lands. Until then this script deploys a verifyBlock-only (paused) bridge so it
+///      does not depend on the not-yet-existing C4 `.bin`.
 contract DeployShellnetE2EBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -44,15 +49,22 @@ contract DeployShellnetE2EBridge is Script {
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
             genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH")
         });
+        bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);
         WithdrawWiring memory wd = WithdrawWiring({
             verifier: IBridgeWithdrawalVerifier(address(0)),
-            dappFr: vm.envOr("WITHDRAW_DAPP_FR", uint256(0)),
-            accFr: vm.envUint("WITHDRAW_ACC_FR"),
-            altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
-            altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
-            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
+            dappFr: wireWithdraw ? vm.envOr("WITHDRAW_DAPP_FR", uint256(0)) : uint256(0),
+            accFr: wireWithdraw ? vm.envUint("WITHDRAW_ACC_FR") : uint256(0),
+            altDstChainId: wireWithdraw
+                ? vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1))
+                : uint256(0),
+            altDstHostChainId: wireWithdraw
+                ? vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111))
+                : uint256(0),
+            altTokenId: wireWithdraw ? vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)) : uint256(0)
         });
-        require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
+        if (wireWithdraw) {
+            require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
+        }
 
         bool startPaused = vm.envOr("START_PAUSED", true);
 
@@ -63,11 +75,17 @@ contract DeployShellnetE2EBridge is Script {
         console.log("MockBlockHeaderOracle:", address(oracle));
 
         (vb.primary, vb.fallback_, vb.layerHashes) = _deployProductionVerifyBlockTriple();
-        wd.verifier = ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
         console.log("PrimaryAggregatorVerifier:", address(vb.primary));
         console.log("FallbackAggregatorVerifier:", address(vb.fallback_));
         console.log("LayerHashesAggregatorVerifier:", address(vb.layerHashes));
-        console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
+
+        if (wireWithdraw) {
+            wd.verifier =
+                ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
+            console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
+        } else {
+            console.log("withdrawByProof DISABLED - set WIRE_WITHDRAW_BY_PROOF=true + C4 .bin (M4)");
+        }
 
         AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
 
@@ -80,6 +98,7 @@ contract DeployShellnetE2EBridge is Script {
 
         console.log("AckiNackiBridge (shellnet E2E):", address(bridge));
         console.log("USDC:", USDC_SEPOLIA);
+        console.log("withdrawWired:", wireWithdraw);
         console.log("withdraw dappFr:", wd.dappFr);
         console.log("withdraw accFr:", wd.accFr);
         console.log("altDstChainId:", wd.altDstChainId);

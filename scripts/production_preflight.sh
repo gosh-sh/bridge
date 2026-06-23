@@ -71,12 +71,10 @@ echo "--- [4/5] Foundry production gate tests ---"
   forge test --match-contract "ShplonkAggregatorForgery|ShplonkDeployLib" -vv
   forge test --match-test test_productionPrimaryAttestation_isolated -vv
   forge test --match-test test_productionFallbackAttestation_isolated -vv
-  if forge test --match-test test_productionVerifyBlock_boundCalldata_advancesState -vv; then
-    echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
-  else
-    echo "WARN: full verifyBlock E2E failed (layer K=22) — attestation paths OK; see docs/production_plan.md" >&2
-    warn=1
-  fi
+  # Full E2E (Primary 1A + Circuit 2 real SHPLONK aggregator proofs) is a hard gate since the
+  # 2026-06-23 bound-witness fix (see docs/production_plan.md §1); a regression must block deploy.
+  forge test --match-test test_productionVerifyBlock_boundCalldata_advancesState -vv
+  echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
 )
 
 echo "--- [5/5] Relayer unit tests ---"

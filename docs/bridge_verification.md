@@ -221,7 +221,7 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000
 - **LH-4**: explicit `if (numLayers == 0 || numLayers > MAX_LAYER_HASHES) revert InvalidNumLayers(numLayers)`.
 - **LH-5**: explicit `for (i = numLayers; i < MAX_LAYER_HASHES; i++) if (layerHashes[i] != 0) revert LayerHashTailNonZero(i)` — guards against silent garbage in unused slots.
 - **LH-6**: explicit `blockSeqNo <= storedLastSeenBlockSeqNo ⇒ revert BlockSeqNoNotMonotonic`.
-- **LH-7**: each adapter wraps `groth16Verifier.verifyProof(...)` in try/catch, normalising gnark reverts to `false`. See `PrimaryVerifier.sol`, `FallbackVerifier.sol`, `LayerHashesMovementVerifier.sol`.
+- **LH-7**: each adapter normalises a failing verifier call to `false` rather than bubbling a revert. The production SHPLONK adapters (`PrimaryAggregatorVerifier.sol`, `FallbackAggregatorVerifier.sol`, `LayerHashesAggregatorVerifier.sol`) wrap the aggregator-Yul `staticcall`; the retained 1A/2 gnark Groth16 test adapters (`PrimaryVerifier.sol`, `LayerHashesMovementVerifier.sol`) wrap `groth16Verifier.verifyProof(...)` in try/catch. (The 1B `FallbackVerifier.sol` Groth16 adapter was retired 2026-06-22.)
 - **LH-8**: state writes happen *only* after both verifiers return `true` and all anchor checks pass. CEI-clean: there are no external calls between the writes and `BlockVerified` emission.
 - **LH-9**: feature gate at the top of `verifyBlock`: any zero verifier address ⇒ revert.
 
@@ -435,8 +435,8 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 
 | Property | Statement |
 |---|---|
-| **ZK-1** | Each gnark Groth16 verifier (`PrimaryGroth16VerifierGenerated`, `FallbackGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) is auto-generated and not subsequently edited. |
-| **ZK-2** | The adapter contracts (`PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) wrap the `verifyProof` call in `try/catch` so reverts are normalised to `false`. |
+| **ZK-1** | Production wires all three circuits to the R15 SHPLONK aggregator Yul (`PrimaryAggregatorVerifier.bin`, `FallbackAggregatorVerifier.bin`, `LayerHashesAggregatorVerifier.bin`), each `snark-verifier-sdk` output not subsequently edited. The retained 1A/2 gnark Groth16 test verifiers (`PrimaryGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) are likewise auto-generated; the 1B `FallbackGroth16VerifierGenerated` was deleted when Circuit 1B moved to SHPLONK. |
+| **ZK-2** | Each adapter normalises a failing verifier call to `false`: the SHPLONK adapters (`PrimaryAggregatorVerifier`, `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`) check the Yul `staticcall` result; the retained 1A/2 gnark adapters (`PrimaryVerifier`, `LayerHashesMovementVerifier`) wrap `verifyProof` in `try/catch`. |
 | **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's 7 public inputs are consumed natively on the AN side, not on Ethereum.) |
 | **ZK-4** | Adapter constructors reject `address(0)` for the underlying Groth16 verifier. |
 | **ZK-5** | Each adapter rejects proofs of the wrong byte length (256 B for the v2 attestation/layer-hashes path). |
@@ -450,7 +450,7 @@ diff -u contracts/ethereum/src/LayerHashesGroth16VerifierGenerated.sol \
   <(cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
 ```
 
-This is a one-shot manual check whenever the corresponding circuit (or its `circuit.go` `Define`) changes. The same applies to `PrimaryGroth16VerifierGenerated.sol` (circuit-1a) and `FallbackGroth16VerifierGenerated.sol` (circuit-1b).
+This is a one-shot manual check whenever the corresponding circuit (or its `circuit.go` `Define`) changes. The same applies to `PrimaryGroth16VerifierGenerated.sol` (circuit-1a). (Circuit 1B no longer has a gnark Groth16 verifier — it uses the SHPLONK aggregator `.bin`; regenerate via `scripts/n14_r15_proving_run.sh`.)
 
 #### L2 — fuzz tests
 

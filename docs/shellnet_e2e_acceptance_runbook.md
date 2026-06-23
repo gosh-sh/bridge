@@ -64,9 +64,10 @@ forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
   --rpc-url $SEPOLIA_RPC --broadcast
 ```
 
-Deploy scripts use hybrid verifyBlock wiring: SHPLONK `.bin` for 1A + 2, gnark Groth16
-(`FallbackGroth16VerifierGenerated.sol`) for 1B fallback. Override SHPLONK paths with
-`SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
+Deploy scripts use all-SHPLONK verifyBlock wiring: R15 aggregator `.bin` for 1A, 1B, and 2
+(Circuit 1B keygen'd at inner `K=21` so its Yul fits EIP-170 — the gnark Groth16 fallback
+hybrid is retired). Override SHPLONK paths with `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`,
+`SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
 
 ## 4. Acceptance sequence
 

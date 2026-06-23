@@ -71,7 +71,7 @@ What v2 *does* introduce is a **larger code surface**:
 |---|---|---|
 | `AckiNackiBridge.verifyBlock` + state machine | ~85 lines + storage | Internal — covered by `AckiNackiBridgeVerifyBlockTest` (17) + `AckiNackiBridgeRelayerLoopTest` (6) |
 | `IPrimaryVerifier.sol` + `PrimaryVerifier.sol` + `PrimaryGroth16VerifierGenerated.sol` | 3 files | The first two are internal (try/catch length-check shim); the generated one is gnark output, ZK-1 |
-| `IFallbackVerifier.sol` + `FallbackVerifier.sol` + `FallbackGroth16VerifierGenerated.sol` | 3 files | Same |
+| `IFallbackVerifier.sol` + `FallbackAggregatorVerifier.sol` (+ `verifiers/FallbackAggregatorVerifier.bin`) | adapter + Yul `.bin` | Production 1B path — R15 SHPLONK aggregator (inner `K=21`). The retired `FallbackVerifier.sol` + `FallbackGroth16VerifierGenerated.sol` were deleted 2026-06-22. Aggregator Yul is `snark-verifier-sdk` output (analogous to ZK-1). |
 | `ILayerHashesMovementVerifier.sol` + `LayerHashesMovementVerifier.sol` + `LayerHashesGroth16VerifierGenerated.sol` | 3 files | Same |
 | `crates/bridge-prover-orchestrator/` | New Rust crate (excluded from main workspace) | Internal — bound test-data generator; per-circuit gnark wrappers under `gnark-wrappers/` |
 | `crates/bridge-relayer-daemon/` | New Rust crate (excluded; Phase 5.1 done with mock sources) | Internal — replaces v1's "no relayer" placeholder. A byzantine relayer can stall but cannot forge state (assumption K-9 is unaffected). |

@@ -255,10 +255,6 @@ contract AckiNackiBridge {
 
     mapping(uint8 => HistoryWindow) private _layerWindows;
 
-    /// @notice Monotonic counter of layer anchors appended by `verifyBlock`
-    ///         (never reset; useful for off-chain tooling).
-    uint256 public anchorsRecorded;
-
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -304,14 +300,9 @@ contract AckiNackiBridge {
     );
 
     /// @notice Emitted whenever a layer anchor is appended by `verifyBlock`.
-    ///         `totalAnchors` is the new value of `anchorsRecorded`.
-    event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
-
-    /// @notice Richer anchor event (layer + height). Emitted alongside
-    ///         `AnchorRecorded` for indexers migrating to spec §8.3 layout.
-    event LayerAnchorAppended(
-        uint8 indexed layer, uint256 hashValue, uint64 blockHeight, uint256 totalAnchors
-    );
+    ///         Carries the per-layer `(layer, hashValue, blockHeight)` so an
+    ///         indexer can reconstruct each layer's rolling window (spec §8.3).
+    event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
 
     /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
     event BkSetUpdated(
@@ -853,11 +844,7 @@ contract AckiNackiBridge {
         }
         w.lastHeight = blockHeight;
 
-        unchecked {
-            anchorsRecorded = anchorsRecorded + 1;
-        }
-        emit AnchorRecorded(hashValue, anchorsRecorded);
-        emit LayerAnchorAppended(layer, hashValue, blockHeight, anchorsRecorded);
+        emit LayerAnchorAppended(layer, hashValue, blockHeight);
     }
 
     /// @dev O(W) membership test against layer `L`'s window.

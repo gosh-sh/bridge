@@ -35,8 +35,8 @@ import "./helpers/UsdcTestLib.sol";
 /// 1. **Constructor wiring**: enabled / disabled toggles; revert if identity
 ///    slots aren't set when the verifier is non-zero
 ///    (`InvalidBridgeWithdrawalIdentity`).
-/// 2. **Anchor recording**: every `verifyBlock` records the new top-of-chain
-///    anchor in `_knownAnchors` and bumps `anchorsRecorded`; `AnchorRecorded`
+/// 2. **Anchor recording**: every `verifyBlock` records each layer anchor in
+///    its per-layer window; the `LayerAnchorAppended(layer, hash, height)`
 ///    event reflects the same state change.
 /// 3. **Happy path**: a verified proof transfers `amount` ETH to the
 ///    reconstructed `recipient`, marks the nullifier used, emits
@@ -108,7 +108,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         address submitter
     );
 
-    event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
+    event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -279,7 +279,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_setUp_recordsSeedAnchor() public view {
         assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "L1 seed anchor recorded");
-        assertEq(bridge.anchorsRecorded(), ACTIVE_LAYERS, "one append per active layer");
     }
 
     function test_verifyBlock_recordsAnchor_andEmitsEvent() public {
@@ -288,6 +287,10 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             layers[i] = uint256(keccak256(abi.encode("wd-block2-layer", i)));
         }
         uint256 expectedL1 = layers[0];
+
+        // First layer appended is L1; assert its `LayerAnchorAppended` fires.
+        vm.expectEmit(true, false, false, true);
+        emit LayerAnchorAppended(1, expectedL1, FIRST_SEQ_NO + 1);
 
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -303,7 +306,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
         assertTrue(bridge.isKnownLayerAnchor(1, expectedL1));
         assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "seed L1 remains valid");
-        assertEq(bridge.anchorsRecorded(), ACTIVE_LAYERS * 2);
     }
 
     function test_isKnownAnchor_initiallyFalseForRandomValue() public view {

@@ -130,8 +130,9 @@ struct Groth16OutputJson {
 }
 
 impl FixturesBlockSource {
-    /// Prefer R15 SHPLONK calldata from `verifiers_dir` when both `*_calldata.bin`
-    /// files exist; otherwise fall back to legacy Groth16 JSON under `fixtures_dir`.
+    /// Prefer R15 SHPLONK calldata from `verifiers_dir` when both
+    /// `*_calldata.bin` files exist; otherwise fall back to legacy Groth16
+    /// JSON under `fixtures_dir`.
     pub fn open(
         fixtures_dir: impl AsRef<Path>,
         verifiers_dir: Option<impl AsRef<Path>>,
@@ -187,16 +188,20 @@ impl FixturesBlockSource {
             decode_hex(&lh_out.proof)?
         };
 
-        proof_validation::validate_attestation_proof(FinalizationType::Primary, &primary_proof_bytes)?;
+        proof_validation::validate_attestation_proof(
+            FinalizationType::Primary,
+            &primary_proof_bytes,
+        )?;
         proof_validation::validate_layer_hashes_proof(&lh_proof_bytes)?;
 
         Self::block_from_scenario(scenario, primary_proof_bytes, lh_proof_bytes)
     }
 
-    /// Legacy layout: `primary/groth16_output.json` + `layer-hashes/groth16_output.json`.
+    /// Legacy layout: `primary/groth16_output.json` +
+    /// `layer-hashes/groth16_output.json`.
     ///
-    /// The scenario is tagged Primary (Phase 4.1 fixture). For hybrid R15 deploys
-    /// use [`Self::open`] or [`Self::from_hybrid_dirs`].
+    /// The scenario is tagged Primary (Phase 4.1 fixture). For hybrid R15
+    /// deploys use [`Self::open`] or [`Self::from_hybrid_dirs`].
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self, RelayerError> {
         let dir = dir.as_ref();
         let scenario_path = dir.join("bound_scenario.json");
@@ -219,7 +224,6 @@ impl FixturesBlockSource {
         primary_proof_bytes: Vec<u8>,
         lh_proof_bytes: Vec<u8>,
     ) -> Result<Self, RelayerError> {
-
         if scenario.num_layers == 0 || scenario.num_layers > MAX_LAYER_HASHES {
             return Err(RelayerError::other(format!(
                 "fixture num_layers {} out of 1..=10",
@@ -477,8 +481,7 @@ impl BkUpdateProofsSource {
     }
 
     fn bkupd_path(&self, seq_no: u64) -> PathBuf {
-        self.proofs_dir
-            .join(format!("bkupd_{seq_no:06}.json"))
+        self.proofs_dir.join(format!("bkupd_{seq_no:06}.json"))
     }
 
     fn bkupd_result_path(&self, seq_no: u64) -> PathBuf {
@@ -487,7 +490,10 @@ impl BkUpdateProofsSource {
     }
 
     /// Load a single bk-update bundle keyed by `block_seq_no`.
-    pub fn load_update(&self, seq_no: u64) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+    pub fn load_update(
+        &self,
+        seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
         let path = self.bkupd_path(seq_no);
         if !path.exists() {
             return Ok(None);
@@ -527,7 +533,7 @@ impl BkUpdateProofsSource {
                 return Err(RelayerError::other(format!(
                     "unknown attestation_circuit {other:?}; expected primary|fallback"
                 )));
-            }
+            },
         };
 
         let attestation_proof = proof_validation::decode_verify_block_proof(

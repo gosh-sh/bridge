@@ -42,8 +42,9 @@ impl FinalizationType {
 /// `AckiNackiBridge.verifyBlock`.
 ///
 /// Both proofs are opaque byte strings passed to `verifyBlock`:
-/// - Circuit 1A / 1B / 2: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
-///   Circuit 1B is keygen'd at K=21 so its aggregated Yul fits EIP-170.
+/// - Circuit 1A / 1B / 2: R15 SHPLONK aggregator calldata (`instances ‖
+///   proof`). Circuit 1B is keygen'd at K=21 so its aggregated Yul fits
+///   EIP-170.
 /// The remaining fields are the cross-circuit-bound public inputs the contract
 /// checks against its stored anchors.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,7 +68,8 @@ pub struct AnBlockData {
     pub layer_hashes_proof: Bytes,
 }
 
-/// Data for `AckiNackiBridge.applyBkSetUpdate` (BK-set rotation without Circuit 3 ZK).
+/// Data for `AckiNackiBridge.applyBkSetUpdate` (BK-set rotation without Circuit
+/// 3 ZK).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BkSetUpdateData {
     pub fin_type: FinalizationType,

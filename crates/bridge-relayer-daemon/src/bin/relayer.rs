@@ -42,10 +42,11 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BackoffConfig, BkSetUpdateSubmitOutcome, BkSetSentry, BkUpdateProofsSource, BkUpdateSource,
+    BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource,
     BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
     PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics,
-    SentryGuardedRelayer, SentryStatus, TickOutcome, WithdrawSubmitOutcome,
+    SentryGuardedRelayer, SentryStatus, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -250,6 +251,29 @@ enum Cmd {
         #[arg(long)]
         accept_halo2_proofs: bool,
     },
+    /// Generate one Circuit 4 withdrawal proof from a `PrivateWitness` by
+    /// driving the partner `bridge-event-halo2-prover` (in
+    /// `crates/an-bridge-prover`). Writes a `proof_event` JSON that
+    /// `submit-withdraw` can consume.
+    ProveWithdraw {
+        /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
+        #[arg(long)]
+        witness: PathBuf,
+        /// `crates/an-bridge-prover` workspace root (holds
+        /// `target/release/bridge-event-halo2-prover`).
+        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
+        an_bridge_prover_dir: PathBuf,
+        /// Working dir holding `./params` (SRS + Circuit 4 PK/VK). Defaults to
+        /// the prover dir.
+        #[arg(long)]
+        work_dir: Option<PathBuf>,
+        /// Where to write the resulting `proof_event` JSON.
+        #[arg(long, default_value = "./proof_event.json")]
+        out: PathBuf,
+        /// Seqno stamped into the proof_event.
+        #[arg(long, default_value_t = 0)]
+        seq_no: u32,
+    },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
@@ -333,12 +357,18 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             no_simulate,
-        } => verify_fixture(fixtures_dir, verifiers_dir, rpc_url, bridge_address, !no_simulate)
-            .await
-            .map_err(|e| {
-                error!(?e, "verify-fixture failed");
-                e
-            }),
+        } => verify_fixture(
+            fixtures_dir,
+            verifiers_dir,
+            rpc_url,
+            bridge_address,
+            !no_simulate,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "verify-fixture failed");
+            e
+        }),
         Cmd::Daemon {
             fixtures_dir,
             verifiers_dir,
@@ -447,6 +477,18 @@ async fn main() -> anyhow::Result<()> {
             error!(?e, "verify-prover-proof failed");
             e
         }),
+        Cmd::ProveWithdraw {
+            witness,
+            an_bridge_prover_dir,
+            work_dir,
+            out,
+            seq_no,
+        } => prove_withdraw(witness, an_bridge_prover_dir, work_dir, out, seq_no)
+            .await
+            .map_err(|e| {
+                error!(?e, "prove-withdraw failed");
+                e
+            }),
         Cmd::SubmitWithdraw {
             proof_event,
             rpc_url,
@@ -509,7 +551,10 @@ async fn smoke_fixture(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?);
+    let source = Arc::new(FixturesBlockSource::open(
+        &fixtures_dir,
+        verifiers_dir.as_deref(),
+    )?);
 
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
@@ -683,7 +728,10 @@ async fn run_daemon(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?);
+    let source = Arc::new(FixturesBlockSource::open(
+        &fixtures_dir,
+        verifiers_dir.as_deref(),
+    )?);
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, bridge)?;
     let metrics = RelayerMetrics::new();
@@ -1068,6 +1116,42 @@ async fn verify_prover_proof(
             reason,
         } => anyhow::bail!("eth_call reverted: {reason}"),
     }
+}
+
+async fn prove_withdraw(
+    witness: PathBuf,
+    an_bridge_prover_dir: PathBuf,
+    work_dir: Option<PathBuf>,
+    out: PathBuf,
+    seq_no: u32,
+) -> anyhow::Result<()> {
+    let mut cfg = SubprocessWithdrawalProverConfig::new(an_bridge_prover_dir);
+    if let Some(wd) = work_dir {
+        cfg.work_dir = wd;
+    }
+    cfg.seq_no = seq_no;
+    let prover = SubprocessWithdrawalProver::new(cfg);
+
+    info!(witness = %witness.display(), "generating Circuit 4 withdrawal proof (this may take minutes)");
+    let proof = prover.prove(&witness).await?;
+
+    // Persist in the `proof_event` schema that `submit-withdraw` reads.
+    let json = serde_json::json!({
+        "schema_version": proof.schema_version,
+        "seq_no": proof.seq_no,
+        "proof_hex": proof.proof_hex,
+        "public_instances_hex": proof.public_instances_hex,
+        "self_verified": proof.self_verified,
+    });
+    std::fs::write(&out, serde_json::to_vec_pretty(&json)?)?;
+    info!(
+        out = %out.display(),
+        public_inputs = proof.public_instances_hex.len(),
+        self_verified = proof.self_verified,
+        "withdrawal proof written; submit with `relayer submit-withdraw --proof-event {}`",
+        out.display()
+    );
+    Ok(())
 }
 
 async fn submit_withdraw(

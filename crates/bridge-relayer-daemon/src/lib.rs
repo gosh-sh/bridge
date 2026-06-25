@@ -68,12 +68,13 @@ pub mod relayer;
 pub mod source;
 pub mod state;
 pub mod types;
+pub mod withdraw_prover;
 pub mod withdrawal;
 
 pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
-    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
-    SubmitOutcome, WithdrawSubmitOutcome, BkSetUpdateSubmitOutcome,
+    BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
+    MockBridgeClient, SubmitOutcome, WithdrawSubmitOutcome,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
@@ -91,4 +92,8 @@ pub use source::{
 };
 pub use state::RelayerState;
 pub use types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
+pub use withdraw_prover::{
+    MockWithdrawalProver, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
+    WithdrawalProver, PROVER_BIN,
+};
 pub use withdrawal::{PartnerWithdrawalProof, WithdrawalPublicInputs, GROTH16_PROOF_SIZE};

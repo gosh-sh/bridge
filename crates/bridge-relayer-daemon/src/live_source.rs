@@ -197,7 +197,10 @@ where
         raw.validate_shape()?;
 
         let proofs = self.prover.prove(&raw).await?;
-        crate::proof_validation::validate_attestation_proof(raw.fin_type, &proofs.attestation_proof)?;
+        crate::proof_validation::validate_attestation_proof(
+            raw.fin_type,
+            &proofs.attestation_proof,
+        )?;
         crate::proof_validation::validate_layer_hashes_proof(&proofs.layer_hashes_proof)?;
 
         let block = AnBlockData {

@@ -6,14 +6,11 @@
 //! 256-byte Groth16 blob is still accepted for back-compat with the per-circuit
 //! Groth16 adapters retained for test coverage.
 
-use crate::{
-    error::RelayerError,
-    types::FinalizationType,
-    withdrawal::GROTH16_PROOF_SIZE,
-};
+use crate::{error::RelayerError, types::FinalizationType, withdrawal::GROTH16_PROOF_SIZE};
 
-/// Minimum instance prefix for an attestation SHPLONK bundle (12 acc + 4 inner).
-/// Both Circuit 1A (primary) and Circuit 1B (fallback) expose 4 public inputs.
+/// Minimum instance prefix for an attestation SHPLONK bundle (12 acc + 4
+/// inner). Both Circuit 1A (primary) and Circuit 1B (fallback) expose 4 public
+/// inputs.
 pub const SHPLONK_MIN_ATTESTATION_INSTANCES: usize = (12 + 4) * 32;
 
 /// Minimum instance prefix for layer-hashes SHPLONK bundle (12 acc + 14 inner).

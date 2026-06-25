@@ -379,7 +379,37 @@ AN_DAPP_ID=0x1a1a1a1a1a deposit-relayer prove-one \
 4. **Gosh halo2 fork:** merge `bump-halo2-lib-v0.4.1` to public `main` so consumers
    can drop local `[patch]` paths.
 
+## 12. Build provenance — ready-to-deploy artifacts (2026-06-26)
+
+The new `USDCBridge` is **already compiled and toolchain-validated**; only the
+shellnet deploy (partner-gated) + live finalize remain.
+
+| Item | Value |
+|------|-------|
+| New embedded VkBlob | `20cf9018647357576e50b3a42fbc3bb0970ca4fa6eb62090f66c8d1cbe647a39` (3982 B, k=18, 11 PI, v2 RLC, `num_advice_per_phase=[13,10]`, `shard_caps=[64]`, chain SRS) |
+| New `USDCBridge.tvc` **code_hash** | `818fb76dd5569d4a15063ceba178d135b491e5e1776e6a8999179a33a6a9abc4` |
+| New `.tvc` file SHA-256 | `c75161364162a08dc5f3ab3eca3c79161fc6d651ea313919c673c7940b57dfb4` (7408 B) |
+| Currently-deployed code_hash (old `147efe14` VK) | `b38e934a3c1e23d42c158dd9dbdb785a3739a449d6059646c391f4d93898e154` |
+| Artifacts (this repo's sibling) | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.{tvc,abi.json}` (ABI unchanged — `finalizeDeposit` signature identical) |
+| Compiler | `sold 0.79.3+commit.c7725d64.Linux.g++` — `TVM-Solidity-Compiler` branch **`origin/halo2_verify`** @ `c7725d64` (has the `gosh.zkhalo2VerifyWithVK` builtin) |
+| Compile cmd | `sold --tvm-version gosh --base-path . exchange/USDCBridge.sol -o exchange/` (run from `contracts/` root) |
+
+**Toolchain validation (byte-for-byte):** compiling the *unmodified* old source
+(`147efe14` VK) with this exact `sold` reproduces the **deployed** code_hash
+`b38e934a…898e154` exactly. Therefore this `sold` matches the partner's original
+build, and the new `20cf9018` `.tvc` differs from the deployed contract **only** by
+the VK swap (code_hash `818fb76d…`). See `docs/deposit_vk_witness_independence.md`
+for why the VK changed (it is now witness-independent — one embedded VK verifies
+every real deposit).
+
+**Remaining (partner-gated):** the bridge account `0:1a1a…1a1a` was deployed via
+shellnet **zerostate** (no executed tx), so swapping its code requires partner
+shellnet-ops (regenerate zerostate / in-place upgrade with the deploy authority).
+Once redeployed, the already-mined Sepolia `depositId=1` proof (8800 B, verifies
+against `20cf9018` via `verify_opcode_triple` — ACCEPTED) can be finalised live.
+
 ---
 
 *Prepared from ursus shellnet E2E session 2026-06-07/08. Relayer host:
-`ubuntu@ursus-tools.dev:/home/ubuntu/bridge-e2e/`.*
+`ubuntu@ursus-tools.dev:/home/ubuntu/bridge-e2e/`. Build provenance §12 added
+2026-06-26 (n14 `sold` build + toolchain validation).*

@@ -127,8 +127,9 @@ MetaMask — the relayer and support staff use it to trace your deposit.
 
 Open your deposit **transaction** on Etherscan (from MetaMask or the bridge
 **Transactions** tab) and check **Logs**. You should see a **`Deposit`** event
-with `depositId`, `sender`, `amount`, `anWorkchain`, and `anAccount`. Note the
-**`depositId`** — the relayer uses it as the cursor when processing deposits.
+with `depositId`, `sender`, `amount`, `anWorkchain`, `anAccount`, and
+`timestamp`. Note the **`depositId`** — the relayer uses it as the cursor when
+processing deposits.
 
 ---
 
@@ -162,6 +163,10 @@ You need **Sepolia ETH** for gas (separate from USDC).
 **`transferFrom` failed / deposit reverts**  
 You skipped **approve**, approved too little USDC, or have insufficient USDC
 balance. Repeat Step 2 with a large enough `amount`.
+
+**`InvalidAmount`**  
+`amount` was `0`. Enter a positive USDC base-unit amount (see the table in
+[Section 3](#reference-addresses-sepolia)).
 
 **`InvalidAnAccount`**  
 `anAccount` was zero or wrong format. Use a non-zero 256-bit Acki Nacki account
@@ -246,13 +251,14 @@ forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
 
 **Option B — verify an already-deployed contract.** `AckiNackiBridge` has a
 struct-heavy constructor, so let Foundry recover the args from on-chain creation
-code:
+code. The address below is this guide's deposit bridge
+(`0x99c37f…ce82`); substitute whichever deployment you are verifying:
 
 ```bash
 cd contracts/ethereum
 forge verify-contract --chain 11155111 --watch --guess-constructor-args \
   --etherscan-api-key "$ETHERSCAN_API_KEY" \
-  0x58a1c8d22a79a91db6e7448a7d64d59ad4dc043d \
+  0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
   src/AckiNackiBridge.sol:AckiNackiBridge
 ```
 

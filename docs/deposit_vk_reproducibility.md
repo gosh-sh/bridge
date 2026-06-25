@@ -74,7 +74,7 @@ transitive drift. Without the original lock, `147efe14` cannot be rebuilt.
 | `snark-verifier(-sdk)` | `gosh-sh/snark-verifier` @ `164bd42` |
 | `halo2-lib` (`[patch]`) | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` `bump-halo2-lib-v0.4.1` @ `026e176` |
 | `halo2-axiom` (`[patch.crates-io]`) | `gosh-sh/halo2-axiom` `main` @ `1f28ded` |
-| SRS | `deposit-prover/data/kzg_params_18.srs` (sha256 `ca97cea5…`, k=18) |
+| SRS | `deposit-prover/data/kzg_params_18.srs` (sha256 `ca97cea5…`, k=18) — ⚠️ **WRONG ceremony.** This is the Hermez SRS; its `s_g2` (`928fafb3…`) does **not** match the AN opcode's embedded `KZG_S_G2_BYTES` (`c6028acf…`), which is why `b1e5ce0b` is opcode-rejected. The production build must use the **chain** SRS `params/kzg_bn254_18.srs` (`s_g2 = c6028acf…`). See `deposit_vk_witness_independence.md`. |
 | Circuit params | `num_instance = [11]`, `max_data_byte_len=256`, `max_log_num=20`, `degree=18` |
 | **VkBlob (v2 RLC)** | **`b1e5ce0b3cafa697421d39e8f9728ccb7b15d690f2a5e579df12d6af800498bd`** (3597 B) |
 

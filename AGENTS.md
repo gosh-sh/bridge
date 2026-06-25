@@ -571,7 +571,7 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 [⏳] tvm-sdk PR #251 merge to main (optional; needs 1 GitHub approving review)
 [🔴] acki-nacki: USDCBridge.sol — embed 11-PI VkBlob + extend finalizeDeposit + redeploy .tvc
 [🔴] shellnet: rebuild AN nodes from tvm-sdk @1b9502cd (--features gosh, nightly toolchain)
-[🔴] SRS alignment: deposit proofs keyed on chain ceremony (kzg_bn254_19.srs → k=18), not Hermez
+[✅] SRS alignment: VERIFIED 2026-06-26 — deposit proofs keyed on chain ceremony (`params/kzg_bn254_18.srs`, downsized from chain `kzg_bn254_19.srs`), not Hermez. The chain SRS `s_g2` (`c6028acf…`) is byte-identical to the opcode's embedded `KZG_S_G2_BYTES`; the Hermez SRS `s_g2` (`928fafb3…`) is not. `prover.rs` loads the chain SRS first; `download_trusted_setup.sh` self-checks it.
 [🔴] deposit-relayer: live finalizeDeposit (remove --dry-run once contract + IAckiNacki send land)
 [⏳] Circuit 1B fallback WITHVK fixtures: regen via bridge-prover `EXPORT_HALO2_FIXTURE_DIR` (positive tests #[ignore])
 ```
@@ -718,7 +718,7 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 [⏳] tvm-sdk PR #251 merge to main (optional; needs 1 GitHub approving review)
 [🔴] acki-nacki: USDCBridge.sol — embed 11-PI VkBlob + extend finalizeDeposit + redeploy .tvc
 [🔴] shellnet: rebuild AN nodes from tvm-sdk @1b9502cd (--features gosh, nightly toolchain)
-[🔴] SRS alignment: deposit proofs keyed on chain ceremony (kzg_bn254_19.srs → k=18), not Hermez
+[✅] SRS alignment: VERIFIED 2026-06-26 — deposit proofs keyed on chain ceremony (`params/kzg_bn254_18.srs`, downsized from chain `kzg_bn254_19.srs`), not Hermez. The chain SRS `s_g2` (`c6028acf…`) is byte-identical to the opcode's embedded `KZG_S_G2_BYTES`; the Hermez SRS `s_g2` (`928fafb3…`) is not. `prover.rs` loads the chain SRS first; `download_trusted_setup.sh` self-checks it.
 [🔴] deposit-relayer: live finalizeDeposit (remove --dry-run once contract + IAckiNacki send land)
 [⏳] Circuit 1B fallback WITHVK fixtures: regen via bridge-prover `EXPORT_HALO2_FIXTURE_DIR` (positive tests #[ignore])
 ```

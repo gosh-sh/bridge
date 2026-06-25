@@ -45,19 +45,23 @@ halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib.git", tag = "v0.4
 # that would yield two snark-verifier crates in the graph and break
 # type unification in src/aggregation.rs + src/prover.rs.
 #
-# Pinned to ccdb510 to match the rev that gosh-sh/axiom-eth (branch
-# gosh-stable-rlcmanager-assignment) pins. axiom-eth's
-# src/utils/snark_verifier.rs (compiled under `aggregation` feature) still
-# uses the pre-PR-#71 `Halo2KzgAccumulationScheme` name. Tracking
-# `branch = "main"` here would split snark-verifier-sdk into two copies
-# (axiom-eth's pin vs. our HEAD) and break type unification with
-# `CircuitExt`.
-snark-verifier = { git = "https://github.com/gosh-sh/snark-verifier", rev = "ccdb510f60c577f2b683e1f77e1faa91a95f8c5c", default-features = false, features = [
+# Pinned to 164bd42 — the rev gosh-sh/axiom-eth (branch
+# gosh-stable-rlcmanager-assignment, tip 1d61be0) pulls transitively. This MUST
+# stay equal to axiom-eth's snark-verifier rev: any divergence yields two
+# `snark-verifier-sdk` copies in the graph, and `EthCircuitImpl<Fr, _>` (from
+# axiom-eth) then satisfies only its own copy's `CircuitExt`, breaking the
+# `gen_snark_shplonk` / `gen_evm_verifier_shplonk` calls in src/prover.rs that
+# bind `C: CircuitExt<Fr>` against *our* copy.
+#
+# History: was ccdb510, but axiom-eth's branch tip advanced to pull 164bd42,
+# desyncing the two and breaking the build (E0277 on `EthCircuitImpl: CircuitExt`).
+# If axiom-eth moves again, bump this rev to match (and refresh Cargo.lock).
+snark-verifier = { git = "https://github.com/gosh-sh/snark-verifier", rev = "164bd42e300b382239e63b16532faca539d6b324", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
   "halo2-axiom",
 ] }
-snark-verifier-sdk = { git = "https://github.com/gosh-sh/snark-verifier", rev = "ccdb510f60c577f2b683e1f77e1faa91a95f8c5c", default-features = false, features = [
+snark-verifier-sdk = { git = "https://github.com/gosh-sh/snark-verifier", rev = "164bd42e300b382239e63b16532faca539d6b324", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
   "halo2-axiom",

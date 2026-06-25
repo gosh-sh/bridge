@@ -45,6 +45,7 @@ impl FinalizationType {
 /// - Circuit 1A / 1B / 2: R15 SHPLONK aggregator calldata (`instances ‖
 ///   proof`). Circuit 1B is keygen'd at K=21 so its aggregated Yul fits
 ///   EIP-170.
+///
 /// The remaining fields are the cross-circuit-bound public inputs the contract
 /// checks against its stored anchors.
 #[derive(Clone, Debug, Serialize, Deserialize)]

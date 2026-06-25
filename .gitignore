@@ -9,7 +9,13 @@ target/
 # `cargo fetch --locked` and `Dockerfile` copies it), but ignore lock files
 # inside the workspace-excluded sub-projects, which each have their own
 # independent dep tree.
-deposit-prover/Cargo.lock
+#
+# EXCEPTION: deposit-prover/Cargo.lock IS tracked. The deposit circuit's
+# verifying key (and the VkBlob embedded in the on-chain USDCBridge) is a
+# deterministic function of the full dependency closure, so the lock must be
+# pinned for the VK to be reproducible. An untracked lock here is exactly what
+# made the original on-chain VK (147efe14…) unbuildable after transitive drift.
+# See docs/deposit_vk_reproducibility.md.
 poseidon-proof/Cargo.lock
 crates/bridge-prover-orchestrator/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock

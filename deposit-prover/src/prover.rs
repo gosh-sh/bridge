@@ -84,17 +84,21 @@ use crate::{
 
 /// Pinned keccak promise-loader capacity.
 ///
-/// Together with the axiom-eth MPT distinct-padding fix (each padding slot is a
-/// well-formed branch with a DISTINCT 32-byte child hash, so the number of
-/// deduplicated keccak requests is a constant `max_depth - 1`), pinning the
-/// keccak promise-loader capacity to a fixed worst case makes the deposit
-/// verifying key **witness-independent** — a single embedded VK verifies every
-/// real deposit regardless of its MPT proof depth or receipt size.
+/// Pinning the keccak promise-loader capacity to a fixed worst case makes the
+/// deposit verifying key **independent of MPT proof depth / receipt size** (the
+/// `num_advice_per_phase` no longer drifts with the used keccak capacity).
+/// Together with dropping the `contract_address` in-circuit constant
+/// (`circuit_v2.rs`, which had leaked the per-deposit address into the fixed
+/// column), this makes the VK fully **witness-independent** — a single embedded
+/// VK verifies every real deposit regardless of bridge address or MPT depth.
+/// No axiom-eth fork change is needed (upstream). See
+/// `docs/deposit_vk_witness_independence.md`.
 ///
-/// Must be `>=` every real deposit's `used_capacity` (shallow real proofs sit at
-/// 28-29; the `max_depth = 10` worst case is ~50) and must match the value used
-/// by `examples/export_vk_blob.rs` and `examples/export_deposit_proof_set.rs`,
-/// otherwise generated proofs will not verify against the embedded VK.
+/// Must be `>=` every real deposit's `used_capacity` (measured: 1-node = 11,
+/// 3-node = 21, ~5/node; the `max_depth = 10` worst case is ~55-60) and must
+/// match the value used by `examples/export_vk_blob.rs` /
+/// `examples/export_deposit_proof_set.rs`, otherwise generated proofs will not
+/// verify against the embedded VK (over-capacity fails safe at prove time).
 pub const FIXED_KECCAK_CAPACITY: usize = 64;
 
 /// Configuration for the deposit proof circuit
@@ -378,6 +382,38 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
 /// # Returns
 ///
 /// Proving key for the circuit
+/// Short hex fingerprint of the circuit shape that determines the verifying key
+/// (and hence whether a cached proving key is reusable): degree, advice/lookup
+/// column counts, RLC columns, and the pinned keccak capacity.
+fn pk_fingerprint(rlc: &RlcCircuitParams, keccak_capacity: usize) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rlc.base.k.hash(&mut h);
+    rlc.base.num_advice_per_phase.hash(&mut h);
+    rlc.base.num_lookup_advice_per_phase.hash(&mut h);
+    rlc.base.num_fixed.hash(&mut h);
+    rlc.base.lookup_bits.hash(&mut h);
+    rlc.base.num_instance_columns.hash(&mut h);
+    rlc.num_rlc_columns.hash(&mut h);
+    keccak_capacity.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Insert a shape fingerprint before the file extension, e.g.
+/// `data/deposit_prover_k18.pk` + `a1b2…` -> `data/deposit_prover_k18.a1b2….pk`.
+fn pk_path_with_fingerprint(pk_path: &Path, fingerprint: &str) -> std::path::PathBuf {
+    let stem = pk_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("deposit_prover");
+    let ext = pk_path.extension().and_then(|s| s.to_str()).unwrap_or("pk");
+    let file = format!("{stem}.{fingerprint}.{ext}");
+    match pk_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(file),
+        _ => std::path::PathBuf::from(file),
+    }
+}
+
 pub fn get_or_create_proving_key(
     params: &ParamsKZG<Bn256>,
     input: &DepositProofInput,
@@ -408,18 +444,28 @@ pub fn get_or_create_proving_key(
     // calculate_params() clears the witnesses; re-fulfill before keygen.
     circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
-    // Generate or load proving key
-    let pk = if pk_path.exists() {
+    // Derive a SHAPE-FINGERPRINTED proving-key path so a stale on-disk PK from a
+    // different circuit shape (e.g. a previous `num_advice_per_phase` /
+    // keccak-capacity / circuit version) is NEVER silently loaded. `gen_pk`
+    // deserialises whatever PK file it finds without checking it matches the
+    // current circuit — loading a stale PK would make the relayer emit proofs
+    // against the WRONG verifying key, which then fail on-chain
+    // (`ZKHALO2VERIFYWITHVK`). Keying the filename on the calculated shape means
+    // a shape change produces a fresh keygen instead of a silent mismatch.
+    let shape = pk_fingerprint(&circuit.params().rlc, FIXED_KECCAK_CAPACITY);
+    let pk_path = pk_path_with_fingerprint(pk_path, &shape);
+    let pk_path = pk_path.as_path();
+
+    // Generate or load proving key. `gen_pk(.., Some(path))` loads the PK if the
+    // (fingerprinted) file exists, otherwise generates it AND persists it there.
+    // Because the path is shape-fingerprinted, a stale PK from a different
+    // circuit shape lives under a different filename and is never loaded.
+    if pk_path.exists() {
         println!("Found existing proving key at {:?}, loading...", pk_path);
-        gen_pk(params, &circuit, Some(pk_path))
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-        use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
-        let vk = keygen_vk(params, &circuit)
-            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
-        keygen_pk(params, vk, &circuit)
-            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
-    };
+    }
+    let pk = gen_pk(params, &circuit, Some(pk_path));
     println!("Proving key ready");
 
     // Get the calculated circuit params from the keygen circuit

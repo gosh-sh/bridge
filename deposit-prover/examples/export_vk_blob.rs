@@ -131,8 +131,9 @@ fn main() -> anyhow::Result<()> {
     // 1. Rebuild the keygen circuit exactly as the prover does.
     // Pin the keccak promise-loader capacity so the VK is witness-INDEPENDENT
     // (one embedded VK verifies every real deposit regardless of MPT proof
-    // depth). Works in tandem with the axiom-eth distinct-padding fix. See
-    // `export_deposit_proof_set.rs` and `docs/deposit_vk_mpt_depth_witness_dependence.md`.
+    // depth). Together with dropping the `contract_address` in-circuit constant
+    // (circuit_v2.rs) this makes the VK fully witness-independent — no axiom-eth
+    // fork change is needed. See `docs/deposit_vk_witness_independence.md`.
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let circuit_input = DepositEventCircuitV2::new(input, &config);
     let rlc_params = get_default_params();

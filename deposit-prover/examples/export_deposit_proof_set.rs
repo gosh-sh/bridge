@@ -37,14 +37,14 @@ use axiom_eth::utils::{
 };
 use clap::Parser;
 
-/// Pinned keccak promise-loader capacity. The axiom-eth distinct-padding fix
-/// makes the *count* of keccak requests constant; pinning the loader capacity
-/// removes the residual +-1 keccak_f drift from data-dependent keccak inputs
-/// (receipt / leaf byte lengths), yielding a witness-independent VK. Must be
-/// >= every real deposit's `used_capacity`. Observed 28-29 for shallow real
-/// proofs; the max_depth=10 worst case (9 full-length branch nodes + leaf +
-/// receipt + header keccaks) is ~50, so 64 leaves a safe margin and still fits
-/// k=18.
+/// Pinned keccak promise-loader capacity. Pinning the loader capacity removes
+/// the data-dependent drift in `num_advice_per_phase` (receipt / MPT keccak
+/// work scales with depth), and dropping the `contract_address` in-circuit
+/// constant in `circuit_v2.rs` removes the address dependence — together the VK
+/// is witness-independent (no axiom-eth fork change needed; see
+/// `docs/deposit_vk_witness_independence.md`). Must be >= every real deposit's
+/// `used_capacity` (measured: 1-node=11, 3-node=21, ~5/node; max_depth=10 worst
+/// case ~55-60), so 64 leaves a safe margin and still fits k=18.
 const FIXED_KECCAK_CAPACITY: usize = 64;
 use deposit_prover::{
     circuit_v2::DepositEventCircuitV2,

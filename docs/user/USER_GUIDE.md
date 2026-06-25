@@ -205,9 +205,79 @@ development.
 | 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
 | Optional local UI (not required for testing) | `frontend/` — `trunk serve` → `http://localhost:8080` |
 | `cast` / Foundry scripts | `contracts/ethereum/script/DeployTestBridge.s.sol` |
+| Verify deployed contract on Etherscan | see below |
 
 Example env template for a hosted relayer:
 `scripts/ursus/deposit-relayer.env.example`.
+
+### Verify & Publish the bridge contract on Etherscan
+
+Source-verification publishes the Solidity that produced the deployed bytecode,
+so the contract is readable on Etherscan and its Read/Write tabs work. Two
+contract kinds verify differently:
+
+- `AckiNackiBridge` + mocks — normal Solidity verification (below).
+- The SHPLONK aggregator verifiers (`PrimaryAggregatorVerifier`,
+  `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`,
+  `BridgeWithdrawalAggregatorVerifier`) are **raw Yul bytecode** deployed from
+  `contracts/ethereum/verifiers/*.bin` via `ShplonkDeployLib`, so there is no
+  Solidity source to submit — publish their provenance
+  (`contracts/ethereum/verifiers/README.md`: `.bin` hash + snark-verifier rev +
+  regen command) instead of a source match.
+
+**Prerequisites**
+
+- An Etherscan **V2** API key (one key works across chains):
+  `export ETHERSCAN_API_KEY=…` (create at <https://etherscan.io/myapikey>).
+- The deployed address + chain id (Sepolia = `11155111`, mainnet = `1`).
+- Run `forge` **from `contracts/ethereum/`** so it reads `foundry.toml` and
+  submits the exact settings the deployment used:
+  **solc 0.8.19, optimizer on, `optimizer_runs = 1`, `via_ir = true`**. A
+  settings mismatch is the #1 cause of "bytecode does NOT match".
+
+**Option A — verify at deploy time (simplest):** add `--verify` to the deploy run.
+
+```bash
+cd contracts/ethereum
+forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+  --rpc-url "$SEPOLIA_RPC_URL" --private-key "$DEPLOYER_PK" \
+  --broadcast --verify --etherscan-api-key "$ETHERSCAN_API_KEY" -vvvv
+```
+
+**Option B — verify an already-deployed contract.** `AckiNackiBridge` has a
+struct-heavy constructor, so let Foundry recover the args from on-chain creation
+code:
+
+```bash
+cd contracts/ethereum
+forge verify-contract --chain 11155111 --watch --guess-constructor-args \
+  --etherscan-api-key "$ETHERSCAN_API_KEY" \
+  0x58a1c8d22a79a91db6e7448a7d64d59ad4dc043d \
+  src/AckiNackiBridge.sol:AckiNackiBridge
+```
+
+Other ways to get the constructor args: read them from
+`broadcast/<script>/<chainId>/run-latest.json`, or ABI-encode by hand
+(structs are tuples):
+
+```bash
+cast abi-encode \
+  "constructor(address,address,address,address,(address,address,address,uint256,uint256),(address,uint256,uint256,uint256,uint256,uint256))" \
+  "$ORACLE" "$USDC" "$AAVE_POOL" "$AUSDC" \
+  "($PRIMARY,$FALLBACK,$LAYERHASHES,$GENESIS_BK_SET_COMMITMENT,$GENESIS_PREV_MAX_LEVEL_LAYER_HASH)" \
+  "($WITHDRAW_VERIFIER,$DAPP_FR,$ACC_FR,$ALT_DST_CHAIN_ID,$ALT_DST_HOST_CHAIN_ID,$ALT_TOKEN_ID)"
+```
+
+**Etherscan V2 gotchas:**
+
+- If Foundry doesn't recognise the chain (`ETHERSCAN_API_KEY must be set…`), add
+  `--verifier etherscan --verifier-url "https://api.etherscan.io/v2/api?chainid=<id>"`.
+- If via-IR metadata trips verification, run `forge verify-contract
+  --show-standard-json-input …` and submit the JSON manually in the Etherscan UI.
+
+After a green ✓ badge, record the verified address + explorer URL in the
+deployment notes, and link the `verifiers/README.md` provenance entry for the
+raw-bytecode verifiers.
 
 ---
 

@@ -1,3 +1,13 @@
+> # ⚠️ PARTIALLY SUPERSEDED (corrected 2026-06-25)
+> The **`Cargo.lock`-is-now-tracked** reproducibility fix (§4.1) is correct and
+> retained. But the **`b1e5ce0b…` "canonical VkBlob" is NOT the production VK**:
+> it was keyed on the Hermez SRS and is rejected by the opcode, and lock-tracking
+> alone did not make a single embedded VK verify real deposits. The actual blocker
+> was a redundant `load_constant(contract_address)` in `circuit_v2.rs` + an
+> unpinned keccak capacity (both fixed in `deposit-prover`, no `axiom-eth` change).
+> The production VkBlob is now the **`20cf9018…`** family (cap=64, witness-independent).
+> **See `docs/deposit_vk_witness_independence.md`.**
+
 # Deposit VK reproducibility + USDCBridge redeploy request
 
 **Status (2026-06-25):** the deposit VkBlob embedded in the **currently deployed**

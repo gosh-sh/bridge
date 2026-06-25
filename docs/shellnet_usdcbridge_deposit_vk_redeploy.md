@@ -1,5 +1,18 @@
 # Shellnet `USDCBridge` deposit VK redeploy — partner checklist
 
+> # ⚠️ VK UPDATE REQUIRED (2026-06-25)
+> The currently deployed `USDCBridge` embeds VK `147efe14…` — keygen'd from
+> **synthetic 1-node fixtures** (`[10,10]`), which **cannot verify real deposits**
+> (3 logs, ≥3 MPT nodes). The deposit circuit had a witness-dependent VK bug
+> (per-deposit `contract_address` leaked into the fixed column + unpinned keccak
+> capacity); both are now fixed in `deposit-prover` (no `axiom-eth` change). The
+> **new production VkBlob is the `20cf9018…` family** (cap=64, k=18, 11 PI, v2
+> RLC), which is **witness-independent** — one embedded VK verifies every real
+> deposit regardless of bridge address or MPT depth. Embed **`20cf9018…`** (NOT
+> `147efe14…`, NOT `b1e5ce0b…`) and redeploy, then finalise `depositId=1`.
+> Root cause + validation: `docs/deposit_vk_witness_independence.md`.
+
+
 > **⚠️ STATUS UPDATE (2026-06-23): the redeploy described below is DONE.**
 > We verified it ourselves (no partner ping needed) by comparing the deployed
 > shellnet account code-hash against the compiled `.tvc` on `gosh-sh/acki-nacki`

@@ -31,8 +31,21 @@ mod halo2_tvm_bundle;
 
 use std::{fs, path::Path};
 
-use axiom_eth::utils::eth_circuit::{create_circuit, EthCircuitParams};
+use axiom_eth::utils::{
+    component::promise_loader::single::PromiseLoaderParams,
+    eth_circuit::{EthCircuitImpl, EthCircuitParams},
+};
 use clap::Parser;
+
+/// Pinned keccak promise-loader capacity. The axiom-eth distinct-padding fix
+/// makes the *count* of keccak requests constant; pinning the loader capacity
+/// removes the residual +-1 keccak_f drift from data-dependent keccak inputs
+/// (receipt / leaf byte lengths), yielding a witness-independent VK. Must be
+/// >= every real deposit's `used_capacity`. Observed 28-29 for shallow real
+/// proofs; the max_depth=10 worst case (9 full-length branch nodes + leaf +
+/// receipt + header keccaks) is ~50, so 64 leaves a safe margin and still fits
+/// k=18.
+const FIXED_KECCAK_CAPACITY: usize = 64;
 use deposit_prover::{
     circuit_v2::DepositEventCircuitV2,
     prover::{get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig},
@@ -100,13 +113,16 @@ fn main() -> anyhow::Result<()> {
     // ---- Keygen ONCE from proof_00, pinning params + break points + pk ----
     println!("Keygen (once) from proof_00/input.json ...");
     let ref_input = load_input(&args.set_dir, 0)?;
-    let mut kcircuit = create_circuit(
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let mut kcircuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Keygen,
-        get_default_params(),
         DepositEventCircuitV2::new(ref_input, &config),
+        get_default_params(),
+        fixed_keccak.clone(),
     );
-    kcircuit.mock_fulfill_keccak_promises(None);
+    kcircuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
     let eth_params: EthCircuitParams = kcircuit.calculate_params();
+    kcircuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
     println!(
         "  pinned params: k={} num_rlc_columns={}",
         eth_params.rlc.base.k, eth_params.rlc.num_rlc_columns
@@ -138,13 +154,14 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let input = load_input(&args.set_dir, i)?;
-        let circuit = create_circuit(
+        let circuit = EthCircuitImpl::<Fr, _>::new_impl(
             CircuitBuilderStage::Prover,
-            eth_params.rlc.clone(),
             DepositEventCircuitV2::new(input, &config),
+            eth_params.rlc.clone(),
+            fixed_keccak.clone(),
         )
         .use_break_points(break_points.clone());
-        circuit.mock_fulfill_keccak_promises(None);
+        circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
         let instances = circuit.instances();
         anyhow::ensure!(

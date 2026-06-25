@@ -61,7 +61,10 @@ use std::{
 
 use axiom_eth::{
     rlc::{circuit::RlcCircuitParams, virtual_region::RlcThreadBreakPoints},
-    utils::eth_circuit::create_circuit,
+    utils::{
+        component::promise_loader::single::PromiseLoaderParams,
+        eth_circuit::{create_circuit, EthCircuitImpl},
+    },
 };
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
@@ -78,6 +81,21 @@ use crate::{
     circuit_v2::DepositEventCircuitV2,
     types::{DepositProofInput, DepositProofOutput},
 };
+
+/// Pinned keccak promise-loader capacity.
+///
+/// Together with the axiom-eth MPT distinct-padding fix (each padding slot is a
+/// well-formed branch with a DISTINCT 32-byte child hash, so the number of
+/// deduplicated keccak requests is a constant `max_depth - 1`), pinning the
+/// keccak promise-loader capacity to a fixed worst case makes the deposit
+/// verifying key **witness-independent** — a single embedded VK verifies every
+/// real deposit regardless of its MPT proof depth or receipt size.
+///
+/// Must be `>=` every real deposit's `used_capacity` (shallow real proofs sit at
+/// 28-29; the `max_depth = 10` worst case is ~50) and must match the value used
+/// by `examples/export_vk_blob.rs` and `examples/export_deposit_proof_set.rs`,
+/// otherwise generated proofs will not verify against the embedded VK.
+pub const FIXED_KECCAK_CAPACITY: usize = 64;
 
 /// Configuration for the deposit proof circuit
 #[derive(Debug, Clone)]
@@ -216,6 +234,39 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 /// - The file is corrupted or invalid
 /// - The file format is incorrect
 pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, String> {
+    // PREFER the chain-ceremony SRS (`params/kzg_bn254_{k}.srs`) over the
+    // Hermez/Polygon SRS (`data/kzg_params_{k}.srs`).
+    //
+    // The AN-side `ZKHALO2VERIFYWITHVK` opcode rebuilds its verifier params from
+    // points embedded from the chain's `kzg_bn254_19.srs` ceremony. A SHPLONK
+    // proof (and the VK it is bound to) ONLY verifies under the opcode if the
+    // prover used the *same* ceremony. The Hermez SRS produces a different,
+    // opcode-REJECTED VK — e.g. deposit VkBlob `b1e5ce0b…` (Hermez) vs the
+    // deployed/opcode-aligned `147efe14…` (chain). See `examples/downsize_srs.rs`
+    // and `docs/deposit_vk_reproducibility.md`. Falls back to the Hermez SRS for
+    // degrees that have no downsized chain SRS on disk (e.g. k=20).
+    let chain_path = format!("params/kzg_bn254_{}.srs", k);
+    if Path::new(&chain_path).exists() {
+        println!("Loading chain-ceremony KZG parameters from {}", chain_path);
+        match load_kzg_params(&chain_path) {
+            Ok(params) => {
+                println!(
+                    "✅ Loaded chain-ceremony KZG parameters (opcode-aligned) from {}",
+                    chain_path
+                );
+                return Ok(params);
+            },
+            Err(e) => {
+                return Err(format!(
+                    "Chain-ceremony SRS {} exists but failed to load: {}. \
+                     Delete it to fall back to the Hermez SRS, or regenerate it \
+                     with `cargo run --release --example downsize_srs`.",
+                    chain_path, e
+                ));
+            },
+        }
+    }
+
     let params_path = format!("data/kzg_params_{}.srs", k);
 
     // Try to load existing parameters
@@ -251,9 +302,15 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
         }
     }
 
-    // Parameters not found - try to use degree 18 parameters (downward compatible)
+    // Parameters not found - try to use degree 18 parameters (downward compatible).
+    // Prefer the chain-ceremony k=18 SRS so downsized params stay opcode-aligned;
+    // fall back to the Hermez k=18 SRS only if the chain SRS is absent.
     if k < 18 {
-        let fallback_path = "data/kzg_params_18.srs";
+        let fallback_path = if Path::new("params/kzg_bn254_18.srs").exists() {
+            "params/kzg_bn254_18.srs"
+        } else {
+            "data/kzg_params_18.srs"
+        };
         if Path::new(fallback_path).exists() {
             println!(
                 "⚠️  KZG parameters for degree {} not found, using degree 18 (downward compatible)",
@@ -332,17 +389,24 @@ pub fn get_or_create_proving_key(
     // because the circuit structure depends on the data layout
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
-    let mut circuit = create_circuit(
+    // Pin the keccak promise-loader capacity so the VK is witness-independent
+    // (see `FIXED_KECCAK_CAPACITY`). The same pin is applied to the prover
+    // circuit below and to the VK exporter, so all three agree.
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let mut circuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Keygen,
-        circuit_params.clone(),
         circuit_input,
+        circuit_params.clone(),
+        fixed_keccak,
     );
 
     // CRITICAL: Fulfill Keccak promises and calculate params BEFORE keygen
     // This is required for axiom-eth circuits even in Keygen mode
     // See: axiom-eth/src/storage/tests.rs for reference
-    circuit.mock_fulfill_keccak_promises(None);
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
     circuit.calculate_params();
+    // calculate_params() clears the witnesses; re-fulfill before keygen.
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
     // Generate or load proving key
     let pk = if pk_path.exists() {
@@ -412,13 +476,19 @@ pub fn generate_proof(
     // 3. Create prover circuit with real input, calculated params, and break points
     // IMPORTANT: Use the circuit_params from keygen, not get_default_params()
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
-    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input)
-        .use_break_points(break_points);
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let circuit = EthCircuitImpl::<Fr, _>::new_impl(
+        CircuitBuilderStage::Prover,
+        circuit_input,
+        circuit_params,
+        fixed_keccak,
+    )
+    .use_break_points(break_points);
 
     // CRITICAL: Fulfill Keccak promises AFTER setting break points
     // This is required for axiom-eth circuits in Prover mode
     // See: axiom-eth/src/storage/tests.rs for reference
-    circuit.mock_fulfill_keccak_promises(None);
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
     // 4. Generate SNARK proof
     println!("Generating SNARK proof...");

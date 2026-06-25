@@ -555,32 +555,28 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Verified event signature ({} bytes)", min_len);
 
-        // 12. Verify contract address
-        // Load expected contract address as constant (we know it at circuit creation
-        // time)
-        let expected_address = &self.inputs.event_data.contract_address;
-        let expected_address_bytes: Vec<AssignedValue<Fr>> = expected_address
-            .iter()
-            .map(|&byte| ctx_gate.load_constant(Fr::from(byte as u64)))
-            .collect();
-
-        // Constrain that address_bytes equals expected_address_bytes
-        // Address should be 20 bytes
+        // 12. Sanity-check the extracted contract address length.
+        //
+        // NOTE: We intentionally do NOT load `self.inputs.event_data.contract_address`
+        // as an in-circuit CONSTANT to constrain `address_bytes` against. Doing so
+        // (the previous implementation) injected the per-deposit contract address
+        // into the single fixed column, which made the verifying key depend on the
+        // contract address — so a VK built for one bridge address would not verify
+        // a deposit from another, and "one embedded VK verifies every deposit"
+        // silently broke. The address binding is fully preserved WITHOUT a constant:
+        // the RLP-extracted address (`address_bytes` -> `contract_address_field`,
+        // below) is constrained equal to the Phase-0 PUBLIC INSTANCE
+        // `contract_address_phase0` (public input #3), and the AN-side
+        // `TokenBridge.finalizeDeposit` checks that public input against the bridge's
+        // configured deposit-source address. Keeping the address out of the fixed
+        // column makes the VK witness-independent (see
+        // `docs/deposit_vk_witness_independence.md`).
         assert_eq!(
             address_bytes.len(),
             20,
             "Contract address should be 20 bytes"
         );
-        assert_eq!(
-            expected_address_bytes.len(),
-            20,
-            "Expected address should be 20 bytes"
-        );
-
-        for (actual, expected) in address_bytes.iter().zip(expected_address_bytes.iter()) {
-            ctx_gate.constrain_equal(actual, expected);
-        }
-        println!("   ✓ Verified contract address");
+        println!("   ✓ Extracted contract address (bound to public input in Phase 1)");
 
         // 13. Convert bytes to field elements for public outputs
         // Topics are already 32 bytes each (uint256 in Solidity)

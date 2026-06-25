@@ -26,13 +26,15 @@
 
 use std::{fs, path::Path};
 
-use axiom_eth::utils::eth_circuit::create_circuit;
+use axiom_eth::utils::{
+    component::promise_loader::single::PromiseLoaderParams, eth_circuit::EthCircuitImpl,
+};
 use clap::Parser;
 use deposit_prover::{
     circuit_v2::DepositEventCircuitV2,
     prover::{
-        get_default_params, get_or_create_proving_key, load_kzg_params_from_trusted_setup,
-        CircuitConfig,
+        get_or_create_proving_key, load_kzg_params_from_trusted_setup, CircuitConfig,
+        FIXED_KECCAK_CAPACITY,
     },
     types::DepositProofInput,
 };
@@ -42,9 +44,9 @@ use halo2_base::{
         halo2curves::bn256::{Bn256, Fr, G1Affine},
         plonk::{create_proof, verify_proof},
         poly::{
-            commitment::{Params, ParamsProver},
+            commitment::ParamsProver,
             kzg::{
-                commitment::{KZGCommitmentScheme, ParamsKZG},
+                commitment::KZGCommitmentScheme,
                 multiopen::{ProverSHPLONK, VerifierSHPLONK},
                 strategy::SingleStrategy,
             },
@@ -55,7 +57,6 @@ use halo2_base::{
     },
 };
 use rand::rngs::OsRng;
-use snark_verifier_sdk::CircuitExt;
 
 #[derive(Parser, Debug)]
 #[command(name = "export-blake2b-proof")]
@@ -102,10 +103,19 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("get_or_create_proving_key: {e}"))?;
 
     // Prover-stage circuit with the keygen break points (mirrors generate_proof).
+    // Pin the keccak promise-loader capacity to FIXED_KECCAK_CAPACITY so this
+    // proof verifies against the witness-independent VK that `export_vk_blob`
+    // (and the live prover) produce.
     let circuit_input = DepositEventCircuitV2::new(input, &config);
-    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input)
-        .use_break_points(break_points);
-    circuit.mock_fulfill_keccak_promises(None);
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let circuit = EthCircuitImpl::<Fr, _>::new_impl(
+        CircuitBuilderStage::Prover,
+        circuit_input,
+        circuit_params,
+        fixed_keccak,
+    )
+    .use_break_points(break_points);
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
     let instances: Vec<Vec<Fr>> = circuit.instances();
     anyhow::ensure!(

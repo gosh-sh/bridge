@@ -498,7 +498,9 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 | Direction | Status | Notes |
 |-----------|--------|-------|
 | **AN→ETH** | ✅ Green (2026-06) | Sepolia bridge `verifyBlock` + `withdrawByProof` mined on Ursus stand |
-| **ETH→AN** | 🔴 Blocked on shellnet VK | Relayer on `ubuntu@ursus-tools.dev` proves Sepolia deposits; `finalizeDeposit` fails at `ZKHALO2VERIFYWITHVK` because deployed `USDCBridge` embeds wrong VK |
+| **ETH→AN** | ✅ Green (2026-07-01) | Full real E2E on shellnet: Sepolia deposit `depositId=3` (tx `0xf6bccc…`, 1 USDC) → `deposit-relayer prove-one` (cached PK, **no keygen**, ~46 s) → `finalizeDeposit` ACCEPTED (AN tx `46adeb0c…`, compute+action `exit_code 0`) → recipient `0:00…d011de8725a6b0d963d031c07bf834c9` credited **ECC currency#3 = 1000000 (1 USDC)**. VK blocker cleared (USDCBridge redeployed, 11-PI VkBlob, code-hash `818fb76d`). ⚠️ Recipient `anAccount` high 16 bytes **must be 0** — see the constraint note below. |
+
+> **⚠️ Recipient constraint (learned 2026-07-01, real E2E).** The deployed `USDCBridge._parsePublicInputs` reads `anWorkchain = int8(uint8(fr[6]))` and `anAccount = fr[7]`, but the **deposit circuit splits the 32-byte `anAccount` into `anAccountHigh (fr[6])` / `anAccountLow (fr[7])`**. A full 256-bit AN recipient (e.g. a real msig `0x20c2db9c…`) puts a large value in `fr[6]`, so `uint8(fr[6])` **overflows → compute `exit_code 4`** (TVM integer overflow — *not* `ERR_INVALID_ZKPROOF`=220; the `ZKHALO2VERIFYWITHVK` opcode actually *accepts* the proof). The deposit `anAccount` **must have its high 16 bytes = 0** (≤128-bit id, exactly as `docs/user/USER_GUIDE.md` shows `0x00…00ab` and the passing fixtures use `0x…deadbe00`). The credited `0:anAccountLow` is an `Uninit` account (`dapp_id == account_id`) — fine for the deposit-credit leg, but the AN→ETH withdraw-back can't originate from it. Debug ground truth: `depositId=2` had `fr[6]=0x20c2db9c…` → `exit_code 4`; `depositId=3` had `fr[6]=0` → success. (The blocker table below is historical — the VK gap it describes is closed.)
 
 **Why shellnet rejects real deposit proofs today**
 
@@ -569,10 +571,10 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 [✅] deposit-relayer: prove Sepolia deposits (production + fast-path CLI; fixture covers log-index mapping)
 [✅] AN→ETH withdraw path on Sepolia (orthogonal)
 [⏳] tvm-sdk PR #251 merge to main (optional; needs 1 GitHub approving review)
-[🔴] acki-nacki: USDCBridge.sol — embed 11-PI VkBlob + extend finalizeDeposit + redeploy .tvc
-[🔴] shellnet: rebuild AN nodes from tvm-sdk @1b9502cd (--features gosh, nightly toolchain)
+[✅] acki-nacki: USDCBridge.sol — 11-PI VkBlob embedded + finalizeDeposit(proof,publicInputs) redeployed (code-hash 818fb76d, VkBlob 20cf9018)
+[✅] shellnet: AN nodes accept ZKHALO2VERIFYWITHVK 11-PI proofs (real deposit finalised 2026-07-01, AN tx 46adeb0c…)
 [✅] SRS alignment: VERIFIED 2026-06-26 — deposit proofs keyed on chain ceremony (`params/kzg_bn254_18.srs`, downsized from chain `kzg_bn254_19.srs`), not Hermez. The chain SRS `s_g2` (`c6028acf…`) is byte-identical to the opcode's embedded `KZG_S_G2_BYTES`; the Hermez SRS `s_g2` (`928fafb3…`) is not. `prover.rs` loads the chain SRS first; `download_trusted_setup.sh` self-checks it.
-[🔴] deposit-relayer: live finalizeDeposit (remove --dry-run once contract + IAckiNacki send land)
+[✅] deposit-relayer: live finalizeDeposit landed (finalize-one signs AN external msg → ACCEPTED; recipient anAccount must have high-16-bytes==0, see recipient constraint above)
 [⏳] Circuit 1B fallback WITHVK fixtures: regen via bridge-prover `EXPORT_HALO2_FIXTURE_DIR` (positive tests #[ignore])
 ```
 
@@ -645,7 +647,9 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 | Direction | Status | Notes |
 |-----------|--------|-------|
 | **AN→ETH** | ✅ Green (2026-06) | Sepolia bridge `verifyBlock` + `withdrawByProof` mined on Ursus stand |
-| **ETH→AN** | 🔴 Blocked on shellnet VK | Relayer on `ubuntu@ursus-tools.dev` proves Sepolia deposits; `finalizeDeposit` fails at `ZKHALO2VERIFYWITHVK` because deployed `USDCBridge` embeds wrong VK |
+| **ETH→AN** | ✅ Green (2026-07-01) | Full real E2E on shellnet: Sepolia deposit `depositId=3` (tx `0xf6bccc…`, 1 USDC) → `deposit-relayer prove-one` (cached PK, **no keygen**, ~46 s) → `finalizeDeposit` ACCEPTED (AN tx `46adeb0c…`, compute+action `exit_code 0`) → recipient `0:00…d011de8725a6b0d963d031c07bf834c9` credited **ECC currency#3 = 1000000 (1 USDC)**. VK blocker cleared (USDCBridge redeployed, 11-PI VkBlob, code-hash `818fb76d`). ⚠️ Recipient `anAccount` high 16 bytes **must be 0** — see the constraint note below. |
+
+> **⚠️ Recipient constraint (learned 2026-07-01, real E2E).** The deployed `USDCBridge._parsePublicInputs` reads `anWorkchain = int8(uint8(fr[6]))` and `anAccount = fr[7]`, but the **deposit circuit splits the 32-byte `anAccount` into `anAccountHigh (fr[6])` / `anAccountLow (fr[7])`**. A full 256-bit AN recipient (e.g. a real msig `0x20c2db9c…`) puts a large value in `fr[6]`, so `uint8(fr[6])` **overflows → compute `exit_code 4`** (TVM integer overflow — *not* `ERR_INVALID_ZKPROOF`=220; the `ZKHALO2VERIFYWITHVK` opcode actually *accepts* the proof). The deposit `anAccount` **must have its high 16 bytes = 0** (≤128-bit id, exactly as `docs/user/USER_GUIDE.md` shows `0x00…00ab` and the passing fixtures use `0x…deadbe00`). The credited `0:anAccountLow` is an `Uninit` account (`dapp_id == account_id`) — fine for the deposit-credit leg, but the AN→ETH withdraw-back can't originate from it. Debug ground truth: `depositId=2` had `fr[6]=0x20c2db9c…` → `exit_code 4`; `depositId=3` had `fr[6]=0` → success. (The blocker table below is historical — the VK gap it describes is closed.)
 
 **Why shellnet rejects real deposit proofs today**
 
@@ -716,10 +720,10 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 [✅] deposit-relayer: prove Sepolia deposits (ursus-tools.dev)
 [✅] AN→ETH withdraw path on Sepolia (orthogonal)
 [⏳] tvm-sdk PR #251 merge to main (optional; needs 1 GitHub approving review)
-[🔴] acki-nacki: USDCBridge.sol — embed 11-PI VkBlob + extend finalizeDeposit + redeploy .tvc
-[🔴] shellnet: rebuild AN nodes from tvm-sdk @1b9502cd (--features gosh, nightly toolchain)
+[✅] acki-nacki: USDCBridge.sol — 11-PI VkBlob embedded + finalizeDeposit(proof,publicInputs) redeployed (code-hash 818fb76d, VkBlob 20cf9018)
+[✅] shellnet: AN nodes accept ZKHALO2VERIFYWITHVK 11-PI proofs (real deposit finalised 2026-07-01, AN tx 46adeb0c…)
 [✅] SRS alignment: VERIFIED 2026-06-26 — deposit proofs keyed on chain ceremony (`params/kzg_bn254_18.srs`, downsized from chain `kzg_bn254_19.srs`), not Hermez. The chain SRS `s_g2` (`c6028acf…`) is byte-identical to the opcode's embedded `KZG_S_G2_BYTES`; the Hermez SRS `s_g2` (`928fafb3…`) is not. `prover.rs` loads the chain SRS first; `download_trusted_setup.sh` self-checks it.
-[🔴] deposit-relayer: live finalizeDeposit (remove --dry-run once contract + IAckiNacki send land)
+[✅] deposit-relayer: live finalizeDeposit landed (finalize-one signs AN external msg → ACCEPTED; recipient anAccount must have high-16-bytes==0, see recipient constraint above)
 [⏳] Circuit 1B fallback WITHVK fixtures: regen via bridge-prover `EXPORT_HALO2_FIXTURE_DIR` (positive tests #[ignore])
 ```
 

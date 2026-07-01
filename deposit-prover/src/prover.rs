@@ -56,7 +56,7 @@
 
 use std::{
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use axiom_eth::{
@@ -456,29 +456,64 @@ pub fn get_or_create_proving_key(
     let pk_path = pk_path_with_fingerprint(pk_path, &shape);
     let pk_path = pk_path.as_path();
 
-    // Generate or load proving key. `gen_pk(.., Some(path))` loads the PK if the
-    // (fingerprinted) file exists, otherwise generates it AND persists it there.
-    // Because the path is shape-fingerprinted, a stale PK from a different
-    // circuit shape lives under a different filename and is never loaded.
-    if pk_path.exists() {
-        println!("Found existing proving key at {:?}, loading...", pk_path);
+    // Break points are computed by halo2 DURING keygen synthesis and stored on
+    // the (RefCell) builder. `gen_pk(.., Some(path))` only *deserialises* an
+    // existing PK — it does NOT synthesise — so on the load path
+    // `circuit.break_points()` comes back EMPTY and the prover later panics with
+    // "break points not set". They are therefore persisted to a sidecar next to
+    // the PK during keygen and reloaded on a cache hit, so proving reuses the PK
+    // with NO keygen (the operator fast path). `RlcThreadBreakPoints` is serde.
+    let bp_path = PathBuf::from(format!("{}.bp.json", pk_path.display()));
+
+    // A PK generated before this sidecar existed would be loaded WITHOUT its
+    // break points (unrecoverable without a synthesis). Remove such a legacy PK
+    // so both the PK and its sidecar are regenerated together, once.
+    if pk_path.exists() && !bp_path.exists() {
+        println!(
+            "Proving key {:?} present but break-points sidecar missing; \
+             regenerating both (one-time)...",
+            pk_path
+        );
+        let _ = fs::remove_file(pk_path);
+    }
+
+    let load_from_cache = pk_path.exists() && bp_path.exists();
+    if load_from_cache {
+        println!(
+            "Found existing proving key + break points, loading (no keygen): {:?}",
+            pk_path
+        );
     } else {
         println!("Generating proving key (this may take a few minutes)...");
     }
+
     let pk = gen_pk(params, &circuit, Some(pk_path));
     println!("Proving key ready");
 
-    // Get the calculated circuit params from the keygen circuit
-    // These are needed to create the prover circuit with the same structure
+    // Get the calculated circuit params from the keygen circuit. Available after
+    // `calculate_params()` above on both the load and generate paths.
     use halo2_base::halo2_proofs::plonk::Circuit;
     let calculated_params = circuit.params().rlc;
 
-    // Get break points from the keygen circuit
-    // These are needed when creating the prover circuit
-    // NOTE: We always get break points from the keygen circuit we just created,
-    // even if the proving key was loaded from disk. This is because break points
-    // are deterministic and depend only on the circuit structure.
-    let break_points = circuit.break_points();
+    let break_points = if load_from_cache {
+        // Load path: the circuit was NOT synthesised (gen_pk only deserialised
+        // the PK), so read the break points from the sidecar instead of the
+        // (empty) builder.
+        let bytes = fs::read(&bp_path)
+            .map_err(|e| format!("reading break-points sidecar {:?}: {e}", bp_path))?;
+        serde_json::from_slice::<RlcThreadBreakPoints>(&bytes)
+            .map_err(|e| format!("deserialising break-points sidecar {:?}: {e}", bp_path))?
+    } else {
+        // Generate path: gen_pk synthesised the circuit, so the builder now holds
+        // the break points. Persist them next to the PK for future cache hits.
+        let bp = circuit.break_points();
+        let bytes = serde_json::to_vec(&bp)
+            .map_err(|e| format!("serialising break points: {e}"))?;
+        fs::write(&bp_path, &bytes)
+            .map_err(|e| format!("writing break-points sidecar {:?}: {e}", bp_path))?;
+        println!("Wrote break-points sidecar -> {:?}", bp_path);
+        bp
+    };
 
     Ok((pk, calculated_params, break_points))
 }

@@ -2,7 +2,7 @@
 
 **Move test USDC from Ethereum (Sepolia) to Acki Nacki.**
 
-*Revision: June 2026 · Sepolia testnet*
+*Revision: July 2026 · Sepolia testnet*
 
 ---
 
@@ -116,6 +116,17 @@ This only **allows** the bridge to pull USDC; it does not deposit yet.
    `0x00000000000000000000000000000000000000000000000000000000000000ab` for
    account byte `0xab`. **Must not be all zeros.** |
 
+   > **⚠️ Testnet constraint — `anAccount` must fit in the low 16 bytes.** The
+   > current shellnet `USDCBridge` credits the account whose id is the **low
+   > 128 bits** of `anAccount`, and requires the **high 16 bytes to be zero**.
+   > In other words the left-hand 32 hex characters after `0x` must all be `0`:
+   > `0x00000000000000000000000000000000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`.
+   > A full-width 256-bit account (e.g. a real multisig address that starts
+   > with non-zero bytes) makes `finalizeDeposit` **revert on Acki Nacki**
+   > (TVM `exit_code 4`), so the relayer cannot credit it. This is a known
+   > testnet limitation of the deployed contract's public-input layout; ask
+   > your operator for a compliant recipient id if unsure.
+
    The **`amount`** here must be less than or equal to the USDC you approved in Step 2.
 
 4. Click **Write**, confirm in MetaMask, wait for confirmation.
@@ -145,13 +156,18 @@ You do not need to run anything yourself:
 
 **Timing:** proof generation takes **minutes**, not seconds.
 
-**Testnet caveat (June 2026):** Sepolia deposits can be **proved** end-to-end,
-but **live crediting on shellnet** may still fail until the AN-side
-`USDCBridge` contract is redeployed with the correct deposit verifying key
-(11 public inputs). Your Ethereum deposit is still valid and visible on
-Etherscan; ask the operator whether `finalizeDeposit` on shellnet is enabled for
-your test window. Technical details:
-`docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
+**Testnet status (July 2026):** live crediting on shellnet **works end-to-end**.
+A real 1 USDC Sepolia deposit was proved and credited on Acki Nacki on
+2026-07-01 (AN `finalizeDeposit` tx `46adeb0c…`). Two things to keep in mind:
+
+- Your `anAccount` **must satisfy the low-16-bytes constraint** from
+  [Section 4](#step-3--call-deposit-on-the-bridge). A non-compliant recipient
+  proves fine but cannot be credited (the AN contract reverts).
+- The AN-side `USDCBridge` is deployed with the correct 11-public-input
+  verifying key (this earlier blocker is resolved). Technical details:
+  `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
+
+Your Ethereum deposit is always valid and visible on Etherscan regardless.
 
 ---
 
@@ -183,13 +199,25 @@ disabled until the operator unpauses the bridge.
 All steps must be on **Sepolia**, not Ethereum mainnet.
 
 **Funds not on Acki Nacki yet**  
-Wait several minutes. If still missing, send your **deposit transaction hash**
-and **depositId** (from the event) to the operator. The relayer or AN contract
-may be mid-upgrade.
+Wait several minutes (proof generation takes minutes). If still missing, send
+your **deposit transaction hash** and **depositId** (from the event) to the
+operator. The relayer or AN contract may be mid-upgrade.
+
+**Deposit succeeded on Sepolia but never arrives on Acki Nacki**  
+The most common cause on testnet is a non-compliant **`anAccount`**: if its
+high 16 bytes are not zero (e.g. you used a full 256-bit multisig address), the
+relayer proves the deposit but Acki Nacki's `finalizeDeposit` **reverts
+(`exit_code 4`)** and nothing is credited. Re-deposit with a recipient whose
+left-hand 32 hex characters are all `0` (see the constraint box in
+[Section 4](#step-3--call-deposit-on-the-bridge)).
 
 **Can I withdraw back to Ethereum?**  
-Not via this user path yet. AN → ETH is a separate bridge direction under
-development.
+Not as a self-serve MetaMask path yet. The reverse **AN → ETH** direction does
+exist and has been demonstrated on Sepolia (the bridge proves Acki Nacki block
+state via `verifyBlock`, then pays out via `withdrawByProof`), but it is
+**operator-driven** (a relayer submits the proofs) and currently uses
+integration-grade verifiers — not a production-safe, user-initiated flow. Ask
+your operator if you need a testnet withdrawal.
 
 ---
 
@@ -205,7 +233,8 @@ development.
 
 | Task | Where to look |
 | --- | --- |
-| Relayer (listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch`, `prove-one`, `daemon` |
+| Deposit relayer (ETH→AN: listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch`, `prove-one`, `finalize-one`, `daemon` |
+| Reverse relayer (AN→ETH: `verifyBlock` + `withdrawByProof`) | `crates/bridge-relayer-daemon/` — `relayer submit-verify-block`, `submit-withdraw`, `daemon-prover`; wiring: `docs/shellnet_an_eth_relayer_wiring.md` |
 | Shellnet / VK redeploy checklist | `docs/shellnet_usdcbridge_deposit_vk_redeploy.md` |
 | 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
 | Optional local UI (not required for testing) | `frontend/` — `trunk serve` → `http://localhost:8080` |

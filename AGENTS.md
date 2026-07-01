@@ -782,6 +782,29 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 - AAVE: mainnet fork tests landed 2026-05-17 in `AckiNackiBridgeAaveFork.t.sol` (4 tests: constructor wiring, supply+withdraw round-trip, 1-year yield accrual + harvest, emergency exit). Opt-in via `FOUNDRY_PROFILE=fork FORK_URL=...`. Default `forge test` skips them. Validates real V3 `Pool` + `WrappedTokenGatewayV3` + `aWETH` ABI assumptions against the mock-based `AckiNackiBridgeAaveTest`.
 - Production LAYER_TREE_DEPTH=8 testing.
 
+### KZG trusted setup provenance — CHAIN ceremony vs Hermez (history dug 2026-07-01)
+
+**TL;DR:** the "CHAIN SRS" is **Acki Nacki's own decentralized on-chain Powers-of-Tau ceremony** (BN254). Every on-chain Halo2/SHPLONK verifier on AN (DarkDEX `ZKHALO2VERIFY` and the bridge deposit `ZKHALO2VERIFYWITHVK`) embeds **that ceremony's** `[s]·G2 = c6028acf4420…7397d6664515`, and all DarkDEX + deposit proofs MUST be keyed on it. Hermez Powers of Tau (`s_g2 = 928fafb3…`) is a **different tau** (same g1/g2 generators) and is REJECTED by the opcode. Do not confuse them.
+
+**What / where it lives**
+- Ceremony implementation: sibling repo **`zk-powers-of-tau-ceremony-contracts`** — TVM-Solidity contracts (`PtauContributionInit.sol`, `PtauContribution.sol`, `CeremonyFinalizer.sol`, multisig contributor wallets). Per its README: a **decentralized tree-of-contributions** ptau (lottery + external Verifier; contributions live in IPFS, only hash+IPFS-link on-chain; Coordinator does the initial + final contribution via random beacon; final chain → circuit VK/PK).
+- Ceremony output SRS: **`acki-nacki:params/kzg_bn254_19.srs`** (67,109,124 B, K=19) + copy under `halo2_test_data/`.
+- Bridge deposit uses a **tau-preserving downsize** to k=18 → `deposit-prover/params/kzg_bn254_18.srs` (`examples/downsize_srs.rs`; `prover.rs` loads it first). `download_trusted_setup.sh` self-checks the chain `s_g2` head/tail and can only fetch the *Hermez test/fallback* SRS (`data/kzg_params_18.srs`), never the chain one.
+- Opcode embed: `tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES` (WithVK path) and `DARK_DEX_KZG_S_G2_BYTES` (legacy path) are **byte-identical** — both the chain ceremony point (verified).
+
+**Who / why introduced it — `alinaT <alina.t@gosh.sh>`**, for the AN on-chain Halo2 verifier (DarkDEX first, bridge later). A KZG verifier must use the exact `[s]·G2` its proofs were created against, so AN ran its own trustless ceremony instead of relying on an external one. Key commits:
+
+| Repo | Commit | Author / date | What |
+|------|--------|---------------|------|
+| `tvm-sdk` | `6af906f7` *use axiom based halo stuff* | alinaT, 12 Feb 2026 | axiom halo2-lib switch; first chain KZG bytes / SRS test data |
+| `tvm-sdk` | `96030d08` *halo2 tvm instruuction updated for latest dex circuit params* | alinaT, 16 Apr 2026 | embed chain KZG points for current DEX params |
+| `tvm-sdk` | `f23028ec` *kzg experiment* | alinaT, 17 Apr 2026 | rework embedded KZG points in `zk_halo2_utils.rs` |
+| `acki-nacki` | `0fe6357fa` *kzg issue* | alinaT, 17 Apr 2026 | add the ceremony file `params/kzg_bn254_19.srs` (+`halo2_test_data/`) |
+
+**The Hermez detour (root of the confusion):** `Sergey Egorov <sergey.egorov@pruvendo.com>` temporarily switched the WithVK opcode's `KZG_S_G2_BYTES` to Hermez in `tvm-sdk@2ee96ca8` *"switch ZKHALO2VERIFYWITHVK to Hermez production trusted setup"* (26 May 2026), with a comment claiming Hermez provenance — wrong, because deposit/DarkDEX proofs are keyed on the chain ceremony. Restored to chain in `38c07822` (deposit RLC, 14 Jun 2026); the misleading "Hermez" comment was finally corrected in **tvm-sdk PR #271 / `287bf843`** (comment-only; empirical: Hermez `s_g2=928fafb3…` ≠ chain `s_g2=c6028acf…`, verified against the bridge repo's two SRS files).
+
+**tvm-sdk PR #271 (`pruvendo/deposit-vk-20cf9018-fixtures` → `full_dex_and_bridge_test_with_final_halo2_circuit`, verified 2026-06-27):** swaps the `deposit_10proofs` regression fixtures to the witness-independent production VkBlob **`20cf9018…647a39`** (3982 B, k=18, 11 PI, v2 RLC) + 10 regenerated proofs (8800 B), and corrects the KZG provenance comment (comment-only source change). VkBlob + all 10 proof/PI pairs are byte-identical to `deposit-prover/fixtures/deposit_10proofs/`; the 3 `deposit_rlc` opcode tests pass under `--features gosh`. **Pre-existing base-branch break (not from this PR):** the gosh test target `node_executor_gosh` fails to compile because `tvm_executor/tests/common/mod.rs::build()`'s `ExecuteParams { … }` literal lacks the `check_history_proof_hash: None` field (field added by alinaT `eb30e7ba` *Add CHKHISTPROOF*; the gosh test file came via `1e46dbe7 #252`; the `main` merge `beb0b8f1` combined them). One-line fix = add the missing field.
+
 ### Canonical v2 doc set (Phase 7 done, 2026-05-10)
 
 - `docs/four_circuit_architecture.md` — **canonical v2 entry point**: envelope-hash leaf table, per-circuit public-input layouts, cross-circuit binding (CC-#), state machine, gas table.

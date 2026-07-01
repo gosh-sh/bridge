@@ -123,9 +123,14 @@ This only **allows** the bridge to pull USDC; it does not deposit yet.
    > `0x00000000000000000000000000000000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`.
    > A full-width 256-bit account (e.g. a real multisig address that starts
    > with non-zero bytes) makes `finalizeDeposit` **revert on Acki Nacki**
-   > (TVM `exit_code 4`), so the relayer cannot credit it. This is a known
-   > testnet limitation of the deployed contract's public-input layout; ask
-   > your operator for a compliant recipient id if unsure.
+   > (TVM `exit_code 4`), so the relayer cannot credit it. Ask your operator
+   > for a compliant recipient id if unsure.
+   >
+   > This is a **transient limitation of the currently deployed** shellnet
+   > contract, not a permanent design choice: the fix (reassembling the full
+   > 256-bit account from both halves) is already merged upstream
+   > (`acki-nacki` #2271) and lifts the restriction once the shellnet
+   > `USDCBridge` is redeployed. Until then, use a ≤128-bit recipient.
 
    The **`amount`** here must be less than or equal to the USDC you approved in Step 2.
 

@@ -116,21 +116,13 @@ This only **allows** the bridge to pull USDC; it does not deposit yet.
    `0x00000000000000000000000000000000000000000000000000000000000000ab` for
    account byte `0xab`. **Must not be all zeros.** |
 
-   > **⚠️ Testnet constraint — `anAccount` must fit in the low 16 bytes.** The
-   > current shellnet `USDCBridge` credits the account whose id is the **low
-   > 128 bits** of `anAccount`, and requires the **high 16 bytes to be zero**.
-   > In other words the left-hand 32 hex characters after `0x` must all be `0`:
-   > `0x00000000000000000000000000000000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`.
-   > A full-width 256-bit account (e.g. a real multisig address that starts
-   > with non-zero bytes) makes `finalizeDeposit` **revert on Acki Nacki**
-   > (TVM `exit_code 4`), so the relayer cannot credit it. Ask your operator
-   > for a compliant recipient id if unsure.
-   >
-   > This is a **transient limitation of the currently deployed** shellnet
-   > contract, not a permanent design choice: the fix (reassembling the full
-   > 256-bit account from both halves) is already merged upstream
-   > (`acki-nacki` #2271) and lifts the restriction once the shellnet
-   > `USDCBridge` is redeployed. Until then, use a ≤128-bit recipient.
+   > **✅ Full 256-bit recipients supported.** You can use any valid Acki Nacki
+   > account id, including a real full-width multisig address that starts with
+   > non-zero bytes (e.g. `0x20c2db9c…`). This was verified end-to-end on
+   > 2026-07-02: a 1 USDC Sepolia deposit to the full-width account
+   > `0x20c2db9c…834c9` was proved and credited on Acki Nacki. (An earlier
+   > shellnet build required the high 16 bytes to be zero; that limitation was
+   > fixed by `acki-nacki` #2271 and is no longer in effect.)
 
    The **`amount`** here must be less than or equal to the USDC you approved in Step 2.
 
@@ -161,16 +153,14 @@ You do not need to run anything yourself:
 
 **Timing:** proof generation takes **minutes**, not seconds.
 
-**Testnet status (July 2026):** live crediting on shellnet **works end-to-end**.
-A real 1 USDC Sepolia deposit was proved and credited on Acki Nacki on
-2026-07-01 (AN `finalizeDeposit` tx `46adeb0c…`). Two things to keep in mind:
-
-- Your `anAccount` **must satisfy the low-16-bytes constraint** from
-  [Section 4](#step-3--call-deposit-on-the-bridge). A non-compliant recipient
-  proves fine but cannot be credited (the AN contract reverts).
-- The AN-side `USDCBridge` is deployed with the correct 11-public-input
-  verifying key (this earlier blocker is resolved). Technical details:
-  `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
+**Testnet status (July 2026):** live crediting on shellnet **works end-to-end**,
+including **full 256-bit recipients**. A real 1 USDC Sepolia deposit to the
+full-width account `0x20c2db9c…834c9` was proved and credited on Acki Nacki on
+2026-07-02 (AN `finalizeDeposit` tx `cc8dfff5…`; recipient credited ECC
+currency #3 = `1000000`). The AN-side `USDCBridge` is deployed with the correct
+11-public-input verifying key and the recipient-parsing fix (`acki-nacki` #2271),
+so there is no longer any restriction on the shape of your `anAccount`.
+Technical details: `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
 
 Your Ethereum deposit is always valid and visible on Etherscan regardless.
 
@@ -209,12 +199,11 @@ your **deposit transaction hash** and **depositId** (from the event) to the
 operator. The relayer or AN contract may be mid-upgrade.
 
 **Deposit succeeded on Sepolia but never arrives on Acki Nacki**  
-The most common cause on testnet is a non-compliant **`anAccount`**: if its
-high 16 bytes are not zero (e.g. you used a full 256-bit multisig address), the
-relayer proves the deposit but Acki Nacki's `finalizeDeposit` **reverts
-(`exit_code 4`)** and nothing is credited. Re-deposit with a recipient whose
-left-hand 32 hex characters are all `0` (see the constraint box in
-[Section 4](#step-3--call-deposit-on-the-bridge)).
+Proof generation takes minutes, so first allow a few minutes plus the async
+Acki Nacki credit hops. If it still hasn't arrived, send your **deposit
+transaction hash** and **depositId** to the operator — the relayer or AN
+contract may be mid-upgrade. (The old "high 16 bytes must be zero" recipient
+limitation was fixed by `acki-nacki` #2271 and no longer applies.)
 
 **Can I withdraw back to Ethereum?**  
 Not as a self-serve MetaMask path yet. The reverse **AN → ETH** direction does

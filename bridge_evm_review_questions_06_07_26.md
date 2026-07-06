@@ -409,6 +409,30 @@ Recommendation: delete both `bin/` files (and the corresponding `[[bin]]` entrie
 
 **`bridge-evm-aggregator/README.md` is stale** — it still describes the crate as the **M2 feasibility spike** proving `a * b == c` (Status table pinned to 2026-05-27/29, "What this crate *is not*" section says "It is **not** the real on-chain Circuit 4 verifier yet", "Layout" lists only `multiply.rs` + `aggregator.rs` + one `round_trip` test, "Pointers to next steps" talks about M3/M4/M5/M6/M7 as future work). Reality today: the crate hosts the production `export-inner-aggregator` binary that emits the on-chain 1A/1B/2 Yul verifiers under EIP-170, `AggregatorConfig::for_verifier_name` carries per-circuit presets (including `withdrawal`), and the multiply toy is auxiliary. Please rewrite the README to describe the current production role — the M2 spike history can move to a short "History" footnote or into `docs/r15_snark_verifier_roadmap.md`.
 
+## Appendix — `bridge-relayer-daemon` residual gnark shape (`GROTH16_PROOF_SIZE = 256`)
+
+`proof_validation.rs` runs on a live production path (`ProverProofsBlockSource::load_block` at `source.rs:408,414`, which the daemon binary instantiates at `bin/relayer.rs:1131,1170,1225,1601`), but its shape checks are unsound for R15:
+
+- `validate_attestation_proof` / `validate_layer_hashes_proof` each contain an `if proof.len() == GROTH16_PROOF_SIZE { return Ok(()); }` short-circuit that accepts **any 256-byte blob** without further inspection. The module's own docstring admits this is "back-compat with the per-circuit Groth16 adapters retained for test coverage" — but the on-chain 1A/1B/2 SHPLONK verifiers don't accept 256-byte calldata. Effect: a malformed 256-byte proof passes validation locally and is rejected on-chain (revert-on-submit instead of parked pre-submit). Recommendation: delete the 256-byte branches; require `≥ SHPLONK_MIN_*_INSTANCES` unconditionally.
+
+More problematic, `GROTH16_PROOF_SIZE = 256` (`withdrawal.rs:18`, re-exported at `lib.rs:101`) is hardcoded as the *required* withdrawal proof length in production paths:
+
+- `withdrawal.rs:60` — `PartnerWithdrawalProof::validate` treats `raw.len() != 256` as an **error** with the message *"withdrawal proof is {} bytes; Ethereum bridge expects {}-byte Groth16 (run gnark-wrappers/circuit-4 prove on the Halo2 export first)"*.
+- `bin/relayer.rs:1447` — daemon logs *"proof not 256-B Groth16 (gnark-wrap first); parking"* and refuses to submit anything else.
+- `withdraw_prover.rs:81,277` — `MockWithdrawalProver` synthesises `[0xAA; 256]` canned proofs consumed by the same gate.
+
+This is the direct on-chain blocker for AB-Q3 (`BridgeWithdrawalAggregatorVerifier`): the R15 Circuit-4 SHPLONK output is multi-kB calldata (12 accumulator limbs + 10 inner PIs + proof body ≈ 3–5 KB), and `PartnerWithdrawalProof::validate` will reject it before the tx is composed. `withdraw_prover.rs:23-30` already flags this as "reconciling the on-chain verifier shape is tracked separately (R15 M3–M7)".
+
+Recommended cleanup, in one PR:
+
+1. Remove `GROTH16_PROOF_SIZE` from `withdrawal.rs` and its `lib.rs` re-export.
+2. Replace the size gate in `PartnerWithdrawalProof::validate` with `raw.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES` (define alongside the other two `SHPLONK_MIN_*` constants in `proof_validation.rs`; value is `(12 + 10) × 32 = 704`).
+3. Update `MockWithdrawalProver` to synth an appropriately-sized SHPLONK-shape stub (or make its size configurable so the unit tests can still drive short blobs through the mock bridge).
+4. Delete the two 256-byte `if` branches in `proof_validation.rs`.
+5. Update `bin/relayer.rs:1447` log line to drop the "gnark-wrap first" hint.
+
+This is a `bridge-relayer-daemon`-only change; no on-chain contract or prover-lib change is needed. It should probably land in the same PR as AB-Q3 (Circuit-4 aggregator wiring) since either half without the other leaves the withdrawal lane broken.
+
 ## Appendix — There is no "Circuit 3"
 
 `AckiNackiBridge.sol:614` and older notes reference a future "Circuit 3" for BK-set rotation. It does not exist and is not in scope. Workspace at `acki-nacki-to-eth-bridge-halo2-circuits/` ships only Circuits 1A/1B (`attestation-bls-checker-circuit`), 2 (`historical-layer-hashes-movement-checker-circuit`), 4 (`bridge-event-prove-circuit`).

@@ -8,6 +8,10 @@
 
 **Scope:** Follow-up on `contracts/ethereum/` after the SHPLONK aggregator landing on `pruvendo/shellnet-e2e-landing`. One blocking item (AB-Q3, Circuit 4 `.bin`), two housekeeping items.
 
+## 🚨 Critical items (read first)
+
+1. **`GROTH16_PROOF_SIZE = 256` in `bridge-relayer-daemon` blocks R15 Circuit-4 submit.** `PartnerWithdrawalProof::validate` (`withdrawal.rs:60`) *requires* the withdrawal proof to be exactly 256 bytes; the daemon parks anything else (`bin/relayer.rs:1447`). R15 SHPLONK `BridgeWithdrawalAggregatorVerifier` calldata is multi-kB, so the withdrawal lane cannot submit even one proof until this constant is torn out. Must land in the same PR as AB-Q3, or immediately after. Details + 5-step cleanup: see [the critical appendix below](#-critical--bridge-relayer-daemon-residual-gnark-shape-groth16_proof_size--256-blocks-r15-circuit-4-submit).
+
 ## AB-Q1 — `withdrawByProof` hardcodes `WITHDRAW_ANCHOR_LAYER = 1`; generalize to arbitrary anchor layer
 
 **State.** `AckiNackiBridge.sol:74` defines `uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;` and `:968` restricts `withdrawByProof` to a single L1 anchor scan (`_isKnownLayerAnchor(WITHDRAW_ANCHOR_LAYER, pub.finalRoot)`). Correct today because the AN witness builder always anchors withdrawal proofs at L1; will silently reject valid L≥2 proofs the moment the partner-side witness lifts that restriction.
@@ -409,7 +413,9 @@ Recommendation: delete both `bin/` files (and the corresponding `[[bin]]` entrie
 
 **`bridge-evm-aggregator/README.md` is stale** — it still describes the crate as the **M2 feasibility spike** proving `a * b == c` (Status table pinned to 2026-05-27/29, "What this crate *is not*" section says "It is **not** the real on-chain Circuit 4 verifier yet", "Layout" lists only `multiply.rs` + `aggregator.rs` + one `round_trip` test, "Pointers to next steps" talks about M3/M4/M5/M6/M7 as future work). Reality today: the crate hosts the production `export-inner-aggregator` binary that emits the on-chain 1A/1B/2 Yul verifiers under EIP-170, `AggregatorConfig::for_verifier_name` carries per-circuit presets (including `withdrawal`), and the multiply toy is auxiliary. Please rewrite the README to describe the current production role — the M2 spike history can move to a short "History" footnote or into `docs/r15_snark_verifier_roadmap.md`.
 
-## Appendix — `bridge-relayer-daemon` residual gnark shape (`GROTH16_PROOF_SIZE = 256`)
+## 🚨 CRITICAL — `bridge-relayer-daemon` residual gnark shape (`GROTH16_PROOF_SIZE = 256`) blocks R15 Circuit-4 submit
+
+> **Severity: CRITICAL.** Withdrawal submit lane is dead as long as this constant survives. Must land in the same PR as AB-Q3 (Circuit-4 aggregator wiring), or immediately after. Neither half ships without the other.
 
 `proof_validation.rs` runs on a live production path (`ProverProofsBlockSource::load_block` at `source.rs:408,414`, which the daemon binary instantiates at `bin/relayer.rs:1131,1170,1225,1601`), but its shape checks are unsound for R15:
 

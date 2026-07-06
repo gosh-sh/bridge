@@ -407,6 +407,8 @@ Foundry deploy scripts (`DeployGenesisCursorBridge.s.sol`, `DeployReuseVerifiers
 
 Recommendation: delete both `bin/` files (and the corresponding `[[bin]]` entries), drop the `cargo build --bin export-halo2-poseidon-snark` line from `n14_r15_proving_run.sh`, and either delete the `Phase B` spike block outright or move the multiply fixture generator into a `#[cfg(test)]` integration test. Net effect: `bridge-evm-aggregator` exposes one binary (`export-inner-aggregator`) matching one production role.
 
+**`bridge-evm-aggregator/README.md` is stale** — it still describes the crate as the **M2 feasibility spike** proving `a * b == c` (Status table pinned to 2026-05-27/29, "What this crate *is not*" section says "It is **not** the real on-chain Circuit 4 verifier yet", "Layout" lists only `multiply.rs` + `aggregator.rs` + one `round_trip` test, "Pointers to next steps" talks about M3/M4/M5/M6/M7 as future work). Reality today: the crate hosts the production `export-inner-aggregator` binary that emits the on-chain 1A/1B/2 Yul verifiers under EIP-170, `AggregatorConfig::for_verifier_name` carries per-circuit presets (including `withdrawal`), and the multiply toy is auxiliary. Please rewrite the README to describe the current production role — the M2 spike history can move to a short "History" footnote or into `docs/r15_snark_verifier_roadmap.md`.
+
 ## Appendix — There is no "Circuit 3"
 
 `AckiNackiBridge.sol:614` and older notes reference a future "Circuit 3" for BK-set rotation. It does not exist and is not in scope. Workspace at `acki-nacki-to-eth-bridge-halo2-circuits/` ships only Circuits 1A/1B (`attestation-bls-checker-circuit`), 2 (`historical-layer-hashes-movement-checker-circuit`), 4 (`bridge-event-prove-circuit`).

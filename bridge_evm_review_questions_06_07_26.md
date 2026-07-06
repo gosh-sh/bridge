@@ -381,3 +381,13 @@ Import surface only. `FallbackKeyManager`, `LayerHashesKeyManager`, `generate_fa
 ### Circuit 4 gap (not blocking Q4/Q5/Q6)
 
 Prover side landed (`bridge-event-prover-lib`), but Phase A2 has no Circuit-4 branch yet. Once `compose_event_input` (bound-witness analogue) and a `BridgeWithdrawalAggregatorVerifier.bin` build target land, the four-circuit lane is fully symmetric — same `KeyManager`, same `_with_transcript(Poseidon)`, same `export_poseidon_snark`, same `export-inner-aggregator`.
+
+---
+
+## Appendix — There is no "Circuit 3"
+
+`AckiNackiBridge.sol:614` and older notes reference a future "Circuit 3" for BK-set rotation. It does not exist and is not in scope. Workspace at `acki-nacki-to-eth-bridge-halo2-circuits/` ships only Circuits 1A/1B (`attestation-bls-checker-circuit`), 2 (`historical-layer-hashes-movement-checker-circuit`), 4 (`bridge-event-prove-circuit`).
+
+Rotation on-chain today = `AckiNackiBridge.sol::applyBkSetUpdate` (line 758): verify the update block with the existing **Circuit 1A/1B** verifier, recompute a 3-hop SHA-256 Merkle path binding `blockId` to `newCommitmentL3`, assign `storedBkSetCommitment`. No new VK/circuit/lane.
+
+Consequences: don't build a Circuit 3 during Q4/Q5/Q6; `bk_set_sentry.rs` recovers via `applyBkSetUpdate` + a 1A/1B proof; the stale line-614 Solidity comment is a doc-only follow-up.

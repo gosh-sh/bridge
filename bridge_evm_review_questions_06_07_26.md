@@ -400,6 +400,13 @@ Foundry deploy scripts (`DeployGenesisCursorBridge.s.sol`, `DeployReuseVerifiers
 
 **Circuit 4 gap:** the two orchestrator binaries `export-bound-block-proofs` + `export-bound-poseidon-snarks` have no Circuit-4 branch — they only keygen/prove/re-prove Circuits 1A, 1B, 2. They should, so Stage C can be invoked with `--name BridgeWithdrawalAggregatorVerifier`. Prover-lib side is ready (`bridge-event-prover-lib` + `KeyManager::ensure_event_keys`); only the orchestrator wiring is missing.
 
+**Aux binaries in `bridge-evm-aggregator/src/bin/` — retirement candidates.** Only `export-inner-aggregator` is production (Stage C above). The other two are safe to delete:
+
+- `export-spike-artifacts` — the leftover M2 sanity check that runs the `multiply.rs` `a·b=c` toy circuit end-to-end and writes fixtures under `contracts/ethereum/test/fixtures/r15_spike/`. `scripts/n14_r15_proving_run.sh` (Phase B) calls it only if `solc` is present and tolerates failure. Value ended when the real 1A/1B/2 `.bin` verifiers were trusted; keeping it live invites confusion about what the "real" aggregator entry point is.
+- `export-halo2-poseidon-snark` — built by the driver script but never invoked. It would duplicate what `bridge-prover-orchestrator::bin/export_bound_poseidon_snarks` already does in-process (Stage A2). Dead code today, redundant tomorrow.
+
+Recommendation: delete both `bin/` files (and the corresponding `[[bin]]` entries), drop the `cargo build --bin export-halo2-poseidon-snark` line from `n14_r15_proving_run.sh`, and either delete the `Phase B` spike block outright or move the multiply fixture generator into a `#[cfg(test)]` integration test. Net effect: `bridge-evm-aggregator` exposes one binary (`export-inner-aggregator`) matching one production role.
+
 ## Appendix — There is no "Circuit 3"
 
 `AckiNackiBridge.sol:614` and older notes reference a future "Circuit 3" for BK-set rotation. It does not exist and is not in scope. Workspace at `acki-nacki-to-eth-bridge-halo2-circuits/` ships only Circuits 1A/1B (`attestation-bls-checker-circuit`), 2 (`historical-layer-hashes-movement-checker-circuit`), 4 (`bridge-event-prove-circuit`).

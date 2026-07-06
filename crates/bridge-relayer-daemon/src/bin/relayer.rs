@@ -33,20 +33,26 @@
 //! `cargo run -p bridge-relayer-daemon --bin relayer -- --help` is the
 //! best entry point.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy::{
-    network::EthereumWallet,
+    network::{EthereumWallet, Network},
     primitives::Address,
     providers::{Provider, ProviderBuilder},
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource,
-    BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics,
-    SentryGuardedRelayer, SentryStatus, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
+    discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome,
+    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, DryRunOutcome,
+    EthBridgeClient, FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, SentryGuardedRelayer,
+    SentryStatus, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
+    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -274,6 +280,86 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         seq_no: u32,
     },
+    /// Long-running daemon reading partner `proof_event_*.json` bundles from
+    /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
+    /// The withdraw-side twin of `daemon-prover`: it gates on the sibling
+    /// `proof_event_*.result.json` ACK, skips nullifiers already consumed
+    /// on-chain (idempotent restart), and retries transient reverts with
+    /// exponential backoff until SIGINT/SIGTERM.
+    DaemonWithdraw {
+        /// Directory containing `proof_event_*.json` + `*.result.json`
+        /// (partner verifier daemon `proofs/` folder).
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Seconds to sleep between directory scans when idle.
+        #[arg(long, default_value_t = 15)]
+        poll_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Skip the partner `proof_event_*.result.json` verification gate.
+        #[arg(long)]
+        skip_verified_gate: bool,
+        /// Simulate (`eth_call`) each pending withdrawal but never send a
+        /// transaction. Useful to confirm the pipeline before spending gas.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Unified AN→ETH daemon: **one process, one relayer EOA** that runs
+    /// BOTH withdrawal-path legs by interleaving them in a single loop —
+    /// no two-service split, no concurrent transactions on the same key.
+    ///
+    /// Each iteration does, in order:
+    ///   1. one `daemon-prover` tick — advance the on-chain AN anchor from the
+    ///      next available partner `proof_<seqno>.json` (`verifyBlock`);
+    ///   2. one `daemon-withdraw` scan — pay out every ready
+    ///      `proof_event_*.json` (`withdrawByProof`), gated on the sibling
+    ///      `*.result.json` ACK and skipping nullifiers already used on-chain.
+    ///
+    /// Both legs read the SAME `--proofs-dir`. Because the two legs run
+    /// sequentially in one task sharing one provider, there is only ever a
+    /// single in-flight transaction, so nonces never race. Shared
+    /// exponential backoff (interruptible by SIGINT/SIGTERM); the prover
+    /// cursor persists to `--state`.
+    DaemonBridge {
+        /// Directory containing BOTH `proof_<seqno>.json` (+ `result_*.json`)
+        /// and `proof_event_*.json` (+ `*.result.json`).
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Seconds to sleep between iterations when idle (no work / all done).
+        #[arg(long, default_value_t = 15)]
+        poll_secs: u64,
+        #[arg(long, default_value_t = 5)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 300)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Skip the partner `result_*.json` / `proof_event_*.result.json`
+        /// verification gate on BOTH legs.
+        #[arg(long)]
+        skip_verified_gate: bool,
+        /// Simulate (`eth_call`) the withdraw leg but never send a
+        /// `withdrawByProof` transaction. The prover leg still submits
+        /// `verifyBlock` (there is no dry-run for the anchor advance).
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
@@ -489,6 +575,73 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "prove-withdraw failed");
                 e
             }),
+        Cmd::DaemonWithdraw {
+            proofs_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            poll_secs,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            skip_verified_gate,
+            dry_run,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_withdraw_daemon(
+                proofs_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                Duration::from_secs(poll_secs),
+                backoff,
+                skip_verified_gate,
+                dry_run,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-withdraw failed");
+                e
+            })
+        },
+        Cmd::DaemonBridge {
+            proofs_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            poll_secs,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            skip_verified_gate,
+            dry_run,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_bridge_daemon(
+                args.state,
+                proofs_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                Duration::from_secs(poll_secs),
+                backoff,
+                skip_verified_gate,
+                dry_run,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-bridge failed");
+                e
+            })
+        },
         Cmd::SubmitWithdraw {
             proof_event,
             rpc_url,
@@ -1152,6 +1305,394 @@ async fn prove_withdraw(
         out.display()
     );
     Ok(())
+}
+
+/// Cross-scan bookkeeping for the withdraw leg. `done` holds proofs fully
+/// handled this process lifetime (paid, already-used, or permanently
+/// rejected) so re-scanning the directory is cheap; on-chain
+/// `isNullifierUsed` is the durable idempotency source across restarts.
+#[derive(Default)]
+struct WithdrawScanState {
+    done: HashSet<PathBuf>,
+    paid: u64,
+    skipped: u64,
+}
+
+/// SIGINT (+ SIGTERM on Unix) shutdown future shared by the long-running
+/// daemons. Resolves on the first signal; systemd sends SIGTERM by default.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+                    _ = sigterm.recv() => info!("SIGTERM received"),
+                }
+            },
+            Err(e) => {
+                warn!(?e, "failed to install SIGTERM handler; SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("SIGINT received");
+    }
+}
+
+/// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
+/// bundles, submitting `withdrawByProof` for each. Gates each proof on its
+/// `*.result.json` ACK (unless `skip_verified_gate`), skips nullifiers
+/// already consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
+///
+/// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
+/// submit revert), signalling the caller to back off before the next scan.
+/// Permanent per-proof problems (parse errors, bad public inputs, non-256-B
+/// proofs, or an ACK that isn't accepted) park the proof in `st.done` and
+/// the scan drains the rest of the directory. Lower-level infra failures
+/// (RPC down during dry-run/submit) propagate as `Err`.
+async fn withdraw_scan_once<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    proofs_dir: &Path,
+    skip_verified_gate: bool,
+    dry_run: bool,
+    st: &mut WithdrawScanState,
+) -> anyhow::Result<bool>
+where
+    P: Provider<N> + Clone,
+    N: Network,
+{
+    let mut had_transient_failure = false;
+    let proofs = match discover_event_proofs(proofs_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(?e, "discovery failed; will retry");
+            Vec::new()
+        },
+    };
+
+    for proof_path in proofs {
+        if st.done.contains(&proof_path) {
+            continue;
+        }
+
+        // Gate on the verifier ACK unless explicitly skipped.
+        if !skip_verified_gate {
+            let result_path = result_path_for(&proof_path);
+            match std::fs::read(&result_path) {
+                Ok(bytes) => match WithdrawalResultGate::from_json_bytes(&bytes) {
+                    Ok(gate) if gate.is_accepted() => {},
+                    Ok(_) => {
+                        warn!(proof = %proof_path.display(), "verifier ACK present but not accepted (verified/anchor_matched/proof_valid); parking");
+                        st.done.insert(proof_path);
+                        continue;
+                    },
+                    Err(e) => {
+                        warn!(?e, proof = %proof_path.display(), "unpardeable result ACK; skipping this scan");
+                        continue;
+                    },
+                },
+                Err(_) => {
+                    // ACK not written yet — verifier hasn't finished.
+                    info!(proof = %proof_path.display(), "no result ACK yet; will re-check");
+                    continue;
+                },
+            }
+        }
+
+        let bundle = match std::fs::read(&proof_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", proof_path.display()))
+            .and_then(|b| Ok(PartnerWithdrawalProof::from_json_bytes(&b)?))
+        {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "parse failed; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        let pub_inputs = match bundle.public_inputs() {
+            Ok(pi) => pi,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "bad public inputs; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        // Idempotency: skip anything already withdrawn on-chain.
+        match bridge.is_nullifier_used(pub_inputs.nullifier).await {
+            Ok(true) => {
+                info!(proof = %proof_path.display(), nullifier = %pub_inputs.nullifier, "nullifier already used on-chain; skipping");
+                st.skipped += 1;
+                st.done.insert(proof_path);
+                continue;
+            },
+            Ok(false) => {},
+            Err(e) => {
+                warn!(?e, "isNullifierUsed read failed; backing off");
+                had_transient_failure = true;
+                break;
+            },
+        }
+
+        let proof_bytes = match bundle.proof_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "proof not 256-B Groth16 (gnark-wrap first); parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        if dry_run {
+            match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
+                DryRunOutcome::WouldSucceed => {
+                    info!(proof = %proof_path.display(), "dry-run: withdrawByProof would succeed");
+                    st.done.insert(proof_path);
+                },
+                DryRunOutcome::WouldRevert {
+                    reason,
+                } => {
+                    warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
+                    had_transient_failure = true;
+                    break;
+                },
+            }
+            continue;
+        }
+
+        match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+            WithdrawSubmitOutcome::Paid {
+                tx_hash,
+            } => {
+                info!(proof = %proof_path.display(), ?tx_hash, "withdrawByProof PAID");
+                st.paid += 1;
+                st.done.insert(proof_path);
+            },
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+            } => {
+                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
+                had_transient_failure = true;
+                break;
+            },
+        }
+    }
+
+    Ok(had_transient_failure)
+}
+
+/// Withdraw-side twin of `run_prover_daemon`. Polls `proofs_dir` for
+/// `proof_event_*.json` bundles, gates each on its `*.result.json` ACK,
+/// skips nullifiers already consumed on-chain (so restarts are idempotent
+/// and re-scanning the same directory is cheap), and submits
+/// `withdrawByProof`. Transient reverts (e.g. anchor not yet registered by
+/// the verifyBlock lane) back off exponentially and are retried; permanent
+/// per-proof failures are logged and the proof is parked so the loop keeps
+/// draining the rest of the directory.
+#[allow(clippy::too_many_arguments)]
+async fn run_withdraw_daemon(
+    proofs_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    poll_interval: Duration,
+    backoff: BackoffConfig,
+    skip_verified_gate: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    info!(
+        proofs_dir = %proofs_dir.display(),
+        ?poll_interval,
+        dry_run,
+        skip_verified_gate,
+        "daemon-withdraw starting"
+    );
+
+    let mut st = WithdrawScanState::default();
+    let mut current_backoff = backoff.initial;
+
+    loop {
+        let had_transient_failure =
+            withdraw_scan_once(&bridge, &proofs_dir, skip_verified_gate, dry_run, &mut st).await?;
+
+        info!(
+            paid = st.paid,
+            skipped = st.skipped,
+            "daemon-withdraw scan complete"
+        );
+
+        // Sleep: backoff after a transient failure, otherwise the idle poll
+        // interval. Either sleep is interruptible by shutdown.
+        let sleep_for = if had_transient_failure {
+            let d = current_backoff;
+            current_backoff = std::cmp::min(current_backoff * backoff.multiplier, backoff.max);
+            d
+        } else {
+            current_backoff = backoff.initial;
+            poll_interval
+        };
+
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!(paid = st.paid, skipped = st.skipped, "daemon-withdraw stopped");
+                return Ok(());
+            },
+            _ = tokio::time::sleep(sleep_for) => {},
+        }
+    }
+}
+
+/// Unified AN→ETH daemon (the `daemon-bridge` subcommand). Interleaves the
+/// two withdrawal-path legs in a single loop on a single relayer EOA:
+///
+///   1. one prover tick — `Relayer::tick()` advances the on-chain anchor from
+///      the next available `proof_<seqno>.json` (`verifyBlock`);
+///   2. one withdraw scan — `withdraw_scan_once` pays out every ready
+///      `proof_event_*.json` (`withdrawByProof`).
+///
+/// Running them sequentially in one task, sharing one provider, means there
+/// is never more than one in-flight transaction, so the shared EOA's nonces
+/// can't race (the failure mode a two-service split invites). A transient
+/// failure in *either* leg trips the shared exponential backoff; a clean
+/// idle iteration resets it to the poll interval. Shutdown (SIGINT/SIGTERM)
+/// is honoured at the sleep boundary, so a `Verified` tick always flushes
+/// `state.json` before exit.
+#[allow(clippy::too_many_arguments)]
+async fn run_bridge_daemon(
+    state_path: PathBuf,
+    proofs_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    poll_interval: Duration,
+    backoff: BackoffConfig,
+    skip_verified_gate: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+
+    // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
+    let source =
+        Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
+    let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
+    let cfg = RelayerConfig::new(state_path);
+    let mut relayer = Relayer::new(cfg, source, prover_bridge)?;
+
+    // Withdraw leg: shares the SAME provider (one nonce source; the two
+    // legs run sequentially so there's only ever one in-flight tx).
+    let wd_bridge = EthBridgeClient::new(bridge_address, provider);
+    let mut wd_state = WithdrawScanState::default();
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    info!(
+        proofs_dir = %proofs_dir.display(),
+        ?poll_interval,
+        dry_run,
+        skip_verified_gate,
+        "daemon-bridge starting (unified verifyBlock + withdrawByProof)"
+    );
+
+    let mut current_backoff = backoff.initial;
+
+    loop {
+        let mut had_transient = false;
+
+        // ── Leg 1: advance the on-chain anchor (verifyBlock). ──────────
+        match relayer.tick().await {
+            Ok(TickOutcome::Verified {
+                seq_no, ..
+            }) => info!(
+                seq_no,
+                "daemon-bridge: verifyBlock verified (anchor advanced)"
+            ),
+            Ok(TickOutcome::NotYetAvailable {
+                ..
+            }) => {},
+            Ok(TickOutcome::BridgeReverted {
+                target_seq_no,
+                reason,
+            }) => {
+                warn!(target_seq_no, %reason, "daemon-bridge: verifyBlock reverted; backing off");
+                had_transient = true;
+            },
+            Err(e) => {
+                warn!(?e, "daemon-bridge: verifyBlock tick failed; backing off");
+                had_transient = true;
+            },
+        }
+
+        // ── Leg 2: pay out ready withdrawal proofs (withdrawByProof). ──
+        match withdraw_scan_once(
+            &wd_bridge,
+            &proofs_dir,
+            skip_verified_gate,
+            dry_run,
+            &mut wd_state,
+        )
+        .await
+        {
+            Ok(transient) => had_transient |= transient,
+            Err(e) => {
+                warn!(?e, "daemon-bridge: withdraw scan hard error; backing off");
+                had_transient = true;
+            },
+        }
+        info!(
+            paid = wd_state.paid,
+            skipped = wd_state.skipped,
+            "daemon-bridge: withdraw scan complete"
+        );
+
+        // ── Shared backoff / poll sleep, interruptible by shutdown. ────
+        let sleep_for = if had_transient {
+            let d = current_backoff;
+            current_backoff = std::cmp::min(current_backoff * backoff.multiplier, backoff.max);
+            d
+        } else {
+            current_backoff = backoff.initial;
+            poll_interval
+        };
+
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                info!(
+                    paid = wd_state.paid,
+                    skipped = wd_state.skipped,
+                    "daemon-bridge stopped"
+                );
+                return Ok(());
+            },
+            _ = tokio::time::sleep(sleep_for) => {},
+        }
+    }
 }
 
 async fn submit_withdraw(

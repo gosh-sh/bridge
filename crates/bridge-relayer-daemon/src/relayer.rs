@@ -149,12 +149,16 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
             },
         };
 
-        if block.block_seq_no != target {
+        // The source may fall forward to the next available key-block proof
+        // (`>= target`), since AN emits proofs only for 512-spaced key
+        // blocks. A block *behind* the cursor is still a real error.
+        if block.block_seq_no < target {
             return Err(RelayerError::SeqNoMismatch {
                 requested: target,
                 got: block.block_seq_no,
             });
         }
+        let seq_no = block.block_seq_no;
         block.validate_shape()?;
 
         // Sanity: the block source should already thread the right
@@ -189,17 +193,18 @@ impl<S: BlockSource, B: BridgeClient> Relayer<S, B> {
                 new_state,
                 tx_hash,
             } => {
-                self.state.record_progress(target);
+                self.state.record_progress(seq_no);
                 self.persist_state()?;
                 info!(
-                    seq_no = target,
+                    seq_no,
+                    target,
                     fin_type = ?block.fin_type,
                     num_layers = block.num_layers,
                     tx = ?tx_hash,
                     "verified",
                 );
                 Ok(TickOutcome::Verified {
-                    seq_no: target,
+                    seq_no,
                     new_state,
                     tx_hash,
                 })

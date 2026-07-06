@@ -96,4 +96,7 @@ pub use withdraw_prover::{
     MockWithdrawalProver, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
     WithdrawalProver, PROVER_BIN,
 };
-pub use withdrawal::{PartnerWithdrawalProof, WithdrawalPublicInputs, GROTH16_PROOF_SIZE};
+pub use withdrawal::{
+    discover_event_proofs, is_event_proof_file, result_path_for, PartnerWithdrawalProof,
+    WithdrawalPublicInputs, WithdrawalResultGate, GROTH16_PROOF_SIZE,
+};

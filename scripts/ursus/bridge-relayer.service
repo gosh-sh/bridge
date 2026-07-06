@@ -1,5 +1,5 @@
 [Unit]
-Description=AN to ETH bridge relayer (Sepolia verifyBlock)
+Description=AN to ETH bridge relayer (unified: verifyBlock + withdrawByProof in one daemon)
 After=network.target
 
 [Service]
@@ -8,18 +8,29 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/bridge-e2e
 EnvironmentFile=/home/ubuntu/bridge-e2e/config/bridge-relayer.env
 Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
-ExecStart=/home/ubuntu/bridge-e2e/bin/relayer daemon-prover \
-  --state ${RELAYER_STATE} \
+# `daemon-bridge` runs BOTH AN->ETH legs in one process on one relayer EOA,
+# interleaved sequentially so there is never more than one in-flight tx
+# (nonces can't race). It replaces the old two-service split
+# (bridge-relayer=daemon-prover + bridge-withdraw=daemon-withdraw).
+#   leg 1: verifyBlock   — advance the on-chain AN anchor from proof_<seqno>.json
+#   leg 2: withdrawByProof — pay out ready proof_event_*.json (gated on *.result.json)
+# `--state` is a global flag and must precede the subcommand.
+# BK-rotation sentry (`--an-node-url`) needs an AN node serving the REST
+# `/v2/bk_set{,_update}` endpoints (e.g. http://94.156.178.19:8600).
+# shellnet.ackinacki.org only exposes GraphQL, so the sentry is left off here.
+ExecStart=/home/ubuntu/bridge-e2e/bin/relayer --state ${RELAYER_STATE} daemon-bridge \
   --proofs-dir ${PROVER_PROOFS_DIR} \
   --rpc-url ${RPC_URL} \
   --bridge-address ${BRIDGE_ADDRESS} \
   --private-key ${RELAYER_PRIVATE_KEY} \
-  --an-node-url ${AN_NODE_URL} \
+  --poll-secs 15 \
   --backoff-initial-secs 30 \
   --backoff-max-secs 600 \
   --backoff-multiplier 2
 Restart=on-failure
-RestartSec=120
+RestartSec=30
+TimeoutStopSec=120
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

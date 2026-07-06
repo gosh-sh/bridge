@@ -320,9 +320,30 @@ cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeRelayerLoop
 cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHashesMovement)Verifier" -vv  # Per-circuit Groth16 adapters
 
 # Relayer skeleton (Phase 5.1, standalone)
-cd crates/bridge-relayer-daemon && cargo test                                            # 29 unit tests (13 baseline + 6 sentry + 5 guarded + 5 daemon)
+cd crates/bridge-relayer-daemon && cargo test                                            # 49 unit tests
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
+# AN→ETH is fully daemonized. Since 2026-07-04 BOTH ETH legs run in ONE systemd service
+# (bridge-relayer.service = `relayer daemon-bridge`) on a SINGLE relayer EOA, interleaved
+# sequentially so there is never more than one in-flight tx (nonces can't race). This unified
+# `daemon-bridge` replaces the earlier two-service split (bridge-relayer=daemon-prover +
+# bridge-withdraw=daemon-withdraw); the two standalone subcommands remain for manual/one-off use.
+#  • leg 1 (was daemon-prover)   → verifyBlock (anchor registration). The block source FALLS
+#    FORWARD to the next available proof_<N>.json (N >= last_seen+1), so it advances a fresh bridge
+#    across the 512-spaced AN key-block stream on its own (each proof bakes the previous key block
+#    as Circuit-1A last_seen). No more one-shot submit-verify-block for the happy path.
+#  • leg 2 (was daemon-withdraw) → watch proof_event_*.json → withdrawByProof. Idempotent (skips
+#    on-chain-consumed nullifiers), result-gated, --dry-run eth_call sim, exponential backoff.
+# LIVE Sepolia both-legs-daemon-driven payout 2026-07-03 on fresh bridge 0xd596fcFA…DC18:
+#   verifyBlock (fall-forward 1083905→1084416) tx 0x7653fbfc…; withdraw tx 0xae9233ce…
+#   (1 USDC → 0x742d35Cc…). Service unit: scripts/ursus/bridge-relayer.service (daemon-bridge).
+#   See docs/an_eth_daemon_withdraw_e2e_2026-07-03.md.
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-bridge \
+    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # unified AN→ETH (verifyBlock + withdrawByProof)
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-prover \
+    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # standalone verifyBlock leg (fall-forward)
+cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
+    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
     --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
     --an-node-url http://94.156.178.19:8600                                              # smoke run wrapped in SentryGuardedRelayer
@@ -603,7 +624,7 @@ Shellnet E2E operator box. SSH: `ssh ubuntu@ursus-tools.dev` (passwordless from 
 | Unit | State | Purpose |
 |------|-------|---------|
 | `deposit-relayer.service` | **active** | EVM→AN loop → `finalizeDeposit` on shellnet |
-| `bridge-relayer.service` | inactive | long-running AN→ETH (manual `relayer` CLI used for E2E) |
+| `bridge-relayer.service` | **active** | unified AN→ETH `relayer daemon-bridge` — verifyBlock + withdrawByProof in one process/one EOA (replaced the old `bridge-withdraw.service` split 2026-07-04) |
 
 **Redeploy recipe** (from dev machine — build on ursus for GLIBC safety):
 
@@ -756,7 +777,7 @@ Shellnet E2E operator box. SSH: `ssh ubuntu@ursus-tools.dev` (passwordless from 
 | Unit | State | Purpose |
 |------|-------|---------|
 | `deposit-relayer.service` | **active** | EVM→AN loop → `finalizeDeposit` on shellnet |
-| `bridge-relayer.service` | inactive | long-running AN→ETH (manual `relayer` CLI used for E2E) |
+| `bridge-relayer.service` | **active** | unified AN→ETH `relayer daemon-bridge` — verifyBlock + withdrawByProof in one process/one EOA (replaced the old `bridge-withdraw.service` split 2026-07-04) |
 
 **Redeploy recipe** (from dev machine — build on ursus for GLIBC safety):
 

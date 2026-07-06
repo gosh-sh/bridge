@@ -330,6 +330,39 @@ impl ProverProofsBlockSource {
         self.proofs_dir.join(format!("proof_{seq_no}.json"))
     }
 
+    /// Find the smallest bundle seqno `N >= target` for which a
+    /// `proof_<N>.json` file exists.
+    ///
+    /// AN key-block proofs are emitted only for key blocks (512-spaced on
+    /// shellnet), so a naive `proof_{last_seen+1}.json` lookup never
+    /// advances. Falling forward to the next available proof is correct
+    /// for the Circuit-1A `last_seen` binding: each key-block proof bakes
+    /// the *previous* key block as its `last_seen`, which is exactly the
+    /// bridge's current `storedLastSeenBlockSeqNo`, so consecutive proofs
+    /// chain cleanly regardless of the numeric gap.
+    fn next_available_seq_no(&self, target: u64) -> Option<u64> {
+        let entries = std::fs::read_dir(&self.proofs_dir).ok()?;
+        let mut best: Option<u64> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(rest) = name.strip_prefix("proof_") else {
+                continue;
+            };
+            let Some(num) = rest.strip_suffix(".json") else {
+                continue;
+            };
+            // `proof_event_*.json` / non-numeric names parse-fail and skip.
+            let Ok(seq) = num.parse::<u64>() else {
+                continue;
+            };
+            if seq >= target && best.map(|b| seq < b).unwrap_or(true) {
+                best = Some(seq);
+            }
+        }
+        best
+    }
+
     fn result_path(&self, seq_no: u64) -> PathBuf {
         self.proofs_dir.join(format!("result_{seq_no}.json"))
     }
@@ -419,7 +452,12 @@ impl ProverProofsBlockSource {
 #[async_trait]
 impl BlockSource for ProverProofsBlockSource {
     async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError> {
-        self.load_block(target_seq_no)
+        // Fall forward to the next available key-block proof `>= target`.
+        // Exact-hit (`proof_{target}.json`) is a special case of this.
+        match self.next_available_seq_no(target_seq_no) {
+            Some(seq_no) => self.load_block(seq_no),
+            None => Ok(None),
+        }
     }
 }
 
@@ -715,6 +753,57 @@ mod tests {
         let b = src.fetch(512).await.unwrap().unwrap();
         assert_eq!(b.block_seq_no, 512);
         assert_eq!(b.attestation_proof.len(), 256);
+    }
+
+    fn write_bundle_proof(dir: &std::path::Path, seq_no: u64) {
+        let proof = serde_json::json!({
+            "schema_version": 2,
+            "block_seq_no": seq_no,
+            "block_height": seq_no,
+            "last_seen_block_seqno": 0,
+            "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
+            "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
+            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
+            "num_layers": 1,
+            "layer_hash_frs_hex": vec![
+                "0500000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+            "prev_max_level_layer_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        std::fs::write(
+            dir.join(format!("proof_{seq_no}.json")),
+            serde_json::to_string(&proof).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prover_proofs_source_falls_forward_to_next_key_block() {
+        // AN emits key-block proofs 512-spaced; the relayer's cursor
+        // (`last_seen + 1`) never lands exactly on a proof file, so the
+        // source must fall forward to the next available one.
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle_proof(dir.path(), 1_084_416);
+        write_bundle_proof(dir.path(), 1_084_928);
+
+        let src = ProverProofsBlockSource::new(dir.path()).skip_verified_gate(true);
+
+        // Cursor just past a previous key block → next available is 1_084_416.
+        let b = src.fetch(1_083_905).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_416);
+
+        // Cursor just past 1_084_416 → next available is 1_084_928.
+        let b = src.fetch(1_084_417).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_928);
+
+        // Exact hit still works.
+        let b = src.fetch(1_084_416).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_416);
+
+        // Past the last proof → nothing available.
+        assert!(src.fetch(1_084_929).await.unwrap().is_none());
     }
 
     #[tokio::test]

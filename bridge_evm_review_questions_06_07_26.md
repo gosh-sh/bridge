@@ -10,7 +10,11 @@
 
 ## 🚨 Critical items (read first)
 
-1. **`GROTH16_PROOF_SIZE = 256` in `bridge-relayer-daemon` blocks R15 Circuit-4 submit.** `PartnerWithdrawalProof::validate` (`withdrawal.rs:60`) *requires* the withdrawal proof to be exactly 256 bytes; the daemon parks anything else (`bin/relayer.rs:1447`). R15 SHPLONK `BridgeWithdrawalAggregatorVerifier` calldata is multi-kB, so the withdrawal lane cannot submit even one proof until this constant is torn out. Must land in the same PR as AB-Q3, or immediately after. Details + 5-step cleanup: see [the critical appendix below](#-critical--bridge-relayer-daemon-residual-gnark-shape-groth16_proof_size--256-blocks-r15-circuit-4-submit).
+1. **No SHPLONK aggregator wrap for Circuit 4 anywhere in `bridge-relayer-daemon`.** The relayer invokes `bridge-event-halo2-prover` via `SubprocessWithdrawalProver::prove` (`withdraw_prover.rs:206`), which produces a **raw Halo2 SHPLONK inner proof** with a Blake2b transcript — *not* aggregator calldata. The relayer then passes that hex verbatim to `EthBridgeClient::submit_withdraw` (`bridge.rs:392-414`), which sends it to `AckiNackiBridge.sol::withdrawByProof`. The deployed `BridgeWithdrawalAggregatorVerifier.bin` will revert on it: its expected calldata layout is `[acc_0..acc_11, inner_pi_0..inner_pi_9] ‖ agg_proof` (12 KZG accumulator limbs + 10 Circuit-4 public inputs + aggregator SHPLONK proof body), and no code in this crate produces that shape. Details + preferred wiring: see [the critical appendix below](#-critical--no-shplonk-wrap-for-circuit-4-in-bridge-relayer-daemon).
+
+2. **`GROTH16_PROOF_SIZE = 256` in `bridge-relayer-daemon` blocks R15 Circuit-4 submit even after (1) is fixed.** `PartnerWithdrawalProof::validate` (`withdrawal.rs:60`) *requires* the withdrawal proof to be exactly 256 bytes; the daemon parks anything else (`bin/relayer.rs:1447`). R15 SHPLONK `BridgeWithdrawalAggregatorVerifier` calldata is multi-kB, so the size gate must be torn out at the same time. Details + 5-step cleanup: see [the critical appendix below](#-critical--bridge-relayer-daemon-residual-gnark-shape-groth16_proof_size--256-blocks-r15-circuit-4-submit).
+
+**Both items block the same PR.** Neither half of the withdrawal lane ships without the other: without (1) the proof shape is wrong, and without (2) the daemon refuses to submit anything ≠ 256 bytes. Preferred landing = (1) + (2) + AB-Q3 (Circuit 4 aggregator wiring in orchestrator + `.bin` refresh) in one bundle.
 
 ## AB-Q1 — `withdrawByProof` hardcodes `WITHDRAW_ANCHOR_LAYER = 1`; generalize to arbitrary anchor layer
 
@@ -412,6 +416,86 @@ Foundry deploy scripts (`DeployGenesisCursorBridge.s.sol`, `DeployReuseVerifiers
 Recommendation: delete both `bin/` files (and the corresponding `[[bin]]` entries), drop the `cargo build --bin export-halo2-poseidon-snark` line from `n14_r15_proving_run.sh`, and either delete the `Phase B` spike block outright or move the multiply fixture generator into a `#[cfg(test)]` integration test. Net effect: `bridge-evm-aggregator` exposes one binary (`export-inner-aggregator`) matching one production role.
 
 **`bridge-evm-aggregator/README.md` is stale** — it still describes the crate as the **M2 feasibility spike** proving `a * b == c` (Status table pinned to 2026-05-27/29, "What this crate *is not*" section says "It is **not** the real on-chain Circuit 4 verifier yet", "Layout" lists only `multiply.rs` + `aggregator.rs` + one `round_trip` test, "Pointers to next steps" talks about M3/M4/M5/M6/M7 as future work). Reality today: the crate hosts the production `export-inner-aggregator` binary that emits the on-chain 1A/1B/2 Yul verifiers under EIP-170, `AggregatorConfig::for_verifier_name` carries per-circuit presets (including `withdrawal`), and the multiply toy is auxiliary. Please rewrite the README to describe the current production role — the M2 spike history can move to a short "History" footnote or into `docs/r15_snark_verifier_roadmap.md`.
+
+## 🚨 CRITICAL — No SHPLONK wrap for Circuit 4 in `bridge-relayer-daemon`
+
+> **Severity: CRITICAL.** The withdrawal lane cannot produce a valid `withdrawByProof` calldata payload for the deployed `BridgeWithdrawalAggregatorVerifier` today. Fixing this is Sergey's part — the relayer owns the *submit* wire, so the aggregator wrap belongs on the relayer side of the boundary (at least initially, until a cleaner ownership design emerges).
+
+### State — end-to-end path is broken between prover and Ethereum
+
+I walked the full call chain in `bridge-relayer-daemon`:
+
+- `bin/relayer.rs::run_withdraw_daemon` (`:1500`) and `run_bridge_daemon` (`:1619`) — pick up `proof_event_*.json` from `--proofs-dir`.
+- `PartnerWithdrawalProof::from_json_bytes` (`withdrawal.rs:53`) — parses `proof_hex` + `public_instances_hex` (10 field elements).
+- `bundle.proof_bytes()` (`withdrawal.rs:58`) — decodes hex, enforces 256-byte gnark shape.
+- `EthBridgeClient::submit_withdraw` (`bridge.rs:392-414`) — calls `contract.withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs)).send()`.
+
+The `proof_hex` that flows through all four steps is the **raw Halo2 SHPLONK inner proof** produced by `bridge-event-halo2-prover` — Blake2b transcript, no accumulator limbs, no aggregation. `SubprocessWithdrawalProver::prove` (`withdraw_prover.rs:206`) reads that binary's stdout summary and hands it up verbatim. Nothing in this crate:
+
+- runs a Poseidon-transcript re-prove pass (Stage A2 equivalent);
+- keygens or invokes a snark-verifier-sdk `AggregationCircuit` (Stage C runtime equivalent);
+- constructs the `[acc_0..acc_11, inner_pi_0..inner_pi_9] ‖ agg_proof` calldata layout that `BridgeWithdrawalAggregatorVerifier.bin` expects;
+- depends on `bridge-evm-aggregator`, `bridge-prover-orchestrator`, `bridge-prover-lib`, `snark-verifier`, or `snark_verifier_sdk`. `Cargo.toml` confirms.
+
+So even with the 256-byte gate torn out (see next section), the very first real withdrawal will submit an inner Halo2 SHPLONK proof to a Yul verifier that expects aggregator calldata, and revert.
+
+### Preferred wiring — grow `SubprocessWithdrawalProver` into a wrap-emitting prover
+
+Ownership consideration: three architectures are viable (spelled out in "Options" below), but for the *initial* landing, the simplest and least-invasive change is to grow the wrap step inside `SubprocessWithdrawalProver`, keeping `bridge-event-halo2-prover` unchanged. A cleaner ownership split can be adopted later — this is a pragmatic first step, not a final architecture.
+
+Concrete shape:
+
+1. `SubprocessWithdrawalProver::new` gains a `bridge_evm_aggregator::AggregatorKeys` field, loaded once at daemon startup from `params/withdrawal_agg_{pk,vk}.bin` (produced by AB-Q3's Circuit-4 export).
+2. `SubprocessWithdrawalProver::prove` grows two additional stages after the subprocess call:
+   - **A2 equivalent** — re-prove the parsed inner Halo2 SHPLONK with a Poseidon transcript, producing a `snark_verifier_sdk::Snark { protocol, instances, proof }`. Same code path `bridge-prover-orchestrator::bin/export-bound-poseidon-snarks` uses today for 1A/1B/2, lifted verbatim.
+   - **C runtime equivalent** — build the aggregator `AggregationCircuit` witness from the `Snark`, `create_proof` on it, extract `[acc_0..acc_11 ‖ inner_pi_0..inner_pi_9] ‖ agg_proof`.
+3. The returned `PartnerWithdrawalProof.proof_hex` becomes the aggregator calldata; `public_instances_hex` retains the 10 inner PIs (they're now redundant with the calldata prefix but useful for the operator log).
+4. The 256-byte gate goes away (see next section).
+
+Wall-clock cost per proof: aggregator keygen once at startup (~seconds), Poseidon re-prove + aggregation per proof (~10–30 s at K_outer=21 based on 1A/1B/2 measurements in `n14_r15_proving_run.sh` history). Acceptable inside the withdraw daemon's per-proof tick budget (the halo2 inner prove already dominates at multi-minute scale).
+
+Options for a cleaner future architecture (out of scope for the initial landing):
+
+| Option | Where wrap runs | Trade-off |
+|---|---|---|
+| **A** (recommended for landing) | Inside `SubprocessWithdrawalProver::prove`, after the subprocess call | Smallest diff. `bridge-relayer-daemon` grows a hard dep on `bridge-evm-aggregator`, which pulls the `axiom-crypto` fork of `halo2-lib` into the relayer's dep tree. Same conflict `bridge-evm-aggregator` already navigates via a nested cargo workspace — the relayer will need the same isolation |
+| B | Extend `bridge-event-halo2-prover` to emit aggregator calldata directly | Zero change to relayer beyond deleting the 256-byte gate. Puts the wrap where the keygen already lives. Symmetric to how the 1A/1B/2 lane works today via `bridge-prover-daemon` |
+| C | New sibling `bridge-withdraw-aggregator-daemon` that reads raw halo2 proofs, writes aggregated ones | Cleanest separation. Adds a moving part to the deployment |
+
+Options B and C are strictly nicer than A, but neither can land without prover-side work Sergey doesn't own today. Option A is the pragmatic unblock — the relayer daemon becomes end-to-end capable of talking to the real bridge without waiting on any upstream repo.
+
+### Stale gnark residue in `withdraw_prover.rs` + `withdrawal.rs` — delete alongside the wrap landing
+
+Independent of the wrap decision, both files still frame Circuit 4 as a gnark hybrid, which contradicts the R15 SHPLONK direction:
+
+- `withdrawal.rs:1-7` (module docstring) — *"On Ethereum the bridge expects a **256-byte Groth16** proof unless a mock verifier is deployed"*. Not true post-R15.
+- `withdrawal.rs:16-18` — `pub const GROTH16_PROOF_SIZE: usize = 256;` with docstring *"On-chain Groth16 proof size enforced by `PrimaryVerifier` / `BridgeWithdrawalVerifier`"*. Both Solidity types are on the AB-Q2 deletion list.
+- `withdrawal.rs:58-69` — `proof_bytes()` size gate + error message *"run gnark-wrappers/circuit-4 prove on the Halo2 export first"*. The gnark-wrappers/circuit-4 path is retired.
+- `withdraw_prover.rs:23-30` — module docstring *"the legacy `submit-withdraw` path still asserts a 256-byte gnark proof … reconciling the on-chain verifier shape is tracked separately (R15 M3–M7)"*. This *is* R15 M3–M7 reconciliation; the docstring predicts a future PR that is now due.
+- `withdraw_prover.rs:81` — `MockWithdrawalProver::valid` fills `proof_hex` with `[0xAA; 256]`. Mock needs to synthesise a SHPLONK-shape stub of the right length (~3–5 kB) to keep the daemon+bridge unit tests exercising the real submit path.
+- `withdraw_prover.rs:277` — mock unit test comment *"Canned proof is submit-shaped (256-byte gnark size)"*. Fix as part of the same edit.
+- `bin/relayer.rs:1447` — log line *"proof not 256-B Groth16 (gnark-wrap first); parking"*. Delete the gnark hint.
+
+All of the above are string-level fixes that follow deterministically once the wrap lands and `GROTH16_PROOF_SIZE` is removed. Not additional design work — just a coordinated find-and-replace.
+
+### Recommended PR shape (bundled)
+
+1. Grow `SubprocessWithdrawalProver` with the wrap step (Option A above).
+2. Delete `GROTH16_PROOF_SIZE` + its `lib.rs` re-export.
+3. Replace `PartnerWithdrawalProof::proof_bytes` size gate with the aggregator-shape floor from `proof_validation.rs` (add `SHPLONK_MIN_WITHDRAWAL_INSTANCES = 704` alongside the other two).
+4. Regenerate the `MockWithdrawalProver` canned proof at the correct SHPLONK length.
+5. Purge the six gnark-shaped strings listed above.
+6. Land in the same PR as AB-Q3 (Circuit 4 aggregator export in orchestrator + on-chain `.bin` refresh) so the on-chain verifier the wrap targets actually exists.
+
+Alternatively, if Option B or C wins the architecture discussion, the relayer-side work collapses to just steps 2–5 (delete gates + strings) and the wrap lives upstream.
+
+### Questions for Sergey
+
+1. Do you prefer Option A (wrap inside `SubprocessWithdrawalProver`) as the initial landing, deferring the architecture question, or would you rather push the wrap upstream (Option B / C) even at the cost of more coordination?
+2. If Option A: comfortable with `bridge-relayer-daemon` pulling `bridge-evm-aggregator` as a dependency (with the `axiom-crypto` fork conflict handled via nested cargo workspace, same pattern as `bridge-evm-aggregator` uses today)?
+3. Timeline preference: bundle with AB-Q3 in one PR (my recommendation — otherwise either half leaves the lane broken), or serialize?
+
+---
 
 ## 🚨 CRITICAL — `bridge-relayer-daemon` residual gnark shape (`GROTH16_PROOF_SIZE = 256`) blocks R15 Circuit-4 submit
 

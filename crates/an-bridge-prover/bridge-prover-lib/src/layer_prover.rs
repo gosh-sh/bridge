@@ -18,6 +18,7 @@ use historical_layer_hashes_movement_checker_circuit::{
 };
 
 use crate::keys::KeyManager;
+use crate::transcript::{PoseidonWrite, TranscriptKind};
 
 /// Number of public instances Circuit 2 emits:
 /// `block_id + bk_set_poseidon + num_layers + 10 layer hashes + prev_max_level_layer_hash = 14`.
@@ -56,7 +57,23 @@ pub fn generate_layer_proof_with_input(
     key_manager: &KeyManager,
     input: LayerHashesProofInput<'_>,
 ) -> anyhow::Result<LayerHashesProofOutput> {
-    let out = generate_layer_proof(
+    generate_layer_proof_with_input_and_transcript(
+        key_manager,
+        input,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Bundled-input wrapper around
+/// [`generate_layer_proof_with_transcript`]. Same relationship to
+/// [`generate_layer_proof_with_input`] as
+/// [`generate_layer_proof_with_transcript`] has to [`generate_layer_proof`].
+pub fn generate_layer_proof_with_input_and_transcript(
+    key_manager: &KeyManager,
+    input: LayerHashesProofInput<'_>,
+    transcript: TranscriptKind,
+) -> anyhow::Result<LayerHashesProofOutput> {
+    let out = generate_layer_proof_with_transcript(
         key_manager,
         &input.layer_hashes_preimage,
         &input.merkle_siblings,
@@ -64,6 +81,7 @@ pub fn generate_layer_proof_with_input(
         input.num_prev_chain_steps,
         input.prev_chain_proofs,
         input.bk_set_poseidon_hash,
+        transcript,
     )?;
     Ok(LayerHashesProofOutput {
         proof_bytes: out.proof_bytes,
@@ -82,7 +100,9 @@ pub struct LayerProofOutput {
     pub prev_max_level_layer_hash_fr: Fr,
 }
 
-/// Generate a Circuit 2 proof (layer historical hashes movement checker).
+/// Generate a Circuit 2 proof (Blake2b transcript — AN-side default). Thin
+/// wrapper around [`generate_layer_proof_with_transcript`] pinned to
+/// [`TranscriptKind::Blake2b`].
 pub fn generate_layer_proof(
     key_manager: &KeyManager,
     layer_hashes_preimage: &[u8; LAYER_PREIMAGE_SIZE],
@@ -92,9 +112,34 @@ pub fn generate_layer_proof(
     prev_chain_proofs: &[DenseChainLink],
     bk_set_poseidon_hash: Fr,
 ) -> anyhow::Result<LayerProofOutput> {
+    generate_layer_proof_with_transcript(
+        key_manager,
+        layer_hashes_preimage,
+        merkle_siblings,
+        prev_max_level_layer_hash,
+        num_prev_chain_steps,
+        prev_chain_proofs,
+        bk_set_poseidon_hash,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Generate a Circuit 2 proof with the chosen Fiat–Shamir transcript. See
+/// [`crate::prover::generate_primary_proof_with_transcript`] for transcript
+/// semantics.
+pub fn generate_layer_proof_with_transcript(
+    key_manager: &KeyManager,
+    layer_hashes_preimage: &[u8; LAYER_PREIMAGE_SIZE],
+    merkle_siblings: &[[u8; 32]; 3],
+    prev_max_level_layer_hash: Fr,
+    num_prev_chain_steps: u8,
+    prev_chain_proofs: &[DenseChainLink],
+    bk_set_poseidon_hash: Fr,
+    transcript: TranscriptKind,
+) -> anyhow::Result<LayerProofOutput> {
     info!(
-        "generating Circuit 2 proof: num_layers={}, chain_steps={}",
-        layer_hashes_preimage[0], num_prev_chain_steps
+        "generating Circuit 2 proof: num_layers={}, chain_steps={}, transcript={:?}",
+        layer_hashes_preimage[0], num_prev_chain_steps, transcript
     );
 
     // Extract expected public instances from the preimage.
@@ -142,24 +187,48 @@ pub fn generate_layer_proof(
     instances.push(prev_max_level_layer_hash); // [13]
 
     let instance_refs: &[&[Fr]] = &[&instances];
-    let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        _,
-        Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
-        _,
-    >(
-        &key_manager.srs,
-        key_manager.layer_pk(),
-        &[circuit],
-        &[instance_refs],
-        OsRng,
-        &mut transcript,
-    )
-    .context("Circuit 2 proof generation failed")?;
-    let proof_bytes = transcript.finalize();
+    let proof_bytes = match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.layer_pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("Circuit 2 proof generation failed (Blake2b transcript)")?;
+            t.finalize()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                &key_manager.srs,
+                key_manager.layer_pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("Circuit 2 proof generation failed (Poseidon transcript)")?;
+            t.finalize()
+        },
+    };
 
     Ok(LayerProofOutput {
         proof_bytes,

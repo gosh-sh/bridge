@@ -19,6 +19,7 @@ use bridge_parsers::attestation_data_parser::{
 
 use crate::keys::{self, KeyManager};
 use crate::poseidon::compute_bk_set_poseidon;
+use crate::transcript::{PoseidonWrite, TranscriptKind};
 
 /// Output of a proof generation.
 #[derive(Debug, Clone)]
@@ -30,12 +31,43 @@ pub struct ProofOutput {
     pub last_seen_block_seqno: u32,
 }
 
-/// Generate a primary attestation proof.
+/// Generate a primary attestation proof (Blake2b transcript — AN-side default).
+///
+/// Thin wrapper around [`generate_primary_proof_with_transcript`] that pins the
+/// Fiat–Shamir transcript to [`TranscriptKind::Blake2b`]. This is the flavour
+/// the AN VM's `ZKHALO2VERIFYWITHVK` opcode accepts; use it for every
+/// AN-facing code path.
 pub fn generate_primary_proof(
     key_manager: &KeyManager,
     attestation_bytes: &[u8],
     bk_set: &HashMap<u16, Vec<u8>>,
     last_seen_block_seqno: u32,
+) -> anyhow::Result<ProofOutput> {
+    generate_primary_proof_with_transcript(
+        key_manager,
+        attestation_bytes,
+        bk_set,
+        last_seen_block_seqno,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Generate a primary attestation proof with the chosen Fiat–Shamir transcript.
+///
+/// - [`TranscriptKind::Blake2b`] — default, matches what `ZKHALO2VERIFYWITHVK`
+///   expects on the AN side.
+/// - [`TranscriptKind::Poseidon`] — for ETH-side aggregator consumption (R15
+///   pipeline, `crates/bridge-evm-aggregator/`). Produces the same proof bytes
+///   as `snark-verifier-sdk`'s `PoseidonTranscript<NativeLoader, _>`, so the
+///   proof can be fed into a downstream `AggregationCircuit` without
+///   re-proving. Proofs in this flavour MUST NOT be shipped to the AN side;
+///   the opcode rejects them.
+pub fn generate_primary_proof_with_transcript(
+    key_manager: &KeyManager,
+    attestation_bytes: &[u8],
+    bk_set: &HashMap<u16, Vec<u8>>,
+    last_seen_block_seqno: u32,
+    transcript: TranscriptKind,
 ) -> anyhow::Result<ProofOutput> {
     let limb_bits = keys::circuit_limb_bits();
     let num_limbs = keys::circuit_num_limbs();
@@ -48,8 +80,8 @@ pub fn generate_primary_proof(
     let last_seen_fr = Fr::from(last_seen_block_seqno as u64);
 
     info!(
-        "generating proof: block_seq_no={}, last_seen={}, bk_set_size={}",
-        block_seq_no, last_seen_block_seqno, bk_set.len()
+        "generating primary proof: block_seq_no={}, last_seen={}, bk_set_size={}, transcript={:?}",
+        block_seq_no, last_seen_block_seqno, bk_set.len(), transcript
     );
 
     // Build circuit.
@@ -101,6 +133,7 @@ pub fn generate_primary_proof(
         key_manager.primary_pk(),
         circuit,
         &instances,
+        transcript,
     )?;
 
     Ok(ProofOutput {
@@ -112,7 +145,11 @@ pub fn generate_primary_proof(
     })
 }
 
-/// Generate a fallback attestation proof (Circuit 1b).
+/// Generate a fallback attestation proof (Circuit 1b) with the Blake2b
+/// Fiat–Shamir transcript. Thin wrapper around
+/// [`generate_fallback_proof_with_transcript`] pinned to
+/// [`TranscriptKind::Blake2b`] — see the primary variant for details on when
+/// to pick which transcript.
 ///
 /// Consumes both attestations from the fallback evidence pair:
 ///   * `attestation_primary_bytes`  — PRIMARY-type prefinalization (>N/2 signers)
@@ -130,6 +167,27 @@ pub fn generate_fallback_proof(
     bk_set: &HashMap<u16, Vec<u8>>,
     last_seen_block_seqno: u32,
 ) -> anyhow::Result<ProofOutput> {
+    generate_fallback_proof_with_transcript(
+        key_manager,
+        attestation_primary_bytes,
+        attestation_fallback_bytes,
+        bk_set,
+        last_seen_block_seqno,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Generate a Circuit 1b (fallback attestation) proof with the chosen
+/// Fiat–Shamir transcript. See
+/// [`generate_primary_proof_with_transcript`] for transcript semantics.
+pub fn generate_fallback_proof_with_transcript(
+    key_manager: &KeyManager,
+    attestation_primary_bytes: &[u8],
+    attestation_fallback_bytes: &[u8],
+    bk_set: &HashMap<u16, Vec<u8>>,
+    last_seen_block_seqno: u32,
+    transcript: TranscriptKind,
+) -> anyhow::Result<ProofOutput> {
     let limb_bits = keys::circuit_limb_bits();
     let num_limbs = keys::circuit_num_limbs();
 
@@ -143,9 +201,10 @@ pub fn generate_fallback_proof(
 
     info!(
         "generating fallback proof: block_seq_no={}, last_seen={}, bk_set_size={}, \
-         primary_sig_len={}, fallback_sig_len={}",
+         primary_sig_len={}, fallback_sig_len={}, transcript={:?}",
         block_seq_no, last_seen_block_seqno, bk_set.len(),
         attestation_primary_bytes.len(), attestation_fallback_bytes.len(),
+        transcript,
     );
 
     let mut circuit = FallbackAttestationBlsCheckerCircuit::<Fr>::new(
@@ -188,6 +247,7 @@ pub fn generate_fallback_proof(
         key_manager.fallback_pk(),
         circuit,
         &instances,
+        transcript,
     )?;
 
     Ok(ProofOutput {
@@ -242,37 +302,63 @@ where
     Ok(())
 }
 
-/// Shared KZG/SHPLONK/Blake2b proof core. The two attestation circuits
+/// Shared KZG/SHPLONK proof core. The two attestation circuits
 /// (1a Primary, 1b Fallback) differ only in their constraint system and
-/// proving key; the transcript / multiopen / commitment scheme is identical.
+/// proving key; the multiopen / commitment scheme is identical, and the
+/// Fiat–Shamir transcript is picked here based on `transcript_kind`.
 fn run_kzg_create_proof<C>(
     key_manager: &KeyManager,
     pk: &ProvingKey<G1Affine>,
     circuit: C,
     instances: &[Fr],
+    transcript_kind: TranscriptKind,
 ) -> anyhow::Result<Vec<u8>>
 where
     C: Circuit<Fr>,
 {
     let instance_refs: &[&[Fr]] = &[instances];
-    let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        _,
-        Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
-        _,
-    >(
-        &key_manager.srs,
-        pk,
-        &[circuit],
-        &[instance_refs],
-        OsRng,
-        &mut transcript,
-    )
-    .context("proof generation failed")?;
-    Ok(transcript.finalize())
+    match transcript_kind {
+        TranscriptKind::Blake2b => {
+            let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                &key_manager.srs,
+                pk,
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut transcript,
+            )
+            .context("proof generation failed (Blake2b transcript)")?;
+            Ok(transcript.finalize())
+        },
+        TranscriptKind::Poseidon => {
+            let mut transcript = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                &key_manager.srs,
+                pk,
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut transcript,
+            )
+            .context("proof generation failed (Poseidon transcript)")?;
+            Ok(transcript.finalize())
+        },
+    }
 }
 
 /// Extract block_id as Fr from raw attestation bytes.

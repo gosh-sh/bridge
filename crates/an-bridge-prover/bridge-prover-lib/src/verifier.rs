@@ -27,6 +27,7 @@ use halo2_base::halo2_proofs::{
 };
 
 use crate::keys::KeyManager;
+use crate::transcript::{PoseidonRead, TranscriptKind};
 
 /// Drive Halo2 KZG/SHPLONK verification with a caller-supplied Fiat–Shamir
 /// transcript reader. Mirror of [`crate::prover::create_proof_with_transcript`]
@@ -63,38 +64,80 @@ where
     .is_ok()
 }
 
-/// Shared verification core. All circuit-specific wrappers delegate here
-/// so the transcript / strategy / multiopen choices live in exactly one
-/// place. Re-exported `pub` for the Circuit 4 verifier in
-/// `bridge-event-prover-lib`.
+/// Shared verification core (Blake2b transcript). Thin wrapper around
+/// [`verify_kzg_proof_with_transcript`] pinned to
+/// [`TranscriptKind::Blake2b`]. Re-exported `pub` for the Circuit 4 verifier
+/// in `bridge-event-prover-lib`.
 pub fn verify_kzg_proof(
     key_manager: &KeyManager,
     vk: &VerifyingKey<G1Affine>,
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
+    verify_kzg_proof_with_transcript(
+        key_manager,
+        vk,
+        proof_bytes,
+        instances,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Shared verification core with caller-picked Fiat–Shamir transcript. The
+/// transcript kind MUST match what the prover used or verification will
+/// (correctly) return `false`. Re-exported `pub` for the Circuit 4 verifier
+/// in `bridge-event-prover-lib`.
+pub fn verify_kzg_proof_with_transcript(
+    key_manager: &KeyManager,
+    vk: &VerifyingKey<G1Affine>,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: TranscriptKind,
+) -> bool {
     let instance_refs: &[&[Fr]] = &[instances];
     let verifier_params = key_manager.srs.verifier_params();
     let strategy = SingleStrategy::new(&key_manager.srs);
-    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(proof_bytes);
-    verify_proof::<
-        KZGCommitmentScheme<Bn256>,
-        VerifierSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
-        SingleStrategy<'_, Bn256>,
-    >(
-        verifier_params,
-        vk,
-        strategy,
-        &[instance_refs],
-        &mut transcript,
-    )
-    .is_ok()
+    match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bRead::<_, _, Challenge255<_>>::init(proof_bytes);
+            verify_proof::<
+                KZGCommitmentScheme<Bn256>,
+                VerifierSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
+                SingleStrategy<'_, Bn256>,
+            >(
+                verifier_params,
+                vk,
+                strategy,
+                &[instance_refs],
+                &mut t,
+            )
+            .is_ok()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonRead::init(proof_bytes);
+            verify_proof::<
+                KZGCommitmentScheme<Bn256>,
+                VerifierSHPLONK<'_, Bn256>,
+                _,
+                PoseidonRead<&[u8]>,
+                SingleStrategy<'_, Bn256>,
+            >(
+                verifier_params,
+                vk,
+                strategy,
+                &[instance_refs],
+                &mut t,
+            )
+            .is_ok()
+        },
+    }
 }
 
 /// Verify a Circuit 1a (Primary Attestation) proof against the given
 /// 4 public instances: `[block_id, bk_set_commitment, block_seq_no, last_seen]`.
+/// Uses the Blake2b transcript — matches [`crate::prover::generate_primary_proof`].
 pub fn verify_primary_proof(
     key_manager: &KeyManager,
     proof_bytes: &[u8],
@@ -103,11 +146,30 @@ pub fn verify_primary_proof(
     verify_kzg_proof(key_manager, key_manager.primary_vk(), proof_bytes, instances)
 }
 
+/// Verify a Circuit 1a proof with the chosen Fiat–Shamir transcript. Must
+/// match what
+/// [`crate::prover::generate_primary_proof_with_transcript`] used.
+pub fn verify_primary_proof_with_transcript(
+    key_manager: &KeyManager,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: TranscriptKind,
+) -> bool {
+    verify_kzg_proof_with_transcript(
+        key_manager,
+        key_manager.primary_vk(),
+        proof_bytes,
+        instances,
+        transcript,
+    )
+}
+
 /// Verify a Circuit 1b (Fallback Attestation) proof. Same 4 public instances
 /// as Circuit 1a — only the verifying key differs, since the fallback
 /// circuit's constraint system covers two BLS verifications (PRIMARY
 /// prefinalization + FALLBACK target proof) plus same-block_id equality
-/// checks, all bound to the fallback VK at keygen.
+/// checks, all bound to the fallback VK at keygen. Uses the Blake2b
+/// transcript — matches [`crate::prover::generate_fallback_proof`].
 pub fn verify_fallback_proof(
     key_manager: &KeyManager,
     proof_bytes: &[u8],
@@ -116,13 +178,51 @@ pub fn verify_fallback_proof(
     verify_kzg_proof(key_manager, key_manager.fallback_vk(), proof_bytes, instances)
 }
 
+/// Verify a Circuit 1b proof with the chosen Fiat–Shamir transcript. Must
+/// match what [`crate::prover::generate_fallback_proof_with_transcript`]
+/// used.
+pub fn verify_fallback_proof_with_transcript(
+    key_manager: &KeyManager,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: TranscriptKind,
+) -> bool {
+    verify_kzg_proof_with_transcript(
+        key_manager,
+        key_manager.fallback_vk(),
+        proof_bytes,
+        instances,
+        transcript,
+    )
+}
+
 /// Verify a Circuit 2 (Layer Historical Hashes Movement Checker) proof
 /// against the given 14 public instances:
 /// `[block_id, bk_set_poseidon_hash, num_layers, layer_hash_frs[0..9], prev_max_level_layer_hash]`.
+/// Uses the Blake2b transcript — matches
+/// [`crate::layer_prover::generate_layer_proof`].
 pub fn verify_layer_proof(
     key_manager: &KeyManager,
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
     verify_kzg_proof(key_manager, key_manager.layer_vk(), proof_bytes, instances)
+}
+
+/// Verify a Circuit 2 proof with the chosen Fiat–Shamir transcript. Must
+/// match what
+/// [`crate::layer_prover::generate_layer_proof_with_transcript`] used.
+pub fn verify_layer_proof_with_transcript(
+    key_manager: &KeyManager,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: TranscriptKind,
+) -> bool {
+    verify_kzg_proof_with_transcript(
+        key_manager,
+        key_manager.layer_vk(),
+        proof_bytes,
+        instances,
+        transcript,
+    )
 }

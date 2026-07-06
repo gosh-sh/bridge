@@ -99,26 +99,26 @@ async fn main() -> anyhow::Result<()> {
     // 2. Load key manager (SRS + VKs only, no PKs needed).
     info!("loading SRS and VKs...");
     let key_manager = KeyManager::new(Path::new(PARAMS_DIR));
-    if key_manager.primary_vk.is_none() {
+    if key_manager.primary.vk_opt().is_none() {
         anyhow::bail!(
             "primary VK not found in {}. Run the prover first to generate keys.",
             PARAMS_DIR
         );
     }
-    if key_manager.fallback_vk.is_none() {
+    if key_manager.fallback.vk_opt().is_none() {
         anyhow::bail!(
             "fallback VK not found in {}. Run the prover first to generate keys \
              (the fallback VK is materialised alongside the primary VK on cold start).",
             PARAMS_DIR
         );
     }
-    if key_manager.layer_vk.is_none() {
+    if key_manager.layer.vk_opt().is_none() {
         anyhow::bail!(
             "layer VK not found in {}. Run the prover first to generate keys.",
             PARAMS_DIR
         );
     }
-    if key_manager.event_vk.is_none() {
+    if key_manager.event.vk_opt().is_none() {
         anyhow::bail!(
             "event VK not found in {}. Run the event prover (Circuit 4) first to generate keys.",
             PARAMS_DIR

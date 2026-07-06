@@ -218,3 +218,5 @@ docs/user/USER_GUIDE.md.bak.*
 
 # Partner handoff / outreach messages — local-only drafts, not for commit.
 docs/partner_handoff_*.md
+
+.temp/*

@@ -287,9 +287,14 @@ fn test_circuit2_keygen() {
     println!("[timing] Circuit 2 keygen: {:?}", keygen_time);
     println!("layer config: {:?}", key_manager.layer_config());
 
-    // Verify VK and PK exist.
-    assert!(key_manager.layer_vk.is_some(), "layer VK should be loaded");
-    assert!(key_manager.layer_pk.is_some(), "layer PK should be loaded");
+    // Verify VK is loaded in memory and PK exists on disk. `ensure_keys`
+    // intentionally drops the PK from memory after keygen — call
+    // `key_manager.layer.load_pk()` if you need it back.
+    assert!(key_manager.layer.vk_opt().is_some(), "layer VK should be loaded");
+    assert!(
+        key_manager.params_dir.join("layer_pk.bin").exists(),
+        "layer PK should be cached on disk"
+    );
 
     println!("Circuit 2 keygen PASSED! Total: {:?}", t_total.elapsed());
 }

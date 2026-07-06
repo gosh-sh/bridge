@@ -5,6 +5,7 @@ pub mod poseidon;
 pub mod poseidon_dense;
 pub mod types;
 pub mod keys;
+pub mod transcript;
 pub mod prover;
 pub mod verifier;
 pub mod ipc;

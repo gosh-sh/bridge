@@ -384,6 +384,22 @@ Prover side landed (`bridge-event-prover-lib`), but Phase A2 has no Circuit-4 br
 
 ---
 
+## Appendix — Pipeline in one page
+
+Three stages, all driven by `scripts/n14_r15_proving_run.sh`:
+
+| Stage | Binary | Crate | Reads | Writes |
+|---|---|---|---|---|
+| A  | `export-bound-block-proofs` | `bridge-prover-orchestrator` | bound block | `params/<c>_{pk,vk}.bin`, `<c>_config.json`; `proofs/bound/<c>/*.{proof,instances}.bin` (Blake2b) |
+| A2 | `export-bound-poseidon-snarks` | `bridge-prover-orchestrator` | Stage A artefacts | `proofs/bound/poseidon-snark/<c>.snark` (Poseidon-transcript, bincode `snark_verifier_sdk::Snark`) |
+| C  | `export-inner-aggregator` | **`bridge-evm-aggregator`** | one `.snark` | `contracts/ethereum/verifiers/<Name>AggregatorVerifier.{sol,bin,_calldata.bin}` |
+
+Stage C reads the `.snark` from disk, keygens its own `AggregationCircuit` **in memory** (never persisted), emits the Yul verifier `.bin` via `gen_evm_verifier_shplonk`, and enforces EIP-170. Native circuit keys (`params/*_{pk,vk}.bin`) come from Stage A and only their VK *shape* reaches Stage C — via the `.snark`'s embedded `Protocol`.
+
+Foundry deploy scripts (`DeployGenesisCursorBridge.s.sol`, `DeployReuseVerifiersBridge.s.sol`) `vm.readFileBinary` each `.bin` and deploy it, then deploy the thin `<Name>AggregatorVerifier.sol` adapter (~1 KB) pointing at it. `AckiNackiBridge` calls the adapters via `IPrimaryVerifier` / `IFallbackVerifier` / `ILayerHashesMovementVerifier`.
+
+**Circuit 4 gap:** the two orchestrator binaries `export-bound-block-proofs` + `export-bound-poseidon-snarks` have no Circuit-4 branch — they only keygen/prove/re-prove Circuits 1A, 1B, 2. They should, so Stage C can be invoked with `--name BridgeWithdrawalAggregatorVerifier`. Prover-lib side is ready (`bridge-event-prover-lib` + `KeyManager::ensure_event_keys`); only the orchestrator wiring is missing.
+
 ## Appendix — There is no "Circuit 3"
 
 `AckiNackiBridge.sol:614` and older notes reference a future "Circuit 3" for BK-set rotation. It does not exist and is not in scope. Workspace at `acki-nacki-to-eth-bridge-halo2-circuits/` ships only Circuits 1A/1B (`attestation-bls-checker-circuit`), 2 (`historical-layer-hashes-movement-checker-circuit`), 4 (`bridge-event-prove-circuit`).

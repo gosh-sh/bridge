@@ -4,16 +4,19 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_prover_lib::keys::KeyManager as PrimaryKeyManager;
+use bridge_prover_lib::{
+    keys::KeyManager,
+    layer_prover::generate_layer_proof_with_input_and_transcript as generate_layer_hashes_proof_with_transcript,
+    prover::{
+        generate_fallback_proof_with_transcript, generate_primary_proof_with_transcript, ProofOutput,
+    },
+    transcript::TranscriptKind,
+    verifier::{verify_fallback_proof_with_transcript, verify_layer_proof_with_transcript},
+    Fr,
+};
 use bridge_prover_orchestrator::{
-    compose_layer_hashes_input,
-    generate_fallback_proof_with_transcript, generate_layer_hashes_proof_with_transcript,
-    generate_primary_proof_with_transcript,
-    halo2_snark::export_poseidon_snark,
-    halo2_tvm_bundle::TranscriptKind,
-    layer_hashes_keys::{LayerHashesKeyManager, LayerHashesReferenceWitness},
-    load_bound_witness_cache, proof_export::save_instances_binary,
-    FallbackKeyManager,
+    compose_layer_hashes_input, halo2_snark::export_poseidon_snark, load_bound_witness_cache,
+    proof_export::save_instances_binary,
 };
 use clap::Parser;
 use tracing::info;
@@ -56,6 +59,19 @@ const CIRCUITS: &[CircuitExport<'static>] = &[
     },
 ];
 
+/// Circuit 1A/1B public-instance vector `[block_id, bk_set_poseidon,
+/// block_seq_no, last_seen]`, reconstructed from the prover-lib
+/// [`ProofOutput`] (which exposes the raw Fr fields rather than a packed
+/// vector).
+fn attestation_instances(p: &ProofOutput) -> [Fr; 4] {
+    [
+        p.block_id_fr,
+        p.bk_set_commitment_fr,
+        Fr::from(p.block_seq_no as u64),
+        Fr::from(p.last_seen_block_seqno as u64),
+    ]
+}
+
 fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -78,17 +94,20 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    let mut primary_km = PrimaryKeyManager::new(&params_dir);
-    primary_km.ensure_primary_keys(&bound.bk_set)?;
-    primary_km.load_primary_pk()?;
+    // One monolithic KeyManager drives all three circuits (per-circuit
+    // sub-managers own the right K / SRS each).
+    let mut km = KeyManager::new(&params_dir);
+
+    km.ensure_primary_keys(&bound.bk_set)?;
+    km.load_primary_pk()?;
     let primary = generate_primary_proof_with_transcript(
-        &primary_km,
+        &km,
         &bound.attestation_primary_bytes,
         &bound.bk_set,
         bound.last_seen_block_seqno,
         TranscriptKind::Poseidon,
     )?;
-    primary_km.unload_primary_pk();
+    km.unload_primary_pk();
     let primary_proof_path = snark_dir.join("primary.proof.bin");
     std::fs::write(&primary_proof_path, &primary.proof_bytes)?;
 
@@ -96,10 +115,10 @@ fn main() -> anyhow::Result<()> {
         .attestation_fallback_bytes
         .as_ref()
         .context("bound data missing fallback attestation")?;
-    let mut fallback_km = FallbackKeyManager::new(&params_dir);
-    fallback_km.ensure_keys(&bound.bk_set)?;
+    km.ensure_fallback_keys(&bound.bk_set)?;
+    km.load_fallback_pk()?;
     let fallback = generate_fallback_proof_with_transcript(
-        &fallback_km,
+        &km,
         &bound.attestation_primary_bytes,
         fallback_bytes,
         &bound.bk_set,
@@ -109,11 +128,10 @@ fn main() -> anyhow::Result<()> {
     let fallback_proof_path = snark_dir.join("fallback.proof.bin");
     std::fs::write(&fallback_proof_path, &fallback.proof_bytes)?;
     {
-        use bridge_prover_orchestrator::verify_fallback_proof_with_transcript;
         let ok = verify_fallback_proof_with_transcript(
-            &fallback_km,
+            &km,
             &fallback.proof_bytes,
-            &fallback.instances(),
+            &attestation_instances(&fallback),
             TranscriptKind::Poseidon,
         );
         println!("SELF_VERIFY fallback (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
@@ -124,44 +142,36 @@ fn main() -> anyhow::Result<()> {
              current bound witness."
         );
     }
+    km.unload_fallback_pk();
 
-    let mut layer_km = LayerHashesKeyManager::new(&params_dir);
-    layer_km.ensure_keys(&LayerHashesReferenceWitness {
-        layer_hashes_preimage: bound.layer_hashes_preimage,
-        merkle_siblings: bound.merkle_siblings,
-        prev_max_level_layer_hash: bound.prev_max_level_layer_hash,
-        num_prev_chain_steps: bound.num_prev_chain_steps,
-        prev_chain_proofs: bound.prev_chain_proofs.clone(),
-        bk_set_poseidon_hash: bound.bk_set_poseidon_fr,
-    })?;
+    km.ensure_layer_keys()?;
+    km.load_layer_pk()?;
     {
         // Diagnostic: prove + verify the SAME bound layer witness under Blake2b.
         // If this PASSES while Poseidon FAILS → transcript-specific bug.
         // If this also FAILS → the bound witness/keygen is the problem (not the
         // transcript and not the snark-verifier aggregator).
-        use bridge_prover_orchestrator::{
-            generate_layer_hashes_proof, verify_layer_hashes_proof,
-        };
-        let blake = generate_layer_hashes_proof(&layer_km, compose_layer_hashes_input(&bound))?;
-        let ok_blake = verify_layer_hashes_proof(&layer_km, &blake.proof_bytes, &blake.instances());
+        use bridge_prover_lib::layer_prover::generate_layer_proof_with_input;
+        use bridge_prover_lib::verifier::verify_layer_proof;
+        let blake = generate_layer_proof_with_input(&km, compose_layer_hashes_input(&bound))?;
+        let ok_blake = verify_layer_proof(&km, &blake.proof_bytes, &blake.instances);
         println!(
             "DIAG layer_hashes (Blake2b round-trip, fresh keys + bound witness): {}",
             if ok_blake { "PASS" } else { "FAIL" }
         );
     }
     let layer = generate_layer_hashes_proof_with_transcript(
-        &layer_km,
+        &km,
         compose_layer_hashes_input(&bound),
         TranscriptKind::Poseidon,
     )?;
     let layer_proof_path = snark_dir.join("layer_hashes.proof.bin");
     std::fs::write(&layer_proof_path, &layer.proof_bytes)?;
     {
-        use bridge_prover_orchestrator::verify_layer_hashes_proof_with_transcript;
-        let ok = verify_layer_hashes_proof_with_transcript(
-            &layer_km,
+        let ok = verify_layer_proof_with_transcript(
+            &km,
             &layer.proof_bytes,
-            &layer.instances(),
+            &layer.instances,
             TranscriptKind::Poseidon,
         );
         println!("SELF_VERIFY layer_hashes (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
@@ -174,11 +184,12 @@ fn main() -> anyhow::Result<()> {
              layer_hashes_config_params.json and re-run to keygen against the current witness."
         );
     }
+    km.unload_layer_pk();
 
     let outputs: [(&str, &PathBuf, Vec<_>); 3] = [
-        ("primary", &primary_proof_path, primary.instances().to_vec()),
-        ("fallback", &fallback_proof_path, fallback.instances().to_vec()),
-        ("layer_hashes", &layer_proof_path, layer.instances().to_vec()),
+        ("primary", &primary_proof_path, attestation_instances(&primary).to_vec()),
+        ("fallback", &fallback_proof_path, attestation_instances(&fallback).to_vec()),
+        ("layer_hashes", &layer_proof_path, layer.instances.to_vec()),
     ];
 
     for spec in CIRCUITS {

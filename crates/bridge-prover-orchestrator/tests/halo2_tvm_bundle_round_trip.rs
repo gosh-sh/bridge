@@ -25,15 +25,15 @@
 //!
 //! ## Cost
 //!
-//! Reuses the `params/` cache populated by `fallback_round_trip` —
-//! first invocation of either test does ~2-5 min keygen, this one is
-//! then seconds (re-uses VK/PK from disk, only does prove+verify).
+//! First invocation does ~2-5 min Circuit 1B keygen into `params/`;
+//! subsequent runs re-use the cached VK/PK from disk and only do
+//! prove+verify (seconds). Keys come from `bridge-prover-lib`'s
+//! `FallbackKeyManager` (K=21 SHPLONK-production degree).
 
 use std::path::PathBuf;
 
-use bridge_prover_orchestrator::{
-    generate_fallback_proof, FallbackKeyManager, Fr, Halo2TvmOperands, TranscriptKind, VkBlob,
-};
+use bridge_prover_lib::{keys::KeyManager, prover::generate_fallback_proof};
+use bridge_prover_orchestrator::{Fr, Halo2TvmOperands, TranscriptKind, VkBlob};
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
 fn params_dir() -> PathBuf {
@@ -59,8 +59,9 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
         .clone()
         .expect("fallback test data must have attestation_2_bytes");
 
-    let mut km = FallbackKeyManager::new(&params_dir());
-    km.ensure_keys(&test_data.bk_set).unwrap();
+    let mut km = KeyManager::new(&params_dir());
+    km.ensure_fallback_keys(&test_data.bk_set).unwrap();
+    km.load_fallback_pk().unwrap();
 
     let block_seq_no = extract_block_seq_no(&test_data.attestation_bytes);
     let last_seen = block_seq_no
@@ -76,12 +77,23 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
     )
     .expect("fallback proof generation must succeed");
 
-    let instances: Vec<Fr> = proof.instances().to_vec();
+    // Circuit 1B public instances `[block_id, bk_set_poseidon, block_seq_no,
+    // last_seen]`, reconstructed from the prover-lib `ProofOutput`.
+    let instances: Vec<Fr> = vec![
+        proof.block_id_fr,
+        proof.bk_set_commitment_fr,
+        Fr::from(proof.block_seq_no as u64),
+        Fr::from(proof.last_seen_block_seqno as u64),
+    ];
 
     // ---- Pack as three opcode operands. ----
-    let operands =
-        Halo2TvmOperands::from_native(km.config(), km.vk(), &instances, proof.proof_bytes.clone())
-            .expect("operand bundle construction must succeed");
+    let operands = Halo2TvmOperands::from_native(
+        km.fallback_config(),
+        km.fallback_vk(),
+        &instances,
+        proof.proof_bytes.clone(),
+    )
+    .expect("operand bundle construction must succeed");
 
     assert_eq!(operands.num_instances(), instances.len());
     assert_eq!(operands.public_inputs.len(), instances.len() * 32);

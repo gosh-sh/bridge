@@ -19,7 +19,8 @@
 //!   attestation, the Circuit 2 layer-hashes witness, and (optionally) a
 //!   fallback attestation envelope signed over the same `block_id`.
 //! - [`compose_layer_hashes_input`] — slot-fill the Circuit 2
-//!   [`crate::LayerHashesProofInput`] from a [`BoundBlockTestData`].
+//!   [`bridge_prover_lib::layer_prover::LayerHashesProofInput`] from a
+//!   [`BoundBlockTestData`].
 //!
 //! Note: `generate_bridge_test_data` uses `rand::thread_rng()` internally, so
 //! the data is non-deterministic across runs. The export binary captures the
@@ -51,7 +52,7 @@ use historical_layer_hashes_movement_checker_circuit::{
     test_helpers::bytes_le_to_fr, LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
 };
 
-use crate::layer_hashes_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
+use bridge_prover_lib::layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DenseChainLinkCache {
@@ -262,8 +263,10 @@ pub fn promote_bridge_test_data(
     // `td.block_id` is the raw SHA-256 envelope-tree root (big-endian byte
     // string). Both Circuit 1A/1B and Circuit 2 emit the block id as the
     // integer value of that BE digest, i.e. `bytes_le_to_fr(reverse(root))`
-    // (see the synthetic builder in `layer_hashes_test_data.rs`, which mirrors
-    // the circuit and reverses before `bytes_le_to_fr`). Interpreting the raw
+    // (see the synthetic builder in
+    // `bridge_test_data_gen::layer_hashes::build_synthetic_layer_hashes_input`,
+    // which mirrors the circuit and reverses before `bytes_le_to_fr`).
+    // Interpreting the raw
     // BE bytes as little-endian (no reverse) yields a byte-reversed scalar that
     // fails the circuit's `block_id` instance equality. Reverse here so the
     // single shared `block_id_fr` matches what both circuits reconstruct.
@@ -440,13 +443,13 @@ fn chain_step_to_dense_link(step: &ChainProofStep) -> DenseChainLink {
 }
 
 /// Compose the Circuit 2
-/// [`LayerHashesProofInput`](crate::LayerHashesProofInput)
+/// [`LayerHashesProofInput`](bridge_prover_lib::layer_prover::LayerHashesProofInput)
 /// from a [`BoundBlockTestData`]. Trivial slot-filling helper kept here so
 /// callers don't need to know the field-name mapping.
 pub fn compose_layer_hashes_input<'a>(
     bound: &'a BoundBlockTestData,
-) -> crate::LayerHashesProofInput<'a> {
-    crate::LayerHashesProofInput {
+) -> bridge_prover_lib::layer_prover::LayerHashesProofInput<'a> {
+    bridge_prover_lib::layer_prover::LayerHashesProofInput {
         layer_hashes_preimage: bound.layer_hashes_preimage,
         merkle_siblings: bound.merkle_siblings,
         prev_max_level_layer_hash: bound.prev_max_level_layer_hash,

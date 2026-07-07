@@ -4,7 +4,7 @@
 //! [`bridge_prover_orchestrator::build_bound_test_data`] and emits proofs for
 //! all three live AN→ETH circuits:
 //!  - **Circuit 1A** (Primary attestation, K=20) — 4 public inputs.
-//!  - **Circuit 1B** (Fallback attestation, K=20) — 4 public inputs.
+//!  - **Circuit 1B** (Fallback attestation, K=21) — 4 public inputs.
 //!  - **Circuit 2** (Layer hashes movement, K=17) — 14 public inputs.
 //!
 //! All three proofs share `block_id` (public input 0) and `bk_set_poseidon`
@@ -30,23 +30,21 @@
 //! ```
 //!
 //! Re-uses the cached SRS/VK/PK on disk under `--params-dir`. First run does
-//! keygen for all three circuits if absent (Primary K=20 ~140s, Fallback K=20
+//! keygen for all three circuits if absent (Primary K=20 ~140s, Fallback K=21
 //! ~180s, Layer-hashes K=17 ~10s); subsequent runs are pure prove-and-write.
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 use bridge_prover_lib::{
-    keys::{circuit_k as primary_k, KeyManager as PrimaryKeyManager},
-    prover::generate_primary_proof,
+    keys::{circuit_k as primary_k, KeyManager},
+    layer_prover::generate_layer_proof_with_input as generate_layer_hashes_proof,
+    prover::{generate_fallback_proof, generate_primary_proof},
 };
 use bridge_prover_orchestrator::{
     build_bound_test_data, compose_layer_hashes_input, format_field_element,
-    generate_fallback_proof, generate_layer_hashes_proof,
-    layer_hashes_keys::LayerHashesReferenceWitness,
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
-    save_bound_witness_cache,
-    BoundBlockTestData, FallbackKeyManager, Fr, LayerHashesKeyManager, LAYER_HASHES_K,
+    save_bound_witness_cache, BoundBlockTestData, Fr,
 };
 use clap::Parser;
 use serde::Serialize;
@@ -162,16 +160,16 @@ fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // 2. Circuit 1A (Primary attestation) — K=20.
     // ------------------------------------------------------------------
-    let mut primary_km = PrimaryKeyManager::new(&params_dir);
-    primary_km
-        .ensure_primary_keys(&bound.bk_set)
+    // Single monolithic KeyManager drives all three circuits (Primary 1A,
+    // Fallback 1B, Layer-Hashes 2). Its per-circuit sub-managers own the right
+    // K / SRS each (Primary K=20, Fallback K=21 SHPLONK-production, Layer K=17).
+    let mut km = KeyManager::new(&params_dir);
+    km.ensure_primary_keys(&bound.bk_set)
         .context("ensure_primary_keys failed")?;
-    primary_km
-        .load_primary_pk()
-        .context("load_primary_pk failed")?;
+    km.load_primary_pk().context("load_primary_pk failed")?;
 
     let primary_proof = generate_primary_proof(
-        &primary_km,
+        &km,
         &bound.attestation_primary_bytes,
         &bound.bk_set,
         bound.last_seen_block_seqno,
@@ -193,10 +191,12 @@ fn main() -> anyhow::Result<()> {
         bytes = primary_proof.proof_bytes.len(),
         "wrote Circuit 1A proof"
     );
-    primary_km.unload_primary_pk();
+    km.unload_primary_pk();
 
     // ------------------------------------------------------------------
-    // 3. Circuit 1B (Fallback attestation) — K=20, same SRS as 1A.
+    // 3. Circuit 1B (Fallback attestation) — K=21 (SHPLONK-production degree;
+    //    the shared K=21 KZG SRS on `KeyManager` also covers the K=20 primary
+    //    and K=17 layer circuits).
     //
     //    Drives `FallbackAttestationBlsCheckerCircuit` against the same
     //    `bound.attestation_primary_bytes` *and* the freshly-signed
@@ -210,13 +210,12 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .context("bound test data must include Fallback attestation when with_fallback=true")?;
 
-    let mut fallback_km = FallbackKeyManager::new(&params_dir);
-    fallback_km
-        .ensure_keys(&bound.bk_set)
+    km.ensure_fallback_keys(&bound.bk_set)
         .context("ensure fallback keys failed")?;
+    km.load_fallback_pk().context("load_fallback_pk failed")?;
 
     let fallback_proof = generate_fallback_proof(
-        &fallback_km,
+        &km,
         &bound.attestation_primary_bytes,
         fallback_attestation_bytes,
         &bound.bk_set,
@@ -246,31 +245,27 @@ fn main() -> anyhow::Result<()> {
         bytes = fallback_proof.proof_bytes.len(),
         "wrote Circuit 1B proof"
     );
+    km.unload_fallback_pk();
 
     // ------------------------------------------------------------------
-    // 4. Circuit 2 (Layer hashes movement) — K=17.
+    // 4. Circuit 2 (Layer hashes movement) — K=17. `ensure_layer_keys` builds
+    //    its own synthetic reference witness internally (correct shape at
+    //    production tree depth), so no reference witness is threaded here.
     // ------------------------------------------------------------------
-    let mut layer_km = LayerHashesKeyManager::new(&params_dir);
-    layer_km
-        .ensure_keys(&LayerHashesReferenceWitness {
-            layer_hashes_preimage: bound.layer_hashes_preimage,
-            merkle_siblings: bound.merkle_siblings,
-            prev_max_level_layer_hash: bound.prev_max_level_layer_hash,
-            num_prev_chain_steps: bound.num_prev_chain_steps,
-            prev_chain_proofs: bound.prev_chain_proofs.clone(),
-            bk_set_poseidon_hash: bound.bk_set_poseidon_fr,
-        })
+    km.ensure_layer_keys()
         .context("ensure layer-hashes keys failed")?;
+    km.load_layer_pk().context("load_layer_pk failed")?;
 
-    let layer_proof = generate_layer_hashes_proof(&layer_km, compose_layer_hashes_input(&bound))
+    let layer_proof = generate_layer_hashes_proof(&km, compose_layer_hashes_input(&bound))
         .context("generate_layer_hashes_proof failed")?;
 
     write_proof_artefacts(
         &layer_dir,
         &layer_proof.proof_bytes,
         &layer_instances,
-        LAYER_HASHES_K,
+        km.layer_k() as u32,
     )?;
+    km.unload_layer_pk();
     info!(
         bytes = layer_proof.proof_bytes.len(),
         "wrote Circuit 2 proof"

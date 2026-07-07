@@ -51,28 +51,12 @@ bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bri
 bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 
 [[bin]]
-name = "export-fallback-proof"
-path = "src/bin/export_fallback_proof.rs"
-
-[[bin]]
-name = "export-primary-proof"
-path = "src/bin/export_primary_proof.rs"
-
-[[bin]]
-name = "export-layer-hashes-proof"
-path = "src/bin/export_layer_hashes_proof.rs"
-
-[[bin]]
 name = "export-bound-block-proofs"
 path = "src/bin/export_bound_block_proofs.rs"
 
 [[bin]]
 name = "export-bound-poseidon-snarks"
 path = "src/bin/export_bound_poseidon_snarks.rs"
-
-[[bin]]
-name = "mock-prove-bound-layer"
-path = "src/bin/mock_prove_bound_layer.rs"
 
 [[bin]]
 name = "export-halo2-poseidon-snark"

@@ -34,21 +34,26 @@ use halo2_base::halo2_proofs::{
     poly::kzg::commitment::ParamsKZG,
 };
 
-/// Facade that owns all four per-circuit managers plus a shared K=20 SRS.
+/// Facade that owns all four per-circuit managers plus a shared SRS sized
+/// at the **maximum** circuit degree across the four circuits.
 ///
-/// The `pub srs` field is the K=20 SRS used by the primary/event/layer
-/// proving paths — orchestrator + daemon code that pass `&key_manager.srs`
-/// to `create_proof`/`SingleStrategy::new` depends on this field name
-/// staying stable.
+/// The `pub srs` field is the SRS used by every shared prover/verifier path
+/// (`crate::prover`, `crate::verifier`, `crate::layer_prover` all call
+/// `create_proof`/`SingleStrategy::new` against `&key_manager.srs`).
+/// Orchestrator + daemon code depend on this field name staying stable.
 ///
-/// The `fallback` sub-manager owns a separate K=21 SRS internally (SHPLONK
-/// production requirement — see [`FallbackKeyManager`] docs).
+/// It is sized at `FallbackKeyManager::DEFAULT_K` (= 21), the largest degree
+/// any of the four circuits uses (Primary 20, Fallback **21**, Layer 17,
+/// Event 19). A larger-K KZG SRS proves/verifies every smaller-K circuit, so
+/// one SRS covers all four. Sizing it at K=20 (the old primary default) left
+/// `generate_fallback_proof(&KeyManager, ..)` proving the K=21 fallback
+/// circuit against a too-small K=20 SRS — the facade could never produce a
+/// valid fallback proof (see AB-Q5 review, 2026-07-06).
 pub struct KeyManager {
     pub params_dir: PathBuf,
-    /// K=20 SRS. Primary uses this exact SRS; layer (K=17) and event
-    /// (K=19) load their own smaller SRSs on their per-circuit managers
-    /// but callers that reach for `&key_manager.srs` get the K=20 one
-    /// (KZG SRS at K=20 also works to prove/verify smaller-K circuits).
+    /// Max-degree (K=21) SRS shared by all four circuits' prove/verify paths.
+    /// A KZG SRS at the max K proves/verifies every smaller-K circuit, so
+    /// Primary (K=20), Layer (K=17) and Event (K=19) reuse it directly.
     pub srs: ParamsKZG<Bn256>,
     pub primary: PrimaryKeyManager,
     pub fallback: FallbackKeyManager,
@@ -61,7 +66,11 @@ impl KeyManager {
     /// SRS + any cached VK/config off disk; PKs stay on disk.
     pub fn new(params_dir: &Path) -> Self {
         std::fs::create_dir_all(params_dir).ok();
-        let srs = common::load_srs(params_dir, PrimaryKeyManager::DEFAULT_K);
+        // Size the shared SRS at the MAX circuit degree (Fallback's K=21), not
+        // the primary K=20: a larger-K KZG SRS proves/verifies every smaller-K
+        // circuit, and the shared `generate_fallback_proof(&KeyManager, ..)`
+        // path proves the K=21 fallback circuit against this SRS. See AB-Q5.
+        let srs = common::load_srs(params_dir, FallbackKeyManager::DEFAULT_K);
         Self {
             params_dir: params_dir.to_path_buf(),
             srs,

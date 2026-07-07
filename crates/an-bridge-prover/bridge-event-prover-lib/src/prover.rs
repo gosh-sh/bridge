@@ -396,7 +396,7 @@ pub fn generate_event_proof_from_circuit_with_transcript(
                 Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
                 _,
             >(
-                &key_manager.srs,
+                key_manager.event.srs(),
                 key_manager.event_pk(),
                 &[circuit],
                 &[instance_refs],
@@ -416,7 +416,7 @@ pub fn generate_event_proof_from_circuit_with_transcript(
                 PoseidonWrite<Vec<u8>>,
                 _,
             >(
-                &key_manager.srs,
+                key_manager.event.srs(),
                 key_manager.event_pk(),
                 &[circuit],
                 &[instance_refs],

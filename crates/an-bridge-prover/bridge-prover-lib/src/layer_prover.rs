@@ -198,7 +198,7 @@ pub fn generate_layer_proof_with_transcript(
                 Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
                 _,
             >(
-                &key_manager.srs,
+                key_manager.layer.srs(),
                 key_manager.layer_pk(),
                 &[circuit],
                 &[instance_refs],
@@ -218,7 +218,7 @@ pub fn generate_layer_proof_with_transcript(
                 PoseidonWrite<Vec<u8>>,
                 _,
             >(
-                &key_manager.srs,
+                key_manager.layer.srs(),
                 key_manager.layer_pk(),
                 &[circuit],
                 &[instance_refs],

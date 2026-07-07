@@ -145,6 +145,20 @@ do_start() {
       cargo +nightly build --release --locked --bin export-inner-aggregator
     fi
 
+    # Circuit 4 (bridge event / withdrawal) inner Poseidon snark. Fills the
+    # BridgeWithdrawalAggregatorVerifier gap: export-bound-poseidon-snarks only
+    # emits 1A/1B/2, so without this the export_one circuit4 line always SKIPs.
+    # Runs in every mode (incl. continue-c) whenever circuit4.snark is missing.
+    if [[ ! -f \"\${SNARK_DIR}/circuit4.snark\" ]]; then
+      cd ${REMOTE_ROOT}/crates/bridge-prover-orchestrator
+      echo \"--- Phase A2b: export-c4-poseidon-snark ---\"
+      cargo +nightly build --release --locked --bin export-c4-poseidon-snark
+      cargo +nightly run --release --locked --bin export-c4-poseidon-snark -- \
+        --params-dir ../../params \
+        --snark-dir \${SNARK_DIR}
+      cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
+    fi
+
     OUT=${REMOTE_ROOT}/contracts/ethereum/verifiers
     mkdir -p \"\${OUT}\"
 

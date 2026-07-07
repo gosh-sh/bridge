@@ -2,9 +2,17 @@
 //!
 //! The shellnet orchestrator writes `proofs/proof_event_NNN.json` with a raw
 //! Halo2 proof (`proof_hex`) and ten public-instance field elements
-//! (`public_instances_hex`). On Ethereum the bridge expects a **256-byte
-//! Groth16** proof unless a mock verifier is deployed — see
-//! `GROTH16_PROOF_SIZE` and the operator runbook.
+//! (`public_instances_hex`).
+//!
+//! The production on-chain verifier is the R15 SHPLONK aggregator
+//! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
+//! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
+//! the 10 re-exposed Circuit-4 public inputs (≥
+//! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
+//! checks in [`crate::proof_validation`]. A legacy 256-byte blob
+//! (`GROTH16_PROOF_SIZE`) is still accepted for back-compat with the retired
+//! per-circuit Groth16 adapter / mock-verifier smoke path — it is **not** the
+//! production shape.
 
 use std::path::{Path, PathBuf};
 
@@ -13,12 +21,19 @@ use serde::Deserialize;
 
 use crate::error::RelayerError;
 
-/// On-chain Groth16 proof size enforced by `PrimaryVerifier` /
-/// `BridgeWithdrawalVerifier`.
+/// Legacy 256-byte proof size (retired per-circuit Groth16 adapter / mock
+/// verifier smoke path). Accepted for back-compat only; the production path is
+/// the SHPLONK aggregator calldata (`SHPLONK_MIN_WITHDRAWAL_INSTANCES`).
 pub const GROTH16_PROOF_SIZE: usize = 256;
 
 /// Ten public inputs for Circuit 4 (single-final-root layout).
 pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 10;
+
+/// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
+/// prefix is 12 KZG accumulator limbs + the 10 re-exposed Circuit-4 public
+/// inputs, each a 32-byte field element (the outer proof bytes follow). Matches
+/// `BridgeWithdrawalAggregatorVerifier`'s 22-instance layout.
+pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
 
 /// Parsed `proof_event_*.json` from
 /// `acki-nacki-to-eth-bridge-halo2-prover`.
@@ -57,11 +72,17 @@ impl PartnerWithdrawalProof {
 
     pub fn proof_bytes(&self) -> Result<Bytes, RelayerError> {
         let raw = decode_hex(&self.proof_hex)?;
-        if raw.len() != GROTH16_PROOF_SIZE {
+        // Production shape: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
+        // Legacy 256-byte blob accepted only for the retired Groth16 adapter /
+        // mock-verifier smoke path.
+        if raw.len() != GROTH16_PROOF_SIZE && raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
             return Err(RelayerError::other(format!(
-                "withdrawal proof is {} bytes; Ethereum bridge expects {}-byte Groth16 (run \
-                 gnark-wrappers/circuit-4 prove on the Halo2 export first)",
+                "withdrawal proof is {} bytes; expected SHPLONK aggregator calldata (>= {} bytes: \
+                 12 accumulator limbs + {} Circuit-4 public inputs, then the outer proof) or a \
+                 legacy {}-byte blob",
                 raw.len(),
+                SHPLONK_MIN_WITHDRAWAL_INSTANCES,
+                WITHDRAWAL_PUBLIC_INPUTS,
                 GROTH16_PROOF_SIZE
             )));
         }
@@ -212,6 +233,41 @@ mod tests {
         let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
         let pi = p.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::from(3u64));
+    }
+
+    fn proof_json_with(proof_len: usize) -> String {
+        let proof_hex = hex::encode(vec![0xABu8; proof_len]);
+        let insts: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS)
+            .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+            .collect();
+        format!(
+            r#"{{"proof_hex":"{proof_hex}","public_instances_hex":[{}]}}"#,
+            insts
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    #[test]
+    fn proof_bytes_accepts_shplonk_and_legacy_rejects_between() {
+        // Legacy 256-byte back-compat blob.
+        let legacy =
+            PartnerWithdrawalProof::from_json_bytes(proof_json_with(GROTH16_PROOF_SIZE).as_bytes())
+                .unwrap();
+        assert_eq!(legacy.proof_bytes().unwrap().len(), GROTH16_PROOF_SIZE);
+
+        // Production SHPLONK aggregator calldata (instances + outer proof).
+        let shplonk = PartnerWithdrawalProof::from_json_bytes(
+            proof_json_with(SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200).as_bytes(),
+        )
+        .unwrap();
+        assert!(shplonk.proof_bytes().is_ok());
+
+        // A blob that is neither legacy-256 nor a valid SHPLONK prefix is rejected.
+        let bad = PartnerWithdrawalProof::from_json_bytes(proof_json_with(300).as_bytes()).unwrap();
+        assert!(bad.proof_bytes().is_err());
     }
 
     #[test]

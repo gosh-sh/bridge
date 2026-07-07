@@ -7,7 +7,11 @@ Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefa
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | **21 493 B** — EIP-170 OK |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | **21 493 B** — EIP-170 OK (K=21 inner) |
 | `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | **19 100 B** — EIP-170 OK |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 10 | TBD (M4) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 10 | **20 987 B** — EIP-170 OK (K=19 inner) |
+
+Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
+is keygen'd at `K=19`; the aggregated Yul is 20 987 B (22 outer instances = 12 KZG accumulator
+limbs + 10 re-exposed Circuit-4 public inputs). Landed 2026-07-07 (M4).
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
@@ -34,6 +38,30 @@ for c in primary:PrimaryAggregatorVerifier fallback:FallbackAggregatorVerifier l
     --name ${name}
 done
 ```
+
+## Generate SHPLONK `.bin` (Circuit 4 withdrawal)
+
+Circuit 4's inner Poseidon snark is produced by a dedicated orchestrator bin (the
+`export-bound-poseidon-snarks` bound-block path only emits 1A/1B/2). It keygens the
+event circuit (K=19), provisions `params/kzg_bn254_19.srs` by downsizing the shared
+K=21 ceremony, proves a synthetic-but-valid reference witness under a Poseidon
+transcript, and self-verifies before wrapping:
+
+```bash
+cd crates/bridge-prover-orchestrator
+cargo run --release --bin export-c4-poseidon-snark -- \
+  --params-dir ../../params --snark-dir ../../proofs/bound/poseidon-snark
+
+cd ../bridge-evm-aggregator
+cargo run --release --bin export-inner-aggregator -- \
+  --inner-snark ../../proofs/bound/poseidon-snark/circuit4.snark \
+  --out-dir ../../contracts/ethereum/verifiers \
+  --name BridgeWithdrawalAggregatorVerifier
+```
+
+The synthetic reference witness only pins the **circuit shape** (VK): real withdrawal
+proofs generated from live Acki Nacki blocks verify against the emitted verifier
+byte-for-byte, since a SHPLONK verifier is bound to the VK, not the witness.
 
 Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c && ./scripts/n14_r15_proving_run.sh pull-artifacts`.
 

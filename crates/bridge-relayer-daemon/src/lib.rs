@@ -57,6 +57,7 @@
 //!                                └──────────────────────────┘
 //! ```
 
+pub mod aggregator;
 pub mod bk_set_sentry;
 pub mod bridge;
 pub mod daemon;
@@ -71,6 +72,12 @@ pub mod types;
 pub mod withdraw_prover;
 pub mod withdrawal;
 
+pub use aggregator::{
+    calldata_binds_instances, Circuit4ShplonkPipeline, Circuit4SnarkProver, MockAggregator,
+    MockCircuit4SnarkProver, ProofAggregator, SnarkArtefacts, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
+    WITHDRAWAL_VERIFIER_NAME,
+};
 pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,

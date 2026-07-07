@@ -19,6 +19,10 @@ sha2 = "0.10"
 # Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
 # the sibling `crates/an-bridge-prover/` sub-workspace.
 bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
+# Circuit 4 (bridge event / withdrawal) prover surface — source of the inner
+# Poseidon SHPLONK snark that `export-c4-poseidon-snark` wraps for the R15
+# `BridgeWithdrawalAggregatorVerifier` Yul.
+bridge-event-prover-lib = { path = "../an-bridge-prover/bridge-event-prover-lib" }
 
 # Halo2 backend — must match the partner's fork; pinned to the `bump-halo2-lib-v0.4.1` branch.
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
@@ -61,6 +65,10 @@ path = "src/bin/export_bound_poseidon_snarks.rs"
 [[bin]]
 name = "export-halo2-poseidon-snark"
 path = "src/bin/export_halo2_poseidon_snark.rs"
+
+[[bin]]
+name = "export-c4-poseidon-snark"
+path = "src/bin/export_c4_poseidon_snark.rs"
 
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.

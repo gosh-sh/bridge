@@ -48,11 +48,13 @@ use alloy::{
 };
 use bridge_relayer_daemon::{
     discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome,
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, DryRunOutcome,
-    EthBridgeClient, FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof,
+    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
+    DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof,
     ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, SentryGuardedRelayer,
-    SentryStatus, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
-    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate,
+    SentryStatus, SubprocessAggregator, SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver,
+    SubprocessCircuit4SnarkProverConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
+    WithdrawalResultGate,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -279,6 +281,44 @@ enum Cmd {
         /// Seqno stamped into the proof_event.
         #[arg(long, default_value_t = 0)]
         seq_no: u32,
+    },
+    /// M7 ETH-side path: generate one Circuit 4 withdrawal proof as **SHPLONK
+    /// aggregator calldata** the deployed `BridgeWithdrawalAggregatorVerifier`
+    /// accepts. Re-proves the `PrivateWitness` with a Poseidon transcript
+    /// (`export-c4-poseidon-snark --fixture`), aggregates the inner snark
+    /// (`aggregate-proof`, which self-checks the regenerated Yul == committed
+    /// `.bin`), cross-checks the calldata binds the ten public inputs, and
+    /// writes a `proof_event` JSON that `submit-withdraw` / `daemon-withdraw`
+    /// consume unchanged.
+    ProveWithdrawShplonk {
+        /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
+        #[arg(long)]
+        witness: PathBuf,
+        /// `crates/bridge-prover-orchestrator` root (holds
+        /// `target/release/export-c4-poseidon-snark`).
+        #[arg(long, env = "ORCHESTRATOR_DIR")]
+        orchestrator_dir: PathBuf,
+        /// `crates/bridge-evm-aggregator` root (holds
+        /// `target/release/aggregate-proof`).
+        #[arg(long, env = "AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (the aggregator's
+        /// byte-identity self-check target).
+        #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
+        verifiers_dir: PathBuf,
+        /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
+        #[arg(long, default_value = "../../params")]
+        params_dir: PathBuf,
+        /// Scratch dir for the intermediate `circuit4.snark` /
+        /// `.instances.bin`.
+        #[arg(long, default_value = "./shplonk-snark")]
+        snark_dir: PathBuf,
+        /// Where to write the resulting `proof_event` JSON.
+        #[arg(long, default_value = "./proof_event.json")]
+        out: PathBuf,
+        /// Seqno stamped into the proof_event.
+        #[arg(long, default_value_t = 0)]
+        seq_no: u64,
     },
     /// Long-running daemon reading partner `proof_event_*.json` bundles from
     /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
@@ -575,6 +615,30 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "prove-withdraw failed");
                 e
             }),
+        Cmd::ProveWithdrawShplonk {
+            witness,
+            orchestrator_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            out,
+            seq_no,
+        } => prove_withdraw_shplonk(
+            witness,
+            orchestrator_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            out,
+            seq_no,
+        )
+        .await
+        .map_err(|e| {
+            error!(?e, "prove-withdraw-shplonk failed");
+            e
+        }),
         Cmd::DaemonWithdraw {
             proofs_dir,
             rpc_url,
@@ -1302,6 +1366,54 @@ async fn prove_withdraw(
         public_inputs = proof.public_instances_hex.len(),
         self_verified = proof.self_verified,
         "withdrawal proof written; submit with `relayer submit-withdraw --proof-event {}`",
+        out.display()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prove_withdraw_shplonk(
+    witness: PathBuf,
+    orchestrator_dir: PathBuf,
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    params_dir: PathBuf,
+    snark_dir: PathBuf,
+    out: PathBuf,
+    seq_no: u64,
+) -> anyhow::Result<()> {
+    let snark_prover = SubprocessCircuit4SnarkProver::new(
+        SubprocessCircuit4SnarkProverConfig::new(&orchestrator_dir, &params_dir),
+    );
+    let aggregator = SubprocessAggregator::new(SubprocessAggregatorConfig::new(
+        &aggregator_dir,
+        &verifiers_dir,
+        &params_dir,
+    ));
+    let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
+
+    info!(
+        witness = %witness.display(),
+        "M7: re-proving Circuit 4 (Poseidon) → aggregating → calldata (this may take minutes)"
+    );
+    let proof = pipeline.prove(&witness, &snark_dir, seq_no).await?;
+
+    // Persist in the `proof_event` schema that `submit-withdraw` reads. The
+    // `proof_hex` here is the SHPLONK aggregator calldata (not raw Halo2).
+    let json = serde_json::json!({
+        "schema_version": proof.schema_version,
+        "seq_no": proof.seq_no,
+        "proof_hex": proof.proof_hex,
+        "public_instances_hex": proof.public_instances_hex,
+        "self_verified": proof.self_verified,
+    });
+    std::fs::write(&out, serde_json::to_vec_pretty(&json)?)?;
+    let calldata_len = proof.proof_bytes().map(|b| b.len()).unwrap_or(0);
+    info!(
+        out = %out.display(),
+        calldata_bytes = calldata_len,
+        public_inputs = proof.public_instances_hex.len(),
+        "SHPLONK withdrawal calldata written; submit with `relayer submit-withdraw --proof-event {}`",
         out.display()
     );
     Ok(())

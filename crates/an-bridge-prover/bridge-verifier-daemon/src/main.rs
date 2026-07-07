@@ -608,7 +608,7 @@ fn write_failure(seq_no: u32, error: &str) {
 }
 
 // =====================================================================
-// BK-set-update bundle scanner + verifier (schema v4)
+// BK-set-update bundle scanner + verifier (schema v5 — 16-leaf block-id tree)
 // =====================================================================
 //
 // On local devnet the prover never produces `bkupd_*.json` (the BK set is
@@ -708,11 +708,15 @@ fn process_bk_update_bundle(
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let h0 = match decode_hash32(&req.merkle_sibling_h0_hex, "merkle_sibling_h0") {
+    let h01 = match decode_hash32(&req.merkle_sibling_h01_hex, "merkle_sibling_h01") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let h23 = match decode_hash32(&req.merkle_sibling_h23_hex, "merkle_sibling_h23") {
+    let h4_7 = match decode_hash32(&req.merkle_sibling_h4_7_hex, "merkle_sibling_h4_7") {
+        Ok(b) => b,
+        Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
+    };
+    let h8_15 = match decode_hash32(&req.merkle_sibling_h8_15_hex, "merkle_sibling_h8_15") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
@@ -785,15 +789,21 @@ fn process_bk_update_bundle(
         }
     };
 
-    // (2) Open SHA-256 Merkle: H1 = SHA(L2‖L3); H01 = SHA(H0‖H1); root = SHA(H01‖H23).
+    // (2) Open SHA-256 Merkle over the 16-leaf depth-4 block-id tree.
+    // Fold order (leaf-side to root):
+    //   h23   = SHA(L2 ‖ L3)
+    //   h0_3  = SHA(h01_sibling ‖ h23)
+    //   h0_7  = SHA(h0_3 ‖ h4_7_sibling)
+    //   root  = SHA(h0_7 ‖ h8_15_sibling)
     // Compared against the raw 32-byte chain block hash (`block_id_hash_hex`),
     // not against `block_id_fr.to_repr()` — the chain hash is 256 bits and may
     // exceed the BN254 Fr modulus, so the Fr public instance is a lossy
     // 254-bit projection. Consistency between the two is enforced separately
     // in check (2b) below.
-    let h1_calc = sha256_concat(&l2, &l3);
-    let h01_calc = sha256_concat(&h0, &h1_calc);
-    let root_calc = sha256_concat(&h01_calc, &h23);
+    let h23_calc = sha256_concat(&l2, &l3);
+    let h0_3_calc = sha256_concat(&h01, &h23_calc);
+    let h0_7_calc = sha256_concat(&h0_3_calc, &h4_7);
+    let root_calc = sha256_concat(&h0_7_calc, &h8_15);
     let merkle_verified = root_calc == block_id_bytes;
     if !merkle_verified {
         warn!(

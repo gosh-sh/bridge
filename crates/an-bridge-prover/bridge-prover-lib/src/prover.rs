@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use attestation_bls_checker_circuit::primary_circuit::PrimaryAttestationBlsCheckerCircuit;
 use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-use bridge_parsers::attestation_data_parser::{
+use attestation_bls_checker_circuit::attestation_data_parser::{
     attestation_data_offset, parse_num_signers,
 };
 

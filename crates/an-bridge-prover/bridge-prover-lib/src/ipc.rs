@@ -15,13 +15,14 @@ const PROOFS_DIR: &str = "proofs";
 /// Current `ProofRequest` schema version. Bumped to 2 when `block_height` was
 /// added; bumped to 3 when `attestation_circuit` was added so the verifier
 /// knows which VK (Primary 1a vs Fallback 1b) to use; bumped to 4 alongside
-/// the introduction of the bk-set-update bundle (`BkUpdateRequest`). The
-/// layer-bundle wire shape is unchanged between v3 and v4 — the bump just
-/// keeps the two file kinds version-synced so the verifier can reject one
-/// commit/the-other mismatches loudly instead of silently re-interpreting
-/// fields. The verifier rejects mismatched versions instead of silently
-/// re-interpreting fields.
-pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 4;
+/// the introduction of the bk-set-update bundle (`BkUpdateRequest`); bumped
+/// to 5 when the block-id Merkle tree grew from 8 leaves (depth 3) to the
+/// canonical 16 leaves (depth 4). The v5 wire shape carries **three** BK-set
+/// update siblings (`h01`, `h4_7`, `h8_15`) instead of the two v4 fields
+/// (`h0`, `h23`), and the layer-bundle `NUM_MERKLE_SIBLINGS` grew from 3 to
+/// 4 accordingly. The verifier rejects mismatched versions instead of
+/// silently re-interpreting fields.
+pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 5;
 
 fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
 
@@ -196,7 +197,7 @@ pub fn fr_to_hex(fr: &Fr) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// BK-set update IPC bundle (schema v4)
+// BK-set update IPC bundle (schema v5 — 16-leaf block-id tree)
 // ---------------------------------------------------------------------------
 
 /// File-name prefix for bk-set-update bundles. The prover writes
@@ -211,7 +212,7 @@ const BKUPD_PREFIX: &str = "bkupd";
 /// receive: the Circuit 1a/1b attestation proof (binding `block_id` under
 /// the OLD commitment) plus the open SHA-256 Merkle siblings revealing
 /// `L2 = old_bk_set_poseidon_hash` and `L3 = new_bk_set_poseidon_hash` as
-/// leaves of the 8-leaf block-id tree.
+/// leaves of the 16-leaf depth-4 block-id tree.
 ///
 /// **No pubkey list.** The verifier daemon mirrors the contract state,
 /// which only stores the commitment. The full pubkey table is the prover's
@@ -238,8 +239,8 @@ pub struct BkUpdateRequest {
     /// the top 2 bits when the chain hash exceeds the Fr modulus).
     pub block_id_hex: String,
     /// Chain's raw 32-byte block hash (= GraphQL `Block.id` = SHA-256 root of
-    /// the 8-leaf `block_merkle_tree_leaves`). Used by the verifier to check
-    /// `root(L2, L3, H0, H23) == this`. This is the value the future
+    /// the 16-leaf `block_merkle_tree_leaves`). Used by the verifier to check
+    /// `root(L2, L3, h01, h4_7, h8_15) == this`. This is the value the future
     /// `applyBkSetUpdate` Solidity entry point will receive on-chain.
     #[serde(default)]
     pub block_id_hash_hex: String,
@@ -261,10 +262,15 @@ pub struct BkUpdateRequest {
     /// L3 = new BK-set Poseidon commitment, as hex (32 bytes LE).
     /// At verify time: becomes the new `stored_bk_set_commitment`.
     pub new_bk_set_poseidon_hash_hex: String,
-    /// Merkle sibling H0 = SHA256(L0 ‖ L1), as hex (32 bytes).
-    pub merkle_sibling_h0_hex: String,
-    /// Merkle sibling H23 = SHA256(H2 ‖ H3), as hex (32 bytes).
-    pub merkle_sibling_h23_hex: String,
+    /// Merkle sibling h01 = SHA256(L0 ‖ L1), as hex (32 bytes). First fold
+    /// step: `sha_pair(h01, sha_pair(L2, L3)) → h0_3`.
+    pub merkle_sibling_h01_hex: String,
+    /// Merkle sibling h4_7 = SHA256(h45 ‖ h67), as hex (32 bytes). Second
+    /// fold step: `sha_pair(h0_3, h4_7) → h0_7`.
+    pub merkle_sibling_h4_7_hex: String,
+    /// Merkle sibling h8_15 = SHA256(h8_11 ‖ h12_15), as hex (32 bytes).
+    /// Third fold step: `sha_pair(h0_7, h8_15) → root`.
+    pub merkle_sibling_h8_15_hex: String,
 
     // ---- Timings (optional, for the prover's heartbeat log) ----
     #[serde(default)]
@@ -279,7 +285,9 @@ pub struct BkUpdateResult {
     pub block_seq_no: u32,
     /// Circuit 1a/1b attestation verification passed.
     pub attestation_verified: bool,
-    /// `root = SHA(SHA(H0‖SHA(L2‖L3))‖H23) == block_id` check passed.
+    /// Depth-4 fold check passed. Fold order:
+    /// `h23 = sha(L2‖L3); h0_3 = sha(h01‖h23);
+    ///  h0_7 = sha(h0_3‖h4_7); root = sha(h0_7‖h8_15) == block_id`.
     pub merkle_verified: bool,
     /// `block_seq_no > stored_last_bk_set_update_seq_no` check passed.
     pub monotonicity_ok: bool,
@@ -370,27 +378,32 @@ mod tests {
     }
 
     #[test]
-    fn bkupd_request_roundtrip_preserves_v4() {
+    fn bkupd_request_roundtrip_preserves_v5() {
         let req = BkUpdateRequest {
             schema_version: PROOF_REQUEST_SCHEMA_VERSION,
             block_seq_no: 1024,
             block_height: 1024,
             last_seen_bk_update_seqno: 0,
             block_id_hex: "ab".repeat(32),
+            block_id_hash_hex: "ba".repeat(32),
             attestation_circuit: AttestationCircuit::Primary,
             primary_proof_hex: "00".to_string(),
             old_bk_set_poseidon_hash_hex: "cc".repeat(32),
             new_bk_set_poseidon_hash_hex: "dd".repeat(32),
-            merkle_sibling_h0_hex: "ee".repeat(32),
-            merkle_sibling_h23_hex: "ff".repeat(32),
+            merkle_sibling_h01_hex: "ee".repeat(32),
+            merkle_sibling_h4_7_hex: "ff".repeat(32),
+            merkle_sibling_h8_15_hex: "aa".repeat(32),
             primary_proof_gen_ms: 12345,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: BkUpdateRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, 4);
+        assert_eq!(back.schema_version, 5);
         assert_eq!(back.block_seq_no, 1024);
         assert_eq!(back.attestation_circuit, AttestationCircuit::Primary);
         assert_eq!(back.old_bk_set_poseidon_hash_hex, "cc".repeat(32));
         assert_eq!(back.new_bk_set_poseidon_hash_hex, "dd".repeat(32));
+        assert_eq!(back.merkle_sibling_h01_hex, "ee".repeat(32));
+        assert_eq!(back.merkle_sibling_h4_7_hex, "ff".repeat(32));
+        assert_eq!(back.merkle_sibling_h8_15_hex, "aa".repeat(32));
     }
 }

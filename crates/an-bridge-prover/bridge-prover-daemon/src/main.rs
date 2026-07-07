@@ -443,8 +443,8 @@ async fn main() -> anyhow::Result<()> {
 
             info!("=== bk-update drain: processing event at seq_no {} ===", upd_seqno);
 
-            // Fetch the bk-update block's 8 Merkle leaves to derive L2/L3
-            // and the open siblings H0/H23.
+            // Fetch the bk-update block's 16 Merkle leaves to derive L2/L3
+            // and the open siblings h01/h4_7/h8_15.
             let upd_block = match gql.query_proof_block_by_seqno(upd_seqno).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -615,8 +615,9 @@ async fn main() -> anyhow::Result<()> {
                 primary_proof_hex: hex::encode(&upd_proof.proof_bytes),
                 old_bk_set_poseidon_hash_hex: hex::encode(l2),
                 new_bk_set_poseidon_hash_hex: hex::encode(l3),
-                merkle_sibling_h0_hex: hex::encode(tree.h0),
-                merkle_sibling_h23_hex: hex::encode(tree.h23),
+                merkle_sibling_h01_hex: hex::encode(tree.h01),
+                merkle_sibling_h4_7_hex: hex::encode(tree.h4_7),
+                merkle_sibling_h8_15_hex: hex::encode(tree.h8_15),
                 primary_proof_gen_ms: upd_proof_gen_ms,
             };
             if let Err(e) = ipc::write_bk_update_request(&req) {
@@ -816,7 +817,7 @@ async fn main() -> anyhow::Result<()> {
         // ---- Circuit 2: Layer Hashes Movement Proof ----
         // Inputs are reconstructed from real block data:
         //   - preimage: history_proofs parsed from the target block's CommonSection
-        //   - siblings: 8-leaf SHA-256 Merkle path for L0 (Poseidon over the preimage)
+        //   - siblings: 16-leaf depth-4 SHA-256 Merkle path for L0 (Poseidon over the preimage)
         //   - chain_links: real Poseidon Merkle proofs walked across intermediate
         //     key blocks fetched via GraphQL (see real_chain_builder).
         // Load layer PK on demand, unload after to free ~2.8 GB.
@@ -1086,7 +1087,7 @@ fn find_next_thinned_key_block(
 /// Fetches the full AckiNackiBlock `data` field, parses it to extract:
 /// - Layer hashes (from history_proofs in CommonSection)
 /// - BK set Poseidon hash (from block_keeper_set_change_proof_data)
-/// - Merkle tree siblings for L0 in the 8-leaf block_id tree
+/// - Merkle tree siblings for L0 in the 16-leaf depth-4 block_id tree
 ///
 /// Chain proofs are built from real intermediate block data by reconstructing
 /// the Poseidon Merkle trees that the node produced.
@@ -1133,7 +1134,7 @@ async fn generate_layer_proof_for_key_block(
     }
     let preimage = block_id_tree::build_layer_hashes_preimage(num_layers as usize, &root_hashes);
 
-    // 2. Build the 8-leaf SHA-256 Merkle tree from the GQL leaves and pull siblings for L0.
+    // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves and pull siblings for L0.
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
     let siblings = tree.siblings_for_l0();
     info!(

@@ -8,7 +8,6 @@ halo2-base = { workspace = true }
 halo2-ecc = { workspace = true }
 attestation-bls-checker-circuit = { workspace = true }
 historical-layer-hashes-movement-checker-circuit = { workspace = true }
-bridge-parsers = { workspace = true }
 bridge-poseidon = { workspace = true }
 bridge-test-data-gen = { workspace = true }
 bridge-event-prove-circuit = { workspace = true }

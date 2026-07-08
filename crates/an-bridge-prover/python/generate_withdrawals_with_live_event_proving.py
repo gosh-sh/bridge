@@ -147,13 +147,25 @@ def deploy_multisig():
             )
             time.sleep(3)
     else:
-        fund_value = max(total_ecc, 100_000_000_000_000)
-        tracer.log(f"  funding via giver ecc[{ECC_ID_FOR_BURN}]={fund_value}")
+        # Canonical bridge pattern from acki-nacki/tests/exchange/
+        # bridge_e2e_self_contained.py::deploy_multisig (and mirrored in
+        # tests/dex/generate_vouchers_with_live_event_proving.py): a single
+        # `sendCurrencyWithFlag` call with flag=17 carrying a large native
+        # `value` and the ECC[2] bootstrap. The follow-up top-up is applied
+        # only AFTER deploy, and only if deploy consumed the ECC balance
+        # (handled below). The earlier two-shot 17→1 loop (borrowed from
+        # test_airegistry/test_registration.py) left the Uninit account in
+        # a state where deployx's stateInit was rejected with
+        # COMPUTE_SKIPPED: The account doesn't have a state.
+        fund_ecc    = max(total_ecc, 100_000_000_000_000)
+        fund_native = 200_000_000_000_000
+        tracer.log(f"  funding via giver single-shot (flag=17), "
+                   f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
         common.call_contract(
             GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
             "sendCurrencyWithFlag",
-            {"dest": msig_address_legacy, "value": "200000000000000",
-             "ecc": {str(ECC_ID_FOR_BURN): str(fund_value)},
+            {"dest": msig_address_legacy, "value": str(fund_native),
+             "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
              "flag": "17", "bounce": False},
         )
     time.sleep(8)

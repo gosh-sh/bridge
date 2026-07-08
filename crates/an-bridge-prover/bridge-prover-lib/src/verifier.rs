@@ -68,14 +68,20 @@ where
 /// [`verify_kzg_proof_with_transcript`] pinned to
 /// [`TranscriptKind::Blake2b`]. Re-exported `pub` for the Circuit 4 verifier
 /// in `bridge-event-prover-lib`.
+///
+/// `srs` MUST be the exact same `ParamsKZG` (same K) that the prover used —
+/// halo2-axiom's verify path consumes `params.n()` for instance-polynomial
+/// resizing and `x^n` evaluation, so a K mismatch here silently returns
+/// `false` (Fiat–Shamir divergence) even when the pairing points are
+/// ceremony-consistent.
 pub fn verify_kzg_proof(
-    key_manager: &KeyManager,
+    srs: &ParamsKZG<Bn256>,
     vk: &VerifyingKey<G1Affine>,
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
     verify_kzg_proof_with_transcript(
-        key_manager,
+        srs,
         vk,
         proof_bytes,
         instances,
@@ -87,16 +93,18 @@ pub fn verify_kzg_proof(
 /// transcript kind MUST match what the prover used or verification will
 /// (correctly) return `false`. Re-exported `pub` for the Circuit 4 verifier
 /// in `bridge-event-prover-lib`.
+///
+/// See [`verify_kzg_proof`] for the `srs` K-matching requirement.
 pub fn verify_kzg_proof_with_transcript(
-    key_manager: &KeyManager,
+    srs: &ParamsKZG<Bn256>,
     vk: &VerifyingKey<G1Affine>,
     proof_bytes: &[u8],
     instances: &[Fr],
     transcript: TranscriptKind,
 ) -> bool {
     let instance_refs: &[&[Fr]] = &[instances];
-    let verifier_params = key_manager.srs.verifier_params();
-    let strategy = SingleStrategy::new(&key_manager.srs);
+    let verifier_params = srs.verifier_params();
+    let strategy = SingleStrategy::new(srs);
     match transcript {
         TranscriptKind::Blake2b => {
             let mut t = Blake2bRead::<_, _, Challenge255<_>>::init(proof_bytes);
@@ -143,7 +151,12 @@ pub fn verify_primary_proof(
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
-    verify_kzg_proof(key_manager, key_manager.primary_vk(), proof_bytes, instances)
+    verify_kzg_proof(
+        key_manager.primary.srs(),
+        key_manager.primary_vk(),
+        proof_bytes,
+        instances,
+    )
 }
 
 /// Verify a Circuit 1a proof with the chosen Fiat–Shamir transcript. Must
@@ -156,7 +169,7 @@ pub fn verify_primary_proof_with_transcript(
     transcript: TranscriptKind,
 ) -> bool {
     verify_kzg_proof_with_transcript(
-        key_manager,
+        key_manager.primary.srs(),
         key_manager.primary_vk(),
         proof_bytes,
         instances,
@@ -175,7 +188,12 @@ pub fn verify_fallback_proof(
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
-    verify_kzg_proof(key_manager, key_manager.fallback_vk(), proof_bytes, instances)
+    verify_kzg_proof(
+        key_manager.fallback.srs(),
+        key_manager.fallback_vk(),
+        proof_bytes,
+        instances,
+    )
 }
 
 /// Verify a Circuit 1b proof with the chosen Fiat–Shamir transcript. Must
@@ -188,7 +206,7 @@ pub fn verify_fallback_proof_with_transcript(
     transcript: TranscriptKind,
 ) -> bool {
     verify_kzg_proof_with_transcript(
-        key_manager,
+        key_manager.fallback.srs(),
         key_manager.fallback_vk(),
         proof_bytes,
         instances,
@@ -206,7 +224,12 @@ pub fn verify_layer_proof(
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
-    verify_kzg_proof(key_manager, key_manager.layer_vk(), proof_bytes, instances)
+    verify_kzg_proof(
+        key_manager.layer.srs(),
+        key_manager.layer_vk(),
+        proof_bytes,
+        instances,
+    )
 }
 
 /// Verify a Circuit 2 proof with the chosen Fiat–Shamir transcript. Must
@@ -219,7 +242,7 @@ pub fn verify_layer_proof_with_transcript(
     transcript: TranscriptKind,
 ) -> bool {
     verify_kzg_proof_with_transcript(
-        key_manager,
+        key_manager.layer.srs(),
         key_manager.layer_vk(),
         proof_bytes,
         instances,

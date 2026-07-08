@@ -23,7 +23,7 @@ pub fn verify_event_proof(
     instances: &[Fr],
 ) -> bool {
     bridge_prover_lib::verifier::verify_kzg_proof(
-        key_manager,
+        key_manager.event.srs(),
         key_manager.event_vk(),
         proof_bytes,
         instances,
@@ -41,7 +41,7 @@ pub fn verify_event_proof_with_transcript(
     transcript: TranscriptKind,
 ) -> bool {
     bridge_prover_lib::verifier::verify_kzg_proof_with_transcript(
-        key_manager,
+        key_manager.event.srs(),
         key_manager.event_vk(),
         proof_bytes,
         instances,

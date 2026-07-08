@@ -129,7 +129,7 @@ pub fn generate_primary_proof_with_transcript(
     }
 
     let proof_bytes = run_kzg_create_proof(
-        key_manager,
+        key_manager.primary.srs(),
         key_manager.primary_pk(),
         circuit,
         &instances,
@@ -243,7 +243,7 @@ pub fn generate_fallback_proof_with_transcript(
     }
 
     let proof_bytes = run_kzg_create_proof(
-        key_manager,
+        key_manager.fallback.srs(),
         key_manager.fallback_pk(),
         circuit,
         &instances,
@@ -307,7 +307,7 @@ where
 /// proving key; the multiopen / commitment scheme is identical, and the
 /// Fiat–Shamir transcript is picked here based on `transcript_kind`.
 fn run_kzg_create_proof<C>(
-    key_manager: &KeyManager,
+    srs: &ParamsKZG<Bn256>,
     pk: &ProvingKey<G1Affine>,
     circuit: C,
     instances: &[Fr],
@@ -328,7 +328,7 @@ where
                 Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
                 _,
             >(
-                &key_manager.srs,
+                srs,
                 pk,
                 &[circuit],
                 &[instance_refs],
@@ -348,7 +348,7 @@ where
                 PoseidonWrite<Vec<u8>>,
                 _,
             >(
-                &key_manager.srs,
+                srs,
                 pk,
                 &[circuit],
                 &[instance_refs],

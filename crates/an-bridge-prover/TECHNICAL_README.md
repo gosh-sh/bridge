@@ -206,6 +206,8 @@ Three cleanups the orchestrator does **not** enforce itself. Each surfaces as an
 
 Local-devnet only: `ACKI_NACKI_ROOT` must point at the sibling `acki-nacki/` checkout (default `../../../../acki-nacki`) so `materialize_bk_set_from_node_config` finds `contracts/` and `config/`. If it's wrong you get `FileNotFoundError` before any tvm-cli call runs.
 
+**Not on this list: BK-set resync.** You do **not** need to manually refresh `bk_set.json` after a cluster rebuild — the orchestrator regenerates it automatically on every run, and the daemons prefer GraphQL anyway. See [BK set rotation](#bk-set-rotation) for the full two-layer picture.
+
 ---
 
 ## Bootstrap behavior
@@ -226,6 +228,16 @@ The BK set is a **circuit witness**, not a circuit constant — only `MAX_SIGNER
 Both daemons fetch the set **once at startup** and cache it for the whole run — there is no `bkSetUpdates` subscription. If the on-chain set rotates mid-run, the prover will silently skip key blocks signed by indices it doesn't recognise (`signers [k] not in BK set, skipping`).
 
 On rotation: **stop both daemons, refresh `bk_set.json` if you rely on the GQL-failure fallback, restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
+
+### BK-set resync on cluster rebuild — fully automatic
+
+A common concern for local-devnet operators: *after `make stop && make run` the node images may regenerate BLS keys — do I need to hand-edit `bk_set.json` to match?* **No.** Two independent layers handle it:
+
+1. **Daemon side (GraphQL first).** Both daemons call `bridge_prover_lib::bk_set_fetcher` at startup, which prefers the on-chain GraphQL `bkSetUpdates` stream and writes the fetched set into `state/prover_bk_set.json`. `./bk_set.json` is a **fallback only**, consulted when the GQL fetch fails (see `bridge-verifier-daemon/src/main.rs:34`, `bridge-prover-daemon/src/main.rs:103`). On a healthy local devnet the fallback file is unused for the entire run.
+
+2. **Orchestrator side (config-file fallback prep).** Before starting anything else, `python/generate_withdrawals_with_live_event_proving.py` calls `materialize_bk_set_from_node_config` (line 258+). This function enumerates live `*-nodeN-*` docker containers, reads each `$ACKI_NACKI_ROOT/config/block_keeperN_bls.keys.json`, and rewrites `<PROVER_DIR>/bk_set.json` from scratch. So even if the daemons had to fall back to the file, it would already be current.
+
+The committed `bk_set.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**. Shellnet path uses GraphQL only; never call the materialiser there.
 
 ---
 

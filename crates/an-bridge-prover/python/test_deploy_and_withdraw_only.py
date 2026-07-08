@@ -1,21 +1,32 @@
 """
-Isolated contract-only sanity test for the AN→ETH bridge (LOCAL DEVNET).
+Isolated contract-only sanity test for the AN→ETH bridge (LOCAL DEVNET + SHELLNET).
 
 Distilled from `generate_withdrawals_with_live_event_proving.py`, but strips
 out everything downstream of event emission — no verifier/prover daemons, no
 Rust binaries, no halo2 proving. Purely tvm-cli + GraphQL.
 
 Purpose: prove the multisig deploy + USDC mint + initiateWithdrawal + emitted
-WithdrawalInitiated event path works on the local cluster BEFORE running the
-heavy Circuit 4 pipeline. If this test fails, the full orchestrator cannot
-succeed either — this is the cheap fast-fail signal.
+WithdrawalInitiated event path works on the target cluster BEFORE running
+the heavy Circuit 4 pipeline. If this test fails, the full orchestrator
+cannot succeed either — this is the cheap fast-fail signal.
+
+Modes (env `MODE`, default `local`):
+  local     - local devnet cluster, keys auto-materialized from
+              `$ACKI_NACKI_ROOT/config/`
+  shellnet  - live https://shellnet.ackinacki.org, no local config
+              auto-refresh. Assumes `python/contracts/USDCBridge.shellnet.keys.json`
+              has already been refreshed from the partner-posted `config-*/`
+              directory after any shellnet redeploy (see TECHNICAL_README
+              §"Shellnet key-refresh checklist").
 
 Steps:
   1. Prechecks: USDCBridge active; USDCBridge owner key matches on-chain.
-  2. Materialize BK-set + USDCBridge owner key from the sibling acki-nacki
-     checkout (local devnet only — same as the full orchestrator).
-  3. Deploy multisig via GiverV3.sendCurrencyWithFlag SINGLE-SHOT flag=17
-     (Sehor `tests/exchange/bridge_e2e_self_contained.py` pattern).
+  2. (local only) Materialize BK-set + USDCBridge owner key from sibling
+     acki-nacki checkout.
+  3. Deploy multisig via GiverV3.sendCurrencyWithFlag. Local: single-shot
+     flag=17 (Sehor `tests/exchange/bridge_e2e_self_contained.py`). Shellnet:
+     two-shot 17→1 with canonical WALLET_INIT amounts (matches the full
+     shellnet orchestrator).
   4. Mint ECC[3] USDC into the multisig via USDCBridge.mintAndSend.
   5. Fire USDCBridge.initiateWithdrawal from the multisig.
   6. Poll USDCBridge ExtOut messages via GQL for a new WithdrawalInitiated
@@ -23,7 +34,7 @@ Steps:
   7. PASS iff an event lands within EVENT_INDEXER_TIMEOUT_S; FAIL otherwise.
 
 Env vars: same subset the full orchestrator honors —
-  PROVER_DIR, NETWORK, GRAPHQL_URL, WORK_DIR,
+  MODE (local|shellnet), PROVER_DIR, NETWORK, GRAPHQL_URL, WORK_DIR,
   USDC_BRIDGE_KEY_PATH, ACKI_NACKI_ROOT.
 """
 
@@ -43,23 +54,39 @@ from helper import common
 from helper import bridge_e2e as be
 from helper.bridge_e2e import (
     USDC_BRIDGE_ADDRESS, USDC_BRIDGE_DAPP_ID, USDC_BRIDGE_ACCOUNT_ID,
-    GIVER_ADDRESS, USDC_BRIDGE_ABI, USDC_BRIDGE_KEYS,
+    GIVER_ADDRESS, USDC_BRIDGE_ABI, USDC_BRIDGE_KEYS, USDC_BRIDGE_KEYS_SHELLNET,
     GIVER_ABI, GIVER_KEY_PATH, MSIG_ABI, MSIG_TVC_STEM,
     WITHDRAWAL_AMOUNT, ECC_ID_FOR_BURN, USDC_TOKEN_ID,
     DST_CHAIN_ID, RECIPIENT_HEX,
 )
 
-# ── Local-devnet configuration ──────────────────────────────────────────────
-DEFAULT_NETWORK = "http://127.0.0.1:80"
-DEFAULT_GRAPHQL = "http://localhost/graphql"
-DEFAULT_WORK    = "work-local"
-EVENT_INDEXER_TIMEOUT_S = 180  # generous — first-run devnet can be sluggish
+# ── Mode-dependent configuration (mirrors full orchestrator) ────────────────
+MODE = os.environ.get("MODE", "local").lower()
+if MODE not in ("local", "shellnet"):
+    raise SystemExit(f"MODE must be 'local' or 'shellnet', got {MODE!r}")
+IS_SHELLNET = MODE == "shellnet"
+
+if IS_SHELLNET:
+    DEFAULT_NETWORK = "shellnet.ackinacki.org"
+    DEFAULT_GRAPHQL = "https://shellnet.ackinacki.org/graphql"
+    DEFAULT_WORK    = "work-shellnet"
+    _DEFAULT_USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEYS_SHELLNET
+    GQL_KWARGS = {"user_agent": "bridge-e2e-orchestrator-shellnet/1.0",
+                  "timeout": 30}
+    EVENT_INDEXER_TIMEOUT_S = 240
+else:
+    DEFAULT_NETWORK = "http://127.0.0.1:80"
+    DEFAULT_GRAPHQL = "http://localhost/graphql"
+    DEFAULT_WORK    = "work-local"
+    _DEFAULT_USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEYS
+    GQL_KWARGS = {}
+    EVENT_INDEXER_TIMEOUT_S = 180
 
 PROVER_DIR  = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR    = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, DEFAULT_WORK))
 GRAPHQL_URL = os.environ.get("GRAPHQL_URL", DEFAULT_GRAPHQL)
 USDC_BRIDGE_KEY_PATH_OVERRIDE = os.environ.get("USDC_BRIDGE_KEY_PATH")
-USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEY_PATH_OVERRIDE or USDC_BRIDGE_KEYS
+USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEY_PATH_OVERRIDE or _DEFAULT_USDC_BRIDGE_KEY_PATH
 
 MSIG_KEY_PATH = os.path.join(WORK_DIR, "msig_withdrawals_e2e.keys.json")
 
@@ -70,15 +97,14 @@ gql: be.GqlClient
 # ── Deployment ──────────────────────────────────────────────────────────────
 
 def deploy_multisig():
-    """Sehor-pattern single-shot funding + deploy.
+    """Fund + deploy multisig, using the mode-appropriate giver pattern.
 
-    Mirrors `acki-nacki/tests/exchange/bridge_e2e_self_contained.py::deploy_multisig`
-    (which is Sehor's currently-working reference) rather than the retired
-    test_airegistry two-shot: value=200T native + ecc[2]=100T in ONE
-    sendCurrencyWithFlag call with flag=17. Follow-up top-up is applied only
-    AFTER deployx if deploy consumed the ECC balance.
+    Local devnet: Sehor single-shot flag=17 (`bridge_e2e_self_contained.py`).
+    Shellnet: canonical two-shot 17→1 with WALLET_INIT amounts (matches the
+    full shellnet orchestrator; single-shot empirically leaves the account
+    under-funded for deployx on shellnet).
     """
-    tracer.log_phase("Deploying multisig (local)")
+    tracer.log_phase(f"Deploying multisig ({MODE})")
 
     work_dir = os.path.join(WORK_DIR, "msig_deploy")
     os.makedirs(work_dir, exist_ok=True)
@@ -97,19 +123,34 @@ def deploy_multisig():
     pubkey = common.read_public_key(MSIG_KEY_PATH)
     tracer.log(f"  multisig address: {msig_address}")
 
-    total_ecc   = WITHDRAWAL_AMOUNT * 4
-    fund_ecc    = max(total_ecc, 100_000_000_000_000)
-    fund_native = 200_000_000_000_000
-    tracer.log(f"  funding via giver single-shot (flag=17), "
-               f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
-    common.call_contract(
-        GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
-        "sendCurrencyWithFlag",
-        {"dest": msig_address_legacy, "value": str(fund_native),
-         "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
-         "flag": "17", "bounce": False},
-        True,  # print_output=True — we want to see the giver's response
-    )
+    total_ecc = WITHDRAWAL_AMOUNT * 4
+    if IS_SHELLNET:
+        value = 10_000_000_000_000     # canonical WALLET_INIT_BALANCE
+        ecc2  = 100_000_000_000_000    # canonical WALLET_INIT_CC
+        for shot, flag in enumerate(("17", "1"), start=1):
+            tracer.log(f"  faucet shot {shot}/2 (flag={flag}): value={value}, ecc[2]={ecc2}")
+            common.call_contract(
+                GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
+                "sendCurrencyWithFlag",
+                {"dest": msig_address_legacy, "value": str(value),
+                 "ecc": {str(ECC_ID_FOR_BURN): str(ecc2)},
+                 "flag": flag, "bounce": False},
+                True,
+            )
+            time.sleep(3)
+    else:
+        fund_ecc    = max(total_ecc, 100_000_000_000_000)
+        fund_native = 200_000_000_000_000
+        tracer.log(f"  funding via giver single-shot (flag=17), "
+                   f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
+        common.call_contract(
+            GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
+            "sendCurrencyWithFlag",
+            {"dest": msig_address_legacy, "value": str(fund_native),
+             "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
+             "flag": "17", "bounce": False},
+            True,
+        )
     time.sleep(8)
     for _ in range(60):
         account = common.get_account(msig_address)
@@ -289,7 +330,7 @@ def wait_for_withdrawal_event(baseline_ids: set, timeout_s: int) -> dict | None:
 def main():
     global tracer, gql
     tracer = be.Tracer()
-    gql = be.GqlClient(GRAPHQL_URL)
+    gql = be.GqlClient(GRAPHQL_URL, **GQL_KWARGS)
     os.makedirs(WORK_DIR, exist_ok=True)
 
     network = os.getenv("NETWORK", DEFAULT_NETWORK)
@@ -299,18 +340,20 @@ def main():
     common.setup()
     time.sleep(1)
 
-    tracer.log_phase("Prechecks (local)")
+    tracer.log_phase(f"Prechecks ({MODE})")
     tracer.log(f"  NETWORK:     {network}")
     tracer.log(f"  PROVER_DIR:  {PROVER_DIR}")
     tracer.log(f"  GRAPHQL_URL: {GRAPHQL_URL}")
     tracer.log(f"  WORK_DIR:    {WORK_DIR}")
+    tracer.log(f"  USDC_BRIDGE_KEY_PATH: {USDC_BRIDGE_KEY_PATH}")
     assert common.is_account_active(USDC_BRIDGE_ADDRESS), \
         f"USDCBridge not active at {USDC_BRIDGE_ADDRESS}"
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
-    tracer.log_phase("Materializing bk_set.json from local cluster config")
-    #materialize_bk_set_from_node_config()
-    if USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
+    # bk_set: local devnet fetches from GraphQL AND falls back to bk_set.json.
+    # The daemons handle this themselves — the isolated test does not run
+    # daemons, so we skip materialization here regardless of MODE.
+    if not IS_SHELLNET and USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
         tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
         materialize_usdc_bridge_key_from_node_config()
 

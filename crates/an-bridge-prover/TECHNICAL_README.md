@@ -399,6 +399,48 @@ Phases printed are identical to Step 5 of the local-devnet runbook; exit code 0 
 - Verifier never reaches the event's anchor seq_no — almost always means the seed sits far behind chain head. Wipe + restart (`stop-bridge-test.sh` → `run-bridge-test.sh`) so auto-seed re-anchors at the next `W·P` boundary past current head.
 - `BRIDGE_BOOTSTRAP_SEQNO must be a multiple of 512` — explicit seeds must be `W·P`-aligned; drop the override or pick a valid boundary (`echo $((N - N % 512))`).
 
+### Shellnet key-refresh checklist (run this after every shellnet redeploy)
+
+Unlike local devnet — where `python/generate_withdrawals_with_live_event_proving.py` auto-materialises everything from the sibling `acki-nacki/config/` — shellnet has **no** auto-refresh path. The shellnet cluster is a shared partner-run environment; when it is redeployed, the on-chain contract owner pubkeys change, the bundled key snapshot in this repo goes stale, and every `USDCBridge.mintAndSend` from this repo silently bounces (`exit_code=209`, "auth check failed").
+
+**Symptom of stale bundled key:** `USDCBridge.mintAndSend` returns `exit_code=209` with no ECC[3] credit — the mint transaction reaches the contract but the compute phase rejects the pubkey check `msg.pubkey() == m_ownerPubkey`.
+
+**Detection — one-liner:**
+
+```bash
+# Compare bundled shellnet key vs live on-chain owner pubkey
+LOCAL=$(jq -r .public python/contracts/USDCBridge.shellnet.keys.json)
+CHAIN=$(./tvm-cli -j runx --abi python/contracts/USDCBridge.abi.json \
+        --addr 0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
+        -m getOwnerPubkey | jq -r .value0 | sed 's/^0x//')
+[ "$LOCAL" = "$CHAIN" ] && echo "OK — shellnet key current" || echo "STALE — refresh required"
+```
+
+**Where the truth lives.** The partner posts the fresh `config/` directory alongside every shellnet redeploy (e.g. `HALO2_TVM_EXPERIMENTS/config-2/` on 2026-07-08 for shellnet deployed from `acki-nacki@7ffec27` on branch `poseidon_dex`). Only one file matters for us:
+
+```bash
+cp <config-N>/USDCBridge.keys.json python/contracts/USDCBridge.shellnet.keys.json
+```
+
+**What else in `config-*/` do we consume?** Nothing. Explicit inventory:
+
+| File in partner `config-*/` | Consumed by shellnet path? | Why / Why not |
+|---|---|---|
+| `USDCBridge.keys.json` | **YES** — the only file that must be refreshed | Owner pubkey pinned in the deployed contract; must match to sign `mintAndSend`. |
+| `USDCToken.keys.json` | **NO** | `USDC_TOKEN_ID = 3` is a bare ECC currency ID; USDCBridge mints ECC[3] directly, no `USDCToken` contract call in this pipeline. Ignore this file. |
+| `block_keeperN_bls.keys.json` | **NO** — daemons pull the BK set from GraphQL on shellnet | Only local devnet uses these via `materialize_bk_set_from_node_config`. |
+| Everything else (Exchange, DappRoot, AiSuperRoot, PMPRoot, EccRoot, LicenseRoot, block_manager*, MobileVerifiers*, keys_config, ip_config, blockchain.conf) | **NO** | Unrelated to the bridge orchestrator. |
+
+**Giver key.** Bundled `python/contracts/GiverV3.keys.json` is the well-known local pubkey; matches shellnet giver's on-chain data BOC (`128a5586045a9a3c…`). Only needs refresh if the partner rotates the shellnet giver too — usually not.
+
+**Post-refresh smoke test.** Run the isolated contract-only test (adds ~90 s) before spending 15 min on the full E2E:
+
+```bash
+MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
+```
+
+Only if that PASSes, proceed to the full runbook above.
+
 ---
 
 ## Runbook — bundle-only (Circuits 1A + 2, local or shellnet)

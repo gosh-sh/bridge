@@ -256,13 +256,14 @@ def mint_usdc(msig_address_legacy: str, amount: int):
 # ── Local-devnet bk_set materialization ───────────────────────────────────────
 
 def materialize_bk_set_from_node_config():
-    """Regenerate `<PROVER_DIR>/bk_set.json` from the running local cluster's
+    """Regenerate `<PROVER_DIR>/bk_set.local.json` from the running local cluster's
     BLS key files. Daemon-side `bridge_prover_lib::bk_set_fetcher` tries the
     GraphQL `bkSetUpdates` stream first; on a fresh devnet (zero validator
     churn since genesis) that stream returns empty and the daemon falls back
-    to `./bk_set.json` (relative to its cwd, which is `PROVER_DIR`).
+    to `./bk_set.local.json` (the default value of `BRIDGE_BK_SET_CONFIG` in
+    the daemon), relative to its cwd, which is `PROVER_DIR`.
 
-    For ad-hoc local runs we cannot rely on a committed `bk_set.json` snapshot
+    For ad-hoc local runs we cannot rely on a committed `bk_set.local.json` snapshot
     — node images may regenerate BLS keys when rebuilt from scratch. Source
     the set from the same `config/block_keeperN_bls.keys.json` files the node
     containers boot with, enumerated by the running `*-nodeN-*` containers so
@@ -316,10 +317,10 @@ def materialize_bk_set_from_node_config():
             raise ValueError(f"unexpected format in {path}: {e}") from e
         bk_set[str(idx)] = pub
 
-    out_path = os.path.join(PROVER_DIR, "bk_set.json")
+    out_path = os.path.join(PROVER_DIR, "bk_set.local.json")
     with open(out_path, "w") as f:
         json.dump(bk_set, f, indent=2)
-    tracer.log(f"  bk_set.json: {len(bk_set)} signers (indices {indices}) "
+    tracer.log(f"  bk_set.local.json: {len(bk_set)} signers (indices {indices}) "
                f"sourced from {config_dir}")
     tracer.log(f"  wrote {out_path}")
 
@@ -427,7 +428,7 @@ def main():
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
     if not IS_SHELLNET:
-        tracer.log_phase("Materializing bk_set.json from local cluster config")
+        tracer.log_phase("Materializing bk_set.local.json from local cluster config")
         materialize_bk_set_from_node_config()
         if USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
             tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")

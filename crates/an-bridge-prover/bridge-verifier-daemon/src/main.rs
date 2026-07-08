@@ -31,11 +31,16 @@ const STATE_FILE: &str = "./state/verifier_state.json";
 /// Default GraphQL endpoint when `BRIDGE_GQL_ENDPOINT` is not set. Same env
 /// var the prover daemon honours, so a single export in the shell selects the
 /// network for both daemons. Used only by [`load_bk_set_commitment`] — the
-/// verifier has no other GQL traffic; bk_set.json is the fallback if GQL is
-/// unreachable.
+/// verifier has no other GQL traffic; the per-network BK-set genesis file is
+/// the fallback if GQL is unreachable or (as on shellnet) returns an empty
+/// `bkSetUpdates` log.
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
-const BK_SET_CONFIG: &str = "./bk_set.json";
+/// Genesis BK-set anchor. Same semantics as the prover daemon's constant of
+/// the same name — see `bridge-prover-daemon/src/main.rs`. Selected per-network
+/// via `BRIDGE_BK_SET_CONFIG` (default: `./bk_set.local.json`).
+const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
+const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 // History window size — must match the prover daemon and the node. Sourced
 // from the vendored poseidon_dense constant so it can never drift.
@@ -74,9 +79,11 @@ async fn main() -> anyhow::Result<()> {
 
     let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
         .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
+    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
+        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
-    info!("GQL endpoint: {} (BK-set fetch only; falls back to {})", gql_endpoint, BK_SET_CONFIG);
+    info!("GQL endpoint: {} (BK-set fetch only; falls back to {})", gql_endpoint, bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
     // Graceful-shutdown flag flipped by the Ctrl-C handler. Checked at the top
@@ -93,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 1. Load BK set commitment (for Circuit 1a verification reference).
-    let bk_set_commitment = load_bk_set_commitment(&gql_endpoint).await?;
+    let bk_set_commitment = load_bk_set_commitment(&gql_endpoint, &bk_set_config).await?;
     info!("BK set commitment: {:?}", bk_set_commitment);
 
     // 2. Load key manager (SRS + VKs only, no PKs needed).
@@ -555,7 +562,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load_bk_set_commitment(gql_endpoint: &str) -> anyhow::Result<Fr> {
+async fn load_bk_set_commitment(gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
     let bk_set = match bridge_prover_lib::gql_client::create_client(gql_endpoint) {
         Ok(gql) => match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql).await {
             Ok(bk) => {
@@ -563,11 +570,11 @@ async fn load_bk_set_commitment(gql_endpoint: &str) -> anyhow::Result<Fr> {
                 bk
             }
             Err(e) => {
-                info!("GraphQL BK set failed ({}), trying config file", e);
-                bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(BK_SET_CONFIG)?
+                info!("GraphQL BK set failed ({}), trying config file {}", e, bk_set_config);
+                bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?
             }
         },
-        Err(_) => bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(BK_SET_CONFIG)?,
+        Err(_) => bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?,
     };
     Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }

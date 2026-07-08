@@ -100,7 +100,13 @@ const STATE_FILE: &str = "./state/prover_state.json";
 /// the verifier daemon (= contract mirror) never reads it. See
 /// `bridge_prover_lib::prover_bk_set::ProverBkSet` for the rationale.
 const PROVER_BK_SET_FILE: &str = "./state/prover_bk_set.json";
-const BK_SET_CONFIG: &str = "./bk_set.json";
+/// Genesis BK-set anchor. On networks where GraphQL `bkSetUpdates` does not
+/// expose the initial committee (e.g. shellnet, where the log is empty), this
+/// file **is** the source of truth. Path is selected per-network via the
+/// `BRIDGE_BK_SET_CONFIG` env var so we can keep both `bk_set.local.json` and
+/// `bk_set.shellnet.json` committed side-by-side without overwriting.
+const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
+const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 #[derive(Default)]
 struct Stats {
@@ -813,6 +819,46 @@ async fn main() -> anyhow::Result<()> {
             target_seqno, attestation_circuit_tag, primary_proof_gen_ms
         );
 
+        // Early Circuit 1a/1b self-verify diagnostic. The normal self-verify
+        // block below (`main.rs` ~line 949) sits AFTER Circuit 2 succeeds; if
+        // Circuit 2 aborts at the `leaves[2]` check we would never learn
+        // whether Circuit 1a's BLS pairing was actually satisfied. This early
+        // gate logs the primary verdict up front so a leaves[2] mismatch on
+        // Circuit 2 can be diagnosed independently from a wrong-pubkey
+        // Circuit 1a. Does NOT bail — flow continues into Circuit 2 as usual.
+        #[cfg(feature = "self-verify")]
+        {
+            let primary_instances = vec![
+                primary_proof.block_id_fr,
+                bk_set_commitment,
+                Fr::from(target_seqno),
+                Fr::from(state.stored_last_seen_block_seq_no),
+            ];
+            let t_verify_primary_early = Instant::now();
+            let primary_ok = match attestation_circuit_tag {
+                ipc::AttestationCircuit::Primary => verifier::verify_primary_proof(
+                    &key_manager,
+                    &primary_proof.proof_bytes,
+                    &primary_instances,
+                ),
+                ipc::AttestationCircuit::Fallback => verifier::verify_fallback_proof(
+                    &key_manager,
+                    &primary_proof.proof_bytes,
+                    &primary_instances,
+                ),
+            };
+            info!(
+                "key block {}: Circuit {} EARLY self-verify {} ({:?})",
+                target_seqno,
+                match attestation_circuit_tag {
+                    ipc::AttestationCircuit::Primary => "1a",
+                    ipc::AttestationCircuit::Fallback => "1b",
+                },
+                if primary_ok { "OK" } else { "FAIL" },
+                t_verify_primary_early.elapsed()
+            );
+        }
+
         // ---- Circuit 2: Layer Hashes Movement Proof ----
         // Inputs are reconstructed from real block data:
         //   - preimage: history_proofs parsed from the target block's CommonSection
@@ -1148,14 +1194,15 @@ async fn generate_layer_proof_for_key_block(
     // `bridge_prover_lib::poseidon::compute_bk_set_poseidon` (see
     // `acki-nacki/node/src/block_keeper_system/mod.rs::poseidon_commitment`).
     // So `leaves[2]` must equal `bk_set_commitment.to_repr()` — assert this
-    // as a fail-fast check on `bk_set.json` freshness. Without it, a stale
-    // BK set silently produces a bogus BLS message hash and only blows up
-    // deep inside Circuit 1A's pairing constraints.
+    // as a fail-fast check on the BK-set genesis file's freshness. Without it,
+    // a stale BK set silently produces a bogus BLS message hash and only blows
+    // up deep inside Circuit 1A's pairing constraints.
     let bk_hash_bytes: [u8; 32] = bk_set_commitment.to_repr();
     if bk_hash_bytes != leaves[2] {
         anyhow::bail!(
             "loaded BK set Poseidon commitment ({}) does not match block.leaves[2] ({}) — \
-             bk_set.json is stale or the chain rotated keys; refresh bk_set.json",
+             BK-set genesis file (see BRIDGE_BK_SET_CONFIG, default ./bk_set.local.json) is \
+             stale or the chain rotated keys; refresh it",
             hex::encode(bk_hash_bytes),
             hex::encode(leaves[2])
         );
@@ -1195,13 +1242,18 @@ async fn generate_layer_proof_for_key_block(
 }
 
 async fn load_bk_set(gql: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
+        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
     match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(gql).await {
         Ok(bk_set) => return Ok(bk_set),
         Err(e) => {
             warn!("failed to fetch BK set from GraphQL: {}", e);
-            info!("trying config file fallback: {}", BK_SET_CONFIG);
+            info!("trying config file fallback: {}", bk_set_config);
         }
     }
-    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(BK_SET_CONFIG)
-        .context("failed to load BK set from both GraphQL and config file")
+    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
+        .with_context(|| format!(
+            "failed to load BK set from both GraphQL and config file {}",
+            bk_set_config,
+        ))
 }

@@ -135,8 +135,9 @@ acki-nacki-to-eth-bridge-halo2-prover/
 │                                          #         PartialPrivateWitness from a block) and
 │                                          #         "bridge-event-witness-builder" (enrich it
 │                                          #         via GQL + verifier state)
-├── bk_set.json                            # local BLS pubkeys fallback (see Troubleshooting)
-├── bk_set.json.poseidon_dex_local.bak     # snapshot for the acki-nacki `poseidon_dex` branch
+├── bk_set.local.json                      # local-devnet BLS pubkeys (materialized by orchestrator; daemon default)
+├── bk_set.shellnet.json                   # shellnet genesis BLS pubkeys (manual; transcribed from partner-posted keys_config.json — see Shellnet BK-set section)
+├── bk_set.json.poseidon_dex_local.bak     # legacy backup for the acki-nacki `poseidon_dex` branch
 ├── scripts/run-bridge-test.sh             # launcher (wipes state, builds, starts both daemons)
 ├── scripts/stop-bridge-test.sh
 ├── params/   state/   proofs/   logs/     # gitignored; created on demand
@@ -168,7 +169,8 @@ acki-nacki-to-eth-bridge-halo2-prover/
 
 | Env var | Used by | Default | Meaning |
 |---|---|---|---|
-| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Verifier uses it for BK-set fetch (falls back to `./bk_set.json` on failure). |
+| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Both daemons use it for BK-set fetch (fall back to `BRIDGE_BK_SET_CONFIG` on failure). |
+| `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
 | `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 512), else the daemon refuses to start. |
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
@@ -206,7 +208,7 @@ Three cleanups the orchestrator does **not** enforce itself. Each surfaces as an
 
 Local-devnet only: `ACKI_NACKI_ROOT` must point at the sibling `acki-nacki/` checkout (default `../../../../acki-nacki`) so `materialize_bk_set_from_node_config` finds `contracts/` and `config/`. If it's wrong you get `FileNotFoundError` before any tvm-cli call runs.
 
-**Not on this list: BK-set resync.** You do **not** need to manually refresh `bk_set.json` after a cluster rebuild — the orchestrator regenerates it automatically on every run, and the daemons prefer GraphQL anyway. See [BK set rotation](#bk-set-rotation) for the full two-layer picture.
+**Not on this list (local devnet only): BK-set resync.** For local devnet you do **not** need to manually refresh `bk_set.local.json` after a cluster rebuild — the orchestrator regenerates it automatically on every run, and the daemons prefer GraphQL anyway. See [BK set rotation](#bk-set-rotation) for the full two-layer picture. **Shellnet is different** — see [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson).
 
 ---
 
@@ -227,17 +229,19 @@ The BK set is a **circuit witness**, not a circuit constant — only `MAX_SIGNER
 
 Both daemons fetch the set **once at startup** and cache it for the whole run — there is no `bkSetUpdates` subscription. If the on-chain set rotates mid-run, the prover will silently skip key blocks signed by indices it doesn't recognise (`signers [k] not in BK set, skipping`).
 
-On rotation: **stop both daemons, refresh `bk_set.json` if you rely on the GQL-failure fallback, restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
+On rotation: **stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`) if you rely on the GQL-failure fallback, restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
 
-### BK-set resync on cluster rebuild — fully automatic
+### BK-set resync on cluster rebuild — automatic (local devnet only)
 
-A common concern for local-devnet operators: *after `make stop && make run` the node images may regenerate BLS keys — do I need to hand-edit `bk_set.json` to match?* **No.** Two independent layers handle it:
+A common concern for local-devnet operators: *after `make stop && make run` the node images may regenerate BLS keys — do I need to hand-edit `bk_set.local.json` to match?* **No — for local devnet.** Two independent layers handle it:
 
-1. **Daemon side (GraphQL first).** Both daemons call `bridge_prover_lib::bk_set_fetcher` at startup, which prefers the on-chain GraphQL `bkSetUpdates` stream and writes the fetched set into `state/prover_bk_set.json`. `./bk_set.json` is a **fallback only**, consulted when the GQL fetch fails (see `bridge-verifier-daemon/src/main.rs:34`, `bridge-prover-daemon/src/main.rs:103`). On a healthy local devnet the fallback file is unused for the entire run.
+1. **Daemon side (GraphQL first).** Both daemons call `bridge_prover_lib::bk_set_fetcher` at startup, which prefers the on-chain GraphQL `bkSetUpdates` stream and writes the fetched set into `state/prover_bk_set.json`. The per-network file selected by `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) is a **fallback only**, consulted when the GQL fetch fails. On a healthy local devnet the fallback file is unused for the entire run.
 
-2. **Orchestrator side (config-file fallback prep).** Before starting anything else, `python/generate_withdrawals_with_live_event_proving.py` calls `materialize_bk_set_from_node_config` (line 258+). This function enumerates live `*-nodeN-*` docker containers, reads each `$ACKI_NACKI_ROOT/config/block_keeperN_bls.keys.json`, and rewrites `<PROVER_DIR>/bk_set.json` from scratch. So even if the daemons had to fall back to the file, it would already be current.
+2. **Orchestrator side (config-file fallback prep).** Before starting anything else, `python/generate_withdrawals_with_live_event_proving.py` calls `materialize_bk_set_from_node_config` (line 258+). This function enumerates live `*-nodeN-*` docker containers, reads each `$ACKI_NACKI_ROOT/config/block_keeperN_bls.keys.json`, and rewrites `<PROVER_DIR>/bk_set.local.json` from scratch. So even if the daemons had to fall back to the file, it would already be current.
 
-The committed `bk_set.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**. Shellnet path uses GraphQL only; never call the materialiser there.
+The committed `bk_set.local.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**.
+
+**Shellnet is different — no auto-resync.** Shellnet has BK-set rotation *disabled* (Sehor confirmed 2026-07-08 for the `poseidon_dex@7ffec27` deployment): the genesis committee is fixed for the life of the chain and the GraphQL `bkSetUpdates` stream stays empty forever. The fetcher therefore always falls through to `bk_set.shellnet.json`, which is **hand-maintained** by transcribing the partner-posted `keys_config.json` (specifically the `bk_nodes[i].bls_pubkey` fields). There is no orchestrator materialiser for it. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson) for the full picture.
 
 ---
 
@@ -259,13 +263,13 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 First-ever build: 10–20 min. Incremental: seconds-to-minutes via Docker cache. Skip `cargo clean`/cache purge only if you're sure neither the node nor `tvm-sdk` has changed since last `make run`.
 
-### Step 2 — Sync `bk_set.json` to the cluster's BLS keys
+### Step 2 — Sync `bk_set.local.json` to the cluster's BLS keys
 
-The verifier falls back to `./bk_set.json` if the GQL `bkSetUpdates` race loses at startup. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
+The daemons fall back to the file named by `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) if the GQL `bkSetUpdates` race loses at startup. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
 
 ```bash
 cd /path/to/acki-nacki-to-eth-bridge-halo2-prover
-cp bk_set.json.poseidon_dex_local.bak bk_set.json   # if backup exists & branch unchanged
+cp bk_set.json.poseidon_dex_local.bak bk_set.local.json   # if backup exists & branch unchanged
 ```
 
 Otherwise build it fresh:
@@ -278,8 +282,10 @@ for i in range(5):
     with open(f"/path/to/acki-nacki/config/block_keeper{i}_bls.keys.json") as f:
         out[str(i)] = json.load(f)[0]["public"]
 print(json.dumps(out, indent=2))
-' > bk_set.json
+' > bk_set.local.json
 ```
+
+(You can normally skip this step — the orchestrator regenerates `bk_set.local.json` on every run via `materialize_bk_set_from_node_config`. See [BK-set resync on cluster rebuild](#bk-set-resync-on-cluster-rebuild--automatic-local-devnet-only).)
 
 ### Step 3 — Keys (first run only)
 
@@ -428,10 +434,56 @@ cp <config-N>/USDCBridge.keys.json python/contracts/USDCBridge.shellnet.keys.jso
 |---|---|---|
 | `USDCBridge.keys.json` | **YES** — the only file that must be refreshed | Owner pubkey pinned in the deployed contract; must match to sign `mintAndSend`. |
 | `USDCToken.keys.json` | **NO** | `USDC_TOKEN_ID = 3` is a bare ECC currency ID; USDCBridge mints ECC[3] directly, no `USDCToken` contract call in this pipeline. Ignore this file. |
-| `block_keeperN_bls.keys.json` | **NO** — daemons pull the BK set from GraphQL on shellnet | Only local devnet uses these via `materialize_bk_set_from_node_config`. |
-| Everything else (Exchange, DappRoot, AiSuperRoot, PMPRoot, EccRoot, LicenseRoot, block_manager*, MobileVerifiers*, keys_config, ip_config, blockchain.conf) | **NO** | Unrelated to the bridge orchestrator. |
+| `keys_config.json` | **YES — must be transcribed into `bk_set.shellnet.json`** | Holds `bk_nodes[i].bls_pubkey` — the *actual* BLS pubkeys the running shellnet nodes hold the secret halves for. This is the source of truth for the genesis committee. See "Shellnet BK-set — manual maintenance" below. |
+| `block_keeperN_bls.keys.json` | **NO** (equivalent — same values as `keys_config.json.bk_nodes[N].bls_pubkey`) | Each file's `[0].public` is identical to `keys_config.json`'s corresponding `bls_pubkey`. Prefer `keys_config.json` because it is a single flat file. |
+| `zs_bk_set` | **NO — do NOT use** | Historical artifact: on the 2026-07-08 shellnet snapshot the `zs_bk_set` posted alongside `SHHH_config/` holds a **different keypair set** than the running nodes (verified 2026-07-08 — using it produced ~96 BLS pairing equality failures in Circuit 1A). It appears to be a stale template from a previous deployment. Always cross-check `zs_bk_set.current[i].pubkey` against `keys_config.json.bk_nodes[i].bls_pubkey` before touching. |
+| Everything else (Exchange, DappRoot, AiSuperRoot, PMPRoot, EccRoot, LicenseRoot, block_manager*, MobileVerifiers*, ip_config, blockchain.conf, zerostate) | **NO** | Unrelated to the bridge orchestrator. |
 
 **Giver key.** Bundled `python/contracts/GiverV3.keys.json` is the well-known local pubkey; matches shellnet giver's on-chain data BOC (`128a5586045a9a3c…`). Only needs refresh if the partner rotates the shellnet giver too — usually not.
+
+### Shellnet BK-set — manual maintenance of `bk_set.shellnet.json`
+
+**Unlike local devnet, the shellnet BK-set cannot be fetched from GraphQL and must be maintained by hand as `bk_set.shellnet.json`. Rebuild it whenever the partner re-genesises shellnet from a new `zerostate`.**
+
+**Why this is manual (empirically verified 2026-07-08 against `https://shellnet.ackinacki.org/graphql`):**
+
+- Sehor confirmed 2026-07-08 that **shellnet BK-set rotation is disabled** for the current deployment (`poseidon_dex@7ffec27`). The genesis committee is fixed for the life of the chain.
+- `blockchain.bkSetUpdates` is a delta log (add/remove rotation events); with rotation off it stays empty forever, and the genesis committee is never emitted as a synthetic "Added" event either.
+- The GraphQL schema has **no** `currentBkSet` / snapshot query. Full type scan for `bk|committee|signer|validator|zerostate|keeper` returns only the three `BlockchainBkSetUpdate*` types — none of which expose the current active set.
+- `Block` carries only `gen_validator_list_hash_short` (a hash, not the pubkeys).
+
+Consequence: on shellnet, the daemon's `bridge_prover_lib::bk_set_fetcher::fetch_bk_set` GraphQL path returns empty (logged as `no bkSetUpdates found — node may not have produced blocks yet` — misleading on shellnet, correct behaviour); the daemon then falls back to the file at `BRIDGE_BK_SET_CONFIG`. If that file is stale or wrong, either Circuit 1A fails with ~96 BLS pairing equality-constraint violations, or Circuit 2 aborts with `loaded BK set Poseidon commitment (…) does not match block.leaves[2] (…)`. The only working source of shellnet's genesis committee is the partner-posted `keys_config.json` — specifically its `bk_nodes[i].bls_pubkey` fields, which are the pubkeys the running nodes actually hold the secret halves for. **Do NOT use the `zs_bk_set` file** posted alongside — on the 2026-07-08 snapshot it holds a *different* keypair set than the running chain (stale template from a prior deployment).
+
+**Producing `bk_set.shellnet.json` from `keys_config.json`:**
+
+```bash
+jq '.bk_nodes | to_entries | map({key: .key, value: .value.bls_pubkey}) | from_entries' \
+   /path/to/SHHH_config/keys_config.json \
+   > bk_set.shellnet.json
+```
+
+That produces the `{"0":"<48-byte-hex>", "1":"…", …}` shape the daemon's fallback loader (`bk_set_fetcher::load_bk_set_from_config`) expects. Sanity-check the file has exactly the number of entries listed in `keys_config.json.bk_nodes` (5 for the 2026-07-08 shellnet from `acki-nacki@7ffec27`) and that each value is a 48-byte compressed BLS12-381 G1 pubkey (96 hex chars).
+
+**Optional cross-check against `zs_bk_set`:** if the partner-posted `zs_bk_set` is *not* stale, then for every `i` it should hold that `zs_bk_set.current[i].pubkey == keys_config.json.bk_nodes[i].bls_pubkey`. On the 2026-07-08 snapshot they diverge for all five indices — `zs_bk_set` is stale — so it must not be used.
+
+**When to update:** only after a shellnet **re-genesis** (partner ships a new `keys_config.json`). Ordinary shellnet redeploys of individual contracts do NOT rotate the BK-set and do NOT require this refresh. Currently there is no in-repo automation for this. If AN ever enables rotation on shellnet and publishes it via `bkSetUpdates`, the daemon will automatically fold updates on top of the genesis file (`current_set = bk_set.shellnet.json ⊕ replay(bkSetUpdates)`) with no manual bookkeeping required.
+
+**State cleanup when `bk_set.shellnet.json` changes.** Because `state/prover_bk_set.json` and `state/prover_state.json` pin the previous BK-set Poseidon commitment, changing the file *requires* `rm -rf state/ proofs/` before restart — otherwise the daemon bails with `prover_bk_set.json commitment X disagrees with prover_state.json Y — delete BOTH files or restore them from a paired backup` (see `bridge-prover-daemon/src/main.rs` around line 222). This is only relevant on shellnet since local devnet regenerates the file every run.
+
+**Sanity check after refresh** — the daemon prints `BK set: N signers, commitment=0x…` at startup. Bring one shellnet block up, take its `boc.leaves[2]`, and confirm both match; if they don't, `keys_config.json` was for a different chain snapshot than the running shellnet.
+
+**Validation shortcut (recommended).** Instead of the full E2E, run the prover daemon with the `self-verify` feature — it produces and inline-verifies both circuits without the verifier daemon or Python orchestrator. If Circuit 1A and Circuit 2 both self-verify on the first bundle (~15 min wall clock), the BK-set is correct:
+
+```bash
+rm -rf state/ proofs/                                          # required after BK-set change
+cargo build --release --bin bridge-prover-daemon --features bridge-prover-daemon/self-verify
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json \
+    ./target/release/bridge-prover-daemon > logs/prover_selfverify.log 2>&1 &
+tail -f logs/prover_selfverify.log     # expect Circuit 1a/2 self-verify OK per bundle
+```
+
+Empirical result 2026-07-08: 5 consecutive bundles self-verified (`processed=5, verify_ok=5, fail=0`) with the corrected file (commitment `0x13a1dfbb…`).
 
 **Post-refresh smoke test.** Run the isolated contract-only test (adds ~90 s) before spending 15 min on the full E2E:
 
@@ -466,9 +518,9 @@ The verifier loads all three VKs at startup, so Circuit 4 keys must exist on dis
 cargo run --release --bin bridge-event-halo2-prover -- --selftest
 ```
 
-### Step 2 — Sync `bk_set.json` (safety net)
+### Step 2 — Sync the per-network BK-set file (safety net)
 
-The verifier prefers GQL and falls back to this file only if the startup race loses. For local devnet, follow Step 2 of the full runbook (copy from `acki-nacki/config/block_keeper*_bls.keys.json`). For shellnet the chain is always live so the GQL fetch normally wins; watch startup log for `loaded BK set from GraphQL: N signers`.
+The verifier prefers GQL and falls back to this file only if the startup race loses. For local devnet, follow Step 2 of the full runbook (copy from `acki-nacki/config/block_keeper*_bls.keys.json`). For shellnet the GQL fetch always returns empty (rotation is disabled and `bkSetUpdates` is a delta log — see [Shellnet BK-set — manual maintenance of `bk_set.shellnet.json`](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)), so the file **is** the source of truth: point the daemon at `bk_set.shellnet.json` (built from the partner-posted `keys_config.json.bk_nodes[i].bls_pubkey`) via `BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json`.
 
 ### Step 3 — Wipe state, start both daemons
 
@@ -619,7 +671,8 @@ cargo test -p bridge-event-prover-lib --test event_prover       -- --nocapture  
 | Verifier exits with `"primary VK not found"` / `"layer VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/2 keys on initial start (~10 min). |
 | Verifier exits with `"event VK not found"` | Run `cargo run --release --bin bridge-event-halo2-prover -- --selftest` once. |
 | Prover auto-mode never starts proving — seed seqno keeps moving | Should not happen (bugfix landed 2026-05-23: seed is pinned once at startup). If observed, file an issue. As a workaround, pin via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |
-| Circuit 1A fails with ~96 BLS pairing equality constraint violations | `bk_set.json` stale — re-sync from `acki-nacki/config/block_keeper*_bls.keys.json` (see local Step 2) or trust the GQL fetch by deleting the stale file. |
+| Circuit 1A fails with ~96 BLS pairing equality constraint violations | Genesis BK-set file stale (path selected by `BRIDGE_BK_SET_CONFIG`). Local devnet: re-sync `bk_set.local.json` from `acki-nacki/config/block_keeper*_bls.keys.json` (see local Step 2) or trust the GQL fetch by deleting the stale file. Shellnet: rebuild `bk_set.shellnet.json` from the partner-posted `keys_config.json` (`bk_nodes[i].bls_pubkey`) and `rm -rf state/ proofs/` before restart — see [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). Do **not** use `zs_bk_set` on the 2026-07-08 snapshot; it is stale. |
+| Circuit 2 fails with `loaded BK set Poseidon commitment (…) does not match block.leaves[2] (…)` | Same root cause as the row above — daemon loaded a stale/wrong genesis BK-set file. Check the log line `trying config file fallback: <path>` to confirm which file the daemon actually consumed, then refresh that file. |
 | Verifier state file shows old `last_key_block` after restart with new network | Wipe `state/` on **both** daemons together before re-seeding. The verifier never re-reads `bootstrap_seed.json` after first init. |
 | Orchestrator hits `VERIFIER_STATE_TIMEOUT_S` | Confirm prover is producing bundles (`logs/prover_output.log` should show `=== Processing key block at height ===` every ~3 min). |
 | `non-monotone height` in verifier log | Cluster was restarted (chain reset) without wiping prover/verifier `state/`. Wipe both, re-bootstrap. |

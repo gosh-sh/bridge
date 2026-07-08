@@ -633,21 +633,21 @@ def execute_graphql_query(
     raise RuntimeError("execute_graphql_query: retry loop exhausted without result")
 
 
-def to_dapp_address(addr: str) -> str:
-    """Convert a TVM workchain-prefixed address to the extended
-    dapp_id::account_id form with a zero dapp_id (required for v3 tvm-cli
-    `--addr` / `account` queries).
+ZERO_DAPP = "0" * 64
+# All DEX contracts (RootPN/PrivateNote/PMP/OrderBook and RootOracle/Oracle/
+# OracleEventList) are deployed in dapp_id 0 — matches the node's hardcoded
+# ext_out tracking (DEFAULT_TRACKED_ROOT_PN_ROUTING) required by the voucher
+# ZK-proof pipeline. The tvm-cli v3 "<dapp>::<acc>" wrapping below still applies.
+DEX_DAPP_ID = ZERO_DAPP
 
-    Accepts:
-        "0:<64-hex>"   -> "<64-zero>::<64-hex>"
-        "<64-hex>"     -> "<64-zero>::<64-hex>"
 
-    Raises ValueError on any other shape. For non-zero dapp_id, build the
-    string explicitly.
+def acc_id_of(addr: str) -> str:
+    """Extract the bare 64-hex account_id from any address form:
+        "0:<acc>", "<acc>", or "<dapp>::<acc>".
     """
-    ZERO_DAPP = "0" * 64
-
-    if ":" in addr:
+    if "::" in addr:
+        acc = addr.split("::", 1)[1]
+    elif ":" in addr:
         wc, _, acc = addr.partition(":")
         if wc != "0":
             raise ValueError(f"non-zero workchain not supported: {wc!r}")
@@ -656,8 +656,25 @@ def to_dapp_address(addr: str) -> str:
 
     if len(acc) != 64 or not all(c in "0123456789abcdefABCDEF" for c in acc):
         raise ValueError(f"account_id must be 64 hex chars, got: {acc!r}")
+    return acc
 
-    return f"{ZERO_DAPP}::{acc}"
+
+def to_dapp_address(addr: str, dapp: str = ZERO_DAPP) -> str:
+    """Convert any address form to the tvm-cli v3 "<dapp_id>::<account_id>"
+    CLI-target form, applying the given dapp_id.
+
+    Accepts "0:<acc>", "<acc>", or "<dapp>::<acc>" — the account_id is
+    re-extracted, so it is safe to call on an already-wrapped address (the
+    dapp_id is replaced by `dapp`). Used for `--addr`/`account`/`runx`/`callx`
+    targets; ABI payload address fields must keep the legacy "0:<acc>" form.
+    """
+    return f"{dapp}::{acc_id_of(addr)}"
+
+
+def to_legacy_address(addr: str) -> str:
+    """ABI payload address fields ('dest', 'recipient', 'to', …) must stay in
+    the legacy '0:<account_id>' form even under tvm-cli v3. Accepts any form."""
+    return "0:" + acc_id_of(addr)
 
 
 __check_cli__()

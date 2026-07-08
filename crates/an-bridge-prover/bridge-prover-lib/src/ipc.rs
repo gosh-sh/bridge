@@ -377,6 +377,7 @@ mod tests {
             block_height: 1024,
             last_seen_bk_update_seqno: 0,
             block_id_hex: "ab".repeat(32),
+            block_id_hash_hex: "bb".repeat(32),
             attestation_circuit: AttestationCircuit::Primary,
             primary_proof_hex: "00".to_string(),
             old_bk_set_poseidon_hash_hex: "cc".repeat(32),

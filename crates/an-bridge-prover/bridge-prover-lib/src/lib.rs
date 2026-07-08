@@ -16,6 +16,7 @@ pub mod block_id_tree;
 pub mod chain_proof_builder;
 pub mod real_chain_builder;
 pub mod layer_prover;
+pub mod live_driver;
 
 // Re-export commonly used types.
 pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr;

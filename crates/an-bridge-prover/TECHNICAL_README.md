@@ -33,6 +33,7 @@ Same binaries for both networks. Endpoint switched via `BRIDGE_GQL_ENDPOINT`; th
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 - [Configuration (env vars)](#configuration-env-vars)
+- [Per-run hygiene (read before every E2E run)](#per-run-hygiene-read-before-every-e2e-run)
 - [Bootstrap behavior](#bootstrap-behavior)
 - [BK set rotation](#bk-set-rotation)
 - [Runbook — local devnet (full E2E with Circuit 4)](#runbook--local-devnet-full-e2e-with-circuit-4)
@@ -172,6 +173,38 @@ acki-nacki-to-eth-bridge-halo2-prover/
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
 All other constants (poll intervals, file paths, `THINNING_FACTOR_P`) are hard-coded; see `bridge-prover-daemon/src/main.rs` and `bridge-verifier-daemon/src/main.rs` if you need to change them.
+
+---
+
+## Per-run hygiene (read before every E2E run)
+
+Three cleanups the orchestrator does **not** enforce itself. Each surfaces as an opaque error deep in `tvm-cli` or witness-builder output, and each has cost hours in the past when skipped. Run them before every E2E:
+
+1. **Rebuild all six binaries whenever `bridge-prover-lib` changed.** Six binaries share `bridge-prover-lib`: `bridge-prover-daemon`, `bridge-verifier-daemon`, `bridge-event-halo2-prover`, `bridge-event-witness-builder`, `bridge-event-private-witness-export`, `bridge-event-halo2-selftest`. Partial rebuilds leave stale binaries embedding old assertions (e.g. `"block_merkle_tree_leaves must have 16 entries"` after the depth-4 → depth-3 migration). Quick check:
+
+   ```bash
+   strings target/release/bridge-event-witness-builder | grep -E 'must have [0-9]+ entries'
+   # should match the current assertion in bridge-prover-lib/src/gql_client.rs
+   cargo build --release   # or rebuild the specific stale bin
+   ```
+
+2. **Wipe the multisig keys file between local-devnet runs:**
+
+   ```bash
+   rm -rf work-local/msig_withdrawals_e2e.keys.json work-local/msig_deploy/
+   ```
+
+   The file is persisted → same multisig address → same `deployx` message hash → the node's `feedback_registry` TTL cache returns `DUPLICATE_MESSAGE`. Symptom looks like a giver / stateInit bug but is purely cache pollution.
+
+3. **Wipe daemon state after any cluster restart:**
+
+   ```bash
+   rm -rf state/ proofs/
+   ```
+
+   `bootstrap_seed.json` pins the daemons to old chain state. On a fresh cluster the pinned seed does not exist → prover polls forever, verifier waits for a bundle that never anchors.
+
+Local-devnet only: `ACKI_NACKI_ROOT` must point at the sibling `acki-nacki/` checkout (default `../../../../acki-nacki`) so `materialize_bk_set_from_node_config` finds `contracts/` and `config/`. If it's wrong you get `FileNotFoundError` before any tvm-cli call runs.
 
 ---
 

@@ -41,12 +41,46 @@
 //! See `an_bridge_prover_live_driver_refactor_plan_2026-07-08.md` in the repo
 //! root for the full extraction rationale and the two-daemon integration
 //! contract.
+//!
+//! ## Downstream-consumer contract (Sergey's `bridge-relayer-daemon`)
+//!
+//! External consumers wire the driver into their own poll loop by:
+//!
+//! 1. building a [`crate::gql_client::GqlClient`] pointed at an AN node,
+//! 2. constructing a [`KeyManager`] and calling `ensure_primary_keys` /
+//!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
+//! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
+//!    their own persistence layer,
+//! 4. fetching the initial BK-set map via
+//!    [`crate::bk_set_fetcher::query_current_signer_index_bk_set`], and
+//! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
+//!    [`SeedPolicy`] matches the desired bootstrap mode.
+//!
+//! From there they call [`LiveProverDriver::poll_next_bundle`] +
+//! [`LiveProverDriver::poll_next_bk_update`] on a tick, submit the
+//! resulting artifacts to their downstream contract via `alloy` (or
+//! whatever transport), then invoke [`LiveProverDriver::ack_bundle`] /
+//! [`LiveProverDriver::ack_bk_update`] on success. On error they call
+//! neither `ack_*` and re-poll on the next tick — the driver's cursors
+//! are unchanged so the same artifact is re-emitted for retry.
+//!
+//! ### halo2 transitive dependency note
+//!
+//! Depending on `bridge-prover-lib` pulls in the halo2 proving stack
+//! (halo2-base, halo2-ecc, gosh forks). Consumers do not need to know
+//! anything about halo2 — the public payloads
+//! ([`BundleProofArtifacts`], [`BkUpdateProofArtifacts`]) carry only
+//! `[u8; 32]` and `Vec<u8>` fields. But their `Cargo.lock` will still
+//! contain halo2 crates, which affects link-time (multi-gigabyte
+//! debug builds) and release-build size. This is inherent — the driver
+//! runs the proving pipeline in-process.
 
 use std::collections::HashMap;
 
 use anyhow::Context;
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::attestation_fetcher::AttestationEvidence;
@@ -77,6 +111,87 @@ pub const HISTORY_WINDOW_SIZE: u64 =
 /// this many artifacts back-to-back, so a broken consumer can't spin the
 /// prover indefinitely.
 pub const DEFAULT_MAX_BK_UPDATES_PER_ITER: usize = 8;
+
+/// Structured error surface for [`LiveProverDriver`] public methods.
+///
+/// The driver's internals still use `anyhow::Result` for ergonomics (many
+/// `?`-chained fallible calls into GQL / halo2), but the public boundary
+/// coerces those into this enum so consumers (Sergey's `bridge-relayer-daemon`
+/// and our own `bridge-prover-daemon`) can pattern-match on failure kind
+/// without depending on `anyhow` in their public signatures.
+///
+/// The `#[from] anyhow::Error` inner value preserves the original error chain
+/// so `tracing::error!("{:?}", err)` still surfaces full context. Consumers
+/// only need to peek at the variant to decide policy (retry vs. bail vs.
+/// operator alert).
+///
+/// The blanket `impl<E: Error+Send+Sync+'static> From<E> for anyhow::Error`
+/// in the `anyhow` crate means the daemon can keep using `?` at call sites
+/// that return `anyhow::Result` — [`DriverError`] threads through unchanged.
+#[derive(Error, Debug)]
+pub enum DriverError {
+    /// Transient GraphQL / HTTP failure. Safe to retry on the next poll.
+    ///
+    /// Examples: node briefly unreachable, GQL 5xx, timeout on
+    /// `query_latest_blocks`.
+    #[error("transient GQL failure: {0}")]
+    GqlTransient(#[source] anyhow::Error),
+
+    /// GraphQL schema mismatch or an unexpected field shape. Not
+    /// retryable — signals a node/library version drift.
+    #[error("GQL schema mismatch: {0}")]
+    GqlSchema(#[source] anyhow::Error),
+
+    /// halo2 proof generation failed for the target seqno. Typically fatal:
+    /// re-running the same witness will fail the same way. Callers should
+    /// alert and stop the pipeline pending operator intervention.
+    #[error("proof generation failed at seq_no {seq_no}: {source}")]
+    ProofGen {
+        seq_no: u64,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// Driver's in-memory state disagrees with what the chain reports (e.g.
+    /// BK-set commitment mismatch, L2 sibling ≠ current commitment).
+    /// Non-retryable — an operator must reconcile.
+    #[error("driver state inconsistent with chain: {0}")]
+    StateInconsistent(#[source] anyhow::Error),
+
+    /// Bootstrap-phase signal: driver is still waiting for chain head to
+    /// catch up to the seed height. Not an error in the usual sense; both
+    /// poll methods return this via [`LiveBundleEvent::Bootstrapping`] /
+    /// [`LiveBkUpdateEvent::Bootstrapping`] rather than as `Err`, so this
+    /// variant is reserved for edge cases where the bootstrap machinery
+    /// itself fails.
+    #[error("bootstrap failure (seed={seed_seqno}, head={chain_head_seqno}): {source}")]
+    Bootstrapping {
+        seed_seqno: u64,
+        chain_head_seqno: u64,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// Anything not classifiable into the above buckets. Preserves the
+    /// original anyhow chain for `{:?}` reporting.
+    #[error("driver error: {0}")]
+    Other(#[source] anyhow::Error),
+}
+
+impl DriverError {
+    /// Wrap an arbitrary `anyhow::Error` as [`DriverError::Other`]. Used at
+    /// the public boundary of poll/ack methods to lift the internal
+    /// anyhow-based helpers into the structured public error type without
+    /// forcing a full site-by-site classification pass. Site-specific
+    /// variants (`GqlTransient`, `ProofGen`, etc.) are constructed
+    /// explicitly at the call sites that know their semantic kind.
+    pub(crate) fn other(err: anyhow::Error) -> Self {
+        DriverError::Other(err)
+    }
+}
+
+/// Convenience alias.
+pub type DriverResult<T> = Result<T, DriverError>;
 
 /// Configuration surface for [`LiveProverDriver`]. No filesystem paths, no
 /// CLI knobs, no verifier timeouts — those all live with the caller.
@@ -319,7 +434,30 @@ impl LiveProverDriver {
     ///
     /// The `seed_policy` inside `cfg` is resolved lazily on the first
     /// poll — nothing is fetched or applied at construction time.
+    ///
+    /// Note for external consumers: constructing this driver transitively
+    /// pulls halo2 crates into your build; see the module docs
+    /// ("halo2 transitive dependency note") for the implication on your
+    /// `Cargo.lock` and link-time. The public payloads themselves stay
+    /// halo2-free — you only feel the dep at build time, not at type
+    /// boundaries.
     pub fn new(
+        gql: GqlClient,
+        key_manager: KeyManager,
+        state: BridgeState,
+        prover_bk_set: ProverBkSet,
+        bk_set: HashMap<u16, Vec<u8>>,
+        cfg: LiveProverConfig,
+    ) -> DriverResult<Self> {
+        Self::new_inner(gql, key_manager, state, prover_bk_set, bk_set, cfg)
+            .map_err(DriverError::StateInconsistent)
+    }
+
+    /// Internal ctor that keeps the anyhow-based validation logic together
+    /// and gets wrapped once at the public boundary. All ctor failures are
+    /// structural (bad config, warm-state mismatch) so they classify as
+    /// [`DriverError::StateInconsistent`].
+    fn new_inner(
         gql: GqlClient,
         key_manager: KeyManager,
         state: BridgeState,
@@ -385,7 +523,11 @@ impl LiveProverDriver {
     /// new thinned key block is available (or a bk-update rotation is
     /// blocking bundle advance), and [`LiveBundleEvent::Bundle`] when a
     /// fully-proven bundle is ready for the caller to submit downstream.
-    pub async fn poll_next_bundle(&mut self) -> anyhow::Result<LiveBundleEvent> {
+    pub async fn poll_next_bundle(&mut self) -> DriverResult<LiveBundleEvent> {
+        self.poll_next_bundle_inner().await.map_err(DriverError::other)
+    }
+
+    async fn poll_next_bundle_inner(&mut self) -> anyhow::Result<LiveBundleEvent> {
         // Bootstrap gate: while `NeedsSeed`, drive the seed and either
         // apply it (transition to Steady) or return Bootstrapping.
         if let DriverStage::NeedsSeed { .. } = self.stage {
@@ -452,7 +594,11 @@ impl LiveProverDriver {
     /// prover is caught up on rotations, and
     /// [`LiveBkUpdateEvent::BkUpdate`] when a fully-proven rotation is
     /// ready for the caller to submit downstream.
-    pub async fn poll_next_bk_update(&mut self) -> anyhow::Result<LiveBkUpdateEvent> {
+    pub async fn poll_next_bk_update(&mut self) -> DriverResult<LiveBkUpdateEvent> {
+        self.poll_next_bk_update_inner().await.map_err(DriverError::other)
+    }
+
+    async fn poll_next_bk_update_inner(&mut self) -> anyhow::Result<LiveBkUpdateEvent> {
         if let DriverStage::NeedsSeed { .. } = self.stage {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
@@ -473,7 +619,11 @@ impl LiveProverDriver {
     /// downstream. Advances the in-memory [`BridgeState`] cursor via
     /// [`BridgeState::append_bundle`]. Idempotent by `block_seq_no`: no-op
     /// when the cursor is already past.
-    pub fn ack_bundle(&mut self, artifacts: &BundleProofArtifacts) -> anyhow::Result<()> {
+    pub fn ack_bundle(&mut self, artifacts: &BundleProofArtifacts) -> DriverResult<()> {
+        self.ack_bundle_inner(artifacts).map_err(DriverError::StateInconsistent)
+    }
+
+    fn ack_bundle_inner(&mut self, artifacts: &BundleProofArtifacts) -> anyhow::Result<()> {
         if artifacts.block_seq_no <= self.state.stored_last_seen_block_seq_no {
             info!(
                 "ack_bundle: no-op — artifacts.block_seq_no={} <= stored_last_seen={}",
@@ -496,6 +646,13 @@ impl LiveProverDriver {
     /// [`ProverBkSet`] cursors and rotates the driver's in-memory pubkey
     /// table + Poseidon commitment. Idempotent by `block_seq_no`.
     pub fn ack_bk_update(
+        &mut self,
+        artifacts: &BkUpdateProofArtifacts,
+    ) -> DriverResult<()> {
+        self.ack_bk_update_inner(artifacts).map_err(DriverError::StateInconsistent)
+    }
+
+    fn ack_bk_update_inner(
         &mut self,
         artifacts: &BkUpdateProofArtifacts,
     ) -> anyhow::Result<()> {

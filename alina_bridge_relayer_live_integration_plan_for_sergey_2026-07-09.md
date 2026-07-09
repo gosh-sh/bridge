@@ -202,13 +202,34 @@ Sites we thread these through inside `bk_update.rs` + `bundle.rs`: GQL failures 
 
 Public API becomes `Result<LiveBundleEvent, DriverError>` and `Result<LiveBkUpdateEvent, DriverError>`. Our own daemon updates its call sites — `?` still works via `From<DriverError> for anyhow::Error`. Zero behaviour change; strictly additive.
 
-### 3.3 Documented "no-halo2 for read-only paths" pattern
+### 3.3 `LiveBlockSource::driver_snapshot()` accessor (~15 LOC)
+
+Sergey's consistency check (§5.4) needs read-only access to `driver.snapshot_state()` from outside the trait-impl call sites. Ship this on `LiveBlockSource`:
+
+```rust
+impl LiveBlockSource {
+    /// Return a cloned snapshot of the driver's post-ack BridgeState. Cheap
+    /// (a Clone of ~10 × 128 × 32 bytes ≈ 40 KiB). Sergey's Relayer::tick
+    /// calls this immediately after ack_last_* to cross-check against
+    /// `EthBridgeClient::read_state()` — see §5.4.
+    pub async fn driver_snapshot(&self) -> BridgeState {
+        self.driver.lock().await.snapshot_state().clone()
+    }
+    pub async fn driver_prover_bk_set_snapshot(&self) -> ProverBkSet {
+        self.driver.lock().await.snapshot_prover_bk_set().clone()
+    }
+}
+```
+
+`BridgeState` and `ProverBkSet` already derive `Clone`. Zero API change on the driver itself.
+
+### 3.4 Documented "no-halo2 for read-only paths" pattern
 
 `LiveProverDriver::new` takes a `KeyManager`, which forces halo2-axiom into Sergey's transitive dep graph the moment he pulls `bridge-prover-lib`. This is the trade-off the July-08 plan accepted (§Decisions #5, no `Fr` in payloads keeps his *runtime* code halo2-clean; the *compile-time* cost of the transitive dep is fine). We document this explicitly in `TECHNICAL_README.md` and in the `LiveProverDriver::new` doc-comment so nobody re-litigates it.
 
 If Sergey pushes back and wants a hard split (e.g. run the ETH-side relayer as a strict wasm-friendly crate), fallback = spool `BundleProofArtifacts` as JSON to disk via a small `bridge-prover-driver-cli` binary, matching his existing `ProverProofsBlockSource` schema (July-08 plan §5.2). Not shipped now; would take ~200 LOC.
 
-**These three items are the entirety of the prover-lib delta.** Any additional field Sergey needs surfaces later as its own shortcut — same pattern as §3.1.
+**These four items are the entirety of the prover-lib delta.** Any additional field Sergey needs surfaces later as its own shortcut — same pattern as §3.1.
 
 ---
 
@@ -590,6 +611,164 @@ Rejects (phase-1 revert) leave the driver's `pending_bk_update` slot intact — 
 
 ---
 
+### 5.4 Contract-side global history data — Sergey collects it, holds it, checks sync
+
+**This is a first-class relayer responsibility, not something the driver does for him.** The prover-lib `BridgeState` is a *witness-building* structure; it does not know or care what's actually on-chain. The relayer must independently poll the contract's stored anchors, persist them in relayer state, and cross-check on every ack that the driver's post-ack view matches what the chain says it stored. Any drift = halt + operator alert.
+
+#### 5.4.1 Contract-side data Sergey collects
+
+The AckiNackiBridge stores derived anchors only (the 10×128 hash window lives off-chain, replaced by proofs). Everything Sergey can and must see:
+
+| Field | Contract getter (sol! binding) | Semantics |
+|---|---|---|
+| `stored_last_seen_block_seq_no: u64` | `storedLastSeenBlockSeqNo()` | Highest key-block seq_no verified. |
+| `stored_bk_set_commitment: [u8; 32]` | `storedBkSetCommitment()` | Poseidon commitment of the current BK set. |
+| `stored_prev_max_level_layer_hash: [u8; 32]` | `storedPrevMaxLevelLayerHash()` | Highest-active-layer latest hash from the last verified bundle. Feeds the next bundle's anchor. |
+| `stored_last_bk_set_update_seq_no: u64` | `storedLastBkSetUpdateSeqNo()` | Highest bk-update seq_no applied via `applyBkSetUpdate`. |
+
+Extend `BridgeOnChainState` to include all four (§4.3 covered the fourth):
+
+```rust
+// src/bridge.rs
+pub struct BridgeOnChainState {
+    pub last_seen_block_seq_no: u64,
+    pub bk_set_commitment: U256,
+    pub prev_max_level_layer_hash: U256,
+    pub last_bk_set_update_seq_no: u64,   // NEW (§4.3)
+}
+```
+
+That struct **IS** Sergey's mirror of the contract's global history data. No new type needed. He already reads it every tick via `bridge.read_state()`.
+
+#### 5.4.2 Persistence — hold it across restarts
+
+Extend `RelayerState` to remember the last observed contract state:
+
+```rust
+// src/state.rs
+pub struct RelayerState {
+    // existing:
+    pub last_processed_seqno: Option<u64>,
+    pub last_attempt_seqno: Option<u64>,
+    pub attempts_since_progress: u32,
+    pub last_bk_update_processed_seqno: Option<u64>,   // §4.4
+    pub last_bk_update_attempt_seqno: Option<u64>,     // §4.4
+    pub bk_update_attempts_since_progress: u32,        // §4.4
+    // new (§5.4):
+    /// Last observed on-chain global history data. Persisted so a restart
+    /// can compare "what the chain said last time we successfully synced"
+    /// against "what the chain says now" and detect drift caused by another
+    /// relayer, manual bridge interaction, or reorg.
+    pub last_observed_on_chain: Option<BridgeOnChainState>,
+}
+```
+
+Schema-bump the JSON version; older files load with `last_observed_on_chain = None`.
+
+#### 5.4.3 Sync check — run it after every ack
+
+Cross-check has two independent flavours; both cheap and additive.
+
+**Check A — driver-vs-contract equality after each ack.** In `Relayer::tick()`, right after `source.ack_last_bundle(seq_no).await?`:
+
+```rust
+let expected = self.source.driver_snapshot().await;          // §3.3 accessor
+let actual   = self.bridge.read_state().await?;
+match check_history_consistency(&expected, &actual) {
+    Ok(()) => {
+        self.state.last_observed_on_chain = Some(actual);
+        self.persist_state()?;
+    }
+    Err(drift) => {
+        tracing::error!(?drift, "contract/driver global-history-data drift — halting");
+        return Err(RelayerError::Other(format!("drift: {drift}")));
+    }
+}
+```
+
+Same pattern after `ack_last_bk_update`.
+
+**Check B — chain monotonicity across ticks.** Every `tick()`'s first `bridge.read_state()` compared against `state.last_observed_on_chain` before doing anything else. Detects:
+
+* `actual.last_seen_block_seq_no < remembered` → chain rewound (reorg / node behind); back off, don't submit anything.
+* `actual.last_seen_block_seq_no > remembered + expected_gap` → another actor advanced the bridge between our ticks (another relayer instance? manual admin? panic-hardcoded state?); halt and require operator ack.
+* `actual.stored_bk_set_commitment != remembered.stored_bk_set_commitment` while `actual.last_bk_set_update_seq_no == remembered.last_bk_set_update_seq_no` → catastrophic (commitment changed without an update event); halt.
+
+Both checks live in a small `src/history_consistency.rs` (~120 LOC). Zero dependency on `bridge-prover-lib` beyond the `BridgeState` type — pure data comparison.
+
+#### 5.4.4 What the check function looks like
+
+```rust
+// src/history_consistency.rs
+pub struct HistoryDrift {
+    pub field: &'static str,
+    pub expected_hex: String,
+    pub actual_hex: String,
+}
+
+pub fn check_history_consistency(
+    expected: &BridgeState,          // from driver.snapshot_state() post-ack
+    actual:   &BridgeOnChainState,   // from bridge.read_state() post-tx
+) -> Result<(), HistoryDrift> {
+    let expected_prev_max = expected
+        .highest_layer_latest_hash()
+        .unwrap_or([0u8; 32]);
+
+    if expected.stored_last_seen_block_seq_no != actual.last_seen_block_seq_no {
+        return Err(drift("last_seen_block_seq_no",
+            expected.stored_last_seen_block_seq_no.to_string(),
+            actual.last_seen_block_seq_no.to_string()));
+    }
+    if expected.stored_bk_set_commitment != actual.bk_set_commitment.to_be_bytes() {
+        return Err(drift("bk_set_commitment",
+            hex::encode(expected.stored_bk_set_commitment),
+            hex::encode(actual.bk_set_commitment.to_be_bytes::<32>())));
+    }
+    if expected_prev_max != actual.prev_max_level_layer_hash.to_be_bytes() {
+        return Err(drift("prev_max_level_layer_hash",
+            hex::encode(expected_prev_max),
+            hex::encode(actual.prev_max_level_layer_hash.to_be_bytes::<32>())));
+    }
+    if expected.stored_last_bk_set_update_seq_no != actual.last_bk_set_update_seq_no {
+        return Err(drift("last_bk_set_update_seq_no",
+            expected.stored_last_bk_set_update_seq_no.to_string(),
+            actual.last_bk_set_update_seq_no.to_string()));
+    }
+    Ok(())
+}
+```
+
+Total: ~50 LOC of arithmetic + `hex::encode`. No cryptography. No halo2. No new deps.
+
+#### 5.4.5 Startup drift audit
+
+At daemon start, before entering `run_until_shutdown`:
+
+1. Load `RelayerState` from disk. If `last_observed_on_chain = Some(remembered)`, read chain now:
+2. If `bridge.read_state() != remembered`: **do not auto-recover**. Print a diff, exit non-zero. Operator decides whether to nuke `state/` and rebootstrap, or intervene.
+3. Cross-check `driver.snapshot_state()` (freshly loaded from disk) against `bridge.read_state()`. Same halt-on-mismatch rule.
+
+This is what catches the "someone else ran a relayer on the same key" scenario early — before the daemon tries to submit a stale bundle and gets a `Reverted` from the contract for the wrong reason.
+
+#### 5.4.6 What Sergey does NOT need to duplicate
+
+* The 10×128 `HistoryWindow` buffer. Not on-chain. Not mirrorable. Lives inside the driver, feeds witness synthesis, never leaks to the ETH side.
+* `BridgeState::append_bundle` / `apply_bk_set_update` transition logic. Already runs inside the driver on ack. Sergey's job is *cross-checking the outcome against chain*, not re-implementing the transition.
+* `ProverBkSet` (the 48-byte pubkey table). Off-chain, private to the prover. Not consumed by the contract; not consumed by the relayer either. Persist it (§6) so restarts work, but no consistency check because there's nothing on-chain to check against.
+
+#### 5.4.7 Metrics + observability
+
+Extend `RelayerMetrics`:
+```rust
+pub history_drift_detected_total: AtomicU64,           // Check A failures
+pub chain_rewind_observed_total: AtomicU64,            // Check B: seq_no went backwards
+pub last_observed_on_chain_seq_no: AtomicU64,          // gauge
+```
+
+Log every `last_observed_on_chain` update at `info` level with all four fields. This gives ops a linear ledger of "what the chain said at every observation" for offline audit.
+
+---
+
 ## 6. Startup, persistence, filesystem layout
 
 Merged with Sergey's existing conventions:
@@ -713,7 +892,9 @@ Constructor picks `GqlBkSetPoller` instead of `BkSetTracker` under a flag; smoke
 **PR-B (Sergey's crate).** Blocks-only lane.
 * Add `bridge-prover-lib` dep.
 * Rewrite `live_source.rs` per §4.2 + §5.2 (block lane only; leave `BkUpdateSource` impl as a `todo!()` stub or return `Ok(None)`).
-* Add `stored_last_bk_set_update_seq_no` to `BridgeOnChainState` (§4.3).
+* Add all four fields to `BridgeOnChainState` (§4.3 + §5.4.1).
+* Add `src/history_consistency.rs` (§5.4.4) + wire Check A into `Relayer::tick` (§5.4.3) + Check B before each tick + startup audit (§5.4.5).
+* Extend `RelayerState` with `last_observed_on_chain` (§5.4.2); bump schema.
 * Extend `bin/relayer.rs` with `daemon-live` subcommand wiring (§4.7), block lane only.
 * Full E2E on local devnet + shellnet Sepolia (dry-run first via `EthBridgeClient::dry_run_block`).
 
@@ -736,9 +917,9 @@ Each PR independently landable + revertable. Circuit 4 unchanged throughout.
 
 > **The seam is landed.** `bridge_prover_lib::live_driver::LiveProverDriver` gives you `poll_next_bundle` + `poll_next_bk_update` + `ack_*` + `snapshot_*`. Payload is `[u8; 32]`-BE only — trivial `From` to your `AnBlockData` / `BkSetUpdateData`.
 >
-> **We owe you three things:** (1) `query_current_signer_index_bk_set` GQL shortcut so you can migrate the sentry off REST when convenient, (2) `DriverError` enum so your `RelayerError` re-mapping is clean, (3) a paragraph in `TECHNICAL_README.md` pointing consumers here. Shipping in PR-A this week.
+> **We owe you four things:** (1) `query_current_signer_index_bk_set` GQL shortcut so you can migrate the sentry off REST when convenient, (2) `DriverError` enum so your `RelayerError` re-mapping is clean, (3) `LiveBlockSource::driver_snapshot()` accessor so you can pull the driver's post-ack `BridgeState` for the §5.4 consistency check, (4) a paragraph in `TECHNICAL_README.md` pointing consumers here. Shipping in PR-A this week.
 >
-> **The one non-trivial thing on your side** is that your `Relayer::tick` currently handles only blocks; the BK-update lane exists as `BkUpdateSource` but nobody calls it in the loop. That has to become a two-phase tick (drain updates → advance blocks). ~80 LOC in `relayer.rs`. Detailed in §4.4 + §5.3.
+> **Two non-trivial things on your side:** (a) your `Relayer::tick` currently handles only blocks; the BK-update lane exists as `BkUpdateSource` but nobody calls it in the loop. That has to become a two-phase tick (drain updates → advance blocks). ~80 LOC in `relayer.rs`. Detailed in §4.4 + §5.3. (b) contract global-history-data consistency is *your* responsibility — collect all four on-chain anchors every tick via `bridge.read_state()`, persist in `RelayerState`, cross-check against `driver.snapshot_state()` after every ack, halt on drift. New module `src/history_consistency.rs` (~120 LOC). Detailed in §5.4.
 >
 > **Ship block lane first (PR-B), rotation lane second (PR-C), sentry migration whenever (PR-D).** BK-set is fixed on the live shellnet right now, so PR-B unblocks E2E immediately.
 >

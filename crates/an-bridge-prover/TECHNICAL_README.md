@@ -146,6 +146,20 @@ acki-nacki-to-eth-bridge-halo2-prover/
 
 `HISTORY_WINDOW_SIZE` is driven by `bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE` (currently `128`) — node and prover therefore cannot disagree on `W` at the constant level. `THINNING_FACTOR_P` (currently `4`) lives in `bridge-prover-lib/src/lib.rs`.
 
+### Consumers of `bridge-prover-lib`
+
+The library is designed to serve two independent binaries:
+
+1. **This repo's `bridge-prover-daemon`** — the reference consumer, drives Circuits 1A/1B + 2 + bk-updates against a real AN node and hands proofs to the paired `bridge-verifier-daemon` over IPC.
+2. **`crates/bridge-relayer-daemon` (Sergey's ETH-side relayer)** — a separate crate outside this workspace, adds `bridge-prover-lib` as a dep and drives the same [`LiveProverDriver`](bridge-prover-lib/src/live_driver/mod.rs) API against the ETH-side `AckiNackiBridge.sol` contract. See `bridge/alina_bridge_relayer_live_integration_plan_for_sergey_2026-07-09.md` for the integration contract (public API, poll/ack protocol, consistency-check invariants, halo2 transitive-dep note).
+
+The public API is stable at:
+- `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
+- `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
+- `query_current_signer_index_bk_set` (in `bk_set_fetcher.rs`) — semantic alias for `fetch_bk_set` used by external consumers to build the initial BK-set map.
+
+Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/live_driver/mod.rs) — a structured enum (`GqlTransient`, `GqlSchema`, `ProofGen`, `StateInconsistent`, `Bootstrapping`, `Other`). Consumers who want to keep using `anyhow::Result<T>` at their call sites don't need to change anything — the blanket `impl<E: Error+Send+Sync+'static> From<E> for anyhow::Error` in `anyhow` auto-converts `DriverError` and `?` continues to work.
+
 ---
 
 ## Prerequisites

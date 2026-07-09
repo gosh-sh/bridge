@@ -223,6 +223,7 @@ pub(super) async fn drive_next_bk_update(
         block_height: upd_block.height,
         last_seen_bk_update_seq_no: last_seen_for_upd as u64,
         block_id_be,
+        block_id_hash_be: tree.root,
         fin_type,
         old_bk_set_commitment_be: l2,
         new_bk_set_commitment_be: l3,

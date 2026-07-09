@@ -182,6 +182,13 @@ pub struct BundleProofArtifacts {
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
     pub block_id_be: [u8; 32],
+    /// Circuit 2's block_id — derived from the layer preimage + SHA-256 Merkle
+    /// siblings (reverse of the tree root, treated as LE bytes of Fr). This is
+    /// distinct from [`Self::block_id_be`] (which comes from parsing the raw
+    /// attestation payload) even though both bind the "same" block: the two
+    /// derivation paths can produce different Fr representations depending on
+    /// byte-order conventions in the attestation wire format.
+    pub layer_block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
     pub bk_set_commitment_be: [u8; 32],
@@ -208,7 +215,15 @@ pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_bk_update_seq_no: u64,
+    /// Attestation-circuit block_id, i.e. `Fr::to_repr()` bytes. May differ
+    /// from [`Self::block_id_hash_be`] in the top 2 bits because the chain
+    /// hash is reduced modulo the Fr prime when the circuit ingests it.
     pub block_id_be: [u8; 32],
+    /// Raw 32-byte block hash = SHA-256 root of the 8-leaf
+    /// `block_merkle_tree_leaves`. This is what `applyBkSetUpdate` on the
+    /// Solidity side receives; the SHA-256 Merkle open (h0/h23 + l2/l3) is
+    /// verified against this root, NOT against [`Self::block_id_be`].
+    pub block_id_hash_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],
     pub new_bk_set_commitment_be: [u8; 32],
@@ -519,10 +534,32 @@ impl LiveProverDriver {
         &self.state
     }
 
+    /// Push a self-verify [`crate::bridge_state::BundleResult`] into the
+    /// contract-mirror state's ring buffer. Used exclusively by the
+    /// `bridge-prover-daemon`'s `self-verify` feature — the ring buffer is
+    /// diagnostic metadata for the CI smoke test's post-run assertions.
+    /// Callers not using `self-verify` should ignore this method.
+    pub fn record_self_verify_result(
+        &mut self,
+        result: crate::bridge_state::BundleResult,
+    ) {
+        self.state.push_bundle_result(result);
+    }
+
     /// Read-only snapshot of the prover-private pubkey table. Caller
     /// persists with [`ProverBkSet::save`] after every ack.
     pub fn snapshot_prover_bk_set(&self) -> &ProverBkSet {
         &self.prover_bk_set
+    }
+
+    /// Read-only handle on the halo2 [`KeyManager`], exposed so callers
+    /// running the `bridge-prover-daemon`'s `self-verify` feature can inline
+    /// [`crate::verifier`] on the returned artifacts without pulling in
+    /// their own PK loader. Note that verifying keys are loaded lazily; the
+    /// caller must invoke `key_manager.ensure_*_keys` (or rely on the
+    /// driver having done so already via proof generation).
+    pub fn key_manager_ref(&self) -> &KeyManager {
+        &self.key_manager
     }
 
     /// Read-only snapshot of the [`BootstrapSeed`] applied during the last

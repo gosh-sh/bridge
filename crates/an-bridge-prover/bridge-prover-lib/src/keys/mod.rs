@@ -37,23 +37,20 @@ use halo2_base::halo2_proofs::{
 /// Facade that owns all four per-circuit managers plus a shared SRS sized
 /// at the **maximum** circuit degree across the four circuits.
 ///
-/// The `pub srs` field is the SRS used by every shared prover/verifier path
-/// (`crate::prover`, `crate::verifier`, `crate::layer_prover` all call
-/// `create_proof`/`SingleStrategy::new` against `&key_manager.srs`).
-/// Orchestrator + daemon code depend on this field name staying stable.
+/// Prove/verify paths use **per-circuit** SRS accessors
+/// (`key_manager.primary.srs()`, `.fallback.srs()`, `.layer.srs()`,
+/// `.event.srs()`). halo2-axiom requires `params.n() == 1 << circuit.k()` —
+/// a larger shared ceremony cannot be passed through without
+/// [`ParamsKZG::downsize`] (see `keys::common::load_srs`).
 ///
-/// It is sized at `FallbackKeyManager::DEFAULT_K` (= 21), the largest degree
-/// any of the four circuits uses (Primary 20, Fallback **21**, Layer 17,
-/// Event 19). A larger-K KZG SRS proves/verifies every smaller-K circuit, so
-/// one SRS covers all four. Sizing it at K=20 (the old primary default) left
-/// `generate_fallback_proof(&KeyManager, ..)` proving the K=21 fallback
-/// circuit against a too-small K=20 SRS — the facade could never produce a
-/// valid fallback proof (see AB-Q5 review, 2026-07-06).
+/// The `pub srs` field stays at `FallbackKeyManager::DEFAULT_K` (= 21) for
+/// orchestrator / exporter callers that still clone+downsize from the max
+/// ceremony. Sizing it at K=20 left `generate_fallback_proof` unable to
+/// prove the K=21 fallback circuit (AB-Q5, 2026-07-06).
 pub struct KeyManager {
     pub params_dir: PathBuf,
-    /// Max-degree (K=21) SRS shared by all four circuits' prove/verify paths.
-    /// A KZG SRS at the max K proves/verifies every smaller-K circuit, so
-    /// Primary (K=20), Layer (K=17) and Event (K=19) reuse it directly.
+    /// Max-degree (K=21) ceremony SRS for callers that downsize per circuit.
+    /// Per-circuit managers hold their own degree-matched slices.
     pub srs: ParamsKZG<Bn256>,
     pub primary: PrimaryKeyManager,
     pub fallback: FallbackKeyManager,
@@ -66,10 +63,9 @@ impl KeyManager {
     /// SRS + any cached VK/config off disk; PKs stay on disk.
     pub fn new(params_dir: &Path) -> Self {
         std::fs::create_dir_all(params_dir).ok();
-        // Size the shared SRS at the MAX circuit degree (Fallback's K=21), not
-        // the primary K=20: a larger-K KZG SRS proves/verifies every smaller-K
-        // circuit, and the shared `generate_fallback_proof(&KeyManager, ..)`
-        // path proves the K=21 fallback circuit against this SRS. See AB-Q5.
+        // Size the shared SRS at the MAX circuit degree (Fallback's K=21).
+        // Per-circuit managers load their own degree-matched slices via
+        // `load_srs` (downsizing from this ceremony when needed).
         let srs = common::load_srs(params_dir, FallbackKeyManager::DEFAULT_K);
         Self {
             params_dir: params_dir.to_path_buf(),

@@ -37,7 +37,19 @@ pub struct LayerHashesKeyManager {
 }
 
 impl LayerHashesKeyManager {
+    /// Circuit-shape degree (rows / advice layout). Saved in
+    /// `layer_config_params.json` and passed into
+    /// `LayerHashesMovementCheckerCircuit::new`.
     pub const DEFAULT_K: u32 = 17;
+
+    /// SRS degree used at keygen / prove / verify.
+    ///
+    /// halo2-axiom's `keygen_vk` sizes `vk.domain` from `params.k()`, **not**
+    /// from the circuit's logical k. Partner PKs were keygen'd against the
+    /// shared K=20 ceremony, so `pk.domain.k() == 20` even though
+    /// `config.k == 17`. Loading an SRS at [`Self::DEFAULT_K`] makes
+    /// `create_proof` panic (`domain.n()=2^20` vs `params.n()=2^17`).
+    pub const KEYGEN_SRS_K: u32 = 20;
 
     pub fn new(params_dir: &Path) -> Self {
         Self::new_with_k(params_dir, Self::DEFAULT_K)
@@ -45,7 +57,9 @@ impl LayerHashesKeyManager {
 
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         std::fs::create_dir_all(params_dir).ok();
-        let srs = common::load_srs(params_dir, k);
+        // SRS must match the degree baked into cached PKs (see KEYGEN_SRS_K).
+        let srs_k = Self::KEYGEN_SRS_K.max(k);
+        let srs = common::load_srs(params_dir, srs_k);
         let mut mgr = Self {
             params_dir: params_dir.to_path_buf(),
             srs,

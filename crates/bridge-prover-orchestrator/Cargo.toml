@@ -14,6 +14,8 @@ bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-e
 historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
 # Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
@@ -69,6 +71,10 @@ path = "src/bin/export_halo2_poseidon_snark.rs"
 [[bin]]
 name = "export-c4-poseidon-snark"
 path = "src/bin/export_c4_poseidon_snark.rs"
+
+[[bin]]
+name = "export-1a1b2-poseidon-snark"
+path = "src/bin/export_1a1b2_poseidon_snark.rs"
 
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.

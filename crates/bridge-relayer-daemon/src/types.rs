@@ -38,6 +38,66 @@ impl FinalizationType {
     }
 }
 
+impl From<bridge_prover_lib::live_driver::BundleFinalizationType> for FinalizationType {
+    fn from(v: bridge_prover_lib::live_driver::BundleFinalizationType) -> Self {
+        match v {
+            bridge_prover_lib::live_driver::BundleFinalizationType::Primary => {
+                FinalizationType::Primary
+            }
+            bridge_prover_lib::live_driver::BundleFinalizationType::Fallback => {
+                FinalizationType::Fallback
+            }
+        }
+    }
+}
+
+impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData {
+    fn from(b: &bridge_prover_lib::live_driver::BundleProofArtifacts) -> Self {
+        // `*_be` artefact fields are misnamed: they are `Fr::to_repr()` bytes
+        // (little-endian), matching `fr_hex_to_u256` / on-chain genesis encoding.
+        // `U256::from_be_bytes` here previously flipped every Fr PI and made
+        // `daemon-live` fail the prev_max / bk_set anchor checks against Sepolia.
+        let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
+        for (i, h) in b
+            .layer_hashes_be
+            .iter()
+            .enumerate()
+            .take(b.num_layers as usize)
+        {
+            layer_hashes[i] = U256::from_le_bytes(*h);
+        }
+        AnBlockData {
+            fin_type: b.fin_type.into(),
+            block_id: U256::from_le_bytes(b.block_id_be),
+            bk_set_commitment: U256::from_le_bytes(b.bk_set_commitment_be),
+            block_seq_no: b.block_seq_no,
+            num_layers: b.num_layers,
+            layer_hashes,
+            prev_max_level_layer_hash: U256::from_le_bytes(b.prev_max_level_layer_hash_be),
+            attestation_proof: Bytes::from(b.attestation_proof.clone()),
+            layer_hashes_proof: Bytes::from(b.layer_hashes_proof.clone()),
+        }
+    }
+}
+
+impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpdateData {
+    fn from(u: &bridge_prover_lib::live_driver::BkUpdateProofArtifacts) -> Self {
+        // `applyBkSetUpdate` verifies the SHA-256 Merkle open against the raw
+        // 32-byte block hash (`block_id_hash_be`), not the Fr-reduced
+        // attestation `block_id_be`. Commitments are `Fr::to_repr()` (LE).
+        BkSetUpdateData {
+            fin_type: u.fin_type.into(),
+            block_id: U256::from_be_bytes(u.block_id_hash_be),
+            block_seq_no: u.block_seq_no,
+            old_commitment_l2: U256::from_le_bytes(u.old_bk_set_commitment_be),
+            new_commitment_l3: U256::from_le_bytes(u.new_bk_set_commitment_be),
+            sibling_h0: u.merkle_sibling_h0_be,
+            sibling_h23: u.merkle_sibling_h23_be,
+            attestation_proof: Bytes::from(u.attestation_proof.clone()),
+        }
+    }
+}
+
 /// All data the relayer needs to submit one block to
 /// `AckiNackiBridge.verifyBlock`.
 ///

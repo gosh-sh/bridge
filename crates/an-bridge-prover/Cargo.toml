@@ -6,6 +6,9 @@ members = [
     "bridge-event-witness",
     "bridge-event-prover-lib",
     "bridge-event-halo2-prover",
+    # Symlink → ../bridge-relayer-daemon. Path deps in that crate are relative
+    # to this member path (see its Cargo.toml header).
+    "bridge-relayer-daemon",
 ]
 resolver = "2"
 
@@ -18,13 +21,15 @@ resolver = "2"
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 
-# Circuit and crypto libs
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+# Circuit and crypto libs — pin circuits rev so out-of-workspace consumers
+# (bridge-relayer-daemon) resolve `bridge-parsers` etc. (tip of `main` has
+# intermittently failed package discovery without a lockfile).
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

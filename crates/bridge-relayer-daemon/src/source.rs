@@ -42,6 +42,21 @@ use crate::{
 #[async_trait]
 pub trait BlockSource: Send + Sync {
     async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError>;
+
+    /// Acknowledge that `seq_no` was accepted on-chain. Default is a no-op
+    /// (file-driven sources have no driver cursor). [`crate::live_source::LiveBlockSource`]
+    /// advances `LiveProverDriver` and persists prover state.
+    async fn ack_last_bundle(&self, _seq_no: u64) -> Result<(), RelayerError> {
+        Ok(())
+    }
+
+    /// Optional post-ack snapshot of the driver's `BridgeState` for
+    /// history-consistency checks. Default: no snapshot (skip Check A).
+    async fn driver_snapshot(
+        &self,
+    ) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+        None
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -613,6 +628,11 @@ pub trait BkUpdateSource: Send + Sync {
         &self,
         target_seq_no: u64,
     ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError>;
+
+    /// Acknowledge that a BK-set update was applied on-chain. Default no-op.
+    async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -622,6 +642,21 @@ impl BkUpdateSource for BkUpdateProofsSource {
         target_seq_no: u64,
     ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
         self.load_update(target_seq_no)
+    }
+}
+
+/// Always-empty BK-update source for file-driven / unit-test relayers that
+/// only exercise the verifyBlock lane.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyBkUpdateSource;
+
+#[async_trait]
+impl BkUpdateSource for EmptyBkUpdateSource {
+    async fn fetch_bk_update(
+        &self,
+        _target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        Ok(None)
     }
 }
 

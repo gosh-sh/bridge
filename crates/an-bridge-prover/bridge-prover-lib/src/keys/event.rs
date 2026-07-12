@@ -35,11 +35,16 @@ pub struct EventKeyManager {
 }
 
 impl EventKeyManager {
-    /// Default degree — matches
+    /// Circuit-shape degree — matches
     /// `bridge_event_prove_circuit::test_helpers::K` and the `k` field of
-    /// `event_prover::default_event_circuit_params`. The Circuit 1 SRS at
-    /// K=20 covers this smaller K too.
+    /// `event_prover::default_event_circuit_params`.
     pub const DEFAULT_K: u32 = 19;
+
+    /// SRS degree used at keygen / prove / verify. Same rationale as
+    /// [`super::LayerHashesKeyManager::KEYGEN_SRS_K`]: halo2-axiom bakes
+    /// `params.k()` into `vk.domain`, and partner event PKs were keygen'd
+    /// against the shared K=20 ceremony.
+    pub const KEYGEN_SRS_K: u32 = 20;
 
     pub fn new(params_dir: &Path) -> Self {
         Self::new_with_k(params_dir, Self::DEFAULT_K)
@@ -47,7 +52,8 @@ impl EventKeyManager {
 
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         std::fs::create_dir_all(params_dir).ok();
-        let srs = common::load_srs(params_dir, k);
+        let srs_k = Self::KEYGEN_SRS_K.max(k);
+        let srs = common::load_srs(params_dir, srs_k);
         let mut mgr = Self {
             params_dir: params_dir.to_path_buf(),
             srs,

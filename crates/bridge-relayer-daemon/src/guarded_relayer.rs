@@ -41,7 +41,7 @@ use crate::{
     bridge::BridgeClient,
     error::RelayerError,
     relayer::{Relayer, TickOutcome},
-    source::BlockSource,
+    source::{BkUpdateSource, BlockSource},
 };
 
 /// What happened during a single [`SentryGuardedRelayer::tick`] call.
@@ -95,14 +95,16 @@ impl GuardedOutcome {
 }
 
 /// Composition of an inner [`Relayer`] and a [`BkSetSentry`].
-pub struct SentryGuardedRelayer<S: BlockSource, B: BridgeClient, P: BkSetPoller> {
-    inner: Relayer<S, B>,
+pub struct SentryGuardedRelayer<S: BlockSource, U: BkUpdateSource, B: BridgeClient, P: BkSetPoller> {
+    inner: Relayer<S, U, B>,
     sentry: BkSetSentry<P>,
     paused: bool,
 }
 
-impl<S: BlockSource, B: BridgeClient, P: BkSetPoller> SentryGuardedRelayer<S, B, P> {
-    pub fn new(inner: Relayer<S, B>, sentry: BkSetSentry<P>) -> Self {
+impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient, P: BkSetPoller>
+    SentryGuardedRelayer<S, U, B, P>
+{
+    pub fn new(inner: Relayer<S, U, B>, sentry: BkSetSentry<P>) -> Self {
         Self {
             inner,
             sentry,
@@ -114,7 +116,7 @@ impl<S: BlockSource, B: BridgeClient, P: BkSetPoller> SentryGuardedRelayer<S, B,
         self.paused
     }
 
-    pub fn inner(&self) -> &Relayer<S, B> {
+    pub fn inner(&self) -> &Relayer<S, U, B> {
         &self.inner
     }
 
@@ -192,8 +194,10 @@ impl<S: BlockSource, B: BridgeClient, P: BkSetPoller> SentryGuardedRelayer<S, B,
 
 /// Convenience: split `SentryGuardedRelayer` back into its parts
 /// (e.g. for shutdown handling that needs to flush each side).
-impl<S: BlockSource, B: BridgeClient, P: BkSetPoller> SentryGuardedRelayer<S, B, P> {
-    pub fn into_parts(self) -> (Relayer<S, B>, BkSetSentry<P>) {
+impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient, P: BkSetPoller>
+    SentryGuardedRelayer<S, U, B, P>
+{
+    pub fn into_parts(self) -> (Relayer<S, U, B>, BkSetSentry<P>) {
         (self.inner, self.sentry)
     }
 }
@@ -218,8 +222,8 @@ mod tests {
     use crate::{
         bk_set_sentry::BkSetPoller,
         bridge::MockBridgeClient,
-        relayer::{RelayerConfig, TickOutcome},
-        source::InMemoryBlockSource,
+        relayer::{Relayer, RelayerConfig, TickOutcome},
+        source::{EmptyBkUpdateSource, InMemoryBlockSource},
         types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
     };
 
@@ -302,7 +306,7 @@ mod tests {
         source: Arc<InMemoryBlockSource>,
         bridge: Arc<MockBridgeClient>,
         state_path: PathBuf,
-    ) -> Relayer<InMemoryBlockSource, MockBridgeClient> {
+    ) -> Relayer<InMemoryBlockSource, EmptyBkUpdateSource, MockBridgeClient> {
         Relayer::new(
             RelayerConfig {
                 state_path,
@@ -310,6 +314,7 @@ mod tests {
                 max_attempts_warn: 16,
             },
             source,
+            Arc::new(EmptyBkUpdateSource),
             bridge,
         )
         .unwrap()

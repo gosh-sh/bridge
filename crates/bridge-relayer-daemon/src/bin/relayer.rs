@@ -49,12 +49,12 @@ use alloy::{
 use bridge_relayer_daemon::{
     discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome,
     BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome, PartnerWithdrawalProof,
-    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, SentryGuardedRelayer,
-    SentryStatus, SubprocessAggregator, SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver,
-    SubprocessCircuit4SnarkProverConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
-    WithdrawalResultGate,
+    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
+    LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
+    RelayerMetrics, SentryGuardedRelayer, SentryStatus, StatePaths, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
+    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
+    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -400,6 +400,45 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
+    /// `applyBkSetUpdate` (Alina live-integration plan).
+    ///
+    /// Requires SRS/PKs under `--params-dir`, shellnet (or local) GQL, and a
+    /// BK-set JSON fallback. Prover state lives under `--prover-state-dir`.
+    DaemonLive {
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Acki Nacki GraphQL endpoint (same as partner `BRIDGE_GQL_ENDPOINT`).
+        #[arg(long, env = "BRIDGE_GQL_ENDPOINT")]
+        gql_endpoint: String,
+        /// Directory with SRS + circuit PKs (`KeyManager`).
+        #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
+        params_dir: PathBuf,
+        /// Directory for `prover_state.json` / `prover_bk_set.json` /
+        /// `bootstrap_seed.json`.
+        #[arg(long, env = "BRIDGE_STATE_DIR", default_value = "./state")]
+        prover_state_dir: PathBuf,
+        /// Fallback BK-set JSON if GQL fetch fails at startup.
+        #[arg(
+            long,
+            env = "BRIDGE_BK_SET_CONFIG",
+            default_value = "../an-bridge-prover/bk_set.shellnet.json"
+        )]
+        bk_set_config: PathBuf,
+        /// Optional explicit bootstrap seqno (`SeedPolicy::Explicit`).
+        #[arg(long, env = "BRIDGE_BOOTSTRAP_SEQNO")]
+        bootstrap_seqno: Option<u64>,
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+    },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
@@ -706,6 +745,42 @@ async fn main() -> anyhow::Result<()> {
                 e
             })
         },
+        Cmd::DaemonLive {
+            rpc_url,
+            bridge_address,
+            private_key,
+            gql_endpoint,
+            params_dir,
+            prover_state_dir,
+            bk_set_config,
+            bootstrap_seqno,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_daemon_live(
+                args.state,
+                rpc_url,
+                bridge_address,
+                private_key,
+                gql_endpoint,
+                params_dir,
+                prover_state_dir,
+                bk_set_config,
+                bootstrap_seqno,
+                backoff,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-live failed");
+                e
+            })
+        },
         Cmd::SubmitWithdraw {
             proof_event,
             rpc_url,
@@ -774,7 +849,7 @@ async fn smoke_fixture(
     )?);
 
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
 
     match an_node_url {
         None => {
@@ -950,7 +1025,7 @@ async fn run_daemon(
         verifiers_dir.as_deref(),
     )?);
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
     // Cross-platform graceful shutdown: SIGINT on every OS, plus SIGTERM
@@ -1194,7 +1269,7 @@ async fn run_prover_daemon(
     let source =
         Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
     let shutdown = async {
@@ -1713,7 +1788,7 @@ async fn run_bridge_daemon(
         Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
     let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, prover_bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
     // Withdraw leg: shares the SAME provider (one nonce source; the two
     // legs run sequentially so there's only ever one in-flight tx).
@@ -1744,6 +1819,12 @@ async fn run_bridge_daemon(
                 seq_no,
                 "daemon-bridge: verifyBlock verified (anchor advanced)"
             ),
+            Ok(TickOutcome::BkUpdateApplied {
+                seq_no, ..
+            }) => info!(
+                seq_no,
+                "daemon-bridge: applyBkSetUpdate applied"
+            ),
             Ok(TickOutcome::NotYetAvailable {
                 ..
             }) => {},
@@ -1752,6 +1833,13 @@ async fn run_bridge_daemon(
                 reason,
             }) => {
                 warn!(target_seq_no, %reason, "daemon-bridge: verifyBlock reverted; backing off");
+                had_transient = true;
+            },
+            Ok(TickOutcome::BkUpdateReverted {
+                seq_no,
+                reason,
+            }) => {
+                warn!(seq_no, %reason, "daemon-bridge: applyBkSetUpdate reverted; backing off");
                 had_transient = true;
             },
             Err(e) => {
@@ -1883,11 +1971,204 @@ async fn submit_bk_update(
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
             tx_hash,
+            ..
         } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
         BkSetUpdateSubmitOutcome::Reverted {
             reason,
         } => anyhow::bail!("applyBkSetUpdate reverted: {reason}"),
     }
+    Ok(())
+}
+
+/// Live GraphQL + `LiveProverDriver` → ETH `verifyBlock` / `applyBkSetUpdate`.
+#[allow(clippy::too_many_arguments)]
+async fn run_daemon_live(
+    state_path: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    gql_endpoint: String,
+    params_dir: PathBuf,
+    prover_state_dir: PathBuf,
+    bk_set_config: PathBuf,
+    bootstrap_seqno: Option<u64>,
+    backoff: BackoffConfig,
+) -> anyhow::Result<()> {
+    use bridge_prover_lib::{
+        bk_set_fetcher::{fetch_bk_set, load_bk_set_from_config},
+        bridge_state::BridgeState,
+        gql_client::create_client,
+        keys::KeyManager,
+        live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
+        prover_bk_set::ProverBkSet,
+    };
+    use tokio::sync::Mutex;
+
+    std::fs::create_dir_all(&prover_state_dir)?;
+    let state_paths = StatePaths::under(&prover_state_dir);
+    let prover_state_path = state_paths.prover_state_json.clone();
+    let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
+
+    let gql = create_client(&gql_endpoint)
+        .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+
+    let bk_set = match fetch_bk_set(&gql).await {
+        Ok(s) => {
+            info!(signers = s.len(), "BK set loaded from GraphQL");
+            s
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %bk_set_config.display(),
+                "GraphQL BK-set fetch failed; falling back to config file"
+            );
+            let path = bk_set_config
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
+            load_bk_set_from_config(path)
+                .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?
+        }
+    };
+
+    info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
+    let mut key_manager = KeyManager::new(&params_dir);
+    key_manager
+        .ensure_primary_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_primary_keys: {e}"))?;
+    key_manager
+        .ensure_fallback_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_fallback_keys: {e}"))?;
+    key_manager
+        .ensure_layer_keys()
+        .map_err(|e| anyhow::anyhow!("ensure_layer_keys: {e}"))?;
+
+    let state_path_str = prover_state_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("prover_state path not UTF-8"))?;
+    let state = BridgeState::load(state_path_str, HISTORY_WINDOW_SIZE as usize)
+        .map_err(|e| anyhow::anyhow!("load BridgeState: {e}"))?;
+
+    let bk_path_str = prover_bk_set_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("prover_bk_set path not UTF-8"))?;
+    let prover_bk_set = match ProverBkSet::load(bk_path_str)
+        .map_err(|e| anyhow::anyhow!("load ProverBkSet: {e}"))?
+    {
+        Some(loaded) => {
+            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
+                anyhow::bail!(
+                    "prover_bk_set commitment {} disagrees with prover_state {} — \
+                     delete BOTH under {} or restore a paired backup",
+                    hex::encode(loaded.commitment),
+                    hex::encode(state.stored_bk_set_commitment),
+                    prover_state_dir.display(),
+                );
+            }
+            loaded
+        }
+        None => {
+            let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
+            pbs.save(bk_path_str)
+                .map_err(|e| anyhow::anyhow!("save ProverBkSet: {e}"))?;
+            info!(
+                signers = pbs.pubkeys_hex.len(),
+                "bootstrapped prover_bk_set.json"
+            );
+            pbs
+        }
+    };
+
+    // Prefer the persisted pubkey table once it exists.
+    let bk_set = prover_bk_set
+        .pubkeys()
+        .map_err(|e| anyhow::anyhow!("prover_bk_set.pubkeys: {e}"))?;
+
+    let seed_policy = match (bootstrap_seqno, state.initialized) {
+        (_, true) => SeedPolicy::Resume,
+        (Some(n), false) => SeedPolicy::Explicit(n),
+        (None, false) => SeedPolicy::Auto,
+    };
+    info!(?seed_policy, "LiveProverDriver seed policy");
+
+    let driver = LiveProverDriver::new(
+        gql,
+        key_manager,
+        state,
+        prover_bk_set,
+        bk_set,
+        LiveProverConfig {
+            seed_policy,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("LiveProverDriver::new: {e}"))?;
+    let driver = Arc::new(Mutex::new(driver));
+
+    let live_source = Arc::new(LiveBlockSource::new(Arc::clone(&driver), state_paths));
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+
+    // Startup drift audit (§5.4.5).
+    let on_chain = bridge.read_state().await?;
+    let driver_state = live_source.driver_snapshot().await;
+    info!(
+        on_chain_last_seen = on_chain.last_seen_block_seq_no,
+        driver_last_seen = driver_state.stored_last_seen_block_seq_no,
+        on_chain_bk_upd = on_chain.last_bk_set_update_seq_no,
+        driver_bk_upd = driver_state.stored_last_bk_set_update_seq_no,
+        "daemon-live startup anchors"
+    );
+    if driver_state.initialized
+        && driver_state.stored_last_seen_block_seq_no != on_chain.last_seen_block_seq_no
+        && on_chain.last_seen_block_seq_no != 0
+        && driver_state.stored_last_seen_block_seq_no != 0
+    {
+        anyhow::bail!(
+            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap \
+             (do NOT auto-heal)",
+            driver_state.stored_last_seen_block_seq_no,
+            on_chain.last_seen_block_seq_no,
+            prover_state_dir.display(),
+        );
+    }
+
+    let cfg = RelayerConfig::new(&state_path);
+    let mut relayer = Relayer::new(
+        cfg,
+        Arc::clone(&live_source),
+        Arc::clone(&live_source),
+        bridge,
+    )?;
+
+    if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
+        let actual = relayer.bridge().read_state().await?;
+        check_startup_drift(&remembered, &actual).map_err(|d| {
+            anyhow::anyhow!(
+                "startup on-chain drift vs last_observed_on_chain: {d} — operator must reconcile"
+            )
+        })?;
+    }
+
+    let metrics = RelayerMetrics::new();
+    let shutdown = shutdown_signal();
+    info!(
+        gql = %gql_endpoint,
+        params = %params_dir.display(),
+        prover_state = %prover_state_dir.display(),
+        "daemon-live starting"
+    );
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
+    info!(?summary, snapshot = ?metrics.snapshot(), "daemon-live stopped");
     Ok(())
 }
 

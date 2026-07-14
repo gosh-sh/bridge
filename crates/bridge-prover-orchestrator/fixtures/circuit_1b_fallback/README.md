@@ -14,17 +14,17 @@ Use this fixture to:
 ## Trusted setup
 
 These artefacts are **production-grade**. The underlying KZG SRS is the
-[Hermez Perpetual Powers of Tau][ppot] ceremony output (BN254, K=20
-slice of `powersOfTau28_hez_final.ptau`), the same multi-party trusted
+[Hermez Perpetual Powers of Tau][ppot] ceremony output (BN254, K=21
+slice of `powersOfTau28_hez_final_21.ptau`), the same multi-party trusted
 setup used by snarkjs, iden3 and Polygon zkEVM. The `[s]·G2` point
 embedded in `tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`
 is sourced from the same ceremony, so verifier and prover agree on the
 KZG commitment scheme byte-for-byte.
 
-To rebuild these fixtures yourself, run
-`scripts/bootstrap_hermez_srs.sh` from the repo root to populate
-`crates/bridge-prover-orchestrator/params/kzg_bn254_20.srs`, then
-`EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-prover-orchestrator`.
+To rebuild these fixtures yourself, place Hermez
+`params/kzg_bn254_21.srs` under the orchestrator crate, then:
+`EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-prover-orchestrator`
+(nightly toolchain required).
 
 [ppot]: https://github.com/privacy-scaling-explorations/perpetualpowersoftau
 
@@ -32,11 +32,11 @@ To rebuild these fixtures yourself, run
 
 | Artefact | Source |
 |---|---|
-| `fallback_vk.bin` | `crates/bridge-prover-orchestrator/params/fallback_vk.bin` — written by `FallbackKeyManager::ensure_keys(..)` via `vk.write(.., SerdeFormat::RawBytes)`. K=20. |
+| `fallback_vk.bin` | `crates/bridge-prover-orchestrator/params/fallback_vk.bin` — written by `FallbackKeyManager::ensure_keys(..)` via `vk.write(.., SerdeFormat::RawBytes)`. K=21. |
 | `fallback_config_params.json` | `crates/bridge-prover-orchestrator/params/fallback_config_params.json` — `BaseCircuitParams` of the fallback circuit, serialised compactly via `serde_json::to_vec`. |
 | `fallback_vk_blob.bin` | `VkBlob::from_native(config, vk).to_bytes()` — the exact byte payload of the `vk_cell` operand. Magic `"VKBLOB\x00\x00"`, version 1, transcript Blake2b. |
 | `fallback_public_inputs.bin` | `encode_instances(&proof.instances())` — raw `N × 32` LE `Fr::to_repr()` (no header). N = 4. |
-| `fallback_proof.bin` | `proof.proof_bytes` — SHPLONK proof with Blake2b transcript, K=20. |
+| `fallback_proof.bin` | `proof.proof_bytes` — SHPLONK proof with Blake2b transcript, K=21. |
 
 All five files were emitted in one run of
 `crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs::halo2_tvm_operands_round_trip_fallback_circuit`
@@ -56,11 +56,11 @@ handler and asserts `Ok(true)`.
 
 | File | Size | What it is |
 |---|---|---|
-| `fallback_config_params.json` | 181 B | `BaseCircuitParams { k: 20, num_advice_per_phase: [44], num_fixed: 1, num_lookup_advice_per_phase: [4, 0, 0], lookup_bits: Some(19), num_instance_columns: 1 }` |
-| `fallback_vk.bin` | 6 154 B | Raw `VerifyingKey<G1Affine>` (SerdeFormat::RawBytes — curve-membership-checked on read) |
-| `fallback_vk_blob.bin` | 6 308 B | `VkBlob` = 16 B header + 4 B + 181 B (config) + 4 B + 6 154 B (vk) − 51 B overhead = 6 308 B |
-| `fallback_public_inputs.bin` | 128 B | 4 × 32 = `[bk_set_poseidon_commit, envelope_hash_high, envelope_hash_low, last_seen_block_seqno]` |
-| `fallback_proof.bin` | 14 784 B | SHPLONK proof + Blake2b transcript at K=20 |
+| `fallback_config_params.json` | 181 B | `BaseCircuitParams { k: 21, num_advice_per_phase: [22], num_fixed: 1, num_lookup_advice_per_phase: [2, 0, 0], lookup_bits: 19, num_instance_columns: 1 }` |
+| `fallback_vk.bin` | 3 210 B | Raw `VerifyingKey<G1Affine>` (SerdeFormat::RawBytes — curve-membership-checked on read) |
+| `fallback_vk_blob.bin` | 3 364 B | `VkBlob` (header + config + vk); sha256 `9ba63795…6444c9` |
+| `fallback_public_inputs.bin` | 128 B | 4 × 32 = `[block_id, bk_set_poseidon, block_seq_no, last_seen]` |
+| `fallback_proof.bin` | 7 616 B | SHPLONK proof + Blake2b transcript at K=21 |
 
 ## Public input layout (4 Fr, 32 B LE each)
 

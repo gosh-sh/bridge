@@ -238,39 +238,9 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 /// - The file is corrupted or invalid
 /// - The file format is incorrect
 pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, String> {
-    // PREFER the chain-ceremony SRS (`params/kzg_bn254_{k}.srs`) over the
-    // Hermez/Polygon SRS (`data/kzg_params_{k}.srs`).
-    //
-    // The AN-side `ZKHALO2VERIFYWITHVK` opcode rebuilds its verifier params from
-    // points embedded from the chain's `kzg_bn254_19.srs` ceremony. A SHPLONK
-    // proof (and the VK it is bound to) ONLY verifies under the opcode if the
-    // prover used the *same* ceremony. The Hermez SRS produces a different,
-    // opcode-REJECTED VK — e.g. deposit VkBlob `b1e5ce0b…` (Hermez) vs the
-    // deployed/opcode-aligned `147efe14…` (chain). See `examples/downsize_srs.rs`
-    // and `docs/deposit_vk_reproducibility.md`. Falls back to the Hermez SRS for
-    // degrees that have no downsized chain SRS on disk (e.g. k=20).
-    let chain_path = format!("params/kzg_bn254_{}.srs", k);
-    if Path::new(&chain_path).exists() {
-        println!("Loading chain-ceremony KZG parameters from {}", chain_path);
-        match load_kzg_params(&chain_path) {
-            Ok(params) => {
-                println!(
-                    "✅ Loaded chain-ceremony KZG parameters (opcode-aligned) from {}",
-                    chain_path
-                );
-                return Ok(params);
-            },
-            Err(e) => {
-                return Err(format!(
-                    "Chain-ceremony SRS {} exists but failed to load: {}. \
-                     Delete it to fall back to the Hermez SRS, or regenerate it \
-                     with `cargo run --release --example downsize_srs`.",
-                    chain_path, e
-                ));
-            },
-        }
-    }
-
+    // Hermez / Polygon Powers of Tau only (`data/kzg_params_{k}.srs`).
+    // Matches `tvm-sdk` `feature/hermez-kzg-resurrection` embedded
+    // `KZG_S_G2_BYTES` (`928fafb3…`). No chain-ceremony fallback.
     let params_path = format!("data/kzg_params_{}.srs", k);
 
     // Try to load existing parameters
@@ -306,15 +276,9 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
         }
     }
 
-    // Parameters not found - try to use degree 18 parameters (downward compatible).
-    // Prefer the chain-ceremony k=18 SRS so downsized params stay opcode-aligned;
-    // fall back to the Hermez k=18 SRS only if the chain SRS is absent.
+    // Parameters not found - try Hermez degree 18 (downward compatible).
     if k < 18 {
-        let fallback_path = if Path::new("params/kzg_bn254_18.srs").exists() {
-            "params/kzg_bn254_18.srs"
-        } else {
-            "data/kzg_params_18.srs"
-        };
+        let fallback_path = "data/kzg_params_18.srs";
         if Path::new(fallback_path).exists() {
             println!(
                 "⚠️  KZG parameters for degree {} not found, using degree 18 (downward compatible)",

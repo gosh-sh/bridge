@@ -173,7 +173,23 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
         )
         .unwrap();
         std::fs::write(dir.join("fallback_proof.bin"), &operands.proof).unwrap();
-        println!("Exported fallback fixture to {}", dir.display());
+        // Mirror the on-disk VK + config the KeyManager just wrote (same bytes
+        // the tvm-sdk ABI tests reassemble into a VkBlob).
+        let params = params_dir();
+        for name in [
+            "fallback_vk.bin",
+            "fallback_config_params.json",
+        ] {
+            std::fs::copy(params.join(name), dir.join(name))
+                .unwrap_or_else(|e| panic!("copy {name}: {e}"));
+        }
+        println!(
+            "Exported Circuit 1B Hermez fixture to {} (vk_blob={}B proof={}B k={})",
+            dir.display(),
+            operands.vk_blob.len(),
+            operands.proof.len(),
+            km.fallback_config().k,
+        );
     }
 
     println!(

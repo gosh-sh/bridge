@@ -1,18 +1,8 @@
-//! Aggregator pipeline (M2 spike).
+//! Aggregator pipeline (R15).
 //!
-//! Three thin wrappers over snark-verifier-sdk primitives. The keygen /
+//! Generalized wrappers over snark-verifier-sdk primitives. The keygen /
 //! `break_points` dance follows the canonical pattern from
-//! `snark-verifier-sdk/examples/{range_check,standard_plonk}.rs`:
-//!
-//! - **inner**: build one `BaseCircuitBuilder` with `witness_gen_only=false`,
-//!   pass it to `gen_pk` (which populates break-points internally as a side
-//!   effect of running keygen), then pass the **same** builder to
-//!   `gen_snark_shplonk`.
-//! - **aggregator**: build the `AggregationCircuit` in `Keygen` stage, call
-//!   `calculate_params`, then `gen_pk`, then read `break_points` (must be AFTER
-//!   `gen_pk` — `calculate_params` alone does not populate them), then drop the
-//!   keygen circuit and build a fresh `Prover`-stage circuit with
-//!   `.use_break_points(break_points)`.
+//! `snark-verifier-sdk/examples/{range_check,standard_plonk}.rs`.
 
 use std::path::Path;
 
@@ -33,88 +23,141 @@ use snark_verifier_sdk::{
     CircuitExt, Snark, SHPLONK,
 };
 
-use crate::multiply::build_multiply_circuit;
+use crate::{eip170, multiply::build_multiply_circuit};
 
-/// Inner-circuit row count (binary log). `2^9 = 512` rows easily fits a
-/// single multiplication gate; we keep `k_inner` small so SRS load + keygen
-/// take seconds, not minutes.
-pub const K_INNER: u32 = 9;
-/// Inner-circuit lookup-bits. The multiply gate doesn't actually use the
-/// range lookup, but [`AggregationCircuit`] requires the inner circuit's
-/// lookup chip to be initialised, so we keep `lookup_bits = k - 1`.
-pub const LOOKUP_BITS_INNER: usize = 8;
+/// Inner-circuit row count for the M2 multiply spike (`2^9` rows).
+pub const K_INNER_SPIKE: u32 = 9;
+pub const LOOKUP_BITS_INNER_SPIKE: usize = 8;
 
-/// Outer (aggregator) row count. snark-verifier-sdk's `standard_plonk.rs`
-/// example uses `k = 21` with `expose_previous_instances`; `k = 20` overflows
-/// the advice columns by a handful of rows once we re-expose inner inputs
-/// (NOT ENOUGH ADVICE COLUMNS @ runtime). We may revisit when sizing the
-/// real Circuit 4 aggregator (M5) — for now `k = 21` is the safe minimum.
-pub const K_OUTER: u32 = 21;
-/// Aggregator lookup-bits. Must be `< k_outer`. snark-verifier-sdk's default
-/// is `k - 1` for the deposit-prover empirics — same here.
-pub const LOOKUP_BITS_OUTER: usize = 20;
+/// Default outer row count — safe minimum for `expose_previous_instances` @ ~13 inner PIs.
+pub const K_OUTER_DEFAULT: u32 = 21;
+pub const LOOKUP_BITS_OUTER_DEFAULT: usize = 20;
 
-/// Generate a SHPLONK SNARK proving `a * b == c` for the supplied scalars.
-///
-/// Uses snark-verifier-sdk's default transcript (Poseidon — the only choice
-/// compatible with `AggregationCircuit` without writing a custom in-circuit
-/// transcript loader).
-pub fn prove_inner(params: &ParamsKZG<Bn256>, a: Fr, b: Fr) -> anyhow::Result<Snark> {
-    let (builder, _) = build_multiply_circuit(
-        // witness_gen_only =
-        false,
-        K_INNER as usize,
-        LOOKUP_BITS_INNER,
-        a,
-        b,
-    );
+/// Back-compat aliases used by the M2 spike tests.
+pub const K_INNER: u32 = K_INNER_SPIKE;
+pub const LOOKUP_BITS_INNER: usize = LOOKUP_BITS_INNER_SPIKE;
+pub const K_OUTER: u32 = K_OUTER_DEFAULT;
+pub const LOOKUP_BITS_OUTER: usize = LOOKUP_BITS_OUTER_DEFAULT;
 
-    // `gen_pk` runs keygen on `builder` and, as a side effect, populates the
-    // builder's break-points. `gen_snark_shplonk` on the SAME builder then
-    // reuses them. This matches `range_check.rs:41-51` upstream.
-    let pk = gen_pk(params, &builder, None);
-    let snark = gen_snark_shplonk(params, &pk, builder, None::<&Path>);
-    Ok(snark)
+/// Tunable aggregator parameters per inner circuit.
+#[derive(Debug, Clone, Copy)]
+pub struct AggregatorConfig {
+    pub k_outer: u32,
+    pub lookup_bits_outer: usize,
+    pub universality: VerifierUniversality,
 }
 
-/// Number of public-instance scalars contributed by the KZG accumulator.
-///
-/// snark-verifier-sdk represents the accumulator as **two G1 points**
-/// (`lhs`, `rhs` of the pairing check), each stored as **two non-native
-/// field elements** (x and y in `Fq` for BN254), and each non-native element
-/// is decomposed into `LIMBS = 3` 88-bit native limbs. So the total is
-/// `2 * 2 * 3 = 12` scalars. This matches the runtime assertion in the M2
-/// round-trip test.
-///
-/// All four `*Verifier.sol` adapters generated downstream must allocate at
-/// least these 12 slots BEFORE any inner circuit's public inputs.
+impl Default for AggregatorConfig {
+    fn default() -> Self {
+        Self {
+            k_outer: K_OUTER_DEFAULT,
+            lookup_bits_outer: LOOKUP_BITS_OUTER_DEFAULT,
+            universality: VerifierUniversality::Full,
+        }
+    }
+}
+
+impl AggregatorConfig {
+    pub fn for_inner_instances(num_inner: usize) -> Self {
+        // Empirics: 13 re-exposed PIs fit @ K=21 (~13 KB). Circuit 2 (14 PIs) may need K=22.
+        let k_outer = if num_inner <= 13 {
+            21
+        } else {
+            22
+        };
+        Self {
+            k_outer,
+            lookup_bits_outer: k_outer.saturating_sub(1) as usize,
+            universality: VerifierUniversality::Full,
+        }
+    }
+
+    /// Production R15 verifier presets (empirical on bound Poseidon snarks, 2026-06-22).
+    pub fn for_verifier_name(name: &str) -> Self {
+        Self::for_verifier_name_with_overrides(name, None, None)
+    }
+
+    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`, universality tag).
+    pub fn for_verifier_name_with_overrides(
+        name: &str,
+        k_outer: Option<u32>,
+        universality: Option<VerifierUniversality>,
+    ) -> Self {
+        let mut config = match name {
+            "PrimaryAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::Full,
+            },
+            "FallbackAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::PreprocessedAsWitness,
+            },
+            "LayerHashesAggregatorVerifier" => Self {
+                k_outer: 22,
+                lookup_bits_outer: 21,
+                universality: VerifierUniversality::Full,
+            },
+            "BridgeWithdrawalAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::Full,
+            },
+            _ => Self::for_inner_instances(4),
+        };
+        if let Some(k) = k_outer {
+            config.k_outer = k;
+            config.lookup_bits_outer = k.saturating_sub(1) as usize;
+        }
+        if let Some(u) = universality {
+            config.universality = u;
+        }
+        config
+    }
+
+    pub fn parse_universality(s: &str) -> anyhow::Result<VerifierUniversality> {
+        match s {
+            "none" => Ok(VerifierUniversality::None),
+            "preprocessed" | "preprocessed-as-witness" => {
+                Ok(VerifierUniversality::PreprocessedAsWitness)
+            }
+            "full" => Ok(VerifierUniversality::Full),
+            other => anyhow::bail!("unknown universality {other} (none|preprocessed|full)"),
+        }
+    }
+}
+
+/// Number of public-instance scalars contributed by the KZG accumulator (12 limbs).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
-/// Wrap `inner_snark` in an [`AggregationCircuit`] and prove the aggregator.
-///
-/// `agg_params` is the outer SRS (`k = K_OUTER`). The returned [`Snark`]
-/// has instance layout `[acc_0 .. acc_11, inner_pi_0 .. inner_pi_{n-1}]`:
-/// the [`NUM_ACCUMULATOR_INSTANCES`] = 12 limbs of the KZG pairing
-/// accumulator **followed by** the inner SNARK's own public inputs, which
-/// are re-exposed via [`AggregationCircuit::expose_previous_instances`].
-///
-/// Exposing the inner PIs is what lets the bridge contract read the
-/// withdrawal fields (`tokenId`, `amount`, …, `finalRoot`) out of the
-/// aggregated proof. The earlier M2 spike skipped this; doing it correctly
-/// is the core M5 task. The key was ordering: `expose_previous_instances`
-/// must be called **before** `calculate_params` on the keygen circuit (so
-/// the auto-tuner sizes `num_advice` to include the extra instance copy
-/// constraints — that is what previously triggered `NOT ENOUGH ADVICE
-/// COLUMNS`) and **again** on the prover circuit before proving. With this
-/// ordering the K=21 auto-tune fits without a hand-pinned `num_advice`.
-///
-/// `Universality::Full` means the verifying key of the inner SNARK is
-/// loaded as a witness — same aggregator PK can verify proofs from
-/// different inner circuits / BK-set rotations without keygen.
-pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::Result<Snark> {
+/// Generate a SHPLONK SNARK proving `a * b == c` (M2 spike inner circuit).
+pub fn prove_inner(params: &ParamsKZG<Bn256>, a: Fr, b: Fr) -> anyhow::Result<Snark> {
+    prove_inner_multiply(params, K_INNER_SPIKE, LOOKUP_BITS_INNER_SPIKE, a, b)
+}
+
+/// Generate inner multiply SNARK with explicit `k_inner`.
+pub fn prove_inner_multiply(
+    params: &ParamsKZG<Bn256>,
+    k_inner: u32,
+    lookup_bits: usize,
+    a: Fr,
+    b: Fr,
+) -> anyhow::Result<Snark> {
+    let (builder, _) = build_multiply_circuit(false, k_inner as usize, lookup_bits, a, b);
+    let pk = gen_pk(params, &builder, None);
+    Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
+}
+
+/// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the aggregator.
+pub fn aggregate_inner(
+    agg_params: &ParamsKZG<Bn256>,
+    inner_snark: Snark,
+    config: AggregatorConfig,
+) -> anyhow::Result<Snark> {
     let agg_config = AggregationConfigParams {
-        degree: K_OUTER,
-        lookup_bits: LOOKUP_BITS_OUTER,
+        degree: config.k_outer,
+        lookup_bits: config.lookup_bits_outer,
         ..Default::default()
     };
 
@@ -123,15 +166,10 @@ pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::R
         agg_config,
         agg_params,
         vec![inner_snark.clone()],
-        VerifierUniversality::Full,
+        config.universality,
     );
-    // Re-expose the inner SNARK's public inputs (false = inner is NOT itself
-    // an aggregation, so keep all of its instances). Must precede
-    // `calculate_params` so the advice count covers the added copy
-    // constraints.
     keygen_circuit.expose_previous_instances(false);
     let calculated = keygen_circuit.calculate_params(Some(10));
-    // ORDER MATTERS: gen_pk first (populates break-points), break_points after.
     let pk = gen_pk(agg_params, &keygen_circuit, None);
     let break_points = keygen_circuit.break_points();
     drop(keygen_circuit);
@@ -141,42 +179,33 @@ pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::R
         calculated,
         agg_params,
         vec![inner_snark],
-        VerifierUniversality::Full,
+        config.universality,
     );
     prover_circuit.expose_previous_instances(false);
     let prover_circuit = prover_circuit.use_break_points(break_points);
 
-    let agg_snark = gen_snark_shplonk(agg_params, &pk, prover_circuit, None::<&Path>);
-    Ok(agg_snark)
+    Ok(gen_snark_shplonk(agg_params, &pk, prover_circuit, None::<&Path>))
 }
 
-/// Generate the Yul EVM verifier for an [`AggregationCircuit`] proved
-/// against `agg_params`.
+/// Back-compat wrapper using default outer config.
+pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::Result<Snark> {
+    aggregate_inner(agg_params, inner_snark, AggregatorConfig::default())
+}
+
+/// Generate Yul EVM verifier for an aggregator keyed on `inner_snark`.
 ///
-/// Writes the human-readable Solidity source to `output_path` (`.sol`) and
-/// the raw deployment bytecode (what `gen_evm_verifier_shplonk` returns)
-/// to a sibling `.bin` file with the same stem. The bytecode is the
-/// **deployable** payload — the Solidity source is provided for review
-/// only; Foundry's solc + optimizer strips the inline-assembly fallback
-/// down to a 67-byte stub (this is why the legacy
-/// `test/halo2_verifier_bytecode.bin` exists; we follow the same
-/// convention).
-///
-/// Returns the deployment bytecode size in bytes (the EIP-170 24 576-byte
-/// runtime limit guard belongs in the caller).
-///
-/// `inner_snark` is used only to seed the aggregator's keygen — it is not
-/// consumed by the verifier. In production we'd cache the aggregator's
-/// VK on disk just like `deposit-prover/src/aggregation.rs` does, but for
-/// the spike a fresh keygen each call keeps the flow obvious.
+/// Writes `.sol` + sibling `.bin`. When `enforce_eip170` is true, fails if bytecode
+/// exceeds 24 576 bytes.
 pub fn generate_yul_verifier(
     agg_params: &ParamsKZG<Bn256>,
     inner_snark: &Snark,
     output_path: &Path,
+    config: AggregatorConfig,
+    enforce_eip170: bool,
 ) -> anyhow::Result<usize> {
     let agg_config = AggregationConfigParams {
-        degree: K_OUTER,
-        lookup_bits: LOOKUP_BITS_OUTER,
+        degree: config.k_outer,
+        lookup_bits: config.lookup_bits_outer,
         ..Default::default()
     };
     let mut keygen_circuit = AggregationCircuit::new::<SHPLONK>(
@@ -184,18 +213,12 @@ pub fn generate_yul_verifier(
         agg_config,
         agg_params,
         vec![inner_snark.clone()],
-        VerifierUniversality::Full,
+        config.universality,
     );
-    // Expose the inner PIs (see `aggregate`) so the generated verifier's
-    // calldata layout is `[acc(12) ‖ inner_pi(n)] ‖ proof` — matching the
-    // proof produced by `aggregate`.
     keygen_circuit.expose_previous_instances(false);
     let _ = keygen_circuit.calculate_params(Some(10));
     let pk = gen_pk(agg_params, &keygen_circuit, None);
     let vk = pk.get_vk();
-
-    // Instance shape taken from the circuit itself, so it always matches the
-    // accumulator limbs PLUS the exposed inner public inputs.
     let num_instance = keygen_circuit.num_instance();
 
     let bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
@@ -205,12 +228,29 @@ pub fn generate_yul_verifier(
         Some(output_path),
     );
 
-    // Persist raw deployable bytecode next to the .sol source so the Foundry
-    // harness can `vm.readFileBinary` + create2 it without going through
-    // solc (which strips the inline-assembly verifier — see doc above).
     let bin_path = output_path.with_extension("bin");
     std::fs::write(&bin_path, &bytecode)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", bin_path.display()))?;
 
-    Ok(bytecode.len())
+    let size = if enforce_eip170 {
+        eip170::assert_eip170(&bytecode, &output_path.display().to_string())?
+    } else {
+        bytecode.len()
+    };
+    Ok(size)
+}
+
+/// Convenience: default config + EIP-170 gate enabled.
+pub fn generate_yul_verifier_gated(
+    agg_params: &ParamsKZG<Bn256>,
+    inner_snark: &Snark,
+    output_path: &Path,
+) -> anyhow::Result<usize> {
+    generate_yul_verifier(
+        agg_params,
+        inner_snark,
+        output_path,
+        AggregatorConfig::default(),
+        true,
+    )
 }

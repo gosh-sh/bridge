@@ -27,8 +27,9 @@ use serde::Deserialize;
 
 use crate::{
     error::RelayerError,
+    proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::{fr_hex_to_u256, GROTH16_PROOF_SIZE},
+    withdrawal::fr_hex_to_u256,
 };
 
 /// Asynchronous source of AN block payloads.
@@ -41,6 +42,21 @@ use crate::{
 #[async_trait]
 pub trait BlockSource: Send + Sync {
     async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError>;
+
+    /// Acknowledge that `seq_no` was accepted on-chain. Default is a no-op
+    /// (file-driven sources have no driver cursor). [`crate::live_source::LiveBlockSource`]
+    /// advances `LiveProverDriver` and persists prover state.
+    async fn ack_last_bundle(&self, _seq_no: u64) -> Result<(), RelayerError> {
+        Ok(())
+    }
+
+    /// Optional post-ack snapshot of the driver's `BridgeState` for
+    /// history-consistency checks. Default: no snapshot (skip Check A).
+    async fn driver_snapshot(
+        &self,
+    ) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+        None
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -129,19 +145,78 @@ struct Groth16OutputJson {
 }
 
 impl FixturesBlockSource {
-    /// Build from a directory layout produced by Phase 4.1:
+    /// Prefer R15 SHPLONK calldata from `verifiers_dir` when both
+    /// `*_calldata.bin` files exist; otherwise fall back to legacy Groth16
+    /// JSON under `fixtures_dir`.
+    pub fn open(
+        fixtures_dir: impl AsRef<Path>,
+        verifiers_dir: Option<impl AsRef<Path>>,
+    ) -> Result<Self, RelayerError> {
+        let fixtures_dir = fixtures_dir.as_ref();
+        if let Some(vdir) = verifiers_dir {
+            return Self::from_hybrid_dirs(fixtures_dir, vdir);
+        }
+        if let Some(root) = fixtures_dir.ancestors().find(|p| {
+            p.join("contracts/ethereum/verifiers/PrimaryAggregatorVerifier_calldata.bin")
+                .is_file()
+        }) {
+            let vdir = root.join("contracts/ethereum/verifiers");
+            if vdir
+                .join("LayerHashesAggregatorVerifier_calldata.bin")
+                .is_file()
+            {
+                return Self::from_hybrid_dirs(fixtures_dir, &vdir);
+            }
+        }
+        Self::from_dir(fixtures_dir)
+    }
+
+    /// Build from Phase 4.1 bound artefacts + R15 SHPLONK calldata under
+    /// `verifiers_dir` (hybrid production layout).
+    pub fn from_hybrid_dirs(
+        bound_dir: impl AsRef<Path>,
+        verifiers_dir: impl AsRef<Path>,
+    ) -> Result<Self, RelayerError> {
+        let bound_dir = bound_dir.as_ref();
+        let verifiers_dir = verifiers_dir.as_ref();
+        let scenario_path = bound_dir.join("bound_scenario.json");
+        let scenario: BoundScenarioJson = serde_json::from_slice(&std::fs::read(&scenario_path)?)?;
+
+        let primary_calldata = verifiers_dir.join("PrimaryAggregatorVerifier_calldata.bin");
+        let lh_calldata = verifiers_dir.join("LayerHashesAggregatorVerifier_calldata.bin");
+
+        let primary_proof_bytes = if primary_calldata.is_file() {
+            std::fs::read(&primary_calldata)?
+        } else {
+            let primary_proof_path = bound_dir.join("primary").join("groth16_output.json");
+            let primary_out: Groth16OutputJson =
+                serde_json::from_slice(&std::fs::read(&primary_proof_path)?)?;
+            decode_hex(&primary_out.proof)?
+        };
+
+        let lh_proof_bytes = if lh_calldata.is_file() {
+            std::fs::read(&lh_calldata)?
+        } else {
+            let lh_proof_path = bound_dir.join("layer-hashes").join("groth16_output.json");
+            let lh_out: Groth16OutputJson =
+                serde_json::from_slice(&std::fs::read(&lh_proof_path)?)?;
+            decode_hex(&lh_out.proof)?
+        };
+
+        proof_validation::validate_attestation_proof(
+            FinalizationType::Primary,
+            &primary_proof_bytes,
+        )?;
+        proof_validation::validate_layer_hashes_proof(&lh_proof_bytes)?;
+
+        Self::block_from_scenario(scenario, primary_proof_bytes, lh_proof_bytes)
+    }
+
+    /// Legacy layout: `primary/groth16_output.json` +
+    /// `layer-hashes/groth16_output.json`.
     ///
-    /// ```text
-    ///   <dir>/bound_scenario.json
-    ///   <dir>/primary/groth16_output.json
-    ///   <dir>/layer-hashes/groth16_output.json
-    /// ```
-    ///
-    /// The scenario is unconditionally tagged as Primary (the Phase 4.1
-    /// fixture binary doesn't generate a Fallback wrap). For Fallback
-    /// smoke testing, swap the proof file at runtime via
-    /// `with_fin_type` / `with_attestation_proof` — kept off for now to
-    /// avoid cargo-culting an API ahead of Phase 5.2.
+    /// The scenario is tagged Primary (Phase 4.1 fixture). For hybrid R15
+    /// deploys use [`Self::open`] or [`Self::from_hybrid_dirs`].
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self, RelayerError> {
         let dir = dir.as_ref();
         let scenario_path = dir.join("bound_scenario.json");
@@ -156,6 +231,14 @@ impl FixturesBlockSource {
         let primary_proof_bytes = decode_hex(&primary_out.proof)?;
         let lh_proof_bytes = decode_hex(&lh_out.proof)?;
 
+        Self::block_from_scenario(scenario, primary_proof_bytes, lh_proof_bytes)
+    }
+
+    fn block_from_scenario(
+        scenario: BoundScenarioJson,
+        primary_proof_bytes: Vec<u8>,
+        lh_proof_bytes: Vec<u8>,
+    ) -> Result<Self, RelayerError> {
         if scenario.num_layers == 0 || scenario.num_layers > MAX_LAYER_HASHES {
             return Err(RelayerError::other(format!(
                 "fixture num_layers {} out of 1..=10",
@@ -262,6 +345,39 @@ impl ProverProofsBlockSource {
         self.proofs_dir.join(format!("proof_{seq_no}.json"))
     }
 
+    /// Find the smallest bundle seqno `N >= target` for which a
+    /// `proof_<N>.json` file exists.
+    ///
+    /// AN key-block proofs are emitted only for key blocks (512-spaced on
+    /// shellnet), so a naive `proof_{last_seen+1}.json` lookup never
+    /// advances. Falling forward to the next available proof is correct
+    /// for the Circuit-1A `last_seen` binding: each key-block proof bakes
+    /// the *previous* key block as its `last_seen`, which is exactly the
+    /// bridge's current `storedLastSeenBlockSeqNo`, so consecutive proofs
+    /// chain cleanly regardless of the numeric gap.
+    fn next_available_seq_no(&self, target: u64) -> Option<u64> {
+        let entries = std::fs::read_dir(&self.proofs_dir).ok()?;
+        let mut best: Option<u64> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(rest) = name.strip_prefix("proof_") else {
+                continue;
+            };
+            let Some(num) = rest.strip_suffix(".json") else {
+                continue;
+            };
+            // `proof_event_*.json` / non-numeric names parse-fail and skip.
+            let Ok(seq) = num.parse::<u64>() else {
+                continue;
+            };
+            if seq >= target && best.map(|b| seq < b).unwrap_or(true) {
+                best = Some(seq);
+            }
+        }
+        best
+    }
+
     fn result_path(&self, seq_no: u64) -> PathBuf {
         self.proofs_dir.join(format!("result_{seq_no}.json"))
     }
@@ -304,8 +420,18 @@ impl ProverProofsBlockSource {
             )));
         }
 
-        let primary = decode_proof_bytes(&req.primary_proof_hex, self.accept_halo2_proofs)?;
-        let layer = decode_proof_bytes(&req.layer_proof_hex, self.accept_halo2_proofs)?;
+        let primary = proof_validation::decode_verify_block_proof(
+            &req.primary_proof_hex,
+            FinalizationType::Primary,
+            false,
+            self.accept_halo2_proofs,
+        )?;
+        let layer = proof_validation::decode_verify_block_proof(
+            &req.layer_proof_hex,
+            FinalizationType::Primary,
+            true,
+            self.accept_halo2_proofs,
+        )?;
 
         if req.num_layers == 0 || req.num_layers as usize > MAX_LAYER_HASHES {
             return Err(RelayerError::other(format!(
@@ -341,29 +467,198 @@ impl ProverProofsBlockSource {
 #[async_trait]
 impl BlockSource for ProverProofsBlockSource {
     async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError> {
-        self.load_block(target_seq_no)
+        // Fall forward to the next available key-block proof `>= target`.
+        // Exact-hit (`proof_{target}.json`) is a special case of this.
+        match self.next_available_seq_no(target_seq_no) {
+            Some(seq_no) => self.load_block(seq_no),
+            None => Ok(None),
+        }
     }
 }
 
-fn decode_proof_bytes(hex_str: &str, accept_halo2: bool) -> Result<Vec<u8>, RelayerError> {
-    let raw = decode_hex(hex_str)?;
-    if raw.len() == GROTH16_PROOF_SIZE {
-        return Ok(raw);
-    }
-    if accept_halo2 {
-        return Ok(raw);
-    }
-    Err(RelayerError::other(format!(
-        "proof is {} bytes; Ethereum `verifyBlock` expects {}-byte Groth16 proofs. Wrap the \
-         partner Halo2 export via gnark-wrappers/circuit-{{1a,2}} before submitting.",
-        raw.len(),
-        GROTH16_PROOF_SIZE
-    )))
+// ─────────────────────────────────────────────────────────────────────
+// Partner prover bk-update bundles — `proofs/bkupd_<seqno>.json`
+// ─────────────────────────────────────────────────────────────────────
+
+/// JSON written by `acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-daemon`
+/// (`bridge-prover-lib::ipc::BkUpdateRequest`).
+#[derive(Deserialize)]
+struct PartnerBkUpdateRequest {
+    #[serde(default, rename = "schema_version")]
+    _schema_version: u32,
+    block_seq_no: u32,
+    #[serde(default, rename = "block_height")]
+    _block_height: u64,
+    #[serde(default, rename = "last_seen_bk_update_seqno")]
+    _last_seen_bk_update_seqno: u32,
+    block_id_hex: String,
+    #[serde(default, rename = "block_id_hash_hex")]
+    _block_id_hash_hex: String,
+    #[serde(default = "default_attestation_primary")]
+    attestation_circuit: String,
+    primary_proof_hex: String,
+    old_bk_set_poseidon_hash_hex: String,
+    new_bk_set_poseidon_hash_hex: String,
+    merkle_sibling_h0_hex: String,
+    merkle_sibling_h23_hex: String,
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────
+fn default_attestation_primary() -> String {
+    "primary".to_string()
+}
+
+/// Reads BK-set rotation bundles from the partner prover's `proofs/` directory.
+pub struct BkUpdateProofsSource {
+    proofs_dir: PathBuf,
+    skip_verified_gate: bool,
+    accept_halo2_proofs: bool,
+}
+
+impl BkUpdateProofsSource {
+    pub fn new(proofs_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            proofs_dir: proofs_dir.into(),
+            skip_verified_gate: false,
+            accept_halo2_proofs: false,
+        }
+    }
+
+    pub fn skip_verified_gate(mut self, skip: bool) -> Self {
+        self.skip_verified_gate = skip;
+        self
+    }
+
+    pub fn accept_halo2_proofs(mut self, accept: bool) -> Self {
+        self.accept_halo2_proofs = accept;
+        self
+    }
+
+    fn bkupd_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir.join(format!("bkupd_{seq_no:06}.json"))
+    }
+
+    fn bkupd_result_path(&self, seq_no: u64) -> PathBuf {
+        self.proofs_dir
+            .join(format!("bkupd_result_{seq_no:06}.json"))
+    }
+
+    /// Load a single bk-update bundle keyed by `block_seq_no`.
+    pub fn load_update(
+        &self,
+        seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        let path = self.bkupd_path(seq_no);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        if !self.skip_verified_gate {
+            let result_path = self.bkupd_result_path(seq_no);
+            if result_path.exists() {
+                let result: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&result_path)?)?;
+                let verify_ok = result
+                    .get("verify_ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !verify_ok {
+                    return Err(RelayerError::other(format!(
+                        "bkupd_result_{seq_no:06}.json exists but verify_ok=false"
+                    )));
+                }
+            }
+        }
+
+        let req: PartnerBkUpdateRequest = serde_json::from_slice(&std::fs::read(&path)?)
+            .map_err(|e| RelayerError::other(format!("parse {}: {e}", path.display())))?;
+
+        if req.block_seq_no as u64 != seq_no {
+            return Err(RelayerError::other(format!(
+                "bkupd file seq mismatch: path={seq_no}, json={}",
+                req.block_seq_no
+            )));
+        }
+
+        let fin_type = match req.attestation_circuit.as_str() {
+            "primary" | "Primary" | "1a" => FinalizationType::Primary,
+            "fallback" | "Fallback" | "1b" => FinalizationType::Fallback,
+            other => {
+                return Err(RelayerError::other(format!(
+                    "unknown attestation_circuit {other:?}; expected primary|fallback"
+                )));
+            },
+        };
+
+        let attestation_proof = proof_validation::decode_verify_block_proof(
+            &req.primary_proof_hex,
+            fin_type,
+            false,
+            self.accept_halo2_proofs,
+        )?;
+
+        fn hex32_to_array(hex_str: &str, label: &str) -> Result<[u8; 32], RelayerError> {
+            let raw = decode_hex(hex_str)?;
+            if raw.len() != 32 {
+                return Err(RelayerError::other(format!(
+                    "{label} must be 32 bytes, got {}",
+                    raw.len()
+                )));
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&raw);
+            Ok(out)
+        }
+
+        Ok(Some(crate::types::BkSetUpdateData {
+            fin_type,
+            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            block_seq_no: seq_no,
+            old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
+            new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
+            sibling_h0: hex32_to_array(&req.merkle_sibling_h0_hex, "merkle_sibling_h0")?,
+            sibling_h23: hex32_to_array(&req.merkle_sibling_h23_hex, "merkle_sibling_h23")?,
+            attestation_proof: Bytes::from(attestation_proof),
+        }))
+    }
+}
+
+#[async_trait]
+pub trait BkUpdateSource: Send + Sync {
+    async fn fetch_bk_update(
+        &self,
+        target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError>;
+
+    /// Acknowledge that a BK-set update was applied on-chain. Default no-op.
+    async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BkUpdateSource for BkUpdateProofsSource {
+    async fn fetch_bk_update(
+        &self,
+        target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        self.load_update(target_seq_no)
+    }
+}
+
+/// Always-empty BK-update source for file-driven / unit-test relayers that
+/// only exercise the verifyBlock lane.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyBkUpdateSource;
+
+#[async_trait]
+impl BkUpdateSource for EmptyBkUpdateSource {
+    async fn fetch_bk_update(
+        &self,
+        _target_seq_no: u64,
+    ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError> {
+        Ok(None)
+    }
+}
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, RelayerError> {
     let trimmed = s.trim();
@@ -493,5 +788,90 @@ mod tests {
         let b = src.fetch(512).await.unwrap().unwrap();
         assert_eq!(b.block_seq_no, 512);
         assert_eq!(b.attestation_proof.len(), 256);
+    }
+
+    fn write_bundle_proof(dir: &std::path::Path, seq_no: u64) {
+        let proof = serde_json::json!({
+            "schema_version": 2,
+            "block_seq_no": seq_no,
+            "block_height": seq_no,
+            "last_seen_block_seqno": 0,
+            "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
+            "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
+            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
+            "num_layers": 1,
+            "layer_hash_frs_hex": vec![
+                "0500000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+            "prev_max_level_layer_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        std::fs::write(
+            dir.join(format!("proof_{seq_no}.json")),
+            serde_json::to_string(&proof).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prover_proofs_source_falls_forward_to_next_key_block() {
+        // AN emits key-block proofs 512-spaced; the relayer's cursor
+        // (`last_seen + 1`) never lands exactly on a proof file, so the
+        // source must fall forward to the next available one.
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle_proof(dir.path(), 1_084_416);
+        write_bundle_proof(dir.path(), 1_084_928);
+
+        let src = ProverProofsBlockSource::new(dir.path()).skip_verified_gate(true);
+
+        // Cursor just past a previous key block → next available is 1_084_416.
+        let b = src.fetch(1_083_905).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_416);
+
+        // Cursor just past 1_084_416 → next available is 1_084_928.
+        let b = src.fetch(1_084_417).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_928);
+
+        // Exact hit still works.
+        let b = src.fetch(1_084_416).await.unwrap().unwrap();
+        assert_eq!(b.block_seq_no, 1_084_416);
+
+        // Past the last proof → nothing available.
+        assert!(src.fetch(1_084_929).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn bkupd_source_parses_partner_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let proof_hex = "0x".to_string() + &"ab".repeat(256);
+        let bkupd = serde_json::json!({
+            "schema_version": 4,
+            "block_seq_no": 24,
+            "attestation_circuit": "primary",
+            "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+            "primary_proof_hex": proof_hex,
+            "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "merkle_sibling_h0_hex": "0x".to_string() + &"aa".repeat(32),
+            "merkle_sibling_h23_hex": "0x".to_string() + &"bb".repeat(32),
+        });
+        std::fs::write(
+            dir.path().join("bkupd_000024.json"),
+            serde_json::to_string(&bkupd).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("bkupd_result_000024.json"),
+            r#"{"block_seq_no":24,"verify_ok":true}"#,
+        )
+        .unwrap();
+
+        let src = BkUpdateProofsSource::new(dir.path());
+        let u = src.fetch_bk_update(24).await.unwrap().unwrap();
+        assert_eq!(u.block_seq_no, 24);
+        assert_eq!(u.fin_type, FinalizationType::Primary);
+        assert_eq!(u.attestation_proof.len(), 256);
+        assert_eq!(u.sibling_h0[0], 0xaa);
     }
 }

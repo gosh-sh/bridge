@@ -184,7 +184,9 @@ impl SubprocessProofGenerator {
         if let Ok(abs) = config.deposit_prover_dir.canonicalize() {
             config.deposit_prover_dir = abs;
         }
-        Self { config }
+        Self {
+            config,
+        }
     }
 
     fn release_example_bin(&self, example: &str) -> Option<PathBuf> {

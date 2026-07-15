@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::RelayerError;
+use crate::{bridge::BridgeOnChainState, error::RelayerError};
 
 /// Locally-persisted relayer progress.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,6 +36,18 @@ pub struct RelayerState {
     /// Consecutive non-success outcomes for the current target. Reset
     /// to 0 on every accepted block.
     pub attempts_since_progress: u32,
+
+    /// Last BK-update seqno applied on-chain.
+    #[serde(default)]
+    pub last_bk_update_processed_seqno: Option<u64>,
+    #[serde(default)]
+    pub last_bk_update_attempt_seqno: Option<u64>,
+    #[serde(default)]
+    pub bk_update_attempts_since_progress: u32,
+
+    /// Last observed on-chain global history data (Check B baseline).
+    #[serde(default)]
+    pub last_observed_on_chain: Option<BridgeOnChainState>,
 }
 
 impl RelayerState {
@@ -75,6 +87,18 @@ impl RelayerState {
     pub fn record_attempt(&mut self, seqno: u64) {
         self.last_attempt_seqno = Some(seqno);
         self.attempts_since_progress = self.attempts_since_progress.saturating_add(1);
+    }
+
+    pub fn record_bk_update_progress(&mut self, seqno: u64) {
+        self.last_bk_update_processed_seqno = Some(seqno);
+        self.last_bk_update_attempt_seqno = Some(seqno);
+        self.bk_update_attempts_since_progress = 0;
+    }
+
+    pub fn record_bk_update_attempt(&mut self, seqno: u64) {
+        self.last_bk_update_attempt_seqno = Some(seqno);
+        self.bk_update_attempts_since_progress =
+            self.bk_update_attempts_since_progress.saturating_add(1);
     }
 }
 
@@ -122,5 +146,20 @@ mod tests {
         assert_eq!(s.attempts_since_progress, 3);
         s.record_progress(3);
         assert_eq!(s.attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn old_json_loads_with_new_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_processed_seqno":1,"last_attempt_seqno":1,"attempts_since_progress":0}"#,
+        )
+        .unwrap();
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.last_processed_seqno, Some(1));
+        assert!(loaded.last_observed_on_chain.is_none());
+        assert_eq!(loaded.last_bk_update_processed_seqno, None);
     }
 }

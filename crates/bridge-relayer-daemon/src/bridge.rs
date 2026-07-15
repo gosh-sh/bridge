@@ -42,7 +42,7 @@ use async_trait::async_trait;
 
 use crate::{
     error::RelayerError,
-    types::{AnBlockData, MAX_LAYER_HASHES},
+    types::{AnBlockData, BkSetUpdateData, MAX_LAYER_HASHES},
     withdrawal::WithdrawalPublicInputs,
 };
 
@@ -52,11 +52,14 @@ use crate::{
 
 /// Snapshot of the on-chain anchors the relayer reads before deciding
 /// what to submit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BridgeOnChainState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: U256,
     pub prev_max_level_layer_hash: U256,
+    /// Highest seq_no applied via `applyBkSetUpdate` (0 if none yet).
+    #[serde(default)]
+    pub last_bk_set_update_seq_no: u64,
 }
 
 /// Outcome of `submit_block`. The relayer interprets this to decide
@@ -95,6 +98,10 @@ pub enum DryRunOutcome {
 pub trait BridgeClient: Send + Sync {
     async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError>;
     async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError>;
+    async fn submit_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -118,6 +125,7 @@ pub struct MockBridgeClient {
 struct MockBridgeInner {
     last_seen_block_seq_no: u64,
     bk_set_commitment: U256,
+    last_bk_set_update_seq_no: u64,
     num_layers: u8,
     layer_hashes: [U256; MAX_LAYER_HASHES],
     prev_max_level_layer_hash: U256,
@@ -137,6 +145,7 @@ impl MockBridgeClient {
             inner: Mutex::new(MockBridgeInner {
                 last_seen_block_seq_no: 0,
                 bk_set_commitment,
+                last_bk_set_update_seq_no: 0,
                 num_layers: 0,
                 layer_hashes: [U256::ZERO; MAX_LAYER_HASHES],
                 prev_max_level_layer_hash,
@@ -169,6 +178,7 @@ impl BridgeClient for MockBridgeClient {
             last_seen_block_seq_no: inner.last_seen_block_seq_no,
             bk_set_commitment: inner.bk_set_commitment,
             prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+            last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
         })
     }
 
@@ -222,6 +232,41 @@ impl BridgeClient for MockBridgeClient {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
                 prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+                last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
+            },
+            tx_hash: None,
+        })
+    }
+
+    async fn submit_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned lock");
+        if update.old_commitment_l2 != inner.bk_set_commitment {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "BkSetCommitmentMismatch(supplied={:#x}, stored={:#x})",
+                    update.old_commitment_l2, inner.bk_set_commitment
+                ),
+            });
+        }
+        if update.block_seq_no <= inner.last_bk_set_update_seq_no {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "BkSetUpdateSeqNoNotMonotonic(supplied={}, stored={})",
+                    update.block_seq_no, inner.last_bk_set_update_seq_no
+                ),
+            });
+        }
+        inner.bk_set_commitment = update.new_commitment_l3;
+        inner.last_bk_set_update_seq_no = update.block_seq_no;
+        Ok(BkSetUpdateSubmitOutcome::Applied {
+            new_state: BridgeOnChainState {
+                last_seen_block_seq_no: inner.last_seen_block_seq_no,
+                bk_set_commitment: inner.bk_set_commitment,
+                prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+                last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
             tx_hash: None,
         })
@@ -256,8 +301,20 @@ mod sol_bindings {
                 uint256 prevMaxLevelLayerHash
             ) external;
 
+            function applyBkSetUpdate(
+                uint8 finType,
+                bytes calldata attestationProof,
+                uint256 blockId,
+                uint64 blockSeqNo,
+                uint256 oldCommitmentL2,
+                uint256 newCommitmentL3,
+                bytes32 siblingH0,
+                bytes32 siblingH23
+            ) external;
+
             function storedLastSeenBlockSeqNo() external view returns (uint64);
             function storedBkSetCommitment() external view returns (uint256);
+            function storedLastBkSetUpdateSeqNo() external view returns (uint64);
             function storedPrevMaxLevelLayerHash() external view returns (uint256);
 
             struct WithdrawalPublicInputs {
@@ -401,6 +458,77 @@ where
         }
     }
 
+    /// Submit `applyBkSetUpdate` for a BK-set rotation bundle (`bkupd_*.json`).
+    pub async fn submit_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        self.send_bk_set_update(update).await
+    }
+
+    async fn send_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        let call = self.contract.applyBkSetUpdate(
+            update.fin_type.tag(),
+            update.attestation_proof.clone(),
+            update.block_id,
+            update.block_seq_no,
+            update.old_commitment_l2,
+            update.new_commitment_l3,
+            B256::from(update.sibling_h0),
+            B256::from(update.sibling_h23),
+        );
+        match call.send().await {
+            Ok(pending) => match pending.get_receipt().await {
+                Ok(receipt) => {
+                    // Inline read (avoid calling BridgeClient::read_state from
+                    // an inherent method — that needs `P: 'static`).
+                    let last = self
+                        .contract
+                        .storedLastSeenBlockSeqNo()
+                        .call()
+                        .await
+                        .map_err(map_contract_err)?;
+                    let bk = self
+                        .contract
+                        .storedBkSetCommitment()
+                        .call()
+                        .await
+                        .map_err(map_contract_err)?;
+                    let anchor = self
+                        .contract
+                        .storedPrevMaxLevelLayerHash()
+                        .call()
+                        .await
+                        .map_err(map_contract_err)?;
+                    let last_bk = self
+                        .contract
+                        .storedLastBkSetUpdateSeqNo()
+                        .call()
+                        .await
+                        .map_err(map_contract_err)?;
+                    Ok(BkSetUpdateSubmitOutcome::Applied {
+                        new_state: BridgeOnChainState {
+                            last_seen_block_seq_no: last,
+                            bk_set_commitment: bk,
+                            prev_max_level_layer_hash: anchor,
+                            last_bk_set_update_seq_no: last_bk,
+                        },
+                        tx_hash: Some(receipt.transaction_hash()),
+                    })
+                }
+                Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!("tx confirmation error: {e}"),
+                }),
+            },
+            Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!("applyBkSetUpdate send failed: {e}"),
+            }),
+        }
+    }
+
     pub async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
         self.contract
             .isNullifierUsed(nullifier)
@@ -414,6 +542,16 @@ where
 #[derive(Clone, Debug)]
 pub enum WithdrawSubmitOutcome {
     Paid { tx_hash: B256 },
+    Reverted { reason: String },
+}
+
+/// Outcome of [`EthBridgeClient::submit_bk_set_update`].
+#[derive(Clone, Debug)]
+pub enum BkSetUpdateSubmitOutcome {
+    Applied {
+        new_state: BridgeOnChainState,
+        tx_hash: Option<B256>,
+    },
     Reverted { reason: String },
 }
 
@@ -459,10 +597,17 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
+        let last_bk = self
+            .contract
+            .storedLastBkSetUpdateSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk,
             prev_max_level_layer_hash: anchor,
+            last_bk_set_update_seq_no: last_bk,
         })
     }
 
@@ -503,6 +648,13 @@ where
             new_state,
             tx_hash,
         })
+    }
+
+    async fn submit_bk_set_update(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        self.send_bk_set_update(update).await
     }
 }
 

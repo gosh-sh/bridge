@@ -1,11 +1,50 @@
 # Shellnet `USDCBridge` deposit VK redeploy — partner checklist
 
-> **Status (2026-06-08).** EVM→AN deposit relayer is deployed on
-> `ubuntu@ursus-tools.dev` and can prove Sepolia deposits end-to-end. The
-> **shellnet `USDCBridge` contract still embeds the wrong VK** (Circuit 1B
-> fallback, 4 public inputs). Real deposit proofs fail at `compute phase` /
-> `ZKHALO2VERIFYWITHVK`. This checklist is the minimum partner work to unblock
-> the live Sepolia→shellnet E2E.
+> # ⚠️ VK UPDATE REQUIRED (2026-06-25)
+> The currently deployed `USDCBridge` embeds VK `147efe14…` — keygen'd from
+> **synthetic 1-node fixtures** (`[10,10]`), which **cannot verify real deposits**
+> (3 logs, ≥3 MPT nodes). The deposit circuit had a witness-dependent VK bug
+> (per-deposit `contract_address` leaked into the fixed column + unpinned keccak
+> capacity); both are now fixed in `deposit-prover` (no `axiom-eth` change). The
+> **new production VkBlob is the `20cf9018…` family** (cap=64, k=18, 11 PI, v2
+> RLC), which is **witness-independent** — one embedded VK verifies every real
+> deposit regardless of bridge address or MPT depth. Embed **`20cf9018…`** (NOT
+> `147efe14…`, NOT `b1e5ce0b…`) and redeploy, then finalise `depositId=1`.
+> Root cause + validation: `docs/deposit_vk_witness_independence.md`.
+
+
+> **⚠️ STATUS UPDATE (2026-06-23): the redeploy described below is DONE.**
+> We verified it ourselves (no partner ping needed) by comparing the deployed
+> shellnet account code-hash against the compiled `.tvc` on `gosh-sh/acki-nacki`
+> branch `poseidon_dex`:
+>
+> - Deployed bridge (`0:1a1a…1a1a`, dapp_id `00…00`) code-hash =
+>   `b38e934a3c1e23d42c158dd9dbdb785a3739a449d6059646c391f4d93898e154` —
+>   **byte-identical** to `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`
+>   (branch `poseidon_dex`, updated 2026-06-22).
+> - That contract embeds the **correct 11-PI deposit VkBlob** (`circuit_shape=1`
+>   RLC, 3597 B, SHA-256 `147efe1425709ade5792469a87eaebc6f0c97dd105e5a4f1633ce7ed1068abaf`)
+>   — identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin`.
+> - The **ABI changed** to `finalizeDeposit(bytes proof, bytes publicInputs)`
+>   (the contract parses every field out of the operand; §3/§5 below describing a
+>   12-arg signature and `_buildPublicInputs` are SUPERSEDED). Canonical ABI:
+>   `scripts/ursus/USDCBridge.abi.json`. The relayer submitter forwards the two
+>   raw blobs (`crates/deposit-relayer-daemon/src/submitter.rs`).
+> - Canonical branches: contract = `poseidon_dex` (NOT the never-existent
+>   `halo2_circuit_with_vk`); `tvm_vm` opcode = `tvm-sdk` branch
+>   `full_dex_and_bridge_test_with_final_halo2_circuit`.
+>
+> **Remaining unknown:** live `finalize-one` against shellnet currently returns
+> `Message queue is full. Please try to send the message later.` on every attempt
+> (node-side queue backpressure, returned *before* execution — not a VK/opcode
+> rejection), so opcode-level ACCEPT is not yet confirmed. Retry when shellnet is
+> less congested, or raise the bridge-thread queue state with AN ops. The bridge
+> account shows `last_trans_lt = 0x0` (no transaction has ever executed on it).
+>
+> ---
+>
+> *Original checklist below (pre-redeploy, 2026-06-08) retained for the artefact
+> generation + acceptance-criteria recipes, which are still valid.*
 
 ## 1. Executive summary
 
@@ -257,9 +296,35 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | Step | Command / check | Expected |
 |------|-----------------|----------|
 | 1 | Sepolia `Deposit` already mined (`depositId=0`) | Event visible |
-| 2 | `deposit-relayer prove-one --deposit-id 0` on ursus | `proof` + `public_inputs` written |
-| 3 | `deposit-relayer daemon` (no `--dry-run`) | `finalizeDeposit` **exit_code 0** |
+| 2a | **Production path:** `BRIDGE_DEPLOY_BLOCK=11025180 deposit-relayer prove-one --deposit-id 0 …` on Ursus | `eth_getLogs` discovery → `proof` + `public_inputs` written |
+| 2b | **Operator fast path** (known tx; skips `getLogs`): `--tx-hash 0x9ac34…2adf --log-index 2` | Same operands; use for reprove only, not sign-off |
+| 3 | `deposit-relayer daemon` (no `--dry-run`, `BRIDGE_DEPLOY_BLOCK` set) | `finalizeDeposit` **exit_code 0** |
 | 4 | Query recipient ECC balance on shellnet | +1 USDC (token id `3`) |
+
+**prove-one examples** (env from `scripts/ursus/deposit-relayer.env.example`):
+
+```bash
+# Production discovery (acceptance gate — needs production/paid Sepolia RPC)
+BRIDGE_DEPLOY_BLOCK=11025180 AN_DAPP_ID=0x1a1a1a1a1a \
+  deposit-relayer prove-one \
+  --rpc-url "$RPC_URL" \
+  --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+  --deposit-id 0 \
+  --deposit-prover-dir "$DEPOSIT_PROVER_DIR" \
+  --out-dir /tmp/deposit-prove-one-0
+
+# Operator fast path (rate-limited RPCs; does not exercise getLogs)
+AN_DAPP_ID=0x1a1a1a1a1a deposit-relayer prove-one \
+  --rpc-url "$RPC_URL" \
+  --bridge-address 0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
+  --deposit-id 0 \
+  --tx-hash 0x9ac341666f70d55780f289187c11a0537a52f7381e5c4b1ebe6f671314552adf \
+  --log-index 2 \
+  --deposit-prover-dir "$DEPOSIT_PROVER_DIR" \
+  --out-dir /tmp/deposit-prove-one-0
+```
+
+**Offline regression** (no RPC): `cargo test -p deposit-relayer-daemon --test log_index_mapping` — Sepolia fixture asserts block `logIndex` 271 → receipt position 2.
 
 **Pending test vectors:**
 
@@ -271,10 +336,14 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | AN recipient | `beef504cfac7c8a8728d9c0a00deca826fd4e8168e5cc9c5f49fd066b5e2a5b1` |
 | `AN_DAPP_ID` | `0x1a1a1a1a1a` |
 | `AN_TOKEN_ID` | `3` |
+| `BRIDGE_DEPLOY_BLOCK` | `11025180` (shellnet Sepolia bridge; required for production `eth_getLogs` scans) |
+| Receipt log index | `2` (receipt-local; block-global `logIndex` = 271) |
 
 ## 9. Acceptance criteria (sign-off)
 
 - [ ] `verify_opcode_triple` **ACCEPTED** on chain-SRS artefacts (§4 step 4).
+- [ ] `cargo test -p deposit-relayer-daemon --test log_index_mapping` green (block → receipt log-index mapping).
+- [ ] `live_log_discovery` green on Ursus/production RPC with `BRIDGE_DEPLOY_BLOCK` set (production `eth_getLogs` path).
 - [ ] On-node executor test green (`round_trip_deposit_rlc_real_proof_returns_true` or
       equivalent on the shellnet node build).
 - [ ] `USDCBridge.tvc` embeds the new VkBlob (SHA-256 recorded).
@@ -295,6 +364,8 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 | `deposit-prover/examples/export_blake2b_proof.rs` | Blake2b proof producer |
 | `deposit-prover/examples/verify_opcode_triple.rs` | Pre-flight opcode check |
 | `crates/deposit-relayer-daemon/src/types.rs` | `NUM_PUBLIC_INPUTS = 11` |
+| `crates/deposit-relayer-daemon/src/source.rs` | `EthLogSource`, `receipt_log_index_from_block_log`, `BRIDGE_DEPLOY_BLOCK` |
+| `scripts/ursus/deposit-relayer.env.example` | Ursus env template (`BRIDGE_DEPLOY_BLOCK`, shellnet GraphQL) |
 | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` | Shellnet finalize harness (fallback fixtures today) |
 
 ## 11. Open questions for partner
@@ -308,7 +379,37 @@ but with **deposit** fixtures instead of `circuit_1b_fallback/`:
 4. **Gosh halo2 fork:** merge `bump-halo2-lib-v0.4.1` to public `main` so consumers
    can drop local `[patch]` paths.
 
+## 12. Build provenance — ready-to-deploy artifacts (2026-06-26)
+
+The new `USDCBridge` is **already compiled and toolchain-validated**; only the
+shellnet deploy (partner-gated) + live finalize remain.
+
+| Item | Value |
+|------|-------|
+| New embedded VkBlob | `20cf9018647357576e50b3a42fbc3bb0970ca4fa6eb62090f66c8d1cbe647a39` (3982 B, k=18, 11 PI, v2 RLC, `num_advice_per_phase=[13,10]`, `shard_caps=[64]`, chain SRS) |
+| New `USDCBridge.tvc` **code_hash** | `818fb76dd5569d4a15063ceba178d135b491e5e1776e6a8999179a33a6a9abc4` |
+| New `.tvc` file SHA-256 | `c75161364162a08dc5f3ab3eca3c79161fc6d651ea313919c673c7940b57dfb4` (7408 B) |
+| Currently-deployed code_hash (old `147efe14` VK) | `b38e934a3c1e23d42c158dd9dbdb785a3739a449d6059646c391f4d93898e154` |
+| Artifacts (this repo's sibling) | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.{tvc,abi.json}` (ABI unchanged — `finalizeDeposit` signature identical) |
+| Compiler | `sold 0.79.3+commit.c7725d64.Linux.g++` — `TVM-Solidity-Compiler` branch **`origin/halo2_verify`** @ `c7725d64` (has the `gosh.zkhalo2VerifyWithVK` builtin) |
+| Compile cmd | `sold --tvm-version gosh --base-path . exchange/USDCBridge.sol -o exchange/` (run from `contracts/` root) |
+
+**Toolchain validation (byte-for-byte):** compiling the *unmodified* old source
+(`147efe14` VK) with this exact `sold` reproduces the **deployed** code_hash
+`b38e934a…898e154` exactly. Therefore this `sold` matches the partner's original
+build, and the new `20cf9018` `.tvc` differs from the deployed contract **only** by
+the VK swap (code_hash `818fb76d…`). See `docs/deposit_vk_witness_independence.md`
+for why the VK changed (it is now witness-independent — one embedded VK verifies
+every real deposit).
+
+**Remaining (partner-gated):** the bridge account `0:1a1a…1a1a` was deployed via
+shellnet **zerostate** (no executed tx), so swapping its code requires partner
+shellnet-ops (regenerate zerostate / in-place upgrade with the deploy authority).
+Once redeployed, the already-mined Sepolia `depositId=1` proof (8800 B, verifies
+against `20cf9018` via `verify_opcode_triple` — ACCEPTED) can be finalised live.
+
 ---
 
 *Prepared from ursus shellnet E2E session 2026-06-07/08. Relayer host:
-`ubuntu@ursus-tools.dev:/home/ubuntu/bridge-e2e/`.*
+`ubuntu@ursus-tools.dev:/home/ubuntu/bridge-e2e/`. Build provenance §12 added
+2026-06-26 (n14 `sold` build + toolchain validation).*

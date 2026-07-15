@@ -56,12 +56,15 @@
 
 use std::{
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use axiom_eth::{
     rlc::{circuit::RlcCircuitParams, virtual_region::RlcThreadBreakPoints},
-    utils::eth_circuit::create_circuit,
+    utils::{
+        component::promise_loader::single::PromiseLoaderParams,
+        eth_circuit::{create_circuit, EthCircuitImpl},
+    },
 };
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
@@ -78,6 +81,25 @@ use crate::{
     circuit_v2::DepositEventCircuitV2,
     types::{DepositProofInput, DepositProofOutput},
 };
+
+/// Pinned keccak promise-loader capacity.
+///
+/// Pinning the keccak promise-loader capacity to a fixed worst case makes the
+/// deposit verifying key **independent of MPT proof depth / receipt size** (the
+/// `num_advice_per_phase` no longer drifts with the used keccak capacity).
+/// Together with dropping the `contract_address` in-circuit constant
+/// (`circuit_v2.rs`, which had leaked the per-deposit address into the fixed
+/// column), this makes the VK fully **witness-independent** — a single embedded
+/// VK verifies every real deposit regardless of bridge address or MPT depth.
+/// No axiom-eth fork change is needed (upstream). See
+/// `docs/deposit_vk_witness_independence.md`.
+///
+/// Must be `>=` every real deposit's `used_capacity` (measured: 1-node = 11,
+/// 3-node = 21, ~5/node; the `max_depth = 10` worst case is ~55-60) and must
+/// match the value used by `examples/export_vk_blob.rs` /
+/// `examples/export_deposit_proof_set.rs`, otherwise generated proofs will not
+/// verify against the embedded VK (over-capacity fails safe at prove time).
+pub const FIXED_KECCAK_CAPACITY: usize = 64;
 
 /// Configuration for the deposit proof circuit
 #[derive(Debug, Clone)]
@@ -216,6 +238,9 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 /// - The file is corrupted or invalid
 /// - The file format is incorrect
 pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, String> {
+    // Hermez / Polygon Powers of Tau only (`data/kzg_params_{k}.srs`).
+    // Matches `tvm-sdk` `feature/hermez-kzg-resurrection` embedded
+    // `KZG_S_G2_BYTES` (`928fafb3…`). No chain-ceremony fallback.
     let params_path = format!("data/kzg_params_{}.srs", k);
 
     // Try to load existing parameters
@@ -251,7 +276,7 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
         }
     }
 
-    // Parameters not found - try to use degree 18 parameters (downward compatible)
+    // Parameters not found - try Hermez degree 18 (downward compatible).
     if k < 18 {
         let fallback_path = "data/kzg_params_18.srs";
         if Path::new(fallback_path).exists() {
@@ -321,6 +346,38 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
 /// # Returns
 ///
 /// Proving key for the circuit
+/// Short hex fingerprint of the circuit shape that determines the verifying key
+/// (and hence whether a cached proving key is reusable): degree, advice/lookup
+/// column counts, RLC columns, and the pinned keccak capacity.
+fn pk_fingerprint(rlc: &RlcCircuitParams, keccak_capacity: usize) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rlc.base.k.hash(&mut h);
+    rlc.base.num_advice_per_phase.hash(&mut h);
+    rlc.base.num_lookup_advice_per_phase.hash(&mut h);
+    rlc.base.num_fixed.hash(&mut h);
+    rlc.base.lookup_bits.hash(&mut h);
+    rlc.base.num_instance_columns.hash(&mut h);
+    rlc.num_rlc_columns.hash(&mut h);
+    keccak_capacity.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Insert a shape fingerprint before the file extension, e.g.
+/// `data/deposit_prover_k18.pk` + `a1b2…` -> `data/deposit_prover_k18.a1b2….pk`.
+fn pk_path_with_fingerprint(pk_path: &Path, fingerprint: &str) -> std::path::PathBuf {
+    let stem = pk_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("deposit_prover");
+    let ext = pk_path.extension().and_then(|s| s.to_str()).unwrap_or("pk");
+    let file = format!("{stem}.{fingerprint}.{ext}");
+    match pk_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(file),
+        _ => std::path::PathBuf::from(file),
+    }
+}
+
 pub fn get_or_create_proving_key(
     params: &ParamsKZG<Bn256>,
     input: &DepositProofInput,
@@ -332,43 +389,95 @@ pub fn get_or_create_proving_key(
     // because the circuit structure depends on the data layout
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
     let circuit_params = get_default_params();
-    let mut circuit = create_circuit(
+    // Pin the keccak promise-loader capacity so the VK is witness-independent
+    // (see `FIXED_KECCAK_CAPACITY`). The same pin is applied to the prover
+    // circuit below and to the VK exporter, so all three agree.
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let mut circuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Keygen,
-        circuit_params.clone(),
         circuit_input,
+        circuit_params.clone(),
+        fixed_keccak,
     );
 
     // CRITICAL: Fulfill Keccak promises and calculate params BEFORE keygen
     // This is required for axiom-eth circuits even in Keygen mode
     // See: axiom-eth/src/storage/tests.rs for reference
-    circuit.mock_fulfill_keccak_promises(None);
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
     circuit.calculate_params();
+    // calculate_params() clears the witnesses; re-fulfill before keygen.
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
-    // Generate or load proving key
-    let pk = if pk_path.exists() {
-        println!("Found existing proving key at {:?}, loading...", pk_path);
-        gen_pk(params, &circuit, Some(pk_path))
+    // Derive a SHAPE-FINGERPRINTED proving-key path so a stale on-disk PK from a
+    // different circuit shape (e.g. a previous `num_advice_per_phase` /
+    // keccak-capacity / circuit version) is NEVER silently loaded. `gen_pk`
+    // deserialises whatever PK file it finds without checking it matches the
+    // current circuit — loading a stale PK would make the relayer emit proofs
+    // against the WRONG verifying key, which then fail on-chain
+    // (`ZKHALO2VERIFYWITHVK`). Keying the filename on the calculated shape means
+    // a shape change produces a fresh keygen instead of a silent mismatch.
+    let shape = pk_fingerprint(&circuit.params().rlc, FIXED_KECCAK_CAPACITY);
+    let pk_path = pk_path_with_fingerprint(pk_path, &shape);
+    let pk_path = pk_path.as_path();
+
+    // Break points are computed by halo2 DURING keygen synthesis and stored on
+    // the (RefCell) builder. `gen_pk(.., Some(path))` only *deserialises* an
+    // existing PK — it does NOT synthesise — so on the load path
+    // `circuit.break_points()` comes back EMPTY and the prover later panics with
+    // "break points not set". They are therefore persisted to a sidecar next to
+    // the PK during keygen and reloaded on a cache hit, so proving reuses the PK
+    // with NO keygen (the operator fast path). `RlcThreadBreakPoints` is serde.
+    let bp_path = PathBuf::from(format!("{}.bp.json", pk_path.display()));
+
+    // A PK generated before this sidecar existed would be loaded WITHOUT its
+    // break points (unrecoverable without a synthesis). Remove such a legacy PK
+    // so both the PK and its sidecar are regenerated together, once.
+    if pk_path.exists() && !bp_path.exists() {
+        println!(
+            "Proving key {:?} present but break-points sidecar missing; \
+             regenerating both (one-time)...",
+            pk_path
+        );
+        let _ = fs::remove_file(pk_path);
+    }
+
+    let load_from_cache = pk_path.exists() && bp_path.exists();
+    if load_from_cache {
+        println!(
+            "Found existing proving key + break points, loading (no keygen): {:?}",
+            pk_path
+        );
     } else {
         println!("Generating proving key (this may take a few minutes)...");
-        use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
-        let vk = keygen_vk(params, &circuit)
-            .map_err(|e| format!("Failed to generate verifying key: {:?}", e))?;
-        keygen_pk(params, vk, &circuit)
-            .map_err(|e| format!("Failed to generate proving key: {:?}", e))?
-    };
+    }
+
+    let pk = gen_pk(params, &circuit, Some(pk_path));
     println!("Proving key ready");
 
-    // Get the calculated circuit params from the keygen circuit
-    // These are needed to create the prover circuit with the same structure
+    // Get the calculated circuit params from the keygen circuit. Available after
+    // `calculate_params()` above on both the load and generate paths.
     use halo2_base::halo2_proofs::plonk::Circuit;
     let calculated_params = circuit.params().rlc;
 
-    // Get break points from the keygen circuit
-    // These are needed when creating the prover circuit
-    // NOTE: We always get break points from the keygen circuit we just created,
-    // even if the proving key was loaded from disk. This is because break points
-    // are deterministic and depend only on the circuit structure.
-    let break_points = circuit.break_points();
+    let break_points = if load_from_cache {
+        // Load path: the circuit was NOT synthesised (gen_pk only deserialised
+        // the PK), so read the break points from the sidecar instead of the
+        // (empty) builder.
+        let bytes = fs::read(&bp_path)
+            .map_err(|e| format!("reading break-points sidecar {:?}: {e}", bp_path))?;
+        serde_json::from_slice::<RlcThreadBreakPoints>(&bytes)
+            .map_err(|e| format!("deserialising break-points sidecar {:?}: {e}", bp_path))?
+    } else {
+        // Generate path: gen_pk synthesised the circuit, so the builder now holds
+        // the break points. Persist them next to the PK for future cache hits.
+        let bp = circuit.break_points();
+        let bytes = serde_json::to_vec(&bp)
+            .map_err(|e| format!("serialising break points: {e}"))?;
+        fs::write(&bp_path, &bytes)
+            .map_err(|e| format!("writing break-points sidecar {:?}: {e}", bp_path))?;
+        println!("Wrote break-points sidecar -> {:?}", bp_path);
+        bp
+    };
 
     Ok((pk, calculated_params, break_points))
 }
@@ -412,13 +521,19 @@ pub fn generate_proof(
     // 3. Create prover circuit with real input, calculated params, and break points
     // IMPORTANT: Use the circuit_params from keygen, not get_default_params()
     let circuit_input = DepositEventCircuitV2::new(input.clone(), config);
-    let circuit = create_circuit(CircuitBuilderStage::Prover, circuit_params, circuit_input)
-        .use_break_points(break_points);
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let circuit = EthCircuitImpl::<Fr, _>::new_impl(
+        CircuitBuilderStage::Prover,
+        circuit_input,
+        circuit_params,
+        fixed_keccak,
+    )
+    .use_break_points(break_points);
 
     // CRITICAL: Fulfill Keccak promises AFTER setting break points
     // This is required for axiom-eth circuits in Prover mode
     // See: axiom-eth/src/storage/tests.rs for reference
-    circuit.mock_fulfill_keccak_promises(None);
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
     // 4. Generate SNARK proof
     println!("Generating SNARK proof...");

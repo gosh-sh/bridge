@@ -14,8 +14,9 @@ import "./ILayerHashesGroth16Verifier.sol";
 ///      `bridge_prover_orchestrator::layer_hashes_prover`) and forwards to the
 ///      generated `verifyProof`.
 ///
-///      Mirrors `PrimaryVerifier.sol` / `FallbackVerifier.sol` structure but
-///      uses a 14-element input array instead of 4.
+///      Mirrors `PrimaryVerifier.sol` structure (the other retained gnark
+///      Groth16 test-coverage adapter) but uses a 14-element input array
+///      instead of 4.
 contract LayerHashesMovementVerifier is ILayerHashesMovementVerifier {
     ILayerHashesGroth16Verifier public immutable groth16Verifier;
 

@@ -1,6 +1,8 @@
 # Shellnet AN→ETH relayer wiring — Sepolia `verifyBlock` + `withdrawByProof`
 
-> **Status (2026-06-10).** Full shellnet AN→ETH E2E **green** on Sepolia.
+> **⚠ Integration-only crypto (2026-06-08).** Sepolia/shellnet deployments use **identity-stub Groth16 wrappers** for circuits 1A/1B/2/4 until R15 SHPLONK aggregator verifiers land. Do **not** treat on-chain `verifyBlock` / `withdrawByProof` as production-safe. See `docs/testnet_security_status.md`.
+
+> **Status (2026-06-10).** Full shellnet AN→ETH E2E **green** on Sepolia (integration path; stub verifiers).
 >
 > | Deploy | Address | Role |
 > |--------|---------|------|

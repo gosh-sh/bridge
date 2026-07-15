@@ -35,8 +35,9 @@ use std::fs;
 use axiom_eth::{
     mpt::MPTChip,
     rlc::circuit::builder::RlcCircuitBuilder,
-    utils::eth_circuit::{
-        create_circuit, EthCircuitImpl, EthCircuitInstructions, EthCircuitParams,
+    utils::{
+        component::promise_loader::single::PromiseLoaderParams,
+        eth_circuit::{create_circuit, EthCircuitImpl, EthCircuitInstructions, EthCircuitParams},
     },
     Field,
 };
@@ -56,6 +57,11 @@ use halo2_base::{
     },
 };
 use halo2_tvm_bundle::{CircuitShape, VkBlob};
+
+/// Pinned keccak promise-loader capacity — makes the deposit VK
+/// witness-independent (one embedded VK verifies every deposit). MUST match the
+/// value used by the prover (`export_deposit_proof_set.rs` / `prover.rs`).
+const FIXED_KECCAK_CAPACITY: usize = 64;
 
 /// Minimal RLC + keccak shape stand-in — identical to the opcode-side reader's
 /// `Noop`. `EthCircuitImpl::configure_with_params` is generic over the inner
@@ -123,13 +129,25 @@ fn main() -> anyhow::Result<()> {
     );
 
     // 1. Rebuild the keygen circuit exactly as the prover does.
+    // Pin the keccak promise-loader capacity so the VK is witness-INDEPENDENT
+    // (one embedded VK verifies every real deposit regardless of MPT proof
+    // depth). Together with dropping the `contract_address` in-circuit constant
+    // (circuit_v2.rs) this makes the VK fully witness-independent — no axiom-eth
+    // fork change is needed. See `docs/deposit_vk_witness_independence.md`.
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let circuit_input = DepositEventCircuitV2::new(input, &config);
     let rlc_params = get_default_params();
-    let mut circuit = create_circuit(CircuitBuilderStage::Keygen, rlc_params, circuit_input);
-    circuit.mock_fulfill_keccak_promises(None);
+    let mut circuit = EthCircuitImpl::<Fr, _>::new_impl(
+        CircuitBuilderStage::Keygen,
+        circuit_input,
+        rlc_params,
+        fixed_keccak,
+    );
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
 
     // 2. Canonical EthCircuitParams (what the opcode needs to read the VK back).
     let eth_params: EthCircuitParams = circuit.calculate_params();
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
     let k = eth_params.rlc.base.k as u32;
     println!(
         "Calculated EthCircuitParams: k={} num_rlc_columns={}",

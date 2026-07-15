@@ -12,8 +12,10 @@ import "./IPrimaryGroth16Verifier.sol";
 ///      proof. This adapter re-assembles the 4 public inputs in the order the
 ///      gnark circuit expects (matches `bridge_prover_lib::ProofOutput`'s
 ///      instance ordering) and forwards to the generated `verifyProof`.
-///      Mirrors `FallbackVerifier.sol` exactly — only the verifier address is
-///      different.
+///      Mirrors `LayerHashesMovementVerifier.sol` (the other retained gnark
+///      Groth16 test-coverage adapter) — only the verifier address and the
+///      public-input count differ. (The 1B Groth16 fallback adapter was retired
+///      when Circuit 1B moved to the R15 SHPLONK aggregator.)
 contract PrimaryVerifier is IPrimaryVerifier {
     IPrimaryGroth16Verifier public immutable groth16Verifier;
 

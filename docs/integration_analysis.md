@@ -77,14 +77,16 @@ Oracle interface for trusted block hash sources:
 
 #### AN→ETH per-circuit verifiers (Phase 4)
 
-- `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` — Circuit 1A adapter (Primary attestation, ≥ 2/3 BLS quorum), 4 public inputs.
-- `IFallbackVerifier.sol` / `FallbackVerifier.sol` — Circuit 1B adapter (Fallback attestation, > 1/2 split), 4 public inputs.
-- `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` — Circuit 2 adapter, 14 public inputs.
-- `PrimaryGroth16VerifierGenerated.sol`, `FallbackGroth16VerifierGenerated.sol`, `LayerHashesGroth16VerifierGenerated.sol` — gnark-generated, do not edit manually.
+**Production (since 2026-06-22) wires all three circuits to the R15 SHPLONK aggregator adapters** — the gnark Groth16 path below is retained for 1A/2 test coverage only:
+
+- `IFallbackVerifier.sol` / `FallbackAggregatorVerifier.sol` — Circuit 1B production adapter (Fallback attestation, > 1/2 split), 4 inner public inputs; wraps `verifiers/FallbackAggregatorVerifier.bin` (inner `K=21` so the Yul fits EIP-170). `PrimaryAggregatorVerifier.sol` / `LayerHashesAggregatorVerifier.sol` are the sibling SHPLONK adapters for 1A / 2.
+- `IPrimaryVerifier.sol` / `PrimaryVerifier.sol` — Circuit 1A **gnark Groth16** adapter (≥ 2/3 BLS quorum), 4 public inputs — retained for test coverage only.
+- `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` — Circuit 2 **gnark Groth16** adapter, 14 public inputs — retained for test coverage only.
+- `PrimaryGroth16VerifierGenerated.sol`, `LayerHashesGroth16VerifierGenerated.sol` — gnark-generated (1A / 2), do not edit manually. The 1B `FallbackGroth16VerifierGenerated.sol` + `FallbackVerifier.sol` were deleted when Circuit 1B moved to the SHPLONK aggregator.
 
 #### Blake2b Verification Path
 
-For Acki Nacki → Ethereum proofs in the bare Halo2 form (used by tests and as a reference; production goes through the gnark wrappers above):
+For Acki Nacki → Ethereum proofs in the bare Halo2 form (used by tests and as a reference; production goes through the SHPLONK aggregator adapters above):
 
 - `Blake2bHalo2Verifier.sol` — Halo2 verifier using EIP-152 Blake2b precompile.
 - `Blake2bTranscript.sol` — Fiat-Shamir transcript matching `halo2_proofs::Blake2bWrite`.

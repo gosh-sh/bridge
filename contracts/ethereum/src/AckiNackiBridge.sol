@@ -27,7 +27,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
 ///      Acki Nacki side (`block_seq_no`, `bk_set_poseidon`, layer-hash roots,
 ///      chain anchor). `verifyBlock` advances the commitment after verifying
-///      a tuple of two cross-circuit-bound Halo2/Groth16 proofs:
+///      a tuple of two cross-circuit-bound Halo2 SHPLONK aggregator proofs:
 ///        - **proof1**: Circuit 1A (Primary) or 1B (Fallback) attestation, BLS-aggregated.
 ///        - **proof2**: Circuit 2 (Layer hashes movement), Poseidon-Merkle-anchored.
 ///      Both proofs share a common `block_id` and `bk_set_poseidon` by
@@ -37,8 +37,9 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      AN→ETH event verification + payout (Circuit 4, single-final-root):
 ///      every successful `verifyBlock` also records the new top-of-chain
 ///      anchor in a set of `knownAnchors`. `withdrawByProof` consumes that
-///      set plus a Circuit 4 (`bridge-event-prove-circuit`) Groth16 proof
-///      whose 10 public inputs include a single `finalRoot`. The bridge
+///      set plus a Circuit 4 (`bridge-event-prove-circuit`) SHPLONK
+///      aggregator proof whose 10 public inputs include a single
+///      `finalRoot`. The bridge
 ///      checks `finalRoot ∈ knownAnchors` off-circuit (this contract) — the
 ///      circuit only proves that the event's hash chain extends *into*
 ///      `finalRoot` via a dense-chain extension. The proof binds the
@@ -66,6 +67,12 @@ contract AckiNackiBridge {
     /// @notice Maximum number of layer-hash slots per block (matches
     ///         partner Circuit 2's MAX_LAYERS).
     uint256 public constant MAX_LAYER_HASHES = 10;
+
+    /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
+    uint256 public constant HISTORY_PROOF_WINDOW = 128;
+
+    /// @notice L1-only anchor layer for Circuit 4 until `anchorLayer` PI lands.
+    uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;
 
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
@@ -138,23 +145,34 @@ contract AckiNackiBridge {
     // Storage: AN→ETH state (Phase 4 verifyBlock)
     // ---------------------------------------------------------------------
 
-    /// @notice Circuit 1A (Primary attestation) verifier (Groth16 adapter).
+    /// @notice Circuit 1A (Primary attestation) verifier, consumed through the
+    ///         `IPrimaryVerifier` interface (production backend: Halo2 SHPLONK
+    ///         aggregator adapter `PrimaryAggregatorVerifier`).
     ///         May be `address(0)` if AN→ETH verification is disabled at
     ///         deployment; in that case `verifyBlock` reverts with `VerifyBlockDisabled`.
     IPrimaryVerifier public immutable primaryVerifier;
 
-    /// @notice Circuit 1B (Fallback attestation) verifier (Groth16 adapter).
+    /// @notice Circuit 1B (Fallback attestation) verifier, consumed through the
+    ///         `IFallbackVerifier` interface (production backend: Halo2 SHPLONK
+    ///         aggregator adapter `FallbackAggregatorVerifier`).
     ///         May be `address(0)` (see `primaryVerifier`).
     IFallbackVerifier public immutable fallbackVerifier;
 
-    /// @notice Circuit 2 (Layer hashes movement) verifier (Groth16 adapter).
+    /// @notice Circuit 2 (Layer hashes movement) verifier, consumed through the
+    ///         `ILayerHashesMovementVerifier` interface (production backend:
+    ///         Halo2 SHPLONK aggregator adapter `LayerHashesAggregatorVerifier`).
     ///         May be `address(0)` (see `primaryVerifier`).
     ILayerHashesMovementVerifier public immutable layerHashesVerifier;
 
     /// @notice Active Acki Nacki BK-set Poseidon commitment.
-    ///         Updated only by future Circuit 3 (BK-set rotation, Phase 1.C);
+    ///         Updated by `applyBkSetUpdate` after attestation + Merkle checks;
     ///         seeded from the constructor's `_genesisBkSetCommitment`.
     uint256 public storedBkSetCommitment;
+
+    /// @notice Highest AN block sequence number whose BK-set rotation has been
+    ///         applied on-chain via `applyBkSetUpdate`. Independent from
+    ///         `storedLastSeenBlockSeqNo` (layer-bundle cursor).
+    uint64 public storedLastBkSetUpdateSeqNo;
 
     /// @notice Highest AN block sequence number whose attestation has been
     ///         verified on-chain. Strictly monotonic via `verifyBlock`.
@@ -168,18 +186,25 @@ contract AckiNackiBridge {
     ///         layer-hashes proof. Indices `>= storedNumLayers` are zero.
     uint256[MAX_LAYER_HASHES] public storedLayerHashes;
 
-    /// @notice Chain anchor — the Poseidon root of the previous chain that
-    ///         the next layer-hashes proof must extend. Equal to the
-    ///         `(storedNumLayers - 1)`-th entry of `storedLayerHashes` after
-    ///         each successful `verifyBlock` (the new top of the chain).
+    /// @notice The most recent block's max-level layer hash, plus the genesis
+    ///         bootstrap seed before any block is verified (set at
+    ///         construction).
+    /// @dev NOT the anchor source for the next `verifyBlock` — the chain anchor
+    ///      is derived per layer from `_layerWindows` via `_expectedPrevAnchor`
+    ///      (see AB-Q4). This field is read only as the genesis seed while no
+    ///      layer is populated; afterwards it is informational (mirrored by the
+    ///      `expectedPrevAnchor(numLayers)` view for relayers). Kept for
+    ///      backward-compatible reads.
     uint256 public storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
     // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
     // ---------------------------------------------------------------------
 
-    /// @notice Circuit 4 verifier (Groth16 adapter; 10-input single-final-root
-    ///         layout). May be `address(0)` if AN→ETH payout verification is
+    /// @notice Circuit 4 verifier, consumed through the
+    ///         `IBridgeWithdrawalVerifier` interface (10-input single-final-root
+    ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
+    ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
     ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock`.
     IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier;
@@ -214,29 +239,21 @@ contract AckiNackiBridge {
     ///         the mapping to reject *re-submission* of an already-paid proof.
     mapping(bytes32 => bool) private _nullifiers;
 
-    /// @notice Set of anchors (Fr) observed via successful `verifyBlock`
-    ///         calls. Each `withdrawByProof` proof exposes one `finalRoot`
-    ///         (slot [9]) and the bridge requires `_knownAnchors[finalRoot]`
-    ///         to be `true` before accepting the proof.
+    /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
+    ///         Each `withdrawByProof` checks `finalRoot` against the L1
+    ///         window (`WITHDRAW_ANCHOR_LAYER`) — matching the partner
+    ///         event-witness builder (`layer_idx = 0`).
     ///
-    /// @dev This replaces the legacy `_layerWindow[100]` ring-buffer +
-    ///      private-index design from Circuit 4 v1/v2. v3
-    ///      (`circuit4-single-final-root`) exposes the anchor as a single
-    ///      public input rather than as a 1-of-N private selection, so the
-    ///      on-chain check is a flat set membership.
-    ///
-    ///      Anchors stay valid forever once recorded — partner's dense-chain
-    ///      construction makes each `finalRoot` unique per (layer, block-
-    ///      height range), and a withdrawal proven against any *previously
-    ///      observed* `finalRoot` is by definition a valid withdrawal that
-    ///      we missed paying out earlier (re-org-resistant by virtue of AN's
-    ///      finalization model).
-    mapping(uint256 => bool) private _knownAnchors;
+    /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
+    struct HistoryWindow {
+        uint256[HISTORY_PROOF_WINDOW] data;
+        uint64[HISTORY_PROOF_WINDOW] heights;
+        uint16 dataLen;
+        uint16 writeCursor;
+        uint64 lastHeight;
+    }
 
-    /// @notice Monotonic counter of distinct anchors recorded by
-    ///         `verifyBlock` calls (never reset; useful for off-chain
-    ///         tooling to detect new state).
-    uint256 public anchorsRecorded;
+    mapping(uint8 => HistoryWindow) private _layerWindows;
 
     // ---------------------------------------------------------------------
     // Events
@@ -282,11 +299,17 @@ contract AckiNackiBridge {
         uint8 numLayers
     );
 
-    /// @notice Emitted whenever a new top-of-chain anchor is recorded by a
-    ///         successful `verifyBlock` call. `anchor` is the new
-    ///         `storedPrevMaxLevelLayerHash`; `totalAnchors` is the new
-    ///         value of `anchorsRecorded` (monotonic, never resets).
-    event AnchorRecorded(uint256 indexed anchor, uint256 totalAnchors);
+    /// @notice Emitted whenever a layer anchor is appended by `verifyBlock`.
+    ///         Carries the per-layer `(layer, hashValue, blockHeight)` so an
+    ///         indexer can reconstruct each layer's rolling window (spec §8.3).
+    event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
+
+    /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
+    event BkSetUpdated(
+        uint256 indexed oldCommitment,
+        uint256 indexed newCommitment,
+        uint64 indexed blockSeqNo
+    );
 
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
     ///         single-final-root layout). A verified ZK proof releases
@@ -349,6 +372,12 @@ contract AckiNackiBridge {
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
 
+    // applyBkSetUpdate errors
+    error BkUpdateDisabled();
+    error StaleBkSetCommitment(uint256 supplied, uint256 stored);
+    error BkUpdateSeqNoNotMonotonic(uint64 supplied, uint64 stored);
+    error BkUpdateMerkleMismatch(uint256 computedRoot, uint256 blockId);
+
     // withdrawByProof (Circuit 4, single-final-root) errors
     error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
@@ -362,6 +391,8 @@ contract AckiNackiBridge {
     ///         for the matching `verifyBlock` to land), or the anchor is
     ///         forged.
     error UnknownAnchor(uint256 finalRoot);
+    error LayerOutOfRange(uint8 layer);
+    error NonMonotonicLayerHeight(uint64 supplied, uint64 last);
     /// @notice Withdrawal verifier was wired but the AN-side
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
@@ -575,13 +606,14 @@ contract AckiNackiBridge {
     /// function relies on the ABI passing a single value to both verifiers).
     ///
     /// @dev Permissionless — anyone can submit; the contract only mutates state
-    ///      after both gnark Groth16 verifiers report success and every cross-
-    ///      circuit / monotonicity / chain-anchor invariant holds.
+    ///      after both verifiers (Halo2 SHPLONK aggregator adapters in
+    ///      production) report success and every cross-circuit / monotonicity /
+    ///      chain-anchor invariant holds.
     ///
     /// Invariants enforced (revert-on-violation):
     ///   - `bkSetCommitment == storedBkSetCommitment`           (BK-set anchor; rotated only by Phase 1.C Circuit 3 in future)
     ///   - `blockSeqNo > storedLastSeenBlockSeqNo`              (strictly monotonic)
-    ///   - `prevMaxLevelLayerHash == storedPrevMaxLevelLayerHash` (chain anchor — guards against fork & replay)
+    ///   - `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` (chain anchor — per-layer pick, guards against fork & replay)
     ///   - `1 <= numLayers <= MAX_LAYER_HASHES`                 (shape)
     ///   - `layerHashes[i] == 0` for `i >= numLayers`           (tail must be zero — defends against
     ///                                                            silent garbage in unused slots)
@@ -593,17 +625,24 @@ contract AckiNackiBridge {
     ///   - `storedNumLayers = numLayers`
     ///   - `storedLayerHashes[i] = layerHashes[i]` for all 0..MAX_LAYER_HASHES
     ///   - `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]`
-    ///     (the new top-of-chain layer becomes the anchor for the *next* call)
+    ///     (informational mirror; the *next* call's anchor is derived per-layer
+    ///     from the rolling windows via `_expectedPrevAnchor`)
+    ///   - each non-zero `layerHashes[i]` appended to its layer's rolling window
     ///
     /// @param finType            Primary or Fallback finalization path.
-    /// @param attestationProof   gnark Groth16 proof bytes for Circuit 1A or 1B (256 bytes).
-    /// @param layerHashesProof   gnark Groth16 proof bytes for Circuit 2 (256 bytes).
+    /// @param attestationProof   Proof bytes accepted by `IPrimaryVerifier` /
+    ///                           `IFallbackVerifier` for Circuit 1A or 1B
+    ///                           (Halo2 SHPLONK aggregator proof in production).
+    /// @param layerHashesProof   Proof bytes accepted by
+    ///                           `ILayerHashesMovementVerifier` for Circuit 2
+    ///                           (Halo2 SHPLONK aggregator proof in production).
     /// @param blockId            32-byte AN block identifier shared between both proofs.
     /// @param bkSetCommitment    Poseidon commitment to the active BK set; shared between both proofs.
     /// @param blockSeqNo         AN block sequence number being attested.
     /// @param numLayers          Number of active layer slots (1..=MAX_LAYER_HASHES).
     /// @param layerHashes        10 layer-hash field elements; tail (>= numLayers) must be zero.
-    /// @param prevMaxLevelLayerHash Chain anchor — must equal `storedPrevMaxLevelLayerHash`.
+    /// @param prevMaxLevelLayerHash Chain anchor — must equal `_expectedPrevAnchor(numLayers)`
+    ///                           (the per-layer pick; query the `expectedPrevAnchor` view).
     function verifyBlock(
         FinalizationType finType,
         bytes calldata attestationProof,
@@ -638,8 +677,14 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastSeenBlockSeqNo) {
             revert BlockSeqNoNotMonotonic(blockSeqNo, storedLastSeenBlockSeqNo);
         }
-        if (prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash) {
-            revert PrevAnchorMismatch(prevMaxLevelLayerHash, storedPrevMaxLevelLayerHash);
+        // Chain anchor — derived PER LAYER from the rolling windows, mirroring
+        // the partner prover's `BridgeState::prev_max_level_layer_hash_for`.
+        // A flat `layerHashes[numLayers - 1]` anchor diverges from the prover
+        // whenever `numLayers` *decreases* across consecutive key blocks, which
+        // would halt `verifyBlock` forever (AB-Q4). See `_expectedPrevAnchor`.
+        uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
+        if (prevMaxLevelLayerHash != expectedAnchor) {
+            revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
         }
 
         // ---- Crypto: verify both proofs. The shared (blockId, bkSetCommitment,
@@ -683,31 +728,204 @@ contract AckiNackiBridge {
         for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
             storedLayerHashes[i] = layerHashes[i];
         }
-        // The new top-of-chain becomes the anchor for the next call; keeps
-        // `storedPrevMaxLevelLayerHash` co-located with the canonical layer.
-        // Also push it into the Circuit 4 ring buffer (via a helper to keep
-        // this function's stack frame small enough to compile cleanly under
+        // Record this block's max-level layer hash. This is now informational
+        // only (the per-layer windows below are the anchor source — see
+        // `_expectedPrevAnchor` / AB-Q4); kept for backward-compatible reads.
+        // Then push each layer into its window (via a helper to keep this
+        // function's stack frame small enough to compile cleanly under
         // `forge coverage`, which runs without `--via-ir`).
         storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
-        _recordAnchor(layerHashes[numLayers - 1]);
+        _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
     }
 
-    /// @dev Record `anchor` in the `_knownAnchors` set and bump the
-    ///      monotonic `anchorsRecorded` counter. Extracted from
-    ///      `verifyBlock` so the latter compiles without `--via-ir`
-    ///      (needed for `forge coverage`). Cost: one SSTORE for the
-    ///      mapping (new key) and one for the counter. The same anchor
-    ///      may be recorded multiple times safely (re-write to true is a
-    ///      no-op in terms of correctness; the counter still bumps so
-    ///      off-chain tooling sees every `verifyBlock` event).
-    function _recordAnchor(uint256 anchor) internal {
-        _knownAnchors[anchor] = true;
-        unchecked {
-            anchorsRecorded = anchorsRecorded + 1;
+    /// @notice Apply an Acki Nacki BK-set rotation on Ethereum after verifying
+    ///         a Circuit 1A/1B attestation and an open SHA-256 Merkle binding
+    ///         `blockId == SHA256(SHA256(H0 ‖ SHA256(L2 ‖ L3)) ‖ H23)`.
+    ///
+    /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
+    ///      the full pubkey table stays off-chain (prover working set).
+    ///
+    /// @param finType Primary or Fallback attestation path for the update block.
+    /// @param attestationProof SHPLONK attestation proof bytes.
+    /// @param blockId Block identifier shared with the attestation public inputs.
+    /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
+    /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
+    /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
+    /// @param siblingH0 Merkle sibling at level 0 (from prover `bkupd_*.json`).
+    /// @param siblingH23 Merkle sibling combining levels 2–3.
+    function applyBkSetUpdate(
+        FinalizationType finType,
+        bytes calldata attestationProof,
+        uint256 blockId,
+        uint64 blockSeqNo,
+        uint256 oldCommitmentL2,
+        uint256 newCommitmentL3,
+        bytes32 siblingH0,
+        bytes32 siblingH23
+    ) external nonReentrant whenNotPaused {
+        if (
+            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
+        ) {
+            revert BkUpdateDisabled();
         }
-        emit AnchorRecorded(anchor, anchorsRecorded);
+
+        if (oldCommitmentL2 != storedBkSetCommitment) {
+            revert StaleBkSetCommitment(oldCommitmentL2, storedBkSetCommitment);
+        }
+        if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
+            revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
+        }
+
+        bool attOk;
+        if (finType == FinalizationType.Primary) {
+            attOk = primaryVerifier.verifyPrimaryAttestation(
+                attestationProof,
+                blockId,
+                oldCommitmentL2,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        } else {
+            attOk = fallbackVerifier.verifyFallbackAttestation(
+                attestationProof,
+                blockId,
+                oldCommitmentL2,
+                uint256(blockSeqNo),
+                uint256(storedLastSeenBlockSeqNo)
+            );
+        }
+        if (!attOk) revert AttestationProofRejected();
+
+        bytes32 h1 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
+        bytes32 h01 = sha256(abi.encodePacked(siblingH0, h1));
+        bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
+        if (uint256(root) != blockId) {
+            revert BkUpdateMerkleMismatch(uint256(root), blockId);
+        }
+
+        storedBkSetCommitment = newCommitmentL3;
+        storedLastBkSetUpdateSeqNo = blockSeqNo;
+
+        emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
+    }
+
+    /// @dev Append each non-zero layer hash from a successful `verifyBlock`
+    ///      into the per-layer rolling windows (spec §8.3–8.4).
+    function _appendLayerHashes(
+        uint8 numLayers,
+        uint256[MAX_LAYER_HASHES] calldata layerHashes,
+        uint64 blockHeight
+    ) internal {
+        for (uint8 L = 1; L <= numLayers; L++) {
+            uint256 hashValue = layerHashes[L - 1];
+            if (hashValue != 0) {
+                _appendLayer(L, hashValue, blockHeight);
+            }
+        }
+    }
+
+    /// @dev Append `hashValue` into layer `L`'s circular buffer.
+    function _appendLayer(uint8 layer, uint256 hashValue, uint64 blockHeight) internal {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            revert LayerOutOfRange(layer);
+        }
+        HistoryWindow storage w = _layerWindows[layer];
+        if (blockHeight < w.lastHeight) {
+            revert NonMonotonicLayerHeight(blockHeight, w.lastHeight);
+        }
+
+        w.data[w.writeCursor] = hashValue;
+        w.heights[w.writeCursor] = blockHeight;
+        w.writeCursor = uint16((uint256(w.writeCursor) + 1) % HISTORY_PROOF_WINDOW);
+        if (w.dataLen < HISTORY_PROOF_WINDOW) {
+            w.dataLen = w.dataLen + 1;
+        }
+        w.lastHeight = blockHeight;
+
+        emit LayerAnchorAppended(layer, hashValue, blockHeight);
+    }
+
+    /// @dev O(W) membership test against layer `L`'s window.
+    function _isKnownLayerAnchor(uint8 layer, uint256 hashValue) internal view returns (bool) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            return false;
+        }
+        HistoryWindow storage w = _layerWindows[layer];
+        uint256 n = w.dataLen;
+        for (uint256 i = 0; i < n; i++) {
+            if (w.data[i] == hashValue) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @dev Most-recently appended hash in layer `L`'s window, or 0 if empty.
+    function _layerLatest(uint8 layer) internal view returns (uint256) {
+        HistoryWindow storage w = _layerWindows[layer];
+        if (w.dataLen == 0) {
+            return 0;
+        }
+        uint256 lastIdx = (uint256(w.writeCursor) + HISTORY_PROOF_WINDOW - 1) % HISTORY_PROOF_WINDOW;
+        return w.data[lastIdx];
+    }
+
+    /// @dev Highest 1-indexed layer that currently holds at least one hash, or
+    ///      0 before any block is verified. Layers fill contiguously (layer L
+    ///      only materialises once layers 1..L-1 exist), so this equals the
+    ///      active-layer count `t` used by the partner prover's
+    ///      `BridgeState::num_active_layers`.
+    function _highestActiveLayer() internal view returns (uint8) {
+        uint8 hi = 0;
+        for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
+            if (_layerWindows[L].dataLen > 0) {
+                hi = L;
+            }
+        }
+        return hi;
+    }
+
+    /// @dev Expected chain anchor for an incoming block that carries
+    ///      `numLayers` non-empty layers — the exact mirror of the partner
+    ///      prover's `BridgeState::prev_max_level_layer_hash_for`
+    ///      (`bridge-prover-lib/src/bridge_state.rs`):
+    ///        * `t = _highestActiveLayer()` (active-layer count);
+    ///        * before any block (`t == 0`): the genesis seed
+    ///          (`storedPrevMaxLevelLayerHash`, set at construction);
+    ///        * otherwise `pick = min(numLayers, t)` and the anchor is the
+    ///          latest hash of layer `pick`.
+    ///      This is the AB-Q4 fix: a flat `layerHashes[numLayers - 1]` anchor
+    ///      diverged from the prover whenever `numLayers` *decreased* between
+    ///      consecutive key blocks (e.g. a 3-layer block followed by a 1-layer
+    ///      block), permanently halting `verifyBlock`.
+    function _expectedPrevAnchor(uint8 numLayers) internal view returns (uint256) {
+        uint8 t = _highestActiveLayer();
+        if (t == 0) {
+            return storedPrevMaxLevelLayerHash; // genesis bootstrap seed
+        }
+        uint8 pick = numLayers >= t ? t : numLayers;
+        return _layerLatest(pick);
+    }
+
+    /// @notice The chain anchor a future `verifyBlock(.., numLayers, ..)` will
+    ///         require as `prevMaxLevelLayerHash`. Relayers should thread this
+    ///         exact value rather than guessing `layerHashes[numLayers - 1]` of
+    ///         the previous block — it is the per-layer pick that mirrors the
+    ///         prover's witness builder (`prev_max_level_layer_hash_for`).
+    function expectedPrevAnchor(uint8 numLayers) external view returns (uint256) {
+        return _expectedPrevAnchor(numLayers);
+    }
+
+    /// @dev Legacy flat membership — true if `anchor` appears in any layer window.
+    function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
+        for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
+            if (_isKnownLayerAnchor(L, anchor)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// @notice View helper: returns the full `storedLayerHashes` array as a
@@ -724,7 +942,12 @@ contract AckiNackiBridge {
     /// @notice O(1) helper: is `anchor` in the bridge's set of known anchors?
     ///         Cheap to call off-chain; mirrored inside `withdrawByProof`.
     function isKnownAnchor(uint256 anchor) external view returns (bool) {
-        return _knownAnchors[anchor];
+        return _isKnownAnchor(anchor);
+    }
+
+    /// @notice View helper: is `anchor` present in layer `L`'s rolling window?
+    function isKnownLayerAnchor(uint8 layer, uint256 anchor) external view returns (bool) {
+        return _isKnownLayerAnchor(layer, anchor);
     }
 
     // ---------------------------------------------------------------------
@@ -740,7 +963,7 @@ contract AckiNackiBridge {
     uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
     /// @notice Pay out a withdrawal proven by a Circuit 4 (single-final-root)
-    ///         Groth16 proof.
+    ///         Halo2 SHPLONK aggregator proof.
     ///
     /// Verifies that:
     ///   1. The proof witnesses a `WithdrawalInitiated(dstChainId, recipient,
@@ -774,7 +997,9 @@ contract AckiNackiBridge {
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
     ///      Typical caller is a relayer running `bridge-relayer-daemon`.
     ///
-    /// @param proof   256-byte gnark Groth16 proof bytes (Circuit 4 wrap).
+    /// @param proof   Circuit 4 proof bytes accepted by
+    ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
+    ///                proof in production).
     /// @param pub     Public-input slots [0..9]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
@@ -812,17 +1037,13 @@ contract AckiNackiBridge {
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // Off-circuit anchor check. The proof exposes `finalRoot` as a
-        // public input (slot [9]) — we accept it only if we have previously
-        // observed it through a successful `verifyBlock` extension. This
-        // replaces the legacy `_layerWindow[100]` private-index design with
-        // an O(1) set lookup that matches the v3 circuit's single-final-root
-        // layout.
-        if (!_knownAnchors[pub.finalRoot]) {
+        // L1-only witness builder (`layer_idx = 0`). Future: read `anchorLayer`
+        // from Circuit 4 public input slot [10] when partner extends the layout.
+        if (!_isKnownLayerAnchor(WITHDRAW_ANCHOR_LAYER, pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 
-        // ---- Crypto: verify the Groth16 proof. The 10 public inputs flow
+        // ---- Crypto: verify the withdrawal proof. The 10 public inputs flow
         //      verbatim through the adapter; the anchor check above guards
         //      against a forged `finalRoot` that the circuit alone cannot
         //      bind to the bridge's view of AN state.

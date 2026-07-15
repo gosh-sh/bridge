@@ -14,14 +14,10 @@
 //! ## Scope boundary
 //!
 //! The AN `/v2/` REST surface is **read-only** (BK-set views only); there is
-//! no transaction-submission endpoint there, and no live
-//! [`acki_nacki_interface::IAckiNacki`] implementation exists yet (only the
-//! mock — the AN team ships the `tvm-sdk`-backed client). So this config wires
-//! and verifies the *read* path against real endpoints; the actual
-//! `finalizeDeposit` *send* still flows through
-//! [`crate::submitter::AnInterfaceSubmitter`] over a (currently mock)
-//! `IAckiNacki`. [`AnConfig::to_submit_config`] produces the submitter config
-//! so the two halves share one source of truth.
+//! no transaction-submission endpoint there. Live submission uses
+//! [`acki_nacki_interface::TvmAckiNacki`] (tvm-sdk feature) via
+//! [`crate::submitter::AnInterfaceSubmitter`] when the daemon runs without
+//! `--dry-run` and `AnConfig::is_live_submit_ready()` is satisfied.
 
 use acki_nacki_interface::{BkSetClient, ExtendedAddress};
 use serde::{Deserialize, Serialize};
@@ -43,14 +39,8 @@ pub const DEFAULT_LOCAL_AN_NODE_URL: &str = "http://127.0.0.1:11000";
 fn default_node_url() -> String {
     DEFAULT_AN_NODE_URL.to_string()
 }
-fn default_gas_limit() -> u64 {
-    1_000_000
-}
 fn default_confirm_timeout_secs() -> u64 {
     60
-}
-fn default_token_id() -> u32 {
-    1
 }
 
 /// Endpoint + account configuration for the Acki Nacki side of the bridge.
@@ -79,12 +69,6 @@ pub struct AnConfig {
     /// Relayer signer account in SDK 3.0 `dapp_id::account_id` form.
     #[serde(default)]
     pub sender: String,
-    /// ECC token id passed to `finalizeDeposit` (USDC on shellnet).
-    #[serde(default = "default_token_id")]
-    pub token_id: u32,
-    /// Gas limit for the `finalizeDeposit` call.
-    #[serde(default = "default_gas_limit")]
-    pub gas_limit: u64,
     /// Seconds to wait for a finalize tx to confirm.
     #[serde(default = "default_confirm_timeout_secs")]
     pub confirm_timeout_secs: u64,
@@ -99,8 +83,6 @@ impl Default for AnConfig {
             bridge_abi_path: String::new(),
             token_bridge: String::new(),
             sender: String::new(),
-            token_id: default_token_id(),
-            gas_limit: default_gas_limit(),
             confirm_timeout_secs: default_confirm_timeout_secs(),
         }
     }
@@ -188,8 +170,6 @@ impl AnConfig {
         AnSubmitConfig {
             from: self.sender.clone(),
             token_bridge: self.token_bridge.clone(),
-            token_id: self.token_id,
-            gas_limit: self.gas_limit,
             confirm_timeout_secs: self.confirm_timeout_secs,
         }
     }
@@ -203,7 +183,7 @@ mod tests {
     fn defaults_point_at_test_node() {
         let cfg = AnConfig::default();
         assert_eq!(cfg.node_url, DEFAULT_AN_NODE_URL);
-        assert_eq!(cfg.gas_limit, 1_000_000);
+        assert_eq!(cfg.confirm_timeout_secs, 60);
     }
 
     #[test]
@@ -237,14 +217,12 @@ mod tests {
             node_url: DEFAULT_AN_NODE_URL.to_string(),
             token_bridge: bridge.clone(),
             sender: sender.clone(),
-            gas_limit: 42,
             confirm_timeout_secs: 7,
             ..AnConfig::default()
         };
         let sc = cfg.to_submit_config();
         assert_eq!(sc.from, sender);
         assert_eq!(sc.token_bridge, bridge);
-        assert_eq!(sc.gas_limit, 42);
         assert_eq!(sc.confirm_timeout_secs, 7);
     }
 

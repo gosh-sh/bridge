@@ -9,7 +9,13 @@ target/
 # `cargo fetch --locked` and `Dockerfile` copies it), but ignore lock files
 # inside the workspace-excluded sub-projects, which each have their own
 # independent dep tree.
-deposit-prover/Cargo.lock
+#
+# EXCEPTION: deposit-prover/Cargo.lock IS tracked. The deposit circuit's
+# verifying key (and the VkBlob embedded in the on-chain USDCBridge) is a
+# deterministic function of the full dependency closure, so the lock must be
+# pinned for the VK to be reproducible. An untracked lock here is exactly what
+# made the original on-chain VK (147efe14…) unbuildable after transitive drift.
+# See docs/deposit_vk_reproducibility.md.
 poseidon-proof/Cargo.lock
 crates/bridge-prover-orchestrator/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock
@@ -23,6 +29,7 @@ contracts/ethereum/lib/
 # Environment variables and secrets
 .env
 .env.local
+.env.production
 .env.*.local
 .secrets
 
@@ -62,6 +69,7 @@ crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key
 crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit.r1cs
 crates/bridge-prover-orchestrator/gnark-wrappers/*/Groth16Verifier.sol
+contracts/ethereum/test/fixtures/r15_spike/MultiplierSpikeVerifier.sol
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_proof.hex
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_public_inputs.hex
 crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_output.json
@@ -207,3 +215,8 @@ deposit-prover/src/bin/an_rlc_verify.rs
 docs/user/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
 docs/user/USER_GUIDE.pdf
 docs/user/USER_GUIDE.md.bak.*
+
+# Partner handoff / outreach messages — local-only drafts, not for commit.
+docs/partner_handoff_*.md
+
+.temp/*

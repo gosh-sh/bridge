@@ -1,0 +1,39 @@
+[Unit]
+Description=EVM to AN deposit relayer (shellnet finalizeDeposit)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bridge-e2e
+EnvironmentFile=/home/ubuntu/bridge-e2e/config/deposit-relayer.env
+Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
+# NOTE: no --dry-run — this actually submits finalizeDeposit on AN.
+# --start-deposit-id is the fresh-start cursor (ignored once state.json has
+# progress); bump it past already-finalized deposits so the daemon doesn't
+# waste ticks re-checking them. --from-block (FROM_BLOCK) must stay near head —
+# see the 429 warning in deposit-relayer.env.example.
+ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
+  --rpc-url ${RPC_URL} \
+  --bridge-address ${BRIDGE_ADDRESS} \
+  --from-block ${FROM_BLOCK} \
+  --confirmations 3 \
+  --deposit-prover-dir ${DEPOSIT_PROVER_DIR} \
+  --dapp-id ${AN_DAPP_ID} \
+  --an-graphql-url ${AN_GRAPHQL_URL} \
+  --an-keys-path ${AN_KEYS_PATH} \
+  --an-bridge-abi-path ${AN_BRIDGE_ABI_PATH} \
+  --an-token-bridge ${AN_TOKEN_BRIDGE} \
+  --an-sender ${AN_SENDER} \
+  --start-deposit-id ${START_DEPOSIT_ID}
+Restart=on-failure
+RestartSec=30
+# A single tick can legitimately take a minute (out-of-process halo2 prove);
+# shutdown is only checked between ticks, so give the process room to finish the
+# current tick before systemd escalates to SIGKILL (default 90s was marking a
+# busy-but-healthy daemon as "failed").
+TimeoutStopSec=180
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

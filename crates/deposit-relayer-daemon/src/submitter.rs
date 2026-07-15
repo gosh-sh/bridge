@@ -1,20 +1,25 @@
 //! [`AnSubmitter`] — abstraction over "how do we deliver the proof to Acki
 //! Nacki and finalise the deposit?".
 //!
-//! The AN-side entry point is `TokenBridge.finalizeDeposit(depositId, sender,
-//! amount, contractAddress, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-//! blockHashHigh, blockHashLow, promiseCommit, proofCell)` (partner branch
-//! `halo2_circuit_with_vk`). The contract builds the `public_inputs` cell from
-//! the eleven scalar arguments — which include the Acki Nacki destination
-//! account (`anAccountHigh`, `anAccountLow`) bound in the proof and the
-//! config-supplied `dappId` (`dappIdHigh`, `dappIdLow`) tag — calls
-//! `ZKHALO2VERIFYWITHVK(vkBlob, publicInputsCell, proofCell)` (opcode
-//! `0xC7 0x4A`), checks `dappId` against its configured value, reconstructs the
-//! recipient account as `(anAccountHigh << 128 | anAccountLow)`, consumes the
-//! `usedDepositIds[depositId]` nullifier, and credits that proven account. An
-//! EVM address is not a valid AN recipient, so binding the destination account
-//! in the proof (rather than trusting an off-circuit relayer hint) is what
-//! makes the credit trust-minimised.
+//! The AN-side entry point is `USDCBridge.finalizeDeposit(bytes proof, bytes
+//! publicInputs)` (acki-nacki branch `poseidon_dex`, deployed on shellnet
+//! 2026-06-22; verified by code-hash match against
+//! `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`). The contract parses
+//! every deposit field straight out of the `publicInputs` operand (11 × 32-byte
+//! little-endian `Fr`), verifies the triple via
+//! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
+//! 0x4A`; the `VK_BLOB` is the deploy-time 11-input deposit VkBlob embedded in
+//! the contract, **not** a per-call argument), reconstructs the recipient
+//! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
+//! consumes a proof-bound deposit nullifier (deployed as a per-deposit
+//! `DepositVoucher`), and credits that proven account. An EVM address is not a
+//! valid AN recipient, so binding the destination account in the proof (rather
+//! than trusting an off-circuit relayer hint) is what makes the credit
+//! trust-minimised.
+//!
+//! Because the contract reads the operand directly, the relayer forwards only
+//! the two raw byte blobs — there are no per-field scalar call arguments, and
+//! the relayer cannot tamper with any proven field.
 //!
 //! Two implementations:
 //!
@@ -81,12 +86,15 @@ pub trait AnSubmitter: Send + Sync {
 // finalizeDeposit call encoding
 // ─────────────────────────────────────────────────────────────────────
 
-/// Interim wire encoding of a `finalizeDeposit` call body.
+/// Diagnostic (non-ABI) serialization of a proof bundle's public inputs +
+/// proof.
 ///
-/// **Not** the final TVM message ABI — the AN team's `tvm-sdk` client will
-/// own the canonical encoder. Until then this produces a deterministic,
-/// self-describing byte layout so the live-delivery plumbing
-/// ([`AnInterfaceSubmitter`]) is fully wired and round-trip-testable:
+/// **Not** the on-chain call ABI. The live `finalizeDeposit(bytes proof, bytes
+/// publicInputs)` call is encoded by [`build_finalize_deposit_params`] + the
+/// tvm_client ABI encoder. This function produces a deterministic,
+/// self-describing big-endian layout used only by debug tooling and the
+/// round-trip unit test (it asserts the eleven decoded scalars survive a
+/// re-encode):
 ///
 /// ```text
 ///   NUM_PUBLIC_INPUTS × 32-byte big-endian scalars (the proof's public inputs):
@@ -96,15 +104,6 @@ pub trait AnSubmitter: Send + Sync {
 ///   u32 BE proof length
 ///   proof bytes (raw Blake2b SHPLONK)
 /// ```
-///
-/// The AN destination account (`anAccountHigh`, `anAccountLow`) is part of the
-/// proof's public inputs — the deposit circuit binds it (see
-/// `deposit-prover/src/circuit_v2.rs`), so there is no separate out-of-circuit
-/// destination side-channel: the AN side reconstructs the recipient account
-/// from these proven scalars. `dappIdHigh`/`dappIdLow` carry the
-/// config-supplied AN dApp identifier the AN side checks. The `vk_blob` is
-/// deploy-time configuration on the AN contract and is therefore **not** part
-/// of the per-call body.
 pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
     let pi = &bundle.parsed;
     let mut out = Vec::with_capacity(NUM_PUBLIC_INPUTS * 32 + 4 + bundle.proof.len());
@@ -263,47 +262,39 @@ impl AnSubmitter for MockAnSubmitter {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Static configuration for the live submitter.
+///
+/// The deployed `finalizeDeposit(bytes proof, bytes publicInputs)` call carries
+/// no token id and no caller-supplied gas (the contract is hardcoded to ECC[3]
+/// USDC and pays its own gas after `tvm.accept()`), so neither is part of this
+/// config.
 #[derive(Clone, Debug)]
 pub struct AnSubmitConfig {
     /// Relayer signer in SDK 3.0 `dapp_id::account_id` form.
     pub from: String,
     /// Bridge contract in SDK 3.0 `dapp_id::account_id` form.
     pub token_bridge: String,
-    /// ECC token id for `finalizeDeposit` (USDC on shellnet).
-    pub token_id: u32,
-    /// Gas limit for the `finalizeDeposit` call.
-    pub gas_limit: u64,
     /// Seconds to wait for the finalize tx to confirm.
     pub confirm_timeout_secs: u64,
 }
 
-/// Left-pad a 20-byte EVM address to 32 bytes for `USDCBridge._srcSenderToFr`.
+/// Build JSON parameters for `USDCBridge.finalizeDeposit(bytes proof, bytes
+/// publicInputs)` from a proof bundle.
 ///
-/// The on-chain helper reads exactly 32 big-endian bytes (`require(length >=
-/// 32)`); a bare 20-byte `srcSender` reverts before ZK verification runs.
-pub fn eth_address_to_src_sender_hex(sender: &[u8; 20]) -> String {
-    let mut padded = [0u8; 32];
-    padded[12..].copy_from_slice(sender);
-    hex::encode(padded)
-}
-
-/// Build JSON parameters for `USDCBridge.finalizeDeposit` from a proof bundle.
-pub fn build_finalize_deposit_params(
-    event: &DepositEvent,
-    bundle: &DepositProofBundle,
-    token_id: u32,
-) -> serde_json::Value {
-    let pi = &bundle.parsed;
-    let amount_u128 = pi.amount.to::<u128>();
+/// The deployed contract (acki-nacki `poseidon_dex`) parses every deposit field
+/// out of the `publicInputs` operand itself and verifies the triple against its
+/// embedded `VK_BLOB`, so the relayer forwards only the two raw byte blobs:
+///
+/// - `proof` — raw Blake2b-transcript SHPLONK bytes.
+/// - `publicInputs` — `NUM_PUBLIC_INPUTS` × 32-byte little-endian `Fr`, exactly
+///   the operand the AN-side opcode's `public_inputs_cell` carries.
+///
+/// Both are encoded as plain hex (no `0x`) for the tvm_client ABI JSON encoder.
+/// The relayer cannot tamper with any proven field — the contract reads them
+/// from the operand the opcode verifies.
+pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json::Value {
     json!({
-        // `bytes` → plain hex; `uint256` → decimal strings (tvm_client ABI JSON).
         "proof": hex::encode(&bundle.proof),
-        "srcDappId": pi.dapp_id().to_string(),
-        "srcSender": eth_address_to_src_sender_hex(&event.sender.into_array()),
-        "recipient_an": pi.an_account().to_string(),
-        "amount": amount_u128.to_string(),
-        "tokenId": token_id,
-        "srcDepositId": pi.deposit_id.to_string(),
+        "publicInputs": hex::encode(&bundle.public_inputs),
     })
 }
 
@@ -328,25 +319,19 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             config,
         }
     }
-}
 
-#[async_trait]
-impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
-    async fn is_finalized(&self, _deposit_id: u64) -> Result<bool, RelayerError> {
-        // No nullifier read primitive on IAckiNacki yet — see struct docs.
-        Ok(false)
-    }
-
-    async fn submit(
+    /// Submit an already-generated bundle directly, without binding it to a
+    /// [`DepositEvent`]. The proof's public inputs are the sole authority (the
+    /// AN-side opcode verifies them against the embedded VK), so this is the
+    /// path used by the `finalize-one` operator command / contract self-test
+    /// where the original Ethereum event is not re-fetched.
+    pub async fn submit_bundle(
         &self,
-        event: &DepositEvent,
         bundle: &DepositProofBundle,
     ) -> Result<SubmitOutcome, RelayerError> {
-        bundle.check_binds_to(event)?;
-
         let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
         let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
-        let params = build_finalize_deposit_params(event, bundle, self.config.token_id);
+        let params = build_finalize_deposit_params(bundle);
         let call = ContractCallRequest {
             from,
             to,
@@ -375,6 +360,23 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 reason: "finalizeDeposit tx still pending after timeout".to_string(),
             }),
         }
+    }
+}
+
+#[async_trait]
+impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
+    async fn is_finalized(&self, _deposit_id: u64) -> Result<bool, RelayerError> {
+        // No nullifier read primitive on IAckiNacki yet — see struct docs.
+        Ok(false)
+    }
+
+    async fn submit(
+        &self,
+        event: &DepositEvent,
+        bundle: &DepositProofBundle,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        bundle.check_binds_to(event)?;
+        self.submit_bundle(bundle).await
     }
 }
 
@@ -462,19 +464,32 @@ mod tests {
     }
 
     #[test]
-    fn finalize_params_encode_proof_as_hex() {
+    fn finalize_params_are_proof_and_public_inputs_hex() {
         let ev = event(1);
         let b = bundle(&ev);
-        let params = build_finalize_deposit_params(&ev, &b, 3);
+        let params = build_finalize_deposit_params(&b);
+        // Exactly the two `bytes` args the deployed contract expects.
+        let obj = params.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+
         let proof = params["proof"].as_str().unwrap();
         assert!(!proof.starts_with("0x"), "proof must be plain hex");
         assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
-        assert_eq!(params["srcDappId"].as_str().unwrap(), b.parsed.dapp_id().to_string());
-        assert_eq!(
-            params["srcSender"].as_str().unwrap(),
-            eth_address_to_src_sender_hex(&ev.sender.into_array())
+
+        let public_inputs = params["publicInputs"].as_str().unwrap();
+        assert!(
+            !public_inputs.starts_with("0x"),
+            "publicInputs must be plain hex"
         );
-        assert_eq!(hex::decode(params["srcSender"].as_str().unwrap()).unwrap().len(), 32);
+        let pi_bytes = hex::decode(public_inputs).unwrap();
+        assert_eq!(pi_bytes, b.public_inputs.to_vec());
+        // The operand must be the canonical 11 × 32-byte LE layout the opcode reads.
+        assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
+        // And it must round-trip back to the same parsed inputs.
+        assert_eq!(
+            crate::types::DepositPublicInputs::from_operand(&pi_bytes).unwrap(),
+            b.parsed
+        );
     }
 
     #[tokio::test]
@@ -488,8 +503,6 @@ mod tests {
                 "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
             ),
             token_bridge: format!("{dapp}::{dapp}"),
-            token_id: 1,
-            gas_limit: 1_000_000,
             confirm_timeout_secs: 5,
         };
         let sub = AnInterfaceSubmitter::new(client, cfg);

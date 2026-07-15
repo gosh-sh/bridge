@@ -99,12 +99,12 @@ contract AckiNackiBridgePauseTest is Test {
         seedAnchor = _seedFirstBlock();
     }
 
-    function _seedFirstBlock() internal returns (uint256 topAnchor) {
+    function _seedFirstBlock() internal returns (uint256 l1Anchor) {
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
             layers[i] = uint256(keccak256(abi.encode("pause-seed-layer", i)));
         }
-        topAnchor = layers[ACTIVE_LAYERS - 1];
+        l1Anchor = layers[0];
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
             abi.encodePacked(keccak256("pause-seed-att")),

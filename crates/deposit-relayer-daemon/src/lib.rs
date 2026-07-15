@@ -77,7 +77,11 @@ pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
-pub use source::{AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource};
+pub use source::{
+    fetch_deposit_from_receipt, is_retryable_eth_rpc_error, receipt_log_index_from_block_log,
+    resolve_from_block, AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource,
+    BRIDGE_DEPLOY_BLOCK_ENV,
+};
 pub use state::RelayerState;
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,

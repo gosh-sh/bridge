@@ -127,7 +127,10 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
 
     if exact_path.exists() {
         match read_srs_file(&exact_path) {
-            Ok(srs) if srs.k() == k => return srs,
+            Ok(srs) if srs.k() == k => {
+                assert_hermez_ceremony(&exact_path, &srs);
+                return srs;
+            }
             Ok(mut srs) if srs.k() > k => {
                 warn!(
                     target: "bridge_prover_lib::keys",
@@ -136,6 +139,7 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
                     circuit_k = k,
                     "SRS file degree exceeds requested k; downsizing (likely a misnamed larger ceremony)"
                 );
+                assert_hermez_ceremony(&exact_path, &srs);
                 srs.downsize(k);
                 let _ = write_srs_file(&exact_path, &srs);
                 return srs;
@@ -161,6 +165,7 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     }
 
     if let Some((src_path, mut srs)) = find_largest_ceremony_ge(params_dir, k) {
+        assert_hermez_ceremony(&src_path, &srs);
         let src_k = srs.k();
         if src_k > k {
             srs.downsize(k);
@@ -171,7 +176,7 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
             src_k,
             circuit_k = k,
             dest = %exact_path.display(),
-            "provisioned circuit SRS by downsizing parent ceremony"
+            "provisioned circuit SRS by downsizing parent Hermez ceremony"
         );
         if let Err(e) = write_srs_file(&exact_path, &srs) {
             warn!(
@@ -184,20 +189,38 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
         return srs;
     }
 
-    warn!(
-        target: "bridge_prover_lib::keys",
-        params_dir = %params_dir.display(),
-        circuit_k = k,
-        "no parent ceremony SRS found; falling back to gen_srs (may synthesise a non-chain trapdoor)"
+    panic!(
+        "no Hermez Perpetual Powers of Tau SRS (≥ k={k}) under {} — \
+         run scripts/bootstrap_hermez_srs.sh (and convert k=21 from \
+         powersOfTau28_hez_final_21.ptau). Chain-ceremony / gen_srs \
+         fallbacks are disabled.",
+        params_dir.display()
     );
-    // gen_srs reads $PARAMS_DIR for its cache; mirror the old KeyManager
-    // pattern (set/restore env var, no lock — single-threaded init).
-    let prev_dir = std::env::current_dir().unwrap();
-    std::env::set_var("PARAMS_DIR", params_dir.to_str().unwrap());
-    let srs = halo2_base::utils::fs::gen_srs(k);
-    std::env::set_current_dir(&prev_dir).ok();
-    debug_assert_eq!(srs.k(), k, "gen_srs({k}) returned params with k={}", srs.k());
-    srs
+}
+
+/// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects Acki Nacki chain ceremony
+/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor.
+const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
+
+fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
+    // Re-read raw file tail — ParamsKZG doesn't expose s_g2 bytes directly
+    // without serialization; the on-disk layout ends with 128-byte s_g2.
+    let bytes = std::fs::read(path).unwrap_or_default();
+    if bytes.len() < 128 {
+        panic!("SRS file {} too small to contain s_g2", path.display());
+    }
+    let head = &bytes[bytes.len() - 128..bytes.len() - 122];
+    if head != HERMEZ_S_G2_HEAD {
+        panic!(
+            "SRS {} is not Hermez Perpetual Powers of Tau (s_g2 head {:02x?}, \
+             expected {:02x?}). Quarantine chain-ceremony files and bootstrap \
+             Hermez SRS — no fallbacks.",
+            path.display(),
+            head,
+            HERMEZ_S_G2_HEAD
+        );
+    }
+    let _ = srs; // degree already checked by caller
 }
 
 fn read_srs_file(path: &Path) -> std::io::Result<ParamsKZG<Bn256>> {
@@ -247,6 +270,11 @@ fn find_largest_ceremony_ge(
             Err(_) => continue,
         };
         if srs.k() < min_k {
+            continue;
+        }
+        // Skip non-Hermez ceremonies (e.g. leftover chain-ceremony files).
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        if raw.len() < 128 || &raw[raw.len() - 128..raw.len() - 122] != HERMEZ_S_G2_HEAD {
             continue;
         }
         let replace = match &best {

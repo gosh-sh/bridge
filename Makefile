@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy
+        coverage-solidity pre-push pre-push-audit audit-solidity-test production-preflight relayer-test relayer-fmt relayer-clippy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -190,6 +190,18 @@ relayer-clippy: ## Run clippy on bridge-relayer-daemon (via an-bridge-prover wor
 production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (see docs/production_plan.md)
 	@chmod +x scripts/production_preflight.sh
 	@./scripts/production_preflight.sh
+
+audit-solidity-test: ## Run audit overlay Foundry suite (47 tests @ profile audit)
+	@echo "$(BLUE)Running audit/spec/ethereum (FOUNDRY_PROFILE=audit)...$(NC)"
+	@cd contracts/ethereum && test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
+	@cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test
+
+pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay (no fork E2E / AN)
+	@echo "$(BLUE)── pre-push-audit: ETH audit closeout gate ──$(NC)"
+	@cd contracts/ethereum && forge fmt --check
+	@cd contracts/ethereum && forge test
+	@$(MAKE) audit-solidity-test
+	@echo "$(GREEN)── pre-push-audit: green ──$(NC)"
 
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"

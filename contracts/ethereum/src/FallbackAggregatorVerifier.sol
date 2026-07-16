@@ -9,7 +9,7 @@ import "./ShplonkAggregatorVerifierBase.sol";
 contract FallbackAggregatorVerifier is IFallbackVerifier, ShplonkAggregatorVerifierBase {
     uint256 private constant NUM_INNER = 4;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) {}
+    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
 
     function verifyFallbackAttestation(
         bytes calldata proof,

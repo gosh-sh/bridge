@@ -24,7 +24,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     uint256 internal constant L3 = 0xB0B;
     uint64 internal constant SEQ = 42;
 
-    event BkSetUpdated(uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo);
+    event BkSetUpdated(
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
+    );
 
     function setUp() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
@@ -61,14 +63,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         emit BkSetUpdated(L2, L3, SEQ);
 
         bridge.applyBkSetUpdate(
-            AckiNackiBridge.FinalizationType.Primary,
-            hex"00",
-            blockId,
-            SEQ,
-            L2,
-            L3,
-            h0,
-            h23
+            AckiNackiBridge.FinalizationType.Primary, hex"00", blockId, SEQ, L2, L3, h0, h23
         );
 
         assertEq(bridge.storedBkSetCommitment(), L3);
@@ -79,7 +74,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         (uint256 blockId,,) = _merkleWitness(L2, L3);
 
         vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.BkUpdateMerkleMismatch.selector, blockId, blockId + 1)
+            abi.encodeWithSelector(
+                AckiNackiBridge.BkUpdateMerkleMismatch.selector, blockId, blockId + 1
+            )
         );
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
@@ -99,14 +96,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
         bridge.applyBkSetUpdate(
-            AckiNackiBridge.FinalizationType.Primary,
-            hex"00",
-            blockId,
-            SEQ,
-            L2,
-            L3,
-            h0,
-            h23
+            AckiNackiBridge.FinalizationType.Primary, hex"00", blockId, SEQ, L2, L3, h0, h23
         );
     }
 

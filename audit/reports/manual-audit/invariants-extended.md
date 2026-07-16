@@ -1,9 +1,6 @@
 # Extended invariants (manual-audit overlay)
 
-Proposed invariants from the manual-audit workstreams, to be folded into
-`docs/operations/bridge_verification.md` once confirmed. Each row maps to the
-enforcing code in `contracts/ethereum/src/AckiNackiBridge.sol` and the covering
-Foundry test(s).
+Proposed invariants from the manual-audit workstreams. **Canonical tracker for A1/A2/A4 test mapping:** `audit/reports/invariants-extended.md`. This file holds **A3 (withdraw)** detail.
 
 ## §A3 — withdrawByProof & nullifiers (WD-*)
 
@@ -47,7 +44,7 @@ invariants pin the **contract-side** enforcement.
 
 ### A3.3 Open items (see questions.md)
 
-- **WD-Q1 / A3-01** — bounded L1 anchor window (128 entries) can evict a `finalRoot`; liveness depends on re-prove-against-newer-anchor capability. No test today for the eviction boundary — a `test_withdrawByProof_evictedAnchor_reverts` (129+ verifyBlocks) would pin the behaviour.
+- **WD-Q1 / A3-01** — bounded L1 anchor window (128 entries) can evict a `finalRoot`; liveness depends on re-prove-against-newer-anchor capability. Pinned by `audit/spec/ethereum/WithdrawAnchorEviction.t.sol`.
 - **WD-Q2 / A3-02** — `address(0)` recipient is accepted on-chain but unpayable on real USDC.
 - **WD-Q3 / A3-03** — the Groth16 adapter (`BridgeWithdrawalVerifier.sol`) is an R15 identity stub; needs a deployment invariant that only the SHPLONK aggregator adapter is wired in production.
 - **WD-Q4 / A3-05** — `WITHDRAW_ANCHOR_LAYER` hard-coded to 1.

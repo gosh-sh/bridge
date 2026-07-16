@@ -11,6 +11,8 @@ cd ../../audit/spec/ethereum && forge test
 
 Profile: `[profile.audit]` — `FOUNDRY_PROFILE=audit forge test` (47 tests).
 
+**Gate:** `make pre-push-audit` (fmt + main `forge test` + audit overlay). CI: `test:solidity:audit` on branch `audit`.
+
 ## Layout (phases C + D)
 
 ```

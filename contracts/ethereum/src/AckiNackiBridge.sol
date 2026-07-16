@@ -306,9 +306,7 @@ contract AckiNackiBridge {
 
     /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
     event BkSetUpdated(
-        uint256 indexed oldCommitment,
-        uint256 indexed newCommitment,
-        uint64 indexed blockSeqNo
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
@@ -765,9 +763,7 @@ contract AckiNackiBridge {
         bytes32 siblingH0,
         bytes32 siblingH23
     ) external nonReentrant whenNotPaused {
-        if (
-            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
-        ) {
+        if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
         }
 

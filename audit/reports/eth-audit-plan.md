@@ -357,12 +357,15 @@ ZK opcode (`ZKHALO2VERIFYWITHVK`) — **smoke only** (trust boundary); глуб�
 
 ## 9. Closeout
 
-- [x] `audit/reports/closeout-eth.md` — QC register with PoC links (BC=0)
+- [x] `audit/reports/closeout-eth.md` — QC register + auditor views
 - [x] Test matrix phases C–E covered
-- [ ] QC disposition (13 items) — partner/dev answers
-- [ ] `make pre-push` green
-- [ ] E-07 post-deploy immutables (manual)
-- [ ] `audit/PROJECT_FACTS.md` — USDC trust assumptions after QC-A1-2 answer
+- [x] CI `test:solidity:audit` + `make pre-push-audit`
+- [x] Docs fixes (QC-A1-4, QC-A2-1) — author ack pending
+- [ ] QC disposition (13 items) — author + agent
+- [ ] E-07 post-deploy immutables — **deferred** (manual)
+- [ ] Phase F AN — **deferred**
+
+**Deferred explicitly:** fork E2E (E-05), shellnet E2E, AN contracts (§8).
 
 ---
 
@@ -377,4 +380,6 @@ ZK opcode (`ZKHALO2VERIFYWITHVK`) — **smoke only** (trust boundary); глуб�
 - `FuzzAckiNackiBridgeVerifyBlock.t.sol` (7) — pre-crypto fuzz
 - `AckiNackiBridgeRelayerLoop.t.sol` (6) — multi-block mock
 
-**Gap (ожидаемый):** solvency invariant handler, withdraw fuzz, production negative E2E, extended CEI state-rollback tests.
+**Gap (baseline at plan start; overlay now covers):** solvency invariant handler, withdraw fuzz, cross-circuit negatives, relayer loop E2E — see `audit/reports/test-matrix.md` closeout table.
+
+**Still deferred:** fork AAVE E2E (E-05), E-07 post-deploy immutables, Phase F AN.

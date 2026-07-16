@@ -260,12 +260,12 @@ contract DeployRealBridge is Script {
     ) internal returns (AckiNackiBridge.VerifyBlockConfig memory vb) {
         if (!wire) {
             return AckiNackiBridge.VerifyBlockConfig({
-                primaryVerifier: IPrimaryVerifier(address(0)),
-                fallbackVerifier: IFallbackVerifier(address(0)),
-                layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
-                genesisBkSetCommitment: 0,
-                genesisPrevMaxLevelLayerHash: 0
-            });
+                    primaryVerifier: IPrimaryVerifier(address(0)),
+                    fallbackVerifier: IFallbackVerifier(address(0)),
+                    layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
+                    genesisBkSetCommitment: 0,
+                    genesisPrevMaxLevelLayerHash: 0
+                });
         }
 
         console.log("Deploying production verifyBlock triple (1A/1B/2 Shplonk)...");
@@ -294,13 +294,13 @@ contract DeployRealBridge is Script {
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         if (!wire) {
             return AckiNackiBridge.BridgeWithdrawConfig({
-                bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
-                dappFr: 0,
-                accFr: 0,
-                altDstChainId: 0,
-                altDstHostChainId: 0,
-                altTokenId: 0
-            });
+                    bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
+                    dappFr: 0,
+                    accFr: 0,
+                    altDstChainId: 0,
+                    altDstHostChainId: 0,
+                    altTokenId: 0
+                });
         }
 
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");

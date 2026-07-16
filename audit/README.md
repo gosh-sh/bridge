@@ -52,6 +52,8 @@ Every spec test header should cite the invariant(s) it covers.
 | C | `spec/ethereum/*.t.sol` | **done** (29 unit) |
 | D | handlers + invariants | **done** (11 fuzz/inv) |
 | E | E2E gaps | **done** (7 E2E) |
-| Closeout | `reports/closeout-eth.md` | **draft** — QC register + signoff |
+| Closeout | `reports/closeout-eth.md` | **draft** — QC open, author ack pending |
+| CI | `test:solidity:audit` in `.gitlab-ci.yml` | ✅ |
+| Local gate | `make pre-push-audit` | ✅ |
 
-Run: `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` (47 tests)
+Run: `make pre-push-audit` or `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test`

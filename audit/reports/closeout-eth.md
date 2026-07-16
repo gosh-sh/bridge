@@ -90,8 +90,12 @@ QC ≠ «не проверяли». QC = «проверили, просим ав
 
 - [x] Phases A–E; 47/47 audit tests
 - [x] QC register with PoC + auditor view
-- [ ] **Author confirms** each QC row (or escalates to BC)
-- [ ] E-07 post-deploy immutables (manual)
-- [ ] `make pre-push` — blocked on pre-existing `forge fmt` drift in main tree
+- [x] CI `test:solidity:audit` + local `make pre-push-audit`
+- [x] Solidity `forge fmt` drift fixed (main tree)
+- [ ] **Author confirms** each QC row (deferred — author reviews with agent)
+- [ ] E-07 post-deploy immutables — **deferred** (manual / not E2E automation)
+- [ ] Full `make pre-push` (Rust + coverage) — optional before merge to `main`
 
-**Auditor note:** We lowered the bar for *our* opinion (see auditor view column) but **did not close** QC items without author. Two docs bugs were fixed proactively; please ack QC-A1-4 and QC-A2-1.
+**Out of scope (this pass):** fork E2E (E-05), production bin E2E extensions, Phase F AN contracts.
+
+**Auditor note:** ETH audit deliverable is test-backed + documented. QC rows stay open until author ack; we do not delete them.

@@ -85,3 +85,17 @@ Profile: `[profile.audit]` in `foundry.toml` — `invariant.runs=128`, `fuzz.run
 | QC-A4-1 | U-SHL-01 | ✅ |
 | WD-Q1 | U-WD-01 | ✅ |
 | WD-Q3 | U-WD-03 + E-06 | ✅ |
+
+---
+
+## Closeout (non-E2E / non-AN)
+
+| Item | Status |
+|------|--------|
+| `closeout-eth.md` | done |
+| CI `test:solidity:audit` | done |
+| `make pre-push-audit` | done |
+| `forge fmt` main tree | done |
+| QC author ack | open |
+| E-07 immutables | deferred |
+| Phase F AN | deferred |

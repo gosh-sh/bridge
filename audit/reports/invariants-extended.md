@@ -3,6 +3,8 @@
 Новые инварианты, предложенные в фазе A ручного аудита. Каждый должен получить
 `invariant_*` / fuzz-тест в фазе D (`audit/spec/ethereum/`) с комментарием `// INV: <ID>`.
 
+**A3 (WD-1..12):** см. `audit/reports/manual-audit/invariants-extended.md` — withdraw/nullifiers (покрытие в main tree + audit overlay).
+
 ## A1 — Deposits & treasury (TR-#, DEP-#, PS-#)
 
 Источник: `audit/reports/manual-audit/A1-deposit-treasury.md`.

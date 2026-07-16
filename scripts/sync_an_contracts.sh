@@ -47,7 +47,7 @@ checkout_branch "$REMOTE" "$BRANCH"
 
 # Bridge exchange stack (USDCBridge, DepositVoucher, deps)
 synced=0
-for sub in exchange token compiler eccconfig; do
+for sub in exchange token eccconfig; do
   if [[ -d "$SRC/contracts/$sub" ]]; then
     echo "Sync contracts/$sub ..."
     rsync -a --delete "$SRC/contracts/$sub/" "$DEST/$sub/"

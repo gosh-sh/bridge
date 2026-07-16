@@ -98,7 +98,7 @@ temp/
 # AN audit toolchain (local symlinks to sibling repos — not portable in git)
 .tools/
 audit/spec/an-contracts/tools
-audit/spec/an/fixtures/
+audit/spec/an-contracts/compiler/
 audit/spec/an-contracts/**/build/
 **/.pytest_cache/
 **/__pycache__/

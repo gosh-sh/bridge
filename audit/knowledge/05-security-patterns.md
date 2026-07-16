@@ -1,0 +1,1 @@
+../../../dex/knowledge/05-security-patterns.md

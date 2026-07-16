@@ -63,3 +63,17 @@ Retired: ETH-side deposit Groth16, `withdraw()`, `verifyEvent`, 103-PI withdraw.
 - **OK:** No action.
 
 This pass: BC=0, QC=13 (all PoC-linked), audit overlay 47/47 green.
+
+## AN audit tooling (Phase F0)
+
+| Item | Path |
+|------|------|
+| Toolchain symlinks | `.tools/{sold,tvm-debugger,tvm-cli}` (gitignored) |
+| Setup script | `scripts/setup_an_audit_tools.sh` |
+| Contract sync | `scripts/sync_an_contracts.sh` → `audit/spec/an-contracts/` (`origin/dev`) |
+| Pytest harness | `audit/spec/an/` (`test_base.py` from dex) |
+| Agent briefing | `audit/spec/an/AGENT_CONTEXT.md` |
+| TVM knowledge | `audit/knowledge/01-05` → `../dex/knowledge/` |
+| Plan | `audit/reports/an-audit-plan.md` |
+
+Gate: `make pre-push-an` (toolchain smoke). Full spec after contract sync.

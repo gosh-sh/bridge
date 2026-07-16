@@ -55,5 +55,7 @@ Every spec test header should cite the invariant(s) it covers.
 | Closeout | `reports/closeout-eth.md` | **draft** — QC open, author ack pending |
 | CI | `test:solidity:audit` in `.gitlab-ci.yml` | ✅ |
 | Local gate | `make pre-push-audit` | ✅ |
+| **F — AN** | `spec/an/` + `reports/an-audit-plan.md` | **F1–F3** 11 pytest ✅ |
 
-Run: `make pre-push-audit` or `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test`
+Run ETH: `make pre-push-audit`  
+Run AN: `make audit-an-test` (after `./scripts/sync_an_contracts.sh`)

@@ -1,5 +1,6 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push pre-push-audit audit-solidity-test production-preflight relayer-test relayer-fmt relayer-clippy
+        coverage-solidity pre-push pre-push-audit audit-solidity-test audit-an-test \
+        setup-an-audit-tools pre-push-an production-preflight relayer-test relayer-fmt relayer-clippy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -195,6 +196,21 @@ audit-solidity-test: ## Run audit overlay Foundry suite (47 tests @ profile audi
 	@echo "$(BLUE)Running audit/spec/ethereum (FOUNDRY_PROFILE=audit)...$(NC)"
 	@cd contracts/ethereum && test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
 	@cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test
+
+audit-an-test: ## Full AN pytest (unit+integration; sync fixtures first)
+	@echo "$(BLUE)Running audit/spec/an (pytest)...$(NC)"
+	@test -x .tools/tvm-debugger || $(MAKE) setup-an-audit-tools
+	@cd audit/spec/an && python3 -m pytest -q
+
+setup-an-audit-tools: ## Symlink sold + tvm-debugger into .tools/
+	@chmod +x scripts/setup_an_audit_tools.sh
+	@./scripts/setup_an_audit_tools.sh
+
+pre-push-an: ## AN audit gate: unit pytest (no fixtures required)
+	@echo "$(BLUE)── pre-push-an: AN audit gate ──$(NC)"
+	@$(MAKE) setup-an-audit-tools
+	@cd audit/spec/an && python3 -m pytest unit/ -q
+	@echo "$(GREEN)── pre-push-an: green ──$(NC)"
 
 pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay (no fork E2E / AN)
 	@echo "$(BLUE)── pre-push-audit: ETH audit closeout gate ──$(NC)"

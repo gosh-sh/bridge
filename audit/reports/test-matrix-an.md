@@ -11,13 +11,17 @@
 | DEP-AN-03 | unit | `confirmDeposit` wrong sender → 207 | `unit/test_usdcbridge_finalize_negative.py` | ✅ |
 | QC-AN-01 | unit | amount Fr overflow → 214 | `unit/test_usdcbridge_finalize_negative.py` | ✅ |
 | DEP-AN-10 | integration | real proof_00 finalize | `integration/test_finalize_deposit_fixture.py` | ✅ |
-| DEP-AN-11 | integration | pipeline voucher→confirm | — | ⏳ F4 |
-| DEP-AN-12 | integration | replay proof_00 | — | ⏳ F4 |
-| WD-AN-01 | unit | `initiateWithdrawal` no ECC | — | ⏳ |
-| WD-AN-02 | unit | unsupported tokenId | — | ⏳ |
-| ADM-AN-01 | unit | `mintAndSend` wrong nonce | — | ⏳ |
+| DEP-AN-11 | integration | pipeline voucher→confirm | `integration/test_finalize_deposit_pipeline.py` | ✅ |
+| DEP-AN-12 | integration | replay proof_00 | `integration/test_finalize_deposit_pipeline.py` | ✅ |
+| WD-AN-01 | unit | `initiateWithdrawal` no ECC | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| WD-AN-02 | unit | unsupported tokenId | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| WD-AN-03 | unit | zero ECC amount | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| WD-AN-04 | unit | recipient too long | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| WD-AN-05 | unit | multiple ECC | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| ADM-AN-01 | unit | `mintAndSend` wrong nonce | `unit/test_usdcbridge_withdraw_admin_negative.py` | ✅ |
+| BC-AN-01 | integration | dual dappId double mint | — | ⏳ needs prover PoC |
 | E-AN-01 | e2e | shellnet finalize | acki-nacki `test_usdcbridge_finalize.py` | deferred |
 
-**Gate:** `cd audit/spec/an && python3 -m pytest -q` → **11/11** (with fixtures synced).
+**Gate:** `make audit-an-test` → **19/19** (fixtures synced).
 
-Fixtures: `./scripts/sync_an_contracts.sh` → `audit/spec/an/fixtures/deposit_10proofs/`.
+Direction: `audit/reports/an-audit-direction.md`.

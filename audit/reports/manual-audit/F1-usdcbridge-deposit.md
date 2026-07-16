@@ -106,7 +106,14 @@ No pause flag on bridge contract.
 | QC-AN-05 | `_totalMinted` vs `_totalMintedBridgeByToken` split | code review | Observability only; no invariant — document |
 | QC-AN-06 | VK_BLOB pin in source | integration fixture | Must match deployed shellnet VK; CI should hash-check |
 
-**BC = 0** this pass.
+### BC candidates (author confirm)
+
+| ID | Sev | Topic | PoC plan |
+|----|-----|-------|----------|
+| BC-AN-01 | High | `dappId` in replay key but config-supplied in circuit (not in L1 event) | Two valid proofs, same receipt, different `dappId` → two mints |
+| BC-AN-02 | Medium | No on-chain allowlist for L1 `contractAddr` | Mint from proof tied to wrong ETH bridge deployment |
+
+**BC = 2 candidates** (BC-AN-01, BC-AN-02 — author confirm). See `audit/reports/an-audit-direction.md`.
 
 ---
 

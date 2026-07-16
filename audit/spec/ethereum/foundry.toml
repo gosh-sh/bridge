@@ -1,0 +1,30 @@
+[profile.default]
+src = "../../../contracts/ethereum/src"
+test = "."
+libs = ["../../../contracts/ethereum/lib"]
+allow_paths = [
+    "../../../contracts/ethereum/src",
+    "../../../contracts/ethereum/test",
+    "../../../contracts/ethereum/script",
+]
+fs_permissions = [
+    { access = "read", path = "../../../contracts/ethereum/verifiers/" },
+]
+solc_version = "0.8.19"
+optimizer = true
+optimizer_runs = 1
+via_ir = true
+remappings = [
+    "forge-std/=../../../contracts/ethereum/lib/forge-std/src/",
+    "@src/=../../../contracts/ethereum/src/",
+    "@bridge-test/=../../../contracts/ethereum/test/",
+    "@script/=../../../contracts/ethereum/script/",
+]
+
+[profile.ci]
+fuzz = { runs = 5000 }
+invariant = { runs = 1000, depth = 50 }
+
+[profile.audit]
+fuzz = { runs = 256 }
+invariant = { runs = 128, depth = 50 }

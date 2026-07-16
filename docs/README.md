@@ -57,6 +57,9 @@ Canonical documentation for the Acki Nacki ↔ Ethereum bridge. Historical agent
 
 ### Audit
 
+- [../audit/README.md](../audit/README.md) — Pruvendo audit overlay (findings, spec tests)
+- [../audit/PROJECT_FACTS.md](../audit/PROJECT_FACTS.md) — Domain facts for agents
+- [../audit/reports/eth-audit-plan.md](../audit/reports/eth-audit-plan.md) — **ETH contracts audit plan** (branch `audit`)
 - [audit/layer_hashes_circuit_audit.md](audit/layer_hashes_circuit_audit.md) — Partner layer-hashes circuit (Phase 0)
 
 ### End users

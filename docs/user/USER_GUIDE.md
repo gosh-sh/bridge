@@ -139,7 +139,7 @@ share your MetaMask secret recovery phrase. Test USDC is not real money.
 | Deposit relayer (ETH→AN: listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch` / `prove-one` / `finalize-one` / `daemon` |
 | Withdraw relayer (AN→ETH: verifyBlock + payout) | `crates/bridge-relayer-daemon/` — `relayer submit-verify-block` / `daemon-prover` / `daemon-withdraw` |
 | Latest AN→ETH daemon E2E | `docs/an_eth_daemon_withdraw_e2e_2026-07-03.md` |
-| Shellnet / VK redeploy checklist | `docs/shellnet_usdcbridge_deposit_vk_redeploy.md` |
+| Shellnet / VK redeploy checklist | `docs/operations/shellnet/shellnet_usdcbridge_deposit_vk_redeploy.md` |
 | 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
 | Deploy scripts | `contracts/ethereum/script/` |
 | Env template (hosted relayer) | `scripts/ursus/deposit-relayer.env.example` |

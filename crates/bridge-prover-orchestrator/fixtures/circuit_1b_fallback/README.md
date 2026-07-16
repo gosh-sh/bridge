@@ -2,7 +2,7 @@
 
 A real, end-to-end-verified set of operands for the AN-side
 `ZKHALO2VERIFYWITHVK` opcode (`0xC7 0x4A`, frozen Variant A — see
-`docs/zkhalo2verifywithvk_reference.md`).
+`docs/zk/an-side/zkhalo2verifywithvk_reference.md`).
 
 Use this fixture to:
 - Smoke-test a fresh `ZKHALO2VERIFYWITHVK` deployment without re-running

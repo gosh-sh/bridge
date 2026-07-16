@@ -2,7 +2,7 @@
 
 This repo turns withdrawal events on Acki Nacki into zero-knowledge proofs that an Ethereum smart contract can check.
 
-> Looking for the deep-dive? See **[TECHNICAL_README.md](./TECHNICAL_README.md)**. This file is the short, end-user quickstart.
+> Operator runbook: **[docs/operations/an_bridge_prover_runbook.md](../../docs/operations/an_bridge_prover_runbook.md)**. This file is the short quickstart.
 
 ---
 
@@ -12,9 +12,9 @@ You want to move tokens from Acki Nacki to Ethereum.
 
 1. On Acki Nacki, you call the **TokenBridge** contract. It **burns your tokens** and emits a `WithdrawalInitiated` event into the block.
 2. Off-chain, this repo produces a small ZK proof saying *"that event really happened inside a finalised Acki Nacki block"*.
-3. That proof is submitted to an Ethereum bridge contract, which checks it and **releases the equivalent funds to your Ethereum address**.
+3. That proof is submitted to an Ethereum bridge contract via `withdrawByProof`, which checks it and **releases USDC to your Ethereum address**.
 
-The script in this guide drives step 1 and produces the proof for step 2. Step 3 (submitting the proof to Ethereum) needs a small helper that is **not shipped yet** — see [Status](#status) below.
+The Python orchestrator drives step 1–2. Step 3 is handled by `crates/bridge-relayer-daemon` (`daemon-bridge` or `daemon-withdraw`).
 
 ---
 
@@ -157,7 +157,7 @@ What's not done yet (planned next):
 
 - 🔲 **Ethereum submitter.** A small helper (likely a `web3.py` script or a Rust binary using `ethers-rs`) that takes the proof file and posts a `proveWithdrawal(...)` transaction to the Ethereum bridge contract.
 - 🔲 **`bridge-event-witness-builder` rewrite.** Today it builds the Circuit-4 witness against the off-chain `bridge-verifier-daemon`'s mirror state. The rewrite will read the Ethereum bridge contract's `layerWindows` storage directly, so the stub no longer depends on running an off-chain verifier daemon.
-- 🔲 **`bridge-prover-daemon` ETH-submission mode.** A variant (or extra mode) of the existing `bridge-prover-daemon` that posts the per-bundle attestation proof (Circuit 1A *or* 1B, selected by the daemon's path classifier — see [`docs/fallback_path.md`](./docs/fallback_path.md)) + Circuit 2 proof to the Ethereum contract via `verifyBlock(...)` instead of writing them to disk for the modelling verifier daemon to read.
+- 🔲 **`bridge-prover-daemon` ETH-submission mode.** A variant (or extra mode) of the existing `bridge-prover-daemon` that posts the per-bundle attestation proof (Circuit 1A *or* 1B, selected by the daemon's path classifier — see [`docs/operations/an_bridge_prover_fallback_path.md`](./docs/operations/an_bridge_prover_fallback_path.md)) + Circuit 2 proof to the Ethereum contract via `verifyBlock(...)` instead of writing them to disk for the modelling verifier daemon to read.
 
 Once all three land, this stub becomes the real end-to-end happy path against a live Ethereum bridge contract.
 

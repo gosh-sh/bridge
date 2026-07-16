@@ -19,7 +19,8 @@ Use this when spawning subagents on Phase F (`audit/spec/an/`).
 4. `audit/knowledge/04-tvm-execution.md` — gosh-solidity vs Ethereum Solidity
 5. `audit/knowledge/05-security-patterns.md` — audit checklist
 6. `audit/spec/an/BUILD.md` — toolchain + debugger limits
-7. `audit/PROJECT_FACTS.md` — bridge flows (deposit 11 PI, finalizeDeposit)
+7. `audit/reports/an-audit-direction.md` — **priority queue / BC-QC**
+8. `audit/PROJECT_FACTS.md` — bridge flows (deposit 11 PI, finalizeDeposit)
 
 DEX-specific knowledge (`06-dex-overview.md` …) is **not** required for bridge.
 

@@ -56,7 +56,10 @@
 ### Принципы ручного аудита
 
 1. **Не «зеленить»** — каждое замечание классифицировать BC / QC / OK до правок кода.
-2. **BC ⇔ PoC** — гипотеза бага без воспроизведения остаётся QC или «BC pending».
+2. **PoC обязателен и для BC, и для QC** — различие не в «проверяли / не проверяли», а в **выводе**:
+   - **QC** — воспроизвели, понимаем механизм, но **не можем** решить bug vs feature без подтверждения intent (продукт / протокол / партнёр).
+   - **BC (bug candidate)** — PoC показывает поведение, которое **по нашим допущениям не должно** быть; не называем confirmed bug из уважения к контексту разработчиков.
+   - Без PoC — не QC и не BC; остаётся гипотеза или «BC pending» до red test.
 3. Фокус на **fund loss**, **unauthorized mint/payout**, **replay**, **accounting drift**, **pause/owner abuse**.
 4. Для каждого external/public — таблица: caller → state read/write → external calls → reentrancy surface.
 
@@ -301,7 +304,7 @@ FOUNDRY_PROFILE=fork FORK_URL=$RPC forge test --match-contract Fork
 - `DeployRealBridge.s.sol` / `DeployShellnetE2EBridge.s.sol` — dry-run `forge script`
 - Checklist L5 из `bridge_verification.md`
 
-**Критерий готовности:** E2E matrix в `audit/reports/e2e-signoff.md` — all P0 scenarios pass.
+**Критерий готовности:** E2E matrix in `audit/reports/closeout-eth.md` — P0 scenarios pass or documented as QC with PoC.
 
 ---
 
@@ -354,11 +357,12 @@ ZK opcode (`ZKHALO2VERIFYWITHVK`) — **smoke only** (trust boundary); глуб�
 
 ## 9. Closeout
 
-- [ ] Все BC: PoC + severity + fix or accepted risk
-- [ ] Test matrix: 100% P0/P1 covered
+- [x] `audit/reports/closeout-eth.md` — QC register with PoC links (BC=0)
+- [x] Test matrix phases C–E covered
+- [ ] QC disposition (13 items) — partner/dev answers
 - [ ] `make pre-push` green
-- [ ] `audit/reports/closeout-eth.md` — residual risk table
-- [ ] Обновить `audit/PROJECT_FACTS.md` если изменились trust assumptions
+- [ ] E-07 post-deploy immutables (manual)
+- [ ] `audit/PROJECT_FACTS.md` — USDC trust assumptions after QC-A1-2 answer
 
 ---
 

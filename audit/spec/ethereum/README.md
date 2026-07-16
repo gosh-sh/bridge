@@ -32,7 +32,7 @@ audit/spec/ethereum/
 ## Conventions
 
 - Header comment: `// INV: TR-1` or `// QC: QC-A4-1`
-- Failing tests for known bugs: comment `// BC pending` or `// QC: documents current behavior`
+- Failing tests for known bugs: comment `// BC pending` (bug candidate) or `// QC: documents current behavior` (PoC pins behaviour; intent TBD)
 - Do not weaken assertions to green without BC/QC/OK classification
 - **`vm.expectRevert`:** evaluate `expectedPrevAnchor()` (and other view calls) into a local **before** `expectRevert` — otherwise Foundry applies it to the staticcall in the argument list
 

@@ -1,6 +1,9 @@
 # Findings summary
 
-| ID | Severity | Invariant | Test | Status |
+**BC = 0** this pass. **QC = 13** — all with PoC (see `questions.md`, `closeout-eth.md`).  
+**BC** = bug candidate (PoC + likely wrong). **QC** = PoC + unclear intent.
+
+| ID | Severity | Invariant | PoC | Status |
 |----|----------|-----------|------|--------|
 | — (A1: BC не найдено) | — | DEP-1..4, AC-1, AC-6, TR-1..4 | покрытие сверено: `FuzzVerifiers.t.sol` (deposit fuzz), `AckiNackiBridgeAave.t.sol`, `AckiNackiBridgePause.t.sol` | A1 закрыт, 0 BC; 3 QC → `questions.md` (QC-A1-1..3) |
 | — (A2: BC не найдено) | — | LH-1..9, CC-1..7, BK-1..5, AC-3, AC-6 | покрытие сверено: `AckiNackiBridgeVerifyBlock.t.sol`, `AckiNackiBridgeRelayerLoop.t.sol`, `FuzzAckiNackiBridgeVerifyBlock.t.sol`, `AckiNackiBridgeLayerAnchor.t.sol`, `AckiNackiBridgeApplyBkSetUpdate.t.sol` | A2 закрыт, 0 BC; 4 QC → `questions.md` (QC-A2-1..4); 7 инвариантов → `invariants-extended.md` §A2 |

@@ -50,3 +50,11 @@ Retired: ETH-side deposit Groth16, `withdraw()`, `verifyEvent`, 103-PI withdraw.
 3. **VkBlob / PI mismatch** — smoke tests with wrong VK (4-PI fallback) ≠ deposit E2E
 4. **SRS mismatch** — proofs keyed on wrong ceremony fail opcode verify silently at integration
 5. **LLM greenwash** — tightening fuzz bounds hides real bridge bugs (see `.cursor/rules/bridge-core-audit.mdc`)
+
+## Audit classification (ETH pass 2026-07)
+
+- **QC:** PoC exists; need intent to classify bug vs feature (`audit/reports/closeout-eth.md`).
+- **BC:** PoC exists; behaviour likely wrong under bridge assumptions — bug **candidate**, not confirmed.
+- **OK:** No action.
+
+This pass: BC=0, QC=13 (all PoC-linked), audit overlay 47/47 green.

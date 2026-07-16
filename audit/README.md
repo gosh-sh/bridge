@@ -26,9 +26,11 @@ audit/
 
 | Prefix | Use |
 |--------|-----|
-| `BRIDGE-XXX` | Security finding (BC) |
-| `QC-NN` | Question to partner / dev |
-| Test IDs `U/I/V/E/R-NN` | Indexed in `audit/TEST_INDEX.md` when suite grows |
+| `BRIDGE-XXX` | Bug **candidate** (BC) — PoC shows likely-wrong behaviour; not a confirmed bug until team agrees |
+| `QC-NN` | **Question after PoC** — behaviour reproduced; need intent to classify bug vs feature |
+| Test IDs `U/I/V/E/R-NN` | Indexed in `audit/reports/test-matrix.md` |
+
+**BC vs QC:** both require PoC. QC = «проверили, не уверены в intent». BC = «проверили, уверены что так быть не должно (кандидат в баг)». See `audit/reports/closeout-eth.md`.
 
 ## Methodology sources
 
@@ -50,5 +52,6 @@ Every spec test header should cite the invariant(s) it covers.
 | C | `spec/ethereum/*.t.sol` | **done** (29 unit) |
 | D | handlers + invariants | **done** (11 fuzz/inv) |
 | E | E2E gaps | **done** (7 E2E) |
+| Closeout | `reports/closeout-eth.md` | **draft** — QC register + signoff |
 
 Run: `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` (47 tests)

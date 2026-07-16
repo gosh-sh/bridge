@@ -47,17 +47,3 @@ interleaving deposit+supply+withdrawByProof (TR-1/TR-2), донат-сценар
 | A4-INV-5 | Каждый AN→ETH aggregator-адаптер возвращает `true` только если `proof.length >= (12 + NUM_INNER)*32`, re-exposed instances `[12..]` равны публичным входам от бриджа, **и** Yul SHPLONK verifier принял `instances‖proof` | negative-тесты `ShplonkAggregatorForgery.t.sol` + fuzz length/instance tampering |
 | A4-INV-6 | `ShplonkHalo2Verifier.verify` возвращает `true` только когда целевой Yul verifier имеет непустой код и не ревертит — сейчас **не enforced** (QC-A4-1): `staticcall` на адрес без кода даёт `ok == true` | unit: wrapper на EOA/пустой адрес должен отвергать; ждёт решения QC-A4-1 |
 | A4-INV-7 | `AxiomBlockHeaderOracle.getBlockHash` fail-closed: revert для future block, для historical без witness и при нулевом `blockhash()` | unit negatives (OR-1..OR-3) |
-
-## A4 — AAVE / owner / pause / verifiers / oracle (A4-INV-#)
-
-Источник: `audit/reports/manual-audit/A4-aave-ac-verifiers.md`.
-
-| ID | Statement | Проверка (фаза D) |
-|----|-----------|-------------------|
-| A4-INV-1 | Владелец не может увести принципал: в любом owner-достижимом состоянии `totalAssets() >= treasuryBalance`, и ни одна owner-функция не уменьшает `treasuryBalance` и не переводит принципал на EOA | handler invariant с owner-actions (supply/withdraw/emergency/harvest/сеттеры) |
-| A4-INV-2 | После `harvestYield(amount)` сохраняется `aUsdcBalance() >= suppliedPrincipal` (принципал остаётся полностью обеспечен; harvest ограничен `accruedYield()`) | unit на границе `amount == accruedYield()` + fuzz |
-| A4-INV-3 | `suppliedPrincipal` убывает только через `_pullFromAave` / `emergencyWithdrawAll`; USDC уходит на не-AAVE адрес только как yield (`harvestYield`) или verified payout (`withdrawByProof`) | state-diff invariant |
-| A4-INV-4 | При `paused`: `deposit` / `verifyBlock` / `applyBkSetUpdate` / `withdrawByProof` revert `BridgePaused`; `supplyToAave` / `withdrawFromAave` / `emergencyWithdrawAll` / `harvestYield` остаются owner-callable | fuzz по (paused × entrypoint) — совмещается с PS-1 |
-| A4-INV-5 | Любой AN→ETH aggregator-адаптер возвращает `true` только если `proof.length >= (12 + NUM_INNER)*32`, re-exposed instances `[12..]` равны публичным входам моста, И Yul-SHPLONK-верификатор принял `instances‖proof` | fuzz malformed calldata + instance-mutation (расширить `ShplonkAggregatorForgery`) |
-| A4-INV-6 | `ShplonkHalo2Verifier.verify` возвращает `true` только если целевой Yul имеет непустой код и не revert'нул — **сейчас не гарантировано** (A4-01); добавить `extcodesize > 0` в ctor обёртки | negative-тест: обёртка на адрес без кода ⇒ `verify` НЕ должен возвращать `true` |
-| A4-INV-7 | `AxiomBlockHeaderOracle.getBlockHash` fail-closed: revert для будущих блоков, историчных без witness и обнулённого `blockhash()` recent-блока | unit (уже частично в `AxiomBlockHeaderOracleTest`) |

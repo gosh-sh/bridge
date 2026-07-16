@@ -1,109 +1,97 @@
 # ETH contracts audit — closeout (branch `audit`)
 
-**Commit:** `ea836dd` (+ merge cleanup → `audit` @ GitLab)  
 **Date:** 2026-07-16  
-**Scope:** Ethereum bridge contracts — wiring, accounting, replay, pause, deploy path. **ZK soundness out of scope.**
+**Scope:** Ethereum bridge — wiring, accounting, replay, pause, deploy. ZK soundness out of scope.
 
 ---
 
-## Classification policy (BC vs QC vs OK)
+## Classification policy
 
-| Label | Meaning | PoC required? |
-|-------|---------|---------------|
-| **OK** | Behaviour matches intent; no action. | Optional |
-| **QC** | **PoC or reproducible evidence exists**, behaviour is understood, but **we cannot tell bug vs feature** without product/protocol/design confirmation. Not laziness — we checked and need intent. | **Yes** — every QC in this closeout links a test or cited code path |
-| **BC** | **Bug candidate:** PoC shows behaviour that **should not** happen under reasonable bridge assumptions; we still do **not** call it a confirmed bug out of respect for dev context we may lack. | **Yes** — mandatory |
+| Label | PoC | Meaning |
+|-------|-----|---------|
+| **OK** | Usually yes | Matches intent (after author confirms) |
+| **QC** | **Required** | Reproduced; **auditor view stated**; **author must confirm** bug vs feature |
+| **BC** | **Required** | Bug **candidate** — likely wrong under bridge assumptions; not confirmed until team agrees |
 
-**This audit:** **BC = 0**, **QC = 13 unique items**, all with PoC or explicit code citation.
+QC ≠ «не проверяли». QC = «проверили, просим автора подтвердить intent».
+
+**This pass:** BC = 0. QC = 13 (all PoC-linked). No QC row deleted without author ack.
 
 ---
 
 ## Phase completion
 
-| Phase | Deliverable | Status |
-|-------|-------------|--------|
-| A | Manual A1–A4 | ✅ |
-| B | `test-matrix.md` | ✅ |
-| C | 29 unit tests | ✅ |
-| D | 11 fuzz/invariant | ✅ |
-| E | E2E gaps (incl. E-03/04/06) | ✅ |
-| Gate | `FOUNDRY_PROFILE=audit forge test` | **47/47 green** |
-| Closeout | This file + `make pre-push` | see CI row below |
+| Phase | Status |
+|-------|--------|
+| A–E tests | ✅ 47/47 audit overlay |
+| Docs fixes (QC-A1-4, QC-A2-1) | ✅ applied — **author ack pending** |
+| Author QC disposition | ⏳ 13 items open |
 
 ---
 
-## Residual risks — QC register (PoC-linked)
+## QC register — PoC, auditor view, ask author
 
 ### A1 — Deposits & treasury
 
-| ID | PoC / evidence | What we proved | Open question (bug or feature?) |
-|----|----------------|----------------|-----------------------------------|
-| QC-A1-1 | `audit/spec/ethereum/DepositWhaleCap.t.sol` | N×100 USDC deposits succeed; no global TVL cap | Per-tx cap only — intentional exposure limit? |
-| QC-A1-2 | `audit/spec/ethereum/FuzzDepositToken.t.sol` (TR-4); code `AckiNackiBridge.deposit` L587–592 | Exact `transferFrom` accounting; no fee-on-transfer handling | Document mainnet USDC proxy/blacklist trust model in `PROJECT_FACTS.md`? |
-| QC-A1-3 | `audit/spec/ethereum/EmergencyYield.t.sol` | After `emergencyWithdrawAll`, residual yield not harvestable | Accepted residual vs emergency should route yield to `yieldRecipient`? |
-| QC-A1-4 | Code review `deposit` / `emergencyWithdrawAll` / `harvestYield` vs `bridge_verification.md` AC-6 | Pull-then-account + `nonReentrant`; docs say “effects before externals” literally | Fix AC-6 wording in ops docs (not a code defect) |
+| ID | PoC | Auditor view | Ask author |
+|----|-----|--------------|------------|
+| QC-A1-1 | `DepositWhaleCap.t.sol` | Per-tx cap likely intentional; not global TVL limit. NatSpec clarified. | Per-tx-only cap OK for deployment target? |
+| QC-A1-2 | `FuzzDepositToken.t.sol` | Trust assumption; draft in `PROJECT_FACTS.md`. | USDC proxy/blacklist risk accepted? |
+| QC-A1-3 | `EmergencyYield.t.sol` | Yield trapped after emergency — tradeoff, not theft. | Accept vs emergency should harvest yield? |
+| QC-A1-4 | Code review | **Docs bug fixed** (`bridge_verification.md` AC-6). Code safe. | AC-6 wording OK? |
 
 ### A2 — verifyBlock
 
-| ID | PoC / evidence | What we proved | Open question |
-|----|----------------|----------------|---------------|
-| QC-A2-1 | `contracts/ethereum/test/AckiNackiBridgeLayerAnchor.t.sol` | `_expectedPrevAnchor(numLayers)` ≠ flat `storedPrevMaxLevelLayerHash` on layer shrink | Update `bridge_verification.md` LH-3/CC-6/L6 monitoring? |
-| QC-A2-2 | `audit/spec/ethereum/BkSetUpdateReplay.t.sol`; code `applyBkSetUpdate` L777/787 | Dual cursor: PI from `storedLastSeenBlockSeqNo`, gate on `storedLastBkSetUpdateSeqNo` | Prover `lastSeen` semantics when `verifyBlock` advances between prove and submit? |
-| QC-A2-3 | `audit/spec/ethereum/VerifyBlockZeroLayer.t.sol` | Active slot `layerHashes[i]==0` accepted; not appended to window | Can Circuit 2 ever emit zero active layer hash? If not — document assumption; if yes — add on-chain reject? |
-| QC-A2-4 | Code `_highestActiveLayer()` L880–888 | `t` monotonic; windows never shrink | Partner semantics when AN permanently reduces layer count? |
+| ID | PoC | Auditor view | Ask author |
+|----|-----|--------------|------------|
+| QC-A2-1 | `AckiNackiBridgeLayerAnchor.t.sol` | **Docs bug fixed** (LH-3/CC-6/L6). AB-Q4 code intentional. | Monitoring/relayer runbook aligned? |
+| QC-A2-2 | `BkSetUpdateReplay.t.sol` | Dual cursor likely by design; stale prover = liveness. | Prover reads live cursor at prove time? |
+| QC-A2-3 | `VerifyBlockZeroLayer.t.sol` | Partner-dependent: zero active hash — document or reject on-chain. | Circuit 2 can emit zero active hash? |
+| QC-A2-4 | `_highestActiveLayer()` | Edge on permanent layer shrink. | Partner semantics on shrink? |
 
 ### A3 — withdrawByProof
 
-| ID | PoC / evidence | What we proved | Open question |
-|----|----------------|----------------|---------------|
-| WD-Q1 / A3-01 | `audit/spec/ethereum/WithdrawAnchorEviction.t.sol` | After 129+ verifyBlocks, old L1 root → `UnknownAnchor` | Can withdrawal proof be re-bound to fresher anchor? |
-| WD-Q2 / A3-02 | `audit/spec/ethereum/WithdrawRecipientZero.t.sol`; main `test_withdrawByProof_zeroRecipientWorks` | Zero recipient accepted; USDC transfer reverts → nullifier unused, event stuck | Early `InvalidRecipient` revert vs AN must never emit recipient=0? |
-| WD-Q3 / A3-03 | `DeployWithdrawVerifier.t.sol`, `DeployShplonkSmoke.t.sol`, `BridgeWithdrawalVerifier.sol` NatSpec | Groth16 stub accepts arbitrary 256 B proof; prod scripts use SHPLONK aggregator | Deploy checklist / CI guard that stub never wired on mainnet? |
-| WD-Q4 / A3-05 | `AckiNackiBridge.sol` L75/L1042 + comments | `WITHDRAW_ANCHOR_LAYER = 1` hard-coded | Fixed forever vs future PI slot `anchorLayer`? |
+| ID | PoC | Auditor view | Ask author |
+|----|-----|--------------|------------|
+| WD-Q1 | `WithdrawAnchorEviction.t.sol` | 128-window by design; liveness if no re-prove. | Re-prove against fresher anchor supported? |
+| WD-Q2 | `WithdrawRecipientZero.t.sol` | Lean hardening: `InvalidRecipient`. Stuck event, not theft. | On-chain reject vs AN guarantee? |
+| WD-Q3 | Deploy smoke tests | Misdeploy risk only; prod uses SHPLONK. | Deploy/CI guard on mainnet? |
+| WD-Q4 | Code comments | Layer 1 coupling intentional. | Fixed vs future PI slot? |
 
-### A4 — AAVE / verifiers / governance
+### A4 — Verifiers / governance
 
-| ID | PoC / evidence | What we proved | Open question |
-|----|----------------|----------------|---------------|
-| QC-A4-1 / A4-01 | `audit/spec/ethereum/ShplonkEmptyCode.t.sol` | `ShplonkHalo2Verifier` on empty code → `verify` returns true (unsafe) | Add `extcodesize` guard in ctor? (blocked test **U-SHL-02** until fix) |
-| A4-Q2 | `audit/spec/ethereum/FuzzPauseMatrix.t.sol` | Owner can pause user ops indefinitely; owner AAVE ops still work | Timelock / max-pause / guardian split before mainnet? |
-
----
-
-## Info / OK (no QC escalation)
-
-| ID | Note |
-|----|------|
-| A3-04 | Zero-amount withdraw consumes nullifier — harmless, undocumented |
-| A4-02..05 | Docs drift, oracle optimism, centralization notes — see `findings-summary.md` |
+| ID | PoC | Auditor view | Ask author |
+|----|-----|--------------|------------|
+| QC-A4-1 | `ShplonkEmptyCode.t.sol` | Lean hardening: `extcodesize` guard. | Add before mainnet? |
+| A4-Q2 | `FuzzPauseMatrix.t.sol` | Centralization; not fund loss. | Timelock / max-pause? |
 
 ---
 
-## Manual / operational (not automated)
+## Recommended hardening (auditor — still ask before implementing)
 
-| ID | Action |
-|----|--------|
-| E-07 | Post-deploy immutables on Sepolia (`cast call` verifier addresses, USDC, BK seed) |
-| E-05 | Opt-in AAVE fork: `FOUNDRY_PROFILE=fork FORK_URL=… forge test --match-contract AaveFork` |
+| ID | Suggested action | Severity if author agrees |
+|----|------------------|---------------------------|
+| WD-Q2 | `recipient != address(0)` revert | Low / UX |
+| QC-A4-1 | `extcodesize(yul) > 0` in `ShplonkHalo2Verifier` ctor | Low / defense-in-depth |
+| QC-A2-3 | Reject `layerHashes[i]==0` for `i<numLayers` **if** Circuit 2 can emit zero | Medium |
 
 ---
 
-## Recommended follow-ups (team)
+## Docs updated by audit (ack pending)
 
-1. **Resolve QC table** — product/protocol answers → move row to OK (accepted) or BC (if team agrees it's wrong).
-2. **Docs:** `bridge_verification.md` anchor wording (QC-A2-1, QC-A1-4); `PROJECT_FACTS.md` USDC trust (QC-A1-2).
-3. **Code (if QC → fix):** `extcodesize` in `ShplonkHalo2Verifier` (QC-A4-1); optional `InvalidRecipient` (WD-Q2).
-4. **CI:** add `FOUNDRY_PROFILE=audit forge test` job on `audit` branch.
-5. **Phase F:** AN contracts (`audit/spec/an/`) after ETH signoff.
+- `docs/operations/bridge_verification.md` — LH-3, LH-8, CC-6, L6 monitoring, AC-6
+- `docs/architecture/four_circuit_architecture.md` — CC-6
+- `contracts/ethereum/src/AckiNackiBridge.sol` — `MAX_DEPOSIT_AMOUNT` NatSpec
+- `audit/PROJECT_FACTS.md` — USDC trust draft
 
 ---
 
 ## Signoff checklist
 
-- [x] Phases A–E complete; audit overlay 47/47 green
-- [x] BC = 0; all QC entries have PoC links
-- [ ] Partner/dev responses on QC register (13 items)
-- [ ] `make pre-push` green on `audit` — **blocked on pre-existing `forge fmt` drift** in `contracts/ethereum/` (not introduced by audit overlay); audit gate `FOUNDRY_PROFILE=audit forge test` is 47/47 green
-- [ ] E-07 immutables check on target deployment
+- [x] Phases A–E; 47/47 audit tests
+- [x] QC register with PoC + auditor view
+- [ ] **Author confirms** each QC row (or escalates to BC)
+- [ ] E-07 post-deploy immutables (manual)
+- [ ] `make pre-push` — blocked on pre-existing `forge fmt` drift in main tree
 
-**Auditor note:** No confirmed bugs filed. Residual risk is **documented and test-backed**; closure requires QC disposition, not more PoC work.
+**Auditor note:** We lowered the bar for *our* opinion (see auditor view column) but **did not close** QC items without author. Two docs bugs were fixed proactively; please ack QC-A1-4 and QC-A2-1.

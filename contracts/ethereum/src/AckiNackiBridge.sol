@@ -55,7 +55,7 @@ contract AckiNackiBridge {
     /// @notice One USDC base unit (USD Coin uses 6 decimals on Ethereum).
     uint256 public constant USDC_UNIT = 10 ** 6;
 
-    /// @notice Maximum deposit amount (100 USDC; prevents whale deposits)
+    /// @notice Maximum deposit amount per transaction (100 USDC). Not a global TVL cap.
     uint256 public constant MAX_DEPOSIT_AMOUNT = 100 * USDC_UNIT;
 
     /// @notice Basis-point denominator

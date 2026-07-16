@@ -1,7 +1,6 @@
 # Findings summary
 
-**BC = 0** this pass. **QC = 13** — all with PoC (see `questions.md`, `closeout-eth.md`).  
-**BC** = bug candidate (PoC + likely wrong). **QC** = PoC + unclear intent.
+**BC = 0** this pass. **QC = 13** — PoC + auditor view in `closeout-eth.md`; **author confirm pending** (items not deleted).
 
 | ID | Severity | Invariant | PoC | Status |
 |----|----------|-----------|------|--------|

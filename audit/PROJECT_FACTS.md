@@ -51,6 +51,11 @@ Retired: ETH-side deposit Groth16, `withdraw()`, `verifyEvent`, 103-PI withdraw.
 4. **SRS mismatch** — proofs keyed on wrong ceremony fail opcode verify silently at integration
 5. **LLM greenwash** — tightening fuzz bounds hides real bridge bugs (see `.cursor/rules/bridge-core-audit.mdc`)
 
+## Trust assumptions (ETH custody)
+
+- **USDC (Sepolia / mainnet):** bridge assumes standard ERC-20 semantics — exact `transferFrom` credit, no fee-on-transfer. Mainnet USDC is an upgradeable proxy; Circle blacklist/pause on the bridge address would freeze flows (operational risk, not a Solidity bug). **Author confirm:** acceptable for target deployment?
+- **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = 100 USDC` limits a single call, not aggregate TVL. **Author confirm:** intentional for milestone?
+
 ## Audit classification (ETH pass 2026-07)
 
 - **QC:** PoC exists; need intent to classify bug vs feature (`audit/reports/closeout-eth.md`).

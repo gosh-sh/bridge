@@ -153,7 +153,7 @@ This is the **minimal-cost cross-circuit consistency check**. It costs zero extr
 | **CC-3** Same epoch on the bridge side | `bkSetCommitment == storedBkSetCommitment` (hard-coded check before crypto) |
 | **CC-4** Same sequence number | `blockSeqNo` is a public input of 1A/1B but not Circuit 2; the relayer is responsible for picking matching numbers, and the partner's test-data generator enforces this at proof-generation time |
 | **CC-5** Strict monotonicity | `blockSeqNo > storedLastSeenBlockSeqNo` (hard-coded check in the bridge) |
-| **CC-6** Chain continuity | `prevMaxLevelLayerHash == storedPrevMaxLevelLayerHash` (hard-coded check in the bridge) |
+| **CC-6** Chain continuity | `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` — per-layer pick from rolling windows (AB-Q4; see `expectedPrevAnchor`) |
 | **CC-7** No silent garbage | `layerHashes[i] == 0` for `i ≥ numLayers` (hard-coded check in the bridge) |
 
 CC-1, CC-2, CC-4 are *circuit-level* invariants: the partner's test-data generator and live AN node bind these by construction; the bridge gets them for free as long as both proofs verify.

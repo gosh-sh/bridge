@@ -186,19 +186,19 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000 (100 USDC, 
 |---|---|
 | **LH-1** | Every successful `verifyBlock(...)` is preceded by **two** Groth16 proofs: one attestation proof (Circuit 1A or 1B, depending on `finType`) and one layer-hashes-movement proof (Circuit 2). |
 | **LH-2** | `bkSetCommitment` (the argument flowing into both verifier calls) equals the bridge's stored `storedBkSetCommitment` — proofs cannot be back-dated to a stale committee. |
-| **LH-3** | `prevMaxLevelLayerHash` (the argument flowing into Circuit 2) equals the bridge's stored `storedPrevMaxLevelLayerHash` — the **chain anchor**. For the very first call after deployment this equals `genesisPrevMaxLevelLayerHash` (typically 0). |
+| **LH-3** | `prevMaxLevelLayerHash` (Circuit 2 argument) equals `_expectedPrevAnchor(numLayers)` — the **per-layer chain anchor** derived from rolling layer windows (AB-Q4). Before the first verified block this equals `genesisPrevMaxLevelLayerHash` (typically 0). Relayers must call `expectedPrevAnchor(numLayers)` rather than assuming `storedPrevMaxLevelLayerHash` or the previous block's top layer. |
 | **LH-4** | `numLayers ∈ [1, MAX_LAYER_HASHES]` (i.e., 1..10) — out-of-range counts revert with `InvalidNumLayers`. |
 | **LH-5** | `layerHashes[i] == 0` for every `i ≥ numLayers`. The bridge will revert with `LayerHashTailNonZero(i)` — the unused tail must not carry silent garbage. |
 | **LH-6** | `blockSeqNo > storedLastSeenBlockSeqNo` — strict monotonicity. Replay attempts revert with `BlockSeqNoNotMonotonic`. |
 | **LH-7** | Each verifier adapter (`PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) returns `false` if `proof.length != 256`, and never reverts on invalid proofs — it normalises gnark reverts to `false` via try/catch so `verifyBlock` produces a clean `AttestationProofRejected` / `LayerHashesProofRejected` revert. |
-| **LH-8** | After a successful call, `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]` (the new top-of-chain becomes the anchor for the next call), `storedNumLayers = numLayers`, `storedLayerHashes = layerHashes`, `storedLastSeenBlockSeqNo = blockSeqNo`. There is no admin path that bypasses this. |
+| **LH-8** | After a successful call: `storedLastSeenBlockSeqNo = blockSeqNo`, `storedNumLayers = numLayers`, `storedLayerHashes = layerHashes`; layer windows append non-zero hashes; `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]` (legacy flat top-of-chain snapshot — **not** the anchor for the next call when `numLayers` shrinks; use `expectedPrevAnchor` for that). No admin path bypasses this. |
 | **LH-9** | If any of the three verifier slots is `address(0)` at construction, `verifyBlock` reverts with `VerifyBlockDisabled`. The deposit/AAVE surface remains fully functional in that mode. |
 
 ### 5.2 Why each property holds
 
 - **LH-1**: `verifyBlock` directly calls both verifier adapters; the verifier addresses are `immutable` and set in the constructor's `VerifyBlockConfig`. There is no setter that can replace them post-deployment.
 - **LH-2**: `bkSetCommitment != storedBkSetCommitment ⇒ revert BkSetCommitmentMismatch`. The user-supplied `bkSetCommitment` is the same value passed to **both** verifier calls — the partner's circuits commit to it as a public input (offset 96 of the envelope tree), so a wrong value would also fail the gnark pairing.
-- **LH-3**: explicit `prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash ⇒ revert PrevAnchorMismatch`. The first-call genesis case is just `storedPrevMaxLevelLayerHash = genesisPrevMaxLevelLayerHash` seeded in the constructor.
+- **LH-3**: `prevMaxLevelLayerHash != _expectedPrevAnchor(numLayers) ⇒ revert PrevAnchorMismatch`. The expected anchor is `pick = min(numLayers, t)` where `t = _highestActiveLayer()` (count of layers with non-empty windows), or the genesis seed when `t == 0`. See `AckiNackiBridgeLayerAnchor.t.sol` and `expectedPrevAnchor(uint8)`.
 - **LH-4**: explicit `if (numLayers == 0 || numLayers > MAX_LAYER_HASHES) revert InvalidNumLayers(numLayers)`.
 - **LH-5**: explicit `for (i = numLayers; i < MAX_LAYER_HASHES; i++) if (layerHashes[i] != 0) revert LayerHashTailNonZero(i)` — guards against silent garbage in unused slots.
 - **LH-6**: explicit `blockSeqNo <= storedLastSeenBlockSeqNo ⇒ revert BlockSeqNoNotMonotonic`.
@@ -214,7 +214,7 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000 (100 USDC, 
 
 1. Feature-gate the three verifier slots (LH-9).
 2. Shape & range checks: `numLayers` in `[1, MAX_LAYER_HASHES]` (LH-4); `layerHashes` tail (LH-5).
-3. Anchor checks against stored state: `bkSetCommitment` (LH-2), `blockSeqNo` (LH-6), `prevMaxLevelLayerHash` (LH-3).
+3. Anchor checks against stored state: `bkSetCommitment` (LH-2), `blockSeqNo` (LH-6), `prevMaxLevelLayerHash` vs `_expectedPrevAnchor(numLayers)` (LH-3).
 4. Crypto: route to `primaryVerifier` or `fallbackVerifier` based on `finType`, then call `layerHashesVerifier`. Both must return `true` (LH-1, LH-7).
 5. Effects (CEI): commit `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes`, `storedPrevMaxLevelLayerHash` (LH-8).
 6. Emit `BlockVerified(blockId, blockSeqNo, finType, numLayers)`.
@@ -235,7 +235,7 @@ forge test --match-contract "AckiNackiBridgeVerifyBlockTest|AckiNackiBridgeRelay
 |---|---|
 | LH-1 | `AckiNackiBridgeVerifyBlockTest::testHappyPathPrimary`, `…::testHappyPathFallback` |
 | LH-2 | `…::testRevertOnBkSetCommitmentMismatch`, `…::testRevertOnTamperedBkSetInProof` |
-| LH-3 | `…::testRevertOnPrevAnchorMismatch`, `AckiNackiBridgeRelayerLoopTest::test_relayerLoop_anchorMismatch_reverts` |
+| LH-3 | `…::testRevertOnPrevAnchorMismatch`, `AckiNackiBridgeRelayerLoopTest::test_relayerLoop_anchorMismatch_reverts`, `AckiNackiBridgeLayerAnchorTest` (AB-Q4 per-layer shrink) |
 | LH-4 | `…::testRevertOnZeroNumLayers`, `…::testRevertOnNumLayersAboveMax` |
 | LH-5 | `…::testRevertOnLayerHashTailNonZero` |
 | LH-6 | `AckiNackiBridgeRelayerLoopTest::test_relayerLoop_replaySameSeqNo_reverts`, `…::test_relayerLoop_lowerSeqNo_reverts` |
@@ -274,12 +274,12 @@ cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
 #### L6 — monitoring invariants
 
 ```
-storedPrevMaxLevelLayerHash(t) == storedLayerHashes[storedNumLayers - 1](t)            # always
-prevMaxLevelLayerHash_in_event_t == storedPrevMaxLevelLayerHash(t-1)                   # event continuity
-storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                            # strict monotonicity
+storedPrevMaxLevelLayerHash(t) == storedLayerHashes[storedNumLayers - 1](t)   # legacy flat snapshot (LH-8)
+prevMaxLevelLayerHash_in_call_t == expectedPrevAnchor(numLayers)(t)             # per-block anchor (LH-3 / AB-Q4)
+storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                     # strict monotonicity (LH-6)
 ```
 
-A relayer/monitor that sees a `BlockVerified` event with a `prevMaxLevelLayerHash` parameter that doesn't match the prior `storedPrevMaxLevelLayerHash` should alert — it would indicate a state-machine break.
+Do **not** alert on `prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash(t-1)` when `numLayers` decreases — that mismatch is expected under AB-Q4. Compare against `expectedPrevAnchor(numLayers)` instead.
 
 ---
 
@@ -335,7 +335,7 @@ These are the v2-specific invariants binding two independent ZK proofs into a si
 | **CC-3** | `bkSetCommitment == storedBkSetCommitment` at the contract level (binds the proofs to the *currently active* committee, not just to "some" committee). |
 | **CC-4** | `blockSeqNo` is committed by Circuit 1A/1B (PI[2]) but not by Circuit 2; relayer-side discipline + the partner's `bridge-test-data-gen` enforce coherent values at proof-generation time. |
 | **CC-5** | Strict monotonicity at the contract: `blockSeqNo > storedLastSeenBlockSeqNo`. Prevents replay across blocks. |
-| **CC-6** | Chain continuity at the contract: `prevMaxLevelLayerHash == storedPrevMaxLevelLayerHash`. Prevents fork injection between consecutive blocks. |
+| **CC-6** | Chain continuity at the contract: `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` (per-layer pick from rolling windows; AB-Q4). Prevents fork injection between consecutive blocks. |
 | **CC-7** | No silent garbage: `layerHashes[i] == 0` for `i ≥ numLayers`. Prevents an attacker from sneaking values into unused slots that would survive future calls. |
 
 ### 6.5.1 How to verify
@@ -468,7 +468,7 @@ Exercises ZK-2, ZK-3, ZK-4 across all three adapters.
 | **AC-3** | `AckiNackiBridge.verifyBlock` is permissionless and `nonReentrant` (no modifier other than the proof checks). |
 | **AC-4** | `transferOwnership`, `setYieldRecipient`, `setLiquidReserveBps`, `setAaveEnabled`, `harvestYield`, `emergencyWithdrawAll` are `onlyOwner`. |
 | **AC-5** | The verifier slots (`primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`, `verifier`, `blockHeaderOracle`, `aavePool`, `wethGateway`, `aWETH`) are `immutable` — there is no setter that can replace them post-deployment. |
-| **AC-6** | All external interactions follow CEI: state mutation precedes external call. |
+| **AC-6** | Value-bearing external calls use a safe ordering: **`verifyBlock`** — crypto checks (view/staticcall-style) complete before storage effects (CEI). **`deposit`** — `transferFrom` then accounting (`treasuryBalance`, `depositCounter`); mitigated by `nonReentrant` and standard ERC-20 (no callback). **Owner AAVE paths** — external pool/gateway calls under `nonReentrant`; principal accounting updated after pull/push where applicable. Do not read AC-6 as “every storage write must precede every external call” literally. |
 
 ### 9.2 How to verify
 
@@ -484,7 +484,13 @@ Tests:
 forge test --match-test "OnlyOwner|NotOwner|nonReentrant|Reentrancy|Unauthorized" -vv
 ```
 
-CEI by inspection: in `AckiNackiBridge.verifyBlock`, the two gnark verifier calls are `view`-style externals returning bool, and storage writes (`storedLastSeenBlockSeqNo`, `storedPrevMaxLevelLayerHash`) follow both successful verifications (effects come after both interactions return). `deposit()` has no external call at all. The owner-only AAVE routing functions (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`) wrap external calls under `nonReentrant` and update `suppliedPrincipal` after the interaction (acceptable because `suppliedPrincipal` is not consulted to gate the call). Legacy `withdraw()`'s CEI (`processedDeposits` set before `_pullFromAave` and `recipient.transfer`) is no longer in scope — the function was retired in Phase 4.3.
+CEI by inspection:
+
+- **`verifyBlock`**: anchor + shape checks, then attestation + layer verifier calls (externals returning `bool`), then storage effects and `BlockVerified` — classic CEI on the state machine.
+- **`deposit`**: `usdc.transferFrom` precedes `treasuryBalance` / `depositCounter` updates (pull-then-account). Safe because `nonReentrant` + USDC has no transfer hook; not a literal “effects before externals” ordering.
+- **Owner AAVE** (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`): externals under `nonReentrant`; `suppliedPrincipal` / yield accounting updated around the interaction as documented in each function.
+
+Legacy `withdraw()` CEI is out of scope (retired Phase 4.3).
 
 ---
 

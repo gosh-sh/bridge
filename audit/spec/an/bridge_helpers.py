@@ -14,6 +14,8 @@ USDC_BRIDGE_ADDR = (
 )
 USDC_ECC_ID = 3
 PI_LEN = 352  # 11 × 32-byte LE Fr
+UINT64_MAX = (1 << 64) - 1
+FR_COUNT_ON_CHAIN = 8  # USDCBridge._parsePublicInputs reads fr[0..7]
 
 ERR_ZERO_AMOUNT = 204
 ERR_INVALID_SENDER = 207
@@ -31,11 +33,96 @@ ERR_OVERFLOW = 214
 EVM_RECIPIENT_20B = "742d35cc6634c05329225a8b3683a49a3ca7d65c"
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "deposit_10proofs"
+MAX_PROOF_INDEX = 9
+FAKE_MISSING_DEST = "0:" + "ff" * 32
+
+
+def max_available_proof_index() -> int:
+    """Highest proof_NN index present on disk (inclusive), or -1."""
+    for i in range(MAX_PROOF_INDEX, -1, -1):
+        if (FIXTURES_ROOT / f"proof_{i:02d}" / "proof.bin").is_file():
+            return i
+    return -1
+
+
+def all_proofs_available() -> bool:
+    return max_available_proof_index() == MAX_PROOF_INDEX
 
 
 def fr_le(pi: bytes, index: int) -> int:
     start = index * 32
     return int.from_bytes(pi[start : start + 32], "little")
+
+
+def parse_pi_fields(pi: bytes) -> dict[str, int]:
+    """Decode on-chain deposit PI limbs (fr[0..7])."""
+    if len(pi) < FR_COUNT_ON_CHAIN * 32:
+        raise ValueError(f"PI too short: {len(pi)} B, need {FR_COUNT_ON_CHAIN * 32}")
+    dapp_hi, dapp_lo = fr_le(pi, 4), fr_le(pi, 5)
+    return {
+        "deposit_id": fr_le(pi, 0),
+        "sender": fr_le(pi, 1),
+        "amount": fr_le(pi, 2),
+        "contract_addr": fr_le(pi, 3),
+        "dapp_id": (dapp_hi << 128) | dapp_lo,
+        "an_account_hi": fr_le(pi, 6),
+        "an_account_lo": fr_le(pi, 7),
+    }
+
+
+def encode_replay_anchor(deposit_id: int, contract_addr: int, dapp_id: int) -> bytes:
+    """Solidity `abi.encode(uint256,uint256,uint256)` preimage (96 B, BE per word)."""
+    return (
+        deposit_id.to_bytes(32, "big")
+        + contract_addr.to_bytes(32, "big")
+        + dapp_id.to_bytes(32, "big")
+    )
+
+
+def amount_exceeds_uint64(amount: int) -> bool:
+    return amount > UINT64_MAX
+
+
+def get_total_minted(tb: TestBase, tvc: Path) -> int:
+    r = tb.call(tvc, "USDCBridge", "getTotalMinted", {}, address=USDC_BRIDGE_ADDR)
+    tb.assert_success(r)
+    return int(r.response["value0"])
+
+
+def get_total_bridged_minted(tb: TestBase, tvc: Path, token_id: int = USDC_ECC_ID) -> int:
+    r = tb.call(
+        tvc,
+        "USDCBridge",
+        "getTotalBridged",
+        {"tokenId": str(token_id)},
+        address=USDC_BRIDGE_ADDR,
+    )
+    tb.assert_success(r)
+    return int(r.response["minted"])
+
+
+def get_total_bridged_burned(tb: TestBase, tvc: Path, token_id: int = USDC_ECC_ID) -> int:
+    r = tb.call(
+        tvc,
+        "USDCBridge",
+        "getTotalBridged",
+        {"tokenId": str(token_id)},
+        address=USDC_BRIDGE_ADDR,
+    )
+    tb.assert_success(r)
+    return int(r.response["burned"])
+
+
+def get_bridged_counters(tb: TestBase, tvc: Path, token_id: int = USDC_ECC_ID) -> tuple[int, int]:
+    r = tb.call(
+        tvc,
+        "USDCBridge",
+        "getTotalBridged",
+        {"tokenId": str(token_id)},
+        address=USDC_BRIDGE_ADDR,
+    )
+    tb.assert_success(r)
+    return int(r.response["minted"]), int(r.response["burned"])
 
 
 def build_public_inputs(
@@ -108,3 +195,7 @@ def load_fixture_proof(n: int = 0) -> tuple[bytes, bytes]:
 
 def fixtures_available() -> bool:
     return (FIXTURES_ROOT / "proof_00" / "proof.bin").is_file()
+
+
+def ten_proofs_available() -> bool:
+    return all_proofs_available()

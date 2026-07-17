@@ -7,7 +7,7 @@
 | `sold` | `../TVM-Solidity-Compiler` | `.tools/sold` (symlink) |
 | `tvm-debugger` | `../tvm-sdk` | `.tools/tvm-debugger` |
 | `tvm-cli` | `../tvm-sdk` | `.tools/tvm-cli` (e2e only) |
-| `python3` + `pytest` | system | `pip install pytest` |
+| `python3` + `pytest` | system | `pip install -r audit/spec/an/requirements-dev.txt` |
 
 One-time setup:
 
@@ -39,6 +39,9 @@ cd audit/spec/an && python3 -m pytest unit/test_toolchain_smoke.py -q
 
 # full spec (after sync + build)
 make audit-an-test
+
+# property tests only (Hypothesis; includes slow integration)
+cd audit/spec/an && python3 -m pytest -m property -q
 
 # CI / unit-only (no deposit fixtures)
 AN_AUDIT_INTEGRATION=0 ./scripts/ci_an_audit.sh

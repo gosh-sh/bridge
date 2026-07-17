@@ -1,6 +1,6 @@
 # Test matrix — фаза B→E (ETH contracts)
 
-**Gate:** `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` — **47/47 green** (2026-07-16).
+**Gate:** `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` — **50/50 green** (2026-07-17).
 
 ---
 
@@ -9,7 +9,7 @@
 | Phase | Tests | Status |
 |-------|-------|--------|
 | C — unit | 29 | ✅ |
-| D — fuzz/invariant | 11 (128 inv / 256 fuzz @ audit profile) | ✅ |
+| D — fuzz/invariant | 14 (128 inv / 256 fuzz @ audit profile) | ✅ |
 | E — E2E gaps | 7 new + covered | ✅ |
 
 ---
@@ -51,7 +51,9 @@
 | F-TR-4 | TR-4 exact transferFrom | fuzz | `FuzzDepositToken.t.sol` | **done** |
 | F-PS-1 | PS-1 / A4-INV-4 pause | fuzz matrix | `FuzzPauseMatrix.t.sol` | **done** |
 | F-VB-1 | LH-6 seq monotonic | `VerifyBlockHandler` | `InvariantsVerifyBlock.t.sol` | **done** |
+| F-CC-3 | CC-3 bkSet stable | `VerifyBlockHandler` | `InvariantsVerifyBlock.t.sol` | **done** |
 | F-WD-1 | WD-7 nullifier replay | `WithdrawReplayHandler` | `InvariantsWithdraw.t.sol` | **done** |
+| F-A4-1 | A4-INV-1 owner treasury | `OwnerOpsHandler` | `InvariantsOwner.t.sol` | **done** |
 | F-A4-5 | instance tampering | — | `ShplonkAggregatorForgery.t.sol` | covered |
 
 Handlers live in `audit/spec/ethereum/handlers/AuditHandlers.sol`.

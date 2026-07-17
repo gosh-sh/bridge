@@ -34,8 +34,22 @@
 | BC-AN-01 | integration | dual dappId double mint | `integration/test_bc_an_01_*.py` | ✅ dual-proof PoC (Hermez SRS) |
 | BC-AN-02 | integration | no L1 bridge allowlist | `integration/test_bc_an_01_*.py` | ✅ pre-ZK |
 | QC-AN-07 | integration | voucher brick w/o code | `integration/test_finalize_deposit_voucher_brick.py` | ✅ |
+| F7-A | unit/property | PI encode round-trip + mutations | `unit/test_public_inputs_properties.py` | ✅ |
+| F7-B | unit/property | replay anchor hash properties | `unit/test_replay_key_properties.py` | ✅ |
+| F7-C | integration/property | counter monotonicity (C1–C4) | `integration/test_bridge_counters_property.py` | ✅ |
+| F7-D | integration/property | garbage proof storm (no mint) | `integration/test_finalize_negative_property.py` | ✅ |
+| F7-E | unit/property | withdraw recipient / ECC table | `unit/test_withdraw_properties.py` | ✅ |
+| F8-A | integration/fuzz | message order — no over-mint | `integration/test_pipeline_order_fuzz.py` | ✅ |
+| F8-B | integration/fuzz | replay interleave cap | `integration/test_pipeline_order_fuzz.py` | ✅ |
+| F8-C | integration/fuzz | two-deposit permutation | `integration/test_pipeline_order_fuzz.py` | ✅ |
+| F8-D | integration/fuzz | Hypothesis state machine (finalize↔deliver) | `integration/test_pipeline_state_machine.py` | ✅ |
+| F8-E | integration/fuzz | withdraw burn counter after deposit | `integration/test_withdraw_counter_fuzz.py` | ✅ |
+| F8-F | integration/fuzz | deep pipeline SM (inflight enqueue) | `integration/test_pipeline_state_machine.py` | ✅ |
+| F8-G | integration/fuzz | cross-counter SM + QC-AN-05 | `integration/test_cross_counter_fuzz.py` | ✅ |
+| F8-H | integration/fuzz | ten-proof SM (proof_00..09) | `integration/test_pipeline_multi_proof_fuzz.py` | ✅ |
+| F8-I | integration/fuzz | bounce probe + deploy retry | `integration/test_pipeline_bounce_fuzz.py` | ✅ |
 | E-AN-01 | e2e | shellnet finalize | acki-nacki `test_usdcbridge_finalize.py` | deferred |
 
-**Gate:** `make audit-an-test` → **37 passed** (2026-07-17).
+**Gate:** `make audit-an-test` → **70 passed** (2026-07-17, F7 + F8 fuzz).
 
 Direction: `audit/reports/an-audit-direction.md`.

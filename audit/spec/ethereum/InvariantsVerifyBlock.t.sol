@@ -77,4 +77,9 @@ contract InvariantsVerifyBlockTest is StdInvariant, Test {
     function invariant_LH6_blockSeqNoMonotonic() public view {
         assertEq(bridge.storedLastSeenBlockSeqNo(), handler.nextSeq() - 1, "LH-6 seq cursor");
     }
+
+    /// @dev INV: CC-3 — every successful verifyBlock keeps the seeded bkSet commitment.
+    function invariant_CC3_bkSetCommitmentStable() public view {
+        assertEq(bridge.storedBkSetCommitment(), BK_SET, "CC-3 bkSet");
+    }
 }

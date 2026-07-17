@@ -21,6 +21,22 @@ os.environ.setdefault("AN_PROJECT_ROOT", str(_CONTRACTS_ROOT))
 from test_base import TestBase  # noqa: E402
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Hypothesis defaults for F7 property tests (debugger calls are slow)."""
+    try:
+        from hypothesis import settings as hypothesis_settings
+    except ImportError:
+        return
+    hypothesis_settings.register_profile(
+        "an_audit",
+        max_examples=int(os.environ.get("HYPOTHESIS_MAX_EXAMPLES", "50")),
+        deadline=None,
+    )
+    hypothesis_settings.load_profile(
+        os.environ.get("HYPOTHESIS_PROFILE", "an_audit")
+    )
+
+
 @pytest.fixture(scope="session")
 def tb() -> Iterator[TestBase]:
     """One TestBase per session — compile-once against an-contracts/."""

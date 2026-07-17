@@ -92,7 +92,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | QC-AN-02 | `unit/test_usdcbridge_admin.py` ADM-AN-02..03 | Owner `mintAndSend` mints ECC **without** cross-chain proof — **centralization**, not deposit-path bug. | Multisig / operational controls on `_ownerPubkey` acceptable? |
 | QC-AN-03 | F2 manual + code review | `updateCode` / `onCodeUpgrade` only path to rotate `_depositVoucherCode` (B2 — no standalone setter). | Upgrade playbook + voucher rotation tested on shellnet? |
 | QC-AN-04 | code review | **No pause** on AN; ETH `pause()` blocks L1 `deposit`. | Should `finalizeDeposit` be pausable on AN? |
-| QC-AN-05 | code review | `_totalMinted` vs `_totalMintedBridgeByToken` — no single supply invariant. | Document ops monitoring for both counters? |
+| QC-AN-05 | code review + `integration/test_cross_counter_fuzz.py` | `_totalMinted` vs bridged minted decoupled; owner path can make `burned > minted`. | Document ops monitoring for both counters? |
 | QC-AN-06 | integration fixtures + synced `VK_BLOB` | VkBlob pinned in source; must match deployment (Hermez `304c1c4e…` on current audit sync). | CI hash-check VK blob on contract sync? |
 
 ### Infrastructure / edge cases

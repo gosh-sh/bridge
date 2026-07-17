@@ -21,6 +21,9 @@ Entry point for subagents and humans. Update as BC/QC close.
 | **P3** | QC-AN-10 | anAccount == 0 | ✅ pre-ZK QC (no ETH-style revert) |
 | **P3** | DEP-AN-04 | Voucher hash | ✅ exit 219 |
 | **defer** | E-AN-01 | shellnet | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` |
+| **next** | F8-F / closeout | BC/QC regressions + `closeout-an.md` | after author replies |
+| **core** | F8 fuzz | MessagePipeline order (AN) | ✅ `test_pipeline_order_fuzz.py` |
+| **core** | F9 fuzz | ETH invariant gaps + CI night | CC-3 + A4-INV-1 ✅; CI night todo |
 
 ---
 
@@ -45,8 +48,8 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 ```bash
 ./scripts/sync_an_contracts.sh
-make audit-an-test    # 37 passed (2026-07-17)
-make pre-push-an      # unit only (28)
+make audit-an-test    # 70 passed (F7 + F8 fuzz incl. 10-proof + bounce)
+make pre-push-an      # unit only (28 deterministic; no Hypothesis integration)
 ```
 
 ---

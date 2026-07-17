@@ -295,3 +295,72 @@ contract WithdrawReplayHandler is Test {
         lo = a & ((1 << 80) - 1);
     }
 }
+
+/// @title OwnerOpsHandler
+/// @notice Handler for A4-INV-1 — owner-only paths must not reduce `treasuryBalance`.
+contract OwnerOpsHandler is Test {
+    AckiNackiBridge public immutable bridge;
+    MockAUSDC public immutable aUSDC;
+    address public immutable owner;
+
+    constructor(AckiNackiBridge _bridge, MockAUSDC _aUSDC, address _owner) {
+        bridge = _bridge;
+        aUSDC = _aUSDC;
+        owner = _owner;
+    }
+
+    function supplyMax() external {
+        vm.startPrank(owner);
+        if (bridge.aaveEnabled() && bridge.treasuryBalance() > 0) {
+            bridge.supplyToAave(type(uint256).max);
+        }
+        vm.stopPrank();
+    }
+
+    function withdrawFromAaveMax() external {
+        vm.startPrank(owner);
+        if (bridge.suppliedPrincipal() > 0) {
+            bridge.withdrawFromAave(type(uint256).max);
+        }
+        vm.stopPrank();
+    }
+
+    function harvestPartial(uint256 seed) external {
+        vm.startPrank(owner);
+        uint256 y = bridge.accruedYield();
+        if (y > 0) {
+            bridge.harvestYield(bound(seed, 1, y));
+        }
+        vm.stopPrank();
+    }
+
+    function emergencyExit() external {
+        vm.startPrank(owner);
+        if (bridge.aUsdcBalance() > 0 || bridge.suppliedPrincipal() > 0) {
+            bridge.emergencyWithdrawAll();
+        }
+        vm.stopPrank();
+    }
+
+    function setLiquidReserve(uint256 seed) external {
+        vm.startPrank(owner);
+        bridge.setLiquidReserveBps(uint16(bound(seed, 0, 5_000)));
+        vm.stopPrank();
+    }
+
+    function togglePause() external {
+        vm.startPrank(owner);
+        if (bridge.paused()) {
+            bridge.unpause();
+        } else {
+            bridge.pause();
+        }
+        vm.stopPrank();
+    }
+
+    function setYieldRecipient(uint256 seed) external {
+        vm.startPrank(owner);
+        bridge.setYieldRecipient(address(uint160(bound(seed, 1, type(uint160).max))));
+        vm.stopPrank();
+    }
+}

@@ -283,6 +283,34 @@ test:solidity:audit:
       - contracts/ethereum/script/**/*
       - contracts/ethereum/test/**/*
 
+# AN contract audit (pytest + tvm-debugger). Runner must have sibling tvm-sdk built
+# (see audit/spec/an/BUILD.md) or cached `.tools/` — otherwise job skips cleanly.
+test:an:audit:
+  extends: .rust_base
+  stage: test
+  script:
+    - apt-get update && apt-get install -y python3-pip
+    - pip install pytest
+    - chmod +x scripts/setup_an_audit_tools.sh scripts/ci_an_audit.sh scripts/sync_an_contracts.sh
+    - |
+      if [[ -x .tools/tvm-debugger ]] && [[ -x .tools/sold ]]; then
+        AN_AUDIT_INTEGRATION=0 ./scripts/ci_an_audit.sh
+      else
+        echo "SKIP test:an:audit — no .tools/tvm-debugger (build ../tvm-sdk locally; gate: make pre-push-an)"
+        exit 0
+      fi
+  allow_failure: true
+  only:
+    refs:
+      - audit
+      - merge_requests
+    changes:
+      - audit/spec/an/**/*
+      - audit/spec/an-contracts/**/*
+      - scripts/sync_an_contracts.sh
+      - scripts/setup_an_audit_tools.sh
+      - scripts/ci_an_audit.sh
+
 test:solidity:coverage:
   extends: .foundry_base
   stage: test

@@ -10,14 +10,16 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | P | ID | Area | Action |
 |---|-----|------|--------|
-| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | PoC: two proofs same receipt, different `dappId` → double mint. Red/xfail test when prover artifacts ready. Fix: on-chain `EXPECTED_DAPP_ID` or drop dappId from hash. |
-| **P1** | BC-AN-02 | No L1 `contractAddr` allowlist | QC/BC: document + optional `require(f.contractAddr == ETH_BRIDGE)`. |
+| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | ✅ dual-proof PoC (`bootstrap_hermez_srs_k18.sh` + `generate_bc_an_01_dual_proofs.sh`; 3 integration tests green). |
+| **P1** | BC-AN-02 | No L1 `contractAddr` allowlist | ✅ pre-ZK integration test |
 | **P1** | DEP-AN-11/12 | MessagePipeline | ✅ `integration/test_finalize_deposit_pipeline.py` |
 | **P2** | WD-AN-01/02, ADM-AN-01 | withdraw + admin negatives | ✅ `unit/test_usdcbridge_withdraw_admin_negative.py` |
-| **P2** | Joint ETH↔AN | cap, pause, anWorkchain | QC: L1 `MAX_DEPOSIT_AMOUNT` / pause not mirrored on AN; workchain dropped in PI |
+| **P2** | Joint ETH↔AN | cap, pause, anWorkchain | ✅ `questions-cross-chain.md` |
+| **P2** | F2 manual + admin tests | withdraw/admin/TIP-3 | ✅ F2 + `test_usdcbridge_admin.py` |
 | **P3** | QC-AN-07 | Voucher brick | Research TVM replay when voucher deploy fails mid-flight |
-| **P3** | QC-AN-08 | PI length | `test_finalize_deposit_public_inputs_too_short` |
-| **P3** | Voucher hash | DepositVoucher ctor | `test_deposit_voucher_hash_mismatch` (exit 219) |
+| **P3** | QC-AN-08 | PI length | ✅ `unit/test_usdcbridge_deposit_edge.py` |
+| **P3** | QC-AN-10 | anAccount == 0 | ✅ pre-ZK QC (no ETH-style revert) |
+| **P3** | DEP-AN-04 | Voucher hash | ✅ exit 219 |
 | **defer** | E-AN-01 | shellnet | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` |
 
 ---
@@ -26,14 +28,14 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | ID | Class | Status | PoC |
 |----|-------|--------|-----|
-| BC-AN-01 | dappId double-mint | **open** | needs dual-proof prover run |
-| BC-AN-02 | L1 bridge allowlist | **open** | doc + optional guard test |
+| BC-AN-01 | dappId double-mint | **open** (PoC ✅) | dual Hermez proofs + 3 integration tests |
+| BC-AN-02 | L1 bridge allowlist | **open** | ✅ pre-ZK integration |
 | QC-AN-01 | amount ≤ uint64 | open | ✅ unit |
-| QC-AN-02…06 | admin/pause/VK | open | partial |
-| QC-AN-07 | voucher brick | open | — |
-| QC-AN-08 | PI length | open | — |
+| QC-AN-02…06 | admin/pause/VK | open | partial (ADM/TIP unit + F2) |
+| QC-AN-07 | voucher brick | **closed** (test) | ✅ integration |
+| QC-AN-08 | PI length | **closed** (test) | ✅ unit |
 | QC-AN-09 | accept before ZK | accepted | griefing only |
-| QC-AN-10 | anAccount == 0 | open | — |
+| QC-AN-10 | anAccount == 0 | **open** (QC) | ✅ no on-chain guard |
 
 **BC count:** 2 candidates (author confirm). Non-deposit surfaces: **BC=0** per withdraw agent.
 
@@ -43,8 +45,8 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 ```bash
 ./scripts/sync_an_contracts.sh
-make audit-an-test    # target: 19/19
-make pre-push-an      # unit only (16)
+make audit-an-test    # 37 passed (2026-07-17)
+make pre-push-an      # unit only (28)
 ```
 
 ---

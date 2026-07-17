@@ -18,7 +18,10 @@ audit/
 │   └── rust/              # Relayer / deposit-relayer / interface
 ├── reports/
 │   ├── findings-summary.md
-│   └── questions.md       # QC items for partners
+│   ├── questions.md           # index → eth / an / cross-chain
+│   ├── questions-eth.md
+│   ├── questions-an.md
+│   └── questions-cross-chain.md
 └── tools/                 # Optional scanners (antipatterns, PI layout)
 ```
 

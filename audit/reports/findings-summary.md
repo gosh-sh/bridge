@@ -19,7 +19,8 @@
 | A4-03 | Info (OK) | A4-INV-2/3 | `AckiNackiBridgeAaveForkTest::test_fork_emergencyWithdrawAllPullsAaveDown` | Noted — дубль QC-A1-3(a): после `emergencyWithdrawAll` остаточный yield заперт как over-collateral казны. |
 | A4-04 | Info (OK) | AC-5 | — | Noted — docs drift: `blockHeaderOracle` не `immutable` (сеттера нет); AC-5 перечисляет несуществующие `verifier`/`wethGateway`/`aWETH`. |
 | A4-05 | Info (OK) | OR-1..4 | `AxiomBlockHeaderOracleTest` | Noted — оракул fail-closed; `isBlockHashAvailable` оптимистичен, `uint32(blockNumber)` truncation; публичной поверхностью не используется. |
-| — (A4: BC не найдено) | — | AC-2,4,5,6, ZK-1..5, OR-1..4 | покрытие сверено: `AckiNackiBridgeAave.t.sol`, `AckiNackiBridgeAaveFork.t.sol`, `AckiNackiBridgePause.t.sol`, `PrimaryVerifier.t.sol`, `FuzzVerifiers.t.sol`, `ShplonkAggregatorForgery.t.sol`, `AxiomBlockHeaderOracle.t.sol` | A4 закрыт, 0 BC; 1 Low + 4 Info; 3 QC → `questions.md` (A4-Q1..3); 7 инвариантов → `invariants-extended.md` §A4 |
+| — (F2: BC не найдено) | — | withdraw/admin/TIP-3 | `test_usdcbridge_admin.py`, `test_usdcbridge_withdraw_*.py` | F2 закрыт, 0 BC; QC → `questions-an.md`, cross-chain → `questions-cross-chain.md` |
+
 
 BC rows must link to a test in `audit/findings/BRIDGE-XXX/`.
 

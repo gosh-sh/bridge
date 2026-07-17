@@ -1,6 +1,6 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
         coverage-solidity pre-push pre-push-audit audit-solidity-test audit-an-test \
-        setup-an-audit-tools pre-push-an production-preflight relayer-test relayer-fmt relayer-clippy
+        setup-an-audit-tools setup-audit-vendors pre-push-an production-preflight relayer-test relayer-fmt relayer-clippy
 
 # Default target
 .DEFAULT_GOAL := help
@@ -206,17 +206,22 @@ setup-an-audit-tools: ## Symlink sold + tvm-debugger into .tools/
 	@chmod +x scripts/setup_an_audit_tools.sh
 	@./scripts/setup_an_audit_tools.sh
 
+setup-audit-vendors: ## Shallow-clone partner repos into audit/vendors/ (gitignored)
+	@chmod +x scripts/setup_audit_vendors.sh
+	@./scripts/setup_audit_vendors.sh
+
 pre-push-an: ## AN audit gate: unit pytest (no fixtures required)
 	@echo "$(BLUE)── pre-push-an: AN audit gate ──$(NC)"
 	@$(MAKE) setup-an-audit-tools
 	@cd audit/spec/an && python3 -m pytest unit/ -q
 	@echo "$(GREEN)── pre-push-an: green ──$(NC)"
 
-pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay (no fork E2E / AN)
+pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN unit
 	@echo "$(BLUE)── pre-push-audit: ETH audit closeout gate ──$(NC)"
 	@cd contracts/ethereum && forge fmt --check
 	@cd contracts/ethereum && forge test
 	@$(MAKE) audit-solidity-test
+	@$(MAKE) pre-push-an
 	@echo "$(GREEN)── pre-push-audit: green ──$(NC)"
 
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.

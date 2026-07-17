@@ -18,9 +18,11 @@ Use this when spawning subagents on Phase F (`audit/spec/an/`).
 3. `audit/knowledge/03-accounts-and-state.md` — addresses, state_init, workchains
 4. `audit/knowledge/04-tvm-execution.md` — gosh-solidity vs Ethereum Solidity
 5. `audit/knowledge/05-security-patterns.md` — audit checklist
-6. `audit/spec/an/BUILD.md` — toolchain + debugger limits
-7. `audit/reports/an-audit-direction.md` — **priority queue / BC-QC**
-8. `audit/PROJECT_FACTS.md` — bridge flows (deposit 11 PI, finalizeDeposit)
+6. `audit/knowledge/hermez_kzg_pins.md` — **Hermez VK/SRS pins** (not chain ceremony)
+7. `audit/spec/an/BUILD.md` — toolchain + debugger limits
+8. `audit/reports/an-audit-direction.md` — **priority queue / BC-QC**
+9. `audit/reports/non-e2e-verification-cycle.md` — full non-E2E scope
+10. `audit/PROJECT_FACTS.md` — bridge flows (deposit 11 PI, finalizeDeposit)
 
 DEX-specific knowledge (`06-dex-overview.md` …) is **not** required for bridge.
 
@@ -48,7 +50,8 @@ Setup: `./scripts/setup_an_audit_tools.sh`
 
 Upstream: `../acki-nacki` @ **`origin/dev`** (`git@github.com:gosh-sh/acki-nacki.git`; `history_cursor` merged). `contracts/exchange/`.
 
-Sync: `./scripts/sync_an_contracts.sh`
+Sync: `./scripts/sync_an_contracts.sh`  
+Optional vendor clones: `./scripts/setup_audit_vendors.sh` → `audit/vendors/` (gitignored)
 
 ## Methodology (same as ETH pass)
 

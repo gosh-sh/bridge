@@ -39,6 +39,13 @@ cd audit/spec/an && python3 -m pytest unit/test_toolchain_smoke.py -q
 
 # full spec (after sync + build)
 make audit-an-test
+
+# CI / unit-only (no deposit fixtures)
+AN_AUDIT_INTEGRATION=0 ./scripts/ci_an_audit.sh
+
+# BC-AN-01 full double-mint PoC (Hermez SRS — see audit/knowledge/hermez_kzg_pins.md)
+./scripts/bootstrap_hermez_srs_k18.sh          # if S3 pre-converted blob 403s
+./scripts/audit/generate_bc_an_01_dual_proofs.sh
 ```
 
 ## tvm-debugger limits (read before writing tests)

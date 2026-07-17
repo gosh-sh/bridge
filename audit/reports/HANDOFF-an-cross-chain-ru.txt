@@ -93,6 +93,9 @@ QC-AN-J5 (кросс-чейн: две модели custody)
 
 Off-chain / relayer (deposit path) — QC-OFF-01..05
 
+Полный текст для разработчиков (4–6 предложений на пункт):
+audit/reports/HANDOFF-f10-prover-relayer-ru.txt
+
 Релеер deposit-relayer-daemon — сторонний операторский сервис, не trust root для выплаты: finalizeDeposit на AN permissionless. При сбое релеера безопасность (нет кражи USDC) сохраняется, страдает liveness (кредит задерживается). Детали: audit/reports/manual-audit/F10-offchain-deposit-pipeline.md.
 
 QC-OFF-01: Демон обрабатывает depositId строго по порядку. Один «застрявший» id блокирует все последующие. Задумано? Нужен skip / out-of-order / алерт?

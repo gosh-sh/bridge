@@ -90,8 +90,8 @@ HANDOFF (RU): `HANDOFF-an-cross-chain-ru.txt`.
 | QC-OFF-01 | Head-of-line blocking |
 | QC-OFF-07…13 | state, ABI drift, backoff, interface status |
 | QC-PROV-01 | 7 vs 11 instances in `verify_proof` |
-| QC-PROV-02 | axiom-eth pin `@1d61be0` — **closed (pin)**; canonical VkBlob `304c1c4e…` unchanged |
-| QC-PROV-03 | `max_key_byte_len: 4` vs axiom-eth reference `3` |
+| QC-PROV-02 | axiom-eth pin `@1d61be0` — **closed (pin)** |
+| QC-PROV-03 | `max_key_byte_len = 3` — **closed (dev ack 2026-07-17)**; audit VkBlob `724687a4…` |
 | QC-PROV-04 | MPT `key_bytes` padding witness malleability (`padding_mutation_poc.rs`) |
 
 ---

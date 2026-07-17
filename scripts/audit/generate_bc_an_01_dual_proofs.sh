@@ -4,7 +4,7 @@
 #
 # Prerequisites (Hermez migration — see audit/knowledge/hermez_kzg_pins.md):
 #   cd deposit-prover && ./download_trusted_setup.sh
-#   → data/kzg_params_18.srs (Hermez; matches USDCBridge VK_BLOB 304c1c4e…)
+#   → data/kzg_params_18.srs (Hermez; matches audit USDCBridge VK_BLOB 724687a4…)
 #
 # Output (gitignored):
 #   audit/spec/an/fixtures/bc_an_01/dapp_a/{proof.bin,public_inputs.bin}

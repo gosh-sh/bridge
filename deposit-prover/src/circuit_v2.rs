@@ -771,10 +771,8 @@ impl ToMPTInput for ReceiptProof {
             //                           = 1 + 0 + 2 = 3
             // where max_rlp_len_len(2) = 0 because 2 <= 55 (no length-of-length bytes)
             //
-            // We use 4 instead of 3 to support edge cases with >65535 transactions.
-            // (Note: 32 is for storage tries which use keccak256 keys)
-            // QC-PROV-03: axiom-eth receipt reference uses 3; see questions-cross-chain.md.
-            max_key_byte_len: 4,
+            // Canonical (QC-PROV-03 closed 2026-07-17): must match axiom-eth receipt reference.
+            max_key_byte_len: 3,
             key_byte_len: Some(path_len),
         }
     }

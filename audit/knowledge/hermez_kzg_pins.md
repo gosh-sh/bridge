@@ -4,9 +4,11 @@ Correct pins for Hermez Powers-of-Tau migration of deposit + Circuit 1B
 fixtures and USDCBridge `VK_BLOB` (`ZKHALO2VERIFYWITHVK` embeds Hermez
 `s_g2 = 928fafb3…`, **not** chain `c6028acf…`).
 
-**Audit sync status (2026-07-17):** `audit/spec/an-contracts/USDCBridge.sol` and
-`deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` both sha256
-`304c1c4ed1e4cf09a00fb1d83a0ae2ba42db2afead035ae089a4faa85346251a`.
+**Audit sync status (2026-07-17):** `max_key_byte_len = 3` (dev-confirmed). Audit overlay
+VkBlob sha256 **`724687a4…`** — `deposit-prover/fixtures/` +
+`audit/spec/an-contracts/USDCBridge.sol` + `audit/spec/an/fixtures/deposit_10proofs/`.
+**Not** byte-identical to tvm-sdk tip (`304c1c4e…`) until new contracts ship; compare
+after deploy.
 
 ---
 
@@ -52,8 +54,8 @@ https://github.com/tvmlabs/tvm-sdk/blob/pruvendo/hermez-deposit-fixtures/tvm_vm/
 
 | Artefact | Path | Expected digests / size |
 |----------|------|-------------------------|
-| Deposit VkBlob + 10 proofs | `tvm_vm/halo2_test_data/deposit_10proofs/` | VkBlob sha256 **`304c1c4e…`** (3982 B) |
-| Same (producer) | `bridge` → `deposit-prover/fixtures/deposit_10proofs/` | same sha256 |
+| Deposit VkBlob + 10 proofs | `tvm_vm/halo2_test_data/deposit_10proofs/` | tvm-sdk tip: **`304c1c4e…`** (3982 B) |
+| Same (audit overlay) | `bridge` → `deposit-prover/fixtures/deposit_10proofs/` | audit: **`724687a4…`** (`max_key_byte_len=3`) |
 | Circuit 1B operands | `tvm_vm/halo2_test_data/fallback_{vk_blob,public_inputs,proof,vk,config_params}.*` | vk_blob **`9ba63795…`** (3364 B), proof 7616 B, **k=21** |
 | USDCBridge constant | `acki-nacki` → `contracts/exchange/USDCBridge.sol` | `VK_BLOB` byte-identical to deposit VkBlob |
 | Partner pack manifest | `scripts/partner_packs/hermez_usdcbridge_vk_for_alina.manifest` | `scripts/build_partner_pack.sh` |

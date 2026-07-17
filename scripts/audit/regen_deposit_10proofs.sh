@@ -2,7 +2,7 @@
 # QC-PROV-02 — regen deposit_10proofs inputs + proofs on heavy host (n14).
 # Requires: chain SRS at deposit-prover/params/kzg_bn254_18.srs (opcode-aligned).
 set -euo pipefail
-ROOT="$(cd "$(dirname "${0}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${0}")/../.." && pwd)"
 PROVER="$ROOT/deposit-prover"
 COUNT="${DEPOSIT_PROOF_COUNT:-10}"
 SET_DIR="${DEPOSIT_PROOF_SET_DIR:-fixtures/deposit_10proofs}"
@@ -32,6 +32,10 @@ echo "── sync to audit overlay ──"
 AUDIT_FIX="$ROOT/audit/spec/an/fixtures/deposit_10proofs"
 mkdir -p "$AUDIT_FIX"
 rsync -a --delete "$SET_DIR/" "$AUDIT_FIX/"
+
+echo "── invalidate stale USDCBridge.tvc (VK_BLOB embedded at compile time) ──"
+rm -f "$ROOT/audit/spec/an-contracts/build/USDCBridge.tvc" \
+      "$ROOT/audit/spec/an-contracts/build/USDCBridge.abi.json"
 
 echo "── smoke: MockProver on proof_00 ──"
 cargo test real_fixture_satisfies_mock_prover -- --nocapture

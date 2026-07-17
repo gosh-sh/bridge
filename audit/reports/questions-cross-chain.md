@@ -100,8 +100,8 @@ Items for **deposit-relayer-daemon** + **deposit-prover** + operator playbook. S
 | QC-OFF-12 | Stale 7-arg `finalizeDeposit` ABI in `an-bridge-prover/python/` vs 2-arg deployed ABI. | Pin/canonical ABI path for operators? |
 | QC-OFF-13 | `TvmAckiNacki` status always `Confirmed` — `Reverted`/`Pending` branches in submitter untested on live path. | Real receipt parsing from tvm-sdk? |
 | QC-PROV-01 | `deposit-prover/prover.rs`: `verify_proof` / Solidity generator use **7** instances; `circuit_v2` uses **11**. | Update off-chain verify + generator to 11? |
-| QC-PROV-02 | ~~`test_circuit_mock` panic (`left:4 right:3`)~~ **closed (pin, 2026-07-17):** axiom-eth `@1d61be0`; canonical `deposit_10proofs/` VkBlob `304c1c4e…` retained (no synthetic regen). MockProver green on Sepolia `proof_00`. | — |
-| QC-PROV-03 | `max_key_byte_len: 4` (HEAD) vs axiom-eth receipt reference `3` — debug `debug_assert` in `rlp/mod.rs` when layouts diverge; release MockProver green on committed Sepolia fixture. | Align to `3` (VK-stable) or document `4` rationale? |
+| QC-PROV-02 | ~~`test_circuit_mock` panic (`left:4 right:3`)~~ **closed (pin, 2026-07-17):** axiom-eth `@1d61be0`. | — |
+| QC-PROV-03 | ~~`max_key_byte_len: 4` vs reference `3`~~ **closed (2026-07-17, dev ack):** circuit uses `3`; regen `deposit_10proofs/` + audit `VK_BLOB` → `724687a4…` (overlay; compare with tvm-sdk after deploy). | — |
 | QC-PROV-04 | MPT `key_bytes` padding slots beyond `key_byte_len` are **not** zero-constrained; PoC `deposit-prover/tests/padding_mutation_poc.rs` (`poc_padding_slot_garbage_accepted_*`). Active prefix corruption still fails (`poc_active_key_byte_corruption_rejected`). No false-deposit path found — witness malleability only. | Upstream axiom-eth hardening or accept? |
 
 **Linked BC:** BC-AN-01 (`AN_DAPP_ID` in relayer/prover config), BC-AN-02 (witness `contractAddr`). **Linked QC:** QC-AN-09 (griefing bad proofs from any submitter, not only relayer).

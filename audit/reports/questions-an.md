@@ -95,7 +95,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | QC-AN-03 | F2 manual + code review | `updateCode` / `onCodeUpgrade` only path to rotate `_depositVoucherCode` (B2 — no standalone setter). | Upgrade playbook + voucher rotation tested on shellnet? |
 | QC-AN-04 | code review | **No pause** on AN; ETH `pause()` blocks L1 `deposit`. | Should `finalizeDeposit` be pausable on AN? |
 | QC-AN-05 | code review + `integration/test_cross_counter_fuzz.py` | `_totalMinted` vs bridged minted decoupled; owner path can make `burned > minted`. | Document ops monitoring for both counters? |
-| QC-AN-06 | integration fixtures + synced `VK_BLOB` | VkBlob pinned in source; must match deployment (Hermez `304c1c4e…` on current audit sync). | CI hash-check VK blob on contract sync? |
+| QC-AN-06 | integration fixtures + synced `VK_BLOB` | Audit overlay VkBlob `724687a4…` (`max_key_byte_len=3`); tvm-sdk tip still `304c1c4e…` until deploy. | Compare hashes after contract rollout? |
 
 ### Infrastructure / edge cases
 

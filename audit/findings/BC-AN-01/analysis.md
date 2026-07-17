@@ -19,7 +19,7 @@ Two valid proofs over the **same** Sepolia receipt with different `dappId` value
 | `test_bc_an_01_double_mint_same_deposit_two_dapp_ids` | **Full fund-loss PoC** — two finalize+mint for one depositId |
 | `integration/test_bc_f8f_regressions.py` | F8-F source regression (no `EXPECTED_DAPP_ID`) |
 
-Regenerate dual proofs (Hermez SRS — matches synced USDCBridge VK `304c1c4e…`):
+Regenerate dual proofs (Hermez SRS — matches audit USDCBridge VK `724687a4…`):
 
 ```bash
 ./scripts/bootstrap_hermez_srs_k18.sh

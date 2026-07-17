@@ -53,7 +53,7 @@ _totalMinted и _totalMintedBridgeByToken (getTotalBridged) живут отде�
 
 QC-AN-06 (VK blob в контракте)
 
-В исходниках USDCBridge зашит VK_BLOB для deposit-circuit; при синхронизации контрактов для аудита используется конкретный Hermez-хеш (304c1c4e…). Риск: задеплоить контракт со старым или чужим VK. Готовы ли добавить в CI проверку хеша VK blob при sync/deploy контрактов?
+В audit overlay USDCBridge зашит VK_BLOB `724687a4…` (`max_key_byte_len=3`, dev ack 2026-07-17). tvm-sdk tip пока `304c1c4e…` — сравним после выката контрактов. Готовы ли добавить в CI проверку хеша VK blob при sync/deploy?
 
 
 QC-AN-07 (закрыто тестом — просьба подтвердить прод)

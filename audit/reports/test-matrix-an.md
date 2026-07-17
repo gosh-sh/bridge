@@ -56,7 +56,7 @@
 
 | ID | Layer | Scenario | Target | Status |
 |----|-------|----------|--------|--------|
-| F10-A | deposit-prover | PI ↔ L1 witness binding + padding PoC | `prover.rs`, `tests/f10a_binding.rs`, `tests/padding_mutation_poc.rs` | ✅ pin `@1d61be0`; canonical VkBlob `304c1c4e…` |
+| F10-A | deposit-prover | PI ↔ L1 witness binding + padding PoC | `prover.rs`, `tests/f10a_binding.rs`, `tests/padding_mutation_poc.rs` | ✅ `max_key_byte_len=3`; VkBlob `724687a4…` |
 | F10-A | deposit-prover | MPT key padding witness malleability | `tests/padding_mutation_poc.rs` | ✅ QC-PROV-04 (no false-deposit path) |
 | F10-B | relayer | fault injection (state, mismatch, decode) | `tests/f10_fault_injection.rs` + unit | ✅ |
 | F10-B | relayer | ProofFailed / AnRejected recoverable | `crates/deposit-relayer-daemon/` | partial (unit) |
@@ -68,8 +68,8 @@
 | F10-E | interface | Reverted → Rejected (QC-OFF-06) | `tests/f10_interface_reverted.rs` | ✅ |
 | F10-E | interface | canonical 2-arg ABI vs params | `tests/f10_e_abi.rs` | ✅ |
 | QC-OFF-01..13, QC-PROV-01 | ops/prover | relayer + prover + interface | `questions-cross-chain.md` | open |
-| QC-PROV-02 | prover | axiom-eth pin `@1d61be0` | `deposit-prover/Cargo.toml` | **closed (pin)** — fixtures stay canonical `304c1c4e…` |
-| QC-PROV-03 | prover | `max_key_byte_len` 4 vs reference 3 | `circuit_v2.rs` | open |
+| QC-PROV-02 | prover | axiom-eth pin `@1d61be0` | `deposit-prover/Cargo.toml` | **closed (pin)** |
+| QC-PROV-03 | prover | `max_key_byte_len = 3` | `circuit_v2.rs` | **closed (2026-07-17, dev ack)** |
 | QC-PROV-04 | prover | MPT `key_bytes` padding not zero-constrained | `tests/padding_mutation_poc.rs` | open (witness malleability) |
 
 Threat model: `audit/reports/manual-audit/F10-offchain-deposit-pipeline.md`.  

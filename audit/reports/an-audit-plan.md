@@ -1,6 +1,6 @@
 # Phase F — AN contracts audit plan
 
-**Status:** F0–F8 landed; **70 passed** pytest (F7 + F8 fuzz incl. 10-proof SM + bounce/retry). Non-E2E **paused** pending author answers (`questions-an.md`). Next: `closeout-an.md`; **F8-F** regressions; **F9** ETH CI night (deferred).
+**Status:** F0–F10 landed; **74 passed** pytest AN; **53/53** ETH audit overlay. **F10** relayer + prover audit overlay ✅ (QC-PROV-02 pin; QC-PROV-03/04 open). **closeout-an.md** drafted — author ack pending.
 
 **Scope:** `USDCBridge` / `DepositVoucher` / deposit finalization on Acki Nacki. ETH-side audit (Phases A–E) is closed separately.
 
@@ -34,8 +34,9 @@ See `audit/spec/an/BUILD.md` and `audit/spec/an/AGENT_CONTEXT.md` (subagents).
 | F6 | Shellnet e2e | deferred |
 | F7 | Property / fuzz layer (Hypothesis + selective debugger) | ✅ |
 | **F8** | **MessagePipeline order fuzz** (reorder / race safety) | ✅ **70/70** gate |
-| F8-F | Post-author BC/QC regressions | blocked on disposition |
-| F9 | ETH fuzz gaps + CI night profile | **in progress** (CC-3 + A4-INV-1 landed) |
+| F8-F | BC-AN-01/02 regression gate | ✅ `integration/test_bc_f8f_regressions.py` |
+| F9 | ETH fuzz gaps + CI night profile | ✅ (CC-3, A4-INV-1, DEP-5/6, CI night 53/53) |
+| **F10** | **Off-chain deposit pipeline** (prover + relayer threat model) | ✅ — see `manual-audit/F10-offchain-deposit-pipeline.md` |
 
 ---
 
@@ -188,8 +189,57 @@ Fuzzing is not optional — it is the primary verification layer alongside manua
 |----|--------|--------|
 | F-CC-03 | `invariant` bkSet agreement across mock verifyBlock steps | ✅ `InvariantsVerifyBlock.t.sol` |
 | F-A4-1 | Owner-ops handler — treasury never decreases | ✅ `InvariantsOwner.t.sol` |
-| CI night | `FOUNDRY_PROFILE=ci` job in GitLab (5000 fuzz / 1000 inv) | todo |
-| AN F8 mirror | Message order on withdraw/admin pipeline | backlog |
+| CI night | `FOUNDRY_PROFILE=ci` job in GitLab (5000 fuzz / 1000 inv) | ✅ `test:solidity:audit:ci` + `scripts/ci_eth_audit_night.sh` |
+| F-DEP-5/6 | deposit counter + VB state isolation | ✅ `InvariantsDeposit.t.sol` |
+| AN F8 mirror | Message order on withdraw/admin pipeline | ✅ |
+
+---
+
+## F10 — Off-chain deposit pipeline (**third-party relayer**)
+
+**Goal:** Close the gap between on-chain AN audit (F0–F8) and end-to-end ETH→AN credit. The **deposit-relayer-daemon** is an operator service, **not** a trust root for payout — but bugs, outages, and misconfig can cause **liveness** loss or amplify **BC-AN-01/02**.
+
+**Manual / threat model:** `audit/reports/manual-audit/F10-offchain-deposit-pipeline.md`  
+**Subagent synthesis:** `audit/reports/manual-audit/F10-subagent-synthesis.md`
+
+### Architecture (reminder)
+
+```text
+Deposit event [ETH] → RPC → deposit-prover → (optional) deposit-relayer-daemon → finalizeDeposit [AN]
+                                                      ↑ permissionless: anyone with proof
+```
+
+### Threat matrix (relayer / network)
+
+| Class | Example | Impact | On-chain safety? |
+|-------|---------|--------|------------------|
+| **Outage** | process killed | Credit delayed | ✅ no theft |
+| **Slow** | backoff, prove 30 min | Credit delayed | ✅ |
+| **Bug** | bad ABI encode | `AnRejected`, retry | ✅ |
+| **Bug** | wrong `AN_DAPP_ID` | **BC-AN-01** double-mint namespace | ❌ config |
+| **Queue** | stuck `depositId` N | N+1 never processed (sequential cursor) | ✅ but **liveness** |
+| **Race** | two relayers | one mint, nullifier blocks replay | ✅ |
+| **Phishing** | fake ops UI | user confusion, not L1 tx change | ✅ if user used real bridge |
+| **RPC MITM** | wrong fork | proof fail / reject | ✅ |
+| **AN endpoint MITM** | wrong GraphQL | operator submit fails | ✅ user ETH |
+| **Griefing** | spam bad proofs | AN gas (QC-AN-09) | ✅ |
+
+### F10 workstreams
+
+| ID | Component | Deliverable |
+|----|-----------|-------------|
+| F10-A | `deposit-prover/` | Witness ↔ 11 PI; MPT; `dappId` injection audit |
+| F10-B | `deposit-relayer-daemon/` | Extend fault-injection tests (reject, crash, restart) |
+| F10-C | Competing submitter | Two parties, one mint (nullifier) |
+| F10-D | ETH reorg / confirmations | Depth policy vs witness staleness |
+| F10-E | `acki-nacki-interface` | `finalizeDeposit` encoding — no scalar tamper path |
+| F10-F | Head-of-line blocking | Test + QC: sequential `depositId` cursor |
+| F10-G | E2E | Shellnet + live relayer (`E-AN-01`) |
+| F10-H | Ops | `finalize-one` recovery runbook for authors |
+
+**Gate (target):** `cargo test -p deposit-relayer-daemon` + new F10 tests green; `deposit-prover` witness tests; cross-ref `questions-cross-chain.md` QC-OFF-*.
+
+**Explicit non-goals:** Auditing full `tvm-sdk` GraphQL stack; proving runtime SLA of operator infra.
 
 ---
 

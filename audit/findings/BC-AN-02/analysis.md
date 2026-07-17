@@ -18,5 +18,8 @@ Requires a proof whose `contractAddr` PI differs from the operator’s canonical
 
 ## Tests
 
-- `integration/test_bc_an_01_dapp_id_double_mint.py::test_bc_an_02_no_l1_bridge_allowlist_pre_zk` — no dedicated revert before ZK.
+| Test | What it shows |
+|------|----------------|
+| `test_bc_an_02_no_l1_bridge_allowlist_pre_zk` | Alien `contractAddr` not rejected before ZK |
+| `integration/test_bc_f8f_regressions.py` | F8-F source + pre-ZK regression gate |
 

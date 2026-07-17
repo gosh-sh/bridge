@@ -28,6 +28,9 @@ make pre-push-audit          # main forge + audit/spec/ethereum (47 tests)
 cd audit/spec/an-contracts && ./build.sh
 make audit-an-test           # full pytest (fixtures)
 make pre-push-an             # unit only, no fixtures
+make audit-deposit-relayer-test   # F10 off-chain relayer (Rust)
+make audit-solidity-test    # ETH audit overlay (53 tests @ audit profile)
+make audit-solidity-ci      # F9 night (53 @ ci profile; ~8 min)
 
 # Optional local vendor tree (gitignored)
 ./scripts/setup_audit_vendors.sh
@@ -60,7 +63,10 @@ SETUP_AUDIT_VENDORS_PROVERS=1 ./scripts/setup_audit_vendors.sh   # when PoC need
 | **P2** | Withdraw happy path (no ZK) | `unit/test_usdcbridge_withdraw_happy.py` | ✅ |
 | **P3** | QC-AN-07 voucher brick | `integration/test_finalize_deposit_voucher_brick.py` | ✅ |
 | **P3** | CI job `test:an:audit` | `.gitlab-ci.yml` (skip w/o `.tools/`) | ✅ |
+| **P3** | CI job `test:deposit-relayer:audit` | F10 Rust gate | ✅ |
+| **P3** | CI job `test:solidity:audit:ci` | night fuzz (allow_failure) | ✅ |
 | **defer** | F6 shellnet | `acki-nacki/tests/exchange/` |
+| **defer** | F10-A prover MockProver | QC-PROV-02 (axiom-eth pin + regen fixtures) |
 
 ---
 

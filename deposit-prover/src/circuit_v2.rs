@@ -18,6 +18,37 @@ use halo2_base::{
 
 use crate::types::{DepositProofInput, ReceiptProof};
 
+/// Audit PoC hook: corrupt MPT key witness before `MPTInput::assign`.
+///
+/// Production prove paths must leave this `None`. Used to test whether
+/// `max_key_byte_len > axiom-eth reference (3)` accepts non-zero padding bytes
+/// while `key_byte_len` claims a shorter prefix.
+#[derive(Clone, Debug, Default)]
+pub struct MptWitnessMutation {
+    /// Override `MPTInput.max_key_byte_len` (PoC: 4 vs axiom-eth reference 3).
+    pub max_key_byte_len: Option<usize>,
+    /// After honest `assign`, overwrite `key_bytes[idx]` (simulates padding-slot garbage).
+    pub corrupt_key_byte_at: Option<(usize, u8)>,
+}
+
+impl MptWitnessMutation {
+    pub fn apply_input(&self, mpt_input: &mut axiom_eth::mpt::MPTInput) {
+        if let Some(max) = self.max_key_byte_len {
+            mpt_input.max_key_byte_len = max;
+        }
+    }
+
+    pub fn apply_assigned<F: ScalarField>(
+        &self,
+        proof: &mut axiom_eth::mpt::MPTProof<F>,
+        ctx: &mut Context<F>,
+    ) {
+        if let Some((idx, byte)) = self.corrupt_key_byte_at {
+            proof.key_bytes[idx] = ctx.load_witness(F::from(byte as u64));
+        }
+    }
+}
+
 /// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
 /// verifier size)
 pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from 256)
@@ -76,6 +107,8 @@ fn bytes_to_field<F: ScalarField>(
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
+    /// Audit-only MPT witness corruption (`None` in production).
+    pub mpt_mutation: Option<MptWitnessMutation>,
 }
 
 impl DepositEventCircuitV2 {
@@ -96,6 +129,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            mpt_mutation: None,
         }
     }
 
@@ -111,6 +145,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            mpt_mutation: None,
         }
     }
 }
@@ -163,12 +198,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
 
         // 2. Convert receipt proof to MPTInput and assign
-        let mpt_input = self.inputs.receipt_proof.to_mpt_input(
+        let mut mpt_input = self.inputs.receipt_proof.to_mpt_input(
             self.inputs.event_data.transaction_index,
             self.params.max_data_byte_len,
             self.params.max_log_num,
         );
-        let proof = mpt_input.assign(ctx);
+        if let Some(mutation) = &self.mpt_mutation {
+            mutation.apply_input(&mut mpt_input);
+        }
+        let mut proof = mpt_input.assign(ctx);
+        if let Some(mutation) = &self.mpt_mutation {
+            mutation.apply_assigned(&mut proof, ctx);
+        }
 
         // 3. Create receipt input
         let rc_input = EthReceiptInputAssigned {
@@ -732,6 +773,7 @@ impl ToMPTInput for ReceiptProof {
             //
             // We use 4 instead of 3 to support edge cases with >65535 transactions.
             // (Note: 32 is for storage tries which use keccak256 keys)
+            // QC-PROV-03: axiom-eth receipt reference uses 3; see questions-cross-chain.md.
             max_key_byte_len: 4,
             key_byte_len: Some(path_len),
         }

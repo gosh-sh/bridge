@@ -344,7 +344,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "axiom-eth"
 version = "0.4.3"
-source = "git+https://github.com/gosh-sh/axiom-eth?branch=gosh-stable-rlcmanager-assignment#1d61be00a63ec73b3f709d74eb9e6b09b754b911"
+source = "git+https://github.com/gosh-sh/axiom-eth?rev=1d61be00a63ec73b3f709d74eb9e6b09b754b911#1d61be00a63ec73b3f709d74eb9e6b09b754b911"
 dependencies = [
  "anyhow",
  "ark-std 0.3.0",

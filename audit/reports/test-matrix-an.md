@@ -44,12 +44,39 @@
 | F8-C | integration/fuzz | two-deposit permutation | `integration/test_pipeline_order_fuzz.py` | ✅ |
 | F8-D | integration/fuzz | Hypothesis state machine (finalize↔deliver) | `integration/test_pipeline_state_machine.py` | ✅ |
 | F8-E | integration/fuzz | withdraw burn counter after deposit | `integration/test_withdraw_counter_fuzz.py` | ✅ |
-| F8-F | integration/fuzz | deep pipeline SM (inflight enqueue) | `integration/test_pipeline_state_machine.py` | ✅ |
+| F8-F | integration | BC-AN-01/02 regression (source + pre-ZK) | `integration/test_bc_f8f_regressions.py` | ✅ |
 | F8-G | integration/fuzz | cross-counter SM + QC-AN-05 | `integration/test_cross_counter_fuzz.py` | ✅ |
 | F8-H | integration/fuzz | ten-proof SM (proof_00..09) | `integration/test_pipeline_multi_proof_fuzz.py` | ✅ |
 | F8-I | integration/fuzz | bounce probe + deploy retry | `integration/test_pipeline_bounce_fuzz.py` | ✅ |
 | E-AN-01 | e2e | shellnet finalize | acki-nacki `test_usdcbridge_finalize.py` | deferred |
 
-**Gate:** `make audit-an-test` → **70 passed** (2026-07-17, F7 + F8 fuzz).
+---
+
+## F10 — Off-chain deposit pipeline (Rust, not pytest gate)
+
+| ID | Layer | Scenario | Target | Status |
+|----|-------|----------|--------|--------|
+| F10-A | deposit-prover | PI ↔ L1 witness binding + padding PoC | `prover.rs`, `tests/f10a_binding.rs`, `tests/padding_mutation_poc.rs` | ✅ pin `@1d61be0`; canonical VkBlob `304c1c4e…` |
+| F10-A | deposit-prover | MPT key padding witness malleability | `tests/padding_mutation_poc.rs` | ✅ QC-PROV-04 (no false-deposit path) |
+| F10-B | relayer | fault injection (state, mismatch, decode) | `tests/f10_fault_injection.rs` + unit | ✅ |
+| F10-B | relayer | ProofFailed / AnRejected recoverable | `crates/deposit-relayer-daemon/` | partial (unit) |
+| F10-C | relayer | competing submitters, one mint | `tests/f10_competing_submit.rs` | ✅ |
+| F10-D | relayer | confirmation depth helper | `source.rs` + `tests/f10_proptest.rs` | ✅ |
+| F10-F | relayer | head-of-line blocking (stuck depositId) | `tests/f10_head_of_line.rs` | ✅ |
+| F10-G | relayer | proptest (PI, encode, state, backoff) | `tests/f10_proptest.rs` | ✅ |
+| F10-B | relayer | partial `check_binds_to` PoC (QC-OFF-07) | `src/types.rs` | ✅ |
+| F10-E | interface | Reverted → Rejected (QC-OFF-06) | `tests/f10_interface_reverted.rs` | ✅ |
+| F10-E | interface | canonical 2-arg ABI vs params | `tests/f10_e_abi.rs` | ✅ |
+| QC-OFF-01..13, QC-PROV-01 | ops/prover | relayer + prover + interface | `questions-cross-chain.md` | open |
+| QC-PROV-02 | prover | axiom-eth pin `@1d61be0` | `deposit-prover/Cargo.toml` | **closed (pin)** — fixtures stay canonical `304c1c4e…` |
+| QC-PROV-03 | prover | `max_key_byte_len` 4 vs reference 3 | `circuit_v2.rs` | open |
+| QC-PROV-04 | prover | MPT `key_bytes` padding not zero-constrained | `tests/padding_mutation_poc.rs` | open (witness malleability) |
+
+Threat model: `audit/reports/manual-audit/F10-offchain-deposit-pipeline.md`.  
+Synthesis: `audit/reports/manual-audit/F10-subagent-synthesis.md`.
+
+**Gate (target):** `make audit-deposit-relayer-test` → unit + F10 overlay + proptest.
+
+**Gate:** `make audit-an-test` → **74 passed** (2026-07-17, F7 + F8 fuzz + F8-F BC).
 
 Direction: `audit/reports/an-audit-direction.md`.

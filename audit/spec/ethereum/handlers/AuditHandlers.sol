@@ -8,6 +8,34 @@ import "@src/IBridgeWithdrawalVerifier.sol";
 import "@bridge-test/mocks/MockERC20.sol";
 import "@bridge-test/mocks/MockAave.sol";
 
+/// @title DepositHandler
+/// @notice Handler for DEP-5 / DEP-3 — monotonic depositCounter and treasury ledger.
+contract DepositHandler is Test {
+    AckiNackiBridge public immutable bridge;
+    MockERC20 public immutable usdc;
+
+    uint256 public depositOps;
+    uint256 public ghostDeposited;
+
+    constructor(AckiNackiBridge _bridge, MockERC20 _usdc) {
+        bridge = _bridge;
+        usdc = _usdc;
+    }
+
+    /// @dev BOUNDS: amount ∈ [1, MAX_DEPOSIT_AMOUNT]
+    function deposit(uint256 amountSeed, uint256 userSeed) external {
+        uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
+        address user = address(uint160(uint256(keccak256(abi.encode("dep-inv", userSeed, depositOps)))));
+        usdc.mint(user, amount);
+        vm.startPrank(user);
+        usdc.approve(address(bridge), amount);
+        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        vm.stopPrank();
+        depositOps++;
+        ghostDeposited += amount;
+    }
+}
+
 /// @title TreasuryHandler
 /// @notice Handler for TR-1 / TR-2 invariant campaigns (deposit, AAVE ops, withdraw).
 /// @dev Ghost vars: `ghostDeposited`, `ghostWithdrawn`.

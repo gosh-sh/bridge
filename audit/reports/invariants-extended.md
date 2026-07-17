@@ -15,8 +15,8 @@
 | TR-2 | Conservation: `treasuryBalance == Σ deposit.amount − Σ withdrawByProof.amount`; AAVE- и owner-функции (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, сеттеры) не изменяют `treasuryBalance` | ghost-переменные в handler'е |
 | TR-3 | `suppliedPrincipal <= aUSDC.balanceOf(bridge)` (при честном AAVE); `harvestYield` никогда не опускает `aUSDC.balanceOf` ниже `suppliedPrincipal` (изоляция principal от yield) | invariant + unit на границе `amount == accruedYield()` |
 | TR-4 | После успешного `deposit(amount)`: `Δusdc.balanceOf(bridge) == amount` точно (детектор fee-on-transfer при смене token-assumptions — QC-A1-2) | fuzz unit |
-| DEP-5 | `depositCounter` строго +1 на каждый успешный `deposit`; `depositId` в событии == счётчик до инкремента; счётчик монотонен | unit + event assert |
-| DEP-6 | `deposit()` изменяет ровно три величины: `depositCounter`, `treasuryBalance`, USDC-баланс контракта; verifyBlock/withdraw/AAVE-состояние (`storedLastSeenBlockSeqNo`, `suppliedPrincipal`, `_nullifiers`, окна слоёв) не затронуто | state-diff unit |
+| DEP-5 | `depositCounter` строго +1 на каждый успешный `deposit`; `depositId` в событии == счётчик до инкремента; счётчик монотонен | handler invariant (`InvariantsDeposit.t.sol`) |
+| DEP-6 | `deposit()` изменяет ровно три величины: `depositCounter`, `treasuryBalance`, USDC-баланс контракта; verifyBlock/withdraw/AAVE-состояние (`storedLastSeenBlockSeqNo`, `suppliedPrincipal`, `_nullifiers`, окна слоёв) не затронуто | handler invariant (`InvariantsDeposit.t.sol`) |
 | PS-1 | User-facing entrypoints (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`) revert с `BridgePaused` ⟺ `paused == true`; owner-функции (AAVE-управление, сеттеры, pause/unpause) работают независимо от `paused` | fuzz по (paused, entrypoint) |
 
 Пробелы существующего покрытия, закрываемые этими инвариантами: negative-тест `anAccount == 0` (DEP-1),

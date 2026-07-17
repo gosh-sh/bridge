@@ -1,6 +1,8 @@
 # Test matrix — фаза B→E (ETH contracts)
 
-**Gate:** `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` — **50/50 green** (2026-07-17).
+**Gate:** `cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test` — **53/53 green** (2026-07-17).
+
+**Night gate:** `make audit-solidity-ci` or `./scripts/ci_eth_audit_night.sh` — **53/53 @ profile ci** (5000 fuzz / 1000 inv).
 
 ---
 
@@ -9,7 +11,7 @@
 | Phase | Tests | Status |
 |-------|-------|--------|
 | C — unit | 29 | ✅ |
-| D — fuzz/invariant | 14 (128 inv / 256 fuzz @ audit profile) | ✅ |
+| D — fuzz/invariant | 17 (128 inv / 256 fuzz @ audit; 1000 inv @ ci) | ✅ |
 | E — E2E gaps | 7 new + covered | ✅ |
 
 ---
@@ -53,6 +55,8 @@
 | F-VB-1 | LH-6 seq monotonic | `VerifyBlockHandler` | `InvariantsVerifyBlock.t.sol` | **done** |
 | F-CC-3 | CC-3 bkSet stable | `VerifyBlockHandler` | `InvariantsVerifyBlock.t.sol` | **done** |
 | F-WD-1 | WD-7 nullifier replay | `WithdrawReplayHandler` | `InvariantsWithdraw.t.sol` | **done** |
+| F-DEP-5 | DEP-5 counter monotonic | `DepositHandler` | `InvariantsDeposit.t.sol` | **done** |
+| F-DEP-6 | DEP-6 deposit isolation from VB state | `DepositHandler` | `InvariantsDeposit.t.sol` | **done** |
 | F-A4-1 | A4-INV-1 owner treasury | `OwnerOpsHandler` | `InvariantsOwner.t.sol` | **done** |
 | F-A4-5 | instance tampering | — | `ShplonkAggregatorForgery.t.sol` | covered |
 
@@ -96,6 +100,7 @@ Profile: `[profile.audit]` in `foundry.toml` — `invariant.runs=128`, `fuzz.run
 |------|--------|
 | `closeout-eth.md` | done |
 | CI `test:solidity:audit` | done |
+| CI `test:solidity:audit:ci` (night, allow_failure) | done |
 | `make pre-push-audit` | done |
 | `forge fmt` main tree | done |
 | QC author ack | open |

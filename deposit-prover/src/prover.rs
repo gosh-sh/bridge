@@ -163,12 +163,22 @@ pub fn get_default_params() -> RlcCircuitParams {
 ///
 /// `Ok(())` if the circuit is satisfied, `Err` otherwise
 pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Result<(), String> {
+    test_circuit_mock_with_mpt_mutation(input, config, None)
+}
+
+/// Like [`test_circuit_mock`], but optionally corrupts the MPT witness (audit PoC).
+pub fn test_circuit_mock_with_mpt_mutation(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+    mpt_mutation: Option<crate::circuit_v2::MptWitnessMutation>,
+) -> Result<(), String> {
     // Load circuit parameters
     let params = get_default_params();
     let k = params.base.k as u32;
 
     // Create the circuit
-    let circuit_input = DepositEventCircuitV2::new(input, config);
+    let mut circuit_input = DepositEventCircuitV2::new(input, config);
+    circuit_input.mpt_mutation = mpt_mutation;
     let mut circuit = create_circuit(CircuitBuilderStage::Mock, params, circuit_input);
 
     // Fulfill Keccak promises (required for RLC)
@@ -775,99 +785,9 @@ pub fn generate_solidity_verifier(
     Ok(())
 }
 
-/// Create a minimal valid RLP input for key generation.
-///
-/// This creates a minimal valid RLP structure that can be used to generate
-/// proving/verifying keys. For axiom-eth circuits, we need valid RLP data even
-/// for keygen because the circuit structure depends on the RLP parsing logic.
-///
-/// This creates a minimal valid Ethereum receipt with a single log entry.
+/// Create a minimal valid RLP input for key generation / MockProver smoke tests.
 fn create_keygen_placeholder_input() -> DepositProofInput {
-    use alloy_rlp::Encodable;
-
-    use crate::types::{DepositEventData, ReceiptProof};
-
-    let event_data = DepositEventData {
-        block_number: 0,
-        transaction_index: 0,
-        log_index: 0,
-        deposit_id: 0,
-        sender: [0u8; 20],
-        amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
-        an_workchain: 0,
-        an_account: [0u8; 32],
-        timestamp: 0,
-        contract_address: [0u8; 20],
-    };
-
-    // Create a minimal valid receipt RLP with one log
-    // Receipt structure: [status, cumulative_gas, bloom, logs]
-
-    // Build topics list: [event_sig, depositId, sender]
-    let mut topics_buf = Vec::new();
-    vec![0u8; 32].encode(&mut topics_buf); // event signature
-    vec![0u8; 32].encode(&mut topics_buf); // depositId
-    vec![0u8; 32].encode(&mut topics_buf); // sender
-    let mut topics_list = Vec::new();
-    alloy_rlp::Header {
-        list: true,
-        payload_length: topics_buf.len(),
-    }
-    .encode(&mut topics_list);
-    topics_list.extend_from_slice(&topics_buf);
-
-    // Build log: [address, topics, data]
-    let mut log_buf = Vec::new();
-    vec![0u8; 20].encode(&mut log_buf); // contract address
-    log_buf.extend_from_slice(&topics_list); // topics (already has list header)
-    vec![0u8; 64].encode(&mut log_buf); // data (amount + timestamp)
-    let mut log_list = Vec::new();
-    alloy_rlp::Header {
-        list: true,
-        payload_length: log_buf.len(),
-    }
-    .encode(&mut log_list);
-    log_list.extend_from_slice(&log_buf);
-
-    // Build logs array containing one log
-    let mut logs_list = Vec::new();
-    alloy_rlp::Header {
-        list: true,
-        payload_length: log_list.len(),
-    }
-    .encode(&mut logs_list);
-    logs_list.extend_from_slice(&log_list);
-
-    // Build receipt: [status, cumulative_gas, bloom, logs]
-    let mut receipt_buf = Vec::new();
-    1u8.encode(&mut receipt_buf); // status = 1 (success)
-    21000u64.encode(&mut receipt_buf); // cumulative_gas
-    vec![0u8; 256].encode(&mut receipt_buf); // bloom filter (256 bytes)
-    receipt_buf.extend_from_slice(&logs_list); // logs (already has list header)
-
-    let mut receipt_rlp = Vec::new();
-    alloy_rlp::Header {
-        list: true,
-        payload_length: receipt_buf.len(),
-    }
-    .encode(&mut receipt_rlp);
-    receipt_rlp.extend_from_slice(&receipt_buf);
-
-    // Create a minimal MPT proof (single node)
-    let proof_nodes = vec![receipt_rlp.clone()];
-
-    let receipt_proof = ReceiptProof {
-        receipt_rlp,
-        proof_nodes,
-        receipt_root: [0u8; 32],
-        block_header_rlp: vec![0u8; 100], // minimal block header
-    };
-
-    DepositProofInput {
-        event_data,
-        receipt_proof,
-        dapp_id: [0u8; 32],
-    }
+    crate::synthetic_fixture::synthetic_deposit_proof_input(0)
 }
 
 #[cfg(test)]
@@ -901,12 +821,11 @@ mod tests {
     fn test_create_keygen_placeholder_input() {
         let input = create_keygen_placeholder_input();
 
-        // Verify placeholder has expected zero values
+        // Verify placeholder has expected synthetic values (deposit_id=0)
         assert_eq!(input.event_data.deposit_id, 0);
-        assert_eq!(input.event_data.sender, [0u8; 20]);
-        assert_eq!(input.event_data.amount, [0u8; 32]); // FIX BC-TYPES-001
-        assert_eq!(input.event_data.timestamp, 0);
-        assert_eq!(input.event_data.contract_address, [0u8; 20]);
+        assert_eq!(input.event_data.sender, [0x11u8; 20]);
+        assert_eq!(input.event_data.amount[31], 1);
+        assert_eq!(input.event_data.contract_address, [0x22u8; 20]);
 
         // Verify receipt proof has minimal structure (1 proof node)
         assert_eq!(input.receipt_proof.proof_nodes.len(), 1);
@@ -924,7 +843,53 @@ mod tests {
         assert_eq!(params.num_rlc_columns, 3);
     }
 
-    // Note: test_circuit_mock requires real Ethereum data and is tested in
-    // integration tests Note: Full proof generation tests are too slow for
-    // unit tests (5-10 minutes)
+    /// QC-PROV-01 registrar: circuit layout drift vs `verify_proof` / Solidity generator.
+    #[test]
+    fn qc_prov_01_verify_proof_expects_seven_instances_not_eleven() {
+        use axiom_eth::utils::build_utils::aggregation::CircuitMetadata;
+
+        use crate::circuit_v2::DepositEventCircuitV2;
+
+        let circuit = DepositEventCircuitV2::new(
+            create_keygen_placeholder_input(),
+            &CircuitConfig::default(),
+        );
+        assert_eq!(circuit.num_instance(), vec![11]);
+
+        const VERIFY_PROOF_EXPECTED: usize = 7;
+        assert_ne!(
+            circuit.num_instance()[0],
+            VERIFY_PROOF_EXPECTED,
+            "QC-PROV-01: update verify_proof + generate_solidity_verifier to 11-instance layout"
+        );
+    }
+
+    #[test]
+    fn f10a_placeholder_satisfies_mock() {
+        let input = create_keygen_placeholder_input();
+        test_circuit_mock(input, &crate::synthetic_fixture::audit_circuit_config())
+            .expect("placeholder witness should satisfy MockProver");
+    }
+
+    #[test]
+    #[should_panic(expected = "circuit was not satisfied")]
+    fn f10a_mutate_amount_breaks_mock() {
+        let mut input = create_keygen_placeholder_input();
+        input.event_data.amount[31] ^= 0x01;
+        let _ = test_circuit_mock(input, &crate::synthetic_fixture::audit_circuit_config());
+    }
+
+    #[test]
+    fn f10a_different_dapp_ids_both_satisfy() {
+        let base = create_keygen_placeholder_input();
+        let mut alt = base.clone();
+        alt.dapp_id = [0xAA; 32];
+        test_circuit_mock(base, &crate::synthetic_fixture::audit_circuit_config())
+            .expect("baseline dappId");
+        test_circuit_mock(alt, &crate::synthetic_fixture::audit_circuit_config())
+            .expect("BC-AN-01: dappId not L1-bound");
+    }
+
+    // Note: test_circuit_mock with real Sepolia fixtures is in tests/f10a_binding.rs
+    // (fixture may need refresh when axiom-eth rev bumps). Full SHPLONK prove: 5-10 min.
 }

@@ -77,3 +77,31 @@ Recipient on AN: `(anAccountHigh << 128) | anAccountLow` — matches post-#2271 
 ## AN → ETH direction (note for integrators)
 
 Withdrawal: user burns ECC on AN via `initiateWithdrawal` → off-chain Circuit 4 proof → `AckiNackiBridge.withdrawByProof` on ETH. That path is audited on **ETH** (`questions-eth.md` § A3), not in the AN contract QC table above.
+
+---
+
+## Off-chain / relayer (deposit path) — QC register
+
+Items for **deposit-relayer-daemon** + **deposit-prover** + operator playbook. Safety baseline: `finalizeDeposit` on AN is **permissionless** — relayer outage must not enable theft, only delay credit. Detail: `manual-audit/F10-offchain-deposit-pipeline.md`.
+
+| ID | Auditor view | Ask author (joint: ETH ops + AN ops) |
+|----|--------------|----------------------------------------|
+| QC-OFF-01 | Daemon uses **strict sequential** `depositId` (`next_target = last_processed + 1`). One deposit that never finalizes (persistent `AnRejected`, bad config) **blocks all later depositIds**. | Intentional? Need skip / out-of-order finalize / alert on `attempts_since_progress`? |
+| QC-OFF-02 | If the **only** relayer dies, credit stops until another operator runs `deposit-relayer finalize-one` or their own daemon. | Documented runbook? Is a backup relayer required for mainnet SLA? |
+| QC-OFF-03 | Any party with ETH RPC + `deposit-prover` + AN access can finalize — relayer is not whitelisted. | Encourage competing relayers / watchdogs? Incentives for permissionless submitters? |
+| QC-OFF-04 | Relayer holds **AN operator keys** and talks to GraphQL endpoint — MITM or DNS hijack risks wrong submit destination. | TLS pinning, allowlisted AN endpoints, key custody model? |
+| QC-OFF-05 | Live `is_finalized` pre-check may be unavailable (`submitter.rs` — mock returns false until read API). Restarts may **re-prove** already-finalized ids (waste gas, not double-mint). | When will on-chain nullifier read ship? Is redundant prove acceptable? |
+| QC-OFF-06 | **Live submitter never returns `AlreadyFinalized`:** duplicate `finalizeDeposit` → `Reverted` → `Rejected`; with sequential cursor, **competing relayer permanently stalls** our daemon on that id (mock hides this). | Map revert reason to `AlreadyFinalized`? Read API before mainnet? |
+| QC-OFF-07 | `check_binds_to` compares only depositId/sender/anAccount — not amount/contract/block. PoC test: `binding_check_ignores_amount_and_contract_poc`. | Extend local bind check or rely on AN only? |
+| QC-OFF-08 | `state.json` not tagged with chain/bridge/dappId; no lock file — reuse across deploys skips deposits. | Deployment binding + single-writer lock? |
+| QC-OFF-09 | CLI `AN_DAPP_ID` defaults to `"0"` without hex/EXPECTED preflight. | Startup validation vs on-chain dappId? |
+| QC-OFF-10 | `EthLogSource::fetch` rescans full `[from_block, safe_head]` every tick (10-block chunks) — O(head) RPC. | Incremental scan cursor? |
+| QC-OFF-11 | `--backoff-multiplier 0` → zero delay hot loop; `state.json` save without fsync; `Pending` after timeout → `Rejected`. | CLI validation + durable persist? |
+| QC-OFF-12 | Stale 7-arg `finalizeDeposit` ABI in `an-bridge-prover/python/` vs 2-arg deployed ABI. | Pin/canonical ABI path for operators? |
+| QC-OFF-13 | `TvmAckiNacki` status always `Confirmed` — `Reverted`/`Pending` branches in submitter untested on live path. | Real receipt parsing from tvm-sdk? |
+| QC-PROV-01 | `deposit-prover/prover.rs`: `verify_proof` / Solidity generator use **7** instances; `circuit_v2` uses **11**. | Update off-chain verify + generator to 11? |
+| QC-PROV-02 | ~~`test_circuit_mock` panic (`left:4 right:3`)~~ **closed (pin, 2026-07-17):** axiom-eth `@1d61be0`; canonical `deposit_10proofs/` VkBlob `304c1c4e…` retained (no synthetic regen). MockProver green on Sepolia `proof_00`. | — |
+| QC-PROV-03 | `max_key_byte_len: 4` (HEAD) vs axiom-eth receipt reference `3` — debug `debug_assert` in `rlp/mod.rs` when layouts diverge; release MockProver green on committed Sepolia fixture. | Align to `3` (VK-stable) or document `4` rationale? |
+| QC-PROV-04 | MPT `key_bytes` padding slots beyond `key_byte_len` are **not** zero-constrained; PoC `deposit-prover/tests/padding_mutation_poc.rs` (`poc_padding_slot_garbage_accepted_*`). Active prefix corruption still fails (`poc_active_key_byte_corruption_rejected`). No false-deposit path found — witness malleability only. | Upstream axiom-eth hardening or accept? |
+
+**Linked BC:** BC-AN-01 (`AN_DAPP_ID` in relayer/prover config), BC-AN-02 (witness `contractAddr`). **Linked QC:** QC-AN-09 (griefing bad proofs from any submitter, not only relayer).

@@ -197,6 +197,15 @@ audit-solidity-test: ## Run audit overlay Foundry suite (47 tests @ profile audi
 	@cd contracts/ethereum && test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
 	@cd audit/spec/ethereum && FOUNDRY_PROFILE=audit forge test
 
+audit-solidity-ci: ## Audit overlay @ profile ci (5000 fuzz / 1000 inv; ~8 min)
+	@echo "$(BLUE)Running audit/spec/ethereum (FOUNDRY_PROFILE=ci)...$(NC)"
+	@chmod +x scripts/ci_eth_audit_night.sh
+	@./scripts/ci_eth_audit_night.sh
+
+audit-deposit-relayer-test: ## F10 deposit-relayer unit + integration + proptest
+	@echo "$(BLUE)Running deposit-relayer-daemon tests...$(NC)"
+	@cd crates/deposit-relayer-daemon && cargo test
+
 audit-an-test: ## Full AN pytest (unit+integration; sync fixtures first)
 	@echo "$(BLUE)Running audit/spec/an (pytest)...$(NC)"
 	@test -x .tools/tvm-debugger || $(MAKE) setup-an-audit-tools

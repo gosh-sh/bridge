@@ -344,4 +344,48 @@ mod tests {
         wrong_acct.an_account = B256::repeat_byte(0x66);
         assert!(bundle.check_binds_to(&wrong_acct).is_err());
     }
+
+    /// QC-OFF-07: local bind check is partial — amount/contract/block not compared.
+    #[test]
+    fn binding_check_ignores_amount_and_contract_poc() {
+        let pi = DepositPublicInputs {
+            deposit_id: U256::from(3u64),
+            sender: U256::from_be_bytes::<32>({
+                let mut b = [0u8; 32];
+                b[12..].copy_from_slice(Address::repeat_byte(0x11).as_slice());
+                b
+            }),
+            amount: U256::from(999u64), // differs from event.amount
+            contract_address: U256::from(0xdeadbeefu64), // differs from event.source_contract
+            dapp_id_high: U256::ZERO,
+            dapp_id_low: U256::ZERO,
+            an_account_high: U256::from_be_slice(&[0x55u8; 16]),
+            an_account_low: U256::from_be_slice(&[0x55u8; 16]),
+            block_hash_high: U256::from(1u64),
+            block_hash_low: U256::from(2u64),
+            promise_commit: U256::ZERO,
+        };
+        let bundle = DepositProofBundle {
+            vk_blob: Bytes::from(vec![1u8; 4]),
+            public_inputs: Bytes::from(pi.to_operand()),
+            proof: Bytes::from(vec![2u8; 8]),
+            parsed: pi,
+        };
+        let event = DepositEvent {
+            deposit_id: 3,
+            sender: Address::repeat_byte(0x11),
+            amount: U256::from(5u64),
+            an_workchain: 0,
+            an_account: B256::repeat_byte(0x55),
+            timestamp: U256::ZERO,
+            tx_hash: B256::ZERO,
+            log_index: 0,
+            block_number: 1,
+            block_hash: B256::ZERO,
+            source_contract: Address::repeat_byte(0x22),
+        };
+        bundle
+            .check_binds_to(&event)
+            .expect("current behavior: amount/contract/block not checked locally");
+    }
 }

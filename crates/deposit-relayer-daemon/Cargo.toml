@@ -40,6 +40,7 @@ tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.0.an"
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1.6"
 
 [[bin]]
 name = "deposit-relayer"

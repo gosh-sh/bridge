@@ -21,9 +21,10 @@ Entry point for subagents and humans. Update as BC/QC close.
 | **P3** | QC-AN-10 | anAccount == 0 | ✅ pre-ZK QC (no ETH-style revert) |
 | **P3** | DEP-AN-04 | Voucher hash | ✅ exit 219 |
 | **defer** | E-AN-01 | shellnet | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` |
-| **next** | F8-F / closeout | BC/QC regressions + `closeout-an.md` | after author replies |
+| **next** | F8-F / closeout | BC/QC regressions + `closeout-an.md` | ✅ draft closeout + `test_bc_f8f_regressions.py` |
 | **core** | F8 fuzz | MessagePipeline order (AN) | ✅ `test_pipeline_order_fuzz.py` |
-| **core** | F9 fuzz | ETH invariant gaps + CI night | CC-3 + A4-INV-1 ✅; CI night todo |
+| **core** | F9 fuzz | ETH invariant gaps + CI night | ✅ 53/53 audit + ci profile |
+| **done** | F10 | Off-chain pipeline + relayer threat model | relayer F10 ✅ (59 tests + proptest); prover F10-A ✅ (pin, binding, padding PoC) |
 
 ---
 
@@ -48,8 +49,9 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 ```bash
 ./scripts/sync_an_contracts.sh
-make audit-an-test    # 70 passed (F7 + F8 fuzz incl. 10-proof + bounce)
+make audit-an-test    # 74 passed (F7 + F8 fuzz + F8-F BC regressions)
 make pre-push-an      # unit only (28 deterministic; no Hypothesis integration)
+make audit-deposit-relayer-test   # F10 relayer: 59 passed + proptest (2026-07-17)
 ```
 
 ---

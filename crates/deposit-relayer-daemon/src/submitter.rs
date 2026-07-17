@@ -422,13 +422,52 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-                                                   // dappId is the config tag (scalars 4/5); the AN account high/low halves
-                                                   // (scalars 6/7) reconstruct the proven recipient account.
         let dapp_id = (scalars[4] << 128) | scalars[5];
         assert_eq!(dapp_id, b.parsed.dapp_id());
         let reconstructed = (scalars[6] << 128) | scalars[7];
         assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
         assert_eq!(proof, b.proof.to_vec());
+    }
+
+    #[test]
+    fn decode_finalize_rejects_truncated_body() {
+        let err = decode_finalize_deposit(&[0u8; 8]).unwrap_err();
+        assert!(matches!(err, RelayerError::Other(_)));
+    }
+
+    #[test]
+    fn decode_finalize_rejects_proof_length_mismatch() {
+        let mut body = vec![0u8; FINALIZE_HEADER_LEN + 2];
+        body[NUM_PUBLIC_INPUTS * 32..NUM_PUBLIC_INPUTS * 32 + 4]
+            .copy_from_slice(&5u32.to_be_bytes()); // claims proof len 5
+        let err = decode_finalize_deposit(&body).unwrap_err();
+        assert!(err.to_string().contains("length"));
+    }
+
+    #[test]
+    fn finalize_params_are_proof_and_public_inputs_hex() {
+        let ev = event(1);
+        let b = bundle(&ev);
+        let params = build_finalize_deposit_params(&b);
+        let obj = params.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+
+        let proof = params["proof"].as_str().unwrap();
+        assert!(!proof.starts_with("0x"), "proof must be plain hex");
+        assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
+
+        let public_inputs = params["publicInputs"].as_str().unwrap();
+        assert!(
+            !public_inputs.starts_with("0x"),
+            "publicInputs must be plain hex"
+        );
+        let pi_bytes = hex::decode(public_inputs).unwrap();
+        assert_eq!(pi_bytes, b.public_inputs.to_vec());
+        assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
+        assert_eq!(
+            crate::types::DepositPublicInputs::from_operand(&pi_bytes).unwrap(),
+            b.parsed
+        );
     }
 
     #[tokio::test]
@@ -463,35 +502,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn finalize_params_are_proof_and_public_inputs_hex() {
-        let ev = event(1);
-        let b = bundle(&ev);
-        let params = build_finalize_deposit_params(&b);
-        // Exactly the two `bytes` args the deployed contract expects.
-        let obj = params.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
-
-        let proof = params["proof"].as_str().unwrap();
-        assert!(!proof.starts_with("0x"), "proof must be plain hex");
-        assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
-
-        let public_inputs = params["publicInputs"].as_str().unwrap();
-        assert!(
-            !public_inputs.starts_with("0x"),
-            "publicInputs must be plain hex"
-        );
-        let pi_bytes = hex::decode(public_inputs).unwrap();
-        assert_eq!(pi_bytes, b.public_inputs.to_vec());
-        // The operand must be the canonical 11 × 32-byte LE layout the opcode reads.
-        assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
-        // And it must round-trip back to the same parsed inputs.
-        assert_eq!(
-            crate::types::DepositPublicInputs::from_operand(&pi_bytes).unwrap(),
-            b.parsed
-        );
-    }
-
     #[tokio::test]
     async fn interface_submitter_sends_through_mock_client() {
         use acki_nacki_interface::MockAckiNacki;
@@ -508,7 +518,6 @@ mod tests {
         let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
         let b = bundle(&ev);
-        // MockAckiNacki confirms transactions, so this should finalize.
         match sub.submit(&ev, &b).await.unwrap() {
             SubmitOutcome::Finalized {
                 tx_hash,

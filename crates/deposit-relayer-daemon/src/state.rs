@@ -140,4 +140,12 @@ mod tests {
         s.record_progress(3);
         assert_eq!(s.attempts_since_progress, 0);
     }
+
+    #[test]
+    fn corrupted_state_json_fails_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"{not-json").unwrap();
+        assert!(RelayerState::load(&path).is_err());
+    }
 }

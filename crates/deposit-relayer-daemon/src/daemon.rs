@@ -54,7 +54,8 @@ impl Default for BackoffConfig {
 }
 
 impl BackoffConfig {
-    fn bump(&self, current: Duration) -> Duration {
+    /// Next sleep duration after a non-success tick, capped at [`Self::max`].
+    pub fn next_backoff(&self, current: Duration) -> Duration {
         let next = current.saturating_mul(self.multiplier);
         if next > self.max {
             self.max
@@ -254,7 +255,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             if success {
                 current_delay = backoff.initial;
             } else {
-                current_delay = backoff.bump(current_delay);
+                current_delay = backoff.next_backoff(current_delay);
             }
             if let Some(m) = &metrics {
                 m.current_backoff_secs
@@ -342,12 +343,23 @@ mod tests {
             multiplier: 3,
         };
         let mut d = b.initial;
-        d = b.bump(d);
+        d = b.next_backoff(d);
         assert_eq!(d, Duration::from_millis(30));
-        d = b.bump(d);
+        d = b.next_backoff(d);
         assert_eq!(d, b.max);
-        d = b.bump(d);
+        d = b.next_backoff(d);
         assert_eq!(d, b.max);
+    }
+
+    /// QC-OFF-11: multiplier 0 yields zero delay (hot-loop risk if CLI allows it).
+    #[test]
+    fn backoff_multiplier_zero_yields_zero_delay() {
+        let b = BackoffConfig {
+            initial: Duration::from_millis(10),
+            max: Duration::from_millis(50),
+            multiplier: 0,
+        };
+        assert_eq!(b.next_backoff(b.initial), Duration::from_millis(0));
     }
 
     #[tokio::test(start_paused = true)]

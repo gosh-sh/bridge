@@ -22,6 +22,20 @@ use async_trait::async_trait;
 
 use crate::{error::RelayerError, types::DepositEvent};
 
+/// Returns `true` when `deposit_block` is at or below the confirmation-safe
+/// head: `chain_head.saturating_sub(confirmations)`.
+///
+/// Used by [`fetch_deposit_from_receipt`] and [`EthLogSource::fetch`] before
+/// surfacing a deposit (F10-D).
+pub fn is_deposit_block_finalized(
+    deposit_block: u64,
+    chain_head: u64,
+    confirmations: u64,
+) -> bool {
+    let safe_head = chain_head.saturating_sub(confirmations);
+    deposit_block <= safe_head
+}
+
 /// Asynchronous source of `Deposit` events.
 ///
 /// `fetch(deposit_id)` returns:
@@ -246,8 +260,7 @@ where
         .get_block_number()
         .await
         .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
-    let safe_head = head.saturating_sub(confirmations);
-    if block_number > safe_head {
+    if !is_deposit_block_finalized(block_number, head, confirmations) {
         return Ok(None);
     }
 
@@ -446,5 +459,35 @@ mod tests {
             &"HTTP error 429 with body: compute units per second"
         ));
         assert!(!is_retryable_eth_rpc_error(&"invalid params"));
+    }
+
+    #[test]
+    fn receipt_log_index_missing_returns_eth_error() {
+        use alloy::rpc::types::Log;
+
+        let logs: Vec<Log> = vec![];
+        let err = receipt_log_index_from_block_log(&logs, 99).unwrap_err();
+        assert!(matches!(err, RelayerError::Eth(_)));
+        assert!(err.to_string().contains("not found"));
+    }
+
+    // F10-D — confirmation depth gate (no RPC; pure helper).
+    #[test]
+    fn confirmation_depth_zero_means_head_inclusive() {
+        assert!(is_deposit_block_finalized(100, 100, 0));
+        assert!(!is_deposit_block_finalized(101, 100, 0));
+    }
+
+    #[test]
+    fn confirmation_depth_buries_deposit() {
+        // head=110, confirmations=12 → safe_head=98
+        assert!(is_deposit_block_finalized(98, 110, 12));
+        assert!(!is_deposit_block_finalized(99, 110, 12));
+    }
+
+    #[test]
+    fn confirmation_depth_saturates_when_confirmations_exceed_head() {
+        assert!(!is_deposit_block_finalized(1, 5, 100));
+        assert!(is_deposit_block_finalized(0, 5, 100));
     }
 }

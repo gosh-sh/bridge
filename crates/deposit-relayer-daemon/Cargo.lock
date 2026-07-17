@@ -2360,6 +2360,7 @@ dependencies = [
  "async-trait",
  "clap",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

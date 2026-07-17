@@ -17,6 +17,7 @@ Two valid proofs over the **same** Sepolia receipt with different `dappId` value
 | `test_bc_an_01_tampered_dapp_id_rejects_same_proof` | PI dappId is ZK-bound — cannot reuse proof bytes |
 | `test_bc_an_01_replay_key_differs_by_dapp_id` | Contract replay key splits on dappId limbs |
 | `test_bc_an_01_double_mint_same_deposit_two_dapp_ids` | **Full fund-loss PoC** — two finalize+mint for one depositId |
+| `integration/test_bc_f8f_regressions.py` | F8-F source regression (no `EXPECTED_DAPP_ID`) |
 
 Regenerate dual proofs (Hermez SRS — matches synced USDCBridge VK `304c1c4e…`):
 

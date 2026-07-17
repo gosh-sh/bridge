@@ -311,6 +311,47 @@ test:an:audit:
       - scripts/setup_an_audit_tools.sh
       - scripts/ci_an_audit.sh
 
+# F10 — deposit-relayer off-chain pipeline (Rust; excluded from workspace)
+test:deposit-relayer:audit:
+  extends: .rust_base
+  stage: test
+  script:
+    - cd crates/deposit-relayer-daemon && cargo test --locked
+  only:
+    refs:
+      - audit
+      - merge_requests
+    changes:
+      - crates/deposit-relayer-daemon/**/*
+      - crates/acki-nacki-interface/**/*
+      - audit/**/*
+
+# Night profile — heavy fuzz on audit ETH overlay (allow_failure; not MR gate)
+test:solidity:audit:ci:
+  extends: .foundry_base
+  stage: test
+  needs:
+    - build:solidity
+  script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
+    - chmod +x scripts/ci_eth_audit_night.sh
+    - ./scripts/ci_eth_audit_night.sh
+  allow_failure: true
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
+      - contracts/ethereum/node_modules/
+    policy: pull
+  only:
+    refs:
+      - audit
+    changes:
+      - audit/spec/ethereum/**/*
+      - contracts/ethereum/src/**/*
+
 test:solidity:coverage:
   extends: .foundry_base
   stage: test

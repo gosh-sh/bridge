@@ -56,9 +56,11 @@ Every spec test header should cite the invariant(s) it covers.
 | D | handlers + invariants | **done** (11 fuzz/inv) |
 | E | E2E gaps | **done** (7 E2E) |
 | Closeout | `reports/closeout-eth.md` | **draft** — QC open, author ack pending |
+| AN closeout | `reports/closeout-an.md` | **draft** — 2 BC + QC open |
 | CI | `test:solidity:audit` in `.gitlab-ci.yml` | ✅ |
 | Local gate | `make pre-push-audit` | ✅ |
-| **F — AN** | `spec/an/` + `reports/an-audit-plan.md` | **F1–F3** 11 pytest ✅ |
+| **F — AN** | `spec/an/` + `reports/an-audit-plan.md` | **F0–F10** 74 pytest ✅; relayer + prover overlay ✅ |
 
 Run ETH: `make pre-push-audit`  
-Run AN: `make audit-an-test` (after `./scripts/sync_an_contracts.sh`)
+Run AN: `make audit-an-test` (after `./scripts/sync_an_contracts.sh`)  
+Run F10 relayer: `make audit-deposit-relayer-test`

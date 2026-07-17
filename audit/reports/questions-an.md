@@ -6,7 +6,9 @@
 **Out of scope here:** Ethereum `AckiNackiBridge`, Circuit 1A/1B/2/4 provers, cross-chain policy — see sibling docs.
 
 **Branch / artefacts:** audit overlay `audit/spec/an/`; synced contract `audit/spec/an-contracts/` from `acki-nacki@dev`.  
-**Test gate:** `make audit-an-test` → **37 passed** (2026-07-17).
+**Test gate:** `make audit-an-test` → **74 passed** (2026-07-17, incl. F8-F BC regressions).
+
+**Closeout:** `audit/reports/closeout-an.md` (draft — author ack pending).
 
 Manual reviews: `manual-audit/F1-usdcbridge-deposit.md`, `manual-audit/F2-usdcbridge-withdraw-admin.md`.
 

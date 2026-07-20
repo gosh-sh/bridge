@@ -56,12 +56,7 @@
 			"name": "finalizeDeposit",
 			"inputs": [
 				{"name":"proof","type":"bytes"},
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient_an","type":"uint256"},
-				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"publicInputs","type":"bytes"}
 			],
 			"outputs": [
 			]
@@ -69,12 +64,12 @@
 		{
 			"name": "confirmDeposit",
 			"inputs": [
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient_an","type":"uint256"},
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"anWorkchain","type":"int8"},
+				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -199,12 +194,12 @@
 		{
 			"name": "DepositFinalized",
 			"inputs": [
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient","type":"uint256"},
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"anWorkchain","type":"int8"},
+				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [
 			]

@@ -79,7 +79,7 @@ use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark
 
 use crate::{
     circuit_v2::DepositEventCircuitV2,
-    types::{DepositProofInput, DepositProofOutput},
+    types::{DepositProofInput, DepositProofOutput, NUM_PUBLIC_INPUTS},
 };
 
 /// Pinned keccak promise-loader capacity.
@@ -595,12 +595,11 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         return Err("Proof has no public instances".to_string());
     }
 
-    // FIX BC-CIRCUIT-004: Check that we have exactly 7 public inputs
-    // (depositId, sender, amount, contract_address, block_hash_high,
-    // block_hash_low, promise_commit)
-    if snark.instances[0].len() != 7 {
+    // Layout: [depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow,
+    // anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]
+    if snark.instances[0].len() != NUM_PUBLIC_INPUTS {
         return Err(format!(
-            "Expected 7 public inputs (6 user values + promise_commit), got {}",
+            "Expected {NUM_PUBLIC_INPUTS} public inputs, got {}",
             snark.instances[0].len()
         ));
     }
@@ -618,43 +617,36 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
 
     // Verify public inputs match the claimed values
     let deposit_id_field = Fr::from(proof.deposit_id);
-
-    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of sender address
     let sender_field = bytes_to_field(&proof.sender);
-
-    // FIX BC-TYPES-001: Convert ALL 32 bytes of amount
     let amount_field = bytes_to_field(&proof.amount);
-
-    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of contract address
     let contract_field = bytes_to_field(&proof.contract_address);
-
-    // FIX BC-PROVER-003 Issue C: Convert block_hash to high/low field elements
-    // Block hash is split into two 128-bit (16-byte) field elements
+    let dapp_id_high = bytes_to_field(&proof.dapp_id[0..16]);
+    let dapp_id_low = bytes_to_field(&proof.dapp_id[16..32]);
+    let an_account_high = bytes_to_field(&proof.an_account[0..16]);
+    let an_account_low = bytes_to_field(&proof.an_account[16..32]);
     let block_hash_high = bytes_to_field(&proof.block_hash[0..16]);
     let block_hash_low = bytes_to_field(&proof.block_hash[16..32]);
 
-    if snark.instances[0][0] != deposit_id_field {
-        return Err("Public input mismatch: depositId".to_string());
-    }
-    if snark.instances[0][1] != sender_field {
-        return Err("Public input mismatch: sender".to_string());
-    }
-    if snark.instances[0][2] != amount_field {
-        return Err("Public input mismatch: amount".to_string());
-    }
-    if snark.instances[0][3] != contract_field {
-        return Err("Public input mismatch: contract_address".to_string());
-    }
-    // FIX BC-PROVER-003 Issue C: Verify block_hash_high and block_hash_low
-    if snark.instances[0][4] != block_hash_high {
-        return Err("Public input mismatch: block_hash_high".to_string());
-    }
-    if snark.instances[0][5] != block_hash_low {
-        return Err("Public input mismatch: block_hash_low".to_string());
+    let expected = [
+        ("depositId", deposit_id_field),
+        ("sender", sender_field),
+        ("amount", amount_field),
+        ("contract_address", contract_field),
+        ("dappIdHigh", dapp_id_high),
+        ("dappIdLow", dapp_id_low),
+        ("anAccountHigh", an_account_high),
+        ("anAccountLow", an_account_low),
+        ("blockHashHigh", block_hash_high),
+        ("blockHashLow", block_hash_low),
+    ];
+    for (idx, (name, expected_fr)) in expected.iter().enumerate() {
+        if snark.instances[0][idx] != *expected_fr {
+            return Err(format!("Public input mismatch: {name}"));
+        }
     }
 
     println!("✓ Proof structure valid");
-    println!("✓ Public inputs verified (7 instances: 6 user values + promise_commit)");
+    println!("✓ Public inputs verified ({NUM_PUBLIC_INPUTS} instances incl. promise_commit)");
     println!("  depositId: {}", proof.deposit_id);
     println!("  sender: 0x{}", hex::encode(proof.sender));
     println!("  amount: 0x{}", hex::encode(proof.amount));
@@ -662,7 +654,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
     println!(
         "  promise_commit: 0x{}",
-        hex::encode(snark.instances[0][6].to_bytes())
+        hex::encode(snark.instances[0][10].to_bytes())
     );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
@@ -717,11 +709,8 @@ pub fn generate_solidity_verifier(
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
 
-    // 4. Define number of public instances
-    // FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
-    // We have 7 public outputs: [depositId, sender, amount,
-    // contract_address, block_hash_high, block_hash_low, promise_commit]
-    let num_instance = vec![7];
+    // 4. Public instance count must match the live circuit / AN opcode (11).
+    let num_instance = vec![NUM_PUBLIC_INPUTS];
 
     // 5. Generate Solidity verifier using SHPLONK
     println!("Generating Solidity code...");

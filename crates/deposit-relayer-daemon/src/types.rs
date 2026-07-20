@@ -251,6 +251,32 @@ impl DepositProofBundle {
                 U256::from_be_slice(event.an_account.as_slice())
             )));
         }
+        if self.parsed.amount != event.amount {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof amount {:#x} != event amount {:#x}",
+                self.parsed.amount, event.amount
+            )));
+        }
+        let expected_contract = U256::from_be_bytes::<32>({
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(event.source_contract.as_slice());
+            buf
+        });
+        if self.parsed.contract_address != expected_contract {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof contractAddress {:#x} != event source_contract {}",
+                self.parsed.contract_address, event.source_contract
+            )));
+        }
+        let exp_bh_hi = U256::from_be_slice(&event.block_hash.as_slice()[0..16]);
+        let exp_bh_lo = U256::from_be_slice(&event.block_hash.as_slice()[16..32]);
+        if self.parsed.block_hash_high != exp_bh_hi || self.parsed.block_hash_low != exp_bh_lo {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof blockHash {:#x} != event blockHash {:#x}",
+                (self.parsed.block_hash_high << 128) | self.parsed.block_hash_low,
+                U256::from_be_slice(event.block_hash.as_slice())
+            )));
+        }
         Ok(())
     }
 }
@@ -343,5 +369,17 @@ mod tests {
         let mut wrong_acct = event.clone();
         wrong_acct.an_account = B256::repeat_byte(0x66);
         assert!(bundle.check_binds_to(&wrong_acct).is_err());
+
+        let mut wrong_amount = event.clone();
+        wrong_amount.amount = U256::from(999u64);
+        assert!(bundle.check_binds_to(&wrong_amount).is_err());
+
+        let mut wrong_contract = event.clone();
+        wrong_contract.source_contract = Address::repeat_byte(0x99);
+        assert!(bundle.check_binds_to(&wrong_contract).is_err());
+
+        let mut wrong_block = event.clone();
+        wrong_block.block_hash = B256::repeat_byte(0x88);
+        assert!(bundle.check_binds_to(&wrong_block).is_err());
     }
 }

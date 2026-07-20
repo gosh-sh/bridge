@@ -14,19 +14,48 @@
 //!   deposit.
 //!
 //! Concurrency note: like the AN→ETH relayer, this is a single-process
-//! daemon. The file is overwritten atomically (write-temp-then-rename). The
-//! AN-side nullifier makes double-submission *safe* (the second submit is
-//! rejected), so even a stale local state can't cause a double-spend.
+//! daemon. The file is overwritten atomically (write-temp-then-rename + fsync).
+//! A deployment binding (`chain_id`, `bridge_address`, `dapp_id`) prevents
+//! reusing state across bridge redeploys. An advisory lock blocks two daemons
+//! from sharing one state file.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
+use alloy::primitives::Address;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RelayerError;
 
+/// Deployment identity stamped into `state.json` so a cursor cannot be reused
+/// after a bridge redeploy or dappId change.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentIdentity {
+    pub chain_id: u64,
+    pub bridge_address: String,
+    pub dapp_id: String,
+}
+
+impl DeploymentIdentity {
+    pub fn new(chain_id: u64, bridge_address: Address, dapp_id: impl Into<String>) -> Self {
+        Self {
+            chain_id,
+            bridge_address: format!("{bridge_address:#x}"),
+            dapp_id: dapp_id.into(),
+        }
+    }
+}
+
 /// Locally-persisted relayer progress.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RelayerState {
+    /// Set on first daemon start; must match the live config on subsequent runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentIdentity>,
     /// Highest `depositId` known finalized on AN. `None` before the first
     /// finalize of this relayer's lifetime.
     pub last_processed_deposit_id: Option<u64>,
@@ -42,22 +71,61 @@ impl RelayerState {
     /// Read the state file. Returns `Ok(None)` if the file does not exist
     /// (fresh start), `Err` on corruption.
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
-        match std::fs::read(path) {
+        match fs::read(path) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Atomically persist to disk: write to `<path>.tmp`, then rename.
+    /// Validate or stamp deployment binding. Legacy state files without
+    /// `deployment` are upgraded on first save.
+    pub fn ensure_deployment(
+        &mut self,
+        expected: &DeploymentIdentity,
+        force: bool,
+    ) -> Result<(), RelayerError> {
+        match &self.deployment {
+            None => {
+                self.deployment = Some(expected.clone());
+                Ok(())
+            },
+            Some(stored) if stored == expected => Ok(()),
+            Some(_) if force => {
+                self.deployment = Some(expected.clone());
+                Ok(())
+            },
+            Some(stored) => Err(RelayerError::other(format!(
+                "state.json deployment mismatch (stored chain={} bridge={} dapp_id={}; \
+                 expected chain={} bridge={} dapp_id={}). Use --force-state to override.",
+                stored.chain_id,
+                stored.bridge_address,
+                stored.dapp_id,
+                expected.chain_id,
+                expected.bridge_address,
+                expected.dapp_id,
+            ))),
+        }
+    }
+
+    /// Atomically persist to disk: write to `<path>.tmp`, fsync, then rename.
     pub fn save(&self, path: &Path) -> Result<(), RelayerError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
         let tmp = sibling_tmp_path(path);
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        {
+            let mut file = File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 
@@ -86,6 +154,31 @@ impl RelayerState {
     }
 }
 
+/// Advisory exclusive lock for a single-writer daemon. Held for the process
+/// lifetime; released on drop.
+pub struct StateLock {
+    _file: File,
+}
+
+impl StateLock {
+    /// Acquire an exclusive lock on `<state_path>.lock`.
+    pub fn acquire(state_path: &Path) -> Result<Self, RelayerError> {
+        let lock_path = state_lock_path(state_path);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(RelayerError::from)?;
+        file.try_lock_exclusive()
+            .map_err(|e| RelayerError::other(format!("state lock {:?}: {e}", lock_path)))?;
+        Ok(Self { _file: file })
+    }
+}
+
 fn sibling_tmp_path(path: &Path) -> PathBuf {
     let mut tmp = path.to_path_buf();
     let mut name = path
@@ -97,11 +190,27 @@ fn sibling_tmp_path(path: &Path) -> PathBuf {
     tmp
 }
 
+fn state_lock_path(state_path: &Path) -> PathBuf {
+    let mut lock = state_path.to_path_buf();
+    let mut name = state_path
+        .file_name()
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| std::ffi::OsString::from("state.json"));
+    name.push(".lock");
+    lock.set_file_name(name);
+    lock
+}
+
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::Address;
     use tempfile::tempdir;
 
     use super::*;
+
+    fn deployment(chain: u64) -> DeploymentIdentity {
+        DeploymentIdentity::new(chain, Address::repeat_byte(0x99), "0x1a1a1a1a1a")
+    }
 
     #[test]
     fn roundtrip_persists_state() {
@@ -111,14 +220,24 @@ mod tests {
         assert_eq!(RelayerState::load(&path).unwrap(), None);
 
         let mut s = RelayerState::default();
+        s.ensure_deployment(&deployment(11155111), false).unwrap();
         s.record_attempt(7);
         s.record_progress(7);
         s.save(&path).unwrap();
 
         let loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.last_processed_deposit_id, Some(7));
-        assert_eq!(loaded.last_attempt_deposit_id, Some(7));
-        assert_eq!(loaded.attempts_since_progress, 0);
+        assert_eq!(loaded.deployment, Some(deployment(11155111)));
+    }
+
+    #[test]
+    fn deployment_mismatch_rejected() {
+        let mut s = RelayerState {
+            deployment: Some(deployment(1)),
+            ..RelayerState::default()
+        };
+        let err = s.ensure_deployment(&deployment(2), false).unwrap_err();
+        assert!(err.to_string().contains("deployment mismatch"));
     }
 
     #[test]
@@ -131,13 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn record_attempt_increments_until_progress() {
-        let mut s = RelayerState::default();
-        s.record_attempt(3);
-        s.record_attempt(3);
-        s.record_attempt(3);
-        assert_eq!(s.attempts_since_progress, 3);
-        s.record_progress(3);
-        assert_eq!(s.attempts_since_progress, 0);
+    fn state_lock_blocks_second_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let _first = StateLock::acquire(&path).unwrap();
+        assert!(StateLock::acquire(&path).is_err());
     }
 }

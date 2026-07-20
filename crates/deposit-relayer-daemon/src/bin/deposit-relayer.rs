@@ -22,13 +22,14 @@
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
-use alloy::{primitives::Address, providers::ProviderBuilder};
+use alloy::{primitives::Address, providers::ProviderBuilder, providers::Provider};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
-    AnSubmitter, BackoffConfig, DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, SubmitOutcome,
-    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
+    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositSource, EthLogSource,
+    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock,
+    SubmitOutcome, SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -169,6 +170,9 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+        /// Override a mismatched deployment binding in an existing state file.
+        #[arg(long)]
+        force_state: bool,
     },
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
@@ -322,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
+            force_state,
         } => {
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
@@ -336,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
             };
+            backoff.validate().map_err(|e| anyhow::anyhow!(e))?;
             let mut an_cfg = AnConfig::default();
             if let Some(url) = an_node_url {
                 an_cfg.node_url = url;
@@ -366,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
                 an_cfg,
                 dry_run,
                 backoff,
+                force_state,
             )
             .await
             .map_err(log_err("daemon"))
@@ -606,7 +613,18 @@ async fn run_daemon(
     an_cfg: AnConfig,
     dry_run: bool,
     backoff: BackoffConfig,
+    force_state: bool,
 ) -> anyhow::Result<()> {
+    let _state_lock = StateLock::acquire(&state_path)
+        .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
+
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("get_chain_id failed: {e}"))?;
+    let deployment = DeploymentIdentity::new(chain_id, bridge_address, prover_cfg.dapp_id.clone());
+
     if !an_cfg.node_url.is_empty() {
         let pf = an_cfg.preflight().await?;
         info!(
@@ -619,7 +637,6 @@ async fn run_daemon(
         warn!("no AN node_url configured; skipping /v2/bk_set preflight");
     }
 
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let source = Arc::new(EthLogSource::new(
         provider,
         bridge_address,
@@ -637,6 +654,8 @@ async fn run_daemon(
             state_path,
             start_deposit_id,
             backoff,
+            deployment,
+            force_state,
             source,
             prover,
             Arc::new(MockAnSubmitter::accepting()),
@@ -670,6 +689,8 @@ async fn run_daemon(
             state_path,
             start_deposit_id,
             backoff,
+            deployment,
+            force_state,
             source,
             prover,
             Arc::new(AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg)),
@@ -682,6 +703,8 @@ async fn run_daemon_loop<S, P, A>(
     state_path: PathBuf,
     start_deposit_id: u64,
     backoff: BackoffConfig,
+    deployment: DeploymentIdentity,
+    force_state: bool,
     source: Arc<S>,
     prover: Arc<P>,
     submitter: Arc<A>,
@@ -696,6 +719,8 @@ where
         start_deposit_id,
         poll_interval: backoff.initial,
         max_attempts_warn: 16,
+        deployment: Some(deployment),
+        force_state,
     };
     let mut relayer = Relayer::new(cfg, source, prover, submitter)?;
     let metrics = RelayerMetrics::new();

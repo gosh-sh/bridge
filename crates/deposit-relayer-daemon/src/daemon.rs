@@ -54,6 +54,21 @@ impl Default for BackoffConfig {
 }
 
 impl BackoffConfig {
+    /// Reject configs that would busy-loop the daemon.
+    pub fn validate(&self) -> Result<(), RelayerError> {
+        if self.initial.is_zero() {
+            return Err(RelayerError::other(
+                "backoff initial delay must be > 0 (got 0s)",
+            ));
+        }
+        if self.multiplier == 0 {
+            return Err(RelayerError::other(
+                "backoff multiplier must be >= 1 (0 causes a hot loop)",
+            ));
+        }
+        Ok(())
+    }
+
     fn bump(&self, current: Duration) -> Duration {
         let next = current.saturating_mul(self.multiplier);
         if next > self.max {
@@ -322,6 +337,8 @@ mod tests {
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()
     }
@@ -332,6 +349,26 @@ mod tests {
             max: Duration::from_millis(80),
             multiplier: 2,
         }
+    }
+
+    #[test]
+    fn backoff_rejects_zero_multiplier() {
+        let b = BackoffConfig {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(10),
+            multiplier: 0,
+        };
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn backoff_rejects_zero_initial() {
+        let b = BackoffConfig {
+            initial: Duration::ZERO,
+            max: Duration::from_secs(10),
+            multiplier: 2,
+        };
+        assert!(b.validate().is_err());
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::{
     error::RelayerError,
     prover::ProofGenerator,
     source::DepositSource,
-    state::RelayerState,
+    state::{DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
 };
 
@@ -44,6 +44,12 @@ pub struct RelayerConfig {
     /// warning. Doesn't stop the relayer; operator-visible only.
     #[serde(default = "default_max_attempts_warn")]
     pub max_attempts_warn: u32,
+    /// Deployment binding stamped into `state.json` (daemon only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentIdentity>,
+    /// Override a mismatched deployment binding in an existing state file.
+    #[serde(default)]
+    pub force_state: bool,
 }
 
 fn default_poll_interval() -> Duration {
@@ -62,6 +68,8 @@ impl RelayerConfig {
             start_deposit_id: 0,
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
+            deployment: None,
+            force_state: false,
         }
     }
 }
@@ -108,7 +116,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         prover: Arc<P>,
         submitter: Arc<A>,
     ) -> Result<Self, RelayerError> {
-        let state = RelayerState::load(&config.state_path)?.unwrap_or_default();
+        let mut state = RelayerState::load(&config.state_path)?.unwrap_or_default();
+        if let Some(deployment) = &config.deployment {
+            state.ensure_deployment(deployment, config.force_state)?;
+        }
         Ok(Self {
             config,
             source,
@@ -303,6 +314,8 @@ mod tests {
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
         };
         Relayer::new(cfg, source, prover, submitter).unwrap()
     }

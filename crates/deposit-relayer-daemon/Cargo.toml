@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
+fs2 = "0.4"
 acki-nacki-interface = { path = "../acki-nacki-interface", features = ["tvm-sdk"] }
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.0.an", default-features = false, features = [
     "std",

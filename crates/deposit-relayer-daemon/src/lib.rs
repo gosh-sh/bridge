@@ -88,5 +88,6 @@ pub use submitter::{
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
-    DepositEvent, DepositProofBundle, DepositPublicInputs, NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,
+    parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,
+    NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,
 };

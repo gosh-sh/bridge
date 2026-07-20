@@ -14,7 +14,7 @@
 |----|----------|---------|-------|
 | QC-OFF-13 | P4 | QC acknowledged | **B** (done) |
 | QC-OFF-06 | P0 | QC acknowledged | **B** (done; maps exit 51) |
-| QC-OFF-09 | P1 | QC acknowledged | C (partial now, on-chain after BC-AN-01) |
+| QC-OFF-09 | P1 | QC acknowledged | **C** (off-chain done; on-chain after BC-AN-01) |
 | QC-PROV-01 | P2 | QC acknowledged | **A** |
 | QC-OFF-01 | P3 | QC acknowledged | D |
 | QC-OFF-07 | P4 | OK to extend | **A** |
@@ -104,9 +104,11 @@ Shippable with unit tests only; target branch `pruvendo/f10-phase-a`.
 
 **Plan:** Remove silent `"0"` default for live paths; parse/validate hex U256 at startup; preflight vs on-chain `EXPECTED_DAPP_ID` after BC-AN-01.
 
+**Done (off-chain):** `parse_and_validate_dapp_id` rejects empty/non-hex/over-width; live `daemon` rejects zero unless `--dry-run`; configured dappId is logged at start. On-chain `EXPECTED_DAPP_ID` getter remains BC-AN-01 (acki-nacki).
+
 ### BC-AN-01 / BC-AN-02
 
-See `HANDOFF-an-cross-chain-ru.txt` — USDCBridge Solidity changes in acki-nacki repo.
+See sibling handoff — USDCBridge Solidity changes in acki-nacki repo (out of scope here).
 
 ---
 
@@ -131,7 +133,8 @@ See `HANDOFF-an-cross-chain-ru.txt` — USDCBridge Solidity changes in acki-nack
 | QC-OFF-11 (partial) | done | `pruvendo/f10-phase-a` |
 | QC-OFF-12 | done | `pruvendo/f10-phase-a` |
 | Phase B (QC-OFF-13, 06) | done | `pruvendo/f10-phase-a` |
-| Phase C (QC-OFF-09, BC-AN-01) | pending | — |
+| Phase C (QC-OFF-09 off-chain) | done | `pruvendo/f10-phase-a` |
+| BC-AN-01 / BC-AN-02 (on-chain) | pending | acki-nacki sibling |
 
 ---
 

@@ -172,6 +172,43 @@ impl DepositPublicInputs {
     }
 }
 
+/// Parse and validate an `AN_DAPP_ID` hex string (optional `0x` prefix).
+///
+/// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
+/// `0x`-prefixed hex form used in proofs and `state.json`.
+///
+/// When `allow_zero` is false, a zero dappId is rejected — live daemon paths
+/// must set an explicit non-zero tag (QC-OFF-09).
+pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String, RelayerError> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID is empty; set --dapp-id / AN_DAPP_ID to a hex UInt256",
+        ));
+    }
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' is not valid hex"
+        )));
+    }
+    if hex.len() > 64 {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' exceeds 32 bytes (got {} hex chars)",
+            hex.len()
+        )));
+    }
+    let value = U256::from_str_radix(hex, 16)
+        .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
+    if value.is_zero() && !allow_zero {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; \
+             set AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
+        ));
+    }
+    Ok(format!("{value:#x}"))
+}
+
 /// The three operands the AN-side `ZKHALO2VERIFYWITHVK` opcode consumes,
 /// plus the decoded public inputs for building the `finalizeDeposit` call.
 ///
@@ -381,5 +418,31 @@ mod tests {
         let mut wrong_block = event.clone();
         wrong_block.block_hash = B256::repeat_byte(0x88);
         assert!(bundle.check_binds_to(&wrong_block).is_err());
+    }
+
+    #[test]
+    fn dapp_id_validation_accepts_hex() {
+        assert_eq!(
+            parse_and_validate_dapp_id("0x1a1a1a1a1a", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+        assert_eq!(
+            parse_and_validate_dapp_id("1A1A1A1A1A", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+    }
+
+    #[test]
+    fn dapp_id_validation_rejects_garbage_and_overwidth() {
+        assert!(parse_and_validate_dapp_id("", true).is_err());
+        assert!(parse_and_validate_dapp_id("zz", true).is_err());
+        assert!(parse_and_validate_dapp_id(&"ab".repeat(33), true).is_err());
+    }
+
+    #[test]
+    fn dapp_id_zero_rejected_unless_allowed() {
+        assert!(parse_and_validate_dapp_id("0", false).is_err());
+        assert!(parse_and_validate_dapp_id("0x0", false).is_err());
+        assert_eq!(parse_and_validate_dapp_id("0", true).unwrap(), "0x0");
     }
 }

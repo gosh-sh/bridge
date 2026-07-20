@@ -25,11 +25,11 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder, providers::Provider};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
-    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositSource, EthLogSource,
-    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock,
-    SubmitOutcome, SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
-    DEFAULT_AN_NODE_URL,
+    fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
+    AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
+    DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
+    RelayerConfig, RelayerMetrics, StateLock, SubmitOutcome, SubprocessProofGenerator,
+    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -106,6 +106,8 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
+        /// Required non-zero for live `daemon` (QC-OFF-09); `"0"` only allowed
+        /// with `--dry-run` / offline `prove-one`.
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
@@ -139,6 +141,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
+        /// Must be non-zero unless `--dry-run` (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// AN node REST base URL for BK-set preflight (`/v2/bk_set`).
@@ -260,6 +263,8 @@ async fn main() -> anyhow::Result<()> {
             dapp_id,
             out_dir,
         } => {
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ true)
+                .map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
@@ -328,6 +333,10 @@ async fn main() -> anyhow::Result<()> {
             backoff_multiplier,
             force_state,
         } => {
+            let dapp_id =
+                parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),

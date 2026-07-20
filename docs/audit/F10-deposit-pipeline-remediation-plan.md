@@ -12,7 +12,8 @@
 
 | ID | Priority | Verdict | Phase |
 |----|----------|---------|-------|
-| QC-OFF-06 | P0 | QC acknowledged | B (needs QC-OFF-13) |
+| QC-OFF-13 | P4 | QC acknowledged | **B** (done) |
+| QC-OFF-06 | P0 | QC acknowledged | **B** (done; maps exit 51) |
 | QC-OFF-09 | P1 | QC acknowledged | C (partial now, on-chain after BC-AN-01) |
 | QC-PROV-01 | P2 | QC acknowledged | **A** |
 | QC-OFF-01 | P3 | QC acknowledged | D |
@@ -20,7 +21,6 @@
 | QC-OFF-08 | P4 | QC acknowledged | **A** |
 | QC-OFF-11 | P4 | QC acknowledged | **A** (partial), B (Pending) |
 | QC-OFF-12 | P4 | OK to fix | **A** |
-| QC-OFF-13 | P4 | QC acknowledged | B |
 | QC-OFF-10 | — | QC acknowledged | D |
 | QC-OFF-02 | — | OK + doc | D |
 | QC-OFF-03 | — | OK by design | — |
@@ -130,7 +130,7 @@ See `HANDOFF-an-cross-chain-ru.txt` — USDCBridge Solidity changes in acki-nack
 | QC-OFF-08 | done | `pruvendo/f10-phase-a` |
 | QC-OFF-11 (partial) | done | `pruvendo/f10-phase-a` |
 | QC-OFF-12 | done | `pruvendo/f10-phase-a` |
-| Phase B (QC-OFF-13, 06) | pending | — |
+| Phase B (QC-OFF-13, 06) | done | `pruvendo/f10-phase-a` |
 | Phase C (QC-OFF-09, BC-AN-01) | pending | — |
 
 ---

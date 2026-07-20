@@ -3,14 +3,15 @@
 //! Requires the `tvm-sdk` feature. See
 //! <https://github.com/tvmlabs/tvm-sdk/blob/main/docs/MIGRATION-3.0.md>.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use serde_json::{json, Value};
 use tvm_client::{
     abi::{Abi, CallSet, ParamsOfEncodeMessage, Signer},
     account::{get_account, ParamsOfGetAccount},
     crypto::KeyPair,
-    net::NetworkConfig,
+    net::{query_collection, NetworkConfig, ParamsOfQueryCollection},
     processing::{process_message, ParamsOfProcessMessage},
     ClientConfig, ClientContext,
 };
@@ -19,12 +20,19 @@ use crate::{
     address::ExtendedAddress,
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
-    types::{ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash},
+    types::{
+        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+    },
 };
 
 /// Default HD derivation path in tvm-sdk 3.0.0 (was `m/44'/396'/0'/0/0` in
 /// 2.x).
 pub const HD_PATH_V3: &str = "m/44'/1331'/0'/0/0";
+
+/// StdContractError: contract cannot be redeployed (DepositVoucher collision).
+pub const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
+/// USDCBridge: `ERR_INVALID_ZKPROOF`.
+pub const EXIT_INVALID_ZKPROOF: i32 = 220;
 
 /// Configuration for a live GraphQL tvm_client connection.
 #[derive(Clone, Debug)]
@@ -129,15 +137,10 @@ impl IAckiNacki for TvmAckiNacki {
             .await
             .map_err(format_tvm_client_error)?;
 
-        let aborted = result
-            .transaction
-            .get("aborted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let exit_code = result.transaction.get("exit_code").and_then(|v| v.as_i64());
-        if aborted || exit_code.is_some_and(|c| c != 0) {
+        let (status, exit_code, aborted) = classify_tx_json(&result.transaction);
+        if !matches!(status, TransactionStatus::Confirmed | TransactionStatus::Included) {
             return Err(AckiNackiError::TransactionFailed(format!(
-                "contract call aborted (exit_code={exit_code:?})"
+                "contract call aborted (exit_code={exit_code:?}, aborted={aborted})"
             )));
         }
 
@@ -150,27 +153,64 @@ impl IAckiNacki for TvmAckiNacki {
     }
 
     async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus> {
-        // process_message already waits; treat unknown hashes as confirmed.
-        let _ = tx_hash;
-        Ok(TransactionStatus::Confirmed)
+        Ok(self.get_transaction_receipt(tx_hash).await?.status)
     }
 
     async fn get_transaction_receipt(&self, tx_hash: &TxHash) -> Result<TransactionReceipt> {
-        Ok(TransactionReceipt::new(
+        let id = hex::encode(tx_hash);
+        let params = ParamsOfQueryCollection {
+            collection: "transactions".to_string(),
+            filter: Some(json!({ "id": { "eq": id } })),
+            result: "id aborted now compute { exit_code success gas_used }".to_string(),
+            order: None,
+            limit: Some(1),
+        };
+        let res = query_collection(self.context.clone(), params)
+            .await
+            .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        let Some(tx) = res.result.first() else {
+            return Ok(TransactionReceipt::with_compute(
+                *tx_hash,
+                TransactionStatus::Pending,
+                None,
+                0,
+                None,
+                false,
+            ));
+        };
+        let (status, exit_code, aborted) = classify_tx_json(tx);
+        let gas_used = tx
+            .get("compute")
+            .and_then(|c| c.get("gas_used"))
+            .and_then(|g| g.as_u64())
+            .unwrap_or(0);
+        let block_number = tx.get("now").and_then(|n| n.as_u64());
+        Ok(TransactionReceipt::with_compute(
             *tx_hash,
-            TransactionStatus::Confirmed,
-            None,
-            0,
-            vec![],
+            status,
+            block_number,
+            gas_used,
+            exit_code,
+            aborted,
         ))
     }
 
     async fn wait_for_confirmation(
         &self,
         tx_hash: &TxHash,
-        _timeout_secs: u64,
+        timeout_secs: u64,
     ) -> Result<TransactionReceipt> {
-        self.get_transaction_receipt(tx_hash).await
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
+        loop {
+            let receipt = self.get_transaction_receipt(tx_hash).await?;
+            if receipt.status.is_finalized() {
+                return Ok(receipt);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(receipt); // still Pending
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     async fn get_block_number(&self) -> Result<u64> {
@@ -186,6 +226,46 @@ impl IAckiNacki for TvmAckiNacki {
         // Balance decoding is deployment-specific; return non-zero when account exists.
         Ok(1)
     }
+}
+
+/// Classify a tvm-sdk transaction JSON into status + compute exit code.
+///
+/// Prefers `compute.exit_code` (canonical process_message / GraphQL shape);
+/// falls back to a top-level `exit_code` for older fixtures.
+pub fn classify_tx_json(tx: &Value) -> (TransactionStatus, Option<i32>, bool) {
+    let aborted = tx
+        .get("aborted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exit_code = tx
+        .get("compute")
+        .and_then(|c| c.get("exit_code"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| tx.get("exit_code").and_then(|v| v.as_i64()))
+        .map(|c| c as i32);
+    let bad = aborted || exit_code.is_some_and(|c| c != 0);
+    let status = if bad {
+        TransactionStatus::Reverted
+    } else {
+        TransactionStatus::Confirmed
+    };
+    (status, exit_code, aborted)
+}
+
+/// Parse `exit_code=N` / `exit_code=Some(N)` from an error string.
+pub fn parse_exit_code_from_message(msg: &str) -> Option<i32> {
+    for marker in ["exit_code=Some(", "exit_code=", "local_exit_code="] {
+        if let Some(rest) = msg.split(marker).nth(1) {
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
 }
 
 fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError {
@@ -206,10 +286,22 @@ fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError 
             msg.push_str(&format!(" [{local_msg}]"));
         }
     }
+    // Nested compute.exit_code inside error data.
+    if let Some(code) = data
+        .pointer("/transaction/compute/exit_code")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            data.pointer("/compute/exit_code")
+                .and_then(|v| v.as_i64())
+        })
+    {
+        if !msg.contains("exit_code=") {
+            msg.push_str(&format!(" (exit_code={code})"));
+        }
+    }
     if let Some(addr) = data.get("account_address").and_then(|v| v.as_str()) {
         msg.push_str(&format!(" (account={addr})"));
     }
-    // `process_message` often nests the actionable exit code under `data` only.
     if !data.as_object().is_none_or(|o| o.len() <= 1) {
         if let Ok(extra) = serde_json::to_string(data) {
             if extra.len() < 512 {
@@ -238,5 +330,59 @@ fn parse_tx_hash(id: Option<&str>) -> Result<TxHash> {
     Ok(hash)
 }
 
-// Re-import AckiNackiTransaction for send_transaction signature.
-use crate::types::AckiNackiTransaction;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_success() {
+        let tx = json!({
+            "aborted": false,
+            "compute": { "exit_code": 0, "gas_used": 100 }
+        });
+        let (status, code, aborted) = classify_tx_json(&tx);
+        assert_eq!(status, TransactionStatus::Confirmed);
+        assert_eq!(code, Some(0));
+        assert!(!aborted);
+    }
+
+    #[test]
+    fn classify_zk_reject_220() {
+        let tx = json!({
+            "aborted": true,
+            "compute": { "exit_code": 220 }
+        });
+        let (status, code, aborted) = classify_tx_json(&tx);
+        assert_eq!(status, TransactionStatus::Reverted);
+        assert_eq!(code, Some(220));
+        assert!(aborted);
+    }
+
+    #[test]
+    fn classify_redeploy_51() {
+        let tx = json!({
+            "aborted": true,
+            "compute": { "exit_code": 51 }
+        });
+        let (status, code, _) = classify_tx_json(&tx);
+        assert_eq!(status, TransactionStatus::Reverted);
+        assert_eq!(code, Some(EXIT_CONSTRUCTOR_ALREADY_CALLED));
+    }
+
+    #[test]
+    fn parse_exit_code_variants() {
+        assert_eq!(
+            parse_exit_code_from_message("contract call aborted (exit_code=Some(51))"),
+            Some(51)
+        );
+        assert_eq!(
+            parse_exit_code_from_message("oops (exit_code=220) more"),
+            Some(220)
+        );
+        assert_eq!(
+            parse_exit_code_from_message("x (local_exit_code=51) y"),
+            Some(51)
+        );
+        assert_eq!(parse_exit_code_from_message("no code here"), None);
+    }
+}

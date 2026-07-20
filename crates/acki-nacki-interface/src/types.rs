@@ -108,10 +108,16 @@ pub struct TransactionReceipt {
     pub gas_used: u64,
     /// Logs/events
     pub logs: Vec<Log>,
+    /// TVM compute-phase exit code (`compute.exit_code`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether the transaction was aborted.
+    #[serde(default)]
+    pub aborted: bool,
 }
 
 impl TransactionReceipt {
-    /// Create a new receipt
+    /// Create a new receipt (successful / unknown exit code).
     pub fn new(
         tx_hash: TxHash,
         status: TransactionStatus,
@@ -125,6 +131,28 @@ impl TransactionReceipt {
             block_number,
             gas_used,
             logs,
+            exit_code: None,
+            aborted: false,
+        }
+    }
+
+    /// Create a receipt with compute-phase details.
+    pub fn with_compute(
+        tx_hash: TxHash,
+        status: TransactionStatus,
+        block_number: Option<u64>,
+        gas_used: u64,
+        exit_code: Option<i32>,
+        aborted: bool,
+    ) -> Self {
+        Self {
+            tx_hash,
+            status,
+            block_number,
+            gas_used,
+            logs: vec![],
+            exit_code,
+            aborted,
         }
     }
 

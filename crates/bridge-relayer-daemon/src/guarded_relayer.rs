@@ -95,7 +95,8 @@ impl GuardedOutcome {
 }
 
 /// Composition of an inner [`Relayer`] and a [`BkSetSentry`].
-pub struct SentryGuardedRelayer<S: BlockSource, U: BkUpdateSource, B: BridgeClient, P: BkSetPoller> {
+pub struct SentryGuardedRelayer<S: BlockSource, U: BkUpdateSource, B: BridgeClient, P: BkSetPoller>
+{
     inner: Relayer<S, U, B>,
     sentry: BkSetSentry<P>,
     paused: bool,

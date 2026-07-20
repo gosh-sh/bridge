@@ -1,12 +1,12 @@
 # AN contracts & deposit proofs — questions for authors
 
-**Date:** 2026-07-17  
+**Date:** 2026-07-20 (BC-AN-01 author ack)  
 **Audience:** Acki Nacki bridge team (`USDCBridge.sol`, `DepositVoucher.sol` in `acki-nacki`).  
 **Scope:** AN-side **contract logic** for ETH→AN deposits (`finalizeDeposit` / `confirmDeposit`), withdraw **initiation** (`initiateWithdrawal`), admin/TIP-3. ZK opcode internals (`tvm-sdk`) out of scope — verified via fixtures only.  
 **Out of scope here:** Ethereum `AckiNackiBridge`, Circuit 1A/1B/2/4 provers, cross-chain policy — see sibling docs.
 
-**Branch / artefacts:** audit overlay `audit/spec/an/`; synced contract `audit/spec/an-contracts/` from `acki-nacki@dev`.  
-**Test gate:** `make audit-an-test` → **74 passed** (2026-07-17, incl. F8-F BC regressions).
+**Branch / artefacts:** audit overlay `audit/spec/an/`; synced contract `audit/spec/an-contracts/` from `acki-nacki@contracts/dex_bridge`.  
+**Test gate:** `make audit-an-test` → **74 passed** (2026-07-20, incl. F8-F BC regressions).
 
 **Closeout:** `audit/reports/closeout-an.md` (draft — author ack pending).
 
@@ -24,7 +24,7 @@ Manual reviews: `manual-audit/F1-usdcbridge-deposit.md`, `manual-audit/F2-usdcbr
 
 QC ≠ «не проверяли». QC = «проверили, просим автора подтвердить intent».
 
-**This pass:** BC = **2 candidates** (author confirm). QC = **10** AN-only (+ accepted QC-AN-09). Withdraw/admin surface: **0 BC**.
+**This pass:** BC = **1 candidate** open (BC-AN-02). BC-AN-01 **closed** (author ack 2026-07-20). QC = **10** AN-only (+ accepted QC-AN-09). Withdraw/admin surface: **0 BC**.
 
 ---
 
@@ -42,21 +42,16 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 
 ## BC register — bug candidates (author confirm)
 
-### BC-AN-01 — `dappId` in replay key, prover-configured (High)
+### BC-AN-01 — `dappId` in replay key, prover-configured (High) — **closed**
 
 | | |
 |--|--|
 | **Area** | `USDCBridge.finalizeDeposit` — `depositHash = hash(depositId, contractAddr, dappId)` |
-| **Issue** | Two valid ZK proofs over the **same** L1 deposit with different `dappId` → two vouchers → **two mints** for one `depositId`. Not a ZK soundness bug: circuit correctly binds proof to PI; `dappId` is a free config tag, not from L1. |
-| **PoC** | ✅ `integration/test_bc_an_01_dapp_id_double_mint.py` — `test_bc_an_01_double_mint_same_deposit_two_dapp_ids` (Hermez dual proofs; regen: `scripts/bootstrap_hermez_srs_k18.sh` + `scripts/audit/generate_bc_an_01_dual_proofs.sh`) |
-| **Supporting tests** | `test_bc_an_01_tampered_dapp_id_rejects_same_proof`, `test_bc_an_01_replay_key_differs_by_dapp_id` |
+| **Issue** | Two valid ZK proofs over the **same** L1 deposit with different `dappId` → two vouchers → **two mints** for one `depositId`. |
+| **Fix** | `acki-nacki@contracts/dex_bridge`: `f.dappId = 0` in `_parsePublicInputs` — PI dapp limbs ignored; all deposits land in dapp 0. |
+| **PoC / regression** | ✅ `integration/test_bc_an_01_dapp_id_double_mint.py` — `test_bc_an_01_double_mint_same_deposit_two_dapp_ids` |
 | **Analysis** | `audit/findings/BC-AN-01/analysis.md` |
-
-**Ask author:**
-
-1. Confirm this is an unintended fund-loss path (not multi-dapp-by-design)?
-2. Preferred fix: immutable `EXPECTED_DAPP_ID` in `USDCBridge`, remove `dappId` from replay hash, and/or bind `dappId` as circuit constant (new VK)?
-3. Should `AN_DAPP_ID` be enforced to match the bridge deployment's `dapp_id::account_id` prefix on-chain?
+| **Disposition** | **Closed (author ack 2026-07-20)** — accepted as intentional fix (interim: no multi-dapp namespace per deposit). |
 
 ---
 
@@ -119,7 +114,6 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 
 | ID | Suggested action | If author agrees |
 |----|------------------|------------------|
-| BC-AN-01 | `immutable EXPECTED_DAPP_ID` + `require(f.dappId == EXPECTED_DAPP_ID)` **or** drop `dappId` from replay hash | High — stops double mint |
 | BC-AN-02 | `immutable EXPECTED_L1_BRIDGE` | Medium |
 | QC-AN-10 | `require(f.anAccount != 0)` before accept | Low / consistency with ETH |
 
@@ -133,7 +127,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 make audit-an-test
 ```
 
-BC-AN-01 dual proofs (optional, ~30 min):
+BC-AN-01 dual proofs (optional regression regen, ~30 min):
 
 ```bash
 ./scripts/bootstrap_hermez_srs_k18.sh

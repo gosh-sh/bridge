@@ -436,7 +436,7 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
             WITHDRAWAL_PUBLIC_INPUTS
         )));
     }
-    Ok(bytes.chunks_exact(32).map(hex::encode).collect())
+    Ok(bytes.as_chunks::<32>().0.iter().map(hex::encode).collect())
 }
 
 /// Assert that the aggregator calldata re-exposes exactly the ten Circuit-4

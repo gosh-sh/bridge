@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Rsync AN bridge contracts from sibling acki-nacki into audit/spec/an-contracts/.
 #
-# Default: origin/dev @ git@github.com:gosh-sh/acki-nacki.git
-# (history_cursor merged into dev). Override: ACKI_NACKI_BRANCH=other
+# Default: contracts/dex_bridge @ git@github.com:gosh-sh/acki-nacki.git
+# (DEX+bridge integration tip). Override: ACKI_NACKI_BRANCH=dev
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${ACKI_NACKI_ROOT:-$ROOT/../acki-nacki}"
 DEST="$ROOT/audit/spec/an-contracts"
 REMOTE="${ACKI_NACKI_REMOTE:-origin}"
-BRANCH="${ACKI_NACKI_BRANCH:-dev}"
+BRANCH="${ACKI_NACKI_BRANCH:-contracts/dex_bridge}"
+PRESERVE_AUDIT_VK_BLOB="${PRESERVE_AUDIT_VK_BLOB:-1}"
+SKIP_DEPOSIT_FIXTURES="${SKIP_DEPOSIT_FIXTURES:-1}"
 
 if [[ ! -d "$SRC/.git" ]]; then
   echo "Error: acki-nacki not found at $SRC" >&2
@@ -76,11 +78,16 @@ cat > "$MANIFEST" <<'EOF'
 }
 EOF
 
-if [[ -d "$SRC/tests/exchange/fixtures/deposit_10proofs" ]]; then
+if [[ "${SKIP_DEPOSIT_FIXTURES}" != "1" ]] && [[ -d "$SRC/tests/exchange/fixtures/deposit_10proofs" ]]; then
   echo "Sync deposit_10proofs fixtures ..."
   mkdir -p "$ROOT/audit/spec/an/fixtures/deposit_10proofs"
   rsync -a "$SRC/tests/exchange/fixtures/deposit_10proofs/" \
     "$ROOT/audit/spec/an/fixtures/deposit_10proofs/"
+fi
+
+if [[ "${PRESERVE_AUDIT_VK_BLOB}" == "1" ]]; then
+  chmod +x "$ROOT/scripts/preserve_audit_vk_blob.sh"
+  "$ROOT/scripts/preserve_audit_vk_blob.sh"
 fi
 
 echo "Source: $REMOTE/$BRANCH ($(git -C "$SRC" rev-parse --short HEAD))"

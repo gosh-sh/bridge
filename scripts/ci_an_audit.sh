@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 ./scripts/setup_an_audit_tools.sh
+./scripts/bootstrap-an-audit-py.sh
+./scripts/sync_audit_deposit_fixtures.sh
 
 # Contracts + fixtures from acki-nacki when not present locally.
 if [[ -z "${SKIP_AN_SYNC:-}" ]]; then
@@ -18,8 +20,8 @@ chmod +x ./build.sh
 
 cd "$ROOT/audit/spec/an"
 if [[ "${AN_AUDIT_INTEGRATION:-1}" == "1" ]] && [[ -f fixtures/deposit_10proofs/proof_00/proof.bin ]]; then
-  python3 -m pytest -q
+  "$ROOT/.venv-an-audit/bin/python" -m pytest -q
 else
   echo "Running unit tests only (no deposit fixtures or AN_AUDIT_INTEGRATION=0)"
-  python3 -m pytest unit/ -q
+  "$ROOT/.venv-an-audit/bin/python" -m pytest unit/ -q
 fi

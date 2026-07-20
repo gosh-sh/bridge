@@ -16,7 +16,7 @@
 | **QC** | **Required** | Reproduced; **auditor view stated**; **author must confirm** bug vs feature |
 | **BC** | **Required** | Bug **candidate** — fund loss or broken binding under stated assumptions |
 
-**This pass:** BC = **2 candidates** (author confirm). QC = **10** AN-only + **5** joint (QC-AN-J*) + **13** off-chain (QC-OFF*) + **4** prover (QC-PROV*). Withdraw/admin surface: **0 BC**.
+**This pass:** BC = **1 candidate** open (BC-AN-02). BC-AN-01 **closed** (author ack 2026-07-20, `f.dappId=0` on `contracts/dex_bridge`). QC = **10** AN-only + **5** joint (QC-AN-J*) + **13** off-chain (QC-OFF*) + **4** prover (QC-PROV*). Withdraw/admin surface: **0 BC**.
 
 ---
 
@@ -55,7 +55,7 @@ CI: `test:an:audit` (skip w/o `.tools/`), `test:solidity:audit`, `test:solidity:
 
 | ID | Severity | PoC | Status |
 |----|----------|-----|--------|
-| **BC-AN-01** | High | `integration/test_bc_an_01_dapp_id_double_mint.py` + F8-F source/dual-mint regressions | **open** |
+| **BC-AN-01** | High | `integration/test_bc_an_01_dapp_id_double_mint.py` + F8-F regressions | **closed** (author ack 2026-07-20; `f.dappId=0` on `contracts/dex_bridge`) |
 | **BC-AN-02** | Medium | `test_bc_an_02_no_l1_bridge_allowlist_pre_zk` + F8-F source regression | **open** |
 
 Analysis: `audit/findings/BC-AN-01/analysis.md`, `audit/findings/BC-AN-02/analysis.md`.  
@@ -98,7 +98,7 @@ HANDOFF (RU): `HANDOFF-an-cross-chain-ru.txt`.
 
 ## F8-F — BC regression gate
 
-Keeps BC-AN-01/02 visible after author replies. **Green while BC open** (documents vulnerable behaviour); after fix, tests must be updated (OK) or `xfail` removed.
+Keeps BC-AN-01 regression + BC-AN-02 gate visible. BC-AN-01 tests are **regression** (post-fix); BC-AN-02 still documents open behaviour.
 
 | Test file | What |
 |-----------|------|
@@ -112,7 +112,6 @@ Keeps BC-AN-01/02 visible after author replies. **Green while BC open** (documen
 
 | ID | Suggested action |
 |----|------------------|
-| BC-AN-01 | `immutable EXPECTED_DAPP_ID` + on-chain check **or** drop `dappId` from replay hash **or** circuit-constant `dappId` + new VK |
 | BC-AN-02 | `immutable EXPECTED_L1_BRIDGE` |
 | QC-AN-10 | `require(anAccount != 0)` before accept (ETH parity) |
 | QC-OFF-06 | Map AN revert → `AlreadyFinalized`; nullifier read API |
@@ -128,7 +127,8 @@ Keeps BC-AN-01/02 visible after author replies. **Green while BC open** (documen
 - [x] F10 relayer + prover audit overlay (QC-PROV-02 pin; QC-PROV-03/04 documented)
 - [x] QC/BC registers with PoC links (`questions-an.md`, HANDOFF)
 - [x] CI jobs (`test:an:audit`, `test:solidity:audit`, `test:deposit-relayer:audit`)
-- [ ] **Author confirms** each BC/QC row
+- [x] **Author confirms** BC-AN-01 (2026-07-20)
+- [ ] **Author confirms** remaining BC/QC rows
 - [ ] E-AN-01 shellnet — **deferred**
 - [ ] `closeout-an.md` final signoff after disposition
 

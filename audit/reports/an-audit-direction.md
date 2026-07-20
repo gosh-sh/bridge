@@ -10,7 +10,7 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | P | ID | Area | Action |
 |---|-----|------|--------|
-| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | ✅ dual-proof PoC (`bootstrap_hermez_srs_k18.sh` + `generate_bc_an_01_dual_proofs.sh`; 3 integration tests green). |
+| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | ✅ **closed** (author ack 2026-07-20; `f.dappId=0` on `contracts/dex_bridge`; regression tests green) |
 | **P1** | BC-AN-02 | No L1 `contractAddr` allowlist | ✅ pre-ZK integration test |
 | **P1** | DEP-AN-11/12 | MessagePipeline | ✅ `integration/test_finalize_deposit_pipeline.py` |
 | **P2** | WD-AN-01/02, ADM-AN-01 | withdraw + admin negatives | ✅ `unit/test_usdcbridge_withdraw_admin_negative.py` |
@@ -32,7 +32,7 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | ID | Class | Status | PoC |
 |----|-------|--------|-----|
-| BC-AN-01 | dappId double-mint | **open** (PoC ✅) | dual Hermez proofs + 3 integration tests |
+| BC-AN-01 | dappId double-mint | **closed** (author ack 2026-07-20; `f.dappId=0`) | dual-proof regression tests |
 | BC-AN-02 | L1 bridge allowlist | **open** | ✅ pre-ZK integration |
 | QC-AN-01 | amount ≤ uint64 | open | ✅ unit |
 | QC-AN-02…06 | admin/pause/VK | open | partial (ADM/TIP unit + F2) |
@@ -41,7 +41,7 @@ Entry point for subagents and humans. Update as BC/QC close.
 | QC-AN-09 | accept before ZK | accepted | griefing only |
 | QC-AN-10 | anAccount == 0 | **open** (QC) | ✅ no on-chain guard |
 
-**BC count:** 2 candidates (author confirm). Non-deposit surfaces: **BC=0** per withdraw agent.
+**BC count:** 1 candidate open (BC-AN-02). BC-AN-01 closed on `contracts/dex_bridge`. Non-deposit surfaces: **BC=0** per withdraw agent.
 
 ---
 

@@ -27,7 +27,8 @@ pub struct MockAckiNacki {
     block_number: Arc<Mutex<u64>>,
     /// Whether to simulate failures
     fail_mode: Arc<Mutex<bool>>,
-    /// Receipt status for `call_contract` / `send_transaction` (default Confirmed).
+    /// Receipt status for `call_contract` / `send_transaction` (default
+    /// Confirmed).
     finalize_receipt_status: Arc<Mutex<TransactionStatus>>,
 }
 
@@ -43,7 +44,8 @@ impl MockAckiNacki {
         }
     }
 
-    /// Force finalize-style contract calls to return a specific terminal status.
+    /// Force finalize-style contract calls to return a specific terminal
+    /// status.
     pub fn set_finalize_receipt_status(&self, status: TransactionStatus) {
         *self.finalize_receipt_status.lock().unwrap() = status;
     }
@@ -94,13 +96,7 @@ impl IAckiNacki for MockAckiNacki {
         // Create receipt
         let block_number = *self.block_number.lock().unwrap();
         let status = *self.finalize_receipt_status.lock().unwrap();
-        let receipt = TransactionReceipt::new(
-            tx_hash,
-            status,
-            Some(block_number),
-            50000,
-            vec![],
-        );
+        let receipt = TransactionReceipt::new(tx_hash, status, Some(block_number), 50000, vec![]);
 
         self.receipts.lock().unwrap().insert(tx_hash, receipt);
 

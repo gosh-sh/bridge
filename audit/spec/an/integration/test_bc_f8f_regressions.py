@@ -1,7 +1,7 @@
 """F8-F — BC-AN-01/02 regression gate.
 
-Stays green while BC candidates remain open (documents absent guards / vulnerable behaviour).
-After author fix: update tests (OK) or flip expected behaviour — do not silently delete.
+BC-AN-01: contracts/dex_bridge pins `f.dappId = 0` (mitigation landed upstream).
+BC-AN-02: still open — no L1 bridge allowlist.
 
 Linked: audit/findings/BC-AN-01/, BC-AN-02/; closeout-an.md § F8-F.
 """
@@ -28,20 +28,17 @@ def _usdc_bridge_source() -> str:
 
 
 def test_f8f_bc_an_01_replay_hash_includes_dapp_id():
-    """BC-AN-01 — replay slot splits on dappId (not depositId alone)."""
+    """BC-AN-01 — replay slot uses f.dappId (pinned to 0 on contracts/dex_bridge)."""
     src = _usdc_bridge_source()
     assert "tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId))" in src or re.search(
         r"abi\.encode\([^)]*depositId[^)]*contractAddr[^)]*dappId", src
     ), "expected depositId+contractAddr+dappId replay preimage"
 
 
-def test_f8f_bc_an_01_no_on_chain_expected_dapp_id():
-    """BC-AN-01 — no immutable EXPECTED_DAPP_ID guard in current USDCBridge."""
+def test_f8f_bc_an_01_dapp_id_pinned_to_zero():
+    """BC-AN-01 mitigation — dapp limbs in PI are ignored; deposits always dapp 0."""
     src = _usdc_bridge_source()
-    assert "EXPECTED_DAPP_ID" not in src
-    assert "expectedDappId" not in src
-    # dappId taken from PI only — not compared to deployment constant.
-    assert "f.dappId" in src
+    assert "f.dappId       = 0" in src or "f.dappId = 0" in src
 
 
 def test_f8f_bc_an_02_no_on_chain_l1_bridge_allowlist():

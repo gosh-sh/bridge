@@ -47,14 +47,15 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome,
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
-    LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
-    RelayerMetrics, SentryGuardedRelayer, SentryStatus, StatePaths, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
-    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
+    check_startup_drift, discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    FixturesBlockSource, GuardedOutcome, LiveBlockSource, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, SentryGuardedRelayer,
+    SentryStatus, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
+    SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
+    WithdrawalResultGate,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -1821,10 +1822,7 @@ async fn run_bridge_daemon(
             ),
             Ok(TickOutcome::BkUpdateApplied {
                 seq_no, ..
-            }) => info!(
-                seq_no,
-                "daemon-bridge: applyBkSetUpdate applied"
-            ),
+            }) => info!(seq_no, "daemon-bridge: applyBkSetUpdate applied"),
             Ok(TickOutcome::NotYetAvailable {
                 ..
             }) => {},
@@ -1970,8 +1968,7 @@ async fn submit_bk_update(
 
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
-            tx_hash,
-            ..
+            tx_hash, ..
         } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
         BkSetUpdateSubmitOutcome::Reverted {
             reason,
@@ -2009,14 +2006,14 @@ async fn run_daemon_live(
     let prover_state_path = state_paths.prover_state_json.clone();
     let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
 
-    let gql = create_client(&gql_endpoint)
-        .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+    let gql =
+        create_client(&gql_endpoint).map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
 
     let bk_set = match fetch_bk_set(&gql).await {
         Ok(s) => {
             info!(signers = s.len(), "BK set loaded from GraphQL");
             s
-        }
+        },
         Err(e) => {
             warn!(
                 error = %e,
@@ -2028,7 +2025,7 @@ async fn run_daemon_live(
                 .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
             load_bk_set_from_config(path)
                 .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?
-        }
+        },
     };
 
     info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
@@ -2058,15 +2055,15 @@ async fn run_daemon_live(
         Some(loaded) => {
             if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
                 anyhow::bail!(
-                    "prover_bk_set commitment {} disagrees with prover_state {} — \
-                     delete BOTH under {} or restore a paired backup",
+                    "prover_bk_set commitment {} disagrees with prover_state {} — delete BOTH \
+                     under {} or restore a paired backup",
                     hex::encode(loaded.commitment),
                     hex::encode(state.stored_bk_set_commitment),
                     prover_state_dir.display(),
                 );
             }
             loaded
-        }
+        },
         None => {
             let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
             pbs.save(bk_path_str)
@@ -2076,7 +2073,7 @@ async fn run_daemon_live(
                 "bootstrapped prover_bk_set.json"
             );
             pbs
-        }
+        },
     };
 
     // Prefer the persisted pubkey table once it exists.
@@ -2132,8 +2129,8 @@ async fn run_daemon_live(
         && driver_state.stored_last_seen_block_seq_no != 0
     {
         anyhow::bail!(
-            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap \
-             (do NOT auto-heal)",
+            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap (do NOT \
+             auto-heal)",
             driver_state.stored_last_seen_block_seq_no,
             on_chain.last_seen_block_seq_no,
             prover_state_dir.display(),

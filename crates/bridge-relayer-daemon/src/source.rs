@@ -44,17 +44,16 @@ pub trait BlockSource: Send + Sync {
     async fn fetch(&self, target_seq_no: u64) -> Result<Option<AnBlockData>, RelayerError>;
 
     /// Acknowledge that `seq_no` was accepted on-chain. Default is a no-op
-    /// (file-driven sources have no driver cursor). [`crate::live_source::LiveBlockSource`]
-    /// advances `LiveProverDriver` and persists prover state.
+    /// (file-driven sources have no driver cursor).
+    /// [`crate::live_source::LiveBlockSource`] advances `LiveProverDriver`
+    /// and persists prover state.
     async fn ack_last_bundle(&self, _seq_no: u64) -> Result<(), RelayerError> {
         Ok(())
     }
 
     /// Optional post-ack snapshot of the driver's `BridgeState` for
     /// history-consistency checks. Default: no snapshot (skip Check A).
-    async fn driver_snapshot(
-        &self,
-    ) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+    async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
         None
     }
 }

@@ -1,6 +1,9 @@
+SHELL := /bin/bash
+
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
         coverage-solidity pre-push pre-push-audit audit-solidity-test audit-an-test \
-        setup-an-audit-tools setup-audit-vendors pre-push-an production-preflight relayer-test relayer-fmt relayer-clippy
+        setup-an-audit-tools setup-audit-vendors pre-push-an production-preflight relayer-test relayer-fmt relayer-clippy \
+        bootstrap-foundry-deps bootstrap-an-audit-py sync-audit-deposit-fixtures
 
 # Default target
 .DEFAULT_GOAL := help
@@ -39,7 +42,11 @@ build-rust: ## Build only Rust workspace
 	@echo "$(BLUE)Building Rust workspace...$(NC)"
 	@cargo build --workspace
 
-build-solidity: ## Build only Solidity contracts
+bootstrap-foundry-deps: ## Install gitignored forge-std + npm deps (post-clone, Linux/macOS)
+	@chmod +x scripts/bootstrap-foundry-deps.sh scripts/bootstrap-cargo-git.sh
+	@source ./scripts/bootstrap-cargo-git.sh && ./scripts/bootstrap-foundry-deps.sh
+
+build-solidity: bootstrap-foundry-deps ## Build only Solidity contracts
 	@echo "$(BLUE)Building Solidity contracts...$(NC)"
 	@cd contracts/ethereum && forge build
 
@@ -62,7 +69,7 @@ test-rust: ## Run only Rust tests
 	@chmod +x test.sh
 	@./test.sh --rust
 
-test-solidity: ## Run only Solidity tests
+test-solidity: bootstrap-foundry-deps ## Run only Solidity tests
 	@echo "$(BLUE)Running Solidity tests...$(NC)"
 	@chmod +x test.sh
 	@./test.sh --solidity
@@ -89,12 +96,12 @@ format: ## Format all code (Rust + Solidity)
 
 format-check: ## Check code formatting without modifying
 	@echo "$(BLUE)Checking code formatting...$(NC)"
-	@cargo fmt --all -- --check
+	@rustup run nightly cargo fmt --all -- --check
 	@cd contracts/ethereum && forge fmt --check
 
 lint: ## Run linters (clippy for Rust)
 	@echo "$(BLUE)Running linters...$(NC)"
-	@cargo clippy --all-targets --all-features -- -D warnings
+	@rustup run nightly cargo clippy --all-targets --all-features -- -D warnings
 
 check: format-check lint test ## Run all checks (format, lint, test)
 
@@ -163,13 +170,13 @@ ci: format-check lint test ## Run CI checks locally
 
 coverage-solidity: ## Run forge coverage --report summary (matches test:solidity:coverage CI job)
 	@echo "$(BLUE)Running forge coverage --report summary...$(NC)"
-	@echo "$(YELLOW)Note: coverage disables optimizer + viaIR; expect Stack-too-deep here$(NC)"
-	@echo "$(YELLOW)      if any function has > 16 live local stack slots.$(NC)"
-	@cd contracts/ethereum && forge coverage --report summary
+	@echo "$(YELLOW)Note: coverage disables optimizer; --ir-minimum avoids stack-too-deep.$(NC)"
+	@cd contracts/ethereum && forge coverage --ir-minimum --report summary
 
 relayer-test: ## Run bridge-relayer-daemon unit tests (via an-bridge-prover workspace)
 	@echo "$(BLUE)Running bridge-relayer-daemon tests...$(NC)"
-	@cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon
+	@chmod +x scripts/bootstrap-cargo-git.sh
+	@source ./scripts/bootstrap-cargo-git.sh && cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon
 
 aggregator-test: ## Run bridge-evm-aggregator tests (release, ~3 min)
 	@echo "$(BLUE)Running bridge-evm-aggregator tests...$(NC)"
@@ -183,7 +190,7 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 	@echo "$(GREEN)Spike artefacts written to contracts/ethereum/test/fixtures/r15_spike/$(NC)"
 
 relayer-fmt: ## Check bridge-relayer-daemon formatting
-	@cd crates/bridge-relayer-daemon && cargo fmt --check
+	@cd crates/bridge-relayer-daemon && rustup run nightly cargo fmt --check
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via an-bridge-prover workspace)
 	@cd crates/an-bridge-prover && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
@@ -206,10 +213,21 @@ audit-deposit-relayer-test: ## F10 deposit-relayer unit + integration + proptest
 	@echo "$(BLUE)Running deposit-relayer-daemon tests...$(NC)"
 	@cd crates/deposit-relayer-daemon && cargo test
 
+bootstrap-an-audit-py: ## Create .venv-an-audit with pytest + hypothesis
+	@chmod +x scripts/bootstrap-an-audit-py.sh
+	@./scripts/bootstrap-an-audit-py.sh
+
+sync-audit-deposit-fixtures: ## Copy deposit_10proofs from deposit-prover to audit overlay
+	@chmod +x scripts/sync_audit_deposit_fixtures.sh
+	@./scripts/sync_audit_deposit_fixtures.sh
+
 audit-an-test: ## Full AN pytest (unit+integration; sync fixtures first)
 	@echo "$(BLUE)Running audit/spec/an (pytest)...$(NC)"
 	@test -x .tools/tvm-debugger || $(MAKE) setup-an-audit-tools
-	@cd audit/spec/an && python3 -m pytest -q
+	@test -x .venv-an-audit/bin/python || $(MAKE) bootstrap-an-audit-py
+	@test -f audit/spec/an/fixtures/deposit_10proofs/proof_00/proof.bin || $(MAKE) sync-audit-deposit-fixtures
+	@cd audit/spec/an-contracts && test -f build/USDCBridge.tvc || ./build.sh
+	@.venv-an-audit/bin/python -m pytest -q audit/spec/an
 
 setup-an-audit-tools: ## Symlink sold + tvm-debugger into .tools/
 	@chmod +x scripts/setup_an_audit_tools.sh
@@ -222,11 +240,13 @@ setup-audit-vendors: ## Shallow-clone partner repos into audit/vendors/ (gitigno
 pre-push-an: ## AN audit gate: unit pytest (no fixtures required)
 	@echo "$(BLUE)── pre-push-an: AN audit gate ──$(NC)"
 	@$(MAKE) setup-an-audit-tools
-	@cd audit/spec/an && python3 -m pytest unit/ -q
+	@test -x .venv-an-audit/bin/python || $(MAKE) bootstrap-an-audit-py
+	@.venv-an-audit/bin/python -m pytest -q audit/spec/an/unit
 	@echo "$(GREEN)── pre-push-an: green ──$(NC)"
 
 pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN unit
 	@echo "$(BLUE)── pre-push-audit: ETH audit closeout gate ──$(NC)"
+	@$(MAKE) bootstrap-foundry-deps
 	@cd contracts/ethereum && forge fmt --check
 	@cd contracts/ethereum && forge test
 	@$(MAKE) audit-solidity-test

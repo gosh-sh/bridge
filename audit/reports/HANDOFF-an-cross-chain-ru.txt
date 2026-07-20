@@ -1,14 +1,14 @@
 HANDOFF для разработчиков Acki Nacki Bridge (ETH ↔ AN)
-Дата: 2026-07-17
+Дата: 2026-07-20 (обновление: BC-AN-01 закрыт)
 Источник: аудит ветки audit, регистры questions-an.md и questions-cross-chain.md
-Тесты AN: make audit-an-test → 70 passed. PoC и детали: audit/reports/questions-an.md, audit/findings/BC-AN-*/
+Тесты AN: make audit-an-test → 74 passed. PoC и детали: audit/reports/questions-an.md, audit/findings/BC-AN-*/
 
 Ниже — открытые вопросы и кандидаты в баги. На каждый пункт нужен ответ команды: это баг или задуманное поведение, и что планируете менять.
 
 
-BC-AN-01 (высокий приоритет, кандидат в баг)
+BC-AN-01 — ЗАКРЫТО (author ack 2026-07-20)
 
-При финализации депозита на AN адрес ваучера и защита от повтора считаются по хешу (depositId, contractAddr, dappId). Поле dappId не приходит из события Deposit на Ethereum — его задаёт конфиг релеера или прувера (AN_DAPP_ID). Если для одного и того же L1-депозита построить два корректных ZK-доказательства с разным dappId, контракт создаст два разных ваучера и дважды заминтит ECC на один depositId. Мы воспроизвели это тестом с двумя реальными прувами (integration/test_bc_an_01_dapp_id_double_mint.py). Это не ошибка математики ZK: схема честно привязывает прув к public inputs, но dappId — свободный тег конфигурации, а не поле из L1. Нужно подтвердить: это нежелательная потеря средств, а не режим «несколько dApp на один мост». Какой фикс предпочтителен: зашить EXPECTED_DAPP_ID в USDCBridge, убрать dappId из ключа реплея, и/или сделать dappId константой схемы с новым VK? Должен ли AN_DAPP_ID на проде совпадать с префиксом dapp_id::account_id деплоя моста?
+Был: double-mint при разном dappId в PI для одного L1 depositId. Фикс на contracts/dex_bridge: f.dappId = 0 в _parsePublicInputs — PI dapp limbs игнорируются, все депозиты в dapp 0. Команда приняла это как финальное решение (временный вид «костыля», но закрываем). Регрессия: integration/test_bc_an_01_dapp_id_double_mint.py. Детали: audit/findings/BC-AN-01/analysis.md.
 
 
 BC-AN-02 (средний приоритет, кандидат в баг)
@@ -113,13 +113,12 @@ QC-OFF-06 (критично для liveness): живой AnInterfaceSubmitter Н
 
 Сводка по BC для обеих команд
 
-BC-AN-01: Ethereum не может ограничить dappId — его нет в L1 event. Фикс на стороне AN и/или смена VK/circuit. ETH-команде важно знать, что один L1 depositId теоретически может дать два минта на AN.
+BC-AN-01: **закрыт** (2026-07-20). Фикс `f.dappId=0` на AN; double-mint по dappId больше не воспроизводится.
 
 BC-AN-02: ETH-команде нужно подтвердить канонический адрес(а) L1-моста для pinning на AN. AN-команде — решить про allowlist contractAddr в контракте.
 
 Рекомендуемые митигации (после вашего подтверждения, не внедрять вслепую)
 
-BC-AN-01: EXPECTED_DAPP_ID on-chain и/или убрать dappId из replay hash.
 BC-AN-02: immutable EXPECTED_L1_BRIDGE.
 QC-AN-10 / QC-AN-J3: require(anAccount != 0) до accept на AN.
 

@@ -23,7 +23,7 @@ Items here are **QC** (design / policy questions). They may reference BC rows on
 
 | Concern | Ethereum (`AckiNackiBridge`) | Acki Nacki (`USDCBridge`) | Gap? |
 |---------|------------------------------|---------------------------|------|
-| Deposit event fields | `depositId`, `sender`, `amount`, `anWorkchain`, `anAccount` | PI fr[0..7] + config `dappId` | `dappId` only off-chain → **BC-AN-01** |
+| Deposit event fields | `depositId`, `sender`, `amount`, `anWorkchain`, `anAccount` | PI fr[0..7]; `f.dappId=0` on-chain (BC-AN-01 **closed**) | ~~BC-AN-01~~ resolved |
 | L1 bridge identity | Fixed deploy address in proof via receipt | `contractAddr` in PI, no allowlist | **BC-AN-02** |
 | Max amount | `MAX_DEPOSIT_AMOUNT` (100 USDC per tx) | `uint64` bound on `fr[2]` (QC-AN-01) | QC-AN-J1 |
 | Zero recipient | `InvalidAnAccount` if `anAccount==0` | No pre-ZK guard (QC-AN-10) | QC-AN-J3 |
@@ -51,7 +51,7 @@ These are filed on the **AN** register but ETH team should ack binding assumptio
 
 | ID | Why cross-chain |
 |----|-----------------|
-| **BC-AN-01** | L1 event has no `dappId`; ETH cannot constrain it. Fix is AN-side (or circuit VK per deployment). |
+| **BC-AN-01** | **Closed (2026-07-20):** `f.dappId=0` on AN — PI dapp limbs ignored; no multi-dapp double-mint. |
 | **BC-AN-02** | L1 `contractAddr` in PI comes from receipt; ETH team confirms canonical bridge address(es) to pin on AN. |
 
 Details: `questions-an.md` § BC register.
@@ -70,7 +70,7 @@ Auditor verified ETH `deposit-prover` layout matches AN `_parsePublicInputs`:
 
 Recipient on AN: `(anAccountHigh << 128) | anAccountLow` — matches post-#2271 256-bit binding.
 
-**Open:** `dappId` limbs [4–5] are config-supplied (relayer `AN_DAPP_ID`), not in L1 log — see BC-AN-01.
+**Note:** PI limbs [4–5] still carry `dappId` in the circuit; on-chain `USDCBridge` pins `f.dappId=0` (BC-AN-01 **closed** 2026-07-20). Relayer `AN_DAPP_ID` no longer affects voucher identity on AN.
 
 ---
 
@@ -104,4 +104,4 @@ Items for **deposit-relayer-daemon** + **deposit-prover** + operator playbook. S
 | QC-PROV-03 | ~~`max_key_byte_len: 4` vs reference `3`~~ **closed (2026-07-17, dev ack):** circuit uses `3`; regen `deposit_10proofs/` + audit `VK_BLOB` → `724687a4…` (overlay; compare with tvm-sdk after deploy). | — |
 | QC-PROV-04 | MPT `key_bytes` padding slots beyond `key_byte_len` are **not** zero-constrained; PoC `deposit-prover/tests/padding_mutation_poc.rs` (`poc_padding_slot_garbage_accepted_*`). Active prefix corruption still fails (`poc_active_key_byte_corruption_rejected`). No false-deposit path found — witness malleability only. | Upstream axiom-eth hardening or accept? |
 
-**Linked BC:** BC-AN-01 (`AN_DAPP_ID` in relayer/prover config), BC-AN-02 (witness `contractAddr`). **Linked QC:** QC-AN-09 (griefing bad proofs from any submitter, not only relayer).
+**Linked BC:** BC-AN-01 **closed** (2026-07-20), BC-AN-02 (witness `contractAddr`). **Linked QC:** QC-AN-09 (griefing bad proofs from any submitter, not only relayer).

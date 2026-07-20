@@ -23,8 +23,9 @@ fn baseline_proof_00_satisfies_mock() {
     test_circuit_mock(input, &audit_circuit_config()).expect("committed fixture");
 }
 
-/// Post-assign `key_bytes[1] = 0x42` with `max_key_byte_len = 4` override (legacy layout).
+/// Legacy `max_key_byte_len = 4` — removed from axiom-eth pin (QC-PROV-03); axiom-eth now asserts 3.
 #[test]
+#[ignore = "axiom-eth pin rejects max_key_byte_len=4; canonical value is 3"]
 fn poc_padding_slot_garbage_accepted_with_max_key_len_four_override() {
     let input = sepolia_proof_00();
     let mutation = MptWitnessMutation {

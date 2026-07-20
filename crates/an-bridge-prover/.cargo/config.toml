@@ -1,2 +1,6 @@
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
+
+# Use system git (SSH) for gosh-sh private deps — same on Linux and macOS.
+[net]
+git-fetch-with-cli = true

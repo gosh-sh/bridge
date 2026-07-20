@@ -101,6 +101,7 @@ audit/vendors/*
 
 # AN audit toolchain (local symlinks to sibling repos — not portable in git)
 .tools/
+.venv-an-audit/
 audit/spec/an-contracts/tools
 audit/spec/an-contracts/compiler/
 audit/spec/an/fixtures/

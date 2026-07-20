@@ -175,7 +175,6 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         hex"c3112744a9864a4ee3ff9859bcfdd07edc24fc1e22fde32d2693af2c94ddf55b36dac541e279be745cb664238fd28f8fed15"
         hex"091638a0fb0da1eacb6862d297e9e185974834b7e55514429ca7b6e9e0a76100";
 
-
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
     ///       in the only deploy path that matters (zerostate premine stub +
@@ -354,7 +353,8 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         );
         ensureBalance();
 
-        // Anti-replay anchor = proof-bound (deposit_id, source contract, dapp).
+        // Anti-replay anchor = proof-bound (deposit_id, source contract); the
+        // dapp component is pinned to 0 (see _parsePublicInputs).
         // amount/recipient are NOT in the key — they are fixed by the proof, so a
         // replay can never re-route or re-mint: same key ⇒ same voucher ⇒ no-op.
         uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId));
@@ -571,13 +571,17 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         }
         require(fr[2] <= uint256(type(uint64).max), ERR_OVERFLOW);
         // The circuit splits the 256-bit AN account into two 16-byte halves
-        // (fr[6]=high, fr[7]=low), exactly like dapp_id above — reassemble it.
-        // The workchain concept is retired on AN, so the recipient always lives
-        // in workchain 0 (see confirmDeposit's makeAddrStd).
+        // (fr[6]=high, fr[7]=low) — reassemble it. The workchain concept is
+        // retired on AN, so the recipient always lives in workchain 0 (see
+        // confirmDeposit's makeAddrStd).
         f.depositId    = fr[0];
         f.amount       = uint128(fr[2]);
         f.contractAddr = fr[3];
-        f.dappId       = (fr[4] << 128) | fr[5];
+        // Deposits into AN always land in dapp 0, so the dapp halves carried by
+        // the circuit (fr[4]=high, fr[5]=low) are not used. Pinning the field to
+        // 0 keeps the deposit identity — and therefore the DepositVoucher
+        // address — independent of what the L1 side reports.
+        f.dappId       = 0;
         f.anAccount    = (fr[6] << 128) | fr[7];
     }
 }

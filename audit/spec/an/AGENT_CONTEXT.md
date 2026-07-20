@@ -48,9 +48,9 @@ Setup: `./scripts/setup_an_audit_tools.sh`
 
 ## Contract sources
 
-Upstream: `../acki-nacki` @ **`origin/dev`** (`git@github.com:gosh-sh/acki-nacki.git`; `history_cursor` merged). `contracts/exchange/`.
+Upstream: `../acki-nacki` @ **`origin/contracts/dex_bridge`** (`git@github.com:gosh-sh/acki-nacki.git`). `contracts/exchange/`.
 
-Sync: `./scripts/sync_an_contracts.sh`  
+Sync: `./scripts/sync_an_contracts.sh` (default branch `contracts/dex_bridge`; audit VkBlob `724687a4…` preserved via `scripts/preserve_audit_vk_blob.sh`)
 Optional vendor clones: `./scripts/setup_audit_vendors.sh` → `audit/vendors/` (gitignored)
 
 ## Methodology (same as ETH pass)

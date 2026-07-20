@@ -518,7 +518,7 @@ where
                         },
                         tx_hash: Some(receipt.transaction_hash()),
                     })
-                }
+                },
                 Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("tx confirmation error: {e}"),
                 }),
@@ -552,7 +552,9 @@ pub enum BkSetUpdateSubmitOutcome {
         new_state: BridgeOnChainState,
         tx_hash: Option<B256>,
     },
-    Reverted { reason: String },
+    Reverted {
+        reason: String,
+    },
 }
 
 fn to_sol_withdrawal_pub(

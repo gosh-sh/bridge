@@ -15,7 +15,7 @@
 | `bridge-an-zk-audit.mdc` | ZK, relayers, cross-chain |
 | `bridge-docs-discipline.mdc` | `docs/`, README |
 | `external-ssh.mdc` | Тяжёлые сборки → n14 |
-| `dual-remote-git.mdc` | Push по запросу → origin + github |
+| `dual-remote-git.mdc` | Push на `origin` по запросу; **на `github` — только по явной команде** |
 
 ## Методология аудита
 
@@ -43,7 +43,14 @@ cd crates/deposit-relayer-daemon && cargo test
 
 ## Git remotes
 
-| Remote | URL |
-|--------|-----|
-| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` |
-| `github` | `git@github.com:gosh-sh/bridge-EVM.git` |
+| Remote | URL | Push |
+|--------|-----|------|
+| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | по запросу |
+| `github` | `git@github.com:gosh-sh/bridge.git` | **только по явной команде пользователя** |
+
+```bash
+git remote add github git@github.com:gosh-sh/bridge.git   # один раз
+git fetch github --prune
+```
+
+Агенты: **запрещён** `git push github` без прямого указания пользователя. См. `.cursor/rules/dual-remote-git.mdc`.

@@ -824,12 +824,13 @@ mod tests {
         // Verify placeholder has expected synthetic values (deposit_id=0)
         assert_eq!(input.event_data.deposit_id, 0);
         assert_eq!(input.event_data.sender, [0x11u8; 20]);
-        assert_eq!(input.event_data.amount[31], 1);
+        // synthetic_fixture: ((deposit_id + 1) * 1000).min(255) → 255 for deposit_id=0
+        assert_eq!(input.event_data.amount[31], 255);
         assert_eq!(input.event_data.contract_address, [0x22u8; 20]);
 
-        // Verify receipt proof has minimal structure (1 proof node)
+        // Verify receipt proof has minimal structure (1 proof node, non-zero trie root)
         assert_eq!(input.receipt_proof.proof_nodes.len(), 1);
-        assert_eq!(input.receipt_proof.receipt_root, [0u8; 32]);
+        assert_ne!(input.receipt_proof.receipt_root, [0u8; 32]);
         assert!(!input.receipt_proof.receipt_rlp.is_empty());
         assert!(!input.receipt_proof.block_header_rlp.is_empty());
     }

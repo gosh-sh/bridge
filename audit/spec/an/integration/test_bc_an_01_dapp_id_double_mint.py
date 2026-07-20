@@ -132,7 +132,11 @@ def test_bc_an_02_no_l1_bridge_allowlist_pre_zk(tb):
 
 @pytest.mark.skipif(not bc_an_01_fixtures_ready(), reason="run scripts/audit/generate_bc_an_01_dual_proofs.sh")
 def test_bc_an_01_double_mint_same_deposit_two_dapp_ids(tb):
-    """BC-AN-01 PoC: two valid proofs, same deposit witness, different dappId → two mints."""
+    """BC-AN-01 regression — upstream pins dappId=0 (contracts/dex_bridge).
+
+    Two valid proofs with different dapp limbs must NOT double-mint: replay
+    anchor uses f.dappId (always 0), not PI fr[4]/fr[5].
+    """
     bridge_tvc = init_bridge_instance(tb, "bc01_poc")
     pipe = MessagePipeline(tb)
     pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
@@ -143,7 +147,7 @@ def test_bc_an_01_double_mint_same_deposit_two_dapp_ids(tb):
         dapp_a = (fr_le(pi_a, 4) << 128) | fr_le(pi_a, 5)
         dapp_b = (fr_le(pi_b, 4) << 128) | fr_le(pi_b, 5)
         assert dep_a == dep_b, "PoC requires same depositId"
-        assert dapp_a != dapp_b, "PoC requires different dappId"
+        assert dapp_a != dapp_b, "PoC requires different dappId in PI"
 
         minted0 = get_minted(tb, bridge_tvc)
         finalize_and_drain(tb, bridge_tvc, pipe, proof_a, pi_a)
@@ -152,7 +156,7 @@ def test_bc_an_01_double_mint_same_deposit_two_dapp_ids(tb):
 
         finalize_and_drain(tb, bridge_tvc, pipe, proof_b, pi_b)
         minted2 = get_minted(tb, bridge_tvc)
-        assert minted2 == minted1 + fr_le(pi_b, 2)
+        assert minted2 == minted1, "second finalize must not mint again (dappId pinned to 0)"
     finally:
         pipe.cleanup()
         tb.cleanup_instance("USDCBridge", "bc01_poc")

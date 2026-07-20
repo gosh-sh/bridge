@@ -43,10 +43,10 @@ impl From<bridge_prover_lib::live_driver::BundleFinalizationType> for Finalizati
         match v {
             bridge_prover_lib::live_driver::BundleFinalizationType::Primary => {
                 FinalizationType::Primary
-            }
+            },
             bridge_prover_lib::live_driver::BundleFinalizationType::Fallback => {
                 FinalizationType::Fallback
-            }
+            },
         }
     }
 }

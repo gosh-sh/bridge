@@ -19,7 +19,7 @@
 //!
 //! - `status` — print the state file path.
 
-use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::{Arc, Mutex}, time::Duration};
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder, providers::Provider};
@@ -28,7 +28,7 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, StateLock, SubmitOutcome, SubprocessProofGenerator,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
     SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
@@ -176,6 +176,13 @@ enum Cmd {
         /// Override a mismatched deployment binding in an existing state file.
         #[arg(long)]
         force_state: bool,
+        /// After this many consecutive failures on one deposit, park it in
+        /// `state.json` and advance the cursor (0 = disabled).
+        #[arg(long, default_value_t = 0)]
+        skip_after_attempts: u32,
+        /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
+        #[arg(long)]
+        allow_insecure_graphql: bool,
     },
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
@@ -332,6 +339,8 @@ async fn main() -> anyhow::Result<()> {
             backoff_max_secs,
             backoff_multiplier,
             force_state,
+            skip_after_attempts,
+            allow_insecure_graphql,
         } => {
             let dapp_id =
                 parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
@@ -382,6 +391,8 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
                 backoff,
                 force_state,
+                skip_after_attempts,
+                allow_insecure_graphql,
             )
             .await
             .map_err(log_err("daemon"))
@@ -454,6 +465,9 @@ async fn finalize_one(
         SubmitOutcome::Rejected {
             reason,
         } => anyhow::bail!("finalizeDeposit rejected by AN: {reason}"),
+        SubmitOutcome::Pending {
+            reason,
+        } => anyhow::bail!("finalizeDeposit still pending on AN: {reason}"),
     }
 }
 
@@ -623,9 +637,18 @@ async fn run_daemon(
     dry_run: bool,
     backoff: BackoffConfig,
     force_state: bool,
+    skip_after_attempts: u32,
+    allow_insecure_graphql: bool,
 ) -> anyhow::Result<()> {
     let _state_lock = StateLock::acquire(&state_path)
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
+
+    let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
+    let scan_cursor = Arc::new(Mutex::new(
+        existing_state
+            .scanned_through_block
+            .unwrap_or(from_block),
+    ));
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let chain_id = provider
@@ -646,13 +669,17 @@ async fn run_daemon(
         warn!("no AN node_url configured; skipping /v2/bk_set preflight");
     }
 
-    let source = Arc::new(EthLogSource::new(
-        provider,
-        bridge_address,
-        from_block,
-        confirmations,
-    ));
+    let source = Arc::new(
+        EthLogSource::new(provider, bridge_address, from_block, confirmations)
+            .with_scan_cursor(scan_cursor.clone()),
+    );
     let prover = Arc::new(SubprocessProofGenerator::new(prover_cfg));
+
+    let skip_after = if skip_after_attempts == 0 {
+        None
+    } else {
+        Some(skip_after_attempts)
+    };
 
     if dry_run {
         warn!(
@@ -665,6 +692,8 @@ async fn run_daemon(
             backoff,
             deployment,
             force_state,
+            skip_after,
+            scan_cursor,
             source,
             prover,
             Arc::new(MockAnSubmitter::accepting()),
@@ -676,6 +705,15 @@ async fn run_daemon(
                 "live submit requires --an-graphql-url, --an-keys-path, --an-bridge-abi-path, \
                  --an-token-bridge, and --an-sender (all in dapp_id::account_id form). Or pass \
                  --dry-run to exercise listen→prove only."
+            );
+        }
+        an_cfg
+            .validate_live_graphql_endpoint(allow_insecure_graphql)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if !allow_insecure_graphql && an_cfg.graphql_url.starts_with("http://") {
+            warn!(
+                graphql_url = %an_cfg.graphql_url,
+                "GraphQL uses HTTP on loopback or dev; use HTTPS in production",
             );
         }
         let keys_json = std::fs::read_to_string(&an_cfg.keys_path)?;
@@ -700,6 +738,8 @@ async fn run_daemon(
             backoff,
             deployment,
             force_state,
+            skip_after,
+            scan_cursor,
             source,
             prover,
             Arc::new(AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg)),
@@ -714,6 +754,8 @@ async fn run_daemon_loop<S, P, A>(
     backoff: BackoffConfig,
     deployment: DeploymentIdentity,
     force_state: bool,
+    skip_after_attempts: Option<u32>,
+    scan_cursor: Arc<Mutex<u64>>,
     source: Arc<S>,
     prover: Arc<P>,
     submitter: Arc<A>,
@@ -730,6 +772,8 @@ where
         max_attempts_warn: 16,
         deployment: Some(deployment),
         force_state,
+        skip_after_attempts,
+        scan_cursor: Some(scan_cursor),
     };
     let mut relayer = Relayer::new(cfg, source, prover, submitter)?;
     let metrics = RelayerMetrics::new();

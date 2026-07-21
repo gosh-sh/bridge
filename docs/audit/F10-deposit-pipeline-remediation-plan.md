@@ -120,6 +120,14 @@ See sibling handoff — USDCBridge Solidity changes in acki-nacki repo (out of s
 - **QC-OFF-04:** TLS/endpoint allowlist, key custody docs.
 - **QC-PROV-04:** upstream axiom-eth padding zero-constraint (accept for testnet).
 
+**Done (Phase D):**
+- `--skip-after-attempts N` parks stuck ids in `state.json` → `parked_deposit_ids`.
+- `scanned_through_block` + shared scan cursor — incremental `eth_getLogs` tail scans.
+- `SubmitOutcome::Pending` distinct from `Rejected` (QC-OFF-11 Pending policy).
+- Live daemon rejects non-HTTPS GraphQL unless loopback / `--allow-insecure-graphql`.
+- Runbook: `docs/audit/deposit-relayer-operator-runbook.md`.
+- QC-PROV-04 documented as accepted upstream limitation in runbook.
+
 ---
 
 ## Implementation tracking
@@ -134,6 +142,7 @@ See sibling handoff — USDCBridge Solidity changes in acki-nacki repo (out of s
 | QC-OFF-12 | done | `pruvendo/f10-phase-a` |
 | Phase B (QC-OFF-13, 06) | done | `pruvendo/f10-phase-a` |
 | Phase C (QC-OFF-09 off-chain) | done | `pruvendo/f10-phase-a` |
+| Phase D (QC-OFF-01,10,02,04,11 Pending) | done | `pruvendo/f10-phase-a` |
 | BC-AN-01 / BC-AN-02 (on-chain) | pending | acki-nacki sibling |
 
 ---

@@ -65,6 +65,15 @@ pub struct RelayerState {
     /// Consecutive non-success outcomes for the current target. Reset to 0
     /// on every finalized deposit.
     pub attempts_since_progress: u32,
+    /// Highest Ethereum block (inclusive) scanned by [`EthLogSource`] on the
+    /// last fetch attempt. Lets the daemon resume log scans from the tail
+    /// instead of re-walking from the bridge deploy block every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_through_block: Option<u64>,
+    /// Deposit ids the daemon advanced past after `--skip-after-attempts`.
+    /// Operators must finalise these manually via `finalize-one`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_deposit_ids: Vec<u64>,
 }
 
 impl RelayerState {
@@ -151,6 +160,17 @@ impl RelayerState {
     pub fn record_attempt(&mut self, deposit_id: u64) {
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = self.attempts_since_progress.saturating_add(1);
+    }
+
+    /// Park a stuck deposit and advance the cursor past it. The id is recorded
+    /// in `parked_deposit_ids` for operator follow-up.
+    pub fn record_skip(&mut self, deposit_id: u64) {
+        if !self.parked_deposit_ids.contains(&deposit_id) {
+            self.parked_deposit_ids.push(deposit_id);
+        }
+        self.last_processed_deposit_id = Some(deposit_id);
+        self.last_attempt_deposit_id = Some(deposit_id);
+        self.attempts_since_progress = 0;
     }
 }
 
@@ -247,6 +267,18 @@ mod tests {
         assert_eq!(s.next_target(5), 5);
         s.record_progress(5);
         assert_eq!(s.next_target(0), 6);
+    }
+
+    #[test]
+    fn record_skip_advances_and_parks() {
+        let mut s = RelayerState::default();
+        s.record_attempt(3);
+        s.record_attempt(3);
+        s.record_skip(3);
+        assert_eq!(s.last_processed_deposit_id, Some(3));
+        assert_eq!(s.next_target(0), 4);
+        assert_eq!(s.parked_deposit_ids, vec![3]);
+        assert_eq!(s.attempts_since_progress, 0);
     }
 
     #[test]

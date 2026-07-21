@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     error::RelayerError,
@@ -155,6 +155,8 @@ pub enum LastOutcome {
     NotYetAvailable { deposit_id: u64 },
     ProofFailed { deposit_id: u64 },
     AnRejected { deposit_id: u64 },
+    AnPending { deposit_id: u64 },
+    Skipped { deposit_id: u64 },
     TickError,
 }
 
@@ -255,6 +257,33 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         deposit_id,
                     })
                 },
+                Ok(TickOutcome::AnPending {
+                    deposit_id,
+                    reason,
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.not_yet_available += 1;
+                    debug!(deposit_id, reason = %reason, "daemon: finalizeDeposit still pending");
+                    (false, LastOutcome::AnPending {
+                        deposit_id,
+                    })
+                },
+                Ok(TickOutcome::Skipped {
+                    deposit_id,
+                    reason,
+                }) => {
+                    summary.already_finalized += 1;
+                    warn!(
+                        deposit_id,
+                        reason = %reason,
+                        "daemon: deposit parked; run finalize-one manually",
+                    );
+                    (true, LastOutcome::Skipped {
+                        deposit_id,
+                    })
+                },
                 Err(e) => {
                     if let Some(m) = &metrics {
                         m.tick_errors_total.fetch_add(1, Ordering::Relaxed);
@@ -339,6 +368,8 @@ mod tests {
             max_attempts_warn: 16,
             deployment: None,
             force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()
     }

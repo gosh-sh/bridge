@@ -64,6 +64,10 @@ pub enum SubmitOutcome {
     /// AN rejected the submission (proof verification failed, malformed
     /// call). The relayer logs and records an attempt.
     Rejected { reason: String },
+    /// The tx was broadcast but confirmation timed out while still pending.
+    /// Distinct from [`Rejected`] — the relayer retries without treating it
+    /// as a verifier failure.
+    Pending { reason: String },
 }
 
 #[async_trait]
@@ -357,7 +361,7 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             TransactionStatus::Reverted | TransactionStatus::Failed => {
                 Ok(classify_reverted(receipt.exit_code, &format!("{:?}", receipt.status)))
             },
-            TransactionStatus::Pending => Ok(SubmitOutcome::Rejected {
+            TransactionStatus::Pending => Ok(SubmitOutcome::Pending {
                 reason: "finalizeDeposit tx still pending after timeout".to_string(),
             }),
         }

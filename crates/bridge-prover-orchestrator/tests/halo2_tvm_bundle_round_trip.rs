@@ -119,9 +119,11 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
     // ---- Verify from the operands, using only their byte payloads. ----
     //
     // The SRS plays the role of the chain-wide shared trusted setup
-    // the TVM opcode would look up by `k`. We just reuse the key
-    // manager's SRS reference here (same on-disk file).
-    let ok = operands.verify(&km.srs).expect("verify must not panic");
+    // the TVM opcode would look up by `k`. Circuit 1B keygens at K=21
+    // via `FallbackKeyManager`, so reuse that manager's degree-matched
+    // slice (same on-disk `kzg_bn254_21.srs`).
+    let srs = km.fallback.srs();
+    let ok = operands.verify(srs).expect("verify must not panic");
     assert!(ok, "round-tripped operand bundle must verify");
 
     // ---- Negative test: flipped proof byte must reject (Ok(false)). ----
@@ -129,7 +131,7 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
     let mid = tampered.proof.len() / 2;
     tampered.proof[mid] ^= 0xFF;
     let tampered_ok = tampered
-        .verify(&km.srs)
+        .verify(srs)
         .expect("verify must not panic on tampered proof bytes");
     assert!(
         !tampered_ok,
@@ -148,7 +150,7 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
         wrong.public_inputs[off..off + 32].copy_from_slice(next.to_bytes().as_ref());
     }
     let wrong_ok = wrong
-        .verify(&km.srs)
+        .verify(srs)
         .expect("verify must not panic on wrong instances");
     assert!(
         !wrong_ok,

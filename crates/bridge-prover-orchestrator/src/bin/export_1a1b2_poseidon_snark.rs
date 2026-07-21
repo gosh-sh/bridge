@@ -115,22 +115,24 @@ struct Args {
 }
 
 /// Provision `params/kzg_bn254_{k}.srs` for `circuit_k`, downsized from the
-/// KeyManager's shared (K=21) ceremony SRS so `export_poseidon_snark`'s internal
-/// `gen_srs(k)` re-loads the ceremony (matching `g2`/`s_g2`) instead of
-/// synthesising a random SRS on cache miss. Identical to the C4 exporter's
-/// `ensure_srs_for_event`, generalised to any degree.
+/// fallback manager's K=21 ceremony SRS (the largest across the four circuits)
+/// so `export_poseidon_snark`'s internal `gen_srs(k)` re-loads the ceremony
+/// (matching `g2`/`s_g2`) instead of synthesising a random SRS on cache miss.
+/// Identical to the C4 exporter's `ensure_srs_for_event`, generalised to any
+/// degree.
 fn ensure_srs_for(km: &KeyManager, params_dir: &Path, circuit_k: u32) -> anyhow::Result<()> {
     use std::io::Write;
     let srs_path = params_dir.join(format!("kzg_bn254_{circuit_k}.srs"));
     if srs_path.exists() {
         return Ok(());
     }
-    let src_k = km.srs.k();
+    let src = km.fallback.srs();
+    let src_k = src.k();
     anyhow::ensure!(
         src_k >= circuit_k,
         "shared SRS (K={src_k}) is smaller than the circuit degree (K={circuit_k})"
     );
-    let mut p = km.srs.clone();
+    let mut p = src.clone();
     if src_k > circuit_k {
         p.downsize(circuit_k);
     }
@@ -232,17 +234,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// halo2-axiom's `create_proof` asserts `params.n() == circuit_domain.n()`, so
-/// the shared K=21 SRS must be downsized in place to the circuit degree before
-/// proving any k<21 circuit (`prover`/`layer_prover` pass `&km.srs` directly).
-/// `downsize` preserves the ceremony toxic waste so the proof still verifies
-/// against the `kzg_bn254_{k}.srs` provisioned by `ensure_srs_for`.
-fn downsize_srs_in_place(km: &mut KeyManager, circuit_k: u32) {
-    if km.srs.k() > circuit_k {
-        km.srs.downsize(circuit_k);
-    }
-}
-
 async fn prove_primary(
     km: &mut KeyManager,
     gql: &gql_client::GqlClient,
@@ -269,7 +260,6 @@ async fn prove_primary(
     km.ensure_primary_keys(bk_set).context("ensure_primary_keys (keygen)")?;
     let k = km.primary_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
-    downsize_srs_in_place(km, k);
     km.load_primary_pk().context("load_primary_pk")?;
 
     let out = prover::generate_primary_proof_with_transcript(
@@ -320,7 +310,6 @@ async fn prove_fallback(
     km.ensure_fallback_keys(bk_set).context("ensure_fallback_keys (keygen)")?;
     let k = km.fallback_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
-    downsize_srs_in_place(km, k);
     km.load_fallback_pk().context("load_fallback_pk")?;
 
     let out = prover::generate_fallback_proof_with_transcript(
@@ -373,7 +362,6 @@ async fn prove_layer(
     km.ensure_layer_keys().context("ensure_layer_keys (keygen)")?;
     let k = km.layer_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
-    downsize_srs_in_place(km, k);
     km.load_layer_pk().context("load_layer_pk")?;
 
     // bk_set Poseidon commitment (fail-fast against block.leaves[2] below).

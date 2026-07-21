@@ -9,6 +9,7 @@ allow_paths = [
 ]
 fs_permissions = [
     { access = "read", path = "../../../contracts/ethereum/verifiers/" },
+    { access = "read", path = "../../../crates/bridge-prover-orchestrator/proofs/bound/" },
 ]
 solc_version = "0.8.19"
 optimizer = true

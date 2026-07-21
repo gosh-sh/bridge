@@ -63,4 +63,5 @@ Every spec test header should cite the invariant(s) it covers.
 
 Run ETH: `make pre-push-audit`  
 Run AN: `make audit-an-test` (after `./scripts/sync_an_contracts.sh`)  
-Run F10 relayer: `make audit-deposit-relayer-test`
+Run F10 relayer: `make audit-deposit-relayer-test`  
+Gas benchmark: `./scripts/run_gas_benchmark.sh` → `audit/reports/gas-cost-benchmark.md`

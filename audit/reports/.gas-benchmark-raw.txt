@@ -54,6 +54,6 @@ Logs:
 Logs:
   GAS|verifier|withdrawal_c4|isolated|393055
 
-Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 47.55ms (67.44ms CPU time)
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 45.67ms (77.27ms CPU time)
 
-Ran 1 test suite in 49.79ms (47.55ms CPU time): 9 tests passed, 0 failed, 0 skipped (9 total tests)
+Ran 1 test suite in 47.97ms (45.67ms CPU time): 9 tests passed, 0 failed, 0 skipped (9 total tests)

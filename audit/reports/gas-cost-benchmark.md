@@ -1,35 +1,40 @@
 # Gas cost benchmark — AckiNackiBridge (ETH L1 contracts)
 
-**Measured:** 2026-07-21 16:38 UTC
-**ETH/USD (Coingecko):** $1,924.28
+**Gas measurements (Forge):** 2026-07-21T16:46:07Z
+**Price snapshot (CoinGecko):** 2026-07-21T16:46:08Z
+**ETH/USD:** $1,924.1600
+**POL/USD:** $0.0803
 **Harness:** `audit/spec/ethereum/GasBenchmark.t.sol`
 **Script:** `scripts/run_gas_benchmark.sh`
-**Profile:** solc 0.8.19, `optimizer_runs=1`, `via_ir=true` (repo default — bytecode-size profile; production may tune `optimizer_runs` for runtime gas).
+**Provenance JSON:** `audit/reports/.gas-benchmark-networks.json`
+**Profile:** solc 0.8.19, `optimizer_runs=1`, `via_ir=true`
 
-## 1. Plan
+## 1. Methodology
 
-1. Inventory `AckiNackiBridge` entrypoints: user (`deposit`), relayer (`verifyBlock`, `withdrawByProof`), owner/AAVE, views.
-2. Forge harness logs `GAS|category|operation|variant|gas` via `vm.snapshotGasLastCall`.
-3. Production SHPLONK uses committed `contracts/ethereum/verifiers/*_calldata.bin`; mock paths isolate bridge logic.
-4. Fetch live `eth_gasPrice` from public RPCs; USD = gas × gwei × 1e-9 × ETH/USD.
-5. Document warm/cold, amount, AAVE pull, proof-size sensitivities.
+1. **Execution gas** — Foundry `vm.snapshotGasLastCall` on local EVM (same gas units on all EVM chains).
+2. **Gas price** — `cast gas-price` → JSON-RPC `eth_gasPrice` at report generation time.
+3. **USD** — `cost = gas_used × gas_price_gwei × 10⁻⁹ × native_token_usd`.
+4. **L2 (Arbitrum / Base / Optimism)** — native gas token is ETH; same ETH/USD as mainnet.
+5. **Polygon** — native gas token is POL; uses POL/USD (`polygon-ecosystem-token`) from CoinGecko.
+6. **Sepolia** — testnet gas price for operator estimates only (not mainnet USD planning).
 
-## 2. Script
+Re-run anytime: `./scripts/run_gas_benchmark.sh` (prices are point-in-time, not historical).
 
-    ./scripts/run_gas_benchmark.sh
+## 2. Network parameters (live at measurement)
 
-## 3. Network gas prices at measurement
+| Network | Gas (gwei) | Gas (wei) | Block | Native | USD/token | Source | RPC |
+| ethereum | 0.165671 | 165671060 | 25582383 | ETH | $1924.1600 | live_rpc | https://ethereum.publicnode.com |
+| sepolia | 1.057373 | 1057373494 | 11320950 | ETH | $1924.1600 | live_rpc | https://ethereum-sepolia.publicnode.com |
+| arbitrum | 0.020052 | 20052000 | 486245084 | ETH | $1924.1600 | live_rpc | https://arb1.arbitrum.io/rpc |
+| base | 0.006000 | 6000000 | 48931511 | ETH | $1924.1600 | live_rpc | https://mainnet.base.org |
+| optimism | 0.001000 | 1000388 | 154526796 | ETH | $1924.1600 | live_rpc | https://mainnet.optimism.io |
+| polygon | 277.971646 | 277971645999 | 90631582 | POL | $0.0803 | live_rpc | https://polygon-bor-rpc.publicnode.com |
 
-| Network | Gas price (gwei) | Source |
-| ethereum | 15.0 | fallback |
-| arbitrum | 0.02 | live |
-| base | 0.006 | live |
-| optimism | 0.001 | live |
-| polygon (MATIC gas units) | 279.5364 | live |
+**Price source:** CoinGecko simple price API (`ethereum`, `polygon-ecosystem-token`).
 
-> USD table below uses ETH/USD for ethereum/arbitrum/base/optimism only. Polygon native gas is MATIC — not converted here.
+**Note:** Ethereum mainnet row uses live RPC when reachable; if all RPCs fail, script uses fallback estimate (marked `fallback_estimate`). L2 `eth_gasPrice` is often <0.1 gwei — USD looks small but is correct for current fee market.
 
-## 4. Measurements (gas)
+## 3. Execution gas (Forge, chain-independent)
 
 | Category | Operation | Variant | Gas | Notes |
 | owner | emergencyWithdrawAll | default | 12,899 |  |
@@ -59,42 +64,51 @@
 | view | expectedPrevAnchor | cold | 24,851 |  |
 | view | isNullifierUsed | cold | 3,759 |  |
 
-## 5. USD estimates
+## 4. USD cost — key operations (all networks)
 
-| Operation | Variant | Gas | ethereum | arbitrum | base | optimism |
-| erc20_approve | 10usdc | 22,527 | $0.6502 | $0.0009 | $0.0003 | $0.0000 |
-| deposit | first_10usdc | 74,686 | $2.1558 | $0.0029 | $0.0009 | $0.0001 |
-| deposit | warm_10usdc | 6,986 | $0.2016 | $0.0003 | $0.0001 | $0.0000 |
-| deposit | max_100usdc | 6,986 | $0.2016 | $0.0003 | $0.0001 | $0.0000 |
-| verifyBlock | mock_primary_first | 342,133 | $9.8754 | $0.0132 | $0.0040 | $0.0007 |
-| verifyBlock | production_primary | 1,283,234 | $37.0395 | $0.0494 | $0.0148 | $0.0025 |
-| primary_attestation | isolated | 419,985 | $12.1225 | $0.0162 | $0.0048 | $0.0008 |
-| layer_hashes | isolated | 346,036 | $9.9881 | $0.0133 | $0.0040 | $0.0007 |
-| fallback_attestation | isolated | 419,985 | $12.1225 | $0.0162 | $0.0048 | $0.0008 |
-| withdrawal_c4 | isolated | 393,055 | $11.3452 | $0.0151 | $0.0045 | $0.0008 |
-| withdrawByProof | mock_liquid_only | 53,560 | $1.5460 | $0.0021 | $0.0006 | $0.0001 |
-| withdrawByProof | mock_with_aave_pull | 63,217 | $1.8247 | $0.0024 | $0.0007 | $0.0001 |
-| supplyToAave | max | 119,915 | $3.4613 | $0.0046 | $0.0014 | $0.0002 |
-| harvestYield | 1usdc | 36,589 | $1.0561 | $0.0014 | $0.0004 | $0.0001 |
-| emergencyWithdrawAll | default | 12,899 | $0.3723 | $0.0005 | $0.0001 | $0.0000 |
+| Operation | Variant | Gas | ethereum | sepolia | arbitrum | base | optimism | polygon |
+| erc20_approve | 10usdc | 22,527 | $0.0072 | $0.0458 | $0.0009 | $0.0003 | $0.0000 | $0.0005 |
+| deposit | first_10usdc | 74,686 | $0.0238 | $0.1520 | $0.0029 | $0.0009 | $0.0001 | $0.0017 |
+| deposit | warm_10usdc | 6,986 | $0.0022 | $0.0142 | $0.0003 | $0.0001 | $0.0000 | $0.0002 |
+| verifyBlock | production_primary | 1,283,234 | $0.4091 | $2.6108 | $0.0495 | $0.0148 | $0.0025 | $0.0287 |
+| withdrawal_c4 | isolated | 393,055 | $0.1253 | $0.7997 | $0.0152 | $0.0045 | $0.0008 | $0.0088 |
+| withdrawByProof | mock_liquid_only | 53,560 | $0.0171 | $0.1090 | $0.0021 | $0.0006 | $0.0001 | $0.0012 |
+| supplyToAave | max | 119,915 | $0.0382 | $0.2440 | $0.0046 | $0.0014 | $0.0002 | $0.0027 |
+
+## 5. USD cost — full matrix
+
+| Operation | Variant | Gas | ethereum | sepolia | arbitrum | base | optimism | polygon |
+| erc20_approve | 10usdc | 22,527 | $0.0072 | $0.0458 | $0.0009 | $0.0003 | $0.0000 | $0.0005 |
+| deposit | first_10usdc | 74,686 | $0.0238 | $0.1520 | $0.0029 | $0.0009 | $0.0001 | $0.0017 |
+| deposit | warm_10usdc | 6,986 | $0.0022 | $0.0142 | $0.0003 | $0.0001 | $0.0000 | $0.0002 |
+| deposit | max_100usdc | 6,986 | $0.0022 | $0.0142 | $0.0003 | $0.0001 | $0.0000 | $0.0002 |
+| verifyBlock | mock_primary_first | 342,133 | $0.1091 | $0.6961 | $0.0132 | $0.0039 | $0.0007 | $0.0076 |
+| verifyBlock | production_primary | 1,283,234 | $0.4091 | $2.6108 | $0.0495 | $0.0148 | $0.0025 | $0.0287 |
+| primary_attestation | isolated | 419,985 | $0.1339 | $0.8545 | $0.0162 | $0.0048 | $0.0008 | $0.0094 |
+| layer_hashes | isolated | 346,036 | $0.1103 | $0.7040 | $0.0134 | $0.0040 | $0.0007 | $0.0077 |
+| fallback_attestation | isolated | 419,985 | $0.1339 | $0.8545 | $0.0162 | $0.0048 | $0.0008 | $0.0094 |
+| withdrawal_c4 | isolated | 393,055 | $0.1253 | $0.7997 | $0.0152 | $0.0045 | $0.0008 | $0.0088 |
+| withdrawByProof | mock_liquid_only | 53,560 | $0.0171 | $0.1090 | $0.0021 | $0.0006 | $0.0001 | $0.0012 |
+| withdrawByProof | mock_with_aave_pull | 63,217 | $0.0202 | $0.1286 | $0.0024 | $0.0007 | $0.0001 | $0.0014 |
+| supplyToAave | max | 119,915 | $0.0382 | $0.2440 | $0.0046 | $0.0014 | $0.0002 | $0.0027 |
+| harvestYield | 1usdc | 36,589 | $0.0117 | $0.0744 | $0.0014 | $0.0004 | $0.0001 | $0.0008 |
+| emergencyWithdrawAll | default | 12,899 | $0.0041 | $0.0262 | $0.0005 | $0.0001 | $0.0000 | $0.0003 |
 
 ## 6. Parameter dependencies
 
 | Parameter | Affects | Direction |
 | Deposit amount | deposit | ~flat for USDC |
-| Warm storage | deposit, verifyBlock, withdraw | 2nd call much cheaper |
-| SHPLONK proof (calldata size) | verifyBlock, withdraw | dominates; fixed per circuit artefact |
-| numLayers (1..10) | verifyBlock | weak linear (≤10 SSTORE) |
-| AAVE utilization | withdrawByProof | +gas when liquid USDC < payout |
-| L1 calldata | proof txs on Ethereum | not in execution gas table; budget ~16 gas/non-zero byte separately |
+| Warm storage | deposit, verifyBlock, withdraw | 2nd call ~10× cheaper |
+| SHPLONK proof size | verifyBlock, withdraw | dominates (~1.28M gas prod) |
+| AAVE pull | withdrawByProof | +~18% vs liquid-only mock |
+| Gas market | USD columns | re-run script; see section 2 |
 
-## 7. Relayer / user budgeting
+## 7. Relayer budgeting snapshot
 
-- **ETH→AN deposit (bridge only):** 74,686 gas ≈ $2.1558 on Ethereum @ 15.0 gwei
-- **ETH→AN deposit (warm):** 6,986 gas ≈ $0.2016 on Ethereum @ 15.0 gwei
-- **AN→ETH verifyBlock (production 1A+2):** 1,283,234 gas ≈ $37.0395 on Ethereum @ 15.0 gwei
-- **C4 verify (isolated):** 393,055 gas ≈ $11.3452 on Ethereum @ 15.0 gwei
-- **withdrawByProof bridge overhead (mock):** 53,560 gas ≈ $1.5460 on Ethereum @ 15.0 gwei
-- **withdrawByProof (prod estimate):** ≈ 446,615 gas (C4 isolated + mock bridge overhead; not yet full E2E on bridge).
+- **deposit (first)** (74,686 gas): ethereum $0.0238 @ 0.1657 gwei; sepolia $0.1520 @ 1.0574 gwei; arbitrum $0.0029 @ 0.0201 gwei; base $0.0009 @ 0.0060 gwei; optimism $0.0001 @ 0.0010 gwei; polygon $0.0017 @ 277.9716 gwei
+- **deposit (warm)** (6,986 gas): ethereum $0.0022 @ 0.1657 gwei; sepolia $0.0142 @ 1.0574 gwei; arbitrum $0.0003 @ 0.0201 gwei; base $0.0001 @ 0.0060 gwei; optimism $0.0000 @ 0.0010 gwei; polygon $0.0002 @ 277.9716 gwei
+- **verifyBlock production** (1,283,234 gas): ethereum $0.4091 @ 0.1657 gwei; sepolia $2.6108 @ 1.0574 gwei; arbitrum $0.0495 @ 0.0201 gwei; base $0.0148 @ 0.0060 gwei; optimism $0.0025 @ 0.0010 gwei; polygon $0.0287 @ 277.9716 gwei
+- **withdrawal C4 verify** (393,055 gas): ethereum $0.1253 @ 0.1657 gwei; sepolia $0.7997 @ 1.0574 gwei; arbitrum $0.0152 @ 0.0201 gwei; base $0.0045 @ 0.0060 gwei; optimism $0.0008 @ 0.0010 gwei; polygon $0.0088 @ 277.9716 gwei
+- **withdrawByProof prod estimate:** 446,615 gas (C4 + bridge overhead; E2E pending)
 
-Raw log: `audit/reports/.gas-benchmark-raw.txt`
+Raw forge log: `audit/reports/.gas-benchmark-raw.txt`

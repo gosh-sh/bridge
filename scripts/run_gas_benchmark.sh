@@ -7,8 +7,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SPEC="$ROOT/audit/spec/ethereum"
 REPORT="$ROOT/audit/reports/gas-cost-benchmark.md"
 RAW="$ROOT/audit/reports/.gas-benchmark-raw.txt"
-ENVF="$ROOT/audit/reports/.gas-benchmark-networks.env"
-TS="$(date -u +"%Y-%m-%d %H:%M UTC")"
+META="$ROOT/audit/reports/.gas-benchmark-networks.json"
+TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 export PATH="${HOME}/.foundry/bin:${PATH}"
 
@@ -16,121 +16,177 @@ echo "[gas] compiling + running GasBenchmark..."
 cd "$SPEC"
 forge test --match-contract GasBenchmark -vv 2>&1 | tee "$RAW"
 
-gas_price_gwei() {
+fetch_gas_wei() {
   local rpc="$1"
-  local wei
-  if wei=$(cast gas-price --rpc-url "$rpc" 2>/dev/null); then
-    python3 -c "print(f'{int(\"$wei\")/1e9:.4f}')"
-  else
-    echo ""
-  fi
+  cast gas-price --rpc-url "$rpc" 2>/dev/null || true
 }
 
-eth_usd=$(curl -fsS "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['ethereum']['usd'])" 2>/dev/null || echo "3500")
+fetch_block() {
+  local rpc="$1"
+  cast block-number --rpc-url "$rpc" 2>/dev/null || true
+}
 
-declare -A RPC=(
-  [ethereum]="https://rpc.ankr.com/eth"
-  [arbitrum]="https://arb1.arbitrum.io/rpc"
-  [base]="https://mainnet.base.org"
-  [optimism]="https://mainnet.optimism.io"
-  [polygon]="https://polygon-bor-rpc.publicnode.com"
+# network metadata: name|native_token|coingecko_id|rpc1,rpc2,...|fallback_gwei
+read -r -d '' NETWORKS <<'EOF' || true
+ethereum|ETH|ethereum|https://ethereum.publicnode.com,https://rpc.ankr.com/eth,https://1rpc.io/eth,https://eth.llamarpc.com|20
+sepolia|ETH|ethereum|https://ethereum-sepolia.publicnode.com,https://rpc.sepolia.org,https://1rpc.io/sepolia|5
+arbitrum|ETH|ethereum|https://arb1.arbitrum.io/rpc,https://arbitrum-one.publicnode.com,https://1rpc.io/arb|0.05
+base|ETH|ethereum|https://mainnet.base.org,https://base.publicnode.com,https://1rpc.io/base|0.01
+optimism|ETH|ethereum|https://mainnet.optimism.io,https://optimism.publicnode.com,https://1rpc.io/op|0.01
+polygon|POL|polygon-ecosystem-token|https://polygon-bor-rpc.publicnode.com,https://polygon-rpc.com,https://1rpc.io/matic|30
+EOF
+
+python3 - "$META" "$TS" "$NETWORKS" <<'PY'
+import json, subprocess, sys, urllib.request
+from datetime import datetime, timezone
+
+meta_path, ts, networks_blob = sys.argv[1:4]
+
+def curl_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "acki-nacki-bridge-gas-benchmark/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
+
+def cast(args: list[str]) -> str:
+    try:
+        out = subprocess.check_output(["cast", *args], stderr=subprocess.DEVNULL, text=True).strip()
+        return out
+    except subprocess.CalledProcessError:
+        return ""
+
+# Token USD at measurement time (single Coingecko call)
+cg_url = (
+    "https://api.coingecko.com/api/v3/simple/price"
+    "?ids=ethereum,polygon-ecosystem-token&vs_currencies=usd"
 )
+cg = curl_json(cg_url)
+prices = {
+    "ethereum": float(cg["ethereum"]["usd"]),
+    "polygon-ecosystem-token": float(cg["polygon-ecosystem-token"]["usd"]),
+}
+fetched_prices_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# Fallback gwei if RPC unreachable (documented in report)
-declare -A FALLBACK_GWEI=(
-  [ethereum]="15"
-  [arbitrum]="0.05"
-  [base]="0.01"
-  [optimism]="0.01"
-  [polygon]="30"
-)
+networks = []
+for line in networks_blob.strip().splitlines():
+    name, native, cg_id, rpcs_csv, fallback = line.split("|")
+    rpcs = [r.strip() for r in rpcs_csv.split(",") if r.strip()]
+    entry = {
+        "network": name,
+        "native_token": native,
+        "coingecko_id": cg_id,
+        "native_token_usd": prices[cg_id],
+        "rpc_candidates": rpcs,
+        "gas_price_wei": None,
+        "gas_price_gwei": None,
+        "block_number": None,
+        "rpc_used": None,
+        "source": "unavailable",
+        "fallback_gwei": float(fallback),
+        "fetched_at_utc": fetched_prices_at,
+    }
+    for rpc in rpcs:
+        wei = cast(["gas-price", "--rpc-url", rpc])
+        if not wei or not wei.isdigit():
+            continue
+        block = cast(["block-number", "--rpc-url", rpc])
+        entry["gas_price_wei"] = int(wei)
+        entry["gas_price_gwei"] = int(wei) / 1e9
+        entry["block_number"] = int(block) if block.isdigit() else None
+        entry["rpc_used"] = rpc
+        entry["source"] = "live_rpc"
+        entry["fetched_at_utc"] = fetched_prices_at
+        break
+    if entry["source"] != "live_rpc":
+        gwei = entry["fallback_gwei"]
+        wei = int(gwei * 1e9)
+        entry["gas_price_wei"] = wei
+        entry["gas_price_gwei"] = gwei
+        entry["source"] = "fallback_estimate"
+        entry["rpc_used"] = None
+    networks.append(entry)
 
-: > "$ENVF"
-for net in ethereum arbitrum base optimism polygon; do
-  gp=$(gas_price_gwei "${RPC[$net]}")
-  if [[ -z "$gp" ]]; then
-    gp="${FALLBACK_GWEI[$net]}"
-    echo "${net}=${gp}" >> "$ENVF"
-    echo "${net}_source=fallback" >> "$ENVF"
-  else
-    echo "${net}=${gp}" >> "$ENVF"
-    echo "${net}_source=live" >> "$ENVF"
-  fi
-done
+payload = {
+    "measurement_utc": ts,
+    "price_source": {
+        "provider": "CoinGecko",
+        "url": cg_url,
+        "fetched_at_utc": fetched_prices_at,
+        "ethereum_usd": prices["ethereum"],
+        "polygon_pol_usd": prices["polygon-ecosystem-token"],
+    },
+    "gas_price_method": "eth_gasPrice via cast (JSON-RPC)",
+    "networks": networks,
+}
+meta_path = __import__("pathlib").Path(meta_path)
+meta_path.write_text(json.dumps(payload, indent=2) + "\n")
+print(f"Wrote {meta_path}")
+PY
 
 mapfile -t ROWS < <(grep -E 'GAS\|' "$RAW" | sed 's/.*GAS|/GAS|/' | sort -u)
 
-python3 - "$REPORT" "$TS" "$eth_usd" "${ROWS[@]}" <<'PY'
-import sys
+python3 - "$REPORT" "$META" "${ROWS[@]}" <<'PY'
+import json, sys
 from pathlib import Path
 
 report_path = Path(sys.argv[1])
-ts = sys.argv[2]
-eth_usd = float(sys.argv[3])
-rows = [r.strip() for r in sys.argv[4:] if r.strip().startswith("GAS|")]
-
-gp = {}
-gp_source = {}
-for line in Path(report_path.parent / ".gas-benchmark-networks.env").read_text().splitlines():
-    if "=" not in line:
-        continue
-    k, v = line.split("=", 1)
-    v = v.strip()
-    if not v:
-        continue
-    if k.endswith("_source"):
-        gp_source[k.replace("_source", "")] = v
-    else:
-        gp[k] = float(v)
+meta = json.loads(Path(sys.argv[2]).read_text())
+rows = [r.strip() for r in sys.argv[3:] if r.strip().startswith("GAS|")]
 
 parsed = []
 for r in rows:
     _, cat, op, var, gas = r.split("|", 4)
     parsed.append((cat, op, var, int(gas)))
-
 lookup = {(c, o, v): g for c, o, v, g in parsed}
 
-def usd_cost(gas: int, gwei: float) -> float:
-    return gas * gwei * 1e-9 * eth_usd
+def usd(gas: int, gwei: float, token_usd: float) -> float:
+    return gas * gwei * 1e-9 * token_usd
 
-nets = [n for n in ["ethereum", "arbitrum", "base", "optimism"] if n in gp]
-polygon_gwei = gp.get("polygon")
+nets = meta["networks"]
+eth_usd = meta["price_source"]["ethereum_usd"]
+ts = meta["measurement_utc"]
+price_ts = meta["price_source"]["fetched_at_utc"]
 
 lines = []
 lines.append("# Gas cost benchmark — AckiNackiBridge (ETH L1 contracts)")
 lines.append("")
-lines.append(f"**Measured:** {ts}")
-lines.append(f"**ETH/USD (Coingecko):** ${eth_usd:,.2f}")
+lines.append(f"**Gas measurements (Forge):** {ts}")
+lines.append(f"**Price snapshot (CoinGecko):** {price_ts}")
+lines.append(f"**ETH/USD:** ${eth_usd:,.4f}")
+lines.append(f"**POL/USD:** ${meta['price_source']['polygon_pol_usd']:,.4f}")
 lines.append("**Harness:** `audit/spec/ethereum/GasBenchmark.t.sol`")
 lines.append("**Script:** `scripts/run_gas_benchmark.sh`")
-lines.append("**Profile:** solc 0.8.19, `optimizer_runs=1`, `via_ir=true` (repo default — bytecode-size profile; production may tune `optimizer_runs` for runtime gas).")
+lines.append("**Provenance JSON:** `audit/reports/.gas-benchmark-networks.json`")
+lines.append("**Profile:** solc 0.8.19, `optimizer_runs=1`, `via_ir=true`")
 lines.append("")
-lines.append("## 1. Plan")
+lines.append("## 1. Methodology")
 lines.append("")
-lines.append("1. Inventory `AckiNackiBridge` entrypoints: user (`deposit`), relayer (`verifyBlock`, `withdrawByProof`), owner/AAVE, views.")
-lines.append("2. Forge harness logs `GAS|category|operation|variant|gas` via `vm.snapshotGasLastCall`.")
-lines.append("3. Production SHPLONK uses committed `contracts/ethereum/verifiers/*_calldata.bin`; mock paths isolate bridge logic.")
-lines.append("4. Fetch live `eth_gasPrice` from public RPCs; USD = gas × gwei × 1e-9 × ETH/USD.")
-lines.append("5. Document warm/cold, amount, AAVE pull, proof-size sensitivities.")
+lines.append("1. **Execution gas** — Foundry `vm.snapshotGasLastCall` on local EVM (same gas units on all EVM chains).")
+lines.append("2. **Gas price** — `cast gas-price` → JSON-RPC `eth_gasPrice` at report generation time.")
+lines.append("3. **USD** — `cost = gas_used × gas_price_gwei × 10⁻⁹ × native_token_usd`.")
+lines.append("4. **L2 (Arbitrum / Base / Optimism)** — native gas token is ETH; same ETH/USD as mainnet.")
+lines.append("5. **Polygon** — native gas token is POL; uses POL/USD (`polygon-ecosystem-token`) from CoinGecko.")
+lines.append("6. **Sepolia** — testnet gas price for operator estimates only (not mainnet USD planning).")
 lines.append("")
-lines.append("## 2. Script")
+lines.append("Re-run anytime: `./scripts/run_gas_benchmark.sh` (prices are point-in-time, not historical).")
 lines.append("")
-lines.append("    ./scripts/run_gas_benchmark.sh")
+lines.append("## 2. Network parameters (live at measurement)")
 lines.append("")
-lines.append("## 3. Network gas prices at measurement")
+lines.append("| Network | Gas (gwei) | Gas (wei) | Block | Native | USD/token | Source | RPC |")
+for n in nets:
+    gwei = f"{n['gas_price_gwei']:.6f}" if n["gas_price_gwei"] is not None else "n/a"
+    wei = str(n["gas_price_wei"]) if n["gas_price_wei"] is not None else "n/a"
+    block = str(n["block_number"]) if n["block_number"] is not None else "n/a"
+    tok = n["native_token"]
+    usd_tok = f"${n['native_token_usd']:.4f}"
+    src = n["source"]
+    rpc = n["rpc_used"] or f"fallback {n['fallback_gwei']} gwei"
+    lines.append(f"| {n['network']} | {gwei} | {wei} | {block} | {tok} | {usd_tok} | {src} | {rpc} |")
 lines.append("")
-lines.append("| Network | Gas price (gwei) | Source |")
-for net in nets:
-    src = gp_source.get(net, "live")
-    lines.append(f"| {net} | {gp[net]} | {src} |")
-if polygon_gwei:
-    src = gp_source.get("polygon", "live")
-    lines.append(f"| polygon (MATIC gas units) | {polygon_gwei} | {src} |")
+lines.append("**Price source:** CoinGecko simple price API (`ethereum`, `polygon-ecosystem-token`).")
 lines.append("")
-lines.append("> USD table below uses ETH/USD for ethereum/arbitrum/base/optimism only. Polygon native gas is MATIC — not converted here.")
+lines.append("**Note:** Ethereum mainnet row uses live RPC when reachable; if all RPCs fail, script uses fallback estimate (marked `fallback_estimate`). L2 `eth_gasPrice` is often <0.1 gwei — USD looks small but is correct for current fee market.")
 lines.append("")
-lines.append("## 4. Measurements (gas)")
+lines.append("## 3. Execution gas (Forge, chain-independent)")
 lines.append("")
 lines.append("| Category | Operation | Variant | Gas | Notes |")
 for cat, op, var, gas in sorted(parsed, key=lambda x: (x[0], x[1], x[2])):
@@ -147,10 +203,32 @@ for cat, op, var, gas in sorted(parsed, key=lambda x: (x[0], x[1], x[2])):
         notes.append("MAX_DEPOSIT_AMOUNT")
     lines.append(f"| {cat} | {op} | {var} | {gas:,} | {', '.join(notes)} |")
 lines.append("")
-lines.append("## 5. USD estimates")
+lines.append("## 4. USD cost — key operations (all networks)")
 lines.append("")
-lines.append("| Operation | Variant | Gas | " + " | ".join(nets) + " |")
+net_names = [n["network"] for n in nets]
+lines.append("| Operation | Variant | Gas | " + " | ".join(net_names) + " |")
 key_ops = [
+    ("user", "erc20_approve", "10usdc"),
+    ("user", "deposit", "first_10usdc"),
+    ("user", "deposit", "warm_10usdc"),
+    ("relayer", "verifyBlock", "production_primary"),
+    ("verifier", "withdrawal_c4", "isolated"),
+    ("relayer", "withdrawByProof", "mock_liquid_only"),
+    ("owner", "supplyToAave", "max"),
+]
+for c, o, v in key_ops:
+    g = lookup.get((c, o, v))
+    if g is None:
+        continue
+    cols = []
+    for n in nets:
+        cols.append(f"${usd(g, n['gas_price_gwei'], n['native_token_usd']):.4f}")
+    lines.append(f"| {o} | {v} | {g:,} | " + " | ".join(cols) + " |")
+lines.append("")
+lines.append("## 5. USD cost — full matrix")
+lines.append("")
+lines.append("| Operation | Variant | Gas | " + " | ".join(net_names) + " |")
+full_ops = [
     ("user", "erc20_approve", "10usdc"),
     ("user", "deposit", "first_10usdc"),
     ("user", "deposit", "warm_10usdc"),
@@ -167,43 +245,44 @@ key_ops = [
     ("owner", "harvestYield", "1usdc"),
     ("owner", "emergencyWithdrawAll", "default"),
 ]
-for c, o, v in key_ops:
+for c, o, v in full_ops:
     g = lookup.get((c, o, v))
     if g is None:
         continue
-    cols = [f"${usd_cost(g, gp[n]):.4f}" for n in nets]
+    cols = [f"${usd(g, n['gas_price_gwei'], n['native_token_usd']):.4f}" for n in nets]
     lines.append(f"| {o} | {v} | {g:,} | " + " | ".join(cols) + " |")
 lines.append("")
 lines.append("## 6. Parameter dependencies")
 lines.append("")
 lines.append("| Parameter | Affects | Direction |")
 lines.append("| Deposit amount | deposit | ~flat for USDC |")
-lines.append("| Warm storage | deposit, verifyBlock, withdraw | 2nd call much cheaper |")
-lines.append("| SHPLONK proof (calldata size) | verifyBlock, withdraw | dominates; fixed per circuit artefact |")
-lines.append("| numLayers (1..10) | verifyBlock | weak linear (≤10 SSTORE) |")
-lines.append("| AAVE utilization | withdrawByProof | +gas when liquid USDC < payout |")
-lines.append("| L1 calldata | proof txs on Ethereum | not in execution gas table; budget ~16 gas/non-zero byte separately |")
+lines.append("| Warm storage | deposit, verifyBlock, withdraw | 2nd call ~10× cheaper |")
+lines.append("| SHPLONK proof size | verifyBlock, withdraw | dominates (~1.28M gas prod) |")
+lines.append("| AAVE pull | withdrawByProof | +~18% vs liquid-only mock |")
+lines.append("| Gas market | USD columns | re-run script; see section 2 |")
 lines.append("")
-lines.append("## 7. Relayer / user budgeting")
+lines.append("## 7. Relayer budgeting snapshot")
 lines.append("")
-eth_g = gp.get("ethereum")
-if eth_g:
-    for label, key in [
-        ("ETH→AN deposit (bridge only)", ("user", "deposit", "first_10usdc")),
-        ("ETH→AN deposit (warm)", ("user", "deposit", "warm_10usdc")),
-        ("AN→ETH verifyBlock (production 1A+2)", ("relayer", "verifyBlock", "production_primary")),
-        ("C4 verify (isolated)", ("verifier", "withdrawal_c4", "isolated")),
-        ("withdrawByProof bridge overhead (mock)", ("relayer", "withdrawByProof", "mock_liquid_only")),
-    ]:
-        g = lookup.get(key, 0)
-        if g:
-            lines.append(f"- **{label}:** {g:,} gas ≈ ${usd_cost(g, eth_g):.4f} on Ethereum @ {eth_g} gwei")
+for label, key in [
+    ("deposit (first)", ("user", "deposit", "first_10usdc")),
+    ("deposit (warm)", ("user", "deposit", "warm_10usdc")),
+    ("verifyBlock production", ("relayer", "verifyBlock", "production_primary")),
+    ("withdrawal C4 verify", ("verifier", "withdrawal_c4", "isolated")),
+]:
+    g = lookup.get(key, 0)
+    if not g:
+        continue
+    parts = []
+    for n in nets:
+        c = usd(g, n["gas_price_gwei"], n["native_token_usd"])
+        parts.append(f"{n['network']} ${c:.4f} @ {n['gas_price_gwei']:.4f} gwei")
+    lines.append(f"- **{label}** ({g:,} gas): " + "; ".join(parts))
 mock_w = lookup.get(("relayer", "withdrawByProof", "mock_liquid_only"), 0)
 c4 = lookup.get(("verifier", "withdrawal_c4", "isolated"), 0)
 if mock_w and c4:
-    lines.append(f"- **withdrawByProof (prod estimate):** ≈ {c4 + mock_w:,} gas (C4 isolated + mock bridge overhead; not yet full E2E on bridge).")
+    lines.append(f"- **withdrawByProof prod estimate:** {c4 + mock_w:,} gas (C4 + bridge overhead; E2E pending)")
 lines.append("")
-lines.append("Raw log: `audit/reports/.gas-benchmark-raw.txt`")
+lines.append("Raw forge log: `audit/reports/.gas-benchmark-raw.txt`")
 
 report_path.write_text("\n".join(lines) + "\n")
 print(f"Report: {report_path}")

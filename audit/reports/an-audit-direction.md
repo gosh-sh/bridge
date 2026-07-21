@@ -1,8 +1,8 @@
-# AN audit — direction (subagent synthesis, 2026-07-17)
+# AN audit — direction (subagent synthesis, 2026-07-21)
 
 Entry point for subagents and humans. Update as BC/QC close.
 
-**Sources:** deposit-path, withdraw/admin, MessagePipeline, ETH-cross agents on `audit` @ `77449b1`.
+**Author responses:** Pruvendo QA Stage II — Bridge § (recorded 2026-07-21). See `questions-an.md`, `questions-cross-chain.md`.
 
 ---
 
@@ -10,8 +10,8 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | P | ID | Area | Action |
 |---|-----|------|--------|
-| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | ✅ **closed** (author ack 2026-07-20; `f.dappId=0` on `contracts/dex_bridge`; regression tests green) |
-| **P1** | BC-AN-02 | No L1 `contractAddr` allowlist | ✅ pre-ZK integration test |
+| **P0** | BC-AN-01 | `dappId` in replay key, not event-bound | ✅ **closed** (Stage II: «dapp_id = 0»; regression green) |
+| **P1** | BC-AN-02 | No L1 `contractAddr` allowlist | ⏳ **open** — Stage II: no answer |
 | **P1** | DEP-AN-11/12 | MessagePipeline | ✅ `integration/test_finalize_deposit_pipeline.py` |
 | **P2** | WD-AN-01/02, ADM-AN-01 | withdraw + admin negatives | ✅ `unit/test_usdcbridge_withdraw_admin_negative.py` |
 | **P2** | Joint ETH↔AN | cap, pause, anWorkchain | ✅ `questions-cross-chain.md` |
@@ -32,16 +32,21 @@ Entry point for subagents and humans. Update as BC/QC close.
 
 | ID | Class | Status | PoC |
 |----|-------|--------|-----|
-| BC-AN-01 | dappId double-mint | **closed** (author ack 2026-07-20; `f.dappId=0`) | dual-proof regression tests |
-| BC-AN-02 | L1 bridge allowlist | **open** | ✅ pre-ZK integration |
-| QC-AN-01 | amount ≤ uint64 | open | ✅ unit |
-| QC-AN-02…06 | admin/pause/VK | open | partial (ADM/TIP unit + F2) |
-| QC-AN-07 | voucher brick | **closed** (test) | ✅ integration |
-| QC-AN-08 | PI length | **closed** (test) | ✅ unit |
-| QC-AN-09 | accept before ZK | accepted | griefing only |
-| QC-AN-10 | anAccount == 0 | **open** (QC) | ✅ no on-chain guard |
+| BC-AN-01 | dappId double-mint | **closed** | dual-proof regression tests |
+| BC-AN-02 | L1 bridge allowlist | **open** (Stage II: no answer) | ✅ pre-ZK integration |
+| QC-AN-01 | amount ≤ uint64 / ETH cap | **partial ack** | ✅ unit |
+| QC-AN-02 | owner mint centralization | **open** | partial unit |
+| QC-AN-03 | voucher code rotation | **closed (ack)** | F2 manual |
+| QC-AN-04 | no AN pause | **open** | code review |
+| QC-AN-05 | dual supply counters | **partial ack** | fuzz |
+| QC-AN-06 | VK blob | **partial ack** | fixtures |
+| QC-AN-07 | voucher brick | **closed (ack)** | ✅ integration |
+| QC-AN-08 | PI length | **closed (test)** | ✅ unit |
+| QC-AN-09 | accept before ZK | **open** | griefing only |
+| QC-AN-10 | anAccount == 0 | **partial ack** | AN require + drop ETH guard |
+| QC-AN-J4 | workchain unused | **closed (ack)** | — |
 
-**BC count:** 1 candidate open (BC-AN-02). BC-AN-01 closed on `contracts/dex_bridge`. Non-deposit surfaces: **BC=0** per withdraw agent.
+**BC count:** 1 open (BC-AN-02). Non-deposit surfaces: **BC=0** per withdraw agent.
 
 ---
 

@@ -1,6 +1,6 @@
 # Cross-chain (ETH ↔ AN) — questions for authors
 
-**Date:** 2026-07-17  
+**Date:** 2026-07-21 (author responses from Pruvendo QA Stage II — Bridge §)  
 **Audience:** Bridge integrators — **both** ETH and AN teams (joint disposition).  
 **Scope:** Policy and binding alignment between `AckiNackiBridge` (Sepolia/mainnet) and `USDCBridge` (shellnet/production AN). Not a substitute for per-side registers.
 
@@ -28,20 +28,20 @@ Items here are **QC** (design / policy questions). They may reference BC rows on
 | Max amount | `MAX_DEPOSIT_AMOUNT` (100 USDC per tx) | `uint64` bound on `fr[2]` (QC-AN-01) | QC-AN-J1 |
 | Zero recipient | `InvalidAnAccount` if `anAccount==0` | No pre-ZK guard (QC-AN-10) | QC-AN-J3 |
 | Emergency pause | `pause()` blocks `deposit` | No pause on `finalizeDeposit` | QC-AN-J2 |
-| Workchain | Emitted in `Deposit` | `makeAddrStd(0, anAccount)` always WC 0 | QC-AN-J4 |
+| Workchain | Emitted in `Deposit` | `makeAddrStd(0, anAccount)` always WC 0 | QC-AN-J4 **closed** |
 | Custody model | USDC in bridge / AAVE | ECC mint (currency #3) | QC-AN-J5 |
 
 ---
 
 ## QC register — cross-chain
 
-| ID | ETH side | AN side | Auditor view | Ask author (joint) |
-|----|----------|---------|--------------|-------------------|
-| QC-AN-J1 | `MAX_DEPOSIT_AMOUNT` = 100 USDC | `uint64` cap on mint path (QC-AN-01) | **Asymmetric caps** if deposit circuit allows larger amounts than ETH accepts. | Align documented max deposit ETH↔AN? Single source of truth? |
-| QC-AN-J2 | `pause()` on user entrypoints | no pause on AN | ETH incident pause does **not** stop AN `finalizeDeposit` for already-deposited L1 events. | Intentional asymmetric liveness? Add AN pause? |
-| QC-AN-J3 | `InvalidAnAccount` | no pre-ZK `anAccount==0` check (QC-AN-10) | ETH stricter than AN on zero recipient. | Harmonize (ETH-style revert on AN)? |
-| QC-AN-J4 | `anWorkchain` in `Deposit` event | payout `makeAddrStd(0, account)` | Workchain from L1 not enforced on AN credit path. | Document workchain retired / always 0? |
-| QC-AN-J5 | USDC trust (QC-A1-2) | ECC mint, no USDC pause hook on bridge | Independent trust domains (L1 custody vs AN ledger). | Accepted two-domain model for milestone? |
+| ID | ETH side | AN side | Auditor view | Author (Stage II) | Disposition |
+|----|----------|---------|--------------|-------------------|-------------|
+| QC-AN-J1 | `MAX_DEPOSIT_AMOUNT` = 100 USDC | `uint64` cap on mint path (QC-AN-01) | Asymmetric caps if circuit > ETH limit. | *No answer* (see QC-AN-01 partial: raise ETH to u64) | **open** — in progress |
+| QC-AN-J2 | `pause()` on user entrypoints | no pause on AN | ETH pause does not stop AN finalize for prior L1 events. | *No answer* | **open** — in progress |
+| QC-AN-J3 | `InvalidAnAccount` | no pre-ZK `anAccount==0` check (QC-AN-10) | ETH stricter than AN on zero recipient. | *No answer* (QC-AN-10: add AN require, drop ETH guard) | **open** — in progress; dev chose opposite harmonization |
+| QC-AN-J4 | `anWorkchain` in `Deposit` event | payout `makeAddrStd(0, account)` | Workchain from L1 not enforced on AN. | «Не используется» | **closed (ack)** — workchain in event ignored on AN |
+| QC-AN-J5 | USDC trust (QC-A1-2) | ECC mint, no USDC pause hook | Two-domain custody model. | *No answer* | **open** — in progress |
 
 ---
 
@@ -52,7 +52,7 @@ These are filed on the **AN** register but ETH team should ack binding assumptio
 | ID | Why cross-chain |
 |----|-----------------|
 | **BC-AN-01** | **Closed (2026-07-20):** `f.dappId=0` on AN — PI dapp limbs ignored; no multi-dapp double-mint. |
-| **BC-AN-02** | L1 `contractAddr` in PI comes from receipt; ETH team confirms canonical bridge address(es) to pin on AN. |
+| **BC-AN-02** | L1 `contractAddr` in PI comes from receipt; ETH team confirms canonical bridge address(es) to pin on AN. *Stage II: no answer.* |
 
 Details: `questions-an.md` § BC register.
 

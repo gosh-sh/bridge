@@ -1,6 +1,6 @@
 # AN contracts audit — closeout (branch `audit`)
 
-**Date:** 2026-07-17  
+**Date:** 2026-07-21 (partial author ack — Pruvendo QA Stage II Bridge §)  
 **Scope:** `USDCBridge` / `DepositVoucher` on Acki Nacki — deposit finalize, withdraw initiation, admin/TIP-3. ZK opcode internals (`tvm-sdk`) out of scope; verified via fixture bytes only.
 
 **Registers:** `questions-an.md` (AN-only), `questions-cross-chain.md` (joint + off-chain F10).  
@@ -16,7 +16,7 @@
 | **QC** | **Required** | Reproduced; **auditor view stated**; **author must confirm** bug vs feature |
 | **BC** | **Required** | Bug **candidate** — fund loss or broken binding under stated assumptions |
 
-**This pass:** BC = **1 candidate** open (BC-AN-02). BC-AN-01 **closed** (author ack 2026-07-20, `f.dappId=0` on `contracts/dex_bridge`). QC = **10** AN-only + **5** joint (QC-AN-J*) + **13** off-chain (QC-OFF*) + **4** prover (QC-PROV*). Withdraw/admin surface: **0 BC**.
+**This pass:** BC = **1** open (BC-AN-02). BC-AN-01 **closed**. QC AN-only: **4 closed**, **4 partial ack**, **3 open**. QC joint (J*): **1 closed**, **4 open**. F10 QC-OFF/PROV unchanged. Withdraw/admin surface: **0 BC**.
 
 ---
 
@@ -32,7 +32,7 @@
 | F9 ETH fuzz (cross-repo gate) | ✅ 53/53 audit + ci |
 | F10 off-chain relayer + prover overlay | ✅ Rust gate (relayer 59 tests); prover pin + padding PoC |
 | BC PoC (BC-AN-01 dual proof) | ✅ |
-| Author BC/QC disposition | ⏳ open |
+| Author BC/QC disposition | ⏳ partial (Stage II Bridge §, 2026-07-21) |
 | E-AN-01 shellnet E2E | **deferred** |
 
 ---
@@ -56,7 +56,7 @@ CI: `test:an:audit` (skip w/o `.tools/`), `test:solidity:audit`, `test:solidity:
 | ID | Severity | PoC | Status |
 |----|----------|-----|--------|
 | **BC-AN-01** | High | `integration/test_bc_an_01_dapp_id_double_mint.py` + F8-F regressions | **closed** (author ack 2026-07-20; `f.dappId=0` on `contracts/dex_bridge`) |
-| **BC-AN-02** | Medium | `test_bc_an_02_no_l1_bridge_allowlist_pre_zk` + F8-F source regression | **open** |
+| **BC-AN-02** | Medium | `test_bc_an_02_no_l1_bridge_allowlist_pre_zk` + F8-F source regression | **open** (Stage II: no answer) |
 
 Analysis: `audit/findings/BC-AN-01/analysis.md`, `audit/findings/BC-AN-02/analysis.md`.  
 HANDOFF (RU): `HANDOFF-an-cross-chain-ru.txt`.
@@ -69,18 +69,26 @@ HANDOFF (RU): `HANDOFF-an-cross-chain-ru.txt`.
 
 | ID | PoC | Disposition |
 |----|-----|-------------|
-| QC-AN-01 | `unit/test_usdcbridge_finalize_negative.py` | open |
-| QC-AN-02…06 | admin / pause / VK / counters | open (partial unit + F2) |
-| QC-AN-07 | `integration/test_finalize_deposit_voucher_brick.py` | **closed (test)** — confirm prod deploy |
+| QC-AN-01 | `unit/test_usdcbridge_finalize_negative.py` | **partial ack** — raise ETH cap toward u64; min deposit TBD |
+| QC-AN-02 | `unit/test_usdcbridge_admin.py` | **open** |
+| QC-AN-03 | F2 manual + code review | **closed (ack)** — voucher code immutable |
+| QC-AN-04 | code review | **open** |
+| QC-AN-05 | `integration/test_cross_counter_fuzz.py` | **partial ack** — separate counters; exceed case under review |
+| QC-AN-06 | integration fixtures | **partial ack** — fixture smoke for VK |
+| QC-AN-07 | `integration/test_finalize_deposit_voucher_brick.py` | **closed (ack)** — voucher at deploy |
 | QC-AN-08 | `unit/test_usdcbridge_deposit_edge.py` | **closed (test)** |
-| QC-AN-09 | code review (accept before ZK) | accepted griefing |
-| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | open (QC) |
+| QC-AN-09 | code review (accept before ZK) | **open** |
+| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | **partial ack** — AN require planned; ETH guard to drop |
 
 ### Cross-chain (`questions-cross-chain.md`)
 
 | ID | Topic |
 |----|-------|
-| QC-AN-J1…J5 | caps, pause asymmetry, zero recipient, workchain, custody model |
+| QC-AN-J1 | caps — **open** |
+| QC-AN-J2 | pause asymmetry — **open** |
+| QC-AN-J3 | zero recipient — **open** (linked QC-AN-10 partial) |
+| QC-AN-J4 | workchain — **closed (ack)** |
+| QC-AN-J5 | custody model — **open** |
 
 ### Off-chain F10 (`questions-cross-chain.md` § QC-OFF)
 
@@ -113,7 +121,7 @@ Keeps BC-AN-01 regression + BC-AN-02 gate visible. BC-AN-01 tests are **regressi
 | ID | Suggested action |
 |----|------------------|
 | BC-AN-02 | `immutable EXPECTED_L1_BRIDGE` |
-| QC-AN-10 | `require(anAccount != 0)` before accept (ETH parity) |
+| QC-AN-10 | `require(anAccount != 0)` on AN; dev to remove ETH guard (Stage II partial) |
 | QC-OFF-06 | Map AN revert → `AlreadyFinalized`; nullifier read API |
 
 ---
@@ -127,7 +135,8 @@ Keeps BC-AN-01 regression + BC-AN-02 gate visible. BC-AN-01 tests are **regressi
 - [x] F10 relayer + prover audit overlay (QC-PROV-02 pin; QC-PROV-03/04 documented)
 - [x] QC/BC registers with PoC links (`questions-an.md`, HANDOFF)
 - [x] CI jobs (`test:an:audit`, `test:solidity:audit`, `test:deposit-relayer:audit`)
-- [x] **Author confirms** BC-AN-01 (2026-07-20)
+- [x] **Author confirms** BC-AN-01 (2026-07-20) + Stage II
+- [x] **Partial author ack** QC-AN-03, QC-AN-07, QC-AN-J4 (Stage II 2026-07-21)
 - [ ] **Author confirms** remaining BC/QC rows
 - [ ] E-AN-01 shellnet — **deferred**
 - [ ] `closeout-an.md` final signoff after disposition

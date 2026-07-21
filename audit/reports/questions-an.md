@@ -1,6 +1,6 @@
 # AN contracts & deposit proofs — questions for authors
 
-**Date:** 2026-07-20 (BC-AN-01 author ack)  
+**Date:** 2026-07-21 (author responses from Pruvendo QA Stage II — Bridge §)  
 **Audience:** Acki Nacki bridge team (`USDCBridge.sol`, `DepositVoucher.sol` in `acki-nacki`).  
 **Scope:** AN-side **contract logic** for ETH→AN deposits (`finalizeDeposit` / `confirmDeposit`), withdraw **initiation** (`initiateWithdrawal`), admin/TIP-3. ZK opcode internals (`tvm-sdk`) out of scope — verified via fixtures only.  
 **Out of scope here:** Ethereum `AckiNackiBridge`, Circuit 1A/1B/2/4 provers, cross-chain policy — see sibling docs.
@@ -8,7 +8,9 @@
 **Branch / artefacts:** audit overlay `audit/spec/an/`; synced contract `audit/spec/an-contracts/` from `acki-nacki@contracts/dex_bridge`.  
 **Test gate:** `make audit-an-test` → **74 passed** (2026-07-20, incl. F8-F BC regressions).
 
-**Closeout:** `audit/reports/closeout-an.md` (draft — author ack pending).
+**Closeout:** `audit/reports/closeout-an.md` (draft — partial author ack).
+
+**Author responses:** recorded from *AckiNacki — Pruvendo QA Stage II* (Bridge §, 2026-07-21). Rows without a dev answer stay **in progress**; no further outbound mail for this round.
 
 Manual reviews: `manual-audit/F1-usdcbridge-deposit.md`, `manual-audit/F2-usdcbridge-withdraw-admin.md`.
 
@@ -24,7 +26,7 @@ Manual reviews: `manual-audit/F1-usdcbridge-deposit.md`, `manual-audit/F2-usdcbr
 
 QC ≠ «не проверяли». QC = «проверили, просим автора подтвердить intent».
 
-**This pass:** BC = **1 candidate** open (BC-AN-02). BC-AN-01 **closed** (author ack 2026-07-20). QC = **10** AN-only (+ accepted QC-AN-09). Withdraw/admin surface: **0 BC**.
+**This pass:** BC = **1** open (BC-AN-02). BC-AN-01 **closed**. QC AN-only: **4 closed**, **4 partial ack**, **3 open** (no Stage II answer). Withdraw/admin surface: **0 BC**.
 
 ---
 
@@ -51,11 +53,11 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | **Fix** | `acki-nacki@contracts/dex_bridge`: `f.dappId = 0` in `_parsePublicInputs` — PI dapp limbs ignored; all deposits land in dapp 0. |
 | **PoC / regression** | ✅ `integration/test_bc_an_01_dapp_id_double_mint.py` — `test_bc_an_01_double_mint_same_deposit_two_dapp_ids` |
 | **Analysis** | `audit/findings/BC-AN-01/analysis.md` |
-| **Disposition** | **Closed (author ack 2026-07-20)** — accepted as intentional fix (interim: no multi-dapp namespace per deposit). |
+| **Disposition** | **Closed** — author ack 2026-07-20 (repo) + Stage II: «fixed. Принудительно dapp_id делаю 0». |
 
 ---
 
-### BC-AN-02 — no L1 bridge `contractAddr` allowlist (Medium)
+### BC-AN-02 — no L1 bridge `contractAddr` allowlist (Medium) — **open**
 
 | | |
 |--|--|
@@ -63,8 +65,9 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | **Issue** | Proof valid for a deposit on bridge deployment A could finalize if circuit only checks “some contract emitted Deposit”, not a pinned Sepolia address. |
 | **PoC** | **Partial** — `test_bc_an_02_no_l1_bridge_allowlist_pre_zk` (no revert before ZK). Full PoC needs second valid proof with different `contractAddr` PI. |
 | **Analysis** | `audit/findings/BC-AN-02/analysis.md` |
+| **Author (Stage II)** | *No answer* — in progress. |
 
-**Ask author:**
+**Still open:**
 
 1. Should `USDCBridge` pin `EXPECTED_L1_BRIDGE` (immutable)?
 2. Is multi-L1-bridge → single AN bridge an intended deployment model?
@@ -75,28 +78,28 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 
 ### Deposit / finalizeDeposit
 
-| ID | PoC | Auditor view | Ask author |
-|----|-----|--------------|------------|
-| QC-AN-01 | `unit/test_usdcbridge_finalize_negative.py` (`test_finalize_deposit_amount_overflow`) | `fr[2]` must fit `uint64` (exit 214) before mint — likely intentional `mintecc` bound. | Confirm max deposit / document alignment with ETH `MAX_DEPOSIT_AMOUNT`? (Cross-ref QC-AN-J1.) |
-| QC-AN-08 | `unit/test_usdcbridge_deposit_edge.py` | Truncated PI rejected before mint. | **Closed (test)** — behaviour documented. |
-| QC-AN-09 | code review (`tvm.accept()` before ZK) | Permissionless submit; bad proof wastes bridge gas only — **griefing**, not theft. | Accept as intentional? |
-| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | No `anAccount==0` guard pre-ZK (ETH reverts `InvalidAnAccount`). | Accept vs add on-chain revert mirroring ETH? |
+| ID | PoC | Auditor view | Author (Stage II) | Disposition |
+|----|-----|--------------|-------------------|-------------|
+| QC-AN-01 | `unit/test_usdcbridge_finalize_negative.py` | `fr[2]` must fit `uint64` (exit 214) before mint. | «лучше в эфире увеличить до u64. Надо подумать про минимальный размер» | **partial ack** — raise ETH cap direction; min deposit TBD (see QC-AN-J1) |
+| QC-AN-08 | `unit/test_usdcbridge_deposit_edge.py` | Truncated PI rejected before mint. | (no question in Stage II) | **closed (test)** |
+| QC-AN-09 | code review (`tvm.accept()` before ZK) | Permissionless submit; bad proof wastes bridge gas — griefing, not theft. | *No answer* | **open** — in progress |
+| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | No `anAccount==0` guard pre-ZK (ETH reverts `InvalidAnAccount`). | «добавлю require» on AN; «убрать проверку в эфире» — burn on L1 allowed | **partial ack** — deliberate asymmetry; await code on both sides (see QC-AN-J3) |
 
 ### Admin / upgrade / ops
 
-| ID | PoC | Auditor view | Ask author |
-|----|-----|--------------|------------|
-| QC-AN-02 | `unit/test_usdcbridge_admin.py` ADM-AN-02..03 | Owner `mintAndSend` mints ECC **without** cross-chain proof — **centralization**, not deposit-path bug. | Multisig / operational controls on `_ownerPubkey` acceptable? |
-| QC-AN-03 | F2 manual + code review | `updateCode` / `onCodeUpgrade` only path to rotate `_depositVoucherCode` (B2 — no standalone setter). | Upgrade playbook + voucher rotation tested on shellnet? |
-| QC-AN-04 | code review | **No pause** on AN; ETH `pause()` blocks L1 `deposit`. | Should `finalizeDeposit` be pausable on AN? |
-| QC-AN-05 | code review + `integration/test_cross_counter_fuzz.py` | `_totalMinted` vs bridged minted decoupled; owner path can make `burned > minted`. | Document ops monitoring for both counters? |
-| QC-AN-06 | integration fixtures + synced `VK_BLOB` | Audit overlay VkBlob `724687a4…` (`max_key_byte_len=3`); tvm-sdk tip still `304c1c4e…` until deploy. | Compare hashes after contract rollout? |
+| ID | PoC | Auditor view | Author (Stage II) | Disposition |
+|----|-----|--------------|-------------------|-------------|
+| QC-AN-02 | `unit/test_usdcbridge_admin.py` ADM-AN-02..03 | Owner `mintAndSend` without cross-chain proof — centralization. | *No answer* | **open** — in progress |
+| QC-AN-03 | F2 manual + code review | `updateCode` / `onCodeUpgrade` only path to rotate voucher code. | «обновлять код ваучера нельзя — старые пруфы позволят наминтить. Тестов нет» | **closed (ack)** — immutable voucher code by design |
+| QC-AN-04 | code review | No pause on AN; ETH `pause()` blocks L1 `deposit`. | *No answer* | **open** — in progress (see QC-AN-J2) |
+| QC-AN-05 | `integration/test_cross_counter_fuzz.py` | `_totalMinted` vs bridged minted decoupled. | «нет, оставляем отдельно. Ещё посмотрю на превышение» | **partial ack** — separate counters OK; burned>m minted under review |
+| QC-AN-06 | integration fixtures + `VK_BLOB` | VkBlob hash must match deployed circuit. | «тестируем тестовыми пруфами» | **partial ack** — fixture smoke, not CI hash gate |
 
 ### Infrastructure / edge cases
 
-| ID | PoC | Auditor view | Ask author |
-|----|-----|--------------|------------|
-| QC-AN-07 | `integration/test_finalize_deposit_voucher_brick.py` | If `_depositVoucherCode` missing, ZK may pass but **no mint** in pipeline. | **Closed (test)** — confirm production deploy always embeds voucher code. |
+| ID | PoC | Auditor view | Author (Stage II) | Disposition |
+|----|-----|--------------|-------------------|-------------|
+| QC-AN-07 | `integration/test_finalize_deposit_voucher_brick.py` | Missing `_depositVoucherCode` → no mint after ZK. | «да. Ваучер будет установлен сразу при деплое» | **closed (ack)** — prod embeds voucher at deploy |
 
 ---
 
@@ -115,7 +118,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | ID | Suggested action | If author agrees |
 |----|------------------|------------------|
 | BC-AN-02 | `immutable EXPECTED_L1_BRIDGE` | Medium |
-| QC-AN-10 | `require(f.anAccount != 0)` before accept | Low / consistency with ETH |
+| QC-AN-10 | `require(f.anAccount != 0)` on AN; dev plans to drop ETH `InvalidAnAccount` | Partial ack — asymmetric burn model (Stage II) |
 
 ---
 

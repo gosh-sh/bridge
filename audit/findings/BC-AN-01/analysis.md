@@ -1,7 +1,7 @@
 # BC-AN-01 — dappId not bound to L1 event
 
 **Class:** was BC candidate (High)  
-**Status:** **closed (author ack 2026-07-20)** — `acki-nacki@contracts/dex_bridge` pins `f.dappId = 0` in `_parsePublicInputs`; team accepts this as the intended fix (interim: PI dapp limbs ignored, all deposits land in dapp 0)  
+**Status:** **closed (ack Stage II 2026-07-21)** — author ack repo 2026-07-20 + PDF: «fixed. Принудительно dapp_id делаю 0».  
 **Area:** `USDCBridge.finalizeDeposit` replay key
 
 ## Summary

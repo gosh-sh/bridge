@@ -1,129 +1,115 @@
 HANDOFF для разработчиков Acki Nacki Bridge (ETH ↔ AN)
-Дата: 2026-07-20 (обновление: BC-AN-01 закрыт)
+Дата: 2026-07-21 (ответы зафиксированы из Pruvendo QA Stage II, раздел Bridge)
 Источник: аудит ветки audit, регистры questions-an.md и questions-cross-chain.md
 Тесты AN: make audit-an-test → 74 passed. PoC и детали: audit/reports/questions-an.md, audit/findings/BC-AN-*/
 
-Ниже — открытые вопросы и кандидаты в баги. На каждый пункт нужен ответ команды: это баг или задуманное поведение, и что планируете менять.
+Ответы разработчиков записаны в регистрах. Дальнейная рассылка не планируется — открытые пункты остаются in progress.
 
 
-BC-AN-01 — ЗАКРЫТО (author ack 2026-07-20)
+BC-AN-01 — ЗАКРЫТО
 
-Был: double-mint при разном dappId в PI для одного L1 depositId. Фикс на contracts/dex_bridge: f.dappId = 0 в _parsePublicInputs — PI dapp limbs игнорируются, все депозиты в dapp 0. Команда приняла это как финальное решение (временный вид «костыля», но закрываем). Регрессия: integration/test_bc_an_01_dapp_id_double_mint.py. Детали: audit/findings/BC-AN-01/analysis.md.
+Был: double-mint при разном dappId в PI. Фикс: f.dappId = 0 на contracts/dex_bridge.
+Ответ Stage II: «fixed. Принудительно dapp_id делаю 0».
+Регрессия: integration/test_bc_an_01_dapp_id_double_mint.py.
 
 
-BC-AN-02 (средний приоритет, кандидат в баг)
+BC-AN-02 — ОТКРЫТО (in progress)
 
-В public inputs депозита есть адрес L1-контракта (contractAddr), он входит в ключ реплея, но на AN нет проверки «это именно наш канонический мост Sepolia/mainnet». Теоретически валидный прув депозита с другого контракта Ethereum (если схема проверяет лишь факт события Deposit, а не конкретный адрес) может пройти finalizeDeposit на вашем USDCBridge. Сейчас есть частичный PoC: контракт не отсекает чужой contractAddr до ZK (test_bc_an_02_no_l1_bridge_allowlist_pre_zk); полный сценарий нужен второй валидный прув с другим contractAddr. Нужно решить: фиксируем ли immutable EXPECTED_L1_BRIDGE в USDCBridge. Допустима ли модель «несколько L1-мостов → один AN-мост» без allowlist?
+Нет allowlist L1 contractAddr на AN. PoC: test_bc_an_02_no_l1_bridge_allowlist_pre_zk.
+Ответ Stage II: нет.
 
 
-QC-AN-01 (лимит суммы на AN)
+QC-AN-01 — ЧАСТИЧНЫЙ ACK (in progress)
 
-На AN перед минтом проверяется, что amount из public inputs помещается в uint64 (иначе exit 214). На Ethereum действует отдельный лимит MAX_DEPOSIT_AMOUNT (100 USDC за транзакцию). Нужно подтвердить, что эти ограничения согласованы по смыслу и документации: какой максимум депозита считается единым для продукта. Если deposit-circuit или прувер допускает суммы больше, чем ETH принимает на deposit(), возможна рассинхронизация политики (см. также QC-AN-J1).
+Лимит uint64 на AN vs 100 USDC на ETH.
+Ответ Stage II: «лучше в эфире увеличить до u64. Надо подумать про минимальный размер».
 
 
-QC-AN-09 (griefing через accept до ZK)
+QC-AN-02 — ОТКРЫТО (in progress)
 
-finalizeDeposit вызывает tvm.accept() до проверки ZK, потому что opcode верификации слишком тяжёлый для лимита газа внешнего сообщения. Любой может прислать мусорный прув; контракт потратит свой газ на неудачную верификацию, но средства пользователей не крадутся. Мы классифицируем это как griefing, не как кражу. Подтвердите, что такая permissionless-модель и порядок accept → ZK — осознанный дизайн.
+Централизация owner mint. Ответ Stage II: нет.
 
 
-QC-AN-10 (нулевой получатель anAccount)
+QC-AN-03 — ЗАКРЫТО (ack)
 
-На Ethereum deposit с anAccount == 0 отклоняется (InvalidAnAccount). На AN в наших тестах нет аналогичной проверки до ZK: нулевой получатель формально проходит ранние проверки и уходит в дорогую верификацию. Нужно решить: оставляем как есть или добавляем require(anAccount != 0) до accept для паритета с ETH (см. QC-AN-J3).
+Ротация кода ваучера.
+Ответ Stage II: «обновлять код ваучера нельзя — старые пруфы позволят наминтить. Тестов нет».
 
 
-QC-AN-02 (централизация owner mint)
+QC-AN-04 — ОТКРЫТО (in progress)
 
-Владелец по pubkey может вызвать mintAndSend и напечатать ECC без ZK-доказательства кросс-чейн депозита. Это не дыра в deposit-path, а риск централизации и операционной дисциплины. Приемлемо ли для продакшена, что _ownerPubkey — мультисиг или жёстко контролируемый оператор? Какие процедуры ротации ключа и мониторинга заложены?
+Пауза на AN vs ETH. Ответ Stage II: нет.
 
 
-QC-AN-03 (ротация кода ваучера)
+QC-AN-05 — ЧАСТИЧНЫЙ ACK (in progress)
 
-Код DepositVoucher меняется только через полный updateCode / onCodeUpgrade моста, отдельного сеттера _depositVoucherCode нет (это плюс с точки зрения B2 из ревью). Нужен ответ: есть ли отработанный playbook апгрейда и проверка на shellnet, что после апгрейда ваучеры деплоятся и confirmDeposit работает с новым кодом.
+Два счётчика supply.
+Ответ Stage II: «нет, оставляем отдельно. Ещё посмотрю на превышение».
 
 
-QC-AN-04 (пауза на AN)
+QC-AN-06 — ЧАСТИЧНЫЙ ACK (in progress)
 
-На Ethereum pause() блокирует пользовательский deposit. На AN нет аналогичной паузы на finalizeDeposit: уже случившиеся L1-депозиты теоретически можно финализировать на AN даже при инциденте на L1. Нужна ли симметричная emergency-пауза на finalizeDeposit (см. QC-AN-J2).
+VK blob в контракте.
+Ответ Stage II: «тестируем тестовыми пруфами».
 
 
-QC-AN-05 (два счётчика supply)
+QC-AN-07 — ЗАКРЫТО (ack)
 
-_totalMinted и _totalMintedBridgeByToken (getTotalBridged) живут отдельно: owner mint увеличивает только _totalMinted, а кросс-чейн депозиты — bridged minted. Наш fuzz показал: после owner mint пользователь может сжечь ECC через initiateWithdrawal так, что burned на bridged leg превысит minted на bridged leg, хотя ECC в сети был от owner. Один общий инвариант «всего монет» на контракте не enforced. Нужно ли задокументировать для операторов мониторинг обоих счётчиков и алерты на рассинхрон?
+Voucher brick при деплое.
+Ответ Stage II: «да. Ваучер будет установлен сразу при деплое».
 
 
-QC-AN-06 (VK blob в контракте)
+QC-AN-08 — ЗАКРЫТО (тест)
 
-В audit overlay USDCBridge зашит VK_BLOB `724687a4…` (`max_key_byte_len=3`, dev ack 2026-07-17). tvm-sdk tip пока `304c1c4e…` — сравним после выката контрактов. Готовы ли добавить в CI проверку хеша VK blob при sync/deploy?
+Усечённые PI. Отдельного вопроса в Stage II нет.
 
 
-QC-AN-07 (закрыто тестом — просьба подтвердить прод)
+QC-AN-09 — ОТКРЫТО (in progress)
 
-Если в состоянии моста не пропатчен _depositVoucherCode, ZK может пройти, но цепочка ваучер → confirmDeposit не даст минт (integration/test_finalize_deposit_voucher_brick.py). Поведение задокументировано тестом. Подтвердите, что production deploy всегда вшивает код ваучера и этот сценарий невозможен на проде.
+Griefing accept до ZK. Ответ Stage II: нет.
 
 
-QC-AN-08 (закрыто тестом — без вопроса)
+QC-AN-10 — ЧАСТИЧНЫЙ ACK (in progress)
 
-Усечённые public inputs (короче 352 байт) отсекаются до минта. Поведение покрыто unit-тестом. Отдельного открытого вопроса нет.
+Нулевой anAccount.
+Ответ Stage II: «добавлю require» на AN; «убрать проверку в эфире» — сжечь на L1 разрешено.
 
 
-QC-AN-J1 (кросс-чейн: лимиты суммы ETH ↔ AN)
+QC-AN-J1 — ОТКРЫТО (in progress)
 
-На L1 лимит 100 USDC на одну транзакцию deposit. На AN — технический потолок uint64 в поле amount PI. Если off-chain схема или конфиг когда-либо позволят сумму выше L1-лимита, политика продукта разъедется. Нужен единый документированный максимум депозита и понимание, кто source of truth: контракт ETH, circuit, или оба.
+Единый лимит депозита ETH↔AN. Ответ Stage II: нет (см. QC-AN-01).
 
 
-QC-AN-J2 (кросс-чейн: пауза ETH vs AN)
+QC-AN-J2 — ОТКРЫТО (in progress)
 
-Пауза на Ethereum не останавливает finalizeDeposit на AN для событий, которые уже попали в L1 до паузы. Это асимметрия liveness: в инциденте можно заморозить новые депозиты на L1, но финализация на AN может продолжаться. Это задумано? Нужна ли зеркальная пауза на AN или явное описание в runbook инцидентов?
+Пауза ETH vs finalize на AN. Ответ Stage II: нет.
 
 
-QC-AN-J3 (кросс-чейн: нулевой получатель)
+QC-AN-J3 — ОТКРЫТО (in progress)
 
-ETH строже: нулевой anAccount на deposit запрещён. AN мягче (QC-AN-10). Для единообразия UX и безопасности стоит ли добавить на AN такую же проверку до ZK, как на Ethereum?
+Паритет нулевого получателя. Ответ Stage II: нет (см. QC-AN-10 — асимметрия).
 
 
-QC-AN-J4 (кросс-чейн: workchain)
+QC-AN-J4 — ЗАКРЫТО (ack)
 
-В событии Deposit на Ethereum есть anWorkchain. На AN выплата идёт через makeAddrStd(0, anAccount), то есть workchain 0 жёстко. Значение workchain из L1 на кредитование не влияет. Нужно явно задокументировать: workchain в событии исторический / всегда 0 / не используется на AN?
+Workchain в событии Deposit.
+Ответ Stage II: «Не используется».
 
 
-QC-AN-J5 (кросс-чейн: две модели custody)
+QC-AN-J5 — ОТКРЫТО (in progress)
 
-На Ethereum пользователь доверяет USDC в мосту и AAVE. На AN пользователь получает ECC (валюта #3), это отдельный ledger без прямой привязки к USDC pause на L1. Принимается ли для текущего milestone двухдоменная модель доверия (L1 custody vs AN ECC) без единого «заморозить всё» переключателя?
+Двухдоменная custody. Ответ Stage II: нет.
 
 
-Off-chain / relayer (deposit path) — QC-OFF-01..05
+Off-chain / relayer — QC-OFF-01..06
 
-Полный текст для разработчиков (4–6 предложений на пункт):
-audit/reports/HANDOFF-f10-prover-relayer-ru.txt
+В Stage II Bridge § не включены. См. audit/reports/HANDOFF-f10-prover-relayer-ru.txt — in progress.
 
-Релеер deposit-relayer-daemon — сторонний операторский сервис, не trust root для выплаты: finalizeDeposit на AN permissionless. При сбое релеера безопасность (нет кражи USDC) сохраняется, страдает liveness (кредит задерживается). Детали: audit/reports/manual-audit/F10-offchain-deposit-pipeline.md.
 
-QC-OFF-01: Демон обрабатывает depositId строго по порядку. Один «застрявший» id блокирует все последующие. Задумано? Нужен skip / out-of-order / алерт?
+Сводка
 
-QC-OFF-02: Если единственный релеер умер — кредит останавливается, пока кто-то не запустит deposit-relayer finalize-one или свой демон. Есть runbook? Нужен ли backup relayer для mainnet SLA?
+Закрыто: BC-AN-01, QC-AN-03, QC-AN-07, QC-AN-08, QC-AN-J4
+Частичный ack: QC-AN-01, QC-AN-05, QC-AN-06, QC-AN-10
+Открыто / ждём: BC-AN-02, QC-AN-02, QC-AN-04, QC-AN-09, QC-AN-J1..J3, QC-AN-J5, QC-OFF-*
 
-QC-OFF-03: Любой с ETH RPC + prover + AN может финализировать. Поощряются ли конкурирующие релееры / watchdog?
-
-QC-OFF-04: Релеер держит AN operator keys и ходит в GraphQL — риск MITM/DNS. TLS pinning, allowlist endpoint, модель custody ключей?
-
-QC-OFF-05: is_finalized pre-check на live AN может быть недоступен — рестарт может повторно генерировать proof (лишний gas, не double-mint). Когда будет read API nullifier?
-
-QC-OFF-06 (критично для liveness): живой AnInterfaceSubmitter НИКОГДА не возвращает AlreadyFinalized — дубликат finalizeDeposit на AN даёт Reverted → Rejected. Вместе со строгой очередью depositId это значит: если другой релеер уже финализировал id N, наш демон застрянет на N навсегда (вечный prove→submit→revert). Мок-тесты это скрывают. Нужен маппинг revert reason или read API nullifier до mainnet.
-
-
-Сводка по BC для обеих команд
-
-BC-AN-01: **закрыт** (2026-07-20). Фикс `f.dappId=0` на AN; double-mint по dappId больше не воспроизводится.
-
-BC-AN-02: ETH-команде нужно подтвердить канонический адрес(а) L1-моста для pinning на AN. AN-команде — решить про allowlist contractAddr в контракте.
-
-Рекомендуемые митигации (после вашего подтверждения, не внедрять вслепую)
-
-BC-AN-02: immutable EXPECTED_L1_BRIDGE.
-QC-AN-10 / QC-AN-J3: require(anAccount != 0) до accept на AN.
-
-Как отвечать
-
-Для каждого ID: OK (так задумано) / QC acknowledged (принимаем риск) / BC confirmed (будем фиксить) + краткий план. Ответы можно прислать в том же формате ID → решение.
-
-Контакты артефактов аудита: audit/reports/questions-an.md, audit/reports/questions-cross-chain.md, audit/reports/an-audit-plan.md, audit/reports/test-matrix-an.md.
+Контакты артефактов: audit/reports/questions-an.md, audit/reports/questions-cross-chain.md, audit/reports/closeout-an.md.

@@ -5,27 +5,14 @@ import "./IBridgeWithdrawalVerifier.sol";
 import "./IBridgeWithdrawalGroth16Verifier.sol";
 
 /// @title BridgeWithdrawalVerifier
-/// @notice Adapter that verifies Circuit 4 (`bridge-event-prove-circuit`,
-///         single-final-root layout — partner branch
-///         `circuit4-single-final-root`) proofs from Acki Nacki using a
-///         gnark-generated Groth16 verifier with **10 public inputs**.
+/// @notice **FORBIDDEN for production / mainnet deploys (WD-Q3).**
+///         Legacy Groth16 adapter for Circuit 4. The gnark wrapper is an
+///         **identity stub** — it does **not** verify the Halo2 SHPLONK proof.
+///         Production must wire `BridgeWithdrawalAggregatorVerifier` via
+///         `ShplonkDeployLib.deployWithdrawalAdapter` only.
 ///
-/// @dev Mirrors `LayerHashesMovementVerifier.sol` structure: re-assembles
-///      the 10 public inputs in the order the gnark circuit expects and
-///      forwards to the generated `verifyProof`. The generated verifier
-///      is wired at construction time and immutable thereafter.
-///
-///      The Halo2 SHPLONK proof from `bridge-prover-orchestrator`
-///      (Circuit 4 path, partner-shipped) is wrapped off-chain by
-///      `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4` into
-///      a 256-byte Groth16 proof.
-///
-///      **R15**: as of 2026-05-26 the gnark wrapper enforces only
-///      identity-stub assertions over the public inputs — the Halo2
-///      SHPLONK proof itself is **not** verified inside Groth16.
-///      Replacing the wrapper with a real Halo2-in-gnark verifier is
-///      tracked as Phase 8 of `docs/an_partner_integration_plan.md` and
-///      is the single biggest open mainnet blocker.
+/// @dev Kept for historical / test reference. CI gate:
+///      `scripts/check_withdrawal_verifier_not_stub.sh`.
 contract BridgeWithdrawalVerifier is IBridgeWithdrawalVerifier {
     IBridgeWithdrawalGroth16Verifier public immutable groth16Verifier;
 

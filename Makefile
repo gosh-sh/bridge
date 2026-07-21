@@ -206,6 +206,8 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@chmod +x scripts/check_eip170_verifier_bins.sh
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike 2>/dev/null || \
 	 ./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers 2>/dev/null || true
+	@chmod +x scripts/check_withdrawal_verifier_not_stub.sh
+	@./scripts/check_withdrawal_verifier_not_stub.sh
 	@echo "$(GREEN)── pre-push: all green; safe to push ──$(NC)"
 
 # Quick commands

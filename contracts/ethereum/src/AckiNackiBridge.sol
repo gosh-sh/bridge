@@ -55,8 +55,10 @@ contract AckiNackiBridge {
     /// @notice One USDC base unit (USD Coin uses 6 decimals on Ethereum).
     uint256 public constant USDC_UNIT = 10 ** 6;
 
-    /// @notice Maximum deposit amount (100 USDC; prevents whale deposits)
-    uint256 public constant MAX_DEPOSIT_AMOUNT = 100 * USDC_UNIT;
+    /// @notice Maximum per-tx deposit amount. Capped at `type(uint64).max` so the
+    ///         amount fits AN `USDCBridge` mint path (`fr[2]` as uint64). Not a
+    ///         global TVL limit (QC-A1-1 / QC-AN-J1).
+    uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -286,6 +288,9 @@ contract AckiNackiBridge {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
+    /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
+    ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
+    event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
 
     /// @notice Emitted on every successful `verifyBlock` call.
     /// @param blockId AN block identifier (Merkle root committed by both proofs).
@@ -306,9 +311,7 @@ contract AckiNackiBridge {
 
     /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
     event BkSetUpdated(
-        uint256 indexed oldCommitment,
-        uint256 indexed newCommitment,
-        uint64 indexed blockSeqNo
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
@@ -371,6 +374,10 @@ contract AckiNackiBridge {
     error PrevAnchorMismatch(uint256 supplied, uint256 stored);
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
+    /// @notice Active layer slot (`i < numLayers`) must be non-zero (QC-A2-3).
+    error LayerHashActiveZero(uint256 index);
+    /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
+    error NoExcessUsdc();
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -669,6 +676,11 @@ contract AckiNackiBridge {
         for (uint256 i = numLayers; i < MAX_LAYER_HASHES; i++) {
             if (layerHashes[i] != 0) revert LayerHashTailNonZero(i);
         }
+        // Active slots must be non-zero so `_appendLayerHashes` cannot skip a
+        // layer and desync per-layer windows / `_highestActiveLayer` (QC-A2-3).
+        for (uint256 i = 0; i < numLayers; i++) {
+            if (layerHashes[i] == 0) revert LayerHashActiveZero(i);
+        }
 
         // ---- Anchor checks against stored state. ----
         if (bkSetCommitment != storedBkSetCommitment) {
@@ -765,9 +777,7 @@ contract AckiNackiBridge {
         bytes32 siblingH0,
         bytes32 siblingH23
     ) external nonReentrant whenNotPaused {
-        if (
-            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
-        ) {
+        if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
         }
 
@@ -1033,6 +1043,11 @@ contract AckiNackiBridge {
         if (pub.recipientLo > RECIPIENT_HALF_MASK) {
             revert RecipientHalfOutOfRange(pub.recipientLo);
         }
+        // WD-Q2: reject recipient=0 before crypto / CEI so a stranded event
+        // cannot burn gas on verify then strand forever on a real USDC reject.
+        if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
+            revert InvalidRecipient();
+        }
         bytes32 nullifierKey = bytes32(pub.nullifier);
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
@@ -1165,6 +1180,28 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, received);
         }
         emit YieldHarvested(yieldRecipient, received);
+    }
+
+    /// @notice Liquid USDC held by the bridge above `treasuryBalance` (user
+    ///         principal). Typically post-`emergencyWithdrawAll` yield that is
+    ///         no longer tracked as AAVE `accruedYield()` (QC-A1-3).
+    function excessUsdc() public view returns (uint256) {
+        uint256 liquid = usdc.balanceOf(address(this));
+        return liquid > treasuryBalance ? liquid - treasuryBalance : 0;
+    }
+
+    /// @notice Owner skim of `excessUsdc` to `yieldRecipient`. Does not touch
+    ///         user principal (`treasuryBalance`).
+    /// @param amount Amount to skim (`type(uint256).max` = all excess).
+    function skimExcessUsdc(uint256 amount) external onlyOwner nonReentrant {
+        if (yieldRecipient == address(0)) revert InvalidRecipient();
+        uint256 excess = excessUsdc();
+        uint256 toSkim = amount == type(uint256).max ? excess : amount;
+        if (excess == 0 || toSkim == 0 || toSkim > excess) revert NoExcessUsdc();
+        if (!usdc.transfer(yieldRecipient, toSkim)) {
+            revert WithdrawTransferFailed(yieldRecipient, toSkim);
+        }
+        emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
     }
 
     // ---------------------------------------------------------------------

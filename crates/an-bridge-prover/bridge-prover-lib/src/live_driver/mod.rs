@@ -296,14 +296,14 @@ pub struct BundleProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
+    /// Block ID as `Fr::to_repr()` bytes — a single value shared by both
+    /// circuits since the 2026-07-22 Circuit 1 byte-order fix. Both Circuit 1
+    /// (from the attestation payload) and Circuit 2 (from the SHA-256 8-leaf
+    /// Merkle root) now compute `block_id_fr = uint256(bytes32(root))`, so
+    /// the two derivation paths are provably equal for a valid block.
+    /// `bundle.rs` debug-asserts this equality at build time to page loudly
+    /// if either circuit's byte-order convention regresses.
     pub block_id_be: [u8; 32],
-    /// Circuit 2's block_id — derived from the layer preimage + SHA-256 Merkle
-    /// siblings (reverse of the tree root, treated as LE bytes of Fr). This is
-    /// distinct from [`Self::block_id_be`] (which comes from parsing the raw
-    /// attestation payload) even though both bind the "same" block: the two
-    /// derivation paths can produce different Fr representations depending on
-    /// byte-order conventions in the attestation wire format.
-    pub layer_block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
     pub bk_set_commitment_be: [u8; 32],

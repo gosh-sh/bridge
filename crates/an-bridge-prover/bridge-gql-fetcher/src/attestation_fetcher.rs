@@ -18,7 +18,7 @@ use crate::gql_client::GqlClient;
 /// `attestations[]` array.
 ///
 /// `raw_bytes` is laid out exactly as `bincode(Envelope<AttestationData>)` so
-/// `bridge_parsers::attestation_data_parser` and `prover.rs::compute_block_id_fr`
+/// `attestation_bls_checker_circuit::attestation_data_parser` and `prover.rs`
 /// can index it with their fixed offsets.
 #[derive(Debug, Clone)]
 pub struct ParsedAttestation {

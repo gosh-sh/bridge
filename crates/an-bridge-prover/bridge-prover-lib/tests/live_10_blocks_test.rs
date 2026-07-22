@@ -137,9 +137,9 @@ async fn test_prove_10_live_blocks() {
         // Off-circuit BLS verification.
         let t = Instant::now();
         {
-            let sig_bytes = bridge_parsers::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
-            let entries = bridge_parsers::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
-            let att_data = bridge_parsers::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
+            let sig_bytes = attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
+            let entries = attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
+            let att_data = attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
             let signature = gosh_bls_verification::helpers::deserialize_g2_signature(sig_bytes);
             let msg_hash = gosh_bls_verification::helpers::compute_msg_hash(&att_data[..120]);
             let pks = gosh_bls_verification::helpers::resolve_pubkeys(&entries, &bk_set);

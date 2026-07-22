@@ -6,12 +6,11 @@ description = "Wraps the partner's halo2 circuits with key/prover/verifier helpe
 
 [dependencies]
 # Partner circuits / parsers / test-data-gen — fetched from public GitHub.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
 hex = "0.4"
@@ -21,6 +20,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
 # the sibling `crates/an-bridge-prover/` sub-workspace.
 bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
+# GraphQL fetchers (attestation, bk_set, gql_client) live here — split out of
+# bridge-prover-lib during the same 2026-06-18 migration.
+bridge-gql-fetcher = { path = "../an-bridge-prover/bridge-gql-fetcher" }
 # Circuit 4 (bridge event / withdrawal) prover surface — source of the inner
 # Poseidon SHPLONK snark that `export-c4-poseidon-snark` wraps for the R15
 # `BridgeWithdrawalAggregatorVerifier` Yul.
@@ -53,8 +55,7 @@ snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git
 
 [dev-dependencies]
 # Already available via [dependencies] above; integration tests need them re-listed.
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
-bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
 
 [[bin]]
 name = "export-bound-block-proofs"
@@ -84,15 +85,10 @@ path = "src/bin/export_1a1b2_poseidon_snark.rs"
 
 [patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
 attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
-bridge-parsers = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/parsers" }
 bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
 bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
 bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
 historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
-bk-set-update-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bk-set-update-checker-circuit" }
-
-[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-prover"]
-bridge-prover-lib = { path = "../../../acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-lib" }
 
 [patch."https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381"]
 halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }

@@ -556,10 +556,9 @@ fn to_ipc_circuit(t: BundleFinalizationType) -> ipc::AttestationCircuit {
 }
 
 fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
-    // Circuit 1a/1b's `block_id` (from attestation payload) and Circuit 2's
-    // `block_id` (from the SHA-256 8-leaf Merkle root reversed to LE) bind the
-    // same block but may have different Fr representations depending on
-    // byte-order conventions in the attestation wire format — send both.
+    // Since the 2026-07-22 Circuit 1 byte-order fix, both circuits emit
+    // `block_id_fr = uint256(bytes32(root))`, so a single `block_id_hex`
+    // field is shared as public instance [0] of Circuit 1 and Circuit 2.
     ipc::ProofRequest {
         schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: b.block_seq_no as u32,
@@ -569,7 +568,6 @@ fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
         attestation_circuit: to_ipc_circuit(b.fin_type),
         primary_proof_hex: hex::encode(&b.attestation_proof),
         layer_proof_hex: hex::encode(&b.layer_hashes_proof),
-        layer_block_id_hex: hex::encode(b.layer_block_id_be),
         bk_set_poseidon_hash_hex: hex::encode(b.bk_set_commitment_be),
         num_layers: b.num_layers,
         layer_hash_frs_hex: b.layer_hashes_be.iter().map(hex::encode).collect(),
@@ -607,7 +605,6 @@ fn verify_bundle_inline(
     bundle: &BundleProofArtifacts,
 ) -> (bool, bool) {
     let block_id_fr = fr_from_repr(bundle.block_id_be);
-    let layer_block_id_fr = fr_from_repr(bundle.layer_block_id_be);
     let bk_set_commitment_fr = fr_from_repr(bundle.bk_set_commitment_be);
 
     // Circuit 1a/1b public instances match the layout the verifier daemon
@@ -631,9 +628,11 @@ fn verify_bundle_inline(
         ),
     };
 
-    // Circuit 2 public instances: 14 elements.
+    // Circuit 2 public instances: 14 elements. Post-Circuit-1 byte-order
+    // fix, Circuit 2 binds the same `block_id_fr` as Circuit 1, so we reuse
+    // `block_id_fr` here for public instance [0].
     let mut layer_instances: Vec<Fr> = Vec::with_capacity(14);
-    layer_instances.push(layer_block_id_fr);
+    layer_instances.push(block_id_fr);
     layer_instances.push(bk_set_commitment_fr);
     layer_instances.push(Fr::from(bundle.num_layers as u64));
     for be in &bundle.layer_hashes_be {

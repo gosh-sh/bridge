@@ -37,9 +37,10 @@ fn test_circuit2_mockprover() {
     let num_chain_steps: u8 = 2;
 
     // 1. Build chain data.
-    let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain(
+    let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth(
         num_layers as usize,
         (num_chain_steps - 1) as usize, // num_prev_chain_steps
+        bridge_test_data_gen::layer_hashes::TREE_DEPTH,
     );
 
     // 2. Build preimage.

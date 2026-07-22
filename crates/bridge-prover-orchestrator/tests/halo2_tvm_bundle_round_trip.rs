@@ -204,7 +204,7 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
 }
 
 fn extract_block_seq_no(attestation_bytes: &[u8]) -> u32 {
-    use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
+    use attestation_bls_checker_circuit::attestation_data_parser::{attestation_data_offset, parse_num_signers};
     const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;
 
     let num_signers = parse_num_signers(attestation_bytes);

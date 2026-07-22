@@ -41,11 +41,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use bridge_prover_lib::{
+use bridge_gql_fetcher::{
     attestation_fetcher::{self, AttestationEvidence},
-    bk_set_fetcher, block_id_tree,
+    bk_set_fetcher, gql_client,
+};
+use bridge_prover_lib::{
+    block_id_tree,
     bridge_state::BridgeState,
-    gql_client, layer_prover,
+    layer_prover,
     poseidon::compute_bk_set_poseidon,
     poseidon_dense::HISTORY_PROOF_WINDOW_SIZE,
     prover, real_chain_builder,
@@ -160,20 +163,15 @@ async fn main() -> anyhow::Result<()> {
     let gql = gql_client::create_client(&args.endpoint)
         .with_context(|| format!("create GraphQL client for {}", args.endpoint))?;
 
-    // BK set — live from the node, config fallback only if the endpoint lacks it.
-    let bk_set = match bk_set_fetcher::fetch_bk_set(&gql).await {
-        Ok(s) => s,
-        Err(e) => {
-            let cfg = args.bk_set_config.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "failed to fetch BK set from {} ({e}); pass --bk-set-config <path> as fallback",
-                    args.endpoint
-                )
-            })?;
-            println!("BK set fetch failed ({e}); falling back to {cfg}");
-            bk_set_fetcher::load_bk_set_from_config(cfg)?
-        }
-    };
+    // BK set — the former GraphQL fetch (`fetch_bk_set`) was disabled on
+    // 2026-07-22 as architecturally broken (see `bk_set_fetcher.rs`), so the
+    // config file is now the only source.
+    let cfg = args.bk_set_config.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--bk-set-config <path> is required (GraphQL BK-set fetch is disabled)",
+        )
+    })?;
+    let bk_set = bk_set_fetcher::load_bk_set_from_config(cfg)?;
     println!("BK set loaded: {} keepers", bk_set.len());
 
     // Fast pre-flight: is this the set that actually signed the block?

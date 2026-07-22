@@ -13,8 +13,8 @@ use tracing::{info, warn};
 
 use attestation_bls_checker_circuit::primary_circuit::PrimaryAttestationBlsCheckerCircuit;
 use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-use bridge_parsers::attestation_data_parser::{
-    attestation_data_offset, parse_num_signers,
+use attestation_bls_checker_circuit::attestation_data_parser::{
+    attestation_data_offset, compute_block_id_fr, parse_num_signers,
 };
 
 use crate::keys::{self, KeyManager};
@@ -359,27 +359,6 @@ where
             Ok(transcript.finalize())
         },
     }
-}
-
-/// Extract block_id as Fr from raw attestation bytes.
-///
-/// block_id is at offset 48 within AttestationData:
-/// parent_block_id(40) + length_prefix(8) = 48, then 32 bytes of hash.
-fn compute_block_id_fr(attestation_bytes: &[u8]) -> Fr {
-    const BLOCK_ID_REL_OFFSET: usize = 48;
-
-    let num_signers = parse_num_signers(attestation_bytes);
-    let abs_offset = attestation_data_offset(num_signers) + BLOCK_ID_REL_OFFSET;
-    let block_id_bytes = &attestation_bytes[abs_offset..abs_offset + 32];
-
-    let mut result = Fr::zero();
-    let mut power = Fr::one();
-    let base = Fr::from(256u64);
-    for &byte in block_id_bytes {
-        result += Fr::from(byte as u64) * power;
-        power *= base;
-    }
-    result
 }
 
 /// Extract block_seq_no (u32) from raw attestation bytes.

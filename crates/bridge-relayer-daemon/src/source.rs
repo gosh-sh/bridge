@@ -756,7 +756,6 @@ mod tests {
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
-            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": [
@@ -799,7 +798,6 @@ mod tests {
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
-            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": vec![

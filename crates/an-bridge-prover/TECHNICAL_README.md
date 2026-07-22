@@ -583,20 +583,21 @@ kill $(cat logs/pids.txt | cut -d= -f2)
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 5,
   "block_seq_no": 1536,
   "last_seen_block_seqno": 1024,
   "block_id_hex": "…",
   "attestation_circuit": "primary",   // or "fallback" — picks the VK (1a vs 1b)
   "primary_proof_hex": "…",   "primary_proof_gen_ms": 102392,
   "layer_proof_hex":   "…",   "layer_proof_gen_ms":   137310,
-  "layer_block_id_hex": "…",
   "bk_set_poseidon_hash_hex": "…",
   "num_layers": 2,
   "layer_hash_frs_hex": ["…", "…", "0", … (MAX_LAYERS = 10 entries)],
   "prev_max_level_layer_hash_hex": "…"
 }
 ```
+
+Since v5 (2026-07-22, Circuit 1 byte-order fix), `block_id_hex` is a *single* field shared as Circuit 1 and Circuit 2 public instance [0] — both circuits emit `block_id_fr = uint256(bytes32(root))`. The pre-v5 `layer_block_id_hex` sibling field has been removed as redundant.
 
 `attestation_circuit` is the **path-selection tag** (see [docs/fallback_path.md](docs/fallback_path.md)). The 4-public-instance layout is identical for 1a and 1b; only the verifying key differs. Schema v3 added this tag; legacy v2 files deserialise as `"primary"`.
 

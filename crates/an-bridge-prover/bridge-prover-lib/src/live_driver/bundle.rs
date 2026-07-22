@@ -143,8 +143,16 @@ pub(super) async fn drive_next_bundle(
     );
 
     // Assemble the transport-agnostic artifacts.
+    // Post-2026-07-22 both circuits emit `block_id_fr = uint256(bytes32(root))`.
+    // Debug-assert equality so a future byte-order regression on either side
+    // pages loudly at proof-build time instead of silently mis-mirroring
+    // state on-chain.
+    debug_assert_eq!(
+        primary_proof.block_id_fr, layer_proof.block_id_fr,
+        "Circuit 1 and Circuit 2 must agree on block_id_fr; a mismatch means \
+         one of the circuits regressed to the pre-fix byte-order convention",
+    );
     let block_id_be: [u8; 32] = primary_proof.block_id_fr.to_repr();
-    let layer_block_id_be: [u8; 32] = layer_proof.block_id_fr.to_repr();
     let bk_set_commitment_be: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
     let mut layer_hashes_be: [[u8; 32]; 10] = [[0u8; 32]; 10];
     for (i, fr) in layer_proof.layer_hash_frs.iter().enumerate() {
@@ -159,7 +167,6 @@ pub(super) async fn drive_next_bundle(
         block_height: observed_height,
         last_seen_block_seq_no: driver.state().stored_last_seen_block_seq_no,
         block_id_be,
-        layer_block_id_be,
         fin_type,
         bk_set_commitment_be,
         num_layers: layer_proof.num_layers,

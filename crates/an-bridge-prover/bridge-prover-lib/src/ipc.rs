@@ -15,13 +15,13 @@ const PROOFS_DIR: &str = "proofs";
 /// Current `ProofRequest` schema version. Bumped to 2 when `block_height` was
 /// added; bumped to 3 when `attestation_circuit` was added so the verifier
 /// knows which VK (Primary 1a vs Fallback 1b) to use; bumped to 4 alongside
-/// the introduction of the bk-set-update bundle (`BkUpdateRequest`). The
-/// layer-bundle wire shape is unchanged between v3 and v4 — the bump just
-/// keeps the two file kinds version-synced so the verifier can reject one
-/// commit/the-other mismatches loudly instead of silently re-interpreting
-/// fields. The verifier rejects mismatched versions instead of silently
-/// re-interpreting fields.
-pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 4;
+/// the introduction of the bk-set-update bundle (`BkUpdateRequest`); bumped
+/// to 5 when `layer_block_id_hex` was removed — after the 2026-07-22 Circuit 1
+/// byte-order fix (`uint256(bytes32(root))`), Circuits 1 and 2 emit the same
+/// `block_id_fr`, so the second copy on the wire was pure redundancy. The
+/// verifier rejects mismatched versions instead of silently re-interpreting
+/// fields.
+pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 5;
 
 fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
 
@@ -63,8 +63,11 @@ pub struct ProofRequest {
     pub block_height: u64,
     /// Sequence number of the previously proved key block.
     pub last_seen_block_seqno: u32,
-    /// Block ID from the attestation circuit as hex Fr. Same value whether
-    /// 1a or 1b emitted the proof — Circuit 1b's same-block_id constraint
+    /// Block ID as hex Fr — a *single* value shared by Circuit 1a/1b and
+    /// Circuit 2. Since the 2026-07-22 Circuit 1 byte-order fix, both
+    /// circuits compute `block_id_fr = uint256(bytes32(root))`, so one wire
+    /// field suffices for both proof verifications. Same value whether 1a or
+    /// 1b emitted the proof — Circuit 1b's same-block_id constraint
     /// guarantees the two attestations in the fallback pair agree.
     pub block_id_hex: String,
 
@@ -82,8 +85,6 @@ pub struct ProofRequest {
     // ---- Circuit 2 (Layer Hashes Movement) ----
     /// Hex-encoded Circuit 2 proof bytes.
     pub layer_proof_hex: String,
-    /// Block ID from Circuit 2 (Merkle tree root) as hex Fr.
-    pub layer_block_id_hex: String,
     /// BK set Poseidon commitment (from node) as hex Fr.
     pub bk_set_poseidon_hash_hex: String,
     /// Number of active layers (1..=10).

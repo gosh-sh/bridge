@@ -22,15 +22,15 @@ resolver = "2"
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 
-# Circuit and crypto libs — pin circuits rev so out-of-workspace consumers
-# (bridge-relayer-daemon) resolve `bridge-parsers` etc. (tip of `main` has
-# intermittently failed package discovery without a lockfile).
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
-bridge-parsers = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "4ffe32ad8478273e0819e845f1783bfaf324ded6" }
+# Circuit and crypto libs — track the branch carrying the Circuit 1 block_id
+# byte-order fix. `bridge-parsers` was inlined into `attestation-bls-checker-
+# circuit::attestation_data_parser` on the circuits side (commit 487b8f5), so
+# it's no longer a separate crate here.
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

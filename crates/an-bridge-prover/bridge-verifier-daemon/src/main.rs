@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
-    info!("GQL endpoint: {} (BK-set fetch only; falls back to {})", gql_endpoint, bk_set_config);
+    info!("GQL endpoint: {} (unused since 2026-07-22 refactor)", gql_endpoint);
+    info!("BK-set config: {}", bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
     // Graceful-shutdown flag flipped by the Ctrl-C handler. Checked at the top
@@ -562,20 +563,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load_bk_set_commitment(gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
-    let bk_set = match bridge_prover_lib::gql_client::create_client(gql_endpoint) {
-        Ok(gql) => match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql).await {
-            Ok(bk) => {
-                info!("BK set loaded from GraphQL: {} signers", bk.len());
-                bk
-            }
-            Err(e) => {
-                info!("GraphQL BK set failed ({}), trying config file {}", e, bk_set_config);
-                bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?
-            }
-        },
-        Err(_) => bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?,
-    };
+/// Load the genesis BK set commitment from the JSON config file.
+///
+/// The `_gql_endpoint` parameter is retained for signature/CLI-plumbing
+/// stability. The old GraphQL-first path (`fetch_bk_set`) was disabled on
+/// 2026-07-22 as architecturally broken — it replayed the `bkSetUpdates`
+/// delta log from ∅ but AN does not emit genesis as a synthetic `Added`
+/// event. Use `bk_set_at_height` (planned) for distant-block cold starts.
+async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
+    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
+    info!("BK set loaded from config: {} signers", bk_set.len());
     Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }
 

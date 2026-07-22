@@ -4,15 +4,24 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context};
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
-use tracing::info;
 
 use crate::gql_client::{BkSetUpdateWithAttestations, GqlClient};
 
 /// Fetch the current BK set from the node's GraphQL `bkSetUpdates`.
 ///
-/// Queries the full history of BK set changes (adds/removes) and reconstructs
-/// the current active validator set. Returns a map of signer_index -> 48-byte
-/// compressed BLS pubkey.
+/// **DISABLED (2026-07-22).** This function is architecturally broken:
+/// it replays the `bkSetUpdates` delta log starting from an empty map, but
+/// AN's protocol does not emit the genesis committee as a synthetic `Added`
+/// event. On any rotating chain this returns the diff-from-genesis (not the
+/// current active set); on a fresh chain it returns empty. Callers now load
+/// the genesis BK set from a JSON config; for cold-start against a distant
+/// block on a long-running rotating chain, use `bk_set_at_height` (to be
+/// added — see `TECHNICAL_README.md` § "BK-set bootstrap").
+///
+/// Kept in-tree behind a never-active cfg so historical references in docs
+/// and imports remain compilable; delete once `bk_set_at_height` lands and
+/// docs are cleaned up.
+#[cfg(any())]
 pub async fn fetch_bk_set(client: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     // Query both first (genesis-era) and last (recent) bkSetUpdates to capture
     // the full history of adds/removes. Use the light query (no attestation subfields)
@@ -249,7 +258,6 @@ mod live_tests {
     //! Live-network tests — ignored by default. Run with:
     //!   cargo test -p bridge-prover-lib --release -- --ignored next_update_after
     use super::*;
-    use crate::gql_client::GqlClient;
 
     const SHELLNET: &str = "https://shellnet.ackinacki.org/graphql";
 

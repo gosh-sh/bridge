@@ -147,29 +147,17 @@ fn test_circuit2_mockprover() {
 fn test_circuit1a_real_proof() {
     let t_total = Instant::now();
 
-    // 1. Load BK set.
+    // 1. Load BK set. The former GraphQL fallback (`fetch_bk_set`) was
+    //    disabled on 2026-07-22 as architecturally broken; if the JSON is
+    //    absent, skip the test rather than fabricate an incorrect set.
     let bk_set = match bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config("./bk_set.json") {
         Ok(bk) => {
             println!("BK set loaded from config: {} signers", bk.len());
             bk
         }
         Err(e) => {
-            println!("BK set config not found ({}), trying shellnet...", e);
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let gql = bridge_prover_lib::gql_client::create_client(
-                "https://shellnet.ackinacki.org/graphql",
-            )
-            .unwrap();
-            match rt.block_on(bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql)) {
-                Ok(bk) => {
-                    println!("BK set from shellnet: {} signers", bk.len());
-                    bk
-                }
-                Err(e2) => {
-                    println!("SKIPPING test_circuit1a_real_proof: no BK set available ({}, {})", e, e2);
-                    return;
-                }
-            }
+            println!("SKIPPING test_circuit1a_real_proof: no BK set config available ({})", e);
+            return;
         }
     };
 

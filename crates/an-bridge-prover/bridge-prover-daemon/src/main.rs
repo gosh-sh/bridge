@@ -259,24 +259,20 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
     }
 }
 
-async fn load_bk_set(gql: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+/// Load the genesis BK set from the JSON config file.
+///
+/// The `_gql` parameter is retained for signature stability with callers that
+/// wire a GraphQL client at bootstrap; it is currently unused because the old
+/// `fetch_bk_set` GraphQL path was disabled (2026-07-22 — it replayed the
+/// `bkSetUpdates` delta log from ∅, but AN does not emit genesis as a
+/// synthetic `Added` event, so the result was wrong on any rotating chain
+/// and empty on fresh ones). For a distant-block cold start on a long-lived
+/// rotating chain, use `bk_set_at_height` (planned).
+async fn load_bk_set(_gql: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(gql).await {
-        Ok(bk_set) => return Ok(bk_set),
-        Err(e) => warn!(
-            "GraphQL BK-set fetch failed ({}), falling back to {}",
-            e, bk_set_config
-        ),
-    }
-    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config).with_context(
-        || {
-            format!(
-                "failed to load BK set from GraphQL and config file {}",
-                bk_set_config
-            )
-        },
-    )
+    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
+        .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))
 }
 
 fn load_or_bootstrap_prover_bk_set(

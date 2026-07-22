@@ -18,7 +18,7 @@
 //!   <set-dir>/deposit_vk_blob.bin             (shared, v2 RLC VkBlob)
 //!   <set-dir>/deposit_eth_circuit_params.json (shared EthCircuitParams)
 //!   <set-dir>/proof_NN/proof.bin              (Blake2b SHPLONK proof)
-//!   <set-dir>/proof_NN/public_inputs.bin      (11 × 32-byte LE Fr)
+//!   <set-dir>/proof_NN/public_inputs.bin      (12 × 32-byte LE Fr)
 //!
 //! Each `proof_NN/input.json` must already exist (written by
 //! `fetch_deposit_data`). Run with:
@@ -90,8 +90,9 @@ struct Args {
     #[arg(long, default_value = "20")]
     max_log_num: usize,
 
-    /// Expected EIP-1559 chain_id baked into the VK (mainnet=1, Sepolia=11155111)
-    #[arg(long, default_value = "1")]
+    /// Fetch / network selector only (not baked into VK; proven chainId is a PI).
+    /// Must be in `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111).
+    #[arg(long, default_value = "11155111")]
     chain_id: u64,
 }
 
@@ -105,6 +106,7 @@ fn load_input(set_dir: &str, i: usize) -> anyhow::Result<DepositProofInput> {
 fn main() -> anyhow::Result<()> {
     println!("=== Export deposit proof set (single shared VkBlob) ===\n");
     let args = Args::parse();
+    deposit_prover::require_supported_deposit_chain(args.chain_id)?;
     let config = CircuitConfig {
         degree: args.degree,
         max_data_byte_len: args.max_data_byte_len,
@@ -170,8 +172,8 @@ fn main() -> anyhow::Result<()> {
 
         let instances = circuit.instances();
         anyhow::ensure!(
-            instances.len() == 1 && instances[0].len() == 11,
-            "proof_{i:02}: expected 11 public inputs, got {:?}",
+            instances.len() == 1 && instances[0].len() == 12,
+            "proof_{i:02}: expected 12 public inputs, got {:?}",
             instances.iter().map(|c| c.len()).collect::<Vec<_>>()
         );
         let inst0 = instances[0].clone();

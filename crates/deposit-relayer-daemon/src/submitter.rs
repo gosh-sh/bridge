@@ -5,10 +5,10 @@
 //! publicInputs)` (acki-nacki branch `poseidon_dex`, deployed on shellnet
 //! 2026-06-22; verified by code-hash match against
 //! `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`). The contract parses
-//! every deposit field straight out of the `publicInputs` operand (11 × 32-byte
+//! every deposit field straight out of the `publicInputs` operand (12 × 32-byte
 //! little-endian `Fr`), verifies the triple via
 //! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
-//! 0x4A`; the `VK_BLOB` is the deploy-time 11-input deposit VkBlob embedded in
+//! 0x4A`; the `VK_BLOB` is the deploy-time 12-input deposit VkBlob embedded in
 //! the contract, **not** a per-call argument), reconstructs the recipient
 //! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
 //! consumes a proof-bound deposit nullifier (deployed as a per-deposit
@@ -93,12 +93,12 @@ pub trait AnSubmitter: Send + Sync {
 /// publicInputs)` call is encoded by [`build_finalize_deposit_params`] + the
 /// tvm_client ABI encoder. This function produces a deterministic,
 /// self-describing big-endian layout used only by debug tooling and the
-/// round-trip unit test (it asserts the eleven decoded scalars survive a
+/// round-trip unit test (it asserts the twelve decoded scalars survive a
 /// re-encode):
 ///
 /// ```text
 ///   NUM_PUBLIC_INPUTS × 32-byte big-endian scalars (the proof's public inputs):
-///     depositId, sender, amount, contractAddress,
+///     depositId, sender, amount, contractAddress, chainId,
 ///     dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 ///     blockHashHigh, blockHashLow, promiseCommit
 ///   u32 BE proof length
@@ -112,6 +112,7 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
         pi.sender,
         pi.amount,
         pi.contract_address,
+        pi.chain_id,
         pi.dapp_id_high,
         pi.dapp_id_low,
         pi.an_account_high,
@@ -132,7 +133,8 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
 const FINALIZE_HEADER_LEN: usize = NUM_PUBLIC_INPUTS * 32 + 4;
 
 /// Decoded `finalizeDeposit` body: the public-input scalars and the raw proof
-/// bytes. dappId is `scalars[4..6]`; the AN account is `scalars[6..8]`.
+/// bytes. `chainId` is `scalars[4]`; dappId is `scalars[5..7]`; the AN account
+/// is `scalars[7..9]`.
 pub type DecodedFinalize = ([U256; NUM_PUBLIC_INPUTS], Vec<u8>);
 
 /// Decode a body produced by [`encode_finalize_deposit`] back into the
@@ -400,6 +402,7 @@ mod tests {
             block_number: 1,
             block_hash: B256::repeat_byte(0xcd),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 
@@ -422,11 +425,12 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-                                                   // dappId is the config tag (scalars 4/5); the AN account high/low halves
-                                                   // (scalars 6/7) reconstruct the proven recipient account.
-        let dapp_id = (scalars[4] << 128) | scalars[5];
+        assert_eq!(scalars[4], b.parsed.chain_id); // proven chainId
+                                                   // dappId is the config tag (scalars 5/6); the AN account high/low halves
+                                                   // (scalars 7/8) reconstruct the proven recipient account.
+        let dapp_id = (scalars[5] << 128) | scalars[6];
         assert_eq!(dapp_id, b.parsed.dapp_id());
-        let reconstructed = (scalars[6] << 128) | scalars[7];
+        let reconstructed = (scalars[7] << 128) | scalars[8];
         assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
         assert_eq!(proof, b.proof.to_vec());
     }
@@ -483,7 +487,7 @@ mod tests {
         );
         let pi_bytes = hex::decode(public_inputs).unwrap();
         assert_eq!(pi_bytes, b.public_inputs.to_vec());
-        // The operand must be the canonical 11 × 32-byte LE layout the opcode reads.
+        // The operand must be the canonical 12 × 32-byte LE layout the opcode reads.
         assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
         // And it must round-trip back to the same parsed inputs.
         assert_eq!(

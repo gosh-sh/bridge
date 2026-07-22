@@ -12,10 +12,11 @@
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
-//! 3. The [`DepositPublicInputs`] — the eleven field elements the proof commits
-//!    to (including the Acki Nacki destination account and the config-supplied
-//!    `dappId` tag), decoded from the `public_inputs` operand so the submitter
-//!    can build the `finalizeDeposit(...)` call arguments.
+//! 3. The [`DepositPublicInputs`] — the twelve field elements the proof commits
+//!    to (including proven `chainId`, the Acki Nacki destination account, and
+//!    the config-supplied `dappId` tag), decoded from the `public_inputs`
+//!    operand so the submitter can build the `finalizeDeposit(...)` call
+//!    arguments.
 
 use alloy::primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -23,16 +24,18 @@ use serde::{Deserialize, Serialize};
 use crate::error::RelayerError;
 
 /// Number of public inputs the deposit circuit commits to. Matches
-/// `deposit-prover`'s `num_instance() == vec![11]`:
-/// `[depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow,
+/// `deposit-prover`'s `num_instance() == vec![12]`:
+/// `[depositId, sender, amount, contractAddress, chainId, dappIdHigh, dappIdLow,
 /// anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
 ///
-/// `anAccount{High,Low}` bind the Acki Nacki destination account into the proof
-/// (an EVM address is not a valid AN recipient). `dappId{High,Low}` (the
-/// UInt256 AN dApp identifier, replaced `anWorkchain` on 2026-06-02) is a
-/// config-supplied tag — it is not bound to event data in-circuit;
-/// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
-pub const NUM_PUBLIC_INPUTS: usize = 11;
+/// `chainId` is the EIP-1559 RLP field-0 value bound via the enclosing tx MPT
+/// proof (not VK-baked). `anAccount{High,Low}` bind the Acki Nacki destination
+/// account into the proof (an EVM address is not a valid AN recipient).
+/// `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced `anWorkchain`
+/// on 2026-06-02) is a config-supplied tag — it is not bound to event data
+/// in-circuit; `TokenBridge.finalizeDeposit` checks it against its configured
+/// dappId. USDCBridge must also allowlist `(chainId → expected bridge Fr)`.
+pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
 pub const PUBLIC_INPUT_BYTES: usize = NUM_PUBLIC_INPUTS * 32;
@@ -78,23 +81,29 @@ pub struct DepositEvent {
     /// The bridge contract that emitted the event (the proof's
     /// `contractAddress` public input binds to this).
     pub source_contract: Address,
+    /// EIP-155 `chain_id` of the RPC used to fetch this event (`eth_chainId`).
+    /// Operator sanity: the proven `chainId` public input must match this
+    /// (not a hardcoded mainnet=1 assumption).
+    pub source_chain_id: u64,
 }
 
-/// The eleven public inputs the deposit proof commits to, decoded from the
+/// The twelve public inputs the deposit proof commits to, decoded from the
 /// `public_inputs` opcode operand. Each is a full `U256` (the field element
 /// re-interpreted as an integer); the submitter forwards these as the
 /// `finalizeDeposit(...)` scalar arguments.
 ///
-/// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
-/// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
-/// `an_account_low` are the high/low halves of the 256-bit AN account, matching
-/// the circuit's split. The AN side reconstructs each as `(high << 128) | low`.
+/// `chain_id` is the proven EIP-1559 tx `chainId`. `dapp_id_high` /
+/// `dapp_id_low` are the high/low 16-byte halves of the 256-bit AN dApp
+/// identifier (config-supplied tag); `an_account_high` / `an_account_low` are
+/// the high/low halves of the 256-bit AN account, matching the circuit's
+/// split. The AN side reconstructs each as `(high << 128) | low`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DepositPublicInputs {
     pub deposit_id: U256,
     pub sender: U256,
     pub amount: U256,
     pub contract_address: U256,
+    pub chain_id: U256,
     pub dapp_id_high: U256,
     pub dapp_id_low: U256,
     pub an_account_high: U256,
@@ -127,13 +136,14 @@ impl DepositPublicInputs {
             sender: field(1),
             amount: field(2),
             contract_address: field(3),
-            dapp_id_high: field(4),
-            dapp_id_low: field(5),
-            an_account_high: field(6),
-            an_account_low: field(7),
-            block_hash_high: field(8),
-            block_hash_low: field(9),
-            promise_commit: field(10),
+            chain_id: field(4),
+            dapp_id_high: field(5),
+            dapp_id_low: field(6),
+            an_account_high: field(7),
+            an_account_low: field(8),
+            block_hash_high: field(9),
+            block_hash_low: field(10),
+            promise_commit: field(11),
         })
     }
 
@@ -147,6 +157,7 @@ impl DepositPublicInputs {
             self.sender,
             self.amount,
             self.contract_address,
+            self.chain_id,
             self.dapp_id_high,
             self.dapp_id_low,
             self.an_account_high,
@@ -179,7 +190,7 @@ impl DepositPublicInputs {
 ///
 /// ```text
 /// bottom: vk_cell            ← `vk_blob`        (VkBlob v2 RLC for deposit)
-/// middle: public_inputs_cell ← `public_inputs`  (11 × 32-byte LE Fr, no header)
+/// middle: public_inputs_cell ← `public_inputs`  (12 × 32-byte LE Fr, no header)
 /// top:    proof_cell         ← `proof`          (raw Blake2b SHPLONK bytes)
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -215,9 +226,12 @@ impl DepositProofBundle {
         })
     }
 
-    /// Sanity-check that the proof's `depositId` public input matches the
-    /// deposit we think we're finalizing. A mismatch means the prover was
-    /// fed the wrong witness — a terminal bug, not a retryable condition.
+    /// Sanity-check that the proof's public inputs match the deposit we think
+    /// we're finalizing, including that proven `chainId` equals the RPC
+    /// `eth_chainId` used to fetch the event (`event.source_chain_id`). A
+    /// mismatch means the prover was fed the wrong witness or the operator
+    /// pointed at the wrong network — a terminal bug, not a retryable
+    /// condition.
     pub fn check_binds_to(&self, event: &DepositEvent) -> Result<(), RelayerError> {
         let expected = U256::from(event.deposit_id);
         if self.parsed.deposit_id != expected {
@@ -235,6 +249,13 @@ impl DepositProofBundle {
             return Err(RelayerError::ProofGeneration(format!(
                 "proof sender {:#x} != event sender {}",
                 self.parsed.sender, event.sender
+            )));
+        }
+        let expected_chain = U256::from(event.source_chain_id);
+        if self.parsed.chain_id != expected_chain {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof chainId {:#x} != RPC eth_chainId {} (operator sanity)",
+                self.parsed.chain_id, event.source_chain_id
             )));
         }
         // The AN destination account is bound in-circuit; it must match the
@@ -266,6 +287,7 @@ mod tests {
             sender: U256::from(0x1234u64),
             amount: U256::from(1_000_000u64),
             contract_address: U256::from(0xabcdu64),
+            chain_id: U256::from(1u64),
             dapp_id_high: U256::from(0xaaaa_bbbbu64),
             dapp_id_low: U256::from(0xcccc_ddddu64),
             an_account_high: U256::from(0x1111_2222u64),
@@ -306,6 +328,7 @@ mod tests {
             }),
             amount: U256::from(5u64),
             contract_address: U256::ZERO,
+            chain_id: U256::from(11155111u64),
             dapp_id_high: U256::from_be_slice(&[0x77u8; 16]),
             dapp_id_low: U256::from_be_slice(&[0x88u8; 16]),
             an_account_high: U256::from_be_slice(&[0x55u8; 16]),
@@ -332,6 +355,7 @@ mod tests {
             block_number: 1,
             block_hash: B256::ZERO,
             source_contract: Address::ZERO,
+            source_chain_id: 11155111,
         };
         bundle.check_binds_to(&event).unwrap();
 
@@ -343,5 +367,10 @@ mod tests {
         let mut wrong_acct = event.clone();
         wrong_acct.an_account = B256::repeat_byte(0x66);
         assert!(bundle.check_binds_to(&wrong_acct).is_err());
+
+        // Proven chainId must match the RPC eth_chainId used to fetch.
+        let mut wrong_chain = event.clone();
+        wrong_chain.source_chain_id = 1;
+        assert!(bundle.check_binds_to(&wrong_chain).is_err());
     }
 }

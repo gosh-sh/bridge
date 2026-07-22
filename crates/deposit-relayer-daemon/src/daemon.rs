@@ -309,6 +309,7 @@ mod tests {
             block_number: 100 + id,
             block_hash: B256::repeat_byte(0xcd),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 

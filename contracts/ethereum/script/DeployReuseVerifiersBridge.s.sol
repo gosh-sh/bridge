@@ -39,15 +39,10 @@ contract DeployReuseVerifiersBridge is Script {
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
         });
 
-        bool startPaused = vm.envOr("START_PAUSED", false);
-
         vm.startBroadcast(pk);
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         AckiNackiBridge bridge =
             new AckiNackiBridge(address(oracle), USDC_SEPOLIA, address(0), address(0), vb, bw);
-        if (startPaused) {
-            bridge.pause();
-        }
         vm.stopBroadcast();
 
         console.log("AckiNackiBridge (reuse-verifiers):", address(bridge));
@@ -56,6 +51,5 @@ contract DeployReuseVerifiersBridge is Script {
         console.log("fallbackVerifier:", address(vb.fallbackVerifier));
         console.log("layerHashesVerifier:", address(vb.layerHashesVerifier));
         console.log("bridgeWithdrawalVerifier:", address(bw.bridgeWithdrawalVerifier));
-        console.log("startPaused:", startPaused);
     }
 }

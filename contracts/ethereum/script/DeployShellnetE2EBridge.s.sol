@@ -15,11 +15,11 @@ import "./ShplonkDeployLib.sol";
 ///         SHPLONK for C4 when wired.
 /// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
 ///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
-///      (or `SHPLONK_BIN_*` overrides). Bridge starts paused unless `START_PAUSED=false`.
+///      (or `SHPLONK_BIN_*` overrides).
 ///
 ///      withdrawByProof (Circuit 4) wiring is OFF by default — set `WIRE_WITHDRAW_BY_PROOF=true`
 ///      (and provide `WITHDRAW_ACC_FR` + `verifiers/BridgeWithdrawalAggregatorVerifier.bin`) once
-///      partner M4 lands. Until then this script deploys a verifyBlock-only (paused) bridge so it
+///      partner M4 lands. Until then this script deploys a verifyBlock-only bridge so it
 ///      does not depend on the not-yet-existing C4 `.bin`.
 contract DeployShellnetE2EBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
@@ -66,8 +66,6 @@ contract DeployShellnetE2EBridge is Script {
             require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
         }
 
-        bool startPaused = vm.envOr("START_PAUSED", true);
-
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
@@ -89,11 +87,6 @@ contract DeployShellnetE2EBridge is Script {
 
         AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
 
-        if (startPaused) {
-            bridge.pause();
-            console.log("Bridge deployed PAUSED - unpause after forgery + E2E sign-off");
-        }
-
         vm.stopBroadcast();
 
         console.log("AckiNackiBridge (shellnet E2E):", address(bridge));
@@ -104,7 +97,6 @@ contract DeployShellnetE2EBridge is Script {
         console.log("altDstChainId:", wd.altDstChainId);
         console.log("altDstHostChainId:", wd.altDstHostChainId);
         console.log("altTokenId:", wd.altTokenId);
-        console.log("startPaused:", startPaused);
     }
 
     function _deployProductionVerifyBlockTriple()

@@ -124,7 +124,7 @@ relayer-driven (the ETH-side steps are automatic — no manual submission):
 | `InvalidAmount` | `amount` was `0`. Enter a positive number. |
 | `InvalidAnAccount` | `anAccount` was zero or malformed. Use a non-zero 64-hex bytes32. |
 | `DepositTooLarge` | Max is 100 USDC (`100000000`) per deposit. |
-| Deposit reverts, no token error | Bridge may be **paused** — check `paused` on the Read tab. |
+| Deposit reverts, no token error | Check amount limits, allowance, and `anAccount != 0`. |
 | USDC not on Acki Nacki yet | Proving takes minutes. If still missing, send your **tx hash** + **depositId** (from the `Deposit` event log) to the operator. |
 
 **Safety:** Sepolia only. Confirm the bridge address before approving. Never

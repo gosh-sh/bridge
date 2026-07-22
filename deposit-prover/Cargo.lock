@@ -970,6 +970,7 @@ dependencies = [
  "num-bigint",
  "ppot-rs",
  "rand 0.8.5",
+ "rlp",
  "serde",
  "serde_json",
  "sha2",

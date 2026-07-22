@@ -134,13 +134,6 @@ contract AckiNackiBridge {
     uint256 private constant _ENTERED = 2;
     uint256 private _reentrancyStatus;
 
-    /// @notice Global pause flag. When `true`, all user-facing entrypoints
-    ///         (`deposit`, `verifyBlock`, `withdrawByProof`) revert with
-    ///         `BridgePaused`. Owner-only AAVE management remains
-    ///         available so funds can still be evacuated in an incident.
-    /// @dev Toggled via `pause()` / `unpause()` (owner-only).
-    bool public paused;
-
     // ---------------------------------------------------------------------
     // Storage: AN→ETH state (Phase 4 verifyBlock)
     // ---------------------------------------------------------------------
@@ -272,12 +265,7 @@ contract AckiNackiBridge {
         bytes32 anAccount,
         uint256 timestamp
     );
-    /// @notice Bridge paused — emitted when the owner sets `paused = true`.
-    /// @param by Owner address that triggered the pause (`msg.sender`).
-    event Paused(address indexed by);
-    /// @notice Bridge unpaused — emitted when the owner sets `paused = false`.
-    /// @param by Owner address that lifted the pause (`msg.sender`).
-    event Unpaused(address indexed by);
+
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
     event YieldHarvested(address indexed recipient, uint256 amount);
@@ -355,12 +343,6 @@ contract AckiNackiBridge {
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
     error NoYield();
-    /// @notice User-facing entrypoints are paused. Owner-only AAVE
-    ///         management (`emergencyWithdrawAll`, `withdrawFromAave`,
-    ///         `harvestYield`) remains available regardless of the pause
-    ///         state so funds can still be evacuated in an incident.
-    error BridgePaused();
-    error AlreadyInThatPauseState();
 
     // verifyBlock errors
     error VerifyBlockDisabled();
@@ -423,15 +405,6 @@ contract AckiNackiBridge {
         _reentrancyStatus = _ENTERED;
         _;
         _reentrancyStatus = _NOT_ENTERED;
-    }
-
-    /// @dev User-facing entrypoints revert when the bridge is paused.
-    ///      Owner-only AAVE management is deliberately *not* gated by
-    ///      this modifier so the owner can still pull liquidity in an
-    ///      incident.
-    modifier whenNotPaused() {
-        if (paused) revert BridgePaused();
-        _;
     }
 
     // ---------------------------------------------------------------------
@@ -579,7 +552,6 @@ contract AckiNackiBridge {
     function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
         external
         nonReentrant
-        whenNotPaused
     {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
@@ -653,7 +625,7 @@ contract AckiNackiBridge {
         uint8 numLayers,
         uint256[MAX_LAYER_HASHES] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         // Feature gate: all three verifier slots must be wired.
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -764,7 +736,7 @@ contract AckiNackiBridge {
         uint256 newCommitmentL3,
         bytes32 siblingH0,
         bytes32 siblingH23
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
         ) {
@@ -1005,7 +977,7 @@ contract AckiNackiBridge {
     function withdrawByProof(
         bytes calldata proof,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-    ) external nonReentrant whenNotPaused returns (bool success) {
+    ) external nonReentrant returns (bool success) {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
@@ -1165,28 +1137,6 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, received);
         }
         emit YieldHarvested(yieldRecipient, received);
-    }
-
-    // ---------------------------------------------------------------------
-    // Pause controls (owner-only)
-    // ---------------------------------------------------------------------
-
-    /// @notice Halt all user-facing entrypoints (`deposit`, `verifyBlock`,
-    ///         `withdrawByProof`). Reverts if the bridge is already paused.
-    /// @dev Owner-only AAVE management is *not* gated — the owner must
-    ///      still be able to evacuate funds via `emergencyWithdrawAll` /
-    ///      `withdrawFromAave` / `harvestYield` while paused.
-    function pause() external onlyOwner {
-        if (paused) revert AlreadyInThatPauseState();
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    /// @notice Re-enable user-facing entrypoints. Reverts if not paused.
-    function unpause() external onlyOwner {
-        if (!paused) revert AlreadyInThatPauseState();
-        paused = false;
-        emit Unpaused(msg.sender);
     }
 
     /// @notice Enable or disable further supplies to AAVE.

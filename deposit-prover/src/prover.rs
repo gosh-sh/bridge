@@ -117,8 +117,9 @@ pub struct CircuitConfig {
     /// Bounds on number of topics per log (min, max)
     pub topic_num_bounds: (usize, usize),
 
-    /// Expected EIP-1559 `chain_id` baked into the VK (Track 2 chain binding).
-    /// Mainnet = 1; Sepolia = 11155111. Changing this requires a new keygen.
+    /// Fetch / network selector only (mainnet = 1, Sepolia = 11155111).
+    /// **Demoted**: no longer constrained in-circuit or baked into the VK.
+    /// Proven `chainId` is a public input; AN allowlists bind it to the bridge.
     pub expected_chain_id: u64,
 }
 

@@ -30,16 +30,12 @@ import "./ShplonkDeployLib.sol";
  * withdrawByProof wiring:
  *   - WIRE_WITHDRAW_BY_PROOF=true → BridgeWithdrawalAggregatorVerifier + identity env vars.
  *     Requires WITHDRAW_ACC_FR (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids.
- *
- * Pause:
- *   - START_PAUSED defaults true when any verifier is wired; owner must unpause after sign-off.
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
         bool useAave;
         bool wireVerifyBlock;
         bool wireWithdraw;
-        bool startPaused;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
         uint256 withdrawDappFr;
@@ -64,7 +60,6 @@ contract DeployRealBridge is Script {
         bool useAave;
         bool wireVerifyBlock;
         bool wireWithdraw;
-        bool startPaused;
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
         address layerHashesVerifierAddr;
@@ -105,7 +100,6 @@ contract DeployRealBridge is Script {
                 useAave: w.useAave,
                 wireVerifyBlock: w.wireVerifyBlock,
                 wireWithdraw: w.wireWithdraw,
-                startPaused: w.startPaused,
                 primaryVerifierAddr: r.primaryVerifierAddr,
                 fallbackVerifierAddr: r.fallbackVerifierAddr,
                 layerHashesVerifierAddr: r.layerHashesVerifierAddr,
@@ -121,7 +115,6 @@ contract DeployRealBridge is Script {
         w.useAave = vm.envOr("USE_AAVE", false);
         w.wireVerifyBlock = vm.envOr("WIRE_VERIFY_BLOCK", false);
         w.wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);
-        w.startPaused = vm.envOr("START_PAUSED", w.wireVerifyBlock || w.wireWithdraw);
 
         if (w.wireVerifyBlock) {
             w.genesisBkSetCommitment = vm.envUint("GENESIS_BK_SET_COMMITMENT");
@@ -169,10 +162,6 @@ contract DeployRealBridge is Script {
         AckiNackiBridge bridge = new AckiNackiBridge(oracleAddr, usdcAddr, aavePool, aUSDC, vb, bw);
         r.bridgeAddr = address(bridge);
 
-        if (w.startPaused && (w.wireVerifyBlock || w.wireWithdraw)) {
-            bridge.pause();
-            console.log("Bridge PAUSED at deploy - unpause after R15 sign-off");
-        }
         console.log("AckiNackiBridge deployed at:", r.bridgeAddr);
     }
 
@@ -187,7 +176,6 @@ contract DeployRealBridge is Script {
         console.log("Oracle type:", oracleType);
         console.log("Oracle:", oracleAddr);
         console.log("AckiNackiBridge:", r.bridgeAddr);
-        console.log("startPaused:", w.startPaused);
         if (w.wireVerifyBlock) {
             console.log("PrimaryAggregatorVerifier:", r.primaryVerifierAddr);
             console.log("FallbackVerifier (Groth16):", r.fallbackVerifierAddr);
@@ -369,9 +357,6 @@ contract DeployRealBridge is Script {
                 ",\n",
                 '  "withdraw_wired": ',
                 a.wireWithdraw ? "true" : "false",
-                ",\n",
-                '  "start_paused": ',
-                a.startPaused ? "true" : "false",
                 ",\n",
                 verifierJson,
                 '  "aave_enabled": ',

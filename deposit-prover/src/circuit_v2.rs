@@ -29,9 +29,11 @@ pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: u
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
-/// Default L1 chain id baked into the production VK (Ethereum mainnet).
-/// Override via [`crate::prover::CircuitConfig::expected_chain_id`] for Sepolia
-/// (`11155111`) etc. — a different constant requires a new keygen.
+/// Default L1 chain id used as a **fetch / network selector** default
+/// (Ethereum mainnet). Not a soundness input: proven `chainId` is a public
+/// instance (slot after `contractAddress`), and the AN-side allowlist binds
+/// `(chainId → expected bridge Fr)`. CLI `--chain-id` only selects which RPC
+/// network to fetch witnesses from.
 pub const EXPECTED_L1_CHAIN_ID: u64 = 1;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
@@ -52,11 +54,41 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 /// vector of this length so `keccak_var_len` and `decompose_rlp_array_*` emit an
 /// identical number of cells / copy-constraints for every block. The true header
 /// length is still bound cryptographically via the `keccak_var_len` length
-/// witness. Post-Shanghai mainnet headers (17 fields, through `withdrawalsRoot`)
-/// are ~540-640 bytes; 640 covers them with margin and matches the 17-entry
-/// `block_header_max_field_lens` table below. The receipt + MPT proof are already
-/// fixed-size (axiom-eth pads them to `value_max_byte_len` / `max_depth`).
-pub const MAX_BLOCK_HEADER_BYTES: usize = 640;
+/// witness.
+///
+/// Sized for axiom-eth's Cancun/Ecotone 20-field header table
+/// (`MAINNET_HEADER_FIELDS_MAX_BYTES` / `get_block_header_rlp_max_lens_from_extra(32)`
+/// → 668 B). Covers post-Shanghai (17 fields) and OP Stack Ecotone (20 fields:
+/// + `blobGasUsed` / `excessBlobGas` / `parentBeaconBlockRoot`). No Prague
+/// `requestsHash` — axiom's table stops at the Cancun 20th slot. The receipt +
+/// MPT proof are already fixed-size (axiom-eth pads them to
+/// `value_max_byte_len` / `max_depth`).
+pub const MAX_BLOCK_HEADER_BYTES: usize = 668;
+
+/// Per-field max byte lengths for `decompose_rlp_array_*`, copied from
+/// axiom-eth `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 Cancun/Ecotone slots).
+pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 20] = [
+    32,  // 0: parentHash
+    32,  // 1: ommersHash
+    20,  // 2: beneficiary (coinbase)
+    32,  // 3: stateRoot
+    32,  // 4: transactionsRoot
+    32,  // 5: receiptsRoot
+    256, // 6: logsBloom
+    7,   // 7: difficulty
+    4,   // 8: number
+    4,   // 9: gasLimit
+    4,   // 10: gasUsed
+    4,   // 11: timestamp
+    32,  // 12: extraData (mainnet / OP Stack max)
+    32,  // 13: mixHash / prevRandao
+    8,   // 14: nonce
+    32,  // 15: baseFeePerGas (post-London)
+    32,  // 16: withdrawalsRoot (post-Shanghai)
+    8,   // 17: blobGasUsed (post-Cancun / Ecotone)
+    8,   // 18: excessBlobGas (post-Cancun / Ecotone)
+    32,  // 19: parentBeaconBlockRoot (post-Cancun / Ecotone)
+];
 
 /// Expected event signature:
 /// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
@@ -93,8 +125,6 @@ fn bytes_to_field<F: ScalarField>(
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
-    /// EIP-1559 `chain_id` constant constrained in-circuit (VK-baked).
-    pub expected_chain_id: u64,
 }
 
 impl DepositEventCircuitV2 {
@@ -104,7 +134,9 @@ impl DepositEventCircuitV2 {
     ///
     /// * `inputs` - The deposit proof input containing event data and receipt
     ///   proof
-    /// * `config` - Circuit configuration (from prover module)
+    /// * `config` - Circuit configuration (from prover module).
+    ///   `expected_chain_id` is ignored (demoted to fetch/network selector only;
+    ///   proven `chainId` is exposed as a public input).
     pub fn new(inputs: DepositProofInput, config: &crate::prover::CircuitConfig) -> Self {
         let params = EthReceiptChipParams {
             max_data_byte_len: config.max_data_byte_len,
@@ -112,10 +144,10 @@ impl DepositEventCircuitV2 {
             topic_num_bounds: config.topic_num_bounds,
             network: Some(Chain::Mainnet), // Default to mainnet
         };
+        let _ = config.expected_chain_id; // demoted: not a VK / soundness input
         Self {
             inputs,
             params,
-            expected_chain_id: config.expected_chain_id,
         }
     }
 
@@ -131,7 +163,6 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
-            expected_chain_id: EXPECTED_L1_CHAIN_ID,
         }
     }
 }
@@ -246,33 +277,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let block_hash_bytes = block_hash_query.output_bytes.as_ref().to_vec();
         println!("   ✓ Computed block hash (32 bytes)");
 
-        // Parse block header RLP to extract receiptsRoot (field index 5)
+        // Parse block header RLP to extract receiptsRoot (field index 5).
+        // 20-slot Cancun/Ecotone table (axiom-eth MAINNET_HEADER_FIELDS_MAX_BYTES).
         let rlp_chip = chip.rlp();
-        let block_header_max_field_lens = vec![
-            32,  // 0: parentHash
-            32,  // 1: ommersHash
-            32,  // 2: beneficiary
-            32,  // 3: stateRoot
-            32,  // 4: transactionsRoot
-            32,  // 5: receiptsRoot ← WE NEED THIS
-            256, // 6: logsBloom
-            32,  // 7: difficulty
-            32,  // 8: number
-            32,  // 9: gasLimit
-            32,  // 10: gasUsed
-            32,  // 11: timestamp
-            32,  // 12: extraData
-            32,  // 13: mixHash
-            8,   // 14: nonce
-            32,  // 15: baseFeePerGas (post-London)
-            32,  // 16: withdrawalsRoot (post-Shanghai, optional)
-        ];
+        let block_header_max_field_lens = BLOCK_HEADER_MAX_FIELD_LENS.to_vec();
 
         let block_header_array = rlp_chip.decompose_rlp_array_phase0(
             ctx,
             block_header_rlp_bytes,
             &block_header_max_field_lens,
-            true, // variable length (15-17 fields)
+            true, // variable length (15–20 fields)
         );
 
         // Extract receiptsRoot (field 5)
@@ -331,7 +345,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
         println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
 
-        // chain_id == expected (VK-baked)
+        // Extract EIP-1559 chain_id (RLP field 0) and expose as a public input.
+        // Not constrained to a VK-baked constant — AN allowlists (chainId →
+        // expected bridge Fr); the relayer sanity-checks against eth_chainId.
         let chain_id_idx = ctx.load_constant(Fr::from(0u64));
         let chain_id_field =
             tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
@@ -341,12 +357,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             &chain_id_field.field_bytes,
             chain_id_field.len,
         );
-        let expected_chain = ctx.load_constant(Fr::from(self.expected_chain_id));
-        ctx.constrain_equal(&chain_id_val, &expected_chain);
-        println!(
-            "   ✓ Constrained chain_id == {}",
-            self.expected_chain_id
-        );
+        println!("   ✓ Extracted chain_id (public input, not VK-constrained)");
 
         // tx.to == Deposit emitter (contractAddress). Field index 5 in type-2.
         // Require exactly 20 bytes (reject contract-create with empty `to`),
@@ -429,7 +440,11 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         ctx.constrain_equal(&to_as_fr, &contract_address_field);
         println!("   ✓ Constrained tx.to == contractAddress");
 
-        // 5. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
+        // 5. chainId - extracted EIP-1559 RLP field 0 (already computed above).
+        //    Exposed as a public input so USDCBridge can allowlist
+        //    (chainId → expected bridge Fr). Not constrained to a constant.
+
+        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
         //    from the bridge config (NOT from the Ethereum event). It replaced
         //    `anWorkchain` on 2026-06-02. A full UInt256 dappId can exceed the
         //    BN254 scalar modulus, so it is split into high/low 16-byte halves
@@ -446,7 +461,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let dapp_id_high = bytes_to_field(ctx, gate, &dapp_id_bytes[0..16]);
         let dapp_id_low = bytes_to_field(ctx, gate, &dapp_id_bytes[16..32]);
 
-        // 6. anAccount - Acki Nacki destination account (256-bit), split into high/low
+        // 7. anAccount - Acki Nacki destination account (256-bit), split into high/low
         //    16-byte halves (mirrors the block-hash split) so each fits a BN254 field
         //    element. Matches log data word 2.
         let an_account_bytes: Vec<AssignedValue<Fr>> = self
@@ -459,24 +474,26 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let an_account_high = bytes_to_field(ctx, gate, &an_account_bytes[0..16]);
         let an_account_low = bytes_to_field(ctx, gate, &an_account_bytes[16..32]);
 
-        // 7. blockHashHigh - from block hash (first 16 bytes)
+        // 8. blockHashHigh - from block hash (first 16 bytes)
         let block_hash_high = bytes_to_field(ctx, gate, &block_hash_bytes[0..16]);
 
-        // 8. blockHashLow - from block hash (last 16 bytes)
+        // 9. blockHashLow - from block hash (last 16 bytes)
         let block_hash_low = bytes_to_field(ctx, gate, &block_hash_bytes[16..32]);
 
         // Set public instances BEFORE promise_commit is added.
-        // Layout (10 user values + promise_commit appended by EthCircuitImpl):
-        //   [depositId, sender, amount, contractAddress,
+        // Layout (11 user values + promise_commit appended by EthCircuitImpl):
+        //   [depositId, sender, amount, contractAddress, chainId,
         //    dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
         //    blockHashHigh, blockHashLow, (promiseCommit)]
-        // All except dappId{High,Low} are verified in Phase 1 against the
-        // RLP-parsed event data; dappId is a config-supplied tag (see above).
+        // All except dappId{High,Low} and chainId are verified in Phase 1
+        // against the RLP-parsed event data; chainId is bound via tx MPT +
+        // EIP-1559 decode; dappId is a config-supplied tag (see above).
         let public_instances = vec![
             deposit_id_field,
             sender_field,
             amount_field,
             contract_address_field,
+            chain_id_val,
             dapp_id_high,
             dapp_id_low,
             an_account_high,
@@ -487,7 +504,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         builder.base.assigned_instances[0] = public_instances;
 
-        println!("   ✓ Set 10 public instances in Phase 0");
+        println!("   ✓ Set 11 public instances in Phase 0");
         println!("   (promise_commit will be appended automatically)");
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
@@ -528,7 +545,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
             (ctx_gate, ctx_rlc),
             phase0_output.block_header_witness,
-            true, // variable length (15-17 fields)
+            true, // variable length (15–20 fields)
         );
         println!("   ✓ Verified block header RLC");
 
@@ -892,12 +909,15 @@ impl CircuitMetadata for DepositEventCircuitV2 {
 
     /// Number of public instance columns.
     ///
-    /// We expose 11 public inputs (10 user values + promise_commit, which is
+    /// We expose 12 public inputs (11 user values + promise_commit, which is
     /// appended automatically by EthCircuitImpl at the end of Phase 0):
-    /// [depositId, sender, amount, contractAddress,
+    /// [depositId, sender, amount, contractAddress, chainId,
     ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
     ///  blockHashHigh, blockHashLow, promiseCommit]
     ///
+    /// `chainId` is the EIP-1559 RLP field-0 value extracted from the enclosing
+    /// tx (MPT-bound under `transactionsRoot`). It is **not** VK-baked — the
+    /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier) replaced
     /// the single `anWorkchain` slot on 2026-06-02. dappId is a config-supplied
     /// tag — it is not bound to event data in-circuit; the AN-side
@@ -905,9 +925,9 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// `anAccountHigh`/`anAccountLow` remain the event-bound AN recipient account.
     /// The `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
     /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the public-inputs
-    /// cell from the same 11-scalar layout.
+    /// cell from the same 12-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
-        vec![11] // 10 user values + 1 promise_commit
+        vec![12] // 11 user values + 1 promise_commit
     }
 }
 
@@ -1016,16 +1036,17 @@ mod tests {
 
         println!("  Column 0: {} instances", snark.instances[0].len());
 
-        // 11-input layout: [depositId, sender, amount, contractAddress,
+        // 12-input layout: [depositId, sender, amount, contractAddress, chainId,
         // dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh,
         // blockHashLow, promise_commit]
         assert_eq!(
             snark.instances[0].len(),
-            11,
-            "Should have 11 instances: [depositId, sender, amount, contractAddress, dappIdHigh, \
-             dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promise_commit]"
+            12,
+            "Should have 12 instances: [depositId, sender, amount, contractAddress, chainId, \
+             dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, \
+             promise_commit]"
         );
 
-        println!("✅ Proof contains all 11 instances!");
+        println!("✅ Proof contains all 12 instances!");
     }
 }

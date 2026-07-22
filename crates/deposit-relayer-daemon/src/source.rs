@@ -181,6 +181,8 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     from_block: u64,
     /// Confirmation depth: `safe_head = head - confirmations`.
     confirmations: u64,
+    /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
+    chain_id: Mutex<Option<u64>>,
     _network: std::marker::PhantomData<N>,
 }
 
@@ -195,12 +197,28 @@ where
             address,
             from_block,
             confirmations,
+            chain_id: Mutex::new(None),
             _network: std::marker::PhantomData,
         }
     }
 
     pub fn address(&self) -> Address {
         self.address
+    }
+
+    /// Resolve and cache `eth_chainId` for operator sanity checks against the
+    /// proven `chainId` public input.
+    async fn resolve_chain_id(&self) -> Result<u64, RelayerError> {
+        if let Some(id) = *self.chain_id.lock().expect("poisoned lock") {
+            return Ok(id);
+        }
+        let id = self
+            .provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RelayerError::eth(format!("eth_chainId failed: {e}")))?;
+        *self.chain_id.lock().expect("poisoned lock") = Some(id);
+        Ok(id)
     }
 
     /// Read the bridge's `depositCounter()` — the number of deposits made so
@@ -296,6 +314,10 @@ where
         block_number,
         block_hash: receipt.block_hash.unwrap_or_default(),
         source_contract: bridge_address,
+        source_chain_id: provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RelayerError::eth(format!("get_chain_id failed: {e}")))?,
     }))
 }
 
@@ -374,6 +396,7 @@ where
                 block_number: decoded.block_number.unwrap_or_default(),
                 block_hash: decoded.block_hash.unwrap_or_default(),
                 source_contract: self.address,
+                source_chain_id: self.resolve_chain_id().await?,
             }));
         }
         Ok(None)
@@ -423,6 +446,7 @@ mod tests {
             block_number: 100 + deposit_id,
             block_hash: B256::repeat_byte(0xbb),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 

@@ -17,6 +17,7 @@ use ethers::{
 
 use crate::{
     mpt::{generate_receipt_proof, generate_transaction_proof},
+    require_supported_deposit_chain,
     types::{DepositEventData, DepositProofInput},
 };
 
@@ -32,6 +33,13 @@ impl EthereumFetcher {
         Ok(Self {
             provider,
         })
+    }
+
+    /// `eth_chainId` — must be in [`crate::SUPPORTED_DEPOSIT_CHAIN_IDS`].
+    pub async fn chain_id(&self) -> Result<u64> {
+        let id = self.provider.get_chainid().await?.as_u64();
+        require_supported_deposit_chain(id)?;
+        Ok(id)
     }
 
     /// Fetch a transaction receipt by hash
@@ -164,6 +172,14 @@ impl EthereumFetcher {
         log_index: usize,
     ) -> Result<DepositProofInput> {
         println!("Fetching deposit proof for tx: {:?}", tx_hash);
+
+        // Reject unsupported networks early (clear error for operators).
+        let chain_id = self.chain_id().await?;
+        println!(
+            "  - RPC chain_id={} ({})",
+            chain_id,
+            crate::supported_deposit_chain_name(chain_id).unwrap_or("?")
+        );
 
         // 1. Fetch the receipt
         println!("  - Fetching receipt...");

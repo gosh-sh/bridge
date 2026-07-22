@@ -51,8 +51,9 @@ struct Args {
     #[arg(long, default_value = "20")]
     max_log_num: usize,
 
-    /// Expected EIP-1559 chain_id baked into the VK (mainnet=1, Sepolia=11155111)
-    #[arg(long, default_value = "1")]
+    /// Fetch / network selector only (not baked into VK; proven chainId is a PI).
+    /// Must be in `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111).
+    #[arg(long, default_value = "11155111")]
     chain_id: u64,
 }
 
@@ -60,6 +61,7 @@ fn main() -> anyhow::Result<()> {
     println!("=== Test Circuit with Real Data ===\n");
 
     let args = Args::parse();
+    deposit_prover::require_supported_deposit_chain(args.chain_id)?;
 
     // Load input data
     println!("Loading input from {}...", args.input);

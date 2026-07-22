@@ -9,7 +9,7 @@
 //! prover circuit + PK, emitting:
 //!   * `--proof-out`    : raw SHPLONK proof bytes (Blake2b, no header) — the
 //!     `proof_cell` operand.
-//!   * `--pubin-out`    : the 11 public inputs as `N × 32` LE `Fr` — the
+//!   * `--pubin-out`    : the 12 public inputs as `N × 32` LE `Fr` — the
 //!     `public_inputs_cell` operand.
 //!
 //! It then verifies the (vk, instances, proof) triple in-process with
@@ -75,14 +75,16 @@ struct Args {
     #[arg(long, default_value = "20")]
     max_log_num: usize,
 
-    /// Expected EIP-1559 chain_id baked into the VK (mainnet=1, Sepolia=11155111)
-    #[arg(long, default_value = "1")]
+    /// Fetch / network selector only (not baked into VK; proven chainId is a PI).
+    /// Must be in `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111).
+    #[arg(long, default_value = "11155111")]
     chain_id: u64,
 }
 
 fn main() -> anyhow::Result<()> {
     println!("=== Export Blake2b SHPLONK proof (opcode-consumable) ===\n");
     let args = Args::parse();
+    deposit_prover::require_supported_deposit_chain(args.chain_id)?;
 
     let json = fs::read_to_string(&args.input)?;
     let input: DepositProofInput = serde_json::from_str(&json)?;
@@ -124,8 +126,8 @@ fn main() -> anyhow::Result<()> {
 
     let instances: Vec<Vec<Fr>> = circuit.instances();
     anyhow::ensure!(
-        instances.len() == 1 && instances[0].len() == 11,
-        "expected 1 instance column of 11 inputs, got {:?}",
+        instances.len() == 1 && instances[0].len() == 12,
+        "expected 1 instance column of 12 inputs, got {:?}",
         instances.iter().map(|c| c.len()).collect::<Vec<_>>()
     );
     let inst0 = instances[0].clone();

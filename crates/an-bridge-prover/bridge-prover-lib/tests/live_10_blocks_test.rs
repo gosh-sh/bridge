@@ -77,12 +77,12 @@ async fn test_prove_10_live_blocks() {
 
         // Fetch attestation.
         let t = Instant::now();
-        let att = match bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(
+        let ev = match bridge_prover_lib::attestation_fetcher::fetch_attestation_evidence(
             &gql, target,
         )
         .await
         {
-            Ok(a) => a,
+            Ok(e) => e,
             Err(e) => {
                 println!("  SKIP: attestation not found: {}", e);
                 results.push(BlockResult {
@@ -100,7 +100,31 @@ async fn test_prove_10_live_blocks() {
             }
         };
         let fetch_time = t.elapsed();
-        let target_type_str = if att.target_type == 0 { "Primary" } else { "Fallback" };
+        let att = match ev {
+            bridge_prover_lib::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+            bridge_prover_lib::attestation_fetcher::AttestationEvidence::Fallback {
+                primary, fallback,
+            } => {
+                println!(
+                    "  SKIP: fallback attestation (primary_signers={}, fallback_signers={})",
+                    primary.signature_occurrences.len(),
+                    fallback.signature_occurrences.len(),
+                );
+                results.push(BlockResult {
+                    seq_no: target,
+                    status: "SKIP-FALLBACK".to_string(),
+                    proof_time: Duration::ZERO,
+                    verify_time: Duration::ZERO,
+                    proof_size: 0,
+                    signers: primary.signature_occurrences.len(),
+                    target_type: "Fallback".to_string(),
+                    error: None,
+                });
+                last_seen = target;
+                continue;
+            }
+        };
+        let target_type_str = "Primary";
         let num_signers = att.signature_occurrences.len();
         println!("  attestation: type={}, signers={}, fetch_time={:?}",
             target_type_str, num_signers, fetch_time);
@@ -109,22 +133,6 @@ async fn test_prove_10_live_blocks() {
         println!("  env_hash:    {}", hex::encode(&att.envelope_hash));
         println!("  signers:     {:?}", att.signature_occurrences);
         println!("  raw_bytes:   {} bytes", att.raw_bytes.len());
-
-        if att.target_type != 0 {
-            println!("  SKIP: fallback attestation");
-            results.push(BlockResult {
-                seq_no: target,
-                status: "SKIP-FALLBACK".to_string(),
-                proof_time: Duration::ZERO,
-                verify_time: Duration::ZERO,
-                proof_size: 0,
-                signers: num_signers,
-                target_type: target_type_str.to_string(),
-                error: None,
-            });
-            last_seen = target;
-            continue;
-        }
 
         // Off-circuit BLS verification.
         let t = Instant::now();

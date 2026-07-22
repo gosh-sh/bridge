@@ -1,6 +1,6 @@
 //! v3 attestation-fetcher smoke test.
 //!
-//! Validates that `attestation_fetcher::fetch_attestation_for_block` against
+//! Validates that `attestation_fetcher::fetch_attestation_evidence` against
 //! the v3 GraphQL endpoint produces a `ParsedAttestation` whose `raw_bytes`
 //! pass the same layout-parsing the circuit performs, and whose BLS signature
 //! verifies off-circuit against the live bk_set.
@@ -38,16 +38,24 @@ async fn test_v3_fetch_attestation_envelope() {
         }
     };
 
-    let att = match bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(
+    let ev = match bridge_prover_lib::attestation_fetcher::fetch_attestation_evidence(
         &gql, seq_no,
     )
     .await
     {
-        Ok(a) => a,
+        Ok(e) => e,
         Err(e) => {
-            eprintln!("Skipping: fetch_attestation_for_block({seq_no}) failed: {e}");
+            eprintln!("Skipping: fetch_attestation_evidence({seq_no}) failed: {e}");
             return;
         }
+    };
+    // This smoke test only validates the on-wire byte layout of a single
+    // `ParsedAttestation`; the primary entry is present in both variants.
+    let att = match ev {
+        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Fallback {
+            primary, ..
+        } => primary,
     };
 
     println!(

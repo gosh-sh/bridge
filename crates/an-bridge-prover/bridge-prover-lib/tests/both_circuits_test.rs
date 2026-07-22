@@ -202,20 +202,23 @@ fn test_circuit1a_real_proof() {
     let target_seq = (latest_seq - 5) as u32;
 
     println!("fetching attestation for block {}...", target_seq);
-    let attestation = match rt.block_on(
-        bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(&gql, target_seq),
+    let ev = match rt.block_on(
+        bridge_prover_lib::attestation_fetcher::fetch_attestation_evidence(&gql, target_seq),
     ) {
-        Ok(att) => att,
+        Ok(ev) => ev,
         Err(e) => {
             println!("SKIPPING: attestation not available for block {}: {}", target_seq, e);
             return;
         }
     };
 
-    if attestation.target_type != 0 {
-        println!("SKIPPING: got fallback attestation (type={})", attestation.target_type);
-        return;
-    }
+    let attestation = match ev {
+        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Fallback { .. } => {
+            println!("SKIPPING: got fallback attestation");
+            return;
+        }
+    };
 
     // Check signers in BK set.
     let missing: Vec<u16> = attestation

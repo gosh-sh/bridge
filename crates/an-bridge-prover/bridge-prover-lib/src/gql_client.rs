@@ -1,10 +1,60 @@
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
+use std::collections::BTreeMap;
+use crate::poseidon_dense::{compute_block_leaf_hash, LayerNumber};
+use crate::types::{AccountRouting, ThreadIdentifier};
+
 /// Lightweight GraphQL client for the acki-nacki node.
 pub struct GqlClient {
     http: reqwest::Client,
     url: String,
+}
+
+/// Block metadata used for computing block leaf hashes.
+#[derive(Debug, Clone)]
+pub struct BlockMetadata {
+    /// TVM block representation hash (legacy) as hex string.
+    pub hash: String,
+    /// Envelope hash (SHA-256 of BLS envelope) as hex string.
+    pub envelope_hash: String,
+    /// Block sequence number / height.
+    pub seq_no: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GqlAttestation {
+    pub block_id: String,
+    pub parent_block_id: String,
+    pub target_type: u8,
+    pub envelope_hash: String,
+    pub aggregated_signature: String,
+    pub signature_occurrences: std::collections::HashMap<u16, u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BkSetUpdateWithAttestations {
+    pub block_id: String,
+    pub bk_set_update_hex: String,
+    pub height: Option<u64>,
+    pub attestations: Vec<GqlAttestation>,
+}
+
+/// GraphQL-fetched proof block — replaces `Envelope<AckiNackiBlock>` as the
+/// authoritative source of per-block proof data. Mirrors
+/// `acki-nacki/helpers/proof_helper/src/blockchain.rs::GqlProofBlock`.
+#[derive(Clone, Debug)]
+pub struct GqlProofBlock {
+    pub id: String,
+    pub block_id: [u8; 32],
+    pub thread_id: ThreadIdentifier,
+    pub height: u64,
+    pub envelope_hash: [u8; 32],
+    pub tracked_ext_out_messages_root: [u8; 32],
+    pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
+    pub history_proofs: BTreeMap<LayerNumber, [u8; 32]>,
+    /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
+    pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
 }
 
 pub fn create_client(endpoint: &str) -> anyhow::Result<GqlClient> {
@@ -248,27 +298,6 @@ impl GqlClient {
     }
 }
 
-/// Block metadata used for computing block leaf hashes.
-#[derive(Debug, Clone)]
-pub struct BlockMetadata {
-    /// TVM block representation hash (legacy) as hex string.
-    pub hash: String,
-    /// Envelope hash (SHA-256 of BLS envelope) as hex string.
-    pub envelope_hash: String,
-    /// Block sequence number / height.
-    pub seq_no: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct GqlAttestation {
-    pub block_id: String,
-    pub parent_block_id: String,
-    pub target_type: u8,
-    pub envelope_hash: String,
-    pub aggregated_signature: String,
-    pub signature_occurrences: std::collections::HashMap<u16, u16>,
-}
-
 impl GqlAttestation {
     pub fn from_json(v: &Value) -> anyhow::Result<Self> {
         let block_id = v
@@ -320,14 +349,6 @@ impl GqlAttestation {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct BkSetUpdateWithAttestations {
-    pub block_id: String,
-    pub bk_set_update_hex: String,
-    pub height: Option<u64>,
-    pub attestations: Vec<GqlAttestation>,
-}
-
 impl BkSetUpdateWithAttestations {
     pub fn from_json(v: &Value) -> anyhow::Result<Self> {
         let block_id = v
@@ -359,26 +380,7 @@ impl BkSetUpdateWithAttestations {
     }
 }
 
-use std::collections::BTreeMap;
-use crate::poseidon_dense::{compute_block_leaf_hash, LayerNumber};
-use crate::types::{AccountRouting, ThreadIdentifier};
 
-/// GraphQL-fetched proof block — replaces `Envelope<AckiNackiBlock>` as the
-/// authoritative source of per-block proof data. Mirrors
-/// `acki-nacki/helpers/proof_helper/src/blockchain.rs::GqlProofBlock`.
-#[derive(Clone, Debug)]
-pub struct GqlProofBlock {
-    pub id: String,
-    pub block_id: [u8; 32],
-    pub thread_id: ThreadIdentifier,
-    pub height: u64,
-    pub envelope_hash: [u8; 32],
-    pub tracked_ext_out_messages_root: [u8; 32],
-    pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
-    pub history_proofs: BTreeMap<LayerNumber, [u8; 32]>,
-    /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
-    pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
-}
 
 impl GqlProofBlock {
     pub fn block_leaf_hash(&self) -> [u8; 32] {
@@ -499,22 +501,6 @@ impl GqlClient {
             .with_context(|| format!("parse_block_attestation for block {target_seq_no}"))
     }
 
-    /// Legacy single-attestation accessor kept for callers that still want
-    /// the v2 shape. Picks the `PRIMARY`-typed entry if one exists, else
-    /// returns the first parseable entry (preserving the previous "be
-    /// defensive" behavior).
-    pub async fn query_attestation_envelope(
-        &self,
-        target_seq_no: u64,
-    ) -> anyhow::Result<crate::attestation_fetcher::ParsedAttestation> {
-        let mut atts = self.query_attestation_envelopes(target_seq_no).await?;
-        if let Some(idx) = atts.iter().position(|a| a.target_type == 0) {
-            return Ok(atts.swap_remove(idx));
-        }
-        atts.into_iter()
-            .next()
-            .ok_or_else(|| anyhow::format_err!("no attestations on block {target_seq_no}"))
-    }
 }
 
 /// Convert one `BlockAttestation` GraphQL object into a `ParsedAttestation`

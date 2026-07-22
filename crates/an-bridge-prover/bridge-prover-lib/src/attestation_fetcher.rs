@@ -31,36 +31,6 @@ pub struct ParsedAttestation {
     pub signature_occurrences: HashMap<u16, u16>,
 }
 
-/// Fetch the attestation envelope for block `target_seq_no` from GraphQL.
-///
-/// Legacy entry point that returns a single attestation. Picks the PRIMARY
-/// entry if present, else the first parseable one. For full path-aware
-/// classification (Primary vs Fallback) use [`fetch_attestation_evidence`].
-pub async fn fetch_attestation_for_block(
-    client: &GqlClient,
-    target_seq_no: u32,
-) -> anyhow::Result<ParsedAttestation> {
-    let mut att = client
-        .query_attestation_envelope(target_seq_no as u64)
-        .await
-        .with_context(|| format!("query_attestation_envelope({target_seq_no})"))?;
-
-    // The GraphQL `BlockAttestation` row doesn't expose block_seq_no; patch it
-    // in here so downstream consumers (prover.rs::extract_block_seq_no) read
-    // the correct value from raw_bytes.
-    patch_seq_no_in_raw_bytes(&mut att, target_seq_no);
-    att.block_seq_no = target_seq_no;
-
-    info!(
-        "attestation for seq={}: type={}, signers={:?}",
-        target_seq_no,
-        if att.target_type == 0 { "Primary" } else { "Fallback" },
-        att.signature_occurrences,
-    );
-
-    Ok(att)
-}
-
 /// Classified attestation evidence for a key block.
 ///
 /// Acki Nacki finalization is a two-path protocol (consensus-protocol.md §4.6):

@@ -14,31 +14,38 @@ description: >-
 The deposit flow spans **four repos** (siblings under `/home/sergey/Pruvendo/gosh/`).
 Touching the public-input layout means changing all of them in lock-step.
 
-## Public inputs (11, since 2026-06-02)
+## Public inputs (12, since 2026-07-23 — `chainId` added)
 
 Instance column order — every producer/consumer MUST agree:
 
 ```
-[ depositId, sender, amount, contractAddress,
+[ depositId, sender, amount, contractAddress, chainId,
   dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
   blockHashHigh, blockHashLow, promiseCommit ]
 ```
 
+- `chainId` (slot #4, added 2026-07-23) = the EIP-1559 RLP field-0 value,
+  extracted from the enclosing tx and **MPT-bound under `transactionsRoot`** —
+  a *proven* value, NOT VK-baked and NOT read from the contract. The AN-side
+  `USDCBridge` must allowlist `(chainId → expected bridge Fr)`.
+- `contractAddress` (slot #3, bridge address) is bound in-circuit via
+  `constrain_equal(tx.to, contractAddress)` — provably the emitter of the Deposit
+  event, not a contract-supplied value.
 - `dappIdHigh`/`dappIdLow` = the 256-bit AN dApp identifier tag (config-supplied).
 - `anAccountHigh`/`anAccountLow` = the 256-bit AN recipient's two 16-byte halves;
   reconstruct as `anAccountHigh << 128 | anAccountLow`.
 - The AN recipient is **bound in-circuit** (not a relayer hint). `dappId` replaced
-  the earlier `anWorkchain` slot; total count is **11** (not 7 or 10).
+  the earlier `anWorkchain` slot; total count is **12** (was 11 before `chainId`).
 
 ## Where each piece lives
 
 | Piece | Location | Notes |
 |---|---|---|
-| Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![11]`; RLC `EthCircuitImpl` + Blake2b SHPLONK proof (NOT Groth16). |
-| Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=11`; `export_vk_blob` + `export_blake2b_proof` (raw Halo2, no gnark wrap). |
+| Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![12]` (`chainId` at slot #4, MPT-bound to the EIP-1559 tx); RLC `EthCircuitImpl` + Blake2b SHPLONK proof (NOT Groth16). Keyed on **Hermez** SRS. |
+| Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=12`; decodes `chainId` at `scalars[4]`; `export_vk_blob` + `export_blake2b_proof` (raw Halo2, no gnark wrap). |
 | USDCBridge / TokenBridge (AN) | `acki-nacki/contracts/exchange/USDCBridge.sol` | ABI is **`finalizeDeposit(bytes proof, bytes publicInputs)`** — the contract parses all deposit fields out of the operand itself and calls `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Branch **`poseidon_dex`** on `gosh-sh/acki-nacki` (NOT `halo2_circuit_with_vk`, which never existed). **Currently deployed to shellnet** (code-hash `b38e934a…898e154`; embedded `VK_BLOB` = `147efe14…068abaf`) — but that VK was keygen'd from **synthetic 1-node fixtures** and **cannot verify real deposits**. **VK swap required:** the deposit circuit had a witness-dependent VK bug (per-deposit `contractAddress` leaked into a fixed column + unpinned keccak capacity), both now fixed in `deposit-prover` (see `docs/deposit_vk_witness_independence.md`). The new **witness-independent** production VkBlob is **`20cf9018…647a39`** (3982 B, `[13,10]`, cap=64); the recompiled `.tvc` has code-hash **`818fb76d…a9abc4`** (toolchain-validated: old source reproduces the deployed `b38e934a` exactly). Pending partner shellnet redeploy. |
 | Compiled bridge | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.tvc` + `.abi.json` | Recompile with `sold --tvm-version gosh --base-path . exchange/USDCBridge.sol -o exchange/` (run from `contracts/`). Canonical ABI snapshot mirrored at `acki-nacki-bridge/scripts/ursus/USDCBridge.abi.json`. ABI unchanged across the VK swap. |
-| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` | VkBlob-driven; RLC `circuit_shape=1`. Branch **`full_dex_and_bridge_test_with_final_halo2_circuit`** on `tvmlabs/tvm-sdk` (the branch `acki-nacki`'s `Cargo.toml` pins for `tvm_vm`). Do **not** use `halo2_circuit_with_vk` (never existed) or `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
+| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` (builds params via `build_shared_kzg_params` → `zk_halo2_utils.rs::KZG_S_G2_BYTES`) | VkBlob-driven (reads PI count from the VkBlob — no opcode change for 11→12 PI). RLC `circuit_shape=1`. **`KZG_S_G2_BYTES` = Hermez `[s]·G2` since 2026-07-23** (`92 8f af b3 …`), so it accepts Hermez-keyed deposit proofs; the legacy Dark DEX path keeps `DARK_DEX_KZG_S_G2_BYTES` = chain ceremony. Verify green: `cargo +nightly test -p tvm_vm --features gosh deposit_rlc` (3/3). Branch **`full_dex_and_bridge_test_with_final_halo2_circuit`** on `tvmlabs/tvm-sdk`. Do **not** use `halo2_circuit_with_vk` (never existed) or `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
 | tvm-sdk e2e test | `tvm-sdk/tvm_executor/src/transaction_executor.rs::athens_finalize_deposit_reaches_mint` | Loads `TokenBridge.tvc` + `/tmp/deposit_e2e/live_finalize_msg.boc`, drives finalize → opcode → mint. Skips if artifacts missing. |
 
 ## e2e artifacts (machine-local, in `/tmp/deposit_e2e/`)
@@ -48,15 +55,22 @@ Instance column order — every producer/consumer MUST agree:
 - `deposit_public_inputs.bin` — `N × 32` LE Fr operand.
 - `deposit_proof_blake2b.bin` — raw Blake2b SHPLONK proof.
 - `live_finalize_msg.boc` — signed external message that calls `finalizeDeposit`.
-- SRS: `acki-nacki-bridge/deposit-prover/params/kzg_bn254_18.srs` (k=18, **opcode-aligned
-  CHAIN ceremony** — `s_g2` matches the opcode's embedded `KZG_S_G2_BYTES`). This is what
-  `prover.rs` loads first and what real deposit proofs must be keyed on. Do **not** use
-  `data/kzg_params_18.srs` (Hermez) for deposit proofs — same g1/g2 generators but a
-  different tau, so the AN `ZKHALO2VERIFYWITHVK` opcode rejects proofs keyed on it.
+- **SRS = Hermez (since 2026-07-23). Forget the chain ceremony for deposits.**
+  Deposit proofs are keyed on the **Hermez Perpetual Powers of Tau** SRS
+  `acki-nacki-bridge/deposit-prover/data/kzg_params_18.srs` (k=18, `s_g2` head
+  `92 8f af b3 …`, tail `… 5c 69 00`). Get it via `./download_trusted_setup.sh`
+  (downloads the 33 MB Hermez file). Do **not** downsize / use the chain ceremony
+  `params/kzg_bn254_{18,19}.srs` (`c6 02 8a cf …`) for deposit proofs anymore.
+  The tvm-sdk `ZKHALO2VERIFYWITHVK` opcode was switched to the Hermez `[s]·G2` on
+  2026-07-23 (`tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`) so it now
+  accepts Hermez-keyed deposit proofs. (The legacy Dark DEX `ZKHALO2VERIFY` path
+  still uses `DARK_DEX_KZG_S_G2_BYTES` = chain ceremony — do not touch it.)
 
 ## Regenerate the VK / VkBlob
 
-The VK changes whenever `num_instance` changes. From `deposit-prover/`:
+The VK changes whenever `num_instance` changes. From `deposit-prover/` — first
+ensure the **Hermez** SRS is present (`./download_trusted_setup.sh` → `data/kzg_params_18.srs`;
+do NOT downsize the chain ceremony):
 
 ```bash
 cargo run --release --example export_vk_blob -- \
@@ -76,9 +90,12 @@ new `deposit_vk_blob.bin` bytes into `TokenBridge.sol`'s `VK_BLOB` constant.
 (`FIXED_KECCAK_CAPACITY = 64`) and `circuit_v2.rs` no longer loads the address as a
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
-the **byte-identical** production VkBlob `20cf9018…647a39`. Regenerate the whole
-`deposit_10proofs` regression set in one shot with
-`cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 256 --max-log-num 20`.
+the **byte-identical** production VkBlob. Current production VkBlob (12-PI, Hermez,
+5006 B) = **`006cca5d…191dec05`** (superseded the 11-PI chain-ceremony `20cf9018…`
+on 2026-07-23 when `chainId` was added + the SRS moved to Hermez). Regenerate the
+whole `deposit_10proofs` regression set in one shot with
+`cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 256 --max-log-num 20`
+then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).
 NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
 circuit-shape change can never silently load a stale PK.
 

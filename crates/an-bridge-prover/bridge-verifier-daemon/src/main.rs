@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
-    info!("GQL endpoint: {} (BK-set fetch only; falls back to {})", gql_endpoint, bk_set_config);
+    info!("GQL endpoint: {} (unused since 2026-07-22 refactor)", gql_endpoint);
+    info!("BK-set config: {}", bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
     // Graceful-shutdown flag flipped by the Ctrl-C handler. Checked at the top
@@ -159,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
                     seed.block_height,
                     seed.layer_hashes.len(),
                 );
-                seed.apply(&mut state);
+                seed.apply(&mut state)?;
                 state.save(STATE_FILE)?;
                 info!(
                     "initialized from seed: seqno={}, height={}",
@@ -230,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                         seed.block_height,
                         seed.layer_hashes.len(),
                     );
-                    seed.apply(&mut state);
+                    seed.apply(&mut state)?;
                     state.save(STATE_FILE)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
                     bootstrapped = true;
@@ -399,18 +400,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Build Circuit 2 public instances (14 values).
+            // Build Circuit 2 public instances (14 values). Since the
+            // 2026-07-22 Circuit 1 byte-order fix, Circuit 2 binds the same
+            // `block_id_fr = uint256(bytes32(root))` as Circuit 1, so we
+            // reuse the `block_id_fr` already parsed above for both proofs.
             let mut layer_instances = Vec::with_capacity(14);
-            // Circuit 2 computes its own block_id from the Merkle path.
-            let layer_block_id_hex = request.layer_block_id_hex.as_str();
-            let layer_block_id_fr = match ipc::fr_from_hex(layer_block_id_hex) {
-                Ok(fr) => fr,
-                Err(_) => {
-                    // Fallback for old proof files without layer_block_id_hex.
-                    ipc::fr_from_hex(&request.block_id_hex).unwrap_or(Fr::zero())
-                }
-            };
-            layer_instances.push(layer_block_id_fr);     // [0] block_id
+            layer_instances.push(block_id_fr);           // [0] block_id
             layer_instances.push(bk_set_hash_fr);        // [1] bk_set_poseidon_hash
             layer_instances.push(Fr::from(request.num_layers as u64)); // [2] num_layers
             for hex_str in &request.layer_hash_frs_hex {
@@ -489,19 +484,25 @@ async fn main() -> anyhow::Result<()> {
                             }
                         })
                         .collect();
-                    let bk_hash_bytes: [u8; 32] = bk_set_hash_fr.to_repr();
                     // `block_height` is the thread-anchored height from the
                     // node's envelope (carried in `ProofRequest` v2). In
                     // multi-thread Acki Nacki this resets across thread
                     // crossings, so it is NOT the same as `block_seq_no` —
                     // mirroring it explicitly is what keeps `heights[W]`
                     // aligned with the contract's per-layer rolling window.
+                    //
+                    // `bk_set_hash_fr` was already checked to equal
+                    // `state.stored_bk_set_commitment` during Circuit 1a
+                    // verification above; `append_bundle` no longer writes
+                    // the commitment (single-writer discipline mirroring
+                    // Solidity `verifyBlock`). Monotonicity is enforced
+                    // inside `append_bundle` too — `?` here is defense in
+                    // depth atop the outer guard above.
                     state.append_bundle(
                         &new_layer_hashes,
                         request.block_height,
                         next_seq_u64,
-                        bk_hash_bytes,
-                    );
+                    )?;
                     state.save(STATE_FILE)?;
                 }
                 // block_id_fr is informational only in v2 state — no longer
@@ -562,20 +563,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load_bk_set_commitment(gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
-    let bk_set = match bridge_prover_lib::gql_client::create_client(gql_endpoint) {
-        Ok(gql) => match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql).await {
-            Ok(bk) => {
-                info!("BK set loaded from GraphQL: {} signers", bk.len());
-                bk
-            }
-            Err(e) => {
-                info!("GraphQL BK set failed ({}), trying config file {}", e, bk_set_config);
-                bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?
-            }
-        },
-        Err(_) => bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?,
-    };
+/// Load the genesis BK set commitment from the JSON config file.
+///
+/// The `_gql_endpoint` parameter is retained for signature/CLI-plumbing
+/// stability. The old GraphQL-first path (`fetch_bk_set`) was disabled on
+/// 2026-07-22 as architecturally broken — it replayed the `bkSetUpdates`
+/// delta log from ∅ but AN does not emit genesis as a synthetic `Added`
+/// event. Use `bk_set_at_height` (planned) for distant-block cold starts.
+async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
+    info!("BK set loaded from config: {} signers", bk_set.len());
     Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }
 
@@ -816,15 +813,17 @@ fn process_bk_update_bundle(
     // Fr instance (bound by the Circuit 1a/1b proof in check 1). Both must
     // refer to the same chain block.
     //
-    // The relation the prover establishes is `block_id_fr = Σ byte_i · 256^i
-    // mod Fr_modulus` where byte_i are the chain hash bytes in LE order
-    // (`compute_block_id_fr` in bridge-prover-lib::prover). We re-run that
-    // construction here and require equality.
+    // The relation the prover (and both circuits) establishes is
+    // `block_id_fr = uint256(bytes32(root))` — the natural integer value of
+    // the BE SHA-256 root. Equivalently, reverse the BE bytes and LE-fold
+    // (`compute_block_id_fr` in `attestation-bls-checker-circuit::
+    // attestation_data_parser`). We re-run that construction here and
+    // require equality.
     let block_id_fr_from_hash = {
         let mut acc = Fr::zero();
         let mut power = Fr::one();
         let base = Fr::from(256u64);
-        for &b in &block_id_bytes {
+        for &b in block_id_bytes.iter().rev() {
             acc += Fr::from(b as u64) * power;
             power *= base;
         }

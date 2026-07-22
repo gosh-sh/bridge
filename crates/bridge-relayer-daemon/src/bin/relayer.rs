@@ -1994,10 +1994,12 @@ async fn run_daemon_live(
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
-    use bridge_prover_lib::{
-        bk_set_fetcher::{fetch_bk_set, load_bk_set_from_config},
-        bridge_state::BridgeState,
+    use bridge_gql_fetcher::{
+        bk_set_fetcher::load_bk_set_from_config,
         gql_client::create_client,
+    };
+    use bridge_prover_lib::{
+        bridge_state::BridgeState,
         keys::KeyManager,
         live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
         prover_bk_set::ProverBkSet,
@@ -2012,23 +2014,19 @@ async fn run_daemon_live(
     let gql = create_client(&gql_endpoint)
         .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
 
-    let bk_set = match fetch_bk_set(&gql).await {
-        Ok(s) => {
-            info!(signers = s.len(), "BK set loaded from GraphQL");
-            s
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                path = %bk_set_config.display(),
-                "GraphQL BK-set fetch failed; falling back to config file"
-            );
-            let path = bk_set_config
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
-            load_bk_set_from_config(path)
-                .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?
-        }
+    // Load genesis BK set from JSON config. The old GraphQL-first path
+    // (`fetch_bk_set`) was disabled on 2026-07-22 as architecturally broken:
+    // it replayed the `bkSetUpdates` delta log from ∅ but AN does not emit
+    // genesis as a synthetic `Added` event. Distant-block cold starts on
+    // long-lived rotating chains should use `bk_set_at_height` (planned).
+    let bk_set = {
+        let path = bk_set_config
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
+        let s = load_bk_set_from_config(path)
+            .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?;
+        info!(signers = s.len(), path = %path, "BK set loaded from config");
+        s
     };
 
     info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");

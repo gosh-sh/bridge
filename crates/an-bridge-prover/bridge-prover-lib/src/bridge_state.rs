@@ -256,6 +256,29 @@ impl BridgeState {
         self.window_mut(layer).append(hash, height);
     }
 
+    /// Genesis-only stamp of the initial BK-set commitment.
+    ///
+    /// Off-chain analogue of the Solidity constructor line
+    /// `storedBkSetCommitment = _vb.genesisBkSetCommitment;`
+    /// (AckiNackiBridge.sol). Runs exactly once, before any bundle is
+    /// applied; erroring if state is already initialized guarantees the
+    /// commitment field has exactly two writers over the lifetime of a
+    /// state file: this method (genesis) and `apply_bk_set_update`
+    /// (rotations). `append_bundle` does not touch it — mirroring
+    /// Solidity's `verifyBlock`, which reads the commitment but never
+    /// writes it.
+    pub fn initialize_bk_set_commitment(
+        &mut self,
+        commitment: [u8; 32],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.initialized,
+            "initialize_bk_set_commitment called on already-initialized state",
+        );
+        self.stored_bk_set_commitment = commitment;
+        Ok(())
+    }
+
     /// Apply the per-layer hashes extracted from a single key block.
     ///
     /// * `per_layer` — pairs of `(root_hash, layer_number)` from the block's
@@ -263,25 +286,42 @@ impl BridgeState {
     ///   into its own window.
     /// * `block_height` / `block_seq_no` — coordinates of the key block that
     ///   produced these hashes.
-    /// * `bk_set_commitment` — Poseidon commitment of the current BK set.
     ///
     /// All layers receive the same `block_height` in their `heights[]` slot.
+    ///
+    /// Preconditions (any failure → unchanged state, error returned):
+    /// * `block_seq_no > self.stored_last_seen_block_seq_no` — monotonicity,
+    ///   mirrors Solidity `verifyBlock` (AckiNackiBridge.sol:677-679). On a
+    ///   freshly-constructed state (`stored_last_seen = 0`) any positive
+    ///   `block_seq_no` passes, so bootstrap is unaffected.
+    ///
+    /// Does NOT touch `stored_bk_set_commitment` — mirrors Solidity's
+    /// `verifyBlock`, which reads the commitment as a precondition but
+    /// never writes it. The commitment is rotated only by
+    /// `apply_bk_set_update` (and stamped once at genesis by
+    /// `initialize_bk_set_commitment`).
     pub fn append_bundle(
         &mut self,
         per_layer: &[([u8; 32], u8)],
         block_height: u64,
         block_seq_no: u64,
-        bk_set_commitment: [u8; 32],
-    ) {
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            block_seq_no > self.stored_last_seen_block_seq_no,
+            "append_bundle: block_seq_no {} is not strictly greater than \
+             stored_last_seen {}",
+            block_seq_no,
+            self.stored_last_seen_block_seq_no,
+        );
         for (hash, layer) in per_layer {
             if (1..=MAX_LAYERS as u8).contains(layer) {
                 self.window_mut(*layer).append(*hash, block_height);
             }
         }
-        self.stored_bk_set_commitment = bk_set_commitment;
         self.stored_last_seen_block_seq_no = block_seq_no;
         self.stored_last_seen_block_height = block_height;
         self.initialized = true;
+        Ok(())
     }
 
     /// Number of layers that currently have at least one entry. Used by
@@ -428,6 +468,66 @@ mod tests {
         s.append_layer(1, [3u8; 32], 24);
         assert_eq!(s.slot_for_event_height(1, 16), Some(1));
         assert_eq!(s.slot_for_event_height(1, 99), None);
+    }
+
+    #[test]
+    fn initialize_bk_set_commitment_stamps_once() {
+        let mut s = BridgeState::new(8);
+        s.initialize_bk_set_commitment([9u8; 32]).unwrap();
+        assert_eq!(s.stored_bk_set_commitment, [9u8; 32]);
+        // Not yet marked initialized — that flip is `append_bundle`'s job.
+        assert!(!s.initialized);
+    }
+
+    #[test]
+    fn initialize_bk_set_commitment_rejects_reinit() {
+        let mut s = BridgeState::new(8);
+        // Simulate a state that has already been through a bundle apply.
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        assert!(s.initialized);
+        let err = s.initialize_bk_set_commitment([9u8; 32]).unwrap_err();
+        assert!(format!("{err}").contains("already-initialized"));
+    }
+
+    #[test]
+    fn append_bundle_does_not_write_bk_set_commitment() {
+        let mut s = BridgeState::new(8);
+        s.initialize_bk_set_commitment([9u8; 32]).unwrap();
+        // Any subsequent append must leave the commitment untouched — that
+        // field has exactly one post-init writer (`apply_bk_set_update`).
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        assert_eq!(s.stored_bk_set_commitment, [9u8; 32]);
+        assert_eq!(s.stored_last_seen_block_seq_no, 8);
+    }
+
+    #[test]
+    fn append_bundle_rejects_non_monotone() {
+        let mut s = BridgeState::new(8);
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        // Replay at same seq_no.
+        let err = s.append_bundle(&[([2u8; 32], 1)], 16, 8).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+        // Out-of-order older seq_no.
+        let err = s.append_bundle(&[([2u8; 32], 1)], 16, 4).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+        // State must be unchanged (cursors still at 8, layer 1 still holds
+        // the first hash).
+        assert_eq!(s.stored_last_seen_block_seq_no, 8);
+        assert_eq!(s.window(1).data_len, 1);
+        assert_eq!(s.window(1).latest(), Some([1u8; 32]));
+    }
+
+    #[test]
+    fn append_bundle_happy_path_advances_cursors() {
+        let mut s = BridgeState::new(8);
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        s.append_bundle(&[([2u8; 32], 1), ([3u8; 32], 2)], 16, 16).unwrap();
+        assert_eq!(s.stored_last_seen_block_seq_no, 16);
+        assert_eq!(s.stored_last_seen_block_height, 16);
+        assert_eq!(s.window(1).data_len, 2);
+        assert_eq!(s.window(1).latest(), Some([2u8; 32]));
+        assert_eq!(s.window(2).data_len, 1);
+        assert_eq!(s.window(2).latest(), Some([3u8; 32]));
     }
 
     #[test]

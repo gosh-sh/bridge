@@ -18,7 +18,7 @@ use crate::gql_client::GqlClient;
 /// `attestations[]` array.
 ///
 /// `raw_bytes` is laid out exactly as `bincode(Envelope<AttestationData>)` so
-/// `bridge_parsers::attestation_data_parser` and `prover.rs::compute_block_id_fr`
+/// `attestation_bls_checker_circuit::attestation_data_parser` and `prover.rs`
 /// can index it with their fixed offsets.
 #[derive(Debug, Clone)]
 pub struct ParsedAttestation {
@@ -29,36 +29,6 @@ pub struct ParsedAttestation {
     pub envelope_hash: [u8; 32],
     pub target_type: u32, // 0 = Primary, 1 = Fallback
     pub signature_occurrences: HashMap<u16, u16>,
-}
-
-/// Fetch the attestation envelope for block `target_seq_no` from GraphQL.
-///
-/// Legacy entry point that returns a single attestation. Picks the PRIMARY
-/// entry if present, else the first parseable one. For full path-aware
-/// classification (Primary vs Fallback) use [`fetch_attestation_evidence`].
-pub async fn fetch_attestation_for_block(
-    client: &GqlClient,
-    target_seq_no: u32,
-) -> anyhow::Result<ParsedAttestation> {
-    let mut att = client
-        .query_attestation_envelope(target_seq_no as u64)
-        .await
-        .with_context(|| format!("query_attestation_envelope({target_seq_no})"))?;
-
-    // The GraphQL `BlockAttestation` row doesn't expose block_seq_no; patch it
-    // in here so downstream consumers (prover.rs::extract_block_seq_no) read
-    // the correct value from raw_bytes.
-    patch_seq_no_in_raw_bytes(&mut att, target_seq_no);
-    att.block_seq_no = target_seq_no;
-
-    info!(
-        "attestation for seq={}: type={}, signers={:?}",
-        target_seq_no,
-        if att.target_type == 0 { "Primary" } else { "Fallback" },
-        att.signature_occurrences,
-    );
-
-    Ok(att)
 }
 
 /// Classified attestation evidence for a key block.

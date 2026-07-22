@@ -37,9 +37,10 @@ fn test_circuit2_mockprover() {
     let num_chain_steps: u8 = 2;
 
     // 1. Build chain data.
-    let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain(
+    let chain_data = bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth(
         num_layers as usize,
         (num_chain_steps - 1) as usize, // num_prev_chain_steps
+        bridge_test_data_gen::layer_hashes::TREE_DEPTH,
     );
 
     // 2. Build preimage.
@@ -147,29 +148,17 @@ fn test_circuit2_mockprover() {
 fn test_circuit1a_real_proof() {
     let t_total = Instant::now();
 
-    // 1. Load BK set.
-    let bk_set = match bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config("./bk_set.json") {
+    // 1. Load BK set. The former GraphQL fallback (`fetch_bk_set`) was
+    //    disabled on 2026-07-22 as architecturally broken; if the JSON is
+    //    absent, skip the test rather than fabricate an incorrect set.
+    let bk_set = match bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config("./bk_set.json") {
         Ok(bk) => {
             println!("BK set loaded from config: {} signers", bk.len());
             bk
         }
         Err(e) => {
-            println!("BK set config not found ({}), trying shellnet...", e);
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let gql = bridge_prover_lib::gql_client::create_client(
-                "https://shellnet.ackinacki.org/graphql",
-            )
-            .unwrap();
-            match rt.block_on(bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql)) {
-                Ok(bk) => {
-                    println!("BK set from shellnet: {} signers", bk.len());
-                    bk
-                }
-                Err(e2) => {
-                    println!("SKIPPING test_circuit1a_real_proof: no BK set available ({}, {})", e, e2);
-                    return;
-                }
-            }
+            println!("SKIPPING test_circuit1a_real_proof: no BK set config available ({})", e);
+            return;
         }
     };
 
@@ -192,7 +181,7 @@ fn test_circuit1a_real_proof() {
 
     // 3. Fetch a real attestation from shellnet.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let gql = bridge_prover_lib::gql_client::create_client(
+    let gql = bridge_gql_fetcher::gql_client::create_client(
         "https://shellnet.ackinacki.org/graphql",
     )
     .unwrap();
@@ -202,20 +191,23 @@ fn test_circuit1a_real_proof() {
     let target_seq = (latest_seq - 5) as u32;
 
     println!("fetching attestation for block {}...", target_seq);
-    let attestation = match rt.block_on(
-        bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(&gql, target_seq),
+    let ev = match rt.block_on(
+        bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(&gql, target_seq),
     ) {
-        Ok(att) => att,
+        Ok(ev) => ev,
         Err(e) => {
             println!("SKIPPING: attestation not available for block {}: {}", target_seq, e);
             return;
         }
     };
 
-    if attestation.target_type != 0 {
-        println!("SKIPPING: got fallback attestation (type={})", attestation.target_type);
-        return;
-    }
+    let attestation = match ev {
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback { .. } => {
+            println!("SKIPPING: got fallback attestation");
+            return;
+        }
+    };
 
     // Check signers in BK set.
     let missing: Vec<u16> = attestation

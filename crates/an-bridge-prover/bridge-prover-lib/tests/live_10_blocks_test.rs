@@ -31,7 +31,7 @@ async fn test_prove_10_live_blocks() {
     let t_total = Instant::now();
 
     // 1. Load BK set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     let (bk_set_commitment, _) = bridge_prover_lib::poseidon::compute_bk_set_poseidon(&bk_set);
     println!("\nBK set: {} signers", bk_set.len());
@@ -48,7 +48,7 @@ async fn test_prove_10_live_blocks() {
     println!("[timing] key load/gen: {:?}", t.elapsed());
 
     // 3. Connect to node.
-    let gql = bridge_prover_lib::gql_client::create_client(GQL_ENDPOINT)
+    let gql = bridge_gql_fetcher::gql_client::create_client(GQL_ENDPOINT)
         .expect("failed to create GQL client");
 
     // 4. Find a starting point: pick a recent block.
@@ -77,12 +77,12 @@ async fn test_prove_10_live_blocks() {
 
         // Fetch attestation.
         let t = Instant::now();
-        let att = match bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(
+        let ev = match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(
             &gql, target,
         )
         .await
         {
-            Ok(a) => a,
+            Ok(e) => e,
             Err(e) => {
                 println!("  SKIP: attestation not found: {}", e);
                 results.push(BlockResult {
@@ -100,7 +100,31 @@ async fn test_prove_10_live_blocks() {
             }
         };
         let fetch_time = t.elapsed();
-        let target_type_str = if att.target_type == 0 { "Primary" } else { "Fallback" };
+        let att = match ev {
+            bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+            bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
+                primary, fallback,
+            } => {
+                println!(
+                    "  SKIP: fallback attestation (primary_signers={}, fallback_signers={})",
+                    primary.signature_occurrences.len(),
+                    fallback.signature_occurrences.len(),
+                );
+                results.push(BlockResult {
+                    seq_no: target,
+                    status: "SKIP-FALLBACK".to_string(),
+                    proof_time: Duration::ZERO,
+                    verify_time: Duration::ZERO,
+                    proof_size: 0,
+                    signers: primary.signature_occurrences.len(),
+                    target_type: "Fallback".to_string(),
+                    error: None,
+                });
+                last_seen = target;
+                continue;
+            }
+        };
+        let target_type_str = "Primary";
         let num_signers = att.signature_occurrences.len();
         println!("  attestation: type={}, signers={}, fetch_time={:?}",
             target_type_str, num_signers, fetch_time);
@@ -110,28 +134,12 @@ async fn test_prove_10_live_blocks() {
         println!("  signers:     {:?}", att.signature_occurrences);
         println!("  raw_bytes:   {} bytes", att.raw_bytes.len());
 
-        if att.target_type != 0 {
-            println!("  SKIP: fallback attestation");
-            results.push(BlockResult {
-                seq_no: target,
-                status: "SKIP-FALLBACK".to_string(),
-                proof_time: Duration::ZERO,
-                verify_time: Duration::ZERO,
-                proof_size: 0,
-                signers: num_signers,
-                target_type: target_type_str.to_string(),
-                error: None,
-            });
-            last_seen = target;
-            continue;
-        }
-
         // Off-circuit BLS verification.
         let t = Instant::now();
         {
-            let sig_bytes = bridge_parsers::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
-            let entries = bridge_parsers::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
-            let att_data = bridge_parsers::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
+            let sig_bytes = attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
+            let entries = attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
+            let att_data = attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
             let signature = gosh_bls_verification::helpers::deserialize_g2_signature(sig_bytes);
             let msg_hash = gosh_bls_verification::helpers::compute_msg_hash(&att_data[..120]);
             let pks = gosh_bls_verification::helpers::resolve_pubkeys(&entries, &bk_set);

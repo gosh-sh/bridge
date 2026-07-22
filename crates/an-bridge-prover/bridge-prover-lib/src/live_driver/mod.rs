@@ -46,13 +46,13 @@
 //!
 //! External consumers wire the driver into their own poll loop by:
 //!
-//! 1. building a [`crate::gql_client::GqlClient`] pointed at an AN node,
+//! 1. building a [`bridge_gql_fetcher::gql_client::GqlClient`] pointed at an AN node,
 //! 2. constructing a [`KeyManager`] and calling `ensure_primary_keys` /
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
 //! 4. fetching the initial BK-set map via
-//!    [`crate::bk_set_fetcher::query_current_signer_index_bk_set`], and
+//!    [`bridge_gql_fetcher::bk_set_fetcher::fetch_bk_set`], and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!
@@ -83,10 +83,10 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use thiserror::Error;
 use tracing::{info, warn};
 
-use crate::attestation_fetcher::AttestationEvidence;
+use bridge_gql_fetcher::attestation_fetcher::AttestationEvidence;
 use crate::bootstrap::BootstrapSeed;
 use crate::bridge_state::BridgeState;
-use crate::gql_client::GqlClient;
+use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
 use crate::poseidon;
 use crate::prover_bk_set::ProverBkSet;
@@ -296,14 +296,14 @@ pub struct BundleProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
+    /// Block ID as `Fr::to_repr()` bytes — a single value shared by both
+    /// circuits since the 2026-07-22 Circuit 1 byte-order fix. Both Circuit 1
+    /// (from the attestation payload) and Circuit 2 (from the SHA-256 8-leaf
+    /// Merkle root) now compute `block_id_fr = uint256(bytes32(root))`, so
+    /// the two derivation paths are provably equal for a valid block.
+    /// `bundle.rs` debug-asserts this equality at build time to page loudly
+    /// if either circuit's byte-order convention regresses.
     pub block_id_be: [u8; 32],
-    /// Circuit 2's block_id — derived from the layer preimage + SHA-256 Merkle
-    /// siblings (reverse of the tree root, treated as LE bytes of Fr). This is
-    /// distinct from [`Self::block_id_be`] (which comes from parsing the raw
-    /// attestation payload) even though both bind the "same" block: the two
-    /// derivation paths can produce different Fr representations depending on
-    /// byte-order conventions in the attestation wire format.
-    pub layer_block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
     pub bk_set_commitment_be: [u8; 32],
@@ -624,6 +624,10 @@ impl LiveProverDriver {
     }
 
     fn ack_bundle_inner(&mut self, artifacts: &BundleProofArtifacts) -> anyhow::Result<()> {
+        // Outer idempotency check: stale replay is a no-op, not an error.
+        // The driver may be re-driven with the same artifacts after a
+        // downstream retry; the *inner* `append_bundle` monotonicity check
+        // would error on that, so we intercept the equal/older case here.
         if artifacts.block_seq_no <= self.state.stored_last_seen_block_seq_no {
             info!(
                 "ack_bundle: no-op — artifacts.block_seq_no={} <= stored_last_seen={}",
@@ -631,13 +635,18 @@ impl LiveProverDriver {
             );
             return Ok(());
         }
-        let bk_hash_bytes: [u8; 32] = self.bk_set_commitment_fr.to_repr();
+        // `append_bundle` no longer writes `stored_bk_set_commitment`
+        // (single-writer discipline mirroring Solidity `verifyBlock`).
+        // The driver's `bk_set_commitment_fr` is rotated in-memory by
+        // `ack_bk_update` after `apply_bk_set_update` succeeds; by the
+        // time we reach here it already matches
+        // `state.stored_bk_set_commitment`. `?` on the append is defense
+        // in depth: the outer guard above already ensures monotonicity.
         self.state.append_bundle(
             &artifacts.state_layer_hashes,
             artifacts.block_height,
             artifacts.block_seq_no,
-            bk_hash_bytes,
-        );
+        )?;
         Ok(())
     }
 
@@ -745,7 +754,7 @@ impl LiveProverDriver {
     /// bundle poll — sends one GQL request.
     async fn pending_bk_update_below(&self, max_height: u64) -> anyhow::Result<bool> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
-        match crate::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
+        match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
             Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
             Ok(None) => Ok(false),
             Err(e) => {
@@ -793,7 +802,7 @@ impl LiveProverDriver {
             bk_hash_bytes,
         )
         .await?;
-        seed.apply(&mut self.state);
+        seed.apply(&mut self.state)?;
         info!(
             "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
             seed.block_seq_no,

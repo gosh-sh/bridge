@@ -23,7 +23,7 @@ use crate::bridge_state::BridgeState;
 use crate::chain_proof_builder::{
     self, build_chain_proofs, pad_leaves_to_power_of_2, LayerTreeData,
 };
-use crate::gql_client::GqlClient;
+use bridge_gql_fetcher::gql_client::GqlClient;
 
 /// Result of building chain proofs from real block data.
 pub struct RealChainResult {
@@ -430,5 +430,9 @@ pub async fn fetch_layer_root(gql: &GqlClient, seqno: u64, layer: u8) -> anyhow:
 /// Fetch a block's leaf hash directly from GQL (block_id, envelope_hash, ext_out_root).
 async fn fetch_block_leaf_hash_from_boc(gql: &GqlClient, seqno: u64) -> anyhow::Result<[u8; 32]> {
     let block = gql.query_proof_block_by_seqno(seqno).await?;
-    Ok(block.block_leaf_hash())
+    Ok(crate::poseidon_dense::compute_block_leaf_hash(
+        &block.block_id,
+        &block.envelope_hash,
+        &block.tracked_ext_out_messages_root,
+    ))
 }

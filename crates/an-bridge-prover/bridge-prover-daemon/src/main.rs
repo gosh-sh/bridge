@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use tracing::{error, info, warn};
 
 use bridge_prover_lib::bootstrap;
 use bridge_prover_lib::bridge_state::BridgeState;
-use bridge_prover_lib::gql_client::{self, GqlClient};
+use bridge_gql_fetcher::gql_client::{self, GqlClient};
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
 use bridge_prover_lib::live_driver::{
@@ -50,6 +50,20 @@ const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
 const ENV_BOOTSTRAP_SEQNO: &str = "BRIDGE_BOOTSTRAP_SEQNO";
 const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
 const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
+
+/// Selects how the initial BK set is derived on first-ever startup.
+///   - `file` (default): treat the JSON file as the current BK set (correct
+///     on fresh chains and on rotating chains booted from genesis).
+///   - `fold_at_height`: treat the JSON file as the *genesis* snapshot and
+///     apply all `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (or the
+///     daemon's bootstrap seqno if that env is unset) via `bk_set_at_height`.
+///     Use this when cold-starting the prover against a long-running chain
+///     whose committee has rotated many times since genesis.
+///
+/// Consulted only on first bootstrap; a persisted `prover_bk_set.json` is
+/// the source of truth on Resume regardless of this setting.
+const ENV_BK_SET_BOOTSTRAP: &str = "BRIDGE_BK_SET_BOOTSTRAP";
+const ENV_BK_SET_TARGET_SEQNO: &str = "BRIDGE_BK_SET_TARGET_SEQNO";
 
 const PARAMS_DIR: &str = "./params";
 const LOGS_DIR: &str = "./logs";
@@ -94,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Wire dependencies -------------------------------------------------
     let gql = gql_client::create_client(&gql_endpoint)?;
-    let bk_set_from_gql = load_bk_set(&gql).await?;
+    let bk_set_from_gql = load_bk_set(&gql, explicit_bootstrap_seqno).await?;
     let (bk_commitment_fr, _) = poseidon::compute_bk_set_poseidon(&bk_set_from_gql);
     info!(
         "BK set (GQL): {} signers, commitment={}",
@@ -259,24 +273,65 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
     }
 }
 
-async fn load_bk_set(gql: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+/// Load the initial BK set. Mode is selected via `BRIDGE_BK_SET_BOOTSTRAP`:
+///
+///   - `file` (default): read JSON verbatim — correct for fresh chains and
+///     for cold starts anchored at genesis.
+///   - `fold_at_height`: read JSON as the *genesis* snapshot, then apply all
+///     `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to
+///     `explicit_bootstrap_seqno` if unset) via
+///     `bk_set_fetcher::bk_set_at_height`.
+///
+/// A persisted `prover_bk_set.json` (loaded downstream) overrides this on
+/// Resume, so this function is only load-bearing on first-ever startup.
+async fn load_bk_set(
+    gql: &GqlClient,
+    explicit_bootstrap_seqno: Option<u64>,
+) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(gql).await {
-        Ok(bk_set) => return Ok(bk_set),
-        Err(e) => warn!(
-            "GraphQL BK-set fetch failed ({}), falling back to {}",
-            e, bk_set_config
+    let json = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
+        .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))?;
+
+    let mode = std::env::var(ENV_BK_SET_BOOTSTRAP).unwrap_or_else(|_| "file".to_string());
+    match mode.as_str() {
+        "file" => {
+            info!(
+                "BK-set bootstrap: mode=file, loaded {} signers from {}",
+                json.len(),
+                bk_set_config
+            );
+            Ok(json)
+        }
+        "fold_at_height" => {
+            let target = match std::env::var(ENV_BK_SET_TARGET_SEQNO) {
+                Ok(s) => s.parse::<u64>().with_context(|| {
+                    format!("{} must be a u64, got '{}'", ENV_BK_SET_TARGET_SEQNO, s)
+                })?,
+                Err(_) => explicit_bootstrap_seqno.ok_or_else(|| {
+                    anyhow::format_err!(
+                        "BRIDGE_BK_SET_BOOTSTRAP=fold_at_height requires either \
+                         {} or {} to be set",
+                        ENV_BK_SET_TARGET_SEQNO,
+                        ENV_BOOTSTRAP_SEQNO
+                    )
+                })?,
+            };
+            info!(
+                "BK-set bootstrap: mode=fold_at_height, genesis={} signers, target_height={}",
+                json.len(),
+                target
+            );
+            bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height(gql, json, target)
+                .await
+                .with_context(|| format!("bk_set_at_height failed for target_height={}", target))
+        }
+        other => bail!(
+            "unknown {}='{}', expected 'file' or 'fold_at_height'",
+            ENV_BK_SET_BOOTSTRAP,
+            other
         ),
     }
-    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config).with_context(
-        || {
-            format!(
-                "failed to load BK set from GraphQL and config file {}",
-                bk_set_config
-            )
-        },
-    )
 }
 
 fn load_or_bootstrap_prover_bk_set(
@@ -501,10 +556,9 @@ fn to_ipc_circuit(t: BundleFinalizationType) -> ipc::AttestationCircuit {
 }
 
 fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
-    // Circuit 1a/1b's `block_id` (from attestation payload) and Circuit 2's
-    // `block_id` (from the SHA-256 8-leaf Merkle root reversed to LE) bind the
-    // same block but may have different Fr representations depending on
-    // byte-order conventions in the attestation wire format — send both.
+    // Since the 2026-07-22 Circuit 1 byte-order fix, both circuits emit
+    // `block_id_fr = uint256(bytes32(root))`, so a single `block_id_hex`
+    // field is shared as public instance [0] of Circuit 1 and Circuit 2.
     ipc::ProofRequest {
         schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: b.block_seq_no as u32,
@@ -514,7 +568,6 @@ fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
         attestation_circuit: to_ipc_circuit(b.fin_type),
         primary_proof_hex: hex::encode(&b.attestation_proof),
         layer_proof_hex: hex::encode(&b.layer_hashes_proof),
-        layer_block_id_hex: hex::encode(b.layer_block_id_be),
         bk_set_poseidon_hash_hex: hex::encode(b.bk_set_commitment_be),
         num_layers: b.num_layers,
         layer_hash_frs_hex: b.layer_hashes_be.iter().map(hex::encode).collect(),
@@ -552,7 +605,6 @@ fn verify_bundle_inline(
     bundle: &BundleProofArtifacts,
 ) -> (bool, bool) {
     let block_id_fr = fr_from_repr(bundle.block_id_be);
-    let layer_block_id_fr = fr_from_repr(bundle.layer_block_id_be);
     let bk_set_commitment_fr = fr_from_repr(bundle.bk_set_commitment_be);
 
     // Circuit 1a/1b public instances match the layout the verifier daemon
@@ -576,9 +628,11 @@ fn verify_bundle_inline(
         ),
     };
 
-    // Circuit 2 public instances: 14 elements.
+    // Circuit 2 public instances: 14 elements. Post-Circuit-1 byte-order
+    // fix, Circuit 2 binds the same `block_id_fr` as Circuit 1, so we reuse
+    // `block_id_fr` here for public instance [0].
     let mut layer_instances: Vec<Fr> = Vec::with_capacity(14);
-    layer_instances.push(layer_block_id_fr);
+    layer_instances.push(block_id_fr);
     layer_instances.push(bk_set_commitment_fr);
     layer_instances.push(Fr::from(bundle.num_layers as u64));
     for be in &bundle.layer_hashes_be {

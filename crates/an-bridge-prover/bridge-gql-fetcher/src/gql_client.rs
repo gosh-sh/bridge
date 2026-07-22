@@ -1,10 +1,64 @@
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
+use std::collections::BTreeMap;
+use crate::types::{AccountRouting, ThreadIdentifier};
+
 /// Lightweight GraphQL client for the acki-nacki node.
 pub struct GqlClient {
     http: reqwest::Client,
     url: String,
+}
+
+/// Block metadata used for computing block leaf hashes.
+#[derive(Debug, Clone)]
+pub struct BlockMetadata {
+    /// TVM block representation hash (legacy) as hex string.
+    pub hash: String,
+    /// Envelope hash (SHA-256 of BLS envelope) as hex string.
+    pub envelope_hash: String,
+    /// Block sequence number / height.
+    pub seq_no: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GqlAttestation {
+    pub block_id: String,
+    pub parent_block_id: String,
+    pub target_type: u8,
+    pub envelope_hash: String,
+    pub aggregated_signature: String,
+    pub signature_occurrences: std::collections::HashMap<u16, u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BkSetUpdateWithAttestations {
+    pub block_id: String,
+    pub bk_set_update_hex: String,
+    pub height: Option<u64>,
+    pub attestations: Vec<GqlAttestation>,
+    /// AN's canonical block ordering key. Present on queries that ask for it
+    /// (e.g. `query_bk_set_updates_paged`); `None` on the light/legacy queries
+    /// that never fetched it. Used as the opaque `after` cursor for
+    /// Relay-style pagination over `bkSetUpdates`.
+    pub chain_order: Option<String>,
+}
+
+/// GraphQL-fetched proof block — replaces `Envelope<AckiNackiBlock>` as the
+/// authoritative source of per-block proof data. Mirrors
+/// `acki-nacki/helpers/proof_helper/src/blockchain.rs::GqlProofBlock`.
+#[derive(Clone, Debug)]
+pub struct GqlProofBlock {
+    pub id: String,
+    pub block_id: [u8; 32],
+    pub thread_id: ThreadIdentifier,
+    pub height: u64,
+    pub envelope_hash: [u8; 32],
+    pub tracked_ext_out_messages_root: [u8; 32],
+    pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
+    pub history_proofs: BTreeMap<u8, [u8; 32]>,
+    /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
+    pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
 }
 
 pub fn create_client(endpoint: &str) -> anyhow::Result<GqlClient> {
@@ -107,6 +161,7 @@ impl GqlClient {
                     bk_set_update_hex,
                     height,
                     attestations: Vec::new(), // no attestations in light query
+                    chain_order: None,        // not queried in the light path
                 });
             }
         }
@@ -204,6 +259,91 @@ impl GqlClient {
         Ok(results)
     }
 
+    /// Fetch `bkSetUpdates` with height <= `height_end`, forward-paginated by
+    /// `chain_order` cursor. Returns the next-page cursor if more results
+    /// exist (i.e. the last node's `chain_order`), or `None` when the page
+    /// is exhausted.
+    ///
+    /// Uses the "light" projection (no `attestations` subfields) because
+    /// this path is optimized for cold-start BK-set replay, where only the
+    /// `bk_set_update` blob + `height` + `chain_order` are needed.
+    ///
+    /// Note: page size in the underlying `bkSetUpdates` connection is
+    /// bounded server-side; callers should treat `first` as a hint.
+    pub async fn query_bk_set_updates_paged(
+        &self,
+        height_end: u64,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<(Vec<BkSetUpdateWithAttestations>, Option<String>)> {
+        let after_arg = match after {
+            Some(cur) => format!(r#", after: "{}""#, cur.replace('"', "\\\"")),
+            None => String::new(),
+        };
+        let q = format!(
+            r#"{{
+              blockchain {{
+                bkSetUpdates(first: {first}, height_end: {height_end}{after_arg}) {{
+                  edges {{
+                    node {{
+                      block_id
+                      bk_set_update
+                      height
+                      chain_order
+                    }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let data = self.query(&q).await?;
+        let edges = data
+            .pointer("/blockchain/bkSetUpdates/edges")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut updates = Vec::new();
+        let mut last_cursor: Option<String> = None;
+        for edge in &edges {
+            if let Some(node) = edge.get("node") {
+                let block_id = node
+                    .get("block_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let bk_set_update_hex = node
+                    .get("bk_set_update")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let height = node.get("height").and_then(|v| v.as_u64());
+                let chain_order = node
+                    .get("chain_order")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref c) = chain_order {
+                    last_cursor = Some(c.clone());
+                }
+                updates.push(BkSetUpdateWithAttestations {
+                    block_id,
+                    bk_set_update_hex,
+                    height,
+                    attestations: Vec::new(),
+                    chain_order,
+                });
+            }
+        }
+        // "More data available" heuristic: server returned a full page.
+        // (The `has_next_page` flag isn't in our projection; comparing
+        // len == first is close enough and only affects when we stop paging.)
+        let next = if updates.len() as u32 >= first {
+            last_cursor
+        } else {
+            None
+        };
+        Ok((updates, next))
+    }
+
     /// Fetch the first N bkSetUpdates (oldest first).
     pub async fn query_bk_set_updates(
         &self,
@@ -246,27 +386,6 @@ impl GqlClient {
         }
         Ok(updates)
     }
-}
-
-/// Block metadata used for computing block leaf hashes.
-#[derive(Debug, Clone)]
-pub struct BlockMetadata {
-    /// TVM block representation hash (legacy) as hex string.
-    pub hash: String,
-    /// Envelope hash (SHA-256 of BLS envelope) as hex string.
-    pub envelope_hash: String,
-    /// Block sequence number / height.
-    pub seq_no: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct GqlAttestation {
-    pub block_id: String,
-    pub parent_block_id: String,
-    pub target_type: u8,
-    pub envelope_hash: String,
-    pub aggregated_signature: String,
-    pub signature_occurrences: std::collections::HashMap<u16, u16>,
 }
 
 impl GqlAttestation {
@@ -320,14 +439,6 @@ impl GqlAttestation {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct BkSetUpdateWithAttestations {
-    pub block_id: String,
-    pub bk_set_update_hex: String,
-    pub height: Option<u64>,
-    pub attestations: Vec<GqlAttestation>,
-}
-
 impl BkSetUpdateWithAttestations {
     pub fn from_json(v: &Value) -> anyhow::Result<Self> {
         let block_id = v
@@ -355,40 +466,12 @@ impl BkSetUpdateWithAttestations {
             bk_set_update_hex,
             height,
             attestations,
+            chain_order: None, // legacy heavy queries don't fetch it
         })
     }
 }
 
-use std::collections::BTreeMap;
-use crate::poseidon_dense::{compute_block_leaf_hash, LayerNumber};
-use crate::types::{AccountRouting, ThreadIdentifier};
 
-/// GraphQL-fetched proof block — replaces `Envelope<AckiNackiBlock>` as the
-/// authoritative source of per-block proof data. Mirrors
-/// `acki-nacki/helpers/proof_helper/src/blockchain.rs::GqlProofBlock`.
-#[derive(Clone, Debug)]
-pub struct GqlProofBlock {
-    pub id: String,
-    pub block_id: [u8; 32],
-    pub thread_id: ThreadIdentifier,
-    pub height: u64,
-    pub envelope_hash: [u8; 32],
-    pub tracked_ext_out_messages_root: [u8; 32],
-    pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
-    pub history_proofs: BTreeMap<LayerNumber, [u8; 32]>,
-    /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
-    pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
-}
-
-impl GqlProofBlock {
-    pub fn block_leaf_hash(&self) -> [u8; 32] {
-        compute_block_leaf_hash(
-            &self.block_id,
-            &self.envelope_hash,
-            &self.tracked_ext_out_messages_root,
-        )
-    }
-}
 
 /// Default thread_id used by the single-thread testbed.
 pub const DEFAULT_THREAD_ID_HEX: &str =
@@ -499,22 +582,6 @@ impl GqlClient {
             .with_context(|| format!("parse_block_attestation for block {target_seq_no}"))
     }
 
-    /// Legacy single-attestation accessor kept for callers that still want
-    /// the v2 shape. Picks the `PRIMARY`-typed entry if one exists, else
-    /// returns the first parseable entry (preserving the previous "be
-    /// defensive" behavior).
-    pub async fn query_attestation_envelope(
-        &self,
-        target_seq_no: u64,
-    ) -> anyhow::Result<crate::attestation_fetcher::ParsedAttestation> {
-        let mut atts = self.query_attestation_envelopes(target_seq_no).await?;
-        if let Some(idx) = atts.iter().position(|a| a.target_type == 0) {
-            return Ok(atts.swap_remove(idx));
-        }
-        atts.into_iter()
-            .next()
-            .ok_or_else(|| anyhow::format_err!("no attestations on block {target_seq_no}"))
-    }
 }
 
 /// Convert one `BlockAttestation` GraphQL object into a `ParsedAttestation`
@@ -654,7 +721,7 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
     }
 
     // history_proofs -> BTreeMap<u8, [u8;32]>
-    let mut history_proofs: BTreeMap<LayerNumber, [u8; 32]> = BTreeMap::new();
+    let mut history_proofs: BTreeMap<u8, [u8; 32]> = BTreeMap::new();
     if let Some(arr) = value.get("history_proofs").and_then(|v| v.as_array()) {
         for entry in arr {
             let layer = parse_u64_field(entry, "layer")?;

@@ -1282,9 +1282,8 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "attestation-bls-checker-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=fix%2Fcircuit1-block-id-byte-order#82d01cb5c6762e4e2d27f420c125c6c347bbeb5b"
 dependencies = [
- "bridge-parsers",
  "bridge-poseidon",
  "gosh-bls-verification",
  "gosh-sha256-chip",
@@ -1705,7 +1704,7 @@ dependencies = [
 [[package]]
 name = "bridge-event-prove-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=fix%2Fcircuit1-block-id-byte-order#82d01cb5c6762e4e2d27f420c125c6c347bbeb5b"
 dependencies = [
  "bridge-poseidon",
  "dense-balanced-tree",
@@ -1749,6 +1748,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "clap",
  "gosh-dense-balanced-tree",
@@ -1763,17 +1763,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridge-parsers"
+name = "bridge-gql-fetcher"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
 dependencies = [
+ "anyhow",
+ "bincode",
+ "halo2-base 0.4.1",
  "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "bridge-poseidon"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=fix%2Fcircuit1-block-id-byte-order#82d01cb5c6762e4e2d27f420c125c6c347bbeb5b"
 dependencies = [
  "gosh-bls-verification",
  "halo2-base 0.4.1",
@@ -1788,6 +1795,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "gosh-dense-balanced-tree",
  "halo2-base 0.4.1",
@@ -1810,7 +1818,7 @@ dependencies = [
  "base64",
  "bincode",
  "bridge-event-prove-circuit",
- "bridge-parsers",
+ "bridge-gql-fetcher",
  "bridge-poseidon",
  "bridge-test-data-gen",
  "gosh-bls-verification",
@@ -1843,6 +1851,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "clap",
  "hex",
@@ -1858,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "bridge-test-data-gen"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=fix%2Fcircuit1-block-id-byte-order#82d01cb5c6762e4e2d27f420c125c6c347bbeb5b"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1879,6 +1888,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bridge-event-prover-lib",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "halo2-base 0.4.1",
  "hex",
@@ -3542,7 +3552,7 @@ checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
 [[package]]
 name = "historical-layer-hashes-movement-checker-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=4ffe32ad8478273e0819e845f1783bfaf324ded6#4ffe32ad8478273e0819e845f1783bfaf324ded6"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=fix%2Fcircuit1-block-id-byte-order#82d01cb5c6762e4e2d27f420c125c6c347bbeb5b"
 dependencies = [
  "bridge-poseidon",
  "gosh-dense-balanced-tree",

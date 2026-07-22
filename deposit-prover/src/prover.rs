@@ -78,7 +78,7 @@ use halo2_base::{
 use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark};
 
 use crate::{
-    circuit_v2::DepositEventCircuitV2,
+    circuit_v2::{self, DepositEventCircuitV2},
     types::{DepositProofInput, DepositProofOutput},
 };
 
@@ -116,6 +116,10 @@ pub struct CircuitConfig {
 
     /// Bounds on number of topics per log (min, max)
     pub topic_num_bounds: (usize, usize),
+
+    /// Expected EIP-1559 `chain_id` baked into the VK (Track 2 chain binding).
+    /// Mainnet = 1; Sepolia = 11155111. Changing this requires a new keygen.
+    pub expected_chain_id: u64,
 }
 
 impl Default for CircuitConfig {
@@ -128,6 +132,7 @@ impl Default for CircuitConfig {
             max_log_num: 3, /* Max logs per receipt (OPTION B+: Ultra-aggressive - most deposit
                              * txs have 1-3 logs) */
             topic_num_bounds: (0, 4), // 0-4 topics per log
+            expected_chain_id: circuit_v2::EXPECTED_L1_CHAIN_ID,
         }
     }
 }
@@ -785,7 +790,7 @@ pub fn generate_solidity_verifier(
 fn create_keygen_placeholder_input() -> DepositProofInput {
     use alloy_rlp::Encodable;
 
-    use crate::types::{DepositEventData, ReceiptProof};
+    use crate::types::{DepositEventData, ReceiptProof, TransactionProof};
 
     let event_data = DepositEventData {
         block_number: 0,
@@ -863,9 +868,51 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         block_header_rlp: vec![0u8; 100], // minimal block header
     };
 
+    // Minimal EIP-1559 typed-tx leaf: 0x02 || RLP([chainId=1, nonce, tips, fees,
+    // gas, to, value, data, accessList, yParity, r, s]) — sizes only need to be
+    // structurally valid for keygen shape (not MockProver-satisfying).
+    let mut tx_payload = Vec::new();
+    1u64.encode(&mut tx_payload); // chain_id
+    0u64.encode(&mut tx_payload); // nonce
+    0u64.encode(&mut tx_payload); // maxPriorityFeePerGas
+    0u64.encode(&mut tx_payload); // maxFeePerGas
+    21000u64.encode(&mut tx_payload); // gas
+    vec![0u8; 20].encode(&mut tx_payload); // to
+    0u64.encode(&mut tx_payload); // value
+    Vec::<u8>::new().encode(&mut tx_payload); // data
+    {
+        // empty accessList
+        let mut al = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: 0,
+        }
+        .encode(&mut al);
+        tx_payload.extend_from_slice(&al);
+    }
+    0u64.encode(&mut tx_payload); // yParity
+    vec![0u8; 32].encode(&mut tx_payload); // r
+    vec![0u8; 32].encode(&mut tx_payload); // s
+    let mut tx_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: tx_payload.len(),
+    }
+    .encode(&mut tx_list);
+    tx_list.extend_from_slice(&tx_payload);
+    let mut tx_bytes = vec![0x02u8];
+    tx_bytes.extend_from_slice(&tx_list);
+
+    let tx_proof = TransactionProof {
+        tx_bytes: tx_bytes.clone(),
+        proof_nodes: vec![tx_bytes],
+        transactions_root: [0u8; 32],
+    };
+
     DepositProofInput {
         event_data,
         receipt_proof,
+        tx_proof,
         dapp_id: [0u8; 32],
     }
 }

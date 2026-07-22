@@ -7,7 +7,11 @@ use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
-    rlp::types::RlpArrayWitness,
+    rlp::{evaluate_byte_array, types::RlpArrayWitness},
+    transaction::{
+        EthTransactionChip, EthTransactionChipParams, EthTransactionInputAssigned,
+        EthTransactionWitness,
+    },
     utils::{build_utils::aggregation::CircuitMetadata, eth_circuit::EthCircuitInstructions},
 };
 use ethers_core::{types::Chain, utils::keccak256};
@@ -16,7 +20,7 @@ use halo2_base::{
     AssignedValue, Context,
 };
 
-use crate::types::{DepositProofInput, ReceiptProof};
+use crate::types::{DepositProofInput, ReceiptProof, TransactionProof};
 
 /// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
 /// verifier size)
@@ -24,6 +28,19 @@ pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from
 pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: ultra-aggressive)
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
+
+/// Default L1 chain id baked into the production VK (Ethereum mainnet).
+/// Override via [`crate::prover::CircuitConfig::expected_chain_id`] for Sepolia
+/// (`11155111`) etc. — a different constant requires a new keygen.
+pub const EXPECTED_L1_CHAIN_ID: u64 = 1;
+/// Max depth of the transactions-trie MPT proof (mirrors receipt path).
+pub const TX_PF_MAX_DEPTH: usize = 10;
+/// Max calldata bytes for the enclosing EIP-1559 tx (deposit ABI is small).
+pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 256;
+/// Max RLP-encoded access-list length (deposit txs typically have none).
+pub const MAX_TX_ACCESS_LIST_LEN: usize = 64;
+/// EIP-1559 type byte / circuit `transaction_type` value.
+pub const EIP1559_TX_TYPE: u64 = 2;
 
 /// Fixed maximum block-header RLP length, in bytes.
 ///
@@ -76,6 +93,8 @@ fn bytes_to_field<F: ScalarField>(
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
+    /// EIP-1559 `chain_id` constant constrained in-circuit (VK-baked).
+    pub expected_chain_id: u64,
 }
 
 impl DepositEventCircuitV2 {
@@ -96,6 +115,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            expected_chain_id: config.expected_chain_id,
         }
     }
 
@@ -111,6 +131,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            expected_chain_id: EXPECTED_L1_CHAIN_ID,
         }
     }
 }
@@ -119,6 +140,7 @@ impl DepositEventCircuitV2 {
 #[derive(Clone)]
 pub struct Phase0Output {
     pub receipt_witness: EthReceiptWitness<Fr>,
+    pub tx_witness: EthTransactionWitness<Fr>,
     pub log_index: AssignedValue<Fr>,
     pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
@@ -257,6 +279,88 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let receipts_root_bytes = block_header_array.field_witness[5].field_cells.to_vec();
         println!("   ✓ Extracted receiptsRoot from block header (32 bytes)");
 
+        // Extract transactionsRoot (field 4) — chain-binding MPT target
+        let transactions_root_bytes = block_header_array.field_witness[4].field_cells.to_vec();
+        println!("   ✓ Extracted transactionsRoot from block header (32 bytes)");
+
+        // ====================================================================
+        // Track 2: bind enclosing EIP-1559 tx (chain_id + to + same tx_index)
+        // ====================================================================
+        // `from` is NOT in the typed-tx RLP (ECDSA-only); binding the Deposit
+        // `sender` topic to the same `tx_index` as this MPT proof closes that
+        // loop without an in-circuit ecrecover.
+        println!("🔧 Phase 0: Transaction MPT + chain_id binding...");
+        assert!(
+            !self.inputs.tx_proof.tx_bytes.is_empty(),
+            "tx_proof.tx_bytes is empty — regenerate DepositProofInput with \
+             generate_transaction_proof / fetch_deposit_proof (Track 2 chain binding)"
+        );
+        let tx_chip_params = EthTransactionChipParams {
+            max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
+            max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
+            enable_types: [false, false, true], // EIP-1559 only
+            network: self.params.network,
+        };
+        let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
+        let tx_mpt_input = self.inputs.tx_proof.to_mpt_input(
+            self.inputs.event_data.transaction_index,
+            MAX_TX_CALLDATA_BYTE_LEN,
+            MAX_TX_ACCESS_LIST_LEN,
+        );
+        let tx_mpt_proof = tx_mpt_input.assign(ctx);
+        // Reuse the same `tx_idx` AssignedValue as the receipt path.
+        let tx_input = EthTransactionInputAssigned {
+            transaction_index: tx_idx,
+            proof: tx_mpt_proof,
+        };
+        let tx_witness = tx_chip.parse_transaction_proof_phase0(ctx, tx_input);
+
+        // MPT root == block header transactionsRoot
+        for (pf_byte, hdr_byte) in tx_witness
+            .mpt_witness()
+            .root_hash_bytes
+            .iter()
+            .zip(transactions_root_bytes.iter())
+        {
+            ctx.constrain_equal(pf_byte, hdr_byte);
+        }
+        println!("   ✓ Constrained tx MPT root == transactionsRoot");
+
+        // transaction_type == 2 (EIP-1559)
+        let eip1559 = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
+        ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
+        println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
+
+        // chain_id == expected (VK-baked)
+        let chain_id_idx = ctx.load_constant(Fr::from(0u64));
+        let chain_id_field =
+            tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
+        let chain_id_val = evaluate_byte_array(
+            ctx,
+            tx_chip.gate(),
+            &chain_id_field.field_bytes,
+            chain_id_field.len,
+        );
+        let expected_chain = ctx.load_constant(Fr::from(self.expected_chain_id));
+        ctx.constrain_equal(&chain_id_val, &expected_chain);
+        println!(
+            "   ✓ Constrained chain_id == {}",
+            self.expected_chain_id
+        );
+
+        // tx.to == Deposit emitter (contractAddress). Field index 5 in type-2.
+        // Require exactly 20 bytes (reject contract-create with empty `to`),
+        // left-pad to 32, compare as Fr against the public-input encoding below.
+        let to_idx = ctx.load_constant(Fr::from(5u64));
+        let to_field = tx_chip.extract_field(ctx, tx_witness.clone(), to_idx);
+        let twenty = ctx.load_constant(Fr::from(20u64));
+        ctx.constrain_equal(&to_field.len, &twenty);
+        let mut to_bytes_32 = vec![ctx.load_constant(Fr::zero()); 12];
+        for i in 0..20 {
+            to_bytes_32.push(to_field.field_bytes[i]);
+        }
+        let to_as_fr = bytes_to_field(ctx, tx_chip.gate(), &to_bytes_32);
+
         // Get MPT root from receipt proof
         let mpt_root_bytes: Vec<AssignedValue<Fr>> = self
             .inputs
@@ -320,6 +424,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
                 .map(|&byte| ctx.load_witness(Fr::from(byte as u64))),
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
+
+        // Bind tx.to == contractAddress (emitter)
+        ctx.constrain_equal(&to_as_fr, &contract_address_field);
+        println!("   ✓ Constrained tx.to == contractAddress");
 
         // 5. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
         //    from the bridge config (NOT from the Ethereum event). It replaced
@@ -385,6 +493,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         Phase0Output {
             receipt_witness,
+            tx_witness,
             log_index,
             block_hash_bytes,
             receipts_root_bytes,
@@ -427,6 +536,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let _receipt_trace = chip
             .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
         println!("   ✓ Verified receipt RLC");
+
+        // 2b. Transaction RLC (chain-binding witness from Phase 0)
+        let tx_chip_params = EthTransactionChipParams {
+            max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
+            max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
+            enable_types: [false, false, true],
+            network: self.params.network,
+        };
+        let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
+        let _tx_trace =
+            tx_chip.parse_transaction_proof_phase1((ctx_gate, ctx_rlc), phase0_output.tx_witness);
+        println!("   ✓ Verified transaction RLC");
 
         // 3. Extract the specific log at log_index
         let log_witness = chip.extract_receipt_log(
@@ -734,6 +855,36 @@ impl ToMPTInput for ReceiptProof {
     }
 }
 
+impl TransactionProof {
+    /// Convert to axiom-eth `MPTInput` for the transactions trie.
+    fn to_mpt_input(
+        &self,
+        tx_index: u64,
+        max_data_byte_len: usize,
+        max_access_list_len: usize,
+    ) -> axiom_eth::mpt::MPTInput {
+        use axiom_eth::{mpt::MPTInput, transaction::calc_max_val_len};
+        use ethers_core::types::H256;
+
+        let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
+        let path_len = path_bytes.len();
+        let value_max_byte_len =
+            calc_max_val_len(max_data_byte_len, max_access_list_len, [false, false, true]);
+
+        MPTInput {
+            path: axiom_eth::mpt::PathBytes(path_bytes),
+            value: self.tx_bytes.clone(),
+            root_hash: H256::from_slice(&self.transactions_root),
+            proof: self.proof_nodes.clone(),
+            slot_is_empty: false,
+            value_max_byte_len,
+            max_depth: TX_PF_MAX_DEPTH,
+            max_key_byte_len: 3,
+            key_byte_len: Some(path_len),
+        }
+    }
+}
+
 /// Implement CircuitMetadata for proof generation compatibility
 impl CircuitMetadata for DepositEventCircuitV2 {
     /// This circuit does not use aggregation, so no accumulator
@@ -763,7 +914,7 @@ impl CircuitMetadata for DepositEventCircuitV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DepositEventData;
+    use crate::types::{DepositEventData, TransactionProof};
 
     #[test]
     fn test_circuit_creation() {
@@ -792,9 +943,16 @@ mod tests {
             block_header_rlp: vec![],
         };
 
+        let tx_proof = TransactionProof {
+            tx_bytes: vec![0x02],
+            proof_nodes: vec![],
+            transactions_root: [0u8; 32],
+        };
+
         let input = DepositProofInput {
             event_data,
             receipt_proof,
+            tx_proof,
             dapp_id: [7u8; 32],
         };
 

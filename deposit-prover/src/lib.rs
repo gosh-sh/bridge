@@ -19,4 +19,6 @@ pub use prover::{
     generate_proof, generate_solidity_verifier, load_kzg_params_from_trusted_setup,
     test_circuit_mock, verify_proof, CircuitConfig,
 };
-pub use types::{DepositEventData, DepositProofInput, DepositProofOutput, ReceiptProof};
+pub use types::{
+    DepositEventData, DepositProofInput, DepositProofOutput, ReceiptProof, TransactionProof,
+};

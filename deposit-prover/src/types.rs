@@ -44,6 +44,21 @@ pub struct ReceiptProof {
     pub block_header_rlp: Vec<u8>,
 }
 
+/// Transaction-trie MPT proof for the enclosing deposit tx (chain-id binding).
+///
+/// Wire format is the typed-tx blob as stored in the transactions trie
+/// (`0x02 || RLP(eip1559_fields)` for EIP-1559). Used by Track 2 of
+/// `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransactionProof {
+    /// Typed-tx wire bytes (MPT leaf value)
+    pub tx_bytes: Vec<u8>,
+    /// Merkle-Patricia Trie proof nodes for `rlp(tx_index)` under `transactionsRoot`
+    pub proof_nodes: Vec<Vec<u8>>,
+    /// `transactionsRoot` from the same block header as [`ReceiptProof`]
+    pub transactions_root: [u8; 32],
+}
+
 /// Input for deposit proof generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositProofInput {
@@ -51,6 +66,13 @@ pub struct DepositProofInput {
     pub event_data: DepositEventData,
     /// Receipt proof (private - proves event exists in Ethereum state)
     pub receipt_proof: ReceiptProof,
+    /// Transaction proof (private — proves enclosing EIP-1559 tx + `chain_id`).
+    /// Required for chain-binding; regenerate fixtures via
+    /// `generate_transaction_proof` / `fetch_deposit_proof`.
+    /// `#[serde(default)]` keeps pre-Track-2 JSON loadable; the circuit asserts
+    /// non-empty `tx_bytes` before proving.
+    #[serde(default)]
+    pub tx_proof: TransactionProof,
     /// Acki Nacki destination dApp identifier (`UInt256`, 32 bytes big-endian).
     /// Config-supplied (not part of the Ethereum `Deposit` event): the bridge
     /// operator sets which AN dApp a deposit credits. Bound as the

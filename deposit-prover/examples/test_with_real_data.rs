@@ -50,6 +50,10 @@ struct Args {
     /// Max log number (default: 20)
     #[arg(long, default_value = "20")]
     max_log_num: usize,
+
+    /// Expected EIP-1559 chain_id baked into the VK (mainnet=1, Sepolia=11155111)
+    #[arg(long, default_value = "1")]
+    chain_id: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         max_data_byte_len: args.max_data_byte_len,
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
+        expected_chain_id: args.chain_id,
     };
 
     println!("Circuit Configuration:");

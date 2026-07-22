@@ -31,7 +31,7 @@ async fn test_prove_10_live_blocks() {
     let t_total = Instant::now();
 
     // 1. Load BK set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     let (bk_set_commitment, _) = bridge_prover_lib::poseidon::compute_bk_set_poseidon(&bk_set);
     println!("\nBK set: {} signers", bk_set.len());
@@ -48,7 +48,7 @@ async fn test_prove_10_live_blocks() {
     println!("[timing] key load/gen: {:?}", t.elapsed());
 
     // 3. Connect to node.
-    let gql = bridge_prover_lib::gql_client::create_client(GQL_ENDPOINT)
+    let gql = bridge_gql_fetcher::gql_client::create_client(GQL_ENDPOINT)
         .expect("failed to create GQL client");
 
     // 4. Find a starting point: pick a recent block.
@@ -77,7 +77,7 @@ async fn test_prove_10_live_blocks() {
 
         // Fetch attestation.
         let t = Instant::now();
-        let ev = match bridge_prover_lib::attestation_fetcher::fetch_attestation_evidence(
+        let ev = match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(
             &gql, target,
         )
         .await
@@ -101,8 +101,8 @@ async fn test_prove_10_live_blocks() {
         };
         let fetch_time = t.elapsed();
         let att = match ev {
-            bridge_prover_lib::attestation_fetcher::AttestationEvidence::Primary(p) => p,
-            bridge_prover_lib::attestation_fetcher::AttestationEvidence::Fallback {
+            bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+            bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
                 primary, fallback,
             } => {
                 println!(

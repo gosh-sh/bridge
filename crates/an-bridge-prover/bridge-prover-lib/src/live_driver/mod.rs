@@ -46,13 +46,13 @@
 //!
 //! External consumers wire the driver into their own poll loop by:
 //!
-//! 1. building a [`crate::gql_client::GqlClient`] pointed at an AN node,
+//! 1. building a [`bridge_gql_fetcher::gql_client::GqlClient`] pointed at an AN node,
 //! 2. constructing a [`KeyManager`] and calling `ensure_primary_keys` /
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
 //! 4. fetching the initial BK-set map via
-//!    [`crate::bk_set_fetcher::fetch_bk_set`], and
+//!    [`bridge_gql_fetcher::bk_set_fetcher::fetch_bk_set`], and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!
@@ -83,10 +83,10 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use thiserror::Error;
 use tracing::{info, warn};
 
-use crate::attestation_fetcher::AttestationEvidence;
+use bridge_gql_fetcher::attestation_fetcher::AttestationEvidence;
 use crate::bootstrap::BootstrapSeed;
 use crate::bridge_state::BridgeState;
-use crate::gql_client::GqlClient;
+use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
 use crate::poseidon;
 use crate::prover_bk_set::ProverBkSet;
@@ -745,7 +745,7 @@ impl LiveProverDriver {
     /// bundle poll — sends one GQL request.
     async fn pending_bk_update_below(&self, max_height: u64) -> anyhow::Result<bool> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
-        match crate::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
+        match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
             Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
             Ok(None) => Ok(false),
             Err(e) => {

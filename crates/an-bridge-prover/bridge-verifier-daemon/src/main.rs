@@ -571,7 +571,7 @@ async fn main() -> anyhow::Result<()> {
 /// delta log from ∅ but AN does not emit genesis as a synthetic `Added`
 /// event. Use `bk_set_at_height` (planned) for distant-block cold starts.
 async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
     info!("BK set loaded from config: {} signers", bk_set.len());
     Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }

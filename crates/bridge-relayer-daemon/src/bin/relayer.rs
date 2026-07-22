@@ -1994,10 +1994,12 @@ async fn run_daemon_live(
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
-    use bridge_prover_lib::{
+    use bridge_gql_fetcher::{
         bk_set_fetcher::load_bk_set_from_config,
-        bridge_state::BridgeState,
         gql_client::create_client,
+    };
+    use bridge_prover_lib::{
+        bridge_state::BridgeState,
         keys::KeyManager,
         live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
         prover_bk_set::ProverBkSet,

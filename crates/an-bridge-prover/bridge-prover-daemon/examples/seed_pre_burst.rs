@@ -22,11 +22,11 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Context};
-use bridge_prover_lib::bk_set_fetcher::{
+use bridge_gql_fetcher::bk_set_fetcher::{
     normalize_bk_set_pubkeys, parse_bk_set_changes_pub, BK_CHANGE_VARIANT_ADDED,
     BK_CHANGE_VARIANT_REMOVED,
 };
-use bridge_prover_lib::gql_client::create_client;
+use bridge_gql_fetcher::gql_client::create_client;
 use bridge_prover_lib::prover_bk_set::ProverBkSet;
 
 #[tokio::main]

@@ -23,7 +23,7 @@ fn test_live_attestation_bls_verification() {
     }
 
     // Load BK set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     println!("BK set: {} signers", bk_set.len());
 

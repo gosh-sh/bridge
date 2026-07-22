@@ -10,11 +10,11 @@
 #[cfg(any())]
 #[tokio::test]
 async fn test_shellnet_bk_set_extraction() {
-    let gql = bridge_prover_lib::gql_client::create_client("https://shellnet.ackinacki.org")
+    let gql = bridge_gql_fetcher::gql_client::create_client("https://shellnet.ackinacki.org")
         .expect("failed to create shellnet client");
 
     println!("Querying shellnet bkSetUpdates...");
-    match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql).await {
+    match bridge_gql_fetcher::bk_set_fetcher::fetch_bk_set(&gql).await {
         Ok(bk_set) => {
             println!("BK set extracted: {} signers", bk_set.len());
             let mut keys: Vec<u16> = bk_set.keys().cloned().collect();

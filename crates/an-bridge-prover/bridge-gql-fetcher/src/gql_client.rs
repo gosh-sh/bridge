@@ -2,7 +2,6 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
 use std::collections::BTreeMap;
-use crate::poseidon_dense::{compute_block_leaf_hash, LayerNumber};
 use crate::types::{AccountRouting, ThreadIdentifier};
 
 /// Lightweight GraphQL client for the acki-nacki node.
@@ -57,7 +56,7 @@ pub struct GqlProofBlock {
     pub envelope_hash: [u8; 32],
     pub tracked_ext_out_messages_root: [u8; 32],
     pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
-    pub history_proofs: BTreeMap<LayerNumber, [u8; 32]>,
+    pub history_proofs: BTreeMap<u8, [u8; 32]>,
     /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
     pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
 }
@@ -474,16 +473,6 @@ impl BkSetUpdateWithAttestations {
 
 
 
-impl GqlProofBlock {
-    pub fn block_leaf_hash(&self) -> [u8; 32] {
-        compute_block_leaf_hash(
-            &self.block_id,
-            &self.envelope_hash,
-            &self.tracked_ext_out_messages_root,
-        )
-    }
-}
-
 /// Default thread_id used by the single-thread testbed.
 pub const DEFAULT_THREAD_ID_HEX: &str =
     "00000000000000000000000000000000000000000000000000000000000000000000";
@@ -732,7 +721,7 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
     }
 
     // history_proofs -> BTreeMap<u8, [u8;32]>
-    let mut history_proofs: BTreeMap<LayerNumber, [u8; 32]> = BTreeMap::new();
+    let mut history_proofs: BTreeMap<u8, [u8; 32]> = BTreeMap::new();
     if let Some(arr) = value.get("history_proofs").and_then(|v| v.as_array()) {
         for entry in arr {
             let layer = parse_u64_field(entry, "layer")?;

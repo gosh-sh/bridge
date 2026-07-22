@@ -123,7 +123,7 @@ impl BootstrapSeed {
 /// single-thread testbed). `bk_set_commitment` is computed by the caller from
 /// the BK set in effect at startup.
 pub async fn fetch_from_node(
-    gql: &crate::gql_client::GqlClient,
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
     first_key_seqno: u64,
     bk_set_commitment: [u8; 32],
 ) -> anyhow::Result<BootstrapSeed> {

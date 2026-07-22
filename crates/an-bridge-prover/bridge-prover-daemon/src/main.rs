@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 use bridge_prover_lib::bootstrap;
 use bridge_prover_lib::bridge_state::BridgeState;
-use bridge_prover_lib::gql_client::{self, GqlClient};
+use bridge_gql_fetcher::gql_client::{self, GqlClient};
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
 use bridge_prover_lib::live_driver::{
@@ -290,7 +290,7 @@ async fn load_bk_set(
 ) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    let json = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
+    let json = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
         .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))?;
 
     let mode = std::env::var(ENV_BK_SET_BOOTSTRAP).unwrap_or_else(|_| "file".to_string());
@@ -322,7 +322,7 @@ async fn load_bk_set(
                 json.len(),
                 target
             );
-            bridge_prover_lib::bk_set_fetcher::bk_set_at_height(gql, json, target)
+            bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height(gql, json, target)
                 .await
                 .with_context(|| format!("bk_set_at_height failed for target_height={}", target))
         }

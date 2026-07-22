@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "bridge-prover-lib",
+    "bridge-gql-fetcher",
     "bridge-prover-daemon",
     "bridge-verifier-daemon",
     "bridge-event-witness",
@@ -65,6 +66,7 @@ rand = "0.8"
 
 # Local crates
 bridge-prover-lib = { path = "bridge-prover-lib" }
+bridge-gql-fetcher = { path = "bridge-gql-fetcher" }
 bridge-event-prover-lib = { path = "bridge-event-prover-lib" }
 
 # --- Halo2 backend unification (collapse to ONE halo2-base instance) ---

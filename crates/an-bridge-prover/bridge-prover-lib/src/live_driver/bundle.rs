@@ -27,7 +27,7 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use tracing::{info, warn};
 use std::time::Instant;
 
-use crate::attestation_fetcher::{self, AttestationEvidence};
+use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
 use crate::block_id_tree;
 use crate::layer_prover;
 use crate::prover;

@@ -1749,6 +1749,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "clap",
  "gosh-dense-balanced-tree",
@@ -1760,6 +1761,21 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "tvm_block 3.0.0",
  "tvm_types 3.0.0",
+]
+
+[[package]]
+name = "bridge-gql-fetcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "halo2-base 0.4.1",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1788,6 +1804,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "gosh-dense-balanced-tree",
  "halo2-base 0.4.1",
@@ -1810,6 +1827,7 @@ dependencies = [
  "base64",
  "bincode",
  "bridge-event-prove-circuit",
+ "bridge-gql-fetcher",
  "bridge-parsers",
  "bridge-poseidon",
  "bridge-test-data-gen",
@@ -1843,6 +1861,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "clap",
  "hex",
@@ -1879,6 +1898,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bridge-event-prover-lib",
+ "bridge-gql-fetcher",
  "bridge-prover-lib",
  "halo2-base 0.4.1",
  "hex",

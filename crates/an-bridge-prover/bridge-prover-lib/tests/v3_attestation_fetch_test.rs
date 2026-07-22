@@ -30,7 +30,7 @@ async fn test_v3_fetch_attestation_envelope() {
         return;
     };
 
-    let gql = match bridge_prover_lib::gql_client::create_client(&endpoint) {
+    let gql = match bridge_gql_fetcher::gql_client::create_client(&endpoint) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Skipping: GQL client init failed: {e}");
@@ -38,7 +38,7 @@ async fn test_v3_fetch_attestation_envelope() {
         }
     };
 
-    let ev = match bridge_prover_lib::attestation_fetcher::fetch_attestation_evidence(
+    let ev = match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(
         &gql, seq_no,
     )
     .await
@@ -52,8 +52,8 @@ async fn test_v3_fetch_attestation_envelope() {
     // This smoke test only validates the on-wire byte layout of a single
     // `ParsedAttestation`; the primary entry is present in both variants.
     let att = match ev {
-        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Primary(p) => p,
-        bridge_prover_lib::attestation_fetcher::AttestationEvidence::Fallback {
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
             primary, ..
         } => primary,
     };
@@ -96,7 +96,7 @@ async fn test_v3_fetch_attestation_envelope() {
     assert_eq!(inner_target, att.target_type, "inner target_type mismatch");
 
     // Off-circuit BLS verification against live bk_set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     println!("bk_set has {} signers", bk_set.len());
 

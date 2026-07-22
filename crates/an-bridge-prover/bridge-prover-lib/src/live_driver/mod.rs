@@ -624,6 +624,10 @@ impl LiveProverDriver {
     }
 
     fn ack_bundle_inner(&mut self, artifacts: &BundleProofArtifacts) -> anyhow::Result<()> {
+        // Outer idempotency check: stale replay is a no-op, not an error.
+        // The driver may be re-driven with the same artifacts after a
+        // downstream retry; the *inner* `append_bundle` monotonicity check
+        // would error on that, so we intercept the equal/older case here.
         if artifacts.block_seq_no <= self.state.stored_last_seen_block_seq_no {
             info!(
                 "ack_bundle: no-op — artifacts.block_seq_no={} <= stored_last_seen={}",
@@ -631,13 +635,18 @@ impl LiveProverDriver {
             );
             return Ok(());
         }
-        let bk_hash_bytes: [u8; 32] = self.bk_set_commitment_fr.to_repr();
+        // `append_bundle` no longer writes `stored_bk_set_commitment`
+        // (single-writer discipline mirroring Solidity `verifyBlock`).
+        // The driver's `bk_set_commitment_fr` is rotated in-memory by
+        // `ack_bk_update` after `apply_bk_set_update` succeeds; by the
+        // time we reach here it already matches
+        // `state.stored_bk_set_commitment`. `?` on the append is defense
+        // in depth: the outer guard above already ensures monotonicity.
         self.state.append_bundle(
             &artifacts.state_layer_hashes,
             artifacts.block_height,
             artifacts.block_seq_no,
-            bk_hash_bytes,
-        );
+        )?;
         Ok(())
     }
 
@@ -793,7 +802,7 @@ impl LiveProverDriver {
             bk_hash_bytes,
         )
         .await?;
-        seed.apply(&mut self.state);
+        seed.apply(&mut self.state)?;
         info!(
             "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
             seed.block_seq_no,

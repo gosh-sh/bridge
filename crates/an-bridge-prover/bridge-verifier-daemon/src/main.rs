@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
                     seed.block_height,
                     seed.layer_hashes.len(),
                 );
-                seed.apply(&mut state);
+                seed.apply(&mut state)?;
                 state.save(STATE_FILE)?;
                 info!(
                     "initialized from seed: seqno={}, height={}",
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                         seed.block_height,
                         seed.layer_hashes.len(),
                     );
-                    seed.apply(&mut state);
+                    seed.apply(&mut state)?;
                     state.save(STATE_FILE)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
                     bootstrapped = true;
@@ -490,19 +490,25 @@ async fn main() -> anyhow::Result<()> {
                             }
                         })
                         .collect();
-                    let bk_hash_bytes: [u8; 32] = bk_set_hash_fr.to_repr();
                     // `block_height` is the thread-anchored height from the
                     // node's envelope (carried in `ProofRequest` v2). In
                     // multi-thread Acki Nacki this resets across thread
                     // crossings, so it is NOT the same as `block_seq_no` —
                     // mirroring it explicitly is what keeps `heights[W]`
                     // aligned with the contract's per-layer rolling window.
+                    //
+                    // `bk_set_hash_fr` was already checked to equal
+                    // `state.stored_bk_set_commitment` during Circuit 1a
+                    // verification above; `append_bundle` no longer writes
+                    // the commitment (single-writer discipline mirroring
+                    // Solidity `verifyBlock`). Monotonicity is enforced
+                    // inside `append_bundle` too — `?` here is defense in
+                    // depth atop the outer guard above.
                     state.append_bundle(
                         &new_layer_hashes,
                         request.block_height,
                         next_seq_u64,
-                        bk_hash_bytes,
-                    );
+                    )?;
                     state.save(STATE_FILE)?;
                 }
                 // block_id_fr is informational only in v2 state — no longer

@@ -97,35 +97,6 @@ pub async fn fetch_bk_set(client: &GqlClient) -> anyhow::Result<HashMap<u16, Vec
     Ok(bk_set)
 }
 
-/// Semantic alias for [`fetch_bk_set`] used by external live-driver
-/// consumers (Sergey's `bridge-relayer-daemon`).
-///
-/// Returns the currently-active BK set as a
-/// `signer_index → 48-byte-compressed-BLS-pubkey` map. This is exactly the
-/// shape the [`crate::live_driver::LiveProverDriver::new`] `bk_set` argument
-/// expects, so the caller can construct the driver directly from the return
-/// value of this function without additional adaptation.
-///
-/// Semantics identical to [`fetch_bk_set`]: reconstructs the current active
-/// set from `bkSetUpdates` history (adds/removes replayed in order). Provided
-/// under a stable, self-documenting name so downstream code reads:
-///
-/// ```ignore
-/// let bk_set = query_current_signer_index_bk_set(&gql).await?;
-/// let driver = LiveProverDriver::new(gql, key_manager, state, prover_bk_set, bk_set, cfg)?;
-/// ```
-///
-/// Two related snapshot forms — compact (indices + hashes only) and full
-/// (with epoch / stake / address metadata) — are deferred: the current
-/// `bkSetUpdates` GQL schema exposes only `block_id`, `bk_set_update` blob,
-/// and `height`. Adding the extra fields is an AN-node schema extension
-/// tracked separately in the live-integration plan (see §3.1).
-pub async fn query_current_signer_index_bk_set(
-    client: &GqlClient,
-) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
-    fetch_bk_set(client).await
-}
-
 /// How many recent `bkSetUpdates` to pull when scanning for the next event
 /// past a cursor. Sized to comfortably cover the prover's worst-case lag:
 /// shellnet bursts are bounded at ~5 events, and the prover normally lags by

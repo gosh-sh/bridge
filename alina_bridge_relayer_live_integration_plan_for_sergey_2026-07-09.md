@@ -171,7 +171,7 @@ Add to `crates/an-bridge-prover/bridge-prover-lib/src/gql_client.rs`. Purpose: s
 |---|---|
 | `pub async fn query_current_bk_set_compact(&self) -> Result<CompactBkSetSnapshot>` | `bk_set_fetcher::fetch_bk_set` + `query_latest_blocks(1)` for seq_no witness. Return `{ seq_no, entries: Vec<{ node_id, node_owner_pk, epoch_start_seq_no }> }`. |
 | `pub async fn query_current_bk_set_full(&self) -> Result<FullBkSetSnapshot>` | Same walk, richer entry (pubkey_48, signer_index, epoch_finish_seq_no, address, stake, owner_address, owner_pubkey, wait_step). |
-| `pub async fn query_current_signer_index_bk_set(&self) -> Result<HashMap<u16, Vec<u8>>>` | Just `fetch_bk_set` + `normalize_bk_set_pubkeys`. Sergey's sentry uses this shape directly. |
+| `pub async fn fetch_bk_set(&self) -> Result<HashMap<u16, Vec<u8>>>` (in `bk_set_fetcher`) | Reconstructs current set from `bkSetUpdates` history (`normalize_bk_set_pubkeys` applied internally). Sergey's sentry uses this shape directly. |
 
 Signer-index width: `u16` (matches `bridge-prover-lib` internal convention). Sergey's current REST returns `u32` for backwards compatibility, but the underlying `signer_index` never exceeds 65535 — the widening happens in `acki-nacki-interface::BkSetClient::fetch_signer_index_bk_set`. Documented in the new function's doc-comment.
 
@@ -825,8 +825,8 @@ pub struct GqlBkSetPoller {
 #[async_trait::async_trait]
 impl BkSetPoller for GqlBkSetPoller {
     async fn poll(&mut self) -> Result<BkSetChange, AckiNackiError> {
-        let current = self.gql
-            .query_current_signer_index_bk_set().await
+        let current = bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&self.gql)
+            .await
             .map_err(|e| AckiNackiError::Transient(e.to_string()))?;
         let new_snapshot = BkSetSnapshot::from_signer_index_map(&current, /*seq_no*/ 0);
         Ok(diff_against(&self.cached_snapshot, &new_snapshot))
@@ -917,7 +917,7 @@ Each PR independently landable + revertable. Circuit 4 unchanged throughout.
 
 > **The seam is landed.** `bridge_prover_lib::live_driver::LiveProverDriver` gives you `poll_next_bundle` + `poll_next_bk_update` + `ack_*` + `snapshot_*`. Payload is `[u8; 32]`-BE only — trivial `From` to your `AnBlockData` / `BkSetUpdateData`.
 >
-> **We owe you four things:** (1) `query_current_signer_index_bk_set` GQL shortcut so you can migrate the sentry off REST when convenient, (2) `DriverError` enum so your `RelayerError` re-mapping is clean, (3) `LiveBlockSource::driver_snapshot()` accessor so you can pull the driver's post-ack `BridgeState` for the §5.4 consistency check, (4) a paragraph in `TECHNICAL_README.md` pointing consumers here. Shipping in PR-A this week.
+> **We owe you four things:** (1) `bk_set_fetcher::fetch_bk_set` (already public) so you can migrate the sentry off REST when convenient, (2) `DriverError` enum so your `RelayerError` re-mapping is clean, (3) `LiveBlockSource::driver_snapshot()` accessor so you can pull the driver's post-ack `BridgeState` for the §5.4 consistency check, (4) a paragraph in `TECHNICAL_README.md` pointing consumers here. Shipping in PR-A this week.
 >
 > **Two non-trivial things on your side:** (a) your `Relayer::tick` currently handles only blocks; the BK-update lane exists as `BkUpdateSource` but nobody calls it in the loop. That has to become a two-phase tick (drain updates → advance blocks). ~80 LOC in `relayer.rs`. Detailed in §4.4 + §5.3. (b) contract global-history-data consistency is *your* responsibility — collect all four on-chain anchors every tick via `bridge.read_state()`, persist in `RelayerState`, cross-check against `driver.snapshot_state()` after every ack, halt on drift. New module `src/history_consistency.rs` (~120 LOC). Detailed in §5.4.
 >

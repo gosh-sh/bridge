@@ -156,7 +156,7 @@ The library is designed to serve two independent binaries:
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
 - `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
-- `query_current_signer_index_bk_set` (in `bk_set_fetcher.rs`) — semantic alias for `fetch_bk_set` used by external consumers to build the initial BK-set map.
+- `fetch_bk_set` (in `bk_set_fetcher.rs`) — reconstructs the currently-active BK-set map from the node's `bkSetUpdates` history; used by external consumers to build the initial BK-set argument for `LiveProverDriver::new`.
 
 Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/live_driver/mod.rs) — a structured enum (`GqlTransient`, `GqlSchema`, `ProofGen`, `StateInconsistent`, `Bootstrapping`, `Other`). Consumers who want to keep using `anyhow::Result<T>` at their call sites don't need to change anything — the blanket `impl<E: Error+Send+Sync+'static> From<E> for anyhow::Error` in `anyhow` auto-converts `DriverError` and `?` continues to work.
 

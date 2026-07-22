@@ -52,7 +52,7 @@
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
 //! 4. fetching the initial BK-set map via
-//!    [`crate::bk_set_fetcher::query_current_signer_index_bk_set`], and
+//!    [`crate::bk_set_fetcher::fetch_bk_set`], and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!

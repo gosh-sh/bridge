@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use tracing::{error, info, warn};
 
 use bridge_prover_lib::bootstrap;
@@ -50,6 +50,20 @@ const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
 const ENV_BOOTSTRAP_SEQNO: &str = "BRIDGE_BOOTSTRAP_SEQNO";
 const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
 const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
+
+/// Selects how the initial BK set is derived on first-ever startup.
+///   - `file` (default): treat the JSON file as the current BK set (correct
+///     on fresh chains and on rotating chains booted from genesis).
+///   - `fold_at_height`: treat the JSON file as the *genesis* snapshot and
+///     apply all `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (or the
+///     daemon's bootstrap seqno if that env is unset) via `bk_set_at_height`.
+///     Use this when cold-starting the prover against a long-running chain
+///     whose committee has rotated many times since genesis.
+///
+/// Consulted only on first bootstrap; a persisted `prover_bk_set.json` is
+/// the source of truth on Resume regardless of this setting.
+const ENV_BK_SET_BOOTSTRAP: &str = "BRIDGE_BK_SET_BOOTSTRAP";
+const ENV_BK_SET_TARGET_SEQNO: &str = "BRIDGE_BK_SET_TARGET_SEQNO";
 
 const PARAMS_DIR: &str = "./params";
 const LOGS_DIR: &str = "./logs";
@@ -94,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Wire dependencies -------------------------------------------------
     let gql = gql_client::create_client(&gql_endpoint)?;
-    let bk_set_from_gql = load_bk_set(&gql).await?;
+    let bk_set_from_gql = load_bk_set(&gql, explicit_bootstrap_seqno).await?;
     let (bk_commitment_fr, _) = poseidon::compute_bk_set_poseidon(&bk_set_from_gql);
     info!(
         "BK set (GQL): {} signers, commitment={}",
@@ -259,20 +273,65 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
     }
 }
 
-/// Load the genesis BK set from the JSON config file.
+/// Load the initial BK set. Mode is selected via `BRIDGE_BK_SET_BOOTSTRAP`:
 ///
-/// The `_gql` parameter is retained for signature stability with callers that
-/// wire a GraphQL client at bootstrap; it is currently unused because the old
-/// `fetch_bk_set` GraphQL path was disabled (2026-07-22 — it replayed the
-/// `bkSetUpdates` delta log from ∅, but AN does not emit genesis as a
-/// synthetic `Added` event, so the result was wrong on any rotating chain
-/// and empty on fresh ones). For a distant-block cold start on a long-lived
-/// rotating chain, use `bk_set_at_height` (planned).
-async fn load_bk_set(_gql: &GqlClient) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+///   - `file` (default): read JSON verbatim — correct for fresh chains and
+///     for cold starts anchored at genesis.
+///   - `fold_at_height`: read JSON as the *genesis* snapshot, then apply all
+///     `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to
+///     `explicit_bootstrap_seqno` if unset) via
+///     `bk_set_fetcher::bk_set_at_height`.
+///
+/// A persisted `prover_bk_set.json` (loaded downstream) overrides this on
+/// Resume, so this function is only load-bearing on first-ever startup.
+async fn load_bk_set(
+    gql: &GqlClient,
+    explicit_bootstrap_seqno: Option<u64>,
+) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
         .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
-        .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))
+    let json = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
+        .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))?;
+
+    let mode = std::env::var(ENV_BK_SET_BOOTSTRAP).unwrap_or_else(|_| "file".to_string());
+    match mode.as_str() {
+        "file" => {
+            info!(
+                "BK-set bootstrap: mode=file, loaded {} signers from {}",
+                json.len(),
+                bk_set_config
+            );
+            Ok(json)
+        }
+        "fold_at_height" => {
+            let target = match std::env::var(ENV_BK_SET_TARGET_SEQNO) {
+                Ok(s) => s.parse::<u64>().with_context(|| {
+                    format!("{} must be a u64, got '{}'", ENV_BK_SET_TARGET_SEQNO, s)
+                })?,
+                Err(_) => explicit_bootstrap_seqno.ok_or_else(|| {
+                    anyhow::format_err!(
+                        "BRIDGE_BK_SET_BOOTSTRAP=fold_at_height requires either \
+                         {} or {} to be set",
+                        ENV_BK_SET_TARGET_SEQNO,
+                        ENV_BOOTSTRAP_SEQNO
+                    )
+                })?,
+            };
+            info!(
+                "BK-set bootstrap: mode=fold_at_height, genesis={} signers, target_height={}",
+                json.len(),
+                target
+            );
+            bridge_prover_lib::bk_set_fetcher::bk_set_at_height(gql, json, target)
+                .await
+                .with_context(|| format!("bk_set_at_height failed for target_height={}", target))
+        }
+        other => bail!(
+            "unknown {}='{}', expected 'file' or 'fold_at_height'",
+            ENV_BK_SET_BOOTSTRAP,
+            other
+        ),
+    }
 }
 
 fn load_or_bootstrap_prover_bk_set(

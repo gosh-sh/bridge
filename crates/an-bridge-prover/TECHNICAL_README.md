@@ -156,7 +156,12 @@ The library is designed to serve two independent binaries:
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
 - `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
-- `fetch_bk_set` (in `bk_set_fetcher.rs`) — reconstructs the currently-active BK-set map from the node's `bkSetUpdates` history; used by external consumers to build the initial BK-set argument for `LiveProverDriver::new`.
+- `bk_set_fetcher` primitives for constructing the initial BK-set argument to `LiveProverDriver::new`:
+  - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default `file` bootstrap mode).
+  - `bk_set_at_height(client, genesis, target_height)` — fold `bkSetUpdates` (height ≤ target) onto a genesis snapshot, for cold-start against a rotating chain long past genesis. Enabled by `BRIDGE_BK_SET_BOOTSTRAP=fold_at_height`.
+  - `next_update_after(client, cursor)` — cursor-walk the delta log for post-startup rotations (used by `poll_next_bk_update`).
+  - `fold_bk_updates` / `parse_bk_set_changes_pub` / `normalize_bk_set_pubkeys` — lower-level helpers exposed for daemons that manage the BK set themselves.
+  - The old `fetch_bk_set` was disabled 2026-07-22 (replayed the delta log from ∅, missing the un-emitted genesis committee); do not resurrect without changing AN's protocol to emit synthetic genesis events.
 
 Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/live_driver/mod.rs) — a structured enum (`GqlTransient`, `GqlSchema`, `ProofGen`, `StateInconsistent`, `Bootstrapping`, `Other`). Consumers who want to keep using `anyhow::Result<T>` at their call sites don't need to change anything — the blanket `impl<E: Error+Send+Sync+'static> From<E> for anyhow::Error` in `anyhow` auto-converts `DriverError` and `?` continues to work.
 
@@ -243,17 +248,17 @@ The BK set is a **circuit witness**, not a circuit constant — only `MAX_SIGNER
 
 Both daemons fetch the set **once at startup** and cache it for the whole run — there is no `bkSetUpdates` subscription. If the on-chain set rotates mid-run, the prover will silently skip key blocks signed by indices it doesn't recognise (`signers [k] not in BK set, skipping`).
 
-On rotation: **stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`) if you rely on the GQL-failure fallback, restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
+On rotation: **stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`), restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
 
 ### BK-set resync on cluster rebuild — automatic (local devnet only)
 
-A common concern for local-devnet operators: *after `make stop && make run` the node images may regenerate BLS keys — do I need to hand-edit `bk_set.local.json` to match?* **No — for local devnet.** Two independent layers handle it:
+A common concern for local-devnet operators: *after `make stop && make run` the node images may regenerate BLS keys — do I need to hand-edit `bk_set.local.json` to match?* **No — for local devnet.** The orchestrator handles it:
 
-1. **Daemon side (GraphQL first).** Both daemons call `bridge_prover_lib::bk_set_fetcher` at startup, which prefers the on-chain GraphQL `bkSetUpdates` stream and writes the fetched set into `state/prover_bk_set.json`. The per-network file selected by `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) is a **fallback only**, consulted when the GQL fetch fails. On a healthy local devnet the fallback file is unused for the entire run.
-
-2. **Orchestrator side (config-file fallback prep).** Before starting anything else, `python/generate_withdrawals_with_live_event_proving.py` calls `materialize_bk_set_from_node_config` (line 258+). This function enumerates live `*-nodeN-*` docker containers, reads each `$ACKI_NACKI_ROOT/config/block_keeperN_bls.keys.json`, and rewrites `<PROVER_DIR>/bk_set.local.json` from scratch. So even if the daemons had to fall back to the file, it would already be current.
+**Orchestrator side (config-file prep).** Before starting anything else, `python/generate_withdrawals_with_live_event_proving.py` calls `materialize_bk_set_from_node_config` (line 258+). This function enumerates live `*-nodeN-*` docker containers, reads each `$ACKI_NACKI_ROOT/config/block_keeperN_bls.keys.json`, and rewrites `<PROVER_DIR>/bk_set.local.json` from scratch. Both daemons then load this file unconditionally on startup.
 
 The committed `bk_set.local.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**.
+
+*(Historical note: prior to 2026-07-22 the daemons preferred a GraphQL `bkSetUpdates` replay over the file. That path was disabled after it was found to reconstruct an incorrect set on any chain with rotations — see the shellnet section below. The file is now the only source at bootstrap; `bk_set_at_height` is the correct primitive for distant-block cold starts.)*
 
 **Shellnet is different — no auto-resync.** Shellnet has BK-set rotation *disabled* (Sehor confirmed 2026-07-08 for the `poseidon_dex@7ffec27` deployment): the genesis committee is fixed for the life of the chain and the GraphQL `bkSetUpdates` stream stays empty forever. The fetcher therefore always falls through to `bk_set.shellnet.json`, which is **hand-maintained** by transcribing the partner-posted `keys_config.json` (specifically the `bk_nodes[i].bls_pubkey` fields). There is no orchestrator materialiser for it. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson) for the full picture.
 
@@ -466,7 +471,7 @@ cp <config-N>/USDCBridge.keys.json python/contracts/USDCBridge.shellnet.keys.jso
 - The GraphQL schema has **no** `currentBkSet` / snapshot query. Full type scan for `bk|committee|signer|validator|zerostate|keeper` returns only the three `BlockchainBkSetUpdate*` types — none of which expose the current active set.
 - `Block` carries only `gen_validator_list_hash_short` (a hash, not the pubkeys).
 
-Consequence: on shellnet, the daemon's `bridge_prover_lib::bk_set_fetcher::fetch_bk_set` GraphQL path returns empty (logged as `no bkSetUpdates found — node may not have produced blocks yet` — misleading on shellnet, correct behaviour); the daemon then falls back to the file at `BRIDGE_BK_SET_CONFIG`. If that file is stale or wrong, either Circuit 1A fails with ~96 BLS pairing equality-constraint violations, or Circuit 2 aborts with `loaded BK set Poseidon commitment (…) does not match block.leaves[2] (…)`. The only working source of shellnet's genesis committee is the partner-posted `keys_config.json` — specifically its `bk_nodes[i].bls_pubkey` fields, which are the pubkeys the running nodes actually hold the secret halves for. **Do NOT use the `zs_bk_set` file** posted alongside — on the 2026-07-08 snapshot it holds a *different* keypair set than the running chain (stale template from a prior deployment).
+Consequence: on shellnet (and on any AN chain — see 2026-07-22 note below) the daemon loads its initial BK set from the file at `BRIDGE_BK_SET_CONFIG`. **The historical `bk_set_fetcher::fetch_bk_set` GraphQL path was disabled 2026-07-22** — it replayed the `bkSetUpdates` delta log from ∅, but AN does not emit genesis as a synthetic `Added` event, so it returned an empty set on fresh chains and a diff-from-genesis (i.e. wrong) set on rotating ones. For a cold start against a rotating chain long past genesis, use `BRIDGE_BK_SET_BOOTSTRAP=fold_at_height` (+ `BRIDGE_BK_SET_TARGET_SEQNO`); this loads the JSON as the *genesis* snapshot and folds all `bkSetUpdates` up to the target height via `bk_set_fetcher::bk_set_at_height`. If that file is stale or wrong, either Circuit 1A fails with ~96 BLS pairing equality-constraint violations, or Circuit 2 aborts with `loaded BK set Poseidon commitment (…) does not match block.leaves[2] (…)`. The only working source of shellnet's genesis committee is the partner-posted `keys_config.json` — specifically its `bk_nodes[i].bls_pubkey` fields, which are the pubkeys the running nodes actually hold the secret halves for. **Do NOT use the `zs_bk_set` file** posted alongside — on the 2026-07-08 snapshot it holds a *different* keypair set than the running chain (stale template from a prior deployment).
 
 **Producing `bk_set.shellnet.json` from `keys_config.json`:**
 
@@ -476,7 +481,7 @@ jq '.bk_nodes | to_entries | map({key: .key, value: .value.bls_pubkey}) | from_e
    > bk_set.shellnet.json
 ```
 
-That produces the `{"0":"<48-byte-hex>", "1":"…", …}` shape the daemon's fallback loader (`bk_set_fetcher::load_bk_set_from_config`) expects. Sanity-check the file has exactly the number of entries listed in `keys_config.json.bk_nodes` (5 for the 2026-07-08 shellnet from `acki-nacki@7ffec27`) and that each value is a 48-byte compressed BLS12-381 G1 pubkey (96 hex chars).
+That produces the `{"0":"<48-byte-hex>", "1":"…", …}` shape the daemon's loader (`bk_set_fetcher::load_bk_set_from_config`) expects. Sanity-check the file has exactly the number of entries listed in `keys_config.json.bk_nodes` (5 for the 2026-07-08 shellnet from `acki-nacki@7ffec27`) and that each value is a 48-byte compressed BLS12-381 G1 pubkey (96 hex chars).
 
 **Optional cross-check against `zs_bk_set`:** if the partner-posted `zs_bk_set` is *not* stale, then for every `i` it should hold that `zs_bk_set.current[i].pubkey == keys_config.json.bk_nodes[i].bls_pubkey`. On the 2026-07-08 snapshot they diverge for all five indices — `zs_bk_set` is stale — so it must not be used.
 

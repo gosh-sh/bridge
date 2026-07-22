@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context};
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
+use tracing::{debug, info};
 
 use crate::gql_client::{BkSetUpdateWithAttestations, GqlClient};
 
@@ -151,6 +152,165 @@ pub fn parse_bk_set_changes_pub(blob: &[u8]) -> Vec<(u32, u16, Vec<u8>)> {
     parse_bk_set_changes(blob)
 }
 
+/// Page size for `bk_set_at_height` cursor pagination. Sized to be gentle
+/// on the node's DB while still finishing large scans in tens of round-trips.
+const BK_SET_AT_HEIGHT_PAGE_SIZE: u32 = 500;
+
+/// Reconstruct the BK set active at chain height `target_height` by folding
+/// `bkSetUpdates` (height <= target_height, chronological) onto the caller-
+/// supplied `genesis_bk_set`.
+///
+/// Why this exists: AN's `bkSetUpdates` is a delta log; it does *not* emit
+/// the genesis committee as a synthetic `Added` event. The old `fetch_bk_set`
+/// replayed the log from ∅ and so returned the wrong set on any rotating
+/// chain. `bk_set_at_height` is the correct cold-start primitive — the
+/// caller provides the genesis snapshot (from a JSON config), and this
+/// function applies every rotation up to and including `target_height`.
+///
+/// Cost: O(rotations-since-genesis-up-to-N), paginated in
+/// `BK_SET_AT_HEIGHT_PAGE_SIZE`-sized chunks over the node's GraphQL cursor.
+/// On a healthy chain this is quick even for long lag; on a chain with
+/// millions of rotations the caller should batch-verify progress via logs.
+///
+/// Preconditions:
+/// - `genesis_bk_set` must be non-empty (typically loaded from a JSON config)
+///   and contain 48- or 96-byte compressed/uncompressed BLS pubkeys; keys are
+///   normalized to 48-byte compressed form before folding.
+/// - `target_height >= 1` (returning genesis unchanged for target_height=0 is
+///   allowed and short-circuits without a network call).
+pub async fn bk_set_at_height(
+    client: &GqlClient,
+    genesis_bk_set: HashMap<u16, Vec<u8>>,
+    target_height: u64,
+) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+    if genesis_bk_set.is_empty() {
+        bail!("bk_set_at_height: genesis_bk_set is empty — cold start needs a non-empty anchor");
+    }
+    let base = normalize_bk_set_pubkeys(genesis_bk_set)?;
+    if target_height == 0 {
+        info!(
+            "bk_set_at_height: target_height=0, returning genesis snapshot ({} signers)",
+            base.len()
+        );
+        return Ok(base);
+    }
+
+    let mut cursor: Option<String> = None;
+    let mut collected: Vec<BkSetUpdateWithAttestations> = Vec::new();
+    let mut pages = 0usize;
+    loop {
+        let (mut page, next) = client
+            .query_bk_set_updates_paged(
+                target_height,
+                BK_SET_AT_HEIGHT_PAGE_SIZE,
+                cursor.as_deref(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "query_bk_set_updates_paged failed at page {} (cursor={:?})",
+                    pages, cursor
+                )
+            })?;
+        pages += 1;
+        debug!(
+            "bk_set_at_height page {}: {} events (cursor advance -> {:?})",
+            pages,
+            page.len(),
+            next
+        );
+        collected.append(&mut page);
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        if pages > 10_000 {
+            bail!(
+                "bk_set_at_height: refusing to paginate past 10_000 pages \
+                 (likely a server-side pagination bug) at cursor {:?}",
+                cursor
+            );
+        }
+    }
+
+    info!(
+        "bk_set_at_height: fetched {} rotation events across {} pages (target_height={})",
+        collected.len(),
+        pages,
+        target_height
+    );
+
+    fold_bk_updates(base, &collected)
+}
+
+/// Pure fold: applies rotation events (in chronological order) to `base`.
+///
+/// Extracted from `bk_set_at_height` so unit tests can drive it with
+/// synthetic events without a live GraphQL server. Events whose `height`
+/// is `None` are applied as-is (the DB row lacked a height column) — this
+/// matches AN's behavior on very early rows and keeps the fold total.
+///
+/// The returned map is normalized to 48-byte compressed pubkeys.
+pub fn fold_bk_updates(
+    mut base: HashMap<u16, Vec<u8>>,
+    events: &[BkSetUpdateWithAttestations],
+) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
+    // Sort by (height, chain_order) so callers who feed unordered pages
+    // still get chronological application. `chain_order` is AN's canonical
+    // tiebreaker for events at the same height.
+    let mut ordered: Vec<&BkSetUpdateWithAttestations> = events.iter().collect();
+    ordered.sort_by(|a, b| {
+        let ha = a.height.unwrap_or(u64::MAX);
+        let hb = b.height.unwrap_or(u64::MAX);
+        ha.cmp(&hb).then_with(|| {
+            a.chain_order
+                .as_deref()
+                .unwrap_or("")
+                .cmp(b.chain_order.as_deref().unwrap_or(""))
+        })
+    });
+
+    let mut adds = 0usize;
+    let mut removes = 0usize;
+    for u in ordered {
+        if u.bk_set_update_hex.is_empty() {
+            continue;
+        }
+        let blob = hex::decode(&u.bk_set_update_hex)
+            .with_context(|| format!("decode bk_set_update at block {}", u.block_id))?;
+        for (variant, signer_idx, pk) in parse_bk_set_changes(&blob) {
+            match variant {
+                BK_CHANGE_ADDED => {
+                    base.insert(signer_idx, pk);
+                    adds += 1;
+                }
+                BK_CHANGE_REMOVED => {
+                    base.remove(&signer_idx);
+                    removes += 1;
+                }
+                _ => {} // FutureAdd/VersionChange etc. — no effect on active set
+            }
+        }
+    }
+
+    info!(
+        "fold_bk_updates: applied {} adds, {} removes; result has {} active signers",
+        adds,
+        removes,
+        base.len()
+    );
+
+    if base.is_empty() {
+        bail!(
+            "fold_bk_updates: result is empty after {} adds / {} removes — \
+             genesis anchor or update log is inconsistent",
+            adds,
+            removes
+        );
+    }
+    normalize_bk_set_pubkeys(base)
+}
+
 /// Variant constants re-exported so the prover daemon doesn't have to repeat
 /// the discriminant table.
 pub const BK_CHANGE_VARIANT_ADDED: u32 = BK_CHANGE_ADDED;
@@ -251,6 +411,137 @@ fn parse_bk_set_changes(blob: &[u8]) -> Vec<(u32, u16, Vec<u8>)> {
         i += 1;
     }
     results
+}
+
+#[cfg(test)]
+mod fold_tests {
+    //! Unit tests for the pure `fold_bk_updates` fold — no network.
+    use super::*;
+
+    /// Build a synthetic bk_set_update blob in AN's on-wire format:
+    /// `[num_changes u64 LE] [variant u32 LE, signer_idx u16 LE, pk_len u64 LE = 96, 96-byte pk]*`
+    fn encode_changes(changes: &[(u32, u16, [u8; 96])]) -> String {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(changes.len() as u64).to_le_bytes());
+        for (variant, idx, pk) in changes {
+            buf.extend_from_slice(&variant.to_le_bytes());
+            buf.extend_from_slice(&idx.to_le_bytes());
+            buf.extend_from_slice(&96u64.to_le_bytes());
+            buf.extend_from_slice(pk);
+        }
+        hex::encode(buf)
+    }
+
+    /// Produce a valid 96-byte uncompressed G1 encoding via generator×scalar.
+    /// The scalar is derived from `seed` so different indices produce distinct
+    /// pubkeys — matching how real BK signers differ. All results decompress
+    /// cleanly under `normalize_bk_set_pubkeys`.
+    fn uncompressed_pk(seed: u64) -> [u8; 96] {
+        use halo2_base::halo2_proofs::halo2curves::bls12_381::{Fr as BlsScalar, G1Affine, G1};
+        use halo2_base::halo2_proofs::halo2curves::group::Curve;
+        let s = BlsScalar::from(seed.max(1));
+        let p: G1Affine = (G1::generator() * s).to_affine();
+        p.to_uncompressed_be()
+    }
+
+    fn synthetic_event(
+        height: u64,
+        chain_order: &str,
+        changes: &[(u32, u16, [u8; 96])],
+    ) -> BkSetUpdateWithAttestations {
+        BkSetUpdateWithAttestations {
+            block_id: format!("h{height}"),
+            bk_set_update_hex: encode_changes(changes),
+            height: Some(height),
+            attestations: Vec::new(),
+            chain_order: Some(chain_order.to_string()),
+        }
+    }
+
+    #[test]
+    fn fold_applies_add_then_remove_in_chronological_order() {
+        // Genesis: signers 0 and 1.
+        let pk0 = uncompressed_pk(1);
+        let pk1 = uncompressed_pk(2);
+        let pk2 = uncompressed_pk(3);
+        let mut genesis = HashMap::new();
+        genesis.insert(0u16, pk0.to_vec());
+        genesis.insert(1u16, pk1.to_vec());
+
+        // Two events: add signer 2 at height 100, remove signer 0 at height 200.
+        let events = vec![
+            synthetic_event(100, "a", &[(BK_CHANGE_ADDED, 2u16, pk2)]),
+            synthetic_event(200, "b", &[(BK_CHANGE_REMOVED, 0u16, [0u8; 96])]),
+        ];
+        let result = fold_bk_updates(genesis, &events).expect("fold succeeds");
+        // Expect signers {1, 2}. All pubkeys normalized to 48 bytes.
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key(&1));
+        assert!(result.contains_key(&2));
+        assert!(!result.contains_key(&0));
+        for (idx, pk) in &result {
+            assert_eq!(pk.len(), 48, "signer {} pk should be compressed", idx);
+        }
+    }
+
+    #[test]
+    fn fold_sorts_out_of_order_events_by_height() {
+        // Feed events in REVERSE chronological order; fold must sort by height.
+        // If it didn't, remove-then-add would leave the set with 2 (from add
+        // at the earlier height being applied *after* the later remove).
+        let pk0 = uncompressed_pk(1);
+        let pk2 = uncompressed_pk(3);
+        let mut genesis = HashMap::new();
+        genesis.insert(0u16, pk0.to_vec());
+
+        let events = vec![
+            // Remove at height 200 fed FIRST
+            synthetic_event(200, "b", &[(BK_CHANGE_REMOVED, 2u16, [0u8; 96])]),
+            // Add at height 100 fed SECOND
+            synthetic_event(100, "a", &[(BK_CHANGE_ADDED, 2u16, pk2)]),
+        ];
+        let result = fold_bk_updates(genesis, &events).expect("fold succeeds");
+        // Correct chronological application: add(2) then remove(2) = {0} only.
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+        assert!(!result.contains_key(&2));
+    }
+
+    #[test]
+    fn fold_uses_chain_order_as_tiebreaker_at_same_height() {
+        // Two events at same height: add(2) with chain_order "a", remove(2) with "b".
+        // Sorted, add comes first, then remove — result excludes 2.
+        let pk0 = uncompressed_pk(1);
+        let pk2 = uncompressed_pk(3);
+        let mut genesis = HashMap::new();
+        genesis.insert(0u16, pk0.to_vec());
+
+        let events = vec![
+            // Feed remove first to force the sort to matter.
+            synthetic_event(500, "b", &[(BK_CHANGE_REMOVED, 2u16, [0u8; 96])]),
+            synthetic_event(500, "a", &[(BK_CHANGE_ADDED, 2u16, pk2)]),
+        ];
+        let result = fold_bk_updates(genesis, &events).expect("fold succeeds");
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+    }
+
+    #[test]
+    fn fold_rejects_empty_result() {
+        // Genesis has one signer, event removes it → fold must error rather
+        // than return an empty (unusable) BK set.
+        let pk0 = uncompressed_pk(1);
+        let mut genesis = HashMap::new();
+        genesis.insert(0u16, pk0.to_vec());
+        let events = vec![synthetic_event(
+            100,
+            "a",
+            &[(BK_CHANGE_REMOVED, 0u16, [0u8; 96])],
+        )];
+        let err = fold_bk_updates(genesis, &events).expect_err("empty result must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "expected 'empty' in error: {msg}");
+    }
 }
 
 #[cfg(test)]

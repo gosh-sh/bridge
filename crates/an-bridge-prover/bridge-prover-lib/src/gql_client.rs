@@ -38,6 +38,11 @@ pub struct BkSetUpdateWithAttestations {
     pub bk_set_update_hex: String,
     pub height: Option<u64>,
     pub attestations: Vec<GqlAttestation>,
+    /// AN's canonical block ordering key. Present on queries that ask for it
+    /// (e.g. `query_bk_set_updates_paged`); `None` on the light/legacy queries
+    /// that never fetched it. Used as the opaque `after` cursor for
+    /// Relay-style pagination over `bkSetUpdates`.
+    pub chain_order: Option<String>,
 }
 
 /// GraphQL-fetched proof block — replaces `Envelope<AckiNackiBlock>` as the
@@ -157,6 +162,7 @@ impl GqlClient {
                     bk_set_update_hex,
                     height,
                     attestations: Vec::new(), // no attestations in light query
+                    chain_order: None,        // not queried in the light path
                 });
             }
         }
@@ -252,6 +258,91 @@ impl GqlClient {
             }
         }
         Ok(results)
+    }
+
+    /// Fetch `bkSetUpdates` with height <= `height_end`, forward-paginated by
+    /// `chain_order` cursor. Returns the next-page cursor if more results
+    /// exist (i.e. the last node's `chain_order`), or `None` when the page
+    /// is exhausted.
+    ///
+    /// Uses the "light" projection (no `attestations` subfields) because
+    /// this path is optimized for cold-start BK-set replay, where only the
+    /// `bk_set_update` blob + `height` + `chain_order` are needed.
+    ///
+    /// Note: page size in the underlying `bkSetUpdates` connection is
+    /// bounded server-side; callers should treat `first` as a hint.
+    pub async fn query_bk_set_updates_paged(
+        &self,
+        height_end: u64,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<(Vec<BkSetUpdateWithAttestations>, Option<String>)> {
+        let after_arg = match after {
+            Some(cur) => format!(r#", after: "{}""#, cur.replace('"', "\\\"")),
+            None => String::new(),
+        };
+        let q = format!(
+            r#"{{
+              blockchain {{
+                bkSetUpdates(first: {first}, height_end: {height_end}{after_arg}) {{
+                  edges {{
+                    node {{
+                      block_id
+                      bk_set_update
+                      height
+                      chain_order
+                    }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let data = self.query(&q).await?;
+        let edges = data
+            .pointer("/blockchain/bkSetUpdates/edges")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut updates = Vec::new();
+        let mut last_cursor: Option<String> = None;
+        for edge in &edges {
+            if let Some(node) = edge.get("node") {
+                let block_id = node
+                    .get("block_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let bk_set_update_hex = node
+                    .get("bk_set_update")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let height = node.get("height").and_then(|v| v.as_u64());
+                let chain_order = node
+                    .get("chain_order")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref c) = chain_order {
+                    last_cursor = Some(c.clone());
+                }
+                updates.push(BkSetUpdateWithAttestations {
+                    block_id,
+                    bk_set_update_hex,
+                    height,
+                    attestations: Vec::new(),
+                    chain_order,
+                });
+            }
+        }
+        // "More data available" heuristic: server returned a full page.
+        // (The `has_next_page` flag isn't in our projection; comparing
+        // len == first is close enough and only affects when we stop paging.)
+        let next = if updates.len() as u32 >= first {
+            last_cursor
+        } else {
+            None
+        };
+        Ok((updates, next))
     }
 
     /// Fetch the first N bkSetUpdates (oldest first).
@@ -376,6 +467,7 @@ impl BkSetUpdateWithAttestations {
             bk_set_update_hex,
             height,
             attestations,
+            chain_order: None, // legacy heavy queries don't fetch it
         })
     }
 }

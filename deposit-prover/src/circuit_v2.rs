@@ -718,21 +718,17 @@ impl ToMPTInput for ReceiptProof {
             slot_is_empty: false,
             value_max_byte_len,
             max_depth: RECEIPT_PF_MAX_DEPTH,
-            // Receipt trie keys are RLP(tx_index):
-            // RLP encoding for integers:
-            // - tx_index 0-127: 1 byte (the value itself, no prefix)
-            // - tx_index 128-255: 2 bytes (0x81 prefix + 1 value byte)
-            // - tx_index 256-65535: 3 bytes (0x82 prefix + 2 value bytes)
-            // - tx_index 65536-16777215: 4 bytes (0x83 prefix + 3 value bytes)
+            // Receipt trie keys are RLP(tx_index). Must match axiom-eth's
+            // receipt/tx providers (`max_key_byte_len: 3`) and
+            // `TRANSACTION_IDX_MAX_LEN = 2` (tx_index ≤ 65535):
+            //   max_key_byte_len = 1 + max_rlp_len_len(2) + 2 = 3
+            // where max_rlp_len_len(2) = 0 because 2 ≤ 55.
             //
-            // axiom-eth uses TRANSACTION_IDX_MAX_LEN = 2 (supports up to 65535 txs)
-            // Formula: max_key_byte_len = 1 + max_rlp_len_len(2) + 2
-            //                           = 1 + 0 + 2 = 3
-            // where max_rlp_len_len(2) = 0 because 2 <= 55 (no length-of-length bytes)
-            //
-            // We use 4 instead of 3 to support edge cases with >65535 transactions.
-            // (Note: 32 is for storage tries which use keccak256 keys)
-            max_key_byte_len: 4,
+            // Using 4 (or 32, the storage-trie keccak key width) desyncs the
+            // MPT chip padding from axiom-eth's RLP key decomposition and
+            // breaks MockProver / under-constrained padding slots.
+            // Storage tries use 32; receipt/tx tries use 3 — never mix them.
+            max_key_byte_len: 3,
             key_byte_len: Some(path_len),
         }
     }

@@ -296,13 +296,17 @@ pub struct BundleProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
-    /// Block ID as `Fr::to_repr()` bytes — a single value shared by both
-    /// circuits since the 2026-07-22 Circuit 1 byte-order fix. Both Circuit 1
-    /// (from the attestation payload) and Circuit 2 (from the SHA-256 8-leaf
-    /// Merkle root) now compute `block_id_fr = uint256(bytes32(root))`, so
-    /// the two derivation paths are provably equal for a valid block.
-    /// `bundle.rs` debug-asserts this equality at build time to page loudly
-    /// if either circuit's byte-order convention regresses.
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 8-leaf
+    /// `block_merkle_tree_leaves` = GraphQL `Block.id` = Solidity
+    /// `uint256(bytes32(blockId))`). Since the 2026-07-22 Circuit 1 byte-order
+    /// fix, both Circuit 1 (from the attestation payload) and Circuit 2 (from
+    /// the SHA-256 root) bind `block_id_fr = fold(reverse(this))`, so the two
+    /// derivation paths are provably equal for a valid block; `bundle.rs`
+    /// debug-asserts this at build time. Carrying the full 256-bit hash (not
+    /// its `Fr::to_repr()` LE bytes) preserves the top 2 bits that would be
+    /// lost when the chain hash `>= p` (~3/4 of blocks). Rust verifiers
+    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain SHPLONK
+    /// auto-reduces via `mod(calldataload, f_q)`.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
@@ -330,15 +334,14 @@ pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_bk_update_seq_no: u64,
-    /// Attestation-circuit block_id, i.e. `Fr::to_repr()` bytes. May differ
-    /// from [`Self::block_id_hash_be`] in the top 2 bits because the chain
-    /// hash is reduced modulo the Fr prime when the circuit ingests it.
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 8-leaf
+    /// `block_merkle_tree_leaves` = Solidity `uint256(bytes32(blockId))`).
+    /// Same semantics as [`BundleProofArtifacts::block_id_be`]: on-chain
+    /// SHPLONK auto-reduces mod p, and the SHA-256 Merkle open (h0/h23 +
+    /// l2/l3) checks against this raw root. The pre-v6 dual-field encoding
+    /// (attestation-circuit `Fr::to_repr` + separate raw hash) is gone —
+    /// callers derive Fr on demand.
     pub block_id_be: [u8; 32],
-    /// Raw 32-byte block hash = SHA-256 root of the 8-leaf
-    /// `block_merkle_tree_leaves`. This is what `applyBkSetUpdate` on the
-    /// Solidity side receives; the SHA-256 Merkle open (h0/h23 + l2/l3) is
-    /// verified against this root, NOT against [`Self::block_id_be`].
-    pub block_id_hash_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],
     pub new_bk_set_commitment_be: [u8; 32],

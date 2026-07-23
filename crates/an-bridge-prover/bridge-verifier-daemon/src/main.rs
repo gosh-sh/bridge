@@ -292,7 +292,10 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // ---- Verify Circuit 1a ----
-            let block_id_fr = match ipc::fr_from_hex(&request.block_id_hex) {
+            // Schema v6: `block_id_hex` is the raw 32-byte BE chain hash.
+            // Reduce to Fr via the same inner-product fold Circuit 1 uses
+            // (matches the on-chain Yul `mod(calldataload, f_q)`).
+            let block_id_fr = match ipc::hash_hex_to_fr(&request.block_id_hex) {
                 Ok(fr) => fr,
                 Err(e) => {
                     let msg = format!("invalid block_id_hex: {}", e);
@@ -720,23 +723,18 @@ fn process_bk_update_bundle(
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let block_id_fr = match ipc::fr_from_hex(&req.block_id_hex) {
-        Ok(fr) => fr,
-        Err(e) => return finalize_bk_update_failure(
-            seq_no,
-            &format!("invalid block_id_hex: {e}"),
-            last_seen_bk_update_seqno,
-        ),
-    };
-    // The chain's raw 32-byte block hash for the SHA-256 Merkle reconstruction.
-    // `block_id_hex` is the Fr-reduced form (254-bit), so it cannot be used
-    // here when the chain hash exceeds the Fr modulus (top 2 bits set on the
-    // LE-interpreted big-endian byte string). The bundle carries the raw hash
-    // separately in `block_id_hash_hex`.
-    let block_id_bytes = match decode_hash32(&req.block_id_hash_hex, "block_id_hash") {
+    // Schema v6: `block_id_hex` carries the raw 32-byte BE chain hash — the
+    // same value the SHA-256 Merkle open compares against and the same value
+    // the on-chain `applyBkSetUpdate` receives as `uint256 blockId`. The Fr
+    // public instance is derived on demand via the inner-product fold
+    // (matches Circuit 1's `compute_block_id_fr` and Yul
+    // `mod(calldataload, f_q)`), so both the SHPLONK check and the SHA
+    // Merkle check are anchored to the same 256-bit source of truth.
+    let block_id_bytes = match decode_hash32(&req.block_id_hex, "block_id") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
+    let block_id_fr = ipc::fold_hash_be_to_fr(&block_id_bytes);
 
     // (1) Attestation. L2 in the bundle MUST match the verifier's stored
     // commitment — this is what authorises the update.
@@ -790,51 +788,23 @@ fn process_bk_update_bundle(
     };
 
     // (2) Open SHA-256 Merkle: H1 = SHA(L2‖L3); H01 = SHA(H0‖H1); root = SHA(H01‖H23).
-    // Compared against the raw 32-byte chain block hash (`block_id_hash_hex`),
-    // not against `block_id_fr.to_repr()` — the chain hash is 256 bits and may
-    // exceed the BN254 Fr modulus, so the Fr public instance is a lossy
-    // 254-bit projection. Consistency between the two is enforced separately
-    // in check (2b) below.
+    // Compared against the raw 32-byte chain block hash carried in
+    // `block_id_hex` (schema v6 semantics = `uint256(bytes32(blockId))`).
+    // The Fr public instance the Circuit 1a/1b proof binds is derived from
+    // exactly these same bytes via the inner-product fold above, so a
+    // separate `block_id_hash ↔ block_id_fr` consistency check is no longer
+    // needed — the two used to diverge only because the pre-v6 wire format
+    // carried both a lossy Fr repr and a raw hash as independent fields.
     let h1_calc = sha256_concat(&l2, &l3);
     let h01_calc = sha256_concat(&h0, &h1_calc);
     let root_calc = sha256_concat(&h01_calc, &h23);
     let merkle_verified = root_calc == block_id_bytes;
     if !merkle_verified {
         warn!(
-            "bk-update {}: Merkle root mismatch — computed {} vs block_id_hash {}",
+            "bk-update {}: Merkle root mismatch — computed {} vs block_id {}",
             seq_no,
             hex::encode(root_calc),
             hex::encode(block_id_bytes),
-        );
-    }
-
-    // (2b) block_id_hash ↔ block_id_fr consistency. Without this, a bundle
-    // could pair one block's raw hash (used by check 2) with another block's
-    // Fr instance (bound by the Circuit 1a/1b proof in check 1). Both must
-    // refer to the same chain block.
-    //
-    // The relation the prover (and both circuits) establishes is
-    // `block_id_fr = uint256(bytes32(root))` — the natural integer value of
-    // the BE SHA-256 root. Equivalently, reverse the BE bytes and LE-fold
-    // (`compute_block_id_fr` in `attestation-bls-checker-circuit::
-    // attestation_data_parser`). We re-run that construction here and
-    // require equality.
-    let block_id_fr_from_hash = {
-        let mut acc = Fr::zero();
-        let mut power = Fr::one();
-        let base = Fr::from(256u64);
-        for &b in block_id_bytes.iter().rev() {
-            acc += Fr::from(b as u64) * power;
-            power *= base;
-        }
-        acc
-    };
-    let fr_consistency_ok = block_id_fr_from_hash == block_id_fr;
-    if !fr_consistency_ok {
-        warn!(
-            "bk-update {}: block_id_fr inconsistent with block_id_hash — \
-             Fr(hash mod p) != bundled Fr instance",
-            seq_no
         );
     }
 
@@ -847,8 +817,7 @@ fn process_bk_update_bundle(
         );
     }
 
-    let verify_ok =
-        attestation_verified && merkle_verified && fr_consistency_ok && monotonicity_ok;
+    let verify_ok = attestation_verified && merkle_verified && monotonicity_ok;
     if verify_ok {
         if let Err(e) = state.apply_bk_set_update(l2, l3, req.block_seq_no as u64) {
             // apply_bk_set_update re-checks the preconditions; if it
@@ -879,8 +848,8 @@ fn process_bk_update_bundle(
         }
     } else {
         warn!(
-            "bk-update {}: REJECTED (attestation={}, merkle={}, fr_consistency={}, monotone={})",
-            seq_no, attestation_verified, merkle_verified, fr_consistency_ok, monotonicity_ok
+            "bk-update {}: REJECTED (attestation={}, merkle={}, monotone={})",
+            seq_no, attestation_verified, merkle_verified, monotonicity_ok
         );
     }
 
@@ -894,8 +863,8 @@ fn process_bk_update_bundle(
             None
         } else {
             Some(format!(
-                "attestation={}, merkle={}, fr_consistency={}, monotone={}",
-                attestation_verified, merkle_verified, fr_consistency_ok, monotonicity_ok
+                "attestation={}, merkle={}, monotone={}",
+                attestation_verified, merkle_verified, monotonicity_ok
             ))
         },
     };

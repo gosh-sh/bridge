@@ -29,7 +29,7 @@ use crate::{
     error::RelayerError,
     proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::fr_hex_to_u256,
+    withdrawal::{fr_hex_to_u256, hash_hex_to_u256},
 };
 
 /// Asynchronous source of AN block payloads.
@@ -450,7 +450,9 @@ impl ProverProofsBlockSource {
 
         let block = AnBlockData {
             fin_type: FinalizationType::Primary,
-            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash — decode
+            // as BE so the U256 matches `uint256(bytes32(blockId))` on-chain.
+            block_id: hash_hex_to_u256(&req.block_id_hex)?,
             bk_set_commitment: fr_hex_to_u256(&req.bk_set_poseidon_hash_hex)?,
             block_seq_no: seq_no,
             num_layers: req.num_layers,
@@ -481,7 +483,9 @@ impl BlockSource for ProverProofsBlockSource {
 // ─────────────────────────────────────────────────────────────────────
 
 /// JSON written by `acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-daemon`
-/// (`bridge-prover-lib::ipc::BkUpdateRequest`).
+/// (`bridge-prover-lib::ipc::BkUpdateRequest`). Schema v6: single
+/// `block_id_hex` carries the raw 32-byte BE chain hash — the pre-v6 dual
+/// (`block_id_hex` Fr LE + `block_id_hash_hex` raw BE) has collapsed.
 #[derive(Deserialize)]
 struct PartnerBkUpdateRequest {
     #[serde(default, rename = "schema_version")]
@@ -492,8 +496,6 @@ struct PartnerBkUpdateRequest {
     #[serde(default, rename = "last_seen_bk_update_seqno")]
     _last_seen_bk_update_seqno: u32,
     block_id_hex: String,
-    #[serde(default, rename = "block_id_hash_hex")]
-    _block_id_hash_hex: String,
     #[serde(default = "default_attestation_primary")]
     attestation_circuit: String,
     primary_proof_hex: String,
@@ -611,7 +613,10 @@ impl BkUpdateProofsSource {
 
         Ok(Some(crate::types::BkSetUpdateData {
             fin_type,
-            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash. Same
+            // semantics as the bundle path — matches
+            // `uint256(bytes32(blockId))` on-chain.
+            block_id: hash_hex_to_u256(&req.block_id_hex)?,
             block_seq_no: seq_no,
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,

@@ -53,10 +53,16 @@ impl From<bridge_prover_lib::live_driver::BundleFinalizationType> for Finalizati
 
 impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData {
     fn from(b: &bridge_prover_lib::live_driver::BundleProofArtifacts) -> Self {
-        // `*_be` artefact fields are misnamed: they are `Fr::to_repr()` bytes
-        // (little-endian), matching `fr_hex_to_u256` / on-chain genesis encoding.
-        // `U256::from_be_bytes` here previously flipped every Fr PI and made
-        // `daemon-live` fail the prev_max / bk_set anchor checks against Sepolia.
+        // Schema v6: `block_id_be` is the raw 32-byte BE chain hash, so it
+        // decodes as `U256::from_be_bytes` — matches Solidity
+        // `uint256(bytes32(blockId))` exactly, which is what the on-chain
+        // SHA-256 Merkle open compares and what the SHPLONK verifier
+        // auto-reduces mod p. The remaining `*_be` fields
+        // (`bk_set_commitment_be`, `layer_hashes_be[i]`,
+        // `prev_max_level_layer_hash_be`) are still `Fr::to_repr()` LE
+        // bytes — those wire fields have not yet been unified with the raw
+        // hash convention (tracked as an open item alongside the schema v6
+        // block_id fix).
         let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         for (i, h) in b
             .layer_hashes_be
@@ -68,7 +74,7 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
         }
         AnBlockData {
             fin_type: b.fin_type.into(),
-            block_id: U256::from_le_bytes(b.block_id_be),
+            block_id: U256::from_be_bytes(b.block_id_be),
             bk_set_commitment: U256::from_le_bytes(b.bk_set_commitment_be),
             block_seq_no: b.block_seq_no,
             num_layers: b.num_layers,
@@ -82,12 +88,13 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
 
 impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpdateData {
     fn from(u: &bridge_prover_lib::live_driver::BkUpdateProofArtifacts) -> Self {
-        // `applyBkSetUpdate` verifies the SHA-256 Merkle open against the raw
-        // 32-byte block hash (`block_id_hash_be`), not the Fr-reduced
-        // attestation `block_id_be`. Commitments are `Fr::to_repr()` (LE).
+        // Schema v6: single `block_id_be` = raw 32-byte BE chain hash, so
+        // `U256::from_be_bytes` matches Solidity's `uint256(bytes32(...))`
+        // that `applyBkSetUpdate` receives. Commitments remain
+        // `Fr::to_repr()` LE bytes (open cleanup item).
         BkSetUpdateData {
             fin_type: u.fin_type.into(),
-            block_id: U256::from_be_bytes(u.block_id_hash_be),
+            block_id: U256::from_be_bytes(u.block_id_be),
             block_seq_no: u.block_seq_no,
             old_commitment_l2: U256::from_le_bytes(u.old_bk_set_commitment_be),
             new_commitment_l3: U256::from_le_bytes(u.new_bk_set_commitment_be),

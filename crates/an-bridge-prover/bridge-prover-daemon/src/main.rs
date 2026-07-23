@@ -556,9 +556,11 @@ fn to_ipc_circuit(t: BundleFinalizationType) -> ipc::AttestationCircuit {
 }
 
 fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
-    // Since the 2026-07-22 Circuit 1 byte-order fix, both circuits emit
-    // `block_id_fr = uint256(bytes32(root))`, so a single `block_id_hex`
-    // field is shared as public instance [0] of Circuit 1 and Circuit 2.
+    // Schema v6: `block_id_hex` is the raw 32-byte BE chain hash (=
+    // `uint256(bytes32(blockId))`); Circuit 1 and Circuit 2 both bind
+    // `block_id_fr = fold(reverse(this))` and the verifier derives Fr on
+    // demand via `ipc::hash_hex_to_fr`. Same wire semantics as
+    // `BkUpdateRequest.block_id_hex`.
     ipc::ProofRequest {
         schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: b.block_seq_no as u32,
@@ -578,13 +580,16 @@ fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
 }
 
 fn bkupdate_to_ipc_request(u: &BkUpdateProofArtifacts) -> ipc::BkUpdateRequest {
+    // Schema v6: single `block_id_hex` = raw 32-byte BE chain hash. The
+    // verifier's SHA-256 Merkle open checks the raw bytes; the Fr public
+    // instance for Circuit 1a/1b is derived on demand via
+    // `ipc::hash_hex_to_fr`.
     ipc::BkUpdateRequest {
         schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: u.block_seq_no as u32,
         block_height: u.block_height,
         last_seen_bk_update_seqno: u.last_seen_bk_update_seq_no as u32,
         block_id_hex: hex::encode(u.block_id_be),
-        block_id_hash_hex: hex::encode(u.block_id_hash_be),
         attestation_circuit: to_ipc_circuit(u.fin_type),
         primary_proof_hex: hex::encode(&u.attestation_proof),
         old_bk_set_poseidon_hash_hex: hex::encode(u.old_bk_set_commitment_be),
@@ -604,7 +609,10 @@ fn verify_bundle_inline(
     driver: &LiveProverDriver,
     bundle: &BundleProofArtifacts,
 ) -> (bool, bool) {
-    let block_id_fr = fr_from_repr(bundle.block_id_be);
+    // Schema v6: `bundle.block_id_be` is the raw 32-byte BE chain hash — may
+    // exceed the Fr modulus, so it is NOT a canonical `Fr::to_repr`. Reduce
+    // via the same inner-product fold the circuits and on-chain Yul use.
+    let block_id_fr = ipc::fold_hash_be_to_fr(&bundle.block_id_be);
     let bk_set_commitment_fr = fr_from_repr(bundle.bk_set_commitment_be);
 
     // Circuit 1a/1b public instances match the layout the verifier daemon

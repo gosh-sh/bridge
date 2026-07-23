@@ -583,10 +583,10 @@ kill $(cat logs/pids.txt | cut -d= -f2)
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "block_seq_no": 1536,
   "last_seen_block_seqno": 1024,
-  "block_id_hex": "…",
+  "block_id_hex": "…",   // raw 32-byte BE chain hash = uint256(bytes32(blockId))
   "attestation_circuit": "primary",   // or "fallback" — picks the VK (1a vs 1b)
   "primary_proof_hex": "…",   "primary_proof_gen_ms": 102392,
   "layer_proof_hex":   "…",   "layer_proof_gen_ms":   137310,
@@ -598,6 +598,8 @@ kill $(cat logs/pids.txt | cut -d= -f2)
 ```
 
 Since v5 (2026-07-22, Circuit 1 byte-order fix), `block_id_hex` is a *single* field shared as Circuit 1 and Circuit 2 public instance [0] — both circuits emit `block_id_fr = uint256(bytes32(root))`. The pre-v5 `layer_block_id_hex` sibling field has been removed as redundant.
+
+Since v6 (2026-07-23), `block_id_hex` carries the **raw 32-byte BE chain hash** (= `Solidity uint256(bytes32(blockId))`), not the `Fr::to_repr()` LE bytes of the reduced public instance. This preserves the top 2 bits when the chain hash exceeds the Fr modulus (~3/4 of blocks). The Fr the Rust verifier consumes is derived on demand via `ipc::hash_hex_to_fr` (inner-product fold of reversed bytes, matching `attestation_bls_checker_circuit::attestation_data_parser::compute_block_id_fr`); the on-chain Halo2Verifier Yul does the equivalent via `mod(calldataload, f_q)`. Same convention applies to `BkUpdateRequest.block_id_hex`; the pre-v6 sibling `block_id_hash_hex` was dropped since the two fields were derivable from each other.
 
 `attestation_circuit` is the **path-selection tag** (see [docs/fallback_path.md](docs/fallback_path.md)). The 4-public-instance layout is identical for 1a and 1b; only the verifying key differs. Schema v3 added this tag; legacy v2 files deserialise as `"primary"`.
 

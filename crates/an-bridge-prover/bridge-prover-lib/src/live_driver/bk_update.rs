@@ -22,7 +22,6 @@
 //!   intended retry semantics.
 
 use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use tracing::{error, info, warn};
 use std::time::Instant;
 
@@ -216,14 +215,23 @@ pub(super) async fn drive_next_bk_update(
 
     // The pre-refactor daemon assembled an `ipc::BkUpdateRequest` here; we
     // return the same fields as a transport-agnostic payload. The caller
-    // maps this into the transport of its choice.
-    let block_id_be: [u8; 32] = upd_proof.block_id_fr.to_repr();
+    // maps this into the transport of its choice. Since schema v6 there is a
+    // single `block_id_be` (raw 32-byte SHA-256 root); the Fr form is
+    // derived on demand by the verifier via `ipc::hash_hex_to_fr` and by the
+    // on-chain Yul via `mod(calldataload, f_q)`. Debug-assert that the
+    // circuit's committed Fr agrees with the fold of the raw hash so a
+    // byte-order regression pages loudly at build time.
+    debug_assert_eq!(
+        crate::ipc::fold_hash_be_to_fr(&tree.root),
+        upd_proof.block_id_fr,
+        "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed \
+         block_id_fr; a mismatch means the wire hash and the proof disagree",
+    );
     Ok(Some(BkUpdateProofArtifacts {
         block_seq_no: upd_seqno,
         block_height: upd_block.height,
         last_seen_bk_update_seq_no: last_seen_for_upd as u64,
-        block_id_be,
-        block_id_hash_be: tree.root,
+        block_id_be: tree.root,
         fin_type,
         old_bk_set_commitment_be: l2,
         new_bk_set_commitment_be: l3,

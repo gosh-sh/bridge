@@ -28,7 +28,7 @@ use std::time::Instant;
 use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
 use bridge_gql_fetcher::bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED};
 use crate::block_id_tree::BlockIdMerkleTree;
-use crate::poseidon;
+use bridge_poseidon as poseidon;
 use crate::prover;
 
 use super::{BkUpdateProofArtifacts, BundleFinalizationType, LiveProverDriver};

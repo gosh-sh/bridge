@@ -18,7 +18,7 @@ use attestation_bls_checker_circuit::attestation_data_parser::{
 };
 
 use crate::keys::{self, KeyManager};
-use crate::poseidon::compute_bk_set_poseidon;
+use bridge_poseidon::compute_bk_set_poseidon;
 use crate::transcript::{PoseidonWrite, TranscriptKind};
 
 /// Output of a proof generation.

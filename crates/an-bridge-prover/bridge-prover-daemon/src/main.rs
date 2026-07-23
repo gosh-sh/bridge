@@ -34,7 +34,7 @@ use bridge_prover_lib::live_driver::{
     HISTORY_WINDOW_SIZE, LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig,
     LiveProverDriver, SeedPolicy,
 };
-use bridge_prover_lib::poseidon;
+use bridge_poseidon as poseidon;
 use bridge_prover_lib::prover_bk_set::ProverBkSet;
 use bridge_prover_lib::Fr;
 use bridge_prover_lib::THINNING_FACTOR_P;

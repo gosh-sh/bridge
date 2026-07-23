@@ -50,7 +50,7 @@ fn test_live_attestation_bls_verification() {
     assert!(bls_ok, "BLS signature verification failed on live attestation!");
 
     // Compute Poseidon commitment.
-    let (commitment, _) = bridge_prover_lib::poseidon::compute_bk_set_poseidon(&bk_set);
+    let (commitment, _) = bridge_poseidon::compute_bk_set_poseidon(&bk_set);
     println!("BK set Poseidon commitment: {:?}", commitment);
 
     println!("All checks passed!");

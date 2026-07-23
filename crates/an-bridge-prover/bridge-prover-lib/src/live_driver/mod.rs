@@ -88,7 +88,7 @@ use crate::bootstrap::BootstrapSeed;
 use crate::bridge_state::BridgeState;
 use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
-use crate::poseidon;
+use bridge_poseidon as poseidon;
 use crate::prover_bk_set::ProverBkSet;
 
 mod bk_update;

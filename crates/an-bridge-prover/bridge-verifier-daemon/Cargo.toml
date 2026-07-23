@@ -11,6 +11,7 @@ path = "src/main.rs"
 bridge-prover-lib = { workspace = true }
 bridge-gql-fetcher = { workspace = true }
 bridge-event-prover-lib = { workspace = true }
+bridge-poseidon = { workspace = true }
 halo2-base = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

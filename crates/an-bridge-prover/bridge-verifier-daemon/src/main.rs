@@ -15,7 +15,7 @@ use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_event_prover_lib as event_verifier;
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
-use bridge_prover_lib::poseidon;
+use bridge_poseidon as poseidon;
 use bridge_prover_lib::verifier;
 use bridge_prover_lib::Fr;
 

@@ -15,7 +15,7 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use halo2_base::halo2_proofs::dev::MockProver;
 
 use bridge_prover_lib::keys::KeyManager;
-use bridge_prover_lib::poseidon;
+use bridge_poseidon as poseidon;
 use bridge_prover_lib::prover;
 use bridge_prover_lib::verifier;
 

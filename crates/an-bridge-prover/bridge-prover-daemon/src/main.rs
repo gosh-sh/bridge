@@ -594,8 +594,9 @@ fn bkupdate_to_ipc_request(u: &BkUpdateProofArtifacts) -> ipc::BkUpdateRequest {
         primary_proof_hex: hex::encode(&u.attestation_proof),
         old_bk_set_poseidon_hash_hex: hex::encode(u.old_bk_set_commitment_be),
         new_bk_set_poseidon_hash_hex: hex::encode(u.new_bk_set_commitment_be),
-        merkle_sibling_h0_hex: hex::encode(u.merkle_sibling_h0_be),
-        merkle_sibling_h23_hex: hex::encode(u.merkle_sibling_h23_be),
+        merkle_sibling_h01_hex: hex::encode(u.merkle_sibling_h01_be),
+        merkle_sibling_h4_7_hex: hex::encode(u.merkle_sibling_h4_7_be),
+        merkle_sibling_h8_15_hex: hex::encode(u.merkle_sibling_h8_15_be),
         primary_proof_gen_ms: u.primary_proof_gen_ms,
     }
 }

@@ -65,8 +65,8 @@ pub(super) async fn drive_next_bk_update(
 
     info!("=== bk-update drain: processing event at seq_no {} ===", upd_seqno);
 
-    // Fetch the bk-update block's 8 Merkle leaves to derive L2/L3 and the
-    // open siblings H0/H23.
+    // Fetch the bk-update block's 16 Merkle leaves to derive L2/L3 and the
+    // three open siblings h01 / h4_7 / h8_15 for the depth-4 fold.
     let upd_block = driver
         .gql()
         .query_proof_block_by_seqno(upd_seqno)
@@ -227,6 +227,7 @@ pub(super) async fn drive_next_bk_update(
         "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed \
          block_id_fr; a mismatch means the wire hash and the proof disagree",
     );
+    let l2_l3_siblings = tree.siblings_for_l2_l3();
     Ok(Some(BkUpdateProofArtifacts {
         block_seq_no: upd_seqno,
         block_height: upd_block.height,
@@ -235,8 +236,9 @@ pub(super) async fn drive_next_bk_update(
         fin_type,
         old_bk_set_commitment_be: l2,
         new_bk_set_commitment_be: l3,
-        merkle_sibling_h0_be: tree.h0,
-        merkle_sibling_h23_be: tree.h23,
+        merkle_sibling_h01_be: l2_l3_siblings[0],
+        merkle_sibling_h4_7_be: l2_l3_siblings[1],
+        merkle_sibling_h8_15_be: l2_l3_siblings[2],
         attestation_proof: upd_proof.proof_bytes,
         new_pubkeys,
         primary_proof_gen_ms,

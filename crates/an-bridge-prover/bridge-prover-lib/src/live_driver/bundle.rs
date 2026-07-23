@@ -191,7 +191,7 @@ pub(super) async fn drive_next_bundle(
 /// Port of `generate_layer_proof_for_key_block` from the pre-refactor
 /// `main.rs:1093-1195`. Additionally returns the per-layer bundle
 /// (`state_layer_hashes`), the authoritative block height, and the raw
-/// 32-byte BE chain block hash (SHA-256 root of the 8-leaf tree), all
+/// 32-byte BE chain block hash (SHA-256 root of the 16-leaf depth-4 tree), all
 /// needed by the bundle assembler and by
 /// [`super::LiveProverDriver::ack_bundle`] to advance the in-memory
 /// [`crate::bridge_state::BridgeState`].
@@ -238,7 +238,8 @@ async fn generate_layer_proof_for_key_block(
     }
     let preimage = block_id_tree::build_layer_hashes_preimage(num_layers as usize, &root_hashes);
 
-    // 2. Build the 8-leaf SHA-256 Merkle tree from the GQL leaves.
+    // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves
+    //    and pull the four siblings that open L0 up to `block_id`.
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
     let siblings = tree.siblings_for_l0();
     info!(

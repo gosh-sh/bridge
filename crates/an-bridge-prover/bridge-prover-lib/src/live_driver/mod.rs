@@ -296,8 +296,8 @@ pub struct BundleProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
-    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 8-leaf
-    /// `block_merkle_tree_leaves` = GraphQL `Block.id` = Solidity
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
+    /// depth-4 `block_merkle_tree_leaves` = GraphQL `Block.id` = Solidity
     /// `uint256(bytes32(blockId))`). Since the 2026-07-22 Circuit 1 byte-order
     /// fix, both Circuit 1 (from the attestation payload) and Circuit 2 (from
     /// the SHA-256 root) bind `block_id_fr = fold(reverse(this))`, so the two
@@ -328,16 +328,17 @@ pub struct BundleProofArtifacts {
 
 /// Payload for a proven bk-set rotation (Circuit 1A/1B against OLD set + the
 /// three SHA-256 Merkle siblings the on-chain verifier needs to reconstruct
-/// the block-id from L0/L2/L3).
+/// the block-id from L2/L3 up to the 16-leaf depth-4 tree root).
 #[derive(Debug, Clone)]
 pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_bk_update_seq_no: u64,
-    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 8-leaf
-    /// `block_merkle_tree_leaves` = Solidity `uint256(bytes32(blockId))`).
-    /// Same semantics as [`BundleProofArtifacts::block_id_be`]: on-chain
-    /// SHPLONK auto-reduces mod p, and the SHA-256 Merkle open (h0/h23 +
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
+    /// depth-4 `block_merkle_tree_leaves` = Solidity
+    /// `uint256(bytes32(blockId))`). Same semantics as
+    /// [`BundleProofArtifacts::block_id_be`]: on-chain SHPLONK auto-reduces
+    /// mod p, and the depth-4 SHA-256 Merkle open (h01 / h4_7 / h8_15 +
     /// l2/l3) checks against this raw root. The pre-v6 dual-field encoding
     /// (attestation-circuit `Fr::to_repr` + separate raw hash) is gone —
     /// callers derive Fr on demand.
@@ -345,8 +346,13 @@ pub struct BkUpdateProofArtifacts {
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],
     pub new_bk_set_commitment_be: [u8; 32],
-    pub merkle_sibling_h0_be: [u8; 32],
-    pub merkle_sibling_h23_be: [u8; 32],
+    /// Depth-4 Merkle siblings needed to fold `sha(L2‖L3)` up to `block_id`:
+    ///   h0_3 = sha(h01 ‖ sha(L2‖L3))
+    ///   h0_7 = sha(h0_3 ‖ h4_7)
+    ///   root = sha(h0_7 ‖ h8_15)
+    pub merkle_sibling_h01_be: [u8; 32],
+    pub merkle_sibling_h4_7_be: [u8; 32],
+    pub merkle_sibling_h8_15_be: [u8; 32],
     pub attestation_proof: Vec<u8>,
     /// Post-rotation pubkey table so the caller can rotate its
     /// `ProverBkSet` snapshot. Same 48-byte compressed BLS pubkeys as the

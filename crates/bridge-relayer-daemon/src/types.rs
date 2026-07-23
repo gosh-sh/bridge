@@ -88,18 +88,22 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
 
 impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpdateData {
     fn from(u: &bridge_prover_lib::live_driver::BkUpdateProofArtifacts) -> Self {
-        // Schema v6: single `block_id_be` = raw 32-byte BE chain hash, so
+        // Schema v7: single `block_id_be` = raw 32-byte BE chain hash, so
         // `U256::from_be_bytes` matches Solidity's `uint256(bytes32(...))`
         // that `applyBkSetUpdate` receives. Commitments remain
-        // `Fr::to_repr()` LE bytes (open cleanup item).
+        // `Fr::to_repr()` LE bytes (open cleanup item). The three open
+        // siblings walk the depth-4 authentication path of L2/L3 in the
+        // 16-leaf block-id tree: `h01` (depth 3), `h4_7` (depth 2), and
+        // `h8_15` (depth 1).
         BkSetUpdateData {
             fin_type: u.fin_type.into(),
             block_id: U256::from_be_bytes(u.block_id_be),
             block_seq_no: u.block_seq_no,
             old_commitment_l2: U256::from_le_bytes(u.old_bk_set_commitment_be),
             new_commitment_l3: U256::from_le_bytes(u.new_bk_set_commitment_be),
-            sibling_h0: u.merkle_sibling_h0_be,
-            sibling_h23: u.merkle_sibling_h23_be,
+            sibling_h01: u.merkle_sibling_h01_be,
+            sibling_h4_7: u.merkle_sibling_h4_7_be,
+            sibling_h8_15: u.merkle_sibling_h8_15_be,
             attestation_proof: Bytes::from(u.attestation_proof.clone()),
         }
     }
@@ -145,8 +149,12 @@ pub struct BkSetUpdateData {
     pub block_seq_no: u64,
     pub old_commitment_l2: U256,
     pub new_commitment_l3: U256,
-    pub sibling_h0: [u8; 32],
-    pub sibling_h23: [u8; 32],
+    /// Depth-3 sibling: hashes with `SHA(L2‖L3)` to form `h0_3`.
+    pub sibling_h01: [u8; 32],
+    /// Depth-2 sibling: hashes with `h0_3` to form `h0_7`.
+    pub sibling_h4_7: [u8; 32],
+    /// Depth-1 sibling: hashes with `h0_7` to form the root/`block_id`.
+    pub sibling_h8_15: [u8; 32],
     pub attestation_proof: Bytes,
 }
 

@@ -57,8 +57,10 @@ pub struct GqlProofBlock {
     pub tracked_ext_out_messages_root: [u8; 32],
     pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
     pub history_proofs: BTreeMap<u8, [u8; 32]>,
-    /// 8-leaf SHA-256 block-id Merkle leaves. May be absent on very old blocks.
-    pub block_merkle_tree_leaves: Option<[[u8; 32]; 8]>,
+    /// 16-leaf SHA-256 block-id Merkle leaves (canonical depth-4 tree, see
+    /// `bridge-prover-lib::block_id_tree`). May be absent on very old blocks
+    /// that predate the node's exposure of this field.
+    pub block_merkle_tree_leaves: Option<[[u8; 32]; 16]>,
 }
 
 pub fn create_client(endpoint: &str) -> anyhow::Result<GqlClient> {
@@ -732,11 +734,11 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
         }
     }
 
-    // block_merkle_tree_leaves -> Option<[[u8;32]; 8]>
+    // block_merkle_tree_leaves -> Option<[[u8;32]; 16]>
     let block_merkle_tree_leaves = match value.get("block_merkle_tree_leaves") {
         Some(serde_json::Value::Array(items)) => {
-            anyhow::ensure!(items.len() == 8, "block_merkle_tree_leaves must have 8 entries");
-            let mut out = [[0u8; 32]; 8];
+            anyhow::ensure!(items.len() == 16, "block_merkle_tree_leaves must have 16 entries");
+            let mut out = [[0u8; 32]; 16];
             for (i, item) in items.iter().enumerate() {
                 let s = item.as_str().ok_or_else(|| {
                     anyhow::format_err!("block_merkle_tree_leaves[{i}] is not a string")

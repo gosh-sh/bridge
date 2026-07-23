@@ -1,8 +1,8 @@
 # BK Set Update Tracking — Lightweight (no Circuit 3) plan
 
 Goal: extend the bridge to track BK-set rotations using only Circuit 1a/1b
-(attestation) + an **open** (non-ZK) SHA-256 Merkle proof over the 8-leaf
-block-id tree to reveal `L2 = old_bk_set_poseidon_hash` and
+(attestation) + an **open** (non-ZK) SHA-256 Merkle proof over the 16-leaf
+depth-4 block-id tree to reveal `L2 = old_bk_set_poseidon_hash` and
 `L3 = new_bk_set_poseidon_hash`. Verifier daemon today models what the
 Ethereum bridge contract will eventually do.
 
@@ -10,47 +10,61 @@ Ethereum bridge contract will eventually do.
 
 ## 0. Recap of the block-id tree
 
-8-leaf SHA-256 tree (see `bridge-prover-lib/src/block_id_tree.rs`):
+16-leaf, depth-4 SHA-256 tree (see `bridge-prover-lib/src/block_id_tree.rs`):
 
 ```
-                Root = block_id
-           /                       \
-         H01                        H23
-       /      \                   /      \
-     H0        H1               H2        H3
-    /  \      /  \             /  \      /  \
-   L0  L1   L2  L3           L4  L5   L6  L7
+                              Root = block_id
+                    /                              \
+                 h0_7                             h8_15
+              /         \                      /         \
+           h0_3         h4_7               h8_11        h12_15
+          /    \        /    \             /    \        /    \
+        h01    h23    h45    h67         h89   h10_11  h12_13 h14_15
+       / \    / \    / \    / \          / \    / \    / \    / \
+      L0 L1  L2 L3  L4 L5  L6 L7        L8 L9 L10 L11 L12 L13 L14 L15
 ```
 
-with leaves:
+with leaves L0..L15 (right subtree currently zero-padded per
+poseidon_profile_new spec):
 
-| Leaf | Meaning                                            |
-|------|----------------------------------------------------|
-| L0   | Poseidon(layer_hashes_preimage)                    |
-| L1   | SHA256(common_section_bytes)                       |
-| **L2** | **old_bk_set_poseidon_hash** (32-byte LE Fr)     |
-| **L3** | **new_bk_set_poseidon_hash** (32-byte LE Fr)     |
-| L4   | tvm_block_repr_hash                                |
-| L5   | SHA256(durable_state)                              |
-| L6   | SHA256(tx_cnt u64 BE)                              |
-| L7   | Poseidon Merkle root of referenced blocks          |
+| Leaf   | Meaning                                            |
+|--------|----------------------------------------------------|
+| L0     | Poseidon(layer_hashes_preimage)                    |
+| L1     | SHA256(common_section_bytes)                       |
+| **L2** | **old_bk_set_poseidon_hash** (32-byte BE Fr)       |
+| **L3** | **new_bk_set_poseidon_hash** (32-byte BE Fr)       |
+| L4     | tvm_block_repr_hash                                |
+| L5     | SHA256(durable_state)                              |
+| L6     | SHA256(tx_cnt u64 BE)                              |
+| L7     | Poseidon Merkle root of referenced blocks          |
+| L8..L15| reserved (currently zero — right subtree padding)  |
 
-Inner hashes: `H1 = SHA(L2 ‖ L3)`, `H01 = SHA(H0 ‖ H1)`, `root = SHA(H01 ‖ H23)`.
-
-**Minimum sibling set to reveal both L2 and L3** = **2 siblings: `H0` and `H23`**.
-Verifier check:
+Inner hashes (only the ones on L2/L3's authentication path are named here):
 
 ```
-H1   = SHA( L2 ‖ L3 )            // L2, L3 are openly provided
-H01  = SHA( H0 ‖ H1 )            // H0  is sibling
-root = SHA( H01 ‖ H23 )          // H23 is sibling
+h23  = SHA(L2  ‖ L3)
+h0_3 = SHA(h01 ‖ h23)
+h0_7 = SHA(h0_3 ‖ h4_7)
+root = SHA(h0_7 ‖ h8_15)
+```
+
+**Minimum sibling set to reveal both L2 and L3** = **3 siblings: `h01`,
+`h4_7`, and `h8_15`**. Verifier check:
+
+```
+h23   = SHA( L2  ‖ L3 )              // L2, L3 are openly provided
+h0_3  = SHA( h01 ‖ h23 )             // h01  is sibling
+h0_7  = SHA( h0_3 ‖ h4_7 )           // h4_7 is sibling
+root  = SHA( h0_7 ‖ h8_15 )          // h8_15 is sibling
 require root == block_id_from_Circuit1a/1b
 ```
 
-The node already exposes the 8 leaves over GraphQL (`block_merkle_tree_leaves`),
-so the prover does not have to reconstruct anything from raw block bytes — it
-just calls `BlockIdMerkleTree::from_leaves` and reads `tree.h0`, `tree.h23`,
-plus `tree.leaves[2]` and `tree.leaves[3]`.
+The node already exposes the 16 leaves over GraphQL
+(`block_merkle_tree_leaves`), so the prover does not have to reconstruct
+anything from raw block bytes — it just calls
+`BlockIdMerkleTree::from_leaves` and reads `tree.h01`, `tree.h4_7`,
+`tree.h8_15`, plus `tree.leaves[2]` and `tree.leaves[3]` (or calls
+`tree.siblings_for_l2_l3()` for the 3-element sibling array).
 
 ---
 
@@ -89,7 +103,7 @@ The pubkey table lives in a **separate prover-only file**, because the
 prover needs it to assemble Circuit 1a/1b witnesses (signer_index → BLS
 pubkey lookup).
 
-### 2.1 `BridgeState` — contract mirror, schema v4
+### 2.1 `BridgeState` — contract mirror, schema v7
 
 In `bridge-prover-lib/src/bridge_state.rs`:
 
@@ -99,7 +113,7 @@ pub struct BridgeState {
     pub stored_bk_set_commitment: [u8; 32],          // existing
     pub stored_last_seen_block_seq_no: u64,           // existing — gates W·P thinning
 
-    /// schema v4 — seq_no of the last bk-set-update block whose transition
+    /// schema v7 — seq_no of the last bk-set-update block whose transition
     /// we have applied. Mirrors what the ETH contract will store.
     #[serde(default)]
     pub stored_last_bk_set_update_seq_no: u64,
@@ -166,7 +180,7 @@ matches the stored commitment.
 ### 2.3 Bootstrap path
 
 Today the prover materialises the BK set from `bkSetUpdates` at startup
-and holds it in memory (`bk_set_fetcher::fetch_bk_set`). With schema v4 the
+and holds it in memory (`bk_set_fetcher::fetch_bk_set`). With schema v7 the
 flow becomes:
 
 1. Load `state.json` (contract mirror) → `stored_bk_set_commitment`.
@@ -263,20 +277,20 @@ A bk-update bundle is a new IPC artefact. It's lighter than a layer bundle —
 no Circuit 2 — but it carries a Circuit 1a/1b proof + the open SHA-256
 sibling pair.
 
-### 4.1 New IPC variant (schema v4)
+### 4.1 New IPC variant (schema v7)
 
 ```rust
-// ipc.rs (PROOF_REQUEST_SCHEMA_VERSION = 4)
+// ipc.rs (PROOF_REQUEST_SCHEMA_VERSION = 7)
 
 pub enum BundleKind { Layer, BkUpdate }   // enum-tagged
 
 pub struct BkUpdateRequest {
-    pub schema_version: u32,            // 4
+    pub schema_version: u32,            // 7
     pub kind: BundleKind,               // BkUpdate
     pub block_seq_no: u32,
     pub block_height: u64,
     pub last_seen_block_seqno: u32,     // = stored_last_bk_set_update_seq_no
-    pub block_id_hex: String,
+    pub block_id_hex: String,           // raw 32-byte BE root; Fr folded on demand
 
     // Attestation (1a or 1b) — same shape as today
     pub attestation_circuit: AttestationCircuit,
@@ -286,8 +300,9 @@ pub struct BkUpdateRequest {
     // needs. No pubkey list: the contract only stores the commitment.
     pub old_bk_set_poseidon_hash_hex: String,   // L2
     pub new_bk_set_poseidon_hash_hex: String,   // L3
-    pub merkle_sibling_h0_hex: String,           // H0
-    pub merkle_sibling_h23_hex: String,          // H23
+    pub merkle_sibling_h01_hex: String,         // sibling of h23 at depth 3
+    pub merkle_sibling_h4_7_hex: String,        // sibling of h0_3 at depth 2
+    pub merkle_sibling_h8_15_hex: String,       // sibling of h0_7 at depth 1
 }
 ```
 
@@ -296,8 +311,8 @@ prover-only working data (§2.2): the prover computes it locally from
 `bkSetUpdates`, sanity-checks `Poseidon(new_pubkeys) == L3`, and uses it
 to build the *next* attestation proof. The verifier never sees it.
 
-Backwards compatibility: `ProofRequest` (layer bundle, v3) and
-`BkUpdateRequest` (v4) live side-by-side. A discriminator file (or a
+Backwards compatibility: `ProofRequest` (layer bundle, v7) and
+`BkUpdateRequest` (v7) live side-by-side. A discriminator file (or a
 top-level enum-tagged JSON) tells the verifier which one to read for a
 given seq_no. Concretely:
 
@@ -322,8 +337,8 @@ For target seq_no `S`:
    anchor for the verifier**: if Poseidon disagrees, abort the bundle.
 5. Generate the Circuit 1a/1b proof against the **OLD** BK set
    (`prover_bk_set.pubkeys`), since the bk-update block is signed by L2.
-6. Write `bkupd_{S}.json` with `L2`, `L3`, `H0`, `H23`, the attestation
-   proof. No pubkey list in the IPC.
+6. Write `bkupd_{S}.json` with `L2`, `L3`, `h01`, `h4_7`, `h8_15`, and
+   the attestation proof. No pubkey list in the IPC.
 7. On verifier ACK (or self-verify pass), rotate the prover's own table:
    `prover_bk_set.rotate(L3, new_pubkeys, S)` and persist
    `prover_bk_set.json`. Also call `state.apply_bk_set_update(L2, L3, S)`
@@ -352,9 +367,9 @@ tag. We add a parallel arm for bk-update bundles:
 ```
 for each new file in proofs/:
     if matches "proof_*.json":
-        verify_layer_bundle(...)             // existing — v3 path
+        verify_layer_bundle(...)             // existing — v7 path
     if matches "bkupd_*.json":
-        verify_bk_update_bundle(...)         // new — v4 path
+        verify_bk_update_bundle(...)         // new — v7 path
 ```
 
 `verify_bk_update_bundle` performs **three** checks — exactly mirroring
@@ -369,10 +384,15 @@ block_id carries L3 as its new commitment".
    `L2` must equal `state.stored_bk_set_commitment`. This *authorises*
    the update — the old set has signed off on the block that announces the
    new set.
-2. **Merkle.** Recompute
-   `root = SHA( SHA(H0 ‖ SHA(L2 ‖ L3)) ‖ H23 )` and require
-   `root == block_id`. This binds L3 into the same block_id the
-   attestation just verified.
+2. **Merkle.** Recompute the depth-4 fold
+   ```
+   h23   = SHA( L2  ‖ L3 )
+   h0_3  = SHA( h01 ‖ h23 )
+   h0_7  = SHA( h0_3 ‖ h4_7 )
+   root  = SHA( h0_7 ‖ h8_15 )
+   ```
+   and require `root == block_id`. This binds L3 into the same block_id
+   the attestation just verified.
 3. **Monotonicity.** `block_seq_no > state.stored_last_bk_set_update_seq_no`.
 
 On success: `state.apply_bk_set_update(L2, L3, S)` + persist. The
@@ -394,8 +414,9 @@ function applyBkSetUpdate(
     uint64 blockSeqNo,
     bytes32 oldCommitmentL2,
     bytes32 newCommitmentL3,
-    bytes32 siblingH0,
-    bytes32 siblingH23
+    bytes32 siblingH01,                    // depth-3 sibling of h23
+    bytes32 siblingH4_7,                   // depth-2 sibling of h0_3
+    bytes32 siblingH8_15                   // depth-1 sibling of h0_7
 ) external {
     require(oldCommitmentL2 == storedBkSetCommitment, "stale old");
     require(blockSeqNo > storedLastBkUpdateSeq, "replay");
@@ -405,10 +426,11 @@ function applyBkSetUpdate(
                      blockId, oldCommitmentL2, blockSeqNo, storedLastSeen),
             "attestation");
 
-    // (2) open merkle check — pure sha256, cheap on ETH
-    bytes32 h1   = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
-    bytes32 h01  = sha256(abi.encodePacked(siblingH0, h1));
-    bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
+    // (2) open depth-4 merkle check — pure sha256, cheap on ETH
+    bytes32 h23  = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
+    bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
+    bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
+    bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
     require(root == blockId, "merkle");
 
     storedBkSetCommitment = newCommitmentL3;
@@ -428,7 +450,7 @@ verify those proofs.
 
 ### Phase 1 — local devnet (no rotation expected)
 
-* Implement schema v4, both daemons, IPC discriminator. On local devnet
+* Implement schema v7, both daemons, IPC discriminator. On local devnet
   `L2 == L3` for every block; the bk-update queue stays empty, no
   `bkupd_*.json` files are ever produced. Verifier passes unchanged.
 * **Acceptance:** existing E2E test in `TECHNICAL_README.md` must still
@@ -463,7 +485,7 @@ arbitrary stacking regardless.
 
 ### Phase 3 — shellnet end-to-end
 
-* Bring up shellnet prover+verifier with the v4 stack.
+* Bring up shellnet prover+verifier with the v7 stack.
 * Watch for the first natural rotation. Verify:
   - `bkupd_{S}.json` appears,
   - verifier accepts it,
@@ -502,11 +524,12 @@ circuit work.
 ## 9. Implementation checklist (when we go to code)
 
 1. `bridge-prover-lib/src/bridge_state.rs`: add `stored_last_bk_set_update_seq_no`
-   (commitment-only — NO pubkeys), schema bump to 4, add `apply_bk_set_update(L2, L3, S)`.
+   (commitment-only — NO pubkeys), schema bump to 7, add `apply_bk_set_update(L2, L3, S)`.
 2. `bridge-prover-lib/src/prover_bk_set.rs` (new): `ProverBkSet` struct +
    `prover_bk_set.json` persistence. Prover-only; verifier never reads it.
-3. `bridge-prover-lib/src/ipc.rs`: schema constant → 4, add `BkUpdateRequest`
-   (no pubkey list), new file paths (`bkupd_*.json`).
+3. `bridge-prover-lib/src/ipc.rs`: schema constant → 7, add `BkUpdateRequest`
+   (no pubkey list, 3 open siblings `h01`/`h4_7`/`h8_15`), new file paths
+   (`bkupd_*.json`).
 4. `bridge-prover-lib/src/bk_set_fetcher.rs`: extract a cursor-walk variant
    that takes a starting seq_no and returns "the next bk-update event > cursor".
 5. `bridge-prover-daemon/src/main.rs`:

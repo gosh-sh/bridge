@@ -501,8 +501,9 @@ struct PartnerBkUpdateRequest {
     primary_proof_hex: String,
     old_bk_set_poseidon_hash_hex: String,
     new_bk_set_poseidon_hash_hex: String,
-    merkle_sibling_h0_hex: String,
-    merkle_sibling_h23_hex: String,
+    merkle_sibling_h01_hex: String,
+    merkle_sibling_h4_7_hex: String,
+    merkle_sibling_h8_15_hex: String,
 }
 
 fn default_attestation_primary() -> String {
@@ -620,8 +621,9 @@ impl BkUpdateProofsSource {
             block_seq_no: seq_no,
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
-            sibling_h0: hex32_to_array(&req.merkle_sibling_h0_hex, "merkle_sibling_h0")?,
-            sibling_h23: hex32_to_array(&req.merkle_sibling_h23_hex, "merkle_sibling_h23")?,
+            sibling_h01: hex32_to_array(&req.merkle_sibling_h01_hex, "merkle_sibling_h01")?,
+            sibling_h4_7: hex32_to_array(&req.merkle_sibling_h4_7_hex, "merkle_sibling_h4_7")?,
+            sibling_h8_15: hex32_to_array(&req.merkle_sibling_h8_15_hex, "merkle_sibling_h8_15")?,
             attestation_proof: Bytes::from(attestation_proof),
         }))
     }
@@ -849,15 +851,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proof_hex = "0x".to_string() + &"ab".repeat(256);
         let bkupd = serde_json::json!({
-            "schema_version": 4,
+            "schema_version": 7,
             "block_seq_no": 24,
             "attestation_circuit": "primary",
             "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": proof_hex,
             "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
-            "merkle_sibling_h0_hex": "0x".to_string() + &"aa".repeat(32),
-            "merkle_sibling_h23_hex": "0x".to_string() + &"bb".repeat(32),
+            "merkle_sibling_h01_hex": "0x".to_string() + &"aa".repeat(32),
+            "merkle_sibling_h4_7_hex": "0x".to_string() + &"bb".repeat(32),
+            "merkle_sibling_h8_15_hex": "0x".to_string() + &"cc".repeat(32),
         });
         std::fs::write(
             dir.path().join("bkupd_000024.json"),
@@ -875,6 +878,8 @@ mod tests {
         assert_eq!(u.block_seq_no, 24);
         assert_eq!(u.fin_type, FinalizationType::Primary);
         assert_eq!(u.attestation_proof.len(), 256);
-        assert_eq!(u.sibling_h0[0], 0xaa);
+        assert_eq!(u.sibling_h01[0], 0xaa);
+        assert_eq!(u.sibling_h4_7[0], 0xbb);
+        assert_eq!(u.sibling_h8_15[0], 0xcc);
     }
 }

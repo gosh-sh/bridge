@@ -1768,6 +1768,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bridge-test-data-gen",
  "halo2-base 0.4.1",
  "hex",
  "reqwest 0.12.28",

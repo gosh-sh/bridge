@@ -43,8 +43,11 @@ use sha2::{Digest, Sha256};
 
 pub use historical_layer_hashes_movement_checker_circuit::NUM_MERKLE_SIBLINGS;
 
-/// Canonical leaf count of the block-id tree (fixed by the protocol).
-pub const BLOCK_ID_TREE_LEAF_COUNT: usize = 16;
+/// Canonical leaf count of the block-id tree (fixed by the protocol). Sourced
+/// from the circuits repo (`bridge_test_data_gen::layer_hashes`) so any change
+/// to the tree width propagates automatically instead of drifting across
+/// duplicated `= 16` literals.
+pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
 
 /// Number of siblings required to open the L2/L3 pair up to `block_id`.
 /// One less than the tree depth because we start from the L2/L3 pair hash.

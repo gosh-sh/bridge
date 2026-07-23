@@ -4,6 +4,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use crate::types::{AccountRouting, ThreadIdentifier};
 
+/// Canonical block-id Merkle leaf count (protocol-fixed = 16). Sourced from
+/// the circuits repo so the GraphQL projection stays in lock-step with the
+/// circuit witness layout — no local `= 16` literal to drift out of sync.
+pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
+
 /// Lightweight GraphQL client for the acki-nacki node.
 pub struct GqlClient {
     http: reqwest::Client,
@@ -59,8 +64,10 @@ pub struct GqlProofBlock {
     pub history_proofs: BTreeMap<u8, [u8; 32]>,
     /// 16-leaf SHA-256 block-id Merkle leaves (canonical depth-4 tree, see
     /// `bridge-prover-lib::block_id_tree`). May be absent on very old blocks
-    /// that predate the node's exposure of this field.
-    pub block_merkle_tree_leaves: Option<[[u8; 32]; 16]>,
+    /// that predate the node's exposure of this field. Leaf count is pinned
+    /// to [`BLOCK_ID_TREE_LEAF_COUNT`] so it stays in lock-step with the
+    /// circuits repo.
+    pub block_merkle_tree_leaves: Option<[[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT]>,
 }
 
 pub fn create_client(endpoint: &str) -> anyhow::Result<GqlClient> {
@@ -734,11 +741,16 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
         }
     }
 
-    // block_merkle_tree_leaves -> Option<[[u8;32]; 16]>
+    // block_merkle_tree_leaves -> Option<[[u8;32]; BLOCK_ID_TREE_LEAF_COUNT]>
     let block_merkle_tree_leaves = match value.get("block_merkle_tree_leaves") {
         Some(serde_json::Value::Array(items)) => {
-            anyhow::ensure!(items.len() == 16, "block_merkle_tree_leaves must have 16 entries");
-            let mut out = [[0u8; 32]; 16];
+            anyhow::ensure!(
+                items.len() == BLOCK_ID_TREE_LEAF_COUNT,
+                "block_merkle_tree_leaves must have {} entries, got {}",
+                BLOCK_ID_TREE_LEAF_COUNT,
+                items.len(),
+            );
+            let mut out = [[0u8; 32]; BLOCK_ID_TREE_LEAF_COUNT];
             for (i, item) in items.iter().enumerate() {
                 let s = item.as_str().ok_or_else(|| {
                     anyhow::format_err!("block_merkle_tree_leaves[{i}] is not a string")

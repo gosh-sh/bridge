@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use gosh_dense_balanced_tree::DenseChainLink;
 use tracing::info;
 
@@ -80,11 +80,13 @@ pub async fn build_real_chain(
     let new_layer_appeared = num_layers > prev_num_layers && prev_num_layers > 0;
 
     if new_layer_appeared {
-        // New layer appeared: single step where prev_hash is a DATA leaf
-        // in the new layer's tree (not at position 1).
+        // A single new layer appeared: prev_hash sits as a data leaf in the
+        // new layer's tree. Multi-layer jumps are structurally impossible under
+        // our thinning cadence — see `build_chain_for_new_layer` for the guard.
         build_chain_for_new_layer(
             gql,
             target_seqno,
+            prev_num_layers,
             num_layers,
             prev_hash,
             window_size,
@@ -210,14 +212,29 @@ async fn build_chain_same_layer(
 /// Layer N first materialises at block height `W^N` (e.g. with W = 128, layer 2
 /// first appears at block 16384, layer 3 at 2^21 = 2_097_152, etc.).
 ///
-/// Single step: build the new layer's tree and find prev_hash among its data leaves.
+/// **Single-step by construction.** Under our thinning cadence the prover
+/// advances the bridge state fast enough that we can only ever cross one layer
+/// boundary between updates. A gap ≥ 2 would mean the state silently missed an
+/// intervening update — a hard consistency error we refuse to paper over with a
+/// longer chain. The `ensure!` below turns that invariant into a runtime bail
+/// so a misconfigured operator sees it immediately instead of shipping a proof
+/// against a stale state.
 async fn build_chain_for_new_layer(
     gql: &GqlClient,
     target_seqno: u64,
+    prev_num_layers: usize,
     num_layers: usize,
     prev_hash: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<RealChainResult> {
+    ensure!(
+        num_layers == prev_num_layers + 1,
+        "gap {} between prev_num_layers={} and num_layers={} — thinning cadence \
+         only permits gap=1; a larger jump means the bridge state skipped an update",
+        num_layers - prev_num_layers,
+        prev_num_layers,
+        num_layers,
+    );
     let new_layer = num_layers as u8;
 
     info!(
@@ -237,22 +254,18 @@ async fn build_chain_for_new_layer(
     .await?;
 
     // Find which data leaf matches prev_hash.
-    let mut chain_pos = None;
-    for (i, leaf) in leaves.iter().enumerate() {
-        if *leaf == prev_hash && i >= 2 {
-            chain_pos = Some(i);
-            break;
-        }
-    }
-
-    let position = chain_pos.ok_or_else(|| {
-        anyhow::format_err!(
-            "prev_hash {} not found among layer {} tree data leaves at seq={}",
-            hex::encode(prev_hash),
-            new_layer,
-            target_seqno,
-        )
-    })?;
+    let position = leaves
+        .iter()
+        .enumerate()
+        .find_map(|(i, l)| (i >= 2 && *l == prev_hash).then_some(i))
+        .ok_or_else(|| {
+            anyhow::format_err!(
+                "prev_hash {} not found among layer {} tree data leaves at seq={}",
+                hex::encode(prev_hash),
+                new_layer,
+                target_seqno,
+            )
+        })?;
 
     info!(
         "found prev_hash at position {} in layer {} tree",
@@ -288,15 +301,18 @@ async fn build_layer1_tree(
     chain_leaf_value: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<LayerTreeData> {
-    // Higher layer root (layer 2): the MOST RECENT L2 root, not necessarily from
-    // this block. The node stores the latest higher-layer root in HistoryBlockData.
-    // We find it by checking the current block first, then scanning back to the
-    // most recent L2 key block (multiples of window_size^2).
+    // Higher layer root (layer 2): the layer-2 root from the PREVIOUS L2 key
+    // block (strictly < key_block_seqno). Strict `<` avoids self-reference at
+    // an L2-boundary block, where the L2 root is derived from this very layer-1
+    // tree and cannot appear as leaves[0].
     let higher_root = {
         let l2_step = window_size * window_size;
-        let most_recent_l2_block = (key_block_seqno / l2_step) * l2_step;
-        if most_recent_l2_block > 0 {
-            fetch_layer_root(gql, most_recent_l2_block, 2).await.unwrap_or([0u8; 32])
+        let prev_l2_block = key_block_seqno
+            .checked_sub(1)
+            .map(|s| (s / l2_step) * l2_step)
+            .unwrap_or(0);
+        if prev_l2_block > 0 {
+            fetch_layer_root(gql, prev_l2_block, 2).await.unwrap_or([0u8; 32])
         } else {
             [0u8; 32]
         }
@@ -371,14 +387,22 @@ async fn build_layer_n_leaves(
     prev_same_root: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<Vec<[u8; 32]>> {
-    // Higher layer root.
+    // Higher layer root: layer-(N+1) root from the PREVIOUS higher-layer key
+    // block (strictly < key_block_seqno). At a layer-(N+1) boundary the layer-
+    // (N+1) root is derived from this very layer-N tree, so leaves[0] must
+    // reference the PRIOR boundary, not this one.
     let higher_layer = layer + 1;
-    let higher_root = if key_block_seqno == 0 {
-        [0u8; 32]
-    } else {
-        fetch_layer_root(gql, key_block_seqno, higher_layer)
+    let higher_step = window_size.pow(higher_layer as u32);
+    let prev_higher_seqno = key_block_seqno
+        .checked_sub(1)
+        .map(|s| (s / higher_step) * higher_step)
+        .unwrap_or(0);
+    let higher_root = if prev_higher_seqno > 0 {
+        fetch_layer_root(gql, prev_higher_seqno, higher_layer)
             .await
             .unwrap_or([0u8; 32])
+    } else {
+        [0u8; 32]
     };
 
     // Data leaves: layer (N-1) roots from HISTORY_PROOF_WINDOW_SIZE (W) key blocks.

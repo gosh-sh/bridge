@@ -1,17 +1,34 @@
 //! Real Poseidon Merkle chain proof construction from actual block data.
 //!
-//! Builds genuine chain proofs by reconstructing layer Poseidon trees from
+//! Builds genuine chain proofs by reconstructing layer-1 Poseidon trees from
 //! intermediate key blocks fetched via GraphQL.
 //!
-//! Tree structure per layer per window (HISTORY_PROOF_WINDOW_SIZE=128, the prod value):
-//!   Leaf [0]:        higher_layer_root (layer N+1 root, or zero)
-//!   Leaf [1]:        prev_same_layer_root (chain position for same-layer linking)
-//!   Leaf [2..130]:   data leaves (layer 1: block leaves; layer 2+: lower-layer roots) — 128 slots
+//! # L1-only chain — a cadence contract, not a protocol invariant
+//!
+//! The daemon proves one key block every `W · P` blocks (`W = 128`,
+//! `P = 4` → 512-block cadence). Each Circuit 2 bundle chains **exactly
+//! `P = 4` layer-1 rungs** via `verify_chain_of_dense_proofs`, connecting the
+//! previous proved block's L1 root to the target block's
+//! `layer_hashes_preimage[0]` (also an L1 root).
+//!
+//! Endpoints:
+//!   * **start** = prev's L1 root (`BridgeState::prev_max_level_layer_hash_for(1)`)
+//!   * **end**   = target's `layer_hashes_preimage[0]`
+//!
+//! Higher-layer roots (`layer_hashes_preimage[i > 0]`) may exist in the target
+//! block but are NOT part of the Circuit 2 chain under this cadence. The
+//! History Proofs Proposal allows vertical rungs up through higher
+//! `layer_hashes_preimage[i]`; those become necessary only if the cadence is
+//! lengthened past `W · P`, at which point the commented-out
+//! `build_chain_for_new_layer` / `build_layer_n_tree` / `build_layer_n_leaves`
+//! helpers return.
+//!
+//! # L1 tree layout per rung (W = 128)
+//!   Leaf [0]:        higher_layer_root (layer 2 root at prior L2 boundary, or zero)
+//!   Leaf [1]:        prev_same_layer_root (chain position; L1 root of the previous rung)
+//!   Leaf [2..130]:   block leaves — Poseidon(block_id ‖ envelope_hash ‖ ext_msg_root) × W
 //!   Leaf [130..256]: zero padding (to next power of 2)
 //! Total: 256 leaves, depth 8.
-//!
-//! Generalised: for any HISTORY_PROOF_WINDOW_SIZE = W the layout is
-//!   [higher_layer_root, prev_same_layer_root, data×W, zero-pad to next pow2(W+2)].
 
 use std::collections::BTreeMap;
 
@@ -35,11 +52,13 @@ pub struct RealChainResult {
     pub prev_hash: [u8; 32],
 }
 
-/// Build real Poseidon chain proofs connecting prev_max_level_layer_hash
-/// to the highest active layer hash in the target key block.
+/// Build real Poseidon chain proofs connecting prev's L1 root to target's
+/// `layer_hashes_preimage[0]` (also an L1 root).
 ///
-/// Fetches intermediate key blocks from the node to reconstruct Poseidon
-/// Merkle trees and extract chain proof siblings.
+/// Under the current W·P = 512-block cadence the chain is L1-only and always
+/// has exactly `P = 4` rungs — see the module-level cadence-contract note.
+/// Higher layers in the target block are irrelevant to the chain: they show
+/// up in `layer_hashes_preimage[i>0]` but are not chained here.
 pub async fn build_real_chain(
     gql: &GqlClient,
     state: &BridgeState,
@@ -48,103 +67,81 @@ pub async fn build_real_chain(
     window_size: u64,
 ) -> anyhow::Result<RealChainResult> {
     let num_layers = target_history_proofs.len();
-    if num_layers == 0 {
-        bail!("target block has no history_proofs");
-    }
+    ensure!(num_layers >= 1, "target block has no history_proofs");
 
-    let prev_num_layers = state.num_active_layers();
-    let prev_hash = state.prev_max_level_layer_hash_for(num_layers);
+    // L1-only chain: both endpoints are layer-1 roots regardless of how many
+    // layers the target block populates. `prev_max_level_layer_hash_for(1)`
+    // always returns prev's L1 latest.
+    let prev_hash = state.prev_max_level_layer_hash_for(1);
     let target_hash = *target_history_proofs
-        .get(&(num_layers as u8))
-        .ok_or_else(|| anyhow::format_err!("missing layer {} in history_proofs", num_layers))?;
+        .get(&1u8)
+        .ok_or_else(|| anyhow::format_err!("target block missing layer 1 in history_proofs"))?;
 
     info!(
-        "building real chain: prev_layers={}, new_layers={}, prev_hash={}, target_hash={}",
-        prev_num_layers,
+        "building real L1 chain: target_num_layers={}, prev_L1={}, target_L1={}",
         num_layers,
         hex::encode(prev_hash),
         hex::encode(target_hash),
     );
 
-    // Determine if a TRULY new layer appeared (never seen before).
-    // A layer re-appearing after being absent is NOT a new layer — it uses
-    // the same-layer chain.
-    //
-    // Example with W = 128: L2 first appears at block W^2 = 16384, then again
-    // at 2·W^2 = 32768. Between those L2 boundaries the key blocks at
-    // 16512, 16640, …, 32640 are L1-only. The L2 boundary at 32768 is a
-    // re-appearance, not a brand-new layer, so it takes the same-layer path.
-    //
-    // `prev_num_layers` is the highest populated 1-based layer index — see
-    // `BridgeState::num_active_layers` for why count == max-index here.
-    let new_layer_appeared = num_layers > prev_num_layers && prev_num_layers > 0;
-
-    if new_layer_appeared {
-        // A single new layer appeared: prev_hash sits as a data leaf in the
-        // new layer's tree. Multi-layer jumps are structurally impossible under
-        // our thinning cadence — see `build_chain_for_new_layer` for the guard.
-        build_chain_for_new_layer(
-            gql,
-            target_seqno,
-            prev_num_layers,
-            num_layers,
-            prev_hash,
-            window_size,
-        )
-        .await
-    } else {
-        // Same layer count (or first proof): chain at the highest layer level.
-        build_chain_same_layer(
-            gql,
-            state,
-            target_seqno,
-            num_layers,
-            prev_hash,
-            window_size,
-        )
-        .await
-    }
+    build_chain_same_layer(gql, state, target_seqno, prev_hash, window_size).await
 }
 
-/// Build chain when operating at the same layer level (most common case).
+/// Build the L1 chain of P rungs connecting prev's L1 root to target's L1 root.
 ///
-/// Lists intermediate key blocks between prev and target at the chain layer's
-/// granularity, reconstructs each tree, and builds the chain.
+/// `step_size` is fixed to `window_size` (= W) because chain_layer = 1 is
+/// baked into the cadence contract. `prev_seqno` and `target_seqno` must both
+/// be W-aligned; under the daemon's W·P cadence they are always W·P-aligned,
+/// which is strictly stronger.
 async fn build_chain_same_layer(
     gql: &GqlClient,
     state: &BridgeState,
     target_seqno: u64,
-    num_layers: usize,
     prev_hash: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<RealChainResult> {
-    let chain_layer = num_layers as u8;
-
-    let step_size = window_size.pow(chain_layer as u32);
+    let step_size = window_size; // L1 step
     let prev_seqno = state.stored_last_seen_block_seq_no;
 
-    // List key block seqnos at this layer from prev+step to target (inclusive).
+    // Enforce the invariants the caller is expected to uphold. Baking them
+    // into runtime `ensure!` calls turns silent chain-corruption modes (mis-
+    // aligned prev_seqno was previously masked by a dead `seq % step_size == 0`
+    // filter that quietly produced a single-hop chain skipping every
+    // intermediate step) into loud bails.
+    ensure!(
+        prev_seqno < target_seqno,
+        "prev_seqno {} must be strictly less than target_seqno {}",
+        prev_seqno,
+        target_seqno,
+    );
+    ensure!(
+        prev_seqno % step_size == 0,
+        "prev_seqno {} not aligned to L1 step {} (bridge state stored a \
+         non-key-block seqno)",
+        prev_seqno,
+        step_size,
+    );
+    ensure!(
+        target_seqno % step_size == 0,
+        "target_seqno {} not aligned to L1 step {}",
+        target_seqno,
+        step_size,
+    );
+
+    // With prev_seqno and target_seqno both known to be multiples of step_size
+    // and prev < target, the walk from prev+step to target is a straight
+    // arithmetic sequence — no modulo filter, no tail rescue, no empty case.
+    // Under W·P cadence this yields exactly P rungs.
     let mut key_seqnos = Vec::new();
     let mut seq = prev_seqno + step_size;
     while seq <= target_seqno {
-        if seq % step_size == 0 {
-            key_seqnos.push(seq);
-        }
+        key_seqnos.push(seq);
         seq += step_size;
     }
-    // Ensure target is included (it should be, since we only process at key block boundaries).
-    if key_seqnos.last() != Some(&target_seqno) && target_seqno % step_size == 0 {
-        key_seqnos.push(target_seqno);
-    }
-
-    if key_seqnos.is_empty() {
-        bail!(
-            "no intermediate key blocks found between {} and {} at step_size={}",
-            prev_seqno,
-            target_seqno,
-            step_size
-        );
-    }
+    debug_assert!(
+        !key_seqnos.is_empty() && *key_seqnos.last().unwrap() == target_seqno,
+        "L1 walk should end at target_seqno by construction",
+    );
 
     if key_seqnos.len() > gosh_dense_balanced_tree::MAX_CHAIN_LEN {
         bail!(
@@ -157,32 +154,19 @@ async fn build_chain_same_layer(
     }
 
     info!(
-        "chain at layer {}: {} steps, seqnos={:?}",
-        chain_layer,
+        "L1 chain: {} rungs, seqnos={:?}",
         key_seqnos.len(),
         key_seqnos
     );
 
-    // Build a LayerTreeData for each step.
+    // Build a LayerTreeData for each L1 rung.
     let mut trees = Vec::with_capacity(key_seqnos.len());
     let mut chain_leaf_value = prev_hash;
 
     for &key_seq in &key_seqnos {
-        let tree = if chain_layer == 1 {
-            build_layer1_tree(gql, key_seq, chain_leaf_value, window_size)
-                .await
-                .with_context(|| format!("building layer 1 tree at seq={}", key_seq))?
-        } else {
-            build_layer_n_tree(
-                gql,
-                key_seq,
-                chain_layer,
-                chain_leaf_value,
-                window_size,
-            )
+        let tree = build_layer1_tree(gql, key_seq, chain_leaf_value, window_size)
             .await
-            .with_context(|| format!("building layer {} tree at seq={}", chain_layer, key_seq))?
-        };
+            .with_context(|| format!("building layer 1 tree at seq={}", key_seq))?;
 
         // The root of this tree becomes the chain_leaf_value for the next step.
         let (root, _) = chain_proof_builder::build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
@@ -207,6 +191,18 @@ async fn build_chain_same_layer(
     })
 }
 
+// ============================================================================
+// Multi-layer chain helpers — commented out under the current W·P = 512-block
+// cadence contract (see module doc). Circuit 2 chains only L1 rungs today.
+//
+// KEEP these bodies parked here: they encode the History Proofs Proposal
+// dispatch for lengthened cadence (e.g. proving less often than every W·P
+// blocks). If cadence is ever increased so that gaps at L2+ become possible,
+// re-enable `build_chain_for_new_layer`, `build_layer_n_tree`, and
+// `build_layer_n_leaves`, and switch `build_real_chain` back to the
+// layer-aware dispatch.
+// ============================================================================
+/*
 /// Build chain when a new layer appeared.
 ///
 /// Layer N first materialises at block height `W^N` (e.g. with W = 128, layer 2
@@ -286,6 +282,7 @@ async fn build_chain_for_new_layer(
         prev_hash,
     })
 }
+*/
 
 /// Build a layer 1 Poseidon tree for a key block.
 ///
@@ -349,6 +346,7 @@ async fn build_layer1_tree(
     })
 }
 
+/*
 /// Build a layer N (N>=2) Poseidon tree for a key block.
 ///
 /// Leaf layout (see crate-level docs for the concrete W=128 example):
@@ -437,6 +435,7 @@ async fn build_layer_n_leaves(
 
     Ok(leaves)
 }
+*/
 
 /// Fetch a specific layer's root hash from a block's `history_proofs` via GQL.
 ///

@@ -40,8 +40,11 @@
 //! Total: 256 leaves, depth 8.
 //!
 //! # L(N≥2) tree layout (W = 128)
-//!   Leaf [0]:        higher_layer_root (layer N+1 root at prior boundary, or zero)
-//!   Leaf [1]:        prev_same_layer_root (zero at first appearance of layer N)
+//!   Leaf [0]:        higher_layer_root (layer N+1 root at prior L(N+1) boundary, or zero if none yet on chain)
+//!   Leaf [1]:        prev_same_layer_root (layer N root at prior L(N) boundary = `target - W^N`;
+//!                    zero ONLY when `target == W^N`, i.e., very first L(N) boundary ever on chain).
+//!                    NOTE: this is a property of the chain's tree construction; it is unrelated
+//!                    to whether the bridge state has observed any prior L(N) boundary.
 //!   Leaf [2..130]:   layer-(N-1) roots from W past L(N-1)-keyblocks
 //!   Leaf [130..256]: zero padding
 //! Same shape and depth as L1 → `DenseChainLink` padding stays consistent.
@@ -312,13 +315,44 @@ async fn build_chain_for_new_layer(
         new_layer, target_seqno
     );
 
-    // Build the new layer's tree. The prev_same_layer_root (position 1) is zero
-    // (first occurrence of this layer). prev_hash should be among the data leaves.
+    // prev_same_layer_root (slot 1 of the L(N) tree) is the L(N) root from
+    // the previous L(N) boundary on chain. This is a property of the chain's
+    // canonical tree construction (see acki-nacki
+    // `HistoryBlockData::calculate_root_hash` — slot 1 = `latest_layer_root(N)`
+    // from the cursor). It is NON-ZERO whenever the chain has already produced
+    // any L(N) boundary before `target_seqno`, regardless of whether the bridge
+    // state has yet observed one. Zero only when `target_seqno == W^N` (the
+    // very first L(N) boundary ever on chain).
+    let same_layer_step = window_size.pow(new_layer as u32);
+    let prev_same_root = if target_seqno > same_layer_step {
+        let prev_same_seqno = target_seqno - same_layer_step;
+        fetch_layer_root(gql, prev_same_seqno, new_layer)
+            .await
+            .with_context(|| {
+                format!(
+                    "fetching prev L{} root from block {} for L{} tree at seq={}",
+                    new_layer, prev_same_seqno, new_layer, target_seqno
+                )
+            })?
+    } else {
+        [0u8; 32]
+    };
+
+    info!(
+        "L{} tree at seq={}: prev_same_root={} (prev L{} boundary={})",
+        new_layer,
+        target_seqno,
+        hex::encode(prev_same_root),
+        new_layer,
+        target_seqno.saturating_sub(same_layer_step),
+    );
+
+    // Build the new layer's tree. prev_hash should be among the data leaves.
     let leaves = build_layer_n_leaves(
         gql,
         target_seqno,
         new_layer,
-        [0u8; 32], // prev_same_layer_root = zero (first occurrence)
+        prev_same_root,
         window_size,
     )
     .await?;
@@ -375,6 +409,12 @@ async fn build_layer1_tree(
     // block (strictly < key_block_seqno). Strict `<` avoids self-reference at
     // an L2-boundary block, where the L2 root is derived from this very layer-1
     // tree and cannot appear as leaves[0].
+    //
+    // When `prev_l2_block > 0` the chain HAS a non-zero L2 root there and the
+    // fetch MUST succeed — bail loudly on any GQL/data anomaly rather than
+    // silently substituting zero (which would build a tree that fails Circuit 2
+    // verification with an opaque error, mirroring the Case B `prev_same_root`
+    // bug that surfaced at shellnet 2,523,136).
     let higher_root = {
         let l2_step = window_size * window_size;
         let prev_l2_block = key_block_seqno
@@ -382,7 +422,14 @@ async fn build_layer1_tree(
             .map(|s| (s / l2_step) * l2_step)
             .unwrap_or(0);
         if prev_l2_block > 0 {
-            fetch_layer_root(gql, prev_l2_block, 2).await.unwrap_or([0u8; 32])
+            fetch_layer_root(gql, prev_l2_block, 2)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching prev L2 root from block {} for L1 tree at seq={}",
+                        prev_l2_block, key_block_seqno
+                    )
+                })?
         } else {
             [0u8; 32]
         }
@@ -464,6 +511,11 @@ async fn build_layer_n_leaves(
     // block (strictly < key_block_seqno). At a layer-(N+1) boundary the layer-
     // (N+1) root is derived from this very layer-N tree, so leaves[0] must
     // reference the PRIOR boundary, not this one.
+    //
+    // When `prev_higher_seqno > 0` the chain HAS a non-zero L(N+1) root there
+    // and the fetch MUST succeed — bail loudly on any GQL/data anomaly rather
+    // than silently substituting zero (same class of silent-zero bug as the
+    // Case B `prev_same_root` fix).
     let higher_layer = layer + 1;
     let higher_step = window_size.pow(higher_layer as u32);
     let prev_higher_seqno = key_block_seqno
@@ -473,7 +525,12 @@ async fn build_layer_n_leaves(
     let higher_root = if prev_higher_seqno > 0 {
         fetch_layer_root(gql, prev_higher_seqno, higher_layer)
             .await
-            .unwrap_or([0u8; 32])
+            .with_context(|| {
+                format!(
+                    "fetching prev L{} root from block {} for L{} tree at seq={}",
+                    higher_layer, prev_higher_seqno, layer, key_block_seqno
+                )
+            })?
     } else {
         [0u8; 32]
     };

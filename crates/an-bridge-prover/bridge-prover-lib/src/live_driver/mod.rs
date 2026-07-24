@@ -51,8 +51,11 @@
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
-//! 4. fetching the initial BK-set map via
-//!    [`bridge_gql_fetcher::bk_set_fetcher::fetch_bk_set`], and
+//! 4. bootstrapping the initial BK-set map by folding rotation events on top
+//!    of a genesis anchor via
+//!    [`bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height`] (the old
+//!    `fetch_bk_set` replayed the delta log from ∅ and missed the un-emitted
+//!    genesis committee — disabled 2026-07-22), and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!
@@ -85,7 +88,7 @@ use tracing::{info, warn};
 
 use bridge_gql_fetcher::attestation_fetcher::AttestationEvidence;
 use crate::bootstrap::BootstrapSeed;
-use crate::bridge_state::BridgeState;
+use crate::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
 use bridge_poseidon as poseidon;
@@ -312,7 +315,7 @@ pub struct BundleProofArtifacts {
     // Public inputs shared by Circuits 1A/1B + 2
     pub bk_set_commitment_be: [u8; 32],
     pub num_layers: u8,
-    pub layer_hashes_be: [[u8; 32]; 10],
+    pub layer_hashes_be: [[u8; 32]; MAX_LAYERS],
     pub prev_max_level_layer_hash_be: [u8; 32],
     // Proof bytes (Blake2b Fiat–Shamir — AN opcode-compatible flavour)
     pub attestation_proof: Vec<u8>,

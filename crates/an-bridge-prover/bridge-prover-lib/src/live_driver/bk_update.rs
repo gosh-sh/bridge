@@ -1,7 +1,5 @@
 //! Single-iteration bk-set-update handler.
-//!
-//! Ported from `bridge-prover-daemon/src/main.rs:418-709` (the "Phase 3
-//! BK-set-update drain" loop). This function does exactly one drain step:
+//! This function does exactly one drain step:
 //! it looks for the next rotation event past
 //! `state.stored_last_bk_set_update_seq_no`, validates the L2/L3 Merkle
 //! constraints, generates the Circuit 1A/1B proof against the OLD set, and

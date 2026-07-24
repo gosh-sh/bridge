@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
 use crate::block_id_tree;
+use crate::bridge_state::MAX_LAYERS;
 use crate::layer_prover;
 use crate::prover;
 use crate::real_chain_builder;
@@ -162,7 +163,7 @@ pub(super) async fn drive_next_bundle(
          a mismatch means bundle.block_id_be is not the raw chain hash BE",
     );
     let bk_set_commitment_be: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
-    let mut layer_hashes_be: [[u8; 32]; 10] = [[0u8; 32]; 10];
+    let mut layer_hashes_be: [[u8; 32]; MAX_LAYERS] = [[0u8; 32]; MAX_LAYERS];
     for (i, fr) in layer_proof.layer_hash_frs.iter().enumerate() {
         layer_hashes_be[i] = fr.to_repr();
     }
@@ -228,8 +229,8 @@ async fn generate_layer_proof_for_key_block(
 
     // 1. Build layer_hashes_preimage from history_proofs.
     let num_layers = block.history_proofs.len() as u8;
-    let mut root_hashes: Vec<[u8; 32]> = Vec::with_capacity(10);
-    for i in 1..=10u8 {
+    let mut root_hashes: Vec<[u8; 32]> = Vec::with_capacity(MAX_LAYERS);
+    for i in 1..=MAX_LAYERS as u8 {
         if let Some(root) = block.history_proofs.get(&i) {
             root_hashes.push(*root);
         } else {

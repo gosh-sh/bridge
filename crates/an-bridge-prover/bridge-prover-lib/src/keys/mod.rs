@@ -11,6 +11,7 @@
 //! compiling; new code should reach for the per-circuit types directly.
 
 mod common;
+pub use common::HERMEZ_S_G2_HEAD;
 pub mod event;
 pub mod fallback;
 pub mod layer;

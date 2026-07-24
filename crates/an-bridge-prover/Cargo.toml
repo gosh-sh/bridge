@@ -38,8 +38,15 @@ bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-e
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
-gosh-zk-snark-halo2-utils = { git = "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils", branch = "bump-halo2-lib-v0.4.1" }
+gosh-zk-snark-halo2-utils = { git = "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils", branch = "main", features = ["download"] }
 pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
+
+# Direct KZG SRS materializer used only by `bootstrap_hermez_srs` when
+# K>20 (the utils crate's anchor+downsize path is capped at K=20). Its
+# `halo2curves` (PSE tag 0.3.1) is byte-compatible with our halo2-base
+# BN254 affine layout; we only cross that boundary via raw bytes.
+halo2_kzg_srs = { git = "https://github.com/han0110/halo2-kzg-srs" }
+halo2_curves = { git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1", package = "halo2curves" }
 
 # Tracks the same branch of tvm-sdk that acki-nacki uses
 tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit", features = ["gosh"] }

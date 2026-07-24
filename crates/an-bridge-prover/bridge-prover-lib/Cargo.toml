@@ -15,6 +15,8 @@ gosh-bls-verification = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
 gosh-sha256-chip = { workspace = true }
 gosh-zk-snark-halo2-utils = { workspace = true }
+halo2_kzg_srs = { workspace = true }
+halo2_curves = { workspace = true }
 pse-poseidon = { workspace = true }
 num-bigint = { workspace = true }
 sha2 = { workspace = true }

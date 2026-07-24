@@ -17,16 +17,26 @@
 //!   the target block's `layer_hashes_preimage[0]` (also an L1 root). Each
 //!   rung proves the L1 evolution over W blocks explicitly.
 //!
-//! * **New-layer bundle** (`num_layers == prev_num_layers + 1`) — fires at
-//!   every `W^L` boundary (with L = 2 that is every W² = 16384 blocks, i.e.
-//!   every 32nd bundle). Chain **one L(N+1) rung** via
-//!   [`build_chain_for_new_layer`]: the L(N+1) tree at target holds the
-//!   prev's L(N) root as one of its `W` data leaves (positions 2..W+2), and a
-//!   single opening from that data-leaf position to the L(N+1) root satisfies
-//!   the circuit's top-layer constraint. Under the W·P cadence contract the
-//!   inclusion slot is deterministic: `prev_seqno = target - P·W`, so the
-//!   prev-L(N) root always sits at leaf index `2 + (W - 1 - (P-1))` in the
-//!   L(N+1) tree.
+//! * **New-layer bundle** (`num_layers > prev_num_layers`) — fires at every
+//!   `W^L` boundary (with L = 2 that is every W² = 16384 blocks, i.e. every
+//!   32nd bundle; L = 3 every W³ = 2_097_152 blocks; etc.). Chain **G =
+//!   num_layers − prev_num_layers rungs vertically** (one rung per new layer)
+//!   via [`build_chain_for_new_layer`]:
+//!     * Rung 1 — target's L(prev_num_layers+1) tree holds prev's
+//!       L(prev_num_layers) root as one of its `W` data leaves (positions
+//!       2..W+2); opening at that data-leaf position produces target's
+//!       L(prev_num_layers+1) root.
+//!     * Rungs 2..G — each intermediate L(L) tree at target carries target's
+//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`),
+//!       because canonical construction places `latest_layer_root(L−1)` at
+//!       `data_leaves[W−1]` and target itself is the "latest" L(L−1)
+//!       boundary. Each opening walks up exactly one layer.
+//!   Under steady-state W·P cadence G is always 1 (single-layer jump per
+//!   bundle). G ≥ 2 only occurs on fresh mid-chain bootstrap that lands at a
+//!   compound boundary (e.g. seeding `layers=1` right before an L3 boundary,
+//!   which is also an L2 and L1 boundary — 1→3 jump). It is not a
+//!   production-cadence scenario but is required for historical-replay
+//!   testing.
 //!
 //! Endpoints (both cases):
 //!   * **start** = prev's max-level layer hash (`BridgeState::prev_max_level_layer_hash_for`)
@@ -53,7 +63,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context};
 use gosh_dense_balanced_tree::DenseChainLink;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::bridge_state::BridgeState;
 use crate::chain_proof_builder::{
@@ -78,13 +88,15 @@ pub struct RealChainResult {
 ///
 /// * `num_layers == prev_num_layers` — same-layer path, `P` L1 rungs via
 ///   [`build_chain_same_layer`].
-/// * `num_layers == prev_num_layers + 1` — new-layer path, one L(N+1) rung
-///   via [`build_chain_for_new_layer`] (the prev L(N) root is included as a
-///   data leaf in the target's L(N+1) tree).
-///
-/// A gap of ≥ 2 between prev and target layer counts means the state silently
-/// skipped an intervening bundle — under W·P cadence at most one W^L boundary
-/// can be crossed per bundle, so this is a hard consistency error and bails.
+/// * `num_layers > prev_num_layers` — new-layer path, G = gap rungs walked
+///   vertically via [`build_chain_for_new_layer`]. G = 1 is the steady-state
+///   case (prev L(N) root sits at a data leaf of target's L(N+1) tree). G ≥ 2
+///   only occurs on fresh mid-chain bootstrap landing at a compound boundary
+///   (e.g. seeding `layers=1` right before an L3 boundary — which is also an
+///   L2 and L1 boundary, giving a 1→3 jump). Under W·P steady-state cadence
+///   at most one W^L boundary can be crossed per bundle, so G ≥ 2 is logged
+///   loudly as it usually means fresh-bootstrap; a mid-run occurrence would
+///   indicate the bridge state skipped an update.
 pub async fn build_real_chain(
     gql: &GqlClient,
     state: &BridgeState,
@@ -280,18 +292,35 @@ async fn build_chain_same_layer(
     })
 }
 
-/// Build chain when a new layer appeared at target.
+/// Build chain when one or more new layers appeared at target.
 ///
-/// Layer N first materialises at block height `W^N` (e.g. with W = 128, layer 2
-/// first appears at block 16384, layer 3 at 2^21 = 2_097_152, etc.).
+/// Layer N first materialises at block height `W^N` (with W = 128 → L2 at
+/// 16384, L3 at 2^21 = 2_097_152, etc.). At a compound boundary (e.g. an L3
+/// boundary block, which is simultaneously an L2 and L1 boundary) more than
+/// one new layer can appear between prev and target — this happens when the
+/// bridge is bootstrapped fresh mid-chain and its first bundle lands at such
+/// a compound boundary. Under steady-state W·P cadence bridge state advances
+/// fast enough to only ever cross one new layer per bundle (G = 1).
 ///
-/// **Single-step by construction.** Under W·P thinning cadence the prover
-/// advances the bridge state fast enough that we can only ever cross one layer
-/// boundary between updates. A gap ≥ 2 would mean the state silently missed an
-/// intervening update — a hard consistency error we refuse to paper over with a
-/// longer chain. The `ensure!` below turns that invariant into a runtime bail
-/// so a misconfigured operator sees it immediately instead of shipping a proof
-/// against a stale state.
+/// Walks the chain **vertically** with `G = num_layers − prev_num_layers`
+/// rungs, one per new layer:
+///
+///   * Rung 1 (`layer = prev_num_layers + 1`): chain leaf = `prev_hash`, at
+///     the data-leaf position where prev's L(prev_num_layers) root appears in
+///     target's L(prev_num_layers+1) tree. Under W·P cadence
+///     `prev_seqno = target − P·W`, so the inclusion slot is deterministic
+///     (leaf index `2 + (W − 1 − (P − 1))`).
+///   * Rungs 2..G (`layer = prev_num_layers + 1 + k`): chain leaf = target's
+///     L(layer−1) root, at the LAST data-leaf position (index `2 + W − 1`).
+///     By canonical construction of `data_leaves` in
+///     [`build_layer_n_leaves`], `data_leaves[i]` is `fetch_layer_root(target
+///     − (W − 1 − i)·W^(layer−1), layer−1)`, so `data_leaves[W−1]` is
+///     `fetch_layer_root(target, layer−1)` — i.e., target's L(layer−1) root
+///     itself.
+///
+/// `build_chain_proofs` then produces one `DenseChainLink` per tree; Circuit
+/// 2 enforces `link[k+1].chain_leaf_value == link[k].computed_root`,
+/// stitching the vertical walk together automatically.
 async fn build_chain_for_new_layer(
     gql: &GqlClient,
     target_seqno: u64,
@@ -301,88 +330,142 @@ async fn build_chain_for_new_layer(
     window_size: u64,
 ) -> anyhow::Result<RealChainResult> {
     ensure!(
-        num_layers == prev_num_layers + 1,
-        "gap {} between prev_num_layers={} and num_layers={} — thinning cadence \
-         only permits gap=1; a larger jump means the bridge state skipped an update",
-        num_layers - prev_num_layers,
+        num_layers > prev_num_layers,
+        "build_chain_for_new_layer called without new layer: prev_num_layers={}, num_layers={}",
         prev_num_layers,
         num_layers,
     );
-    let new_layer = num_layers as u8;
+    let gap = num_layers - prev_num_layers;
+    if gap >= 2 {
+        warn!(
+            "multi-layer jump G={} (prev_num_layers={} → num_layers={}) at seq={} — \
+             not a steady-state W·P cadence scenario; expected only on fresh mid-chain \
+             bootstrap landing at a compound boundary. In production this would indicate \
+             the bridge state skipped an intervening update.",
+            gap, prev_num_layers, num_layers, target_seqno,
+        );
+    }
 
     info!(
-        "new layer {} appeared at seq={}, finding prev_hash in data leaves",
-        new_layer, target_seqno
+        "building vertical chain: {} rung(s), prev_num_layers={} → num_layers={} at seq={}",
+        gap, prev_num_layers, num_layers, target_seqno,
     );
 
-    // prev_same_layer_root (slot 1 of the L(N) tree) is the L(N) root from
-    // the previous L(N) boundary on chain. This is a property of the chain's
-    // canonical tree construction (see acki-nacki
-    // `HistoryBlockData::calculate_root_hash` — slot 1 = `latest_layer_root(N)`
-    // from the cursor). It is NON-ZERO whenever the chain has already produced
-    // any L(N) boundary before `target_seqno`, regardless of whether the bridge
-    // state has yet observed one. Zero only when `target_seqno == W^N` (the
-    // very first L(N) boundary ever on chain).
-    let same_layer_step = window_size.pow(new_layer as u32);
-    let prev_same_root = if target_seqno > same_layer_step {
-        let prev_same_seqno = target_seqno - same_layer_step;
-        fetch_layer_root(gql, prev_same_seqno, new_layer)
-            .await
-            .with_context(|| {
-                format!(
-                    "fetching prev L{} root from block {} for L{} tree at seq={}",
-                    new_layer, prev_same_seqno, new_layer, target_seqno
-                )
-            })?
-    } else {
-        [0u8; 32]
-    };
+    let mut trees: Vec<LayerTreeData> = Vec::with_capacity(gap);
+    let mut chain_leaf_value = prev_hash;
 
-    info!(
-        "L{} tree at seq={}: prev_same_root={} (prev L{} boundary={})",
-        new_layer,
-        target_seqno,
-        hex::encode(prev_same_root),
-        new_layer,
-        target_seqno.saturating_sub(same_layer_step),
-    );
+    for step in 0..gap {
+        let layer_num = (prev_num_layers + 1 + step) as u8;
 
-    // Build the new layer's tree. prev_hash should be among the data leaves.
-    let leaves = build_layer_n_leaves(
-        gql,
-        target_seqno,
-        new_layer,
-        prev_same_root,
-        window_size,
-    )
-    .await?;
+        // Slot 1 (prev_same_layer_root) for this layer. See `build_layer_n_leaves`
+        // and the acki-nacki `HistoryBlockData::calculate_root_hash` reference:
+        // slot 1 = latest_layer_root(layer_num) = L(layer_num) root at the
+        // previous L(layer_num) boundary on chain (= target − W^layer_num).
+        // Non-zero whenever the chain has produced any prior L(layer_num)
+        // boundary; zero only when target ≤ W^layer_num.
+        let same_layer_step = window_size.pow(layer_num as u32);
+        let prev_same_root = if target_seqno > same_layer_step {
+            let prev_same_seqno = target_seqno - same_layer_step;
+            fetch_layer_root(gql, prev_same_seqno, layer_num)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching prev L{} root from block {} for L{} tree at seq={} \
+                         (vertical-chain rung {}/{})",
+                        layer_num, prev_same_seqno, layer_num, target_seqno,
+                        step + 1, gap,
+                    )
+                })?
+        } else {
+            [0u8; 32]
+        };
 
-    // Find which data leaf matches prev_hash.
-    let position = leaves
-        .iter()
-        .enumerate()
-        .find_map(|(i, l)| (i >= 2 && *l == prev_hash).then_some(i))
-        .ok_or_else(|| {
-            anyhow::format_err!(
-                "prev_hash {} not found among layer {} tree data leaves at seq={}",
-                hex::encode(prev_hash),
-                new_layer,
+        info!(
+            "  rung {}/{}: L{} tree at seq={}, prev_same_root={} (prev L{} boundary={})",
+            step + 1, gap,
+            layer_num,
+            target_seqno,
+            hex::encode(prev_same_root),
+            layer_num,
+            target_seqno.saturating_sub(same_layer_step),
+        );
+
+        let leaves = build_layer_n_leaves(
+            gql,
+            target_seqno,
+            layer_num,
+            prev_same_root,
+            window_size,
+        )
+        .await
+        .with_context(|| format!(
+            "building L{} leaves at seq={} (vertical-chain rung {}/{})",
+            layer_num, target_seqno, step + 1, gap,
+        ))?;
+
+        let position = if step == 0 {
+            // First rung: chain leaf = prev_hash sits at whichever data-leaf
+            // slot matches. Under W·P cadence this is deterministic; we search
+            // rather than compute to catch cadence misalignments loudly.
+            leaves
+                .iter()
+                .enumerate()
+                .find_map(|(i, l)| (i >= 2 && *l == chain_leaf_value).then_some(i))
+                .ok_or_else(|| {
+                    anyhow::format_err!(
+                        "prev_hash {} not found among L{} tree data leaves at seq={} \
+                         (rung 1/{})",
+                        hex::encode(chain_leaf_value),
+                        layer_num,
+                        target_seqno,
+                        gap,
+                    )
+                })?
+        } else {
+            // Subsequent rungs: chain leaf = target's L(layer_num−1) root,
+            // which by construction sits at data_leaves[W−1] = leaves[2+W−1].
+            let last_data_position = 2 + window_size as usize - 1;
+            ensure!(
+                leaves[last_data_position] == chain_leaf_value,
+                "L{} tree last data leaf {} != expected chain leaf {} at seq={} \
+                 (rung {}/{}); GQL data anomaly or canonical construction mismatch",
+                layer_num,
+                hex::encode(leaves[last_data_position]),
+                hex::encode(chain_leaf_value),
                 target_seqno,
-            )
-        })?;
+                step + 1,
+                gap,
+            );
+            last_data_position
+        };
 
-    info!(
-        "found prev_hash at position {} in layer {} tree",
-        position, new_layer
-    );
+        info!(
+            "  rung {}/{}: chain_leaf at position {} of {} leaves",
+            step + 1, gap, position, leaves.len(),
+        );
 
-    let tree = LayerTreeData {
-        leaves,
-        chain_leaf_position: position,
-        chain_leaf_value: prev_hash,
-    };
+        trees.push(LayerTreeData {
+            leaves,
+            chain_leaf_position: position,
+            chain_leaf_value,
+        });
 
-    let (chain_links, num_steps) = build_chain_proofs(&[tree]);
+        // Seed next rung's chain leaf = target's L(layer_num) root
+        // (= this tree's computed root by construction). Fetching rather than
+        // computing avoids re-doing Poseidon Merkle work and gives an
+        // independent check against the tree we just built (Circuit 2 will
+        // still enforce `link[k+1].chain_leaf == link[k].root`).
+        if step + 1 < gap {
+            chain_leaf_value = fetch_layer_root(gql, target_seqno, layer_num)
+                .await
+                .with_context(|| format!(
+                    "fetching target's L{} root at seq={} for vertical-chain rung {}/{} seeding",
+                    layer_num, target_seqno, step + 2, gap,
+                ))?;
+        }
+    }
+
+    let (chain_links, num_steps) = build_chain_proofs(&trees);
 
     Ok(RealChainResult {
         chain_links,

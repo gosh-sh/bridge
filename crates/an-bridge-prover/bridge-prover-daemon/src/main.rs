@@ -229,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
                 persist_seed_if_needed(&driver, &mut seed_persisted)?;
             }
             Err(e) => {
-                error!("poll_next_bundle: {} — retrying", e);
+                error!("poll_next_bundle: {:#} — retrying", e);
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         }

@@ -175,9 +175,10 @@ pub enum DriverError {
         source: anyhow::Error,
     },
 
-    /// Anything not classifiable into the above buckets. Preserves the
-    /// original anyhow chain for `{:?}` reporting.
-    #[error("driver error: {0}")]
+    /// Anything not classifiable into the above buckets. Uses `{0:#}` so the
+    /// full anyhow context chain (all `.with_context(..)` frames) is included
+    /// in the Display output, not just the top-level message.
+    #[error("driver error: {0:#}")]
     Other(#[source] anyhow::Error),
 }
 

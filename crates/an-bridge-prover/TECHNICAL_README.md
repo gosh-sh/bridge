@@ -32,6 +32,7 @@ Same binaries for both networks. Endpoint switched via `BRIDGE_GQL_ENDPOINT`; th
 - [Binary roles & state ownership](#binary-roles--state-ownership)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
+- [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot)
 - [Configuration (env vars)](#configuration-env-vars)
 - [Per-run hygiene (read before every E2E run)](#per-run-hygiene-read-before-every-e2e-run)
 - [Bootstrap behavior](#bootstrap-behavior)
@@ -170,7 +171,7 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 ## Prerequisites
 
 - **Rust nightly** (release builds).
-- **~10 GB free disk** under `params/` (KZG SRS + three PKs).
+- **~13 GB free disk** under `params/` (Hermez KZG SRS at K=17/19/20/21 + four PKs).
 - **~16 GB RAM** during proof generation.
 - **Docker / docker compose** for the local 5-node Acki Nacki cluster (local devnet only).
 - Sibling checkout of [`acki-nacki`](https://github.com/gosh-sh/acki-nacki) on branch **`poseidon_dex`** (local devnet only).
@@ -181,6 +182,65 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 |---|---|
 | `gosh-sh/acki-nacki-to-eth-bridge-halo2-prover` (this repo) | `main` |
 | `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | `main` (pinned via this repo's `Cargo.toml`) |
+
+---
+
+## KZG SRS provisioning (Hermez PPoT)
+
+The four circuits use the community-audited **Hermez Perpetual Powers of Tau** ceremony as their KZG trust root. The runtime SRS loader in `bridge_prover_lib::keys::common::assert_hermez_ceremony` rejects anything whose `s_g2` head is not `928fafb3d0cc…` — that includes the legacy Acki Nacki chain-ceremony blobs (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Before your first run on a fresh checkout, materialize the four SRS files under `params/` with the in-tree provisioning binary:
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+What this does:
+
+1. Ensures `powersOfTau28_hez_final_20.ptau` (~1.2 GB, SnarkJs format) at `$HOME/.cache/halo2-kzg-srs/` — auto-downloads from the Polygon zkEVM GCS mirror on cache miss.
+2. For each of K=17, 19, 20: reads the K=20 ptau, verifies the K=20 raw-SRS SHA-256 trust anchor (single-sourced from `gosh-zk-snark-halo2-utils::ptau`), and downsizes to the requested degree.
+3. For K=21: reads the separate `powersOfTau28_hez_final_21.ptau` (~2.4 GB — **not** auto-downloaded; the utils crate's shared trust anchor is K=20-capped, so K=21 uses a byte-level Hermez `s_g2`-head check instead).
+4. Byte-level asserts `s_g2` head = `928fafb3d0cc` on every file before writing → any file this binary writes is guaranteed to pass the runtime loader.
+
+Outputs:
+
+| File | Size | Used by |
+|---|---|---|
+| `params/kzg_bn254_17.srs` | ~16 MB  | Circuit 2 (layer, K=17) proving |
+| `params/kzg_bn254_19.srs` | ~64 MB  | Circuit 4 (event, K=19) proving |
+| `params/kzg_bn254_20.srs` | ~128 MB | Circuit 1A (primary, K=20) proving + all keygen |
+| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 3 (fallback, K=21) proving |
+
+### K=21 ptau — one-time manual download
+
+The K=21 ceremony ptau is not fetched by the binary. If the default cache path is empty, `bootstrap_hermez_srs --k 21` will print the exact `curl` command; it is:
+
+```bash
+mkdir -p ~/.cache/halo2-kzg-srs
+curl -L --fail --progress-bar \
+  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
+```
+
+Then re-run `./target/release/bootstrap_hermez_srs`.
+
+### CLI flags
+
+```
+--params-dir PATH        Where to write kzg_bn254_N.srs
+                         (default: <bridge-prover-lib>/../params)
+--k N                    Circuit K to materialize (repeatable, 1..=21)
+                         (default: --k 17 --k 19 --k 20 --k 21)
+--wipe-cached-keys       Delete {primary,layer,event,fallback}_{vk,pk,config_params}.*
+                         (VK commitments embed s_g2 — mandatory after any SRS swap)
+--ptau PATH              Override K=20 ptau path
+--ptau21 PATH            Override K=21 ptau path
+```
+
+### When to re-run
+
+- **First checkout** — one-off before the first daemon start.
+- **After changing the SRS backend** (e.g. rotating away from a legacy `gen_srs`-provisioned `params/`) — always add `--wipe-cached-keys`, since existing `{primary,layer,event,fallback}_vk.bin` embed the old ceremony's `s_g2`.
+- **Otherwise, never.** The Hermez ceremony is fixed; on subsequent runs the four `kzg_bn254_*.srs` files stay valid indefinitely.
 
 ---
 
@@ -308,10 +368,20 @@ print(json.dumps(out, indent=2))
 
 ### Step 3 — Keys (first run only)
 
+Before any key generation runs, materialize the Hermez PPoT KZG SRS files under `params/` (one-off; see [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot) for details):
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+Then generate the per-circuit VKs / PKs:
+
 | Circuit | Files produced under `params/` | Command |
 |---|---|---|
 | 4 — Event Prover (K=19) | `event_pk.bin`, `event_vk.bin`, `event_config_params.json` | `cargo run --release --bin bridge-event-halo2-prover -- --selftest` (~5 min). **Run this first** — the verifier bails on missing `event_vk.bin`. |
 | 1A — Primary (K=20) | `primary_pk.bin`, `primary_vk.bin` | generated by `bridge-prover-daemon` on first start (next step). |
+| 1B — Fallback (K=21) | `fallback_pk.bin`, `fallback_vk.bin` | same — generated by `bridge-prover-daemon` on first start. |
 | 2 — Layer (K=17) | `layer_pk.bin`, `layer_vk.bin` | same — generated by `bridge-prover-daemon` on first start. |
 
 ### Step 4 — Start prover + verifier
@@ -525,14 +595,23 @@ Pick the endpoint:
 | Local devnet | `http://localhost/graphql` (default — env var can be omitted) |
 | Shellnet | `https://shellnet.ackinacki.org/graphql` |
 
-### Step 1 — Build binaries
+### Step 1 — Build binaries + provision Hermez SRS
 
 ```bash
 cd /path/to/acki-nacki-to-eth-bridge-halo2-prover
 cargo build --release --bin bridge-prover-daemon --bin bridge-verifier-daemon
 ```
 
-The verifier loads all three VKs at startup, so Circuit 4 keys must exist on disk even when no event will be proven. If `params/event_*.bin` are absent:
+**First run only** — materialize the four Hermez PPoT KZG SRS files under `params/`:
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot) for what this does, when to add `--wipe-cached-keys`, and how to fetch the K=21 ptau (not auto-downloaded).
+
+The verifier loads all four VKs at startup, so Circuit 4 keys must exist on disk even when no event will be proven. If `params/event_*.bin` are absent:
 ```bash
 cargo run --release --bin bridge-event-halo2-prover -- --selftest
 ```
@@ -661,12 +740,16 @@ Verify times: ~5 ms (1A), ~3 ms (2), ~110 ms (4). All constant-time.
 
 | File | Size |
 |---|---|
-| `params/kzg_bn254_20.srs` | ~128 MB (K=17/19/20 share via degree truncation) |
+| `params/kzg_bn254_17.srs` | ~16 MB |
+| `params/kzg_bn254_19.srs` | ~64 MB |
+| `params/kzg_bn254_20.srs` | ~128 MB |
+| `params/kzg_bn254_21.srs` | ~256 MB |
 | `params/primary_pk.bin` | ~3.5 GB |
+| `params/fallback_pk.bin` | ~3.5 GB |
 | `params/layer_pk.bin` | ~2.7 GB |
 | `params/event_pk.bin` | ~2.65 GB |
 
-Peak RSS stays around the largest of the three (load-on-demand).
+Each circuit K keeps its own degree-matched SRS slice on disk (halo2-axiom requires `params.n() == 1 << circuit.k()`). All four SRS files come from the same Hermez ceremony — see [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). Peak RSS stays around the largest of the four PKs (load-on-demand).
 
 ---
 
@@ -690,7 +773,9 @@ cargo test -p bridge-event-prover-lib --test event_prover       -- --nocapture  
 
 | Symptom | Cause / Fix |
 |---|---|
-| Verifier exits with `"primary VK not found"` / `"layer VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/2 keys on initial start (~10 min). |
+| Daemon panics with `SRS … is not Hermez Perpetual Powers of Tau (s_g2 head … expected 928fafb3d0cc)` | `params/kzg_bn254_*.srs` was written by legacy `gen_srs` or the Acki Nacki chain ceremony (head starts with `c6028acf…`). Wipe stale artifacts and re-provision from Hermez: `./target/release/bootstrap_hermez_srs --wipe-cached-keys`. See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). |
+| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 3, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
+| Verifier exits with `"primary VK not found"` / `"layer VK not found"` / `"fallback VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/1B/2 keys on initial start (~10 min). |
 | Verifier exits with `"event VK not found"` | Run `cargo run --release --bin bridge-event-halo2-prover -- --selftest` once. |
 | Prover auto-mode never starts proving — seed seqno keeps moving | Should not happen (bugfix landed 2026-05-23: seed is pinned once at startup). If observed, file an issue. As a workaround, pin via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |
 | Circuit 1A fails with ~96 BLS pairing equality constraint violations | Genesis BK-set file stale (path selected by `BRIDGE_BK_SET_CONFIG`). Local devnet: re-sync `bk_set.local.json` from `acki-nacki/config/block_keeper*_bls.keys.json` (see local Step 2) or trust the GQL fetch by deleting the stale file. Shellnet: rebuild `bk_set.shellnet.json` from the partner-posted `keys_config.json` (`bk_nodes[i].bls_pubkey`) and `rm -rf state/ proofs/` before restart — see [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). Do **not** use `zs_bk_set` on the 2026-07-08 snapshot; it is stale. |

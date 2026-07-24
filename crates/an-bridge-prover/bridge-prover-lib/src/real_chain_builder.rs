@@ -3,25 +3,34 @@
 //! Builds genuine chain proofs by reconstructing layer-1 Poseidon trees from
 //! intermediate key blocks fetched via GraphQL.
 //!
-//! # L1-only chain — a cadence contract, not a protocol invariant
+//! # Two chain topologies, dispatched by layer growth
 //!
 //! The daemon proves one key block every `W · P` blocks (`W = 128`,
-//! `P = 4` → 512-block cadence). Each Circuit 2 bundle chains **exactly
-//! `P = 4` layer-1 rungs** via `verify_chain_of_dense_proofs`, connecting the
-//! previous proved block's L1 root to the target block's
-//! `layer_hashes_preimage[0]` (also an L1 root).
+//! `P = 4` → 512-block cadence). Circuit 2 requires the chain to end at the
+//! target block's top-layer root: `chain_result == layer_hash_frs[num_layers-1]`.
 //!
-//! Endpoints:
-//!   * **start** = prev's L1 root (`BridgeState::prev_max_level_layer_hash_for(1)`)
-//!   * **end**   = target's `layer_hashes_preimage[0]`
+//! Two cases occur under this cadence:
 //!
-//! Higher-layer roots (`layer_hashes_preimage[i > 0]`) may exist in the target
-//! block but are NOT part of the Circuit 2 chain under this cadence. The
-//! History Proofs Proposal allows vertical rungs up through higher
-//! `layer_hashes_preimage[i]`; those become necessary only if the cadence is
-//! lengthened past `W · P`, at which point the commented-out
-//! `build_chain_for_new_layer` / `build_layer_n_tree` / `build_layer_n_leaves`
-//! helpers return.
+//! * **Same-layer bundle** (`num_layers == prev_num_layers`) — the common case
+//!   (~31 out of every 32 bundles). Chain **exactly `P = 4` layer-1 rungs** via
+//!   [`build_chain_same_layer`], connecting the prev proved block's L1 root to
+//!   the target block's `layer_hashes_preimage[0]` (also an L1 root). Each
+//!   rung proves the L1 evolution over W blocks explicitly.
+//!
+//! * **New-layer bundle** (`num_layers == prev_num_layers + 1`) — fires at
+//!   every `W^L` boundary (with L = 2 that is every W² = 16384 blocks, i.e.
+//!   every 32nd bundle). Chain **one L(N+1) rung** via
+//!   [`build_chain_for_new_layer`]: the L(N+1) tree at target holds the
+//!   prev's L(N) root as one of its `W` data leaves (positions 2..W+2), and a
+//!   single opening from that data-leaf position to the L(N+1) root satisfies
+//!   the circuit's top-layer constraint. Under the W·P cadence contract the
+//!   inclusion slot is deterministic: `prev_seqno = target - P·W`, so the
+//!   prev-L(N) root always sits at leaf index `2 + (W - 1 - (P-1))` in the
+//!   L(N+1) tree.
+//!
+//! Endpoints (both cases):
+//!   * **start** = prev's max-level layer hash (`BridgeState::prev_max_level_layer_hash_for`)
+//!   * **end**   = target's top-layer root (`layer_hash_frs[num_layers-1]`)
 //!
 //! # L1 tree layout per rung (W = 128)
 //!   Leaf [0]:        higher_layer_root (layer 2 root at prior L2 boundary, or zero)
@@ -29,6 +38,13 @@
 //!   Leaf [2..130]:   block leaves — Poseidon(block_id ‖ envelope_hash ‖ ext_msg_root) × W
 //!   Leaf [130..256]: zero padding (to next power of 2)
 //! Total: 256 leaves, depth 8.
+//!
+//! # L(N≥2) tree layout (W = 128)
+//!   Leaf [0]:        higher_layer_root (layer N+1 root at prior boundary, or zero)
+//!   Leaf [1]:        prev_same_layer_root (zero at first appearance of layer N)
+//!   Leaf [2..130]:   layer-(N-1) roots from W past L(N-1)-keyblocks
+//!   Leaf [130..256]: zero padding
+//! Same shape and depth as L1 → `DenseChainLink` padding stays consistent.
 
 use std::collections::BTreeMap;
 
@@ -52,13 +68,20 @@ pub struct RealChainResult {
     pub prev_hash: [u8; 32],
 }
 
-/// Build real Poseidon chain proofs connecting prev's L1 root to target's
-/// `layer_hashes_preimage[0]` (also an L1 root).
+/// Build real Poseidon chain proofs from prev's top-layer root to target's
+/// top-layer root (`layer_hash_frs[num_layers - 1]`).
 ///
-/// Under the current W·P = 512-block cadence the chain is L1-only and always
-/// has exactly `P = 4` rungs — see the module-level cadence-contract note.
-/// Higher layers in the target block are irrelevant to the chain: they show
-/// up in `layer_hashes_preimage[i>0]` but are not chained here.
+/// Dispatches on layer growth between prev and target:
+///
+/// * `num_layers == prev_num_layers` — same-layer path, `P` L1 rungs via
+///   [`build_chain_same_layer`].
+/// * `num_layers == prev_num_layers + 1` — new-layer path, one L(N+1) rung
+///   via [`build_chain_for_new_layer`] (the prev L(N) root is included as a
+///   data leaf in the target's L(N+1) tree).
+///
+/// A gap of ≥ 2 between prev and target layer counts means the state silently
+/// skipped an intervening bundle — under W·P cadence at most one W^L boundary
+/// can be crossed per bundle, so this is a hard consistency error and bails.
 pub async fn build_real_chain(
     gql: &GqlClient,
     state: &BridgeState,
@@ -68,23 +91,86 @@ pub async fn build_real_chain(
 ) -> anyhow::Result<RealChainResult> {
     let num_layers = target_history_proofs.len();
     ensure!(num_layers >= 1, "target block has no history_proofs");
+    let prev_num_layers = state.num_active_layers();
 
-    // L1-only chain: both endpoints are layer-1 roots regardless of how many
-    // layers the target block populates. `prev_max_level_layer_hash_for(1)`
-    // always returns prev's L1 latest.
-    let prev_hash = state.prev_max_level_layer_hash_for(1);
+    // start = prev's max-level layer hash (same value the verifier will
+    // reconstruct from its BridgeState via `prev_max_level_layer_hash_for`).
+    let prev_hash = state.prev_max_level_layer_hash_for(num_layers);
+
+    // end = target's top-layer root (= layer_hash_frs[num_layers-1]).
     let target_hash = *target_history_proofs
-        .get(&1u8)
-        .ok_or_else(|| anyhow::format_err!("target block missing layer 1 in history_proofs"))?;
+        .get(&(num_layers as u8))
+        .ok_or_else(|| anyhow::format_err!(
+            "target block missing top layer {} in history_proofs",
+            num_layers
+        ))?;
 
     info!(
-        "building real L1 chain: target_num_layers={}, prev_L1={}, target_L1={}",
+        "building real chain: num_layers={}, prev_num_layers={}, prev_top={}, target_top={}",
         num_layers,
+        prev_num_layers,
         hex::encode(prev_hash),
         hex::encode(target_hash),
     );
 
-    build_chain_same_layer(gql, state, target_seqno, prev_hash, window_size).await
+    if num_layers > prev_num_layers {
+        // Case B: a new layer just appeared at target (e.g. FIRST L2 boundary
+        // with prev_num_layers=1, num_layers=2). Prev's L(N) root sits at a
+        // data-leaf slot of target's L(N+1) tree — single opening.
+        // Under W·P cadence only one boundary can be crossed per bundle; a
+        // strict-+1 gap is enforced inside `build_chain_for_new_layer`.
+        build_chain_for_new_layer(
+            gql,
+            target_seqno,
+            prev_num_layers,
+            num_layers,
+            prev_hash,
+            window_size,
+        )
+        .await
+    } else if num_layers >= 2 && target_seqno % window_size.pow(num_layers as u32) == 0 {
+        // Case D: subsequent L(N) boundary (target_seqno aligned to W^N) with
+        // prev already at num_layers=N. Prev's L(N) root sits at slot 1 of
+        // target's L(N) tree (`prev_same_layer_root`) — single opening.
+        build_chain_same_layer_n(gql, target_seqno, num_layers as u8, prev_hash, window_size).await
+    } else {
+        // Cases A and C: same-layer L1 path — chain P L1 rungs from prev_L1 to
+        // target_L1. Note `prev_hash` here equals prev's L1 latest because
+        // under W·P cadence non-boundary bundles always emit num_layers=1, and
+        // `prev_max_level_layer_hash_for(1)` returns L1 latest regardless of
+        // how many higher layers prev has accumulated.
+        build_chain_same_layer(gql, state, target_seqno, prev_hash, window_size).await
+    }
+}
+
+/// Same-layer chain at layer N (N >= 2): one rung from prev_L(N) to target_L(N)
+/// via slot-1 opening in target's L(N) tree.
+async fn build_chain_same_layer_n(
+    gql: &GqlClient,
+    target_seqno: u64,
+    layer: u8,
+    prev_hash: [u8; 32],
+    window_size: u64,
+) -> anyhow::Result<RealChainResult> {
+    info!(
+        "building L{} same-layer chain (subsequent boundary): target_seq={}, prev_L{}={}",
+        layer,
+        target_seqno,
+        layer,
+        hex::encode(prev_hash),
+    );
+
+    let tree = build_layer_n_tree(gql, target_seqno, layer, prev_hash, window_size)
+        .await
+        .with_context(|| format!("building layer {} tree at seq={}", layer, target_seqno))?;
+
+    let (chain_links, num_steps) = build_chain_proofs(&[tree]);
+
+    Ok(RealChainResult {
+        chain_links,
+        num_steps,
+        prev_hash,
+    })
 }
 
 /// Build the L1 chain of P rungs connecting prev's L1 root to target's L1 root.
@@ -191,24 +277,12 @@ async fn build_chain_same_layer(
     })
 }
 
-// ============================================================================
-// Multi-layer chain helpers — commented out under the current W·P = 512-block
-// cadence contract (see module doc). Circuit 2 chains only L1 rungs today.
-//
-// KEEP these bodies parked here: they encode the History Proofs Proposal
-// dispatch for lengthened cadence (e.g. proving less often than every W·P
-// blocks). If cadence is ever increased so that gaps at L2+ become possible,
-// re-enable `build_chain_for_new_layer`, `build_layer_n_tree`, and
-// `build_layer_n_leaves`, and switch `build_real_chain` back to the
-// layer-aware dispatch.
-// ============================================================================
-/*
-/// Build chain when a new layer appeared.
+/// Build chain when a new layer appeared at target.
 ///
 /// Layer N first materialises at block height `W^N` (e.g. with W = 128, layer 2
 /// first appears at block 16384, layer 3 at 2^21 = 2_097_152, etc.).
 ///
-/// **Single-step by construction.** Under our thinning cadence the prover
+/// **Single-step by construction.** Under W·P thinning cadence the prover
 /// advances the bridge state fast enough that we can only ever cross one layer
 /// boundary between updates. A gap ≥ 2 would mean the state silently missed an
 /// intervening update — a hard consistency error we refuse to paper over with a
@@ -282,7 +356,6 @@ async fn build_chain_for_new_layer(
         prev_hash,
     })
 }
-*/
 
 /// Build a layer 1 Poseidon tree for a key block.
 ///
@@ -346,14 +419,13 @@ async fn build_layer1_tree(
     })
 }
 
-/*
-/// Build a layer N (N>=2) Poseidon tree for a key block.
+/// Build a layer N (N>=2) Poseidon tree for a key block, with the chain leaf
+/// positioned at slot 1 (`prev_same_layer_root`).
 ///
-/// Leaf layout (see crate-level docs for the concrete W=128 example):
-///   [0]:        higher_layer_root (layer N+1 root, or zero)
-///   [1]:        prev_same_layer_root = chain_leaf_value
-///   [2..W+2]:   layer N-1 root hashes from HISTORY_PROOF_WINDOW_SIZE (W) intermediate key blocks
-///   [W+2..pow2]: zero padding (to next power of 2)
+/// Used by [`build_chain_same_layer_n`] for subsequent L(N) boundaries where
+/// prev already has an L(N) root — the target's L(N) tree carries prev's L(N)
+/// root at slot 1, so a single opening from slot 1 to the L(N) root chains
+/// prev_L(N) → target_L(N) in one rung.
 async fn build_layer_n_tree(
     gql: &GqlClient,
     key_block_seqno: u64,
@@ -378,6 +450,9 @@ async fn build_layer_n_tree(
 }
 
 /// Build leaf array for a layer N (N>=2) tree.
+///
+/// Used by [`build_chain_for_new_layer`] (chain leaf at a data-leaf position)
+/// and [`build_layer_n_tree`] (chain leaf at slot 1).
 async fn build_layer_n_leaves(
     gql: &GqlClient,
     key_block_seqno: u64,
@@ -435,7 +510,6 @@ async fn build_layer_n_leaves(
 
     Ok(leaves)
 }
-*/
 
 /// Fetch a specific layer's root hash from a block's `history_proofs` via GQL.
 ///

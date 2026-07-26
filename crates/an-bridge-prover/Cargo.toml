@@ -22,19 +22,19 @@ resolver = "2"
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 
-# Circuit and crypto libs — track the branch carrying the canonical
+# Circuit and crypto libs — track `main`, which now carries the canonical
 # 16-leaf (depth-4) block-id Merkle tree plus the Circuit 1 block_id
-# byte-order fix (both landed in `fix/block_id_16_leafs_and_security_updates`
-# via #5). On this branch `NUM_MERKLE_SIBLINGS = 4` and Circuit 2's SHA
-# Merkle open reflects the canonical depth-4 layout. `bridge-parsers` was
-# inlined into `attestation-bls-checker-circuit::attestation_data_parser`
-# on the circuits side (commit 487b8f5), so it's no longer a separate crate
-# here.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/block_id_16_leafs_and_security_updates" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/block_id_16_leafs_and_security_updates" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/block_id_16_leafs_and_security_updates" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/block_id_16_leafs_and_security_updates" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/block_id_16_leafs_and_security_updates" }
+# byte-order fix (formerly on `fix/block_id_16_leafs_and_security_updates`,
+# merged via #5 and the branch purged). On this branch
+# `NUM_MERKLE_SIBLINGS = 4` and Circuit 2's SHA Merkle open reflects the
+# canonical depth-4 layout. `bridge-parsers` was inlined into
+# `attestation-bls-checker-circuit::attestation_data_parser` on the
+# circuits side (commit 487b8f5), so it's no longer a separate crate here.
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

@@ -80,6 +80,30 @@ Every subsequent `verifyBlock` pays the SSTORE for a value that no on-chain logi
 
 ---
 
+## NB-Q5 — Residual Groth16/gnark NatSpec + deploy-log labels (interfaces + `DeployRealBridge`)
+
+All Groth16 adapter contracts and generated verifiers for 1A/2/4 are gone from `contracts/ethereum/src/` — nothing to delete anymore. But the *interface* NatSpec and one deploy script still describe the proof bytes as `gnark Groth16`, which is wrong now that every wired backend is Shplonk (and 1B specifically was retired on `e2a962b`).
+
+**Sites (verified 2026-07-27):**
+
+| File | Lines | Issue |
+|---|---|---|
+| `src/IPrimaryVerifier.sol` | 21 | "256-byte Groth16 proof (8 × uint256, gnark MarshalSolidity layout)" |
+| `src/IFallbackVerifier.sol` | 18 | same |
+| `src/ILayerHashesMovementVerifier.sol` | 29, 35 | "Groth16 proof" / "reverts in the underlying gnark" |
+| `src/IBridgeWithdrawalVerifier.sol` | 23, 25, 28, 60, 62 | describes struct as mirroring gnark PI layout and references `IBridgeWithdrawalGroth16Verifier` — a file that no longer exists |
+| `script/DeployRealBridge.s.sol` | 17 | `@dev … gnark Groth16 for 1B fallback` — 1B is now Shplonk |
+| `script/DeployRealBridge.s.sol` | 193 | `console.log("FallbackVerifier (Groth16):", …)` — operator-visible label, wrong |
+
+Test-side mentions (`ShplonkAggregatorForgery.t.sol`, `MockPrimaryVerifier.sol`, `MockBridgeWithdrawalVerifier.sol`, `AckiNackiBridgeWithdrawByProof.t.sol`, `FuzzVerifiers.t.sol`, `verifiers/README.md`) are legitimate historical context / forgery fixtures — flagging so they're deliberately excluded from the sweep.
+
+**Questions.**
+
+1. OK to sweep the six sites above to "SHPLONK proof bytes (Halo2 KZG aggregator calldata)" and drop the stale `IBridgeWithdrawalGroth16Verifier` cross-reference?
+2. Reaffirm policy: no Groth16 adapter will be wired into a live `AckiNackiBridge` constructor on any network including Sepolia, correct?
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

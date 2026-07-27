@@ -107,11 +107,11 @@ pub async fn fetch_bk_set(client: &GqlClient) -> anyhow::Result<HashMap<u16, Vec
     Ok(bk_set)
 }
 
-/// How many recent `bkSetUpdates` to pull when scanning for the next event
-/// past a cursor. Sized to comfortably cover the prover's worst-case lag:
-/// shellnet bursts are bounded at ~5 events, and the prover normally lags by
-/// at most a few `W·P` windows, so 100 is far more than enough.
-const NEXT_UPDATE_AFTER_LOOKBACK: u32 = 100;
+/// Page size for `next_update_after` cursor walk. Sized to match
+/// `BK_SET_AT_HEIGHT_PAGE_SIZE`: near-head callers (prover caught up to
+/// within one page's worth of rotation events) resolve in a single round
+/// trip via the ascending-order early-return.
+const NEXT_UPDATE_PAGE_SIZE: u32 = 500;
 
 /// Cursor-walk over `bkSetUpdates`: returns the *next* rotation event whose
 /// chain height is strictly greater than `cursor_seq_no`, regardless of W·P
@@ -122,6 +122,28 @@ const NEXT_UPDATE_AFTER_LOOKBACK: u32 = 100;
 /// check could not provide — real rotations land on arbitrary heights, almost
 /// none of them W·P-aligned.
 ///
+/// # Correctness
+///
+/// AN's `bkSetUpdates` Relay connection returns edges in ascending
+/// `chain_order`, which coincides with ascending block height on any
+/// well-formed chain. We paginate forward via `after: cursor` and return the
+/// min-height past-`cursor_seq_no` entry from the *first* page that
+/// contains any such entry — ascending order guarantees no earlier page has
+/// one and no later page can have a smaller past-cursor height.
+///
+/// An [`assert_ascending_by_height`] check runs on every page against a
+/// running high-water mark. If a page ever returns an out-of-order height,
+/// the function errors out rather than silently returning a wrong answer —
+/// this guards the early-return against a future schema / pagination-order
+/// change.
+///
+/// # Cost
+///
+/// Round trips = `ceil(events_past_cursor_up_to_first_hit / NEXT_UPDATE_PAGE_SIZE)`.
+/// On a chain where the prover is caught up to head this is O(1). On a
+/// long-lagging prover it degrades linearly but is bounded by the
+/// hard 10_000-page ceiling.
+///
 /// The returned struct includes `block_id`, `height`, and the raw
 /// `bk_set_update_hex` blob; the caller parses the latter via
 /// [`parse_bk_set_changes_pub`] to derive the new pubkey table.
@@ -129,19 +151,89 @@ pub async fn next_update_after(
     client: &GqlClient,
     cursor_seq_no: u64,
 ) -> anyhow::Result<Option<BkSetUpdateWithAttestations>> {
-    let recent = client
-        .query_bk_set_updates_light(NEXT_UPDATE_AFTER_LOOKBACK, false)
-        .await
-        .context("query_bk_set_updates_light failed in next_update_after")?;
+    let mut after: Option<String> = None;
+    let mut pages = 0usize;
+    let mut last_height_seen: u64 = 0;
+    loop {
+        let (page, next) = client
+            .query_bk_set_updates_paged(
+                u64::MAX,
+                NEXT_UPDATE_PAGE_SIZE,
+                after.as_deref(),
+            )
+            .await
+            .with_context(|| format!("next_update_after page {}", pages))?;
+        pages += 1;
+        debug!(
+            "next_update_after page {}: {} events (cursor advance -> {:?})",
+            pages,
+            page.len(),
+            next,
+        );
 
-    // Filter to events strictly past cursor, then pick the smallest height
-    // (so we drain in chronological order).
-    let next = recent
-        .into_iter()
+        assert_ascending_by_height(&page, &mut last_height_seen)
+            .with_context(|| format!("next_update_after page {}: order sanity", pages))?;
+
+        if let Some(hit) = pick_next_past_cursor(&page, cursor_seq_no) {
+            return Ok(Some(hit.clone()));
+        }
+
+        match next {
+            Some(c) => after = Some(c),
+            None => return Ok(None),
+        }
+        if pages > 10_000 {
+            bail!(
+                "next_update_after: refusing to paginate past 10_000 pages \
+                 (likely a server-side pagination bug) at cursor {:?}",
+                after,
+            );
+        }
+    }
+}
+
+/// Pick the smallest-height entry with `height > cursor_seq_no` from a
+/// single page. Extracted so `next_update_after`'s per-page decision is
+/// unit-testable without a live GQL server.
+///
+/// Returns `None` when no entry qualifies — the caller should fetch the
+/// next page and re-apply.
+pub(crate) fn pick_next_past_cursor<'a>(
+    page: &'a [BkSetUpdateWithAttestations],
+    cursor_seq_no: u64,
+) -> Option<&'a BkSetUpdateWithAttestations> {
+    page.iter()
         .filter(|u| u.height.map(|h| h > cursor_seq_no).unwrap_or(false))
-        .min_by_key(|u| u.height.unwrap_or(u64::MAX));
+        .min_by_key(|u| u.height.unwrap_or(u64::MAX))
+}
 
-    Ok(next)
+/// Assert that heights in `page` are non-decreasing relative to
+/// `last_height_seen`. Updates `last_height_seen` in place to the max
+/// height observed on success. Entries with `height = None` are skipped
+/// (some early DB rows lack a height column; they cannot break the
+/// invariant on their own).
+///
+/// Extracted so the ascending-order invariant `next_update_after` relies on
+/// is unit-testable and the error text is exercised by CI.
+pub(crate) fn assert_ascending_by_height(
+    page: &[BkSetUpdateWithAttestations],
+    last_height_seen: &mut u64,
+) -> anyhow::Result<()> {
+    for u in page {
+        if let Some(h) = u.height {
+            if h < *last_height_seen {
+                bail!(
+                    "bkSetUpdates page returned non-ascending height: \
+                     saw {} after {} — next_update_after early-return \
+                     assumption violated (schema drift?)",
+                    h,
+                    *last_height_seen,
+                );
+            }
+            *last_height_seen = h;
+        }
+    }
+    Ok(())
 }
 
 /// Public wrapper around [`parse_bk_set_changes`] so the prover daemon can
@@ -545,6 +637,140 @@ mod fold_tests {
 }
 
 #[cfg(test)]
+mod pagination_tests {
+    //! Unit tests for the pure per-page helpers behind `next_update_after`.
+    //! No network — these lock in the algorithm's decision logic and the
+    //! ascending-order sanity check independently of GQL wire behavior.
+    use super::*;
+
+    fn mk_event(height: Option<u64>, id: &str) -> BkSetUpdateWithAttestations {
+        BkSetUpdateWithAttestations {
+            block_id: id.into(),
+            bk_set_update_hex: String::new(),
+            height,
+            attestations: Vec::new(),
+            chain_order: None,
+        }
+    }
+
+    #[test]
+    fn pick_returns_min_height_past_cursor() {
+        // Page intentionally shuffled to prove `min_by_key` (not first-hit)
+        // is what selects — we do not depend on caller-side ordering when
+        // choosing within a page.
+        let page = vec![
+            mk_event(Some(100), "a"),
+            mk_event(Some(50), "b"),
+            mk_event(Some(75), "c"),
+            mk_event(Some(200), "d"),
+        ];
+        let hit = pick_next_past_cursor(&page, 60).expect("60 < 75 < 100 < 200");
+        assert_eq!(hit.height, Some(75));
+        assert_eq!(hit.block_id, "c");
+    }
+
+    #[test]
+    fn pick_returns_none_when_all_at_or_before_cursor() {
+        let page = vec![
+            mk_event(Some(100), "a"),
+            mk_event(Some(50), "b"),
+            mk_event(Some(100), "c"), // exactly at cursor — strictly-greater rejects
+        ];
+        assert!(pick_next_past_cursor(&page, 100).is_none());
+    }
+
+    #[test]
+    fn pick_ignores_events_with_missing_height() {
+        // `height: None` rows exist in early DB rows; they must never win
+        // over a real past-cursor candidate.
+        let page = vec![
+            mk_event(None, "a"),
+            mk_event(Some(150), "b"),
+            mk_event(None, "c"),
+        ];
+        let hit = pick_next_past_cursor(&page, 100).unwrap();
+        assert_eq!(hit.block_id, "b");
+    }
+
+    #[test]
+    fn ascending_within_page_ok() {
+        let page = vec![
+            mk_event(Some(10), "a"),
+            mk_event(Some(20), "b"),
+            mk_event(Some(30), "c"),
+        ];
+        let mut last = 0;
+        assert_ascending_by_height(&page, &mut last).unwrap();
+        assert_eq!(last, 30, "high-water mark must advance to page max");
+    }
+
+    #[test]
+    fn ascending_across_pages_ok() {
+        let p1 = vec![mk_event(Some(10), "a"), mk_event(Some(20), "b")];
+        let p2 = vec![mk_event(Some(25), "c"), mk_event(Some(40), "d")];
+        let mut last = 0;
+        assert_ascending_by_height(&p1, &mut last).unwrap();
+        assert_ascending_by_height(&p2, &mut last).unwrap();
+        assert_eq!(last, 40);
+    }
+
+    #[test]
+    fn ascending_rejects_descending_within_page() {
+        let page = vec![
+            mk_event(Some(30), "a"),
+            mk_event(Some(20), "b"), // regression relative to prior in same page
+        ];
+        let mut last = 0;
+        let err = assert_ascending_by_height(&page, &mut last).unwrap_err();
+        assert!(
+            err.to_string().contains("non-ascending"),
+            "error must name the invariant so schema-drift is diagnosable: {err}"
+        );
+    }
+
+    #[test]
+    fn ascending_rejects_descending_across_pages() {
+        // Guards the cross-page invariant — a subsequent page must never
+        // start below the prior page's max.
+        let p1 = vec![mk_event(Some(30), "a")];
+        let p2 = vec![mk_event(Some(20), "b")];
+        let mut last = 0;
+        assert_ascending_by_height(&p1, &mut last).unwrap();
+        let err = assert_ascending_by_height(&p2, &mut last).unwrap_err();
+        assert!(err.to_string().contains("non-ascending"));
+    }
+
+    #[test]
+    fn ascending_ignores_missing_heights() {
+        // Missing-height rows are transparent — they neither advance the
+        // watermark nor can they violate ordering.
+        let page = vec![
+            mk_event(None, "a"),
+            mk_event(Some(50), "b"),
+            mk_event(None, "c"),
+            mk_event(Some(100), "d"),
+        ];
+        let mut last = 0;
+        assert_ascending_by_height(&page, &mut last).unwrap();
+        assert_eq!(last, 100);
+    }
+
+    #[test]
+    fn ascending_equal_heights_ok() {
+        // Same-height events can legitimately appear on the same page
+        // (same block emits multiple rotation deltas); `<` — not `<=` —
+        // must be the rejection criterion.
+        let page = vec![
+            mk_event(Some(500), "a"),
+            mk_event(Some(500), "b"),
+        ];
+        let mut last = 0;
+        assert_ascending_by_height(&page, &mut last).unwrap();
+        assert_eq!(last, 500);
+    }
+}
+
+#[cfg(test)]
 mod live_tests {
     //! Live-network tests — ignored by default. Run with:
     //!   cargo test -p bridge-prover-lib --release -- --ignored next_update_after
@@ -584,5 +810,26 @@ mod live_tests {
         let r = next_update_after(&client, 2_584_711).await.unwrap();
         let u = r.expect("next event after 2584711 must exist");
         assert_eq!(u.height, Some(2_584_894));
+    }
+
+    /// Regression against the removed `NEXT_UPDATE_AFTER_LOOKBACK = 100`
+    /// silent-skip bug: cursor `= 0` walks paginated `bkSetUpdates` from the
+    /// very first event, verifying that even on a chain with more rotations
+    /// than one page fits (or on any prover restart after a long lag) the
+    /// earliest-past-cursor event is returned rather than one from the
+    /// most-recent page. The shipped fixture's first-ever shellnet rotation
+    /// at `2_584_711` pins the answer.
+    #[tokio::test]
+    #[ignore]
+    async fn next_update_after_paginates_from_genesis() {
+        let client = crate::gql_client::create_client(SHELLNET).unwrap();
+        let r = next_update_after(&client, 0).await.unwrap();
+        let u = r.expect("chain must have at least one bkSetUpdate");
+        assert_eq!(
+            u.height,
+            Some(2_584_711),
+            "earliest-ever rotation on shellnet expected at height 2584711, got {:?}",
+            u.height,
+        );
     }
 }

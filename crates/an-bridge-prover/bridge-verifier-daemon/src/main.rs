@@ -221,7 +221,14 @@ async fn main() -> anyhow::Result<()> {
         // If not bootstrapped, retry loading the seed file. The prover writes
         // `state/bootstrap_seed.json` on its own cold start; if the verifier
         // was started first, this is the loop point at which it picks it up.
-        if !bootstrapped {
+        //
+        // Also guard on `state.initialized`: after the ProverBkSet refactor
+        // the prover persists the seed only after the first bundle ACKs, so
+        // the verifier can process (and initialize state from) that first
+        // bundle *before* the seed file appears. Applying the seed on top of
+        // an already-initialized state would panic in
+        // `BridgeState::initialize_bk_set_commitment`.
+        if !bootstrapped && !state.initialized {
             match BootstrapSeed::load(bootstrap::DEFAULT_SEED_PATH)? {
                 Some(seed) => {
                     info!(

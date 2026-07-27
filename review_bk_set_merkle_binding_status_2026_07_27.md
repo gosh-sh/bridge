@@ -2,8 +2,6 @@
 
 **Scope.** Per-item status of the 7 recommendations from the 2026-06-08 review of the AN-side BK-set update Merkle binding, checked against `crates/an-bridge-prover/` at HEAD (branch `feture/block_id_16_leafs_support_plus_exta_bridge_prover_refactoring_and_cleaning`).
 
-**No prover is deployed at this time.** All fixes below can land without a coordinated rollout.
-
 ---
 
 ## 0. Structural drift since the review
@@ -17,16 +15,18 @@ Two things about the reviewed baseline are no longer true and need to be read in
 
 ## 1. Summary
 
-| # | Recommendation | Status |
-|---|---|---|
-| 1 | Layer-path `verify_gql_block_merkle` off-circuit port | **Open** |
-| 2 | Drain fail-fast `upd_block.block_id == tree.root` | **Partially resolved** — L2, L3, and Fr-fold checks landed; explicit `tree.root == upd_block.block_id` compare still missing |
-| 3 | Misleading self-verify comment in drain loop | **Resolved** (refactor deleted it; current comment is truthful) |
-| 4 | Layer-verifier cross-check `block_id` between C1a and C2 | **Open** |
-| 5 | `NEXT_UPDATE_AFTER_LOOKBACK = 100` → pagination | **Resolved in this PR** (see §5 below) |
-| 6a | Unit test open Merkle reconstruction | **Resolved** — `block_id_tree.rs` has three tests including `l2_l3_opening_reconstructs_root`; all rewritten for 16-leaf |
-| 6b | Parity test: real shellnet block → `Poseidon(new_bk_set) == leaves[3]` | **Partially resolved** — the equality is enforced at runtime on every drain (see §6b); no dedicated fixture test |
-| 7 | `probe_bk_updates` binary (plan §7 Phase 2) | **Open** |
+Ranked by honest severity — most items in this review are defense-in-depth / diagnostic improvements, not correctness fixes. The one exception (item #5) shipped in this PR.
+
+| # | Recommendation | Status | Honest importance |
+|---|---|---|---|
+| 5 | `NEXT_UPDATE_AFTER_LOOKBACK = 100` → pagination | **Resolved (this PR)** | **Real bug.** Silent-skip of BK-updates if prover ever lagged >100 rotation events. Not observable on shellnet (rotation off); a footgun the moment a rotating deploy runs. |
+| 6b | Parity test: shellnet block → `Poseidon(new_bk_set) == leaves[3]` | **Partially resolved** — enforced at runtime every drain step, no fixture test | Modest. Runtime check is already load-bearing; a fixture test would guard against silent drift if the AN node changes leaf construction (like the 8→16 migration itself). |
+| 3 | Misleading self-verify comment | **Resolved (by refactor)** | Cosmetic. Now honest. |
+| 6a | Unit test open Merkle reconstruction | **Resolved** | Low. Three tests exist in `block_id_tree.rs`, rewritten for 16-leaf. |
+| 2 | Drain fail-fast `tree.root == upd_block.block_id` | **Resolved (this PR)** | **Low — diagnostic/fail-fast only, not a security fix.** See §#2 for the honest analysis. |
+| 4 | Layer-verifier cross-check `block_id` between C1a and C2 | **Resolved (by refactor)** | **Zero — invariant now enforced by IPC schema.** See §#4 for the surprise finding. |
+| 1 | Layer-path `verify_gql_block_merkle` off-circuit port | **Open** | Low. Failure mode is already loud (Circuit 2 witness builder / on-chain verifier rejects malformed leaves). Deferred. |
+| 7 | `probe_bk_updates` binary | **Open** | Zero-until-deploy. Operational tooling for rotation cadence study; not needed while rotation is off. |
 
 ---
 
@@ -40,21 +40,39 @@ Grep across `bridge/crates/` for `verify_gql_block_merkle | verify_gql_proof_blo
 
 Current layer path still relies on the `leaves[2] == bk_set_commitment` fail-fast (and Circuit 2 witness/on-chain verifier rejection) as the only defenses against malformed GQL leaves. The failure mode is loud, not silent, so this is a **defense-in-depth gap** rather than a correctness bug.
 
-**Suggested next step.** Deferred until we see actual GQL-corruption incidents or the layer verifier grows enough surface that a shared helper pays for itself.
+**Honest importance.** Low. Deferred until we see actual GQL-corruption incidents or the layer verifier grows enough surface that a shared helper pays for itself.
 
-### #2 — Drain fail-fast `upd_block.block_id == tree.root` **[Partially resolved]**
+### #2 — Drain fail-fast `upd_block.block_id == tree.root` **[Resolved (this PR)]**
 
-Present in `bridge-prover-lib/src/live_driver/bk_update.rs`:
+**Landed at** `bridge-prover-lib/src/live_driver/bk_update.rs`: right after `let tree = BlockIdMerkleTree::from_leaves(leaves);`, added:
 
-- **L2 vs commitment** (line 89): `bail!` if `l2 != cur_commitment`.
-- **Poseidon(new_pubkeys) == L3** (line 133): `bail!` on mismatch.
-- **Fr-fold vs circuit-committed `block_id_fr`** (line 222): `debug_assert_eq!(fold_hash_be_to_fr(&tree.root), upd_proof.block_id_fr, ...)`.
+```rust
+if tree.root != upd_block.block_id {
+    anyhow::bail!(
+        "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — \
+         GQL leaves inconsistent with block header", ...
+    );
+}
+```
 
-Missing: the explicit `tree.root == upd_block.block_id` comparison called out in the review. `upd_block.block_id` is fetched at line 68 via `query_proof_block_by_seqno` and never compared to the reconstructed root — only the derived Fr form is checked, and only under `debug_assert!`. In a release build with a corrupted GQL leaf array whose fold happens to collide with the block's true Fr (equivalent-modulo-`p` on the low 32 bytes), the mismatch could go undetected until the on-chain verifier rejects.
+Complements the pre-existing checks in the same function: L2 vs commitment (line ~89), Poseidon(new_pubkeys) == L3 (line ~133), and the `debug_assert_eq!(fold(tree.root), upd_proof.block_id_fr)` further down.
 
-**Suggested next step.** Small, self-contained follow-up: add `if tree.root != upd_block.block_id_be { bail!(...) }` right after `BlockIdMerkleTree::from_leaves(leaves)` at line 81. Assumes `upd_block.block_id` (or a new `block_id_be` accessor) is available as raw bytes; if the GQL currently only returns the hex form, add a decode + compare.
+**Honest importance: LOW.** This is *not* a security fix. The verifier's step 2b already catches every case where GQL returns bad leaves:
 
-### #3 — Misleading self-verify comment **[Resolved]**
+1. Bad leaves → `tree.root` is garbage.
+2. Prover writes `block_id_be = tree.root` (garbage) into the IPC bundle.
+3. Verifier re-folds `L2‖L3 + siblings` up → same garbage root; matches `block_id_be`, step 2 passes.
+4. Step 2b: `fold(garbage_root) == upd_proof.block_id_fr`? `upd_proof.block_id_fr` comes from the *attestation* (over the *real* block_id), so they differ → verifier bails.
+
+A collision that made these agree would require SHA-256 second preimage (infeasible). What the new check actually buys us:
+
+- **Fail-fast latency.** Skip Circuit 1a proof gen (~seconds) + IPC roundtrip when leaves are broken; error immediately instead of paying full aggregator cost + waiting for verifier.
+- **Release-build parity.** `debug_assert_eq!` at line ~222 is compiled out in release. The new `bail!` enforces the invariant in release too.
+- **Diagnostic clarity.** "GQL leaves inconsistent with block header" is more actionable than a verifier-side "step 2b failed".
+
+Shipped because it's five lines and closes the review item cleanly. Would not have been worth doing on its own merits.
+
+### #3 — Misleading self-verify comment **[Resolved (by refactor)]**
 
 The reviewed text ("Local checks already enforced by the Merkle equality assertion above") is gone from `bridge-prover-daemon/src/main.rs`. The current self-verify branch at line 586 is honest:
 
@@ -62,17 +80,25 @@ The reviewed text ("Local checks already enforced by the Merkle equality asserti
 
 And `bridge-prover-lib/src/live_driver/bk_update.rs`:388 explicitly names the runtime L2 check in `bk_update.rs` as the safety net rather than an "assertion above" that doesn't exist. Nothing further to do.
 
-### #4 — Layer verifier cross-check between C1a and C2 in one bundle **[Open]**
+### #4 — Layer-verifier cross-check between C1a and C2 in one bundle **[Resolved (by refactor)]**
 
-Grep for `layer_block_id | block_id.*hex.*layer | primary.*layer.*block_id` across `bridge-verifier-daemon/` returns no matches. `bridge-verifier-daemon/src/main.rs` still does not assert that the Circuit 1a-verified `block_id` matches the Circuit 2 `layer_block_id_hex` when both belong to the same bundle.
+**Surprise finding.** The 2026-07-22 IPC schema-v5 refactor (documented at `bridge-prover-lib/src/ipc.rs:19`) **removed** the separate `layer_block_id_hex` field:
 
-Individual public-input pinning + state-machine monotonicity partially cover the equivalent-effect attack, but the explicit cross-check is a `~5-line` addition that makes the invariant textual rather than emergent.
+> "to 5 when `layer_block_id_hex` was removed — after the 2026-07-22 Circuit 1 byte-order fix"
 
-**Suggested next step.** Add the assertion when the verifier is next touched. Low urgency (no observed attack path with our own prover), low cost.
+`ProofRequest` now carries a single `block_id_hex` (line 88) that feeds *both* Circuit 1a and Circuit 2 public inputs. At `bridge-verifier-daemon/src/main.rs:411` the verifier uses the same `block_id_fr` for both proofs' instances (comment lines 407-409 makes this explicit).
 
-### #5 — Pagination for `NEXT_UPDATE_AFTER_LOOKBACK` **[Resolved in this PR]**
+**This makes mismatched bundles unrepresentable in the IPC schema.** If prover packaged C1a for block X and C2 for block Y, only one `block_id_hex` can be sent — verifier uses it for both proofs' public inputs, so whichever proof was over the other block fails ZK verification.
 
-**Old code.** `bridge-gql-fetcher/src/bk_set_fetcher.rs:128-145` pulled the last 100 events via `query_bk_set_updates_light(100, false)`, filtered `height > cursor_seq_no`, took the min. If more than 100 rotations accumulated between `cursor_seq_no` and chain head, the true next-past-cursor event fell off the bottom of the window and the drain **silently advanced to a later event**, skipping every rotation between them.
+**Honest importance: ZERO.** Better than a runtime check would have been. The review's concern was valid at time of writing (schema still had two fields); the refactor closed it by construction.
+
+Nothing landed for this item.
+
+### #5 — Pagination for `NEXT_UPDATE_AFTER_LOOKBACK` **[Resolved (this PR)]**
+
+**Honest importance: HIGH.** The one actual bug in this review — a silent-skip of BK-update events, not caught by any downstream check.
+
+**Old code.** `bridge-gql-fetcher/src/bk_set_fetcher.rs:128-145` pulled the last 100 events via `query_bk_set_updates_light(100, false)`, filtered `height > cursor_seq_no`, took the min. If more than 100 rotations accumulated between `cursor_seq_no` and chain head, the true next-past-cursor event fell off the bottom of the window and the drain **silently advanced to a later event**, skipping every rotation between them. Prover's `stored_bk_set_commitment` would jump forward past valid rotations; the first bundle whose `leaves[2]` equaled a skipped rotation's L3 would then fail — but only after wasting the aggregator wrap. On shellnet BK rotation is off, so no observable failure today.
 
 **New code.**
 
@@ -89,7 +115,7 @@ Individual public-input pinning + state-machine monotonicity partially cover the
 - One new `#[ignore]` live test `next_update_after_paginates_from_genesis` that runs `next_update_after(client, 0)` against shellnet and pins the earliest-ever rotation to height 2 584 711 — regression coverage against the old silent-skip behavior (fetching last-100 with cursor 0 would have returned some recent event; the new paginated walk returns the true first).
 - Existing `#[ignore]` `next_update_after_finds_known_rotation` and `next_update_after_handles_cursor_inside_burst` remain green under the new impl.
 
-**Downstream.** `bridge-prover-daemon` and `bridge-verifier-daemon` both build clean; the drain-loop caller in `bridge-prover-lib/src/live_driver/bk_update.rs:45` still treats `Ok(None)` as "caught up, proceed", so semantics are preserved.
+**Downstream.** `bridge-prover-daemon` and `bridge-verifier-daemon` both build clean; the drain-loop caller in `bridge-prover-lib/src/live_driver/bk_update.rs` still treats `Ok(None)` as "caught up, proceed", so semantics are preserved.
 
 **Phase 2a (server-side `height_start` filter) not landed.** Would require a GQL schema check against a live AN node; deferred until we see per-drain-iteration latency worth the round-trip savings. The current implementation is O(1) round trip for the common near-head case anyway.
 
@@ -103,15 +129,17 @@ Individual public-input pinning + state-machine monotonicity partially cover the
 
 ### #6b — Parity test against real shellnet block **[Partially resolved]**
 
-There is no dedicated fixture-based parity test comparing an AN node's `leaves[3]` against a locally-recomputed `Poseidon(new_bk_set)`. However, the same invariant is enforced on **every** live drain step at `bridge-prover-lib/src/live_driver/bk_update.rs:133`:
+There is no dedicated fixture-based parity test comparing an AN node's `leaves[3]` against a locally-recomputed `Poseidon(new_bk_set)`. However, the same invariant is enforced on **every** live drain step at `bridge-prover-lib/src/live_driver/bk_update.rs`:
 
 ```rust
 if recomp_c != l3 { anyhow::bail!("Poseidon(new_pubkeys) != L3", ...) }
 ```
 
-So every shellnet drain the daemon runs is a parity check with immediate failure on drift. A dedicated fixture test would still be worth adding — it catches regressions in CI without needing a live network — but the review's underlying safety concern is covered.
+So every shellnet drain the daemon runs is a parity check with immediate failure on drift. A dedicated fixture test would still be worth adding — it catches regressions in CI without needing a live network, and would have caught things like the 8→16 leaf migration before shellnet did — but the review's underlying safety concern is covered.
 
-**Suggested next step.** When we next capture a shellnet bk-update block for regression fixtures, drop the 16 leaves + the parsed rotation blob into a JSON under `bridge-prover-lib/tests/fixtures/` and add a unit test that re-runs the drain's L3 replay. Low urgency.
+**Honest importance: MODEST.** Runtime coverage exists; fixture would be regression insurance during future schema changes.
+
+**Suggested next step.** When we next capture a shellnet bk-update block for regression fixtures, drop the 16 leaves + the parsed rotation blob into a JSON under `bridge-prover-lib/tests/fixtures/` and add a unit test that re-runs the drain's L3 replay.
 
 ### #7 — `probe_bk_updates` binary **[Open]**
 
@@ -121,15 +149,20 @@ Only referenced in `crates/an-bridge-prover/docs/bk_set_update_no_circuit3_plan.
 
 ## 3. What lands in this PR
 
-- `bridge-gql-fetcher/src/bk_set_fetcher.rs` — new `next_update_after` implementation + two pure helpers + 9 unit tests + 1 live test. `NEXT_UPDATE_AFTER_LOOKBACK` constant removed.
+- `bridge-gql-fetcher/src/bk_set_fetcher.rs` — new `next_update_after` implementation + two pure helpers + 9 unit tests + 1 live test. `NEXT_UPDATE_AFTER_LOOKBACK` constant removed. *(Item #5, real fix.)*
+- `bridge-prover-lib/src/live_driver/bk_update.rs` — `tree.root != upd_block.block_id` bail-out after tree construction. *(Item #2, diagnostic/fail-fast only.)*
 - This status doc.
 
 ## 4. What remains open
 
 Ordered by suggested priority:
 
-1. **#2 tree.root cross-check.** ~5 lines in `bk_update.rs`. Ships with #4 in one small PR when convenient.
-2. **#4 layer-verifier block_id cross-check.** ~5 lines in `bridge-verifier-daemon`.
-3. **#6b parity fixture.** ~50 lines + one JSON, next time we capture a fresh shellnet bk-update.
-4. **#1 layer-path `verify_gql_block_merkle`.** Defer unless we see actual GQL-corruption incidents.
-5. **#7 `probe_bk_updates`.** Defer until a rotating deploy exists.
+1. **#6b parity fixture.** ~50 lines + one JSON, next time we capture a fresh shellnet bk-update. Modest value.
+2. **#1 layer-path `verify_gql_block_merkle`.** Defer unless we see actual GQL-corruption incidents.
+3. **#7 `probe_bk_updates`.** Defer until a rotating deploy exists.
+
+## 5. Overall honest read
+
+Of the 7 review items, **one** was a real bug (#5, silent-skip). **Two** were resolved by unrelated refactors (#3 comment cleanup, #4 IPC-schema unification making mismatched bundles unrepresentable). **Two** are diagnostic/fail-fast improvements that don't change security posture (#2 landed here, #6b partially — runtime check exists, fixture doesn't). **Two** remain deferred as low-value operational polish (#1, #7).
+
+The review was useful primarily for surfacing #5; the remaining items were either already fixed by other work or shake out as defense-in-depth rather than correctness gaps.

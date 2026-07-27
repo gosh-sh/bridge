@@ -79,6 +79,24 @@ pub(super) async fn drive_next_bk_update(
             )
         })?;
     let tree = BlockIdMerkleTree::from_leaves(leaves);
+
+    // Structural sanity: the tree we just folded must agree with the
+    // block_id the node reports in the same GQL response. The verifier's
+    // step 2b (fold(root) == circuit-committed block_id_fr) already guards
+    // the security invariant end-to-end, so this is not a correctness fix.
+    // The value is fail-fast (skip Circuit 1a proof gen + IPC roundtrip on
+    // broken leaves) and release-build parity (the `debug_assert_eq!`
+    // further down is compiled out in release; this bail! stays in).
+    if tree.root != upd_block.block_id {
+        anyhow::bail!(
+            "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — \
+             GQL leaves inconsistent with block header",
+            upd_seqno,
+            hex::encode(tree.root),
+            hex::encode(upd_block.block_id),
+        );
+    }
+
     let l2 = tree.leaves[2];
     let l3 = tree.leaves[3];
 

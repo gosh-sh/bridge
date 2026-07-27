@@ -157,8 +157,9 @@ The library is designed to serve two independent binaries:
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
 - `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
-- `bk_set_fetcher` primitives for constructing the initial BK-set argument to `LiveProverDriver::new`:
-  - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default `file` bootstrap mode).
+- `LiveProverDriver::new(gql, key_manager, state, prover_bk_set, cfg)` — as of 2026-07-27 refactor, the ctor takes a `ProverBkSet` (persisted schema-versioned struct) directly, not a decoded `HashMap<u16, Vec<u8>>`. Pubkeys are read internally via `driver.prover_bk_set().pubkeys()?`. The old `bk_set: HashMap<u16, Vec<u8>>` parameter is gone.
+- `bk_set_fetcher` primitives for producing a `ProverBkSet` at daemon startup:
+  - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default cold-boot seed source).
   - `bk_set_at_height(client, genesis, target_height)` — fold `bkSetUpdates` (height ≤ target) onto a genesis snapshot, for cold-start against a rotating chain long past genesis. Enabled by `BRIDGE_BK_SET_BOOTSTRAP=fold_at_height`.
   - `next_update_after(client, cursor)` — cursor-walk the delta log for post-startup rotations (used by `poll_next_bk_update`).
   - `fold_bk_updates` / `parse_bk_set_changes_pub` / `normalize_bk_set_pubkeys` — lower-level helpers exposed for daemons that manage the BK set themselves.
@@ -248,8 +249,8 @@ Then re-run `./target/release/bootstrap_hermez_srs`.
 
 | Env var | Used by | Default | Meaning |
 |---|---|---|---|
-| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Both daemons use it for BK-set fetch (fall back to `BRIDGE_BK_SET_CONFIG` on failure). |
-| `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
+| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Used for bundle fetch, attestation polling and `bkSetUpdates` diffs at runtime. **Not** consulted for the BK set at bootstrap — startup is file-first (`state/prover_bk_set.json` → `BRIDGE_BK_SET_CONFIG` on cold boot). |
+| `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. Consulted only on cold boot (as the seed for `state/prover_bk_set.json`) and by the startup guard for commitment-mismatch detection. See [Startup guard & cold-boot mismatch](#startup-guard--cold-boot-mismatch-post-2026-07-27) and [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
 | `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 512), else the daemon refuses to start. |
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
@@ -306,9 +307,34 @@ After first init the seed file is the single source of truth — the verifier do
 
 The BK set is a **circuit witness**, not a circuit constant — only `MAX_SIGNERS = 300` (compile-time, `bridge-prover-lib/src/keys.rs`) shapes the keys. **Rotation does not require regenerating `primary_*.bin` / `layer_*.bin`** as long as the new set still fits ≤ `MAX_SIGNERS`.
 
-Both daemons fetch the set **once at startup** and cache it for the whole run — there is no `bkSetUpdates` subscription. If the on-chain set rotates mid-run, the prover will silently skip key blocks signed by indices it doesn't recognise (`signers [k] not in BK set, skipping`).
+Post 2026-07-27 refactor there is a **single source of truth** — `state/prover_bk_set.json` — driven by two paths:
 
-On rotation: **stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`), restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
+- **At bootstrap:** file-first startup (see [Startup guard & cold-boot mismatch](#startup-guard--cold-boot-mismatch-post-2026-07-27) below). If `state/prover_bk_set.json` already exists, it wins outright; `BRIDGE_BK_SET_CONFIG` is only read on cold boot (empty `state/`).
+- **At runtime:** the driver consumes GQL `bkSetUpdates` via `poll_next_bk_update` + `ack_bk_update`, which rewrites `state/prover_bk_set.json` and refreshes the cached Poseidon Fr. On shellnet the diff stream is currently empty (rotation OFF per Sehor 2026-07-08); on local devnet each fresh chain regenerates keys, but the runtime-diff path never fires because the daemon is restarted alongside the chain.
+
+**Runtime rotation (both daemons kept running):** the driver ingests the GQL diff and rewrites `state/prover_bk_set.json`; **do NOT** stop daemons or wipe `state/`.
+
+**Restart after a chain-side key rotation:** stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`), restart both. The startup guard will catch a stale-`state/` mismatch at seq 0 and tell you to `rm -rf ./state/`. See the next subsection.
+
+### Startup guard & cold-boot mismatch (post 2026-07-27)
+
+The daemon runs `verify_prover_bk_set_matches_config_file` at startup: if `BRIDGE_BK_SET_CONFIG` file exists, its Poseidon commitment is compared to `state/prover_bk_set.json.commitment`. Four outcomes:
+
+| Case | State cursor | Config file | Commitment | Action |
+|---|---|---|---|---|
+| A — fresh chain + stale state | `last_applied_update_seq_no == 0` | present | mismatch | **BAIL** with "wipe `./state/`" message. Fresh chain regenerated the BK set; `state/` from prior chain instance is stale. Fix: `rm -rf ./state/` → cold boot re-seeds from the config file. |
+| B — chain rotated past genesis snapshot | cursor > 0 | present | mismatch | Info log only, continue. Expected on shellnet after any partner re-genesis; `state/` is the authoritative post-rotation truth. |
+| C — config file absent | any | missing | n/a | Silent pass. Warm restarts without the seed file present are legal. |
+| D — match | any | present | equal | OK. |
+
+**Rules of thumb for the operator (developer running `cargo run`):**
+
+- **Case A (seq-0 bail on local devnet):** `rm -rf ./state/` and restart. The seed file (`bk_set.local.json`) is already correct — the orchestrator regenerated it via `materialize_bk_set_from_node_config` at the start of the E2E script. No JSON edits needed.
+- **Case A on shellnet:** shellnet is Case A only if the seed file was rebuilt from the wrong source (e.g., `zs_bk_set` instead of `keys_config.json.bk_nodes[i].bls_pubkey`). Fix the seed file, restart. Do **not** wipe state.
+- **Wrong network's seed file selected:** fix `BRIDGE_BK_SET_CONFIG`, restart. No JSON edits, no state wipe.
+- **Never hand-edit `state/prover_bk_set.json`** — it is driven exclusively by the cold-boot seed and runtime GQL diffs.
+
+The two JSONs (`state/prover_bk_set.json` and `bk_set.*.json`) are **not** kept in sync after cold boot. The seed file is a bootstrap input; the state file is the working record.
 
 ### BK-set resync on cluster rebuild — automatic (local devnet only)
 
@@ -318,7 +344,7 @@ A common concern for local-devnet operators: *after `make stop && make run` the 
 
 The committed `bk_set.local.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**.
 
-*(Historical note: prior to 2026-07-22 the daemons preferred a GraphQL `bkSetUpdates` replay over the file. That path was disabled after it was found to reconstruct an incorrect set on any chain with rotations — see the shellnet section below. The file is now the only source at bootstrap; `bk_set_at_height` is the correct primitive for distant-block cold starts.)*
+*(Historical note: prior to 2026-07-22 the daemons preferred a GraphQL `bkSetUpdates` replay over the file. That path was disabled after it was found to reconstruct an incorrect set on any chain with rotations — see the shellnet section below. The 2026-07-27 refactor further inverted the startup: `state/prover_bk_set.json` is now the single source of truth, and `BRIDGE_BK_SET_CONFIG` is consulted only on cold boot and by the startup guard. `bk_set_at_height` remains the correct primitive for distant-block cold starts.)*
 
 **Shellnet is different — no auto-resync.** Shellnet has BK-set rotation *disabled* (Sehor confirmed 2026-07-08 for the `poseidon_dex@7ffec27` deployment): the genesis committee is fixed for the life of the chain and the GraphQL `bkSetUpdates` stream stays empty forever. The fetcher therefore always falls through to `bk_set.shellnet.json`, which is **hand-maintained** by transcribing the partner-posted `keys_config.json` (specifically the `bk_nodes[i].bls_pubkey` fields). There is no orchestrator materialiser for it. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson) for the full picture.
 
@@ -344,7 +370,7 @@ First-ever build: 10–20 min. Incremental: seconds-to-minutes via Docker cache.
 
 ### Step 2 — Sync `bk_set.local.json` to the cluster's BLS keys
 
-The daemons fall back to the file named by `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) if the GQL `bkSetUpdates` race loses at startup. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
+The daemons cold-boot from `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) when `state/prover_bk_set.json` is absent, and the startup guard also compares the two on every restart. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
 
 ```bash
 cd /path/to/acki-nacki-to-eth-bridge-halo2-prover

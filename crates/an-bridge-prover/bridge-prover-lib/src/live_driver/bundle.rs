@@ -62,12 +62,22 @@ pub(super) async fn drive_next_bundle(
         }
     };
 
+    // Decode the prover's BK pubkey table once from `prover_bk_set`
+    // (the sole in-driver source of truth). `pubkeys()` re-hexes
+    // ~N × 48 bytes — negligible next to ~75-second proof generation
+    // that follows. Owned local so it coexists with `key_manager_mut()`
+    // borrows below without an extra clone.
+    let bk_set = driver
+        .prover_bk_set()
+        .pubkeys()
+        .context("prover_bk_set.pubkeys() decode failed")?;
+
     // Defensive BK-set-membership warning. In-circuit checks are
     // authoritative; this surfaces obviously-stale sets earlier.
     let signer_indices = evidence.signer_indices();
     let missing: Vec<u16> = signer_indices
         .iter()
-        .filter(|idx| !driver.bk_set().contains_key(idx))
+        .filter(|idx| !bk_set.contains_key(idx))
         .copied()
         .collect();
     if !missing.is_empty() {
@@ -92,7 +102,6 @@ pub(super) async fn drive_next_bundle(
                 .key_manager_mut()
                 .load_primary_pk()
                 .with_context(|| format!("key block {}: load_primary_pk", target_seqno))?;
-            let bk_set = driver.bk_set().clone();
             let res = prover::generate_primary_proof(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
@@ -108,7 +117,6 @@ pub(super) async fn drive_next_bundle(
                 .key_manager_mut()
                 .load_fallback_pk()
                 .with_context(|| format!("key block {}: load_fallback_pk", target_seqno))?;
-            let bk_set = driver.bk_set().clone();
             let res = prover::generate_fallback_proof(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,

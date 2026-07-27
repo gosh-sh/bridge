@@ -424,7 +424,11 @@ pub struct LiveProverDriver {
     key_manager: KeyManager,
     state: BridgeState,
     prover_bk_set: ProverBkSet,
-    bk_set: HashMap<u16, Vec<u8>>,
+    /// Cached Poseidon commitment of `prover_bk_set` as `Fr`. Kept as a
+    /// field (not derived per-poll) because the underlying hash requires
+    /// BLS-G1 deserialization of every pubkey plus a full Poseidon fold —
+    /// re-computing per bundle poll would waste real cycles. Refreshed in
+    /// `ack_bk_update` alongside `prover_bk_set.rotate`.
     bk_set_commitment_fr: Fr,
     cfg: LiveProverConfig,
     stage: DriverStage,
@@ -440,10 +444,10 @@ impl LiveProverDriver {
     ///   driver does NOT eagerly re-load keys — it drives on-demand load /
     ///   unload during proof generation to stay within the single-PK memory
     ///   envelope.
-    /// * `bk_set` is normalized to 48-byte compressed BLS pubkeys and its
-    ///   Poseidon commitment agrees with `state.stored_bk_set_commitment`
-    ///   (on a warm start) or with the seed that will be applied (on a
-    ///   cold start).
+    /// * `prover_bk_set` is the sole authoritative BK-pubkey source. The
+    ///   ctor re-derives its Poseidon commitment from `prover_bk_set.pubkeys()`
+    ///   and cross-checks against `state.stored_bk_set_commitment` on a
+    ///   warm start.
     ///
     /// The `seed_policy` inside `cfg` is resolved lazily on the first
     /// poll — nothing is fetched or applied at construction time.
@@ -459,10 +463,9 @@ impl LiveProverDriver {
         key_manager: KeyManager,
         state: BridgeState,
         prover_bk_set: ProverBkSet,
-        bk_set: HashMap<u16, Vec<u8>>,
         cfg: LiveProverConfig,
     ) -> DriverResult<Self> {
-        Self::new_inner(gql, key_manager, state, prover_bk_set, bk_set, cfg)
+        Self::new_inner(gql, key_manager, state, prover_bk_set, cfg)
             .map_err(DriverError::StateInconsistent)
     }
 
@@ -475,11 +478,24 @@ impl LiveProverDriver {
         key_manager: KeyManager,
         state: BridgeState,
         prover_bk_set: ProverBkSet,
-        bk_set: HashMap<u16, Vec<u8>>,
         cfg: LiveProverConfig,
     ) -> anyhow::Result<Self> {
+        // Derive Fr + bytes commitment from prover_bk_set — the sole
+        // pubkey source. Also serves as a self-consistency check: if the
+        // persisted `commitment` field disagrees with the recomputed hash
+        // of `pubkeys_hex`, the file was hand-edited or corrupted.
+        let pubkeys = prover_bk_set
+            .pubkeys()
+            .context("prover_bk_set.pubkeys() decode failed")?;
         let (bk_set_commitment_fr, bk_set_commitment_bytes) =
-            poseidon::compute_bk_set_poseidon(&bk_set);
+            poseidon::compute_bk_set_poseidon(&pubkeys);
+        anyhow::ensure!(
+            bk_set_commitment_bytes == prover_bk_set.commitment,
+            "prover_bk_set self-inconsistent: pubkeys hash to {} but stored \
+             commitment is {}",
+            hex::encode(bk_set_commitment_bytes),
+            hex::encode(prover_bk_set.commitment),
+        );
 
         // Sanity check: on a warm start the caller's `state` must agree with
         // its `bk_set`. Refuse to run silently in a mixed state.
@@ -521,7 +537,6 @@ impl LiveProverDriver {
             key_manager,
             state,
             prover_bk_set,
-            bk_set,
             bk_set_commitment_fr,
             cfg,
             stage,
@@ -699,10 +714,11 @@ impl LiveProverDriver {
                 artifacts.block_seq_no,
             )
             .context("ack_bk_update: prover_bk_set.rotate failed")?;
-        // Refresh in-memory pubkey table + Poseidon commitment so
-        // subsequent bundle / bk-update proofs use the rotated set.
-        self.bk_set = artifacts.new_pubkeys.clone();
-        let (new_fr, _) = poseidon::compute_bk_set_poseidon(&self.bk_set);
+        // Refresh the cached Fr commitment so subsequent bundle /
+        // bk-update proofs use the rotated set. Callers reading the
+        // rotated pubkey table go through `prover_bk_set.pubkeys()`
+        // — no separate in-memory table to sync any more.
+        let (new_fr, _) = poseidon::compute_bk_set_poseidon(&artifacts.new_pubkeys);
         self.bk_set_commitment_fr = new_fr;
         Ok(())
     }
@@ -839,9 +855,6 @@ impl LiveProverDriver {
     }
     pub(crate) fn state(&self) -> &BridgeState {
         &self.state
-    }
-    pub(crate) fn bk_set(&self) -> &HashMap<u16, Vec<u8>> {
-        &self.bk_set
     }
     pub(crate) fn bk_set_commitment_fr(&self) -> Fr {
         self.bk_set_commitment_fr

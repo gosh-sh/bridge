@@ -36,7 +36,6 @@ use bridge_prover_lib::live_driver::{
 };
 use bridge_poseidon as poseidon;
 use bridge_prover_lib::prover_bk_set::ProverBkSet;
-use bridge_prover_lib::Fr;
 use bridge_prover_lib::THINNING_FACTOR_P;
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 
@@ -44,6 +43,8 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use bridge_prover_lib::bridge_state::BundleResult;
 #[cfg(feature = "self-verify")]
 use bridge_prover_lib::verifier;
+#[cfg(feature = "self-verify")]
+use bridge_prover_lib::Fr;
 
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
@@ -108,37 +109,80 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Wire dependencies -------------------------------------------------
     let gql = gql_client::create_client(&gql_endpoint)?;
-    let bk_set_from_gql = load_bk_set(&gql, explicit_bootstrap_seqno).await?;
-    let (bk_commitment_fr, _) = poseidon::compute_bk_set_poseidon(&bk_set_from_gql);
-    info!(
-        "BK set (GQL): {} signers, commitment={}",
-        bk_set_from_gql.len(),
-        hex::encode(bk_commitment_fr.to_repr())
-    );
-
-    info!("loading keys...");
-    let mut key_manager = KeyManager::new(Path::new(PARAMS_DIR));
-    key_manager.ensure_primary_keys(&bk_set_from_gql)?;
-    key_manager.ensure_fallback_keys(&bk_set_from_gql)?;
-    key_manager.ensure_layer_keys()?;
-    info!("keys ready (primary, fallback, layer)");
-
     let state = BridgeState::load(STATE_FILE, HISTORY_WINDOW_SIZE as usize)?;
     info!(
         "state: initialized={}, last_key_block={}",
         state.initialized, state.stored_last_seen_block_seq_no
     );
 
-    let prover_bk_set =
-        load_or_bootstrap_prover_bk_set(&state, &bk_set_from_gql, bk_commitment_fr)?;
+    // Resolve prover_bk_set: warm-load from disk if present, else
+    // cold-seed from BRIDGE_BK_SET_CONFIG (bk_set.local.json /
+    // bk_set.shellnet.json / fold_at_height).
+    //
+    // Once `prover_bk_set.json` exists, IT is the sole source of truth
+    // for the BK-pubkey table — intermediate rotations advance it via
+    // the bk-update lane in `LiveProverDriver`. `bk_set.local.json` is
+    // only read on first-ever startup.
+    let prover_bk_set = match ProverBkSet::load(PROVER_BK_SET_FILE)? {
+        Some(loaded) => {
+            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
+                anyhow::bail!(
+                    "prover_bk_set.json commitment {} disagrees with \
+                     prover_state.json {} — delete BOTH files or restore \
+                     them from a paired backup",
+                    hex::encode(loaded.commitment),
+                    hex::encode(state.stored_bk_set_commitment),
+                );
+            }
+            info!(
+                "prover_bk_set: loaded {} signers, last_applied_update_seq_no={}",
+                loaded.pubkeys_hex.len(),
+                loaded.last_applied_update_seq_no,
+            );
+            loaded
+        }
+        None => {
+            // Cold boot: this is the ONLY code path that reads the seed
+            // file directly. Once saved, `prover_bk_set.json` takes over.
+            let bk_set_from_file = load_bk_set(&gql, explicit_bootstrap_seqno).await?;
+            let pbs = ProverBkSet::from_pubkeys(&bk_set_from_file, 0);
+            pbs.save(PROVER_BK_SET_FILE)?;
+            info!(
+                "prover_bk_set: cold-boot seeded {} signers → {}",
+                pbs.pubkeys_hex.len(),
+                PROVER_BK_SET_FILE,
+            );
+            pbs
+        }
+    };
 
-    // Re-anchor in-memory bk_set to the persisted prover_bk_set. Once a paired
-    // prover_bk_set exists on disk, IT (not the GQL-fresh set) is the source
-    // of truth for "what set has been formally applied to the contract mirror"
-    // — intermediate rotations get drained via the bk-update path.
+    // Guard against the "fresh chain + stale ./state/" footgun without a
+    // GQL round-trip: if BRIDGE_BK_SET_CONFIG points to a readable file,
+    // compare its commitment against `prover_bk_set.commitment`. On
+    // devnet, `bk_set.local.json` gets rewritten every time zerostate is
+    // regenerated — mismatch + prover never rotated (`last_applied=0`)
+    // is a strong signal that state/ is stale relative to the current
+    // chain instance and must be wiped. On shellnet the file is a
+    // genesis snapshot, so mismatch + prover has rotated is expected
+    // and only logged.
+    verify_prover_bk_set_matches_config_file(&prover_bk_set)?;
+
     let bk_set = prover_bk_set
         .pubkeys()
         .context("prover_bk_set.pubkeys()")?;
+    let (bk_commitment_fr, _) = poseidon::compute_bk_set_poseidon(&bk_set);
+    info!(
+        "BK set: {} signers, commitment={}",
+        bk_set.len(),
+        hex::encode(bk_commitment_fr.to_repr())
+    );
+
+    info!("loading keys...");
+    let mut key_manager = KeyManager::new(Path::new(PARAMS_DIR));
+    key_manager.ensure_primary_keys(&bk_set)?;
+    key_manager.ensure_fallback_keys(&bk_set)?;
+    key_manager.ensure_layer_keys()?;
+    info!("keys ready (primary, fallback, layer)");
 
     let seed_policy = match (explicit_bootstrap_seqno, state.initialized) {
         (_, true) => SeedPolicy::Resume,
@@ -151,7 +195,6 @@ async fn main() -> anyhow::Result<()> {
         key_manager,
         state,
         prover_bk_set,
-        bk_set,
         LiveProverConfig {
             seed_policy,
             ..Default::default()
@@ -334,47 +377,75 @@ async fn load_bk_set(
     }
 }
 
-fn load_or_bootstrap_prover_bk_set(
-    state: &BridgeState,
-    bk_set: &HashMap<u16, Vec<u8>>,
-    bk_commitment_fr: Fr,
-) -> anyhow::Result<ProverBkSet> {
-    match ProverBkSet::load(PROVER_BK_SET_FILE)? {
-        Some(loaded) => {
-            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
-                anyhow::bail!(
-                    "prover_bk_set.json commitment {} disagrees with prover_state.json {} — \
-                     delete BOTH files or restore them from a paired backup",
-                    hex::encode(loaded.commitment),
-                    hex::encode(state.stored_bk_set_commitment),
-                );
-            }
-            info!(
-                "prover_bk_set: loaded {} signers, last_applied_update_seq_no={}",
-                loaded.pubkeys_hex.len(),
-                loaded.last_applied_update_seq_no,
-            );
-            Ok(loaded)
-        }
-        None => {
-            let pbs = ProverBkSet::from_pubkeys(bk_set, 0);
-            let bk_hash_bytes: [u8; 32] = bk_commitment_fr.to_repr();
-            anyhow::ensure!(
-                pbs.commitment == bk_hash_bytes,
-                "ProverBkSet commitment {} != poseidon::compute_bk_set_poseidon {} — \
-                 Poseidon-parameter mismatch?",
-                hex::encode(pbs.commitment),
-                hex::encode(bk_hash_bytes),
-            );
-            pbs.save(PROVER_BK_SET_FILE)?;
-            info!(
-                "prover_bk_set: bootstrapped {} signers, saved to {}",
-                pbs.pubkeys_hex.len(),
-                PROVER_BK_SET_FILE,
-            );
-            Ok(pbs)
-        }
+/// File-first startup guard: if `BRIDGE_BK_SET_CONFIG` points to a
+/// readable file, compare its Poseidon commitment against
+/// `prover_bk_set.commitment`. Runs before any GQL call — cheap and
+/// catches the common devnet stale-state footgun immediately.
+///
+/// Behaviour:
+/// * Match — silent pass.
+/// * File missing — silent pass (config was hand-set to a path we don't
+///   own; the runtime L2 check in `bk_update.rs` remains as a safety net).
+/// * Mismatch AND `last_applied_update_seq_no == 0` — BAIL. The prover
+///   has never processed a rotation, so a fresh chain overwriting the
+///   seed file while `./state/` persisted from the previous chain
+///   instance is the overwhelmingly likely explanation.
+/// * Mismatch AND `last_applied_update_seq_no > 0` — INFO log only.
+///   Expected on any chain where BK rotation is enabled and the seed
+///   file is only the genesis snapshot; the prover has legitimately
+///   moved past it via the bk-update lane.
+fn verify_prover_bk_set_matches_config_file(
+    prover_bk_set: &ProverBkSet,
+) -> anyhow::Result<()> {
+    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
+        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
+    if !Path::new(&bk_set_config).exists() {
+        info!(
+            "chain-config check skipped: {} not found (this is fine on \
+             warm restarts where the file is intentionally absent)",
+            bk_set_config,
+        );
+        return Ok(());
     }
+    let file_pubkeys = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(
+        &bk_set_config,
+    )
+    .with_context(|| format!("load {} for startup guard", bk_set_config))?;
+    let (_, file_commitment) = poseidon::compute_bk_set_poseidon(&file_pubkeys);
+    if file_commitment == prover_bk_set.commitment {
+        info!(
+            "chain-config check OK: {} matches prover_bk_set.commitment",
+            bk_set_config,
+        );
+        return Ok(());
+    }
+    if prover_bk_set.last_applied_update_seq_no == 0 {
+        anyhow::bail!(
+            "chain-config check FAILED:\n  \
+             {} commitment: {}\n  \
+             prover_bk_set:      {}\n\
+             prover_bk_set.last_applied_update_seq_no == 0 — the prover \
+             has never processed a rotation, so this almost certainly \
+             means the chain was re-initialised (fresh devnet zerostate \
+             rewrote {}) while ./state/ persisted from the previous \
+             chain instance. Wipe ./state/ and restart, or restore the \
+             paired {} from backup.",
+            bk_set_config,
+            hex::encode(file_commitment),
+            hex::encode(prover_bk_set.commitment),
+            bk_set_config,
+            bk_set_config,
+        );
+    }
+    info!(
+        "chain-config check: {} commitment {} != prover_bk_set {} (cursor {}) \
+         — prover has rotated past the genesis snapshot; not an issue",
+        bk_set_config,
+        hex::encode(file_commitment),
+        hex::encode(prover_bk_set.commitment),
+        prover_bk_set.last_applied_update_seq_no,
+    );
+    Ok(())
 }
 
 // -------------------------------------------------------------------------

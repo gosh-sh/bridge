@@ -117,6 +117,40 @@ Standing references to `poseidon-proof` are now only: `Cargo.toml` workspace mem
 
 ---
 
+## NB-Q7 — Relayer 256-byte back-compat gate still lets malformed Groth16 blobs pass local validation
+
+`bridge-relayer-daemon/src/proof_validation.rs:23,41` still short-circuits with:
+
+```rust
+if proof.len() == GROTH16_PROOF_SIZE { return Ok(()); }   // GROTH16_PROOF_SIZE = 256
+```
+
+for both `validate_attestation_proof` and `validate_layer_hashes_proof`. Any 256-byte blob passes local validation and only reverts on-chain — losing us the pre-submit sanity check for the (now overwhelmingly common) SHPLONK path. The SHPLONK aggregator wrap has otherwise landed (`aggregator.rs`, `SHPLONK_MIN_WITHDRAWAL_INSTANCES`, C4 wrap path). Same shape gate lingers in `withdrawal.rs:78` (`if raw.len() != GROTH16_PROOF_SIZE && raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES`).
+
+**Questions.**
+
+1. All three back-compat gates safe to remove — `proof_validation.rs:23`, `proof_validation.rs:41`, and the `!= 256` disjunct in `withdrawal.rs:78`? Any deployed Sepolia bridge still expecting a real 256-byte Groth16 payload?
+2. If any deployed instance still needs the back-compat path, gate it behind a `--accept-legacy-groth16` CLI flag defaulted off so mainnet/shellnet get strict SHPLONK-only validation.
+3. Companion stale strings: `withdraw_prover.rs:28,81` module docstring + `MockWithdrawalProver` `[0xAA; 256]` fill; `bin/relayer.rs:1447` "proof not 256-B Groth16" log. Regenerate the mock at SHPLONK length in the same PR?
+
+---
+
+## NB-Q8 — `WIRE_WITHDRAW_BY_PROOF` defaults to `false` in deploy scripts even though the C4 `.bin` now exists
+
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` is committed, `ShplonkDeployLib.deployWithdrawalAdapter()` is ready, `BridgeWithdrawalAggregatorVerifier.sol` compiles — but both deploy scripts still make Circuit 4 opt-in:
+
+- `DeployShellnetE2EBridge.s.sol:52` — `bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);`
+- `DeployRealBridge.s.sol:123` — same; `_buildWithdrawConfig(wire=false, …)` returns `bridgeWithdrawalVerifier: address(0)`.
+
+A default-off flag was a stopgap for the missing artefact. That artefact now exists, so a production deploy that forgets to set the env var silently ships with `withdrawByProof` disabled (reverting with `WithdrawByProofDisabled`).
+
+**Questions.**
+
+1. Flip the default to `true` (or remove the flag entirely) in both scripts, making the C4 aggregator mandatory? A deploy that intentionally omits withdraw wiring seems like a footgun, not a valid production shape.
+2. If the flag stays for CI convenience, at minimum have the `!wire` branch of `_buildWithdrawConfig` `revert` on non-test networks — silent `address(0)` wiring is the failure mode we want to prevent.
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

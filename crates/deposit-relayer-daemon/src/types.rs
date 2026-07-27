@@ -172,6 +172,43 @@ impl DepositPublicInputs {
     }
 }
 
+/// Parse and validate an `AN_DAPP_ID` hex string (optional `0x` prefix).
+///
+/// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
+/// `0x`-prefixed hex form used in proofs and `state.json`.
+///
+/// When `allow_zero` is false, a zero dappId is rejected — live daemon paths
+/// must set an explicit non-zero tag (QC-OFF-09).
+pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String, RelayerError> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID is empty; set --dapp-id / AN_DAPP_ID to a hex UInt256",
+        ));
+    }
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' is not valid hex"
+        )));
+    }
+    if hex.len() > 64 {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' exceeds 32 bytes (got {} hex chars)",
+            hex.len()
+        )));
+    }
+    let value = U256::from_str_radix(hex, 16)
+        .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
+    if value.is_zero() && !allow_zero {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; \
+             set AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
+        ));
+    }
+    Ok(format!("{value:#x}"))
+}
+
 /// The three operands the AN-side `ZKHALO2VERIFYWITHVK` opcode consumes,
 /// plus the decoded public inputs for building the `finalizeDeposit` call.
 ///
@@ -249,6 +286,32 @@ impl DepositProofBundle {
                 "proof anAccount {:#x} != event anAccount {:#x}",
                 self.parsed.an_account(),
                 U256::from_be_slice(event.an_account.as_slice())
+            )));
+        }
+        if self.parsed.amount != event.amount {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof amount {:#x} != event amount {:#x}",
+                self.parsed.amount, event.amount
+            )));
+        }
+        let expected_contract = U256::from_be_bytes::<32>({
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(event.source_contract.as_slice());
+            buf
+        });
+        if self.parsed.contract_address != expected_contract {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof contractAddress {:#x} != event source_contract {}",
+                self.parsed.contract_address, event.source_contract
+            )));
+        }
+        let exp_bh_hi = U256::from_be_slice(&event.block_hash.as_slice()[0..16]);
+        let exp_bh_lo = U256::from_be_slice(&event.block_hash.as_slice()[16..32]);
+        if self.parsed.block_hash_high != exp_bh_hi || self.parsed.block_hash_low != exp_bh_lo {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof blockHash {:#x} != event blockHash {:#x}",
+                (self.parsed.block_hash_high << 128) | self.parsed.block_hash_low,
+                U256::from_be_slice(event.block_hash.as_slice())
             )));
         }
         Ok(())
@@ -343,5 +406,43 @@ mod tests {
         let mut wrong_acct = event.clone();
         wrong_acct.an_account = B256::repeat_byte(0x66);
         assert!(bundle.check_binds_to(&wrong_acct).is_err());
+
+        let mut wrong_amount = event.clone();
+        wrong_amount.amount = U256::from(999u64);
+        assert!(bundle.check_binds_to(&wrong_amount).is_err());
+
+        let mut wrong_contract = event.clone();
+        wrong_contract.source_contract = Address::repeat_byte(0x99);
+        assert!(bundle.check_binds_to(&wrong_contract).is_err());
+
+        let mut wrong_block = event.clone();
+        wrong_block.block_hash = B256::repeat_byte(0x88);
+        assert!(bundle.check_binds_to(&wrong_block).is_err());
+    }
+
+    #[test]
+    fn dapp_id_validation_accepts_hex() {
+        assert_eq!(
+            parse_and_validate_dapp_id("0x1a1a1a1a1a", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+        assert_eq!(
+            parse_and_validate_dapp_id("1A1A1A1A1A", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+    }
+
+    #[test]
+    fn dapp_id_validation_rejects_garbage_and_overwidth() {
+        assert!(parse_and_validate_dapp_id("", true).is_err());
+        assert!(parse_and_validate_dapp_id("zz", true).is_err());
+        assert!(parse_and_validate_dapp_id(&"ab".repeat(33), true).is_err());
+    }
+
+    #[test]
+    fn dapp_id_zero_rejected_unless_allowed() {
+        assert!(parse_and_validate_dapp_id("0", false).is_err());
+        assert!(parse_and_validate_dapp_id("0x0", false).is_err());
+        assert_eq!(parse_and_validate_dapp_id("0", true).unwrap(), "0x0");
     }
 }

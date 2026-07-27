@@ -82,11 +82,12 @@ pub use source::{
     resolve_from_block, AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource,
     BRIDGE_DEPLOY_BLOCK_ENV,
 };
-pub use state::RelayerState;
+pub use state::{DeploymentIdentity, RelayerState, StateLock};
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
-    DepositEvent, DepositProofBundle, DepositPublicInputs, NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,
+    parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,
+    NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,
 };

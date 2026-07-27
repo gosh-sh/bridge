@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Number of public inputs the deposit circuit commits to. Must match
+/// `DepositEventCircuitV2::num_instance()` and the AN-side opcode layout.
+pub const NUM_PUBLIC_INPUTS: usize = 11;
+
 /// Deposit event data from Ethereum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositEventData {

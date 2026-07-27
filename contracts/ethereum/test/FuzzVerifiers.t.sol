@@ -192,7 +192,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     /// @notice Any valid deposit amount should succeed and update state correctly
     function testFuzz_DepositAmountInvariants(uint256 amount) public {
-        amount = bound(amount, 1, 100 * UsdcTestLib.UNIT);
+        amount = bound(amount, 1, type(uint64).max);
 
         address user = address(uint160(uint256(keccak256(abi.encodePacked(amount)))));
         usdc.mint(user, amount);
@@ -217,7 +217,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     /// @notice Amounts outside valid range must revert
     function testFuzz_DepositInvalidAmountReverts(uint256 amount) public {
-        vm.assume(amount == 0 || amount > 100 * UsdcTestLib.UNIT);
+        vm.assume(amount == 0 || amount > type(uint64).max);
         address user = address(0xBEEF);
         usdc.mint(user, type(uint256).max);
         vm.startPrank(user);

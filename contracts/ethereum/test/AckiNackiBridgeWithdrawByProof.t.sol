@@ -598,19 +598,17 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(usdc.balanceOf(weird), before + 1 * UsdcTestLib.UNIT, "weird recipient credited");
     }
 
-    function test_withdrawByProof_zeroRecipientWorks() public {
-        // address(0) is a valid 20-byte address. Whether the bridge *should*
-        // pay address(0) is a policy question (today: yes — the circuit said
-        // so). This test pins the current behaviour so a future deliberate
-        // change shows up as a test break.
+    function test_withdrawByProof_zeroRecipient_reverts() public {
+        // WD-Q2: address(0) is rejected so a Circuit-4 event binding
+        // recipient=0 cannot strand forever against real USDC.
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("zeroAddr")));
         pub.recipientHi = 0;
         pub.recipientLo = 0;
 
-        uint256 before = usdc.balanceOf(address(0));
+        vm.expectRevert(AckiNackiBridge.InvalidRecipient.selector);
         bridge.withdrawByProof(_dummyProof(), pub);
-        assertEq(usdc.balanceOf(address(0)), before + 1 * UsdcTestLib.UNIT);
+        assertFalse(bridge.isNullifierUsed(pub.nullifier));
     }
 
     // ─────────────────────────────────────────────────────────────────────

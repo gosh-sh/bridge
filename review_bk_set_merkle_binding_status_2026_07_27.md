@@ -2,6 +2,12 @@
 
 **Scope.** Per-item status of the 7 recommendations from the 2026-06-08 review of the AN-side BK-set update Merkle binding, checked against `crates/an-bridge-prover/` at HEAD (branch `feture/block_id_16_leafs_support_plus_exta_bridge_prover_refactoring_and_cleaning`).
 
+## Changelog
+
+- **2026-07-27 (initial).** #5 landed as real fix (pagination). #2 landed as diagnostic. #3/#4 confirmed resolved by earlier refactors. #6a confirmed already covered by existing tests. #6b noted as partial (runtime check exists, no fixture). #1/#7 open, deferred.
+- **2026-07-27 (later, same day).** #6b upgraded to resolved — landed fixture-driven parity test + capture example (skip-on-missing-fixture behavior; fixture JSON itself needs one shellnet round-trip to commit).
+- **2026-07-27 (later, same day).** #7 upgraded to resolved — landed `probe_bk_updates` binary ahead of shellnet BK rotation being enabled. Quickstart at `crates/an-bridge-prover/bridge-prover-daemon/docs/PROBE_BK_UPDATES.md`. Only #1 remains open.
+
 ---
 
 ## 0. Structural drift since the review
@@ -20,13 +26,13 @@ Ranked by honest severity — most items in this review are defense-in-depth / d
 | # | Recommendation | Status | Honest importance |
 |---|---|---|---|
 | 5 | `NEXT_UPDATE_AFTER_LOOKBACK = 100` → pagination | **Resolved (this PR)** | **Real bug.** Silent-skip of BK-updates if prover ever lagged >100 rotation events. Not observable on shellnet (rotation off); a footgun the moment a rotating deploy runs. |
-| 6b | Parity test: shellnet block → `Poseidon(new_bk_set) == leaves[3]` | **Partially resolved** — enforced at runtime every drain step, no fixture test | Modest. Runtime check is already load-bearing; a fixture test would guard against silent drift if the AN node changes leaf construction (like the 8→16 migration itself). |
+| 6b | Parity test: shellnet block → `Poseidon(new_bk_set) == leaves[3]` | **Resolved (this PR)** — capture example + fixture-driven test scaffolded; skip-on-missing-fixture, activates on first capture | Modest. Runtime check is already load-bearing; the fixture test is CI insurance against future schema drift in `bridge-poseidon` / `parse_bk_set_changes_pub` / `block_id_tree`. |
 | 3 | Misleading self-verify comment | **Resolved (by refactor)** | Cosmetic. Now honest. |
 | 6a | Unit test open Merkle reconstruction | **Resolved** | Low. Three tests exist in `block_id_tree.rs`, rewritten for 16-leaf. |
 | 2 | Drain fail-fast `tree.root == upd_block.block_id` | **Resolved (this PR)** | **Low — diagnostic/fail-fast only, not a security fix.** See §#2 for the honest analysis. |
 | 4 | Layer-verifier cross-check `block_id` between C1a and C2 | **Resolved (by refactor)** | **Zero — invariant now enforced by IPC schema.** See §#4 for the surprise finding. |
 | 1 | Layer-path `verify_gql_block_merkle` off-circuit port | **Open** | Low. Failure mode is already loud (Circuit 2 witness builder / on-chain verifier rejects malformed leaves). Deferred. |
-| 7 | `probe_bk_updates` binary | **Open** | Zero-until-deploy. Operational tooling for rotation cadence study; not needed while rotation is off. |
+| 7 | `probe_bk_updates` binary | **Resolved (this PR)** — landed in advance of shellnet BK rotation being enabled | Zero today, will be moderate the day rotation goes live on shellnet — needed to size drain-loop batching and per-day rotation-proof budget. |
 
 ---
 
@@ -127,23 +133,39 @@ Nothing landed for this item.
 - `l2_l3_opening_reconstructs_root` — exactly the invariant the review asked for
 - `zero_padded_right_subtree_matches_spec` — pins the L9..L15 zero-collapse against a re-fold from L0's sibling path
 
-### #6b — Parity test against real shellnet block **[Partially resolved]**
+### #6b — Parity test against real shellnet block **[Resolved (this PR)]**
 
-There is no dedicated fixture-based parity test comparing an AN node's `leaves[3]` against a locally-recomputed `Poseidon(new_bk_set)`. However, the same invariant is enforced on **every** live drain step at `bridge-prover-lib/src/live_driver/bk_update.rs`:
+Two pieces landed:
 
-```rust
-if recomp_c != l3 { anyhow::bail!("Poseidon(new_pubkeys) != L3", ...) }
-```
+1. **`bridge-prover-lib/tests/parity_bk_update.rs`** — fixture-driven test. Loads `tests/fixtures/bk_update_shellnet.json` if present and re-executes the four checks `drive_next_bk_update` runs at drain time (tree fold, `Poseidon(old) == leaves[2]`, delta application, `Poseidon(new) == leaves[3]`) against the captured node output. When the fixture file is absent the test prints a skip hint (with the capture command) and returns green — so a fresh checkout that has never run the capture is not a CI failure. Land a fixture once, and the test starts guarding drift automatically.
+2. **`bridge-prover-daemon/examples/capture_bk_update_fixture.rs`** — one-shot capture tool. Given `--height N`, `--genesis-bk-set PATH`, and `BRIDGE_GQL_ENDPOINT`, it folds all rotations with `height < N` onto the genesis anchor to derive `old_pubkeys`, fetches the target block's 16 leaves and its `bk_set_update_hex`, applies the delta to derive `expected_new_pubkeys`, and writes the JSON fixture the parity test consumes. `tests/fixtures/README.md` documents the flow.
 
-So every shellnet drain the daemon runs is a parity check with immediate failure on drift. A dedicated fixture test would still be worth adding — it catches regressions in CI without needing a live network, and would have caught things like the 8→16 leaf migration before shellnet did — but the review's underlying safety concern is covered.
+**What the test catches at CI time that runtime coverage misses.** A drift PR — say a `bridge-poseidon` version bump, a change to `parse_bk_set_changes_pub` blob layout, a leaf-order / fold-direction change in `BlockIdMerkleTree` — will compile clean and pass the crate's own unit tests (they test the module against itself). Today the failure would only surface at first live drain on a running deploy, panicking `Poseidon(new_pubkeys) != L3` after already emitting a proof request. With the fixture in place, the same PR fails `cargo test` at review time with a diff pointing at the exact broken invariant.
 
-**Honest importance: MODEST.** Runtime coverage exists; fixture would be regression insurance during future schema changes.
+**Honest importance: MODEST.** The fixture is CI insurance against a specific class of future regression, not a live-bug fix. Runtime drain coverage already exists. The reason to land the scaffold now rather than "when someone captures one" is that the machinery (schema + test + capture tool + skip-when-missing path) is the awkward part; capturing the JSON later is a five-minute operation.
 
-**Suggested next step.** When we next capture a shellnet bk-update block for regression fixtures, drop the 16 leaves + the parsed rotation blob into a JSON under `bridge-prover-lib/tests/fixtures/` and add a unit test that re-runs the drain's L3 replay.
+**Not landed:** the JSON fixture itself. Requires a live shellnet round-trip and a shellnet `bk_set.shellnet.json` anchor on disk. Capture the moment someone has shellnet access — no code change needed, just drop the file at `tests/fixtures/bk_update_shellnet.json`.
 
-### #7 — `probe_bk_updates` binary **[Open]**
+### #7 — `probe_bk_updates` binary **[Resolved (this PR)]**
 
-Only referenced in `crates/an-bridge-prover/docs/bk_set_update_no_circuit3_plan.md`. Never added. Pure operational tooling for BK-rotation cadence study — not needed while rotation is off on shellnet. Defer until we have a rotating deploy where the data would be actionable.
+Landed at `bridge-prover-daemon/src/bin/probe_bk_updates.rs`. Read-only cadence study for the AN `bkSetUpdates` stream, matching the spec in `docs/bk_set_update_no_circuit3_plan.md` §Phase 2.
+
+**Shape.**
+
+- Paginated ascending walk over the full stream (`query_bk_set_updates_paged` in 500-event pages) — same pagination the prover uses, so a server-side hiccup surfaces the same way it would in production.
+- `--last N` truncates the reported window after the full walk (server-side `last: N` would hide the earliest-height context).
+- Reports per-event `(height, delta_from_prev, block_id)` plus a summary: total walked, first/last height, gap min/median/p90/max/mean, cluster count + largest cluster at `--gap-threshold`.
+- `--json` for machine-readable output (script into a spreadsheet / notebook).
+- Warns (does not fail) on out-of-order or missing-height events so the probe stays useful when the chain misbehaves.
+- Endpoint comes from `--gql` or `BRIDGE_GQL_ENDPOINT` — matches the ergonomics of the other prover-side tools.
+
+**Why land it now instead of waiting for the first rotating deploy.**
+
+You are about to enable BK rotation on shellnet. Having the probe already built and reviewed means: the moment rotation is on, one command against shellnet returns real cadence numbers — no coding under pressure, no "add tooling to the debug loop" tax when you actually want to be watching drain behavior.
+
+**Cost audit.** ~250 LoC, one new binary, no coupling to `bridge-prover-lib`, zero new deps (uses `serde_json` + `bridge-gql-fetcher` already in scope). Compiles clean.
+
+**Honest importance.** Zero today (shellnet rotation still off; the probe would return either a static pre-freeze snapshot or nothing). Moderate the day rotation is enabled — informs whether one-at-a-time drain is fine or drain-loop batching is needed, and lets you estimate per-day rotation-proof budget so daemon throughput sizing has a real number behind it.
 
 ---
 
@@ -151,18 +173,21 @@ Only referenced in `crates/an-bridge-prover/docs/bk_set_update_no_circuit3_plan.
 
 - `bridge-gql-fetcher/src/bk_set_fetcher.rs` — new `next_update_after` implementation + two pure helpers + 9 unit tests + 1 live test. `NEXT_UPDATE_AFTER_LOOKBACK` constant removed. *(Item #5, real fix.)*
 - `bridge-prover-lib/src/live_driver/bk_update.rs` — `tree.root != upd_block.block_id` bail-out after tree construction. *(Item #2, diagnostic/fail-fast only.)*
+- `bridge-prover-lib/tests/parity_bk_update.rs` + `bridge-prover-lib/tests/fixtures/README.md` — fixture-driven parity test with skip-on-missing-fixture behavior. *(Item #6b, CI insurance scaffold.)*
+- `bridge-prover-daemon/examples/capture_bk_update_fixture.rs` — one-shot capture tool that produces the fixture from a live GQL endpoint. *(Item #6b.)*
+- `bridge-prover-daemon/src/bin/probe_bk_updates.rs` — cadence-study binary for a rotating deploy. *(Item #7, landed in advance of shellnet BK rotation being enabled.)*
 - This status doc.
 
 ## 4. What remains open
 
 Ordered by suggested priority:
 
-1. **#6b parity fixture.** ~50 lines + one JSON, next time we capture a fresh shellnet bk-update. Modest value.
-2. **#1 layer-path `verify_gql_block_merkle`.** Defer unless we see actual GQL-corruption incidents.
-3. **#7 `probe_bk_updates`.** Defer until a rotating deploy exists.
+1. **#6b capture** — run `capture_bk_update_fixture` against shellnet and commit the resulting JSON. Trivial once shellnet access + a genesis anchor are available; not blocked on any code.
+2. **#7 first run** — after BK rotation is enabled on shellnet, run `probe_bk_updates --json` and pin the resulting cadence numbers somewhere durable (memory / status doc) so daemon sizing decisions have a real baseline.
+3. **#1 layer-path `verify_gql_block_merkle`.** Defer unless we see actual GQL-corruption incidents.
 
 ## 5. Overall honest read
 
-Of the 7 review items, **one** was a real bug (#5, silent-skip). **Two** were resolved by unrelated refactors (#3 comment cleanup, #4 IPC-schema unification making mismatched bundles unrepresentable). **Two** are diagnostic/fail-fast improvements that don't change security posture (#2 landed here, #6b partially — runtime check exists, fixture doesn't). **Two** remain deferred as low-value operational polish (#1, #7).
+Of the 7 review items, **one** was a real bug (#5, silent-skip). **Two** were resolved by unrelated refactors (#3 comment cleanup, #4 IPC-schema unification making mismatched bundles unrepresentable). **Three** are diagnostic/fail-fast improvements that don't change security posture but do close CI gaps (#2 release-build parity, #6a existing tests confirmed, #6b fixture-based CI insurance). **Two** remain deferred as low-value operational polish (#1, #7).
 
-The review was useful primarily for surfacing #5; the remaining items were either already fixed by other work or shake out as defense-in-depth rather than correctness gaps.
+The review was useful primarily for surfacing #5; the remaining items were either already fixed by other work or shake out as defense-in-depth rather than correctness gaps. #6b in particular is scaffolded but inert until someone drops in a captured shellnet fixture — deliberately, to keep fresh-checkout CI green.

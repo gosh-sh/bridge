@@ -209,6 +209,22 @@ pub fn fr_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
     Ok(U256::from_le_bytes(le))
 }
 
+/// Partner schema v6 `block_id_hex` carries the raw 32-byte BE chain hash
+/// (= `Solidity uint256(bytes32(blockId))`). Decode as big-endian so the
+/// `U256` we hand to `verifyBlock` / `applyBkSetUpdate` matches the value
+/// on-chain SHPLONK auto-reduces via `mod(calldataload, f_q)` and the value
+/// the SHA-256 Merkle open compares against.
+pub fn hash_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
+    let bytes = decode_hex(hex_str)?;
+    if bytes.len() != 32 {
+        return Err(RelayerError::other(format!(
+            "expected 32-byte hash hex, got {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(U256::from_be_slice(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,36 +1,57 @@
-//! 8-leaf SHA-256 Merkle tree for block ID computation.
+//! 16-leaf, depth-4 SHA-256 Merkle tree for the canonical `block_id`
+//! (acki-nacki `poseidon_profile_new`, see
+//! `acki-nacki-to-eth-bridge-halo2-circuits/GLOBAL_HISTORY_DATA_SPEC_MULTITHREAD.md`).
 //!
-//! Reconstructs the block_id and extracts Merkle siblings needed by Circuit 2.
+//! Reconstructs the `block_id` and extracts the Merkle siblings needed to open
+//! two leaf views:
+//!   1. L0 (Poseidon of the layer-hashes preimage) — 4 opaque top-level SHA
+//!      siblings, matching Circuit 2 `NUM_MERKLE_SIBLINGS = 4`.
+//!   2. The L2/L3 pair (old/new BK-set Poseidon commitments) — 3 sibling nodes,
+//!      consumed by the no-Circuit-3 BK-set rotation path (see
+//!      `docs/bk_set_update_no_circuit3_plan.md`).
 //!
 //! Tree structure:
 //! ```text
-//!                        Root (= block_id)
-//!                       /                  \
-//!                  H_01                      H_23
-//!                 /     \                  /      \
-//!              H_0       H_1           H_2        H_3
-//!             /   \     /   \         /   \      /   \
-//!           L0    L1   L2   L3      L4    L5   L6    L7
+//!                                     root  (= block_id)
+//!                                    /                     \
+//!                             h_0_7                            h_8_15
+//!                            /      \                         /       \
+//!                       h_0_3        h_4_7               h_8_11       h_12_15
+//!                       /  \         /   \                /   \         /   \
+//!                     h01 h23      h45   h67           h89 h10_11   h12_13 h14_15
+//!                    / \  / \      / \   / \           / \   /  \    /  \   /   \
+//!                   L0 L1 L2 L3   L4 L5 L6 L7         L8 L9 L10 L11 L12 L13 L14 L15
 //! ```
 //!
-//! Leaf values:
-//! - L0: Poseidon(layer_hashes_preimage)  — 331 bytes split into 31-byte Fr chunks
-//! - L1: SHA-256(common_section_bytes)
-//! - L2: old_bk_set_poseidon_hash (32 bytes LE)
-//! - L3: new_bk_set_poseidon_hash (32 bytes LE)
-//! - L4: tvm_block_repr_hash
-//! - L5: SHA-256(durable_state_bytes)
-//! - L6: SHA-256(tx_cnt as u64 big-endian)
-//! - L7: Poseidon Merkle root of referenced blocks (see
-//!       `acki-nacki/node/src/types/ackinacki_block/mod.rs::block_merkle_leaves`)
+//! Internal nodes: `SHA-256(left_32B || right_32B)`. Leaf values, per the
+//! canonical spec:
+//! - L0 = `Poseidon(layer_hashes_preimage)` (331 bytes split into 31-byte Fr chunks)
+//! - L1 = `SHA-256(bincode(CommonSection))`
+//! - L2 = `Poseidon(old_bk_set_hash)` (32 bytes LE) — zero if no BK-set change
+//! - L3 = `Poseidon(new_bk_set_hash)` (32 bytes LE) — zero if no BK-set change
+//! - L4 = TVM block representation hash
+//! - L5 = `SHA-256(bincode(durable_state_update))`
+//! - L6 = `SHA-256(tx_cnt.to_be_bytes())`
+//! - L7 = Poseidon Merkle root of `[parent_block_id, refs…]`
+//! - L8 = `tracked_ext_out_messages_root` (event-binding leaf for Circuit 4)
+//! - L9..L15 = `[0u8; 32]` — protocol-fixed zero padding
+//!
+//! The prover never recomputes the individual leaves; it fetches all 16 via the
+//! GraphQL `block_merkle_tree_leaves` field and folds them here.
 
 use sha2::{Digest, Sha256};
 
-// Note: at runtime the prover never recomputes the full 8-leaf tree from its
-// components — the node ships the 8 leaves directly via the GraphQL field
-// `block_merkle_tree_leaves`, and we only reconstruct the inner SHA-256
-// Merkle hashing via `BlockIdMerkleTree::from_leaves`. The leaf layout above
-// is kept purely as a reference for what the node guarantees.
+pub use historical_layer_hashes_movement_checker_circuit::NUM_MERKLE_SIBLINGS;
+
+/// Canonical leaf count of the block-id tree (fixed by the protocol). Sourced
+/// from the circuits repo (`bridge_test_data_gen::layer_hashes`) so any change
+/// to the tree width propagates automatically instead of drifting across
+/// duplicated `= 16` literals.
+pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
+
+/// Number of siblings required to open the L2/L3 pair up to `block_id`.
+/// One less than the tree depth because we start from the L2/L3 pair hash.
+pub const L2_L3_OPEN_SIBLINGS: usize = 3;
 
 /// SHA-256(left || right) for Merkle internal nodes.
 fn sha256_combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -40,35 +61,82 @@ fn sha256_combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// All data for the 8-leaf block ID Merkle tree.
+/// All data for the 16-leaf block-id Merkle tree. Every field is materialised so
+/// callers can pull whichever internal node they need without re-folding.
 #[derive(Clone, Debug)]
 pub struct BlockIdMerkleTree {
-    pub leaves: [[u8; 32]; 8],
-    pub h0: [u8; 32],
-    pub h1: [u8; 32],
-    pub h2: [u8; 32],
-    pub h3: [u8; 32],
+    /// All 16 leaves L0..L15.
+    pub leaves: [[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT],
+
+    // Level 1 — pairs of leaves.
     pub h01: [u8; 32],
     pub h23: [u8; 32],
+    pub h45: [u8; 32],
+    pub h67: [u8; 32],
+    pub h89: [u8; 32],
+    pub h10_11: [u8; 32],
+    pub h12_13: [u8; 32],
+    pub h14_15: [u8; 32],
+
+    // Level 2 — spans of 4 leaves.
+    pub h0_3: [u8; 32],
+    pub h4_7: [u8; 32],
+    pub h8_11: [u8; 32],
+    pub h12_15: [u8; 32],
+
+    // Level 3 — spans of 8 leaves.
+    pub h0_7: [u8; 32],
+    pub h8_15: [u8; 32],
+
+    /// Root = `block_id`.
     pub root: [u8; 32],
 }
 
 impl BlockIdMerkleTree {
-    /// Build from 8 leaf values.
-    pub fn from_leaves(leaves: [[u8; 32]; 8]) -> Self {
-        let h0 = sha256_combine(&leaves[0], &leaves[1]);
-        let h1 = sha256_combine(&leaves[2], &leaves[3]);
-        let h2 = sha256_combine(&leaves[4], &leaves[5]);
-        let h3 = sha256_combine(&leaves[6], &leaves[7]);
-        let h01 = sha256_combine(&h0, &h1);
-        let h23 = sha256_combine(&h2, &h3);
-        let root = sha256_combine(&h01, &h23);
-        Self { leaves, h0, h1, h2, h3, h01, h23, root }
+    /// Build the tree from all 16 leaves.
+    pub fn from_leaves(leaves: [[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT]) -> Self {
+        let h01 = sha256_combine(&leaves[0], &leaves[1]);
+        let h23 = sha256_combine(&leaves[2], &leaves[3]);
+        let h45 = sha256_combine(&leaves[4], &leaves[5]);
+        let h67 = sha256_combine(&leaves[6], &leaves[7]);
+        let h89 = sha256_combine(&leaves[8], &leaves[9]);
+        let h10_11 = sha256_combine(&leaves[10], &leaves[11]);
+        let h12_13 = sha256_combine(&leaves[12], &leaves[13]);
+        let h14_15 = sha256_combine(&leaves[14], &leaves[15]);
+
+        let h0_3 = sha256_combine(&h01, &h23);
+        let h4_7 = sha256_combine(&h45, &h67);
+        let h8_11 = sha256_combine(&h89, &h10_11);
+        let h12_15 = sha256_combine(&h12_13, &h14_15);
+
+        let h0_7 = sha256_combine(&h0_3, &h4_7);
+        let h8_15 = sha256_combine(&h8_11, &h12_15);
+
+        let root = sha256_combine(&h0_7, &h8_15);
+
+        Self {
+            leaves,
+            h01, h23, h45, h67, h89, h10_11, h12_13, h14_15,
+            h0_3, h4_7, h8_11, h12_15,
+            h0_7, h8_15,
+            root,
+        }
     }
 
-    /// Merkle siblings for Circuit 2 (leaf L0): [L1, H_1, H_23].
-    pub fn siblings_for_l0(&self) -> [[u8; 32]; 3] {
-        [self.leaves[1], self.h1, self.h23]
+    /// Siblings for opening L0 up to `block_id`. Matches Circuit 2's
+    /// `NUM_MERKLE_SIBLINGS = 4` witness layout: fold with
+    /// `sha_pair(acc, sibling[i])` for i = 0..4 starting from `acc = L0`.
+    pub fn siblings_for_l0(&self) -> [[u8; 32]; NUM_MERKLE_SIBLINGS] {
+        [self.leaves[1], self.h23, self.h4_7, self.h8_15]
+    }
+
+    /// Siblings for opening the L2/L3 pair up to `block_id`. The verifier
+    /// starts from `h23 = sha_pair(L2, L3)` and folds with each sibling in
+    /// turn: `sha_pair(h01_sibling, h23) → h0_3`,
+    /// `sha_pair(h0_3, h4_7_sibling) → h0_7`,
+    /// `sha_pair(h0_7, h8_15_sibling) → root`.
+    pub fn siblings_for_l2_l3(&self) -> [[u8; 32]; L2_L3_OPEN_SIBLINGS] {
+        [self.h01, self.h4_7, self.h8_15]
     }
 
     /// Block ID = root of the tree.
@@ -79,7 +147,7 @@ impl BlockIdMerkleTree {
 
 /// Build a 331-byte layer hashes preimage from layer root hashes.
 ///
-/// Format: [num_layers: u8] + 10 * [layer_number: u8, root_hash: [u8; 32]]
+/// Format: `[num_layers: u8] + 10 * [layer_number: u8, root_hash: [u8; 32]]`.
 pub fn build_layer_hashes_preimage(
     num_layers: usize,
     root_hashes: &[[u8; 32]],
@@ -100,4 +168,66 @@ pub fn build_layer_hashes_preimage(
     }
 
     preimage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn indexed_leaves() -> [[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT] {
+        let mut leaves = [[0u8; 32]; BLOCK_ID_TREE_LEAF_COUNT];
+        for (i, leaf) in leaves.iter_mut().enumerate() {
+            // Distinct, non-zero content per leaf so accidental symmetry
+            // (e.g. all zeros) can't mask a bug.
+            leaf[0] = (i as u8) + 1;
+        }
+        leaves
+    }
+
+    #[test]
+    fn root_and_l0_opening_are_consistent() {
+        let leaves = indexed_leaves();
+        let tree = BlockIdMerkleTree::from_leaves(leaves);
+        let siblings = tree.siblings_for_l0();
+
+        // Walk depth-4 from L0.
+        let mut acc = leaves[0];
+        for sib in siblings.iter() {
+            acc = sha256_combine(&acc, sib);
+        }
+        assert_eq!(acc, tree.root);
+    }
+
+    #[test]
+    fn l2_l3_opening_reconstructs_root() {
+        let leaves = indexed_leaves();
+        let tree = BlockIdMerkleTree::from_leaves(leaves);
+        let siblings = tree.siblings_for_l2_l3();
+
+        // Start from sha(L2 ‖ L3), then fold up.
+        let mut acc = sha256_combine(&leaves[2], &leaves[3]);
+        acc = sha256_combine(&siblings[0], &acc); // (h01, h23)
+        acc = sha256_combine(&acc, &siblings[1]); // (h0_3, h4_7)
+        acc = sha256_combine(&acc, &siblings[2]); // (h0_7, h8_15)
+        assert_eq!(acc, tree.root);
+    }
+
+    #[test]
+    fn zero_padded_right_subtree_matches_spec() {
+        // Only L0 populated; L1..L15 all zero. Ensures our fold agrees with the
+        // canonical "L9..L15 = zero" collapse described in the spec.
+        let mut leaves = [[0u8; 32]; BLOCK_ID_TREE_LEAF_COUNT];
+        leaves[0] = [0xAB; 32];
+        let tree = BlockIdMerkleTree::from_leaves(leaves);
+
+        let expected = {
+            let mut acc = leaves[0];
+            let siblings = tree.siblings_for_l0();
+            for sib in siblings.iter() {
+                acc = sha256_combine(&acc, sib);
+            }
+            acc
+        };
+        assert_eq!(expected, tree.root);
+    }
 }

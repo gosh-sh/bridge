@@ -193,8 +193,10 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
 }
 
 /// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects Acki Nacki chain ceremony
-/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor.
-const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
+/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Re-exported from
+/// `bridge_prover_lib::keys` so the `bootstrap_hermez_srs` binary can share
+/// the same anchor byte-string.
+pub const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
 
 fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
     let mut buf = Vec::with_capacity(128);

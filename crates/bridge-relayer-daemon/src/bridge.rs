@@ -308,8 +308,9 @@ mod sol_bindings {
                 uint64 blockSeqNo,
                 uint256 oldCommitmentL2,
                 uint256 newCommitmentL3,
-                bytes32 siblingH0,
-                bytes32 siblingH23
+                bytes32 siblingH01,
+                bytes32 siblingH4_7,
+                bytes32 siblingH8_15
             ) external;
 
             function storedLastSeenBlockSeqNo() external view returns (uint64);
@@ -477,8 +478,9 @@ where
             update.block_seq_no,
             update.old_commitment_l2,
             update.new_commitment_l3,
-            B256::from(update.sibling_h0),
-            B256::from(update.sibling_h23),
+            B256::from(update.sibling_h01),
+            B256::from(update.sibling_h4_7),
+            B256::from(update.sibling_h8_15),
         );
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {

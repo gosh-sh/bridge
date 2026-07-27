@@ -15,13 +15,13 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use halo2_base::halo2_proofs::dev::MockProver;
 
 use bridge_prover_lib::keys::KeyManager;
-use bridge_prover_lib::poseidon;
+use bridge_poseidon as poseidon;
 use bridge_prover_lib::prover;
 use bridge_prover_lib::verifier;
 
 use historical_layer_hashes_movement_checker_circuit::{
     circuit::LayerHashesMovementCheckerCircuit,
-    LAYER_PREIMAGE_SIZE, MAX_LAYERS,
+    LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
     test_helpers::{K as LAYER_K, NUM_UNUSABLE_ROWS as LAYER_UNUSABLE, LOOKUP_BITS as LAYER_LOOKUP, bytes_le_to_fr},
 };
 use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink};
@@ -54,10 +54,11 @@ fn test_circuit2_mockprover() {
         }
     }
 
-    // 3. Build Merkle siblings (synthetic).
-    let siblings: [[u8; 32]; 3] = {
-        let mut s = [[0u8; 32]; 3];
-        for i in 0..3 {
+    // 3. Build Merkle siblings (synthetic). One opaque sibling per depth
+    // level of the 16-leaf tree (NUM_MERKLE_SIBLINGS = 4).
+    let siblings: [[u8; 32]; NUM_MERKLE_SIBLINGS] = {
+        let mut s = [[0u8; 32]; NUM_MERKLE_SIBLINGS];
+        for i in 0..NUM_MERKLE_SIBLINGS {
             for j in 0..32 {
                 s[i][j] = ((i * 32 + j + 0x10) & 0xFF) as u8;
             }
@@ -291,37 +292,27 @@ fn test_circuit2_keygen() {
     println!("Circuit 2 keygen PASSED! Total: {:?}", t_total.elapsed());
 }
 
-/// Compute block_id Fr natively (same as in layer_prover.rs).
-fn compute_block_id_fr_native(preimage: &[u8; LAYER_PREIMAGE_SIZE], siblings: &[[u8; 32]; 3]) -> Fr {
+/// Compute block_id Fr natively (same as in layer_prover.rs). Depth-4 fold:
+/// start from `acc = L0 = Poseidon(preimage)` and combine with each sibling
+/// in turn `acc = SHA256(acc ‖ sibling[i])` for i = 0..NUM_MERKLE_SIBLINGS.
+fn compute_block_id_fr_native(
+    preimage: &[u8; LAYER_PREIMAGE_SIZE],
+    siblings: &[[u8; 32]; NUM_MERKLE_SIBLINGS],
+) -> Fr {
     use sha2::{Digest, Sha256};
 
     let l0_hash = bridge_poseidon::poseidon_hash_bytes(preimage);
-    let mut l0_bytes = [0u8; 32];
-    l0_bytes.copy_from_slice(&l0_hash);
+    let mut acc = [0u8; 32];
+    acc.copy_from_slice(&l0_hash);
 
-    let h0: [u8; 32] = {
-        let mut input = Vec::with_capacity(64);
-        input.extend_from_slice(&l0_bytes);
-        input.extend_from_slice(&siblings[0]);
-        Sha256::digest(&input).into()
-    };
+    for sib in siblings.iter() {
+        let mut input = [0u8; 64];
+        input[..32].copy_from_slice(&acc);
+        input[32..].copy_from_slice(sib);
+        acc = Sha256::digest(&input).into();
+    }
 
-    let h01: [u8; 32] = {
-        let mut input = Vec::with_capacity(64);
-        input.extend_from_slice(&h0);
-        input.extend_from_slice(&siblings[1]);
-        Sha256::digest(&input).into()
-    };
-
-    let root_be: [u8; 32] = {
-        let mut input = Vec::with_capacity(64);
-        input.extend_from_slice(&h01);
-        input.extend_from_slice(&siblings[2]);
-        Sha256::digest(&input).into()
-    };
-
-    let mut root_le = root_be;
+    let mut root_le = acc;
     root_le.reverse();
-
     bytes_le_to_fr(&root_le)
 }

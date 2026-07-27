@@ -106,7 +106,7 @@ pub struct LayerProofOutput {
 pub fn generate_layer_proof(
     key_manager: &KeyManager,
     layer_hashes_preimage: &[u8; LAYER_PREIMAGE_SIZE],
-    merkle_siblings: &[[u8; 32]; 3],
+    merkle_siblings: &[[u8; 32]; NUM_MERKLE_SIBLINGS],
     prev_max_level_layer_hash: Fr,
     num_prev_chain_steps: u8,
     prev_chain_proofs: &[DenseChainLink],
@@ -130,7 +130,7 @@ pub fn generate_layer_proof(
 pub fn generate_layer_proof_with_transcript(
     key_manager: &KeyManager,
     layer_hashes_preimage: &[u8; LAYER_PREIMAGE_SIZE],
-    merkle_siblings: &[[u8; 32]; 3],
+    merkle_siblings: &[[u8; 32]; NUM_MERKLE_SIBLINGS],
     prev_max_level_layer_hash: Fr,
     num_prev_chain_steps: u8,
     prev_chain_proofs: &[DenseChainLink],
@@ -242,39 +242,30 @@ pub fn generate_layer_proof_with_transcript(
 
 /// Compute block_id Fr natively from layer_hashes_preimage + merkle_siblings.
 ///
-/// Matches the in-circuit computation: Poseidon(preimage) → L0 bytes,
-/// then SHA-256 Merkle path with 3 siblings → root, reverse → LE → Fr.
+/// Matches the in-circuit computation: Poseidon(preimage) → L0 bytes, then
+/// SHA-256 Merkle path with `NUM_MERKLE_SIBLINGS` siblings → root, reverse to
+/// LE, pack into Fr.
 fn compute_block_id_fr_native(
     preimage: &[u8; LAYER_PREIMAGE_SIZE],
-    siblings: &[[u8; 32]; 3],
+    siblings: &[[u8; 32]; NUM_MERKLE_SIBLINGS],
 ) -> Fr {
     use sha2::{Digest, Sha256};
 
     // L0 = Poseidon(preimage chunks)
     let l0_hash = bridge_poseidon::poseidon_hash_bytes(preimage);
-    let mut l0_bytes = [0u8; 32];
-    l0_bytes.copy_from_slice(&l0_hash);
+    let mut acc = [0u8; 32];
+    acc.copy_from_slice(&l0_hash);
 
-    // H_0 = SHA-256(L0_bytes || siblings[0])
-    let mut h0_input = Vec::with_capacity(64);
-    h0_input.extend_from_slice(&l0_bytes);
-    h0_input.extend_from_slice(&siblings[0]);
-    let h0: [u8; 32] = Sha256::digest(&h0_input).into();
-
-    // H_01 = SHA-256(H_0 || siblings[1])
-    let mut h01_input = Vec::with_capacity(64);
-    h01_input.extend_from_slice(&h0);
-    h01_input.extend_from_slice(&siblings[1]);
-    let h01: [u8; 32] = Sha256::digest(&h01_input).into();
-
-    // Root = SHA-256(H_01 || siblings[2])
-    let mut root_input = Vec::with_capacity(64);
-    root_input.extend_from_slice(&h01);
-    root_input.extend_from_slice(&siblings[2]);
-    let root_be: [u8; 32] = Sha256::digest(&root_input).into();
+    // Fold acc up the depth-4 tree with each opaque sibling in turn.
+    for sib in siblings.iter() {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(&acc);
+        buf[32..].copy_from_slice(sib);
+        acc = Sha256::digest(&buf).into();
+    }
 
     // SHA-256 outputs big-endian. Convert to LE for Fr.
-    let mut root_le = root_be;
+    let mut root_le = acc;
     root_le.reverse();
 
     // Convert LE bytes to Fr via inner product with powers of 256.

@@ -32,6 +32,7 @@ Same binaries for both networks. Endpoint switched via `BRIDGE_GQL_ENDPOINT`; th
 - [Binary roles & state ownership](#binary-roles--state-ownership)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
+- [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot)
 - [Configuration (env vars)](#configuration-env-vars)
 - [Per-run hygiene (read before every E2E run)](#per-run-hygiene-read-before-every-e2e-run)
 - [Bootstrap behavior](#bootstrap-behavior)
@@ -156,8 +157,9 @@ The library is designed to serve two independent binaries:
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
 - `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
-- `bk_set_fetcher` primitives for constructing the initial BK-set argument to `LiveProverDriver::new`:
-  - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default `file` bootstrap mode).
+- `LiveProverDriver::new(gql, key_manager, state, prover_bk_set, cfg)` — as of 2026-07-27 refactor, the ctor takes a `ProverBkSet` (persisted schema-versioned struct) directly, not a decoded `HashMap<u16, Vec<u8>>`. Pubkeys are read internally via `driver.prover_bk_set().pubkeys()?`. The old `bk_set: HashMap<u16, Vec<u8>>` parameter is gone.
+- `bk_set_fetcher` primitives for producing a `ProverBkSet` at daemon startup:
+  - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default cold-boot seed source).
   - `bk_set_at_height(client, genesis, target_height)` — fold `bkSetUpdates` (height ≤ target) onto a genesis snapshot, for cold-start against a rotating chain long past genesis. Enabled by `BRIDGE_BK_SET_BOOTSTRAP=fold_at_height`.
   - `next_update_after(client, cursor)` — cursor-walk the delta log for post-startup rotations (used by `poll_next_bk_update`).
   - `fold_bk_updates` / `parse_bk_set_changes_pub` / `normalize_bk_set_pubkeys` — lower-level helpers exposed for daemons that manage the BK set themselves.
@@ -170,7 +172,7 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 ## Prerequisites
 
 - **Rust nightly** (release builds).
-- **~10 GB free disk** under `params/` (KZG SRS + three PKs).
+- **~13 GB free disk** under `params/` (Hermez KZG SRS at K=17/19/20/21 + four PKs).
 - **~16 GB RAM** during proof generation.
 - **Docker / docker compose** for the local 5-node Acki Nacki cluster (local devnet only).
 - Sibling checkout of [`acki-nacki`](https://github.com/gosh-sh/acki-nacki) on branch **`poseidon_dex`** (local devnet only).
@@ -184,12 +186,71 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 
 ---
 
+## KZG SRS provisioning (Hermez PPoT)
+
+The four circuits use the community-audited **Hermez Perpetual Powers of Tau** ceremony as their KZG trust root. The runtime SRS loader in `bridge_prover_lib::keys::common::assert_hermez_ceremony` rejects anything whose `s_g2` head is not `928fafb3d0cc…` — that includes the legacy Acki Nacki chain-ceremony blobs (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Before your first run on a fresh checkout, materialize the four SRS files under `params/` with the in-tree provisioning binary:
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+What this does:
+
+1. Ensures `powersOfTau28_hez_final_20.ptau` (~1.2 GB, SnarkJs format) at `$HOME/.cache/halo2-kzg-srs/` — auto-downloads from the Polygon zkEVM GCS mirror on cache miss.
+2. For each of K=17, 19, 20: reads the K=20 ptau, verifies the K=20 raw-SRS SHA-256 trust anchor (single-sourced from `gosh-zk-snark-halo2-utils::ptau`), and downsizes to the requested degree.
+3. For K=21: reads the separate `powersOfTau28_hez_final_21.ptau` (~2.4 GB — **not** auto-downloaded; the utils crate's shared trust anchor is K=20-capped, so K=21 uses a byte-level Hermez `s_g2`-head check instead).
+4. Byte-level asserts `s_g2` head = `928fafb3d0cc` on every file before writing → any file this binary writes is guaranteed to pass the runtime loader.
+
+Outputs:
+
+| File | Size | Used by |
+|---|---|---|
+| `params/kzg_bn254_17.srs` | ~16 MB  | Circuit 2 (layer, K=17) proving |
+| `params/kzg_bn254_19.srs` | ~64 MB  | Circuit 4 (event, K=19) proving |
+| `params/kzg_bn254_20.srs` | ~128 MB | Circuit 1A (primary, K=20) proving + all keygen |
+| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 3 (fallback, K=21) proving |
+
+### K=21 ptau — one-time manual download
+
+The K=21 ceremony ptau is not fetched by the binary. If the default cache path is empty, `bootstrap_hermez_srs --k 21` will print the exact `curl` command; it is:
+
+```bash
+mkdir -p ~/.cache/halo2-kzg-srs
+curl -L --fail --progress-bar \
+  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
+```
+
+Then re-run `./target/release/bootstrap_hermez_srs`.
+
+### CLI flags
+
+```
+--params-dir PATH        Where to write kzg_bn254_N.srs
+                         (default: <bridge-prover-lib>/../params)
+--k N                    Circuit K to materialize (repeatable, 1..=21)
+                         (default: --k 17 --k 19 --k 20 --k 21)
+--wipe-cached-keys       Delete {primary,layer,event,fallback}_{vk,pk,config_params}.*
+                         (VK commitments embed s_g2 — mandatory after any SRS swap)
+--ptau PATH              Override K=20 ptau path
+--ptau21 PATH            Override K=21 ptau path
+```
+
+### When to re-run
+
+- **First checkout** — one-off before the first daemon start.
+- **After changing the SRS backend** (e.g. rotating away from a legacy `gen_srs`-provisioned `params/`) — always add `--wipe-cached-keys`, since existing `{primary,layer,event,fallback}_vk.bin` embed the old ceremony's `s_g2`.
+- **Otherwise, never.** The Hermez ceremony is fixed; on subsequent runs the four `kzg_bn254_*.srs` files stay valid indefinitely.
+
+---
+
 ## Configuration (env vars)
 
 | Env var | Used by | Default | Meaning |
 |---|---|---|---|
-| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Both daemons use it for BK-set fetch (fall back to `BRIDGE_BK_SET_CONFIG` on failure). |
-| `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
+| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Used for bundle fetch, attestation polling and `bkSetUpdates` diffs at runtime. **Not** consulted for the BK set at bootstrap — startup is file-first (`state/prover_bk_set.json` → `BRIDGE_BK_SET_CONFIG` on cold boot). |
+| `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. Consulted only on cold boot (as the seed for `state/prover_bk_set.json`) and by the startup guard for commitment-mismatch detection. See [Startup guard & cold-boot mismatch](#startup-guard--cold-boot-mismatch-post-2026-07-27) and [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
 | `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 512), else the daemon refuses to start. |
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
@@ -246,9 +307,34 @@ After first init the seed file is the single source of truth — the verifier do
 
 The BK set is a **circuit witness**, not a circuit constant — only `MAX_SIGNERS = 300` (compile-time, `bridge-prover-lib/src/keys.rs`) shapes the keys. **Rotation does not require regenerating `primary_*.bin` / `layer_*.bin`** as long as the new set still fits ≤ `MAX_SIGNERS`.
 
-Both daemons fetch the set **once at startup** and cache it for the whole run — there is no `bkSetUpdates` subscription. If the on-chain set rotates mid-run, the prover will silently skip key blocks signed by indices it doesn't recognise (`signers [k] not in BK set, skipping`).
+Post 2026-07-27 refactor there is a **single source of truth** — `state/prover_bk_set.json` — driven by two paths:
 
-On rotation: **stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`), restart both — do NOT wipe `state/`** (`stored_bk_set_commitment` is overwritten on the next bundle). The only case that needs `rm -rf state/` is a rotation that happens during the bootstrap key block itself, since `bootstrap_seed.json` would then encode the stale set.
+- **At bootstrap:** file-first startup (see [Startup guard & cold-boot mismatch](#startup-guard--cold-boot-mismatch-post-2026-07-27) below). If `state/prover_bk_set.json` already exists, it wins outright; `BRIDGE_BK_SET_CONFIG` is only read on cold boot (empty `state/`).
+- **At runtime:** the driver consumes GQL `bkSetUpdates` via `poll_next_bk_update` + `ack_bk_update`, which rewrites `state/prover_bk_set.json` and refreshes the cached Poseidon Fr. On shellnet the diff stream is currently empty (rotation OFF per Sehor 2026-07-08); on local devnet each fresh chain regenerates keys, but the runtime-diff path never fires because the daemon is restarted alongside the chain.
+
+**Runtime rotation (both daemons kept running):** the driver ingests the GQL diff and rewrites `state/prover_bk_set.json`; **do NOT** stop daemons or wipe `state/`.
+
+**Restart after a chain-side key rotation:** stop both daemons, refresh the genesis file selected by `BRIDGE_BK_SET_CONFIG` (`bk_set.local.json` or `bk_set.shellnet.json`), restart both. The startup guard will catch a stale-`state/` mismatch at seq 0 and tell you to `rm -rf ./state/`. See the next subsection.
+
+### Startup guard & cold-boot mismatch (post 2026-07-27)
+
+The daemon runs `verify_prover_bk_set_matches_config_file` at startup: if `BRIDGE_BK_SET_CONFIG` file exists, its Poseidon commitment is compared to `state/prover_bk_set.json.commitment`. Four outcomes:
+
+| Case | State cursor | Config file | Commitment | Action |
+|---|---|---|---|---|
+| A — fresh chain + stale state | `last_applied_update_seq_no == 0` | present | mismatch | **BAIL** with "wipe `./state/`" message. Fresh chain regenerated the BK set; `state/` from prior chain instance is stale. Fix: `rm -rf ./state/` → cold boot re-seeds from the config file. |
+| B — chain rotated past genesis snapshot | cursor > 0 | present | mismatch | Info log only, continue. Expected on shellnet after any partner re-genesis; `state/` is the authoritative post-rotation truth. |
+| C — config file absent | any | missing | n/a | Silent pass. Warm restarts without the seed file present are legal. |
+| D — match | any | present | equal | OK. |
+
+**Rules of thumb for the operator (developer running `cargo run`):**
+
+- **Case A (seq-0 bail on local devnet):** `rm -rf ./state/` and restart. The seed file (`bk_set.local.json`) is already correct — the orchestrator regenerated it via `materialize_bk_set_from_node_config` at the start of the E2E script. No JSON edits needed.
+- **Case A on shellnet:** shellnet is Case A only if the seed file was rebuilt from the wrong source (e.g., `zs_bk_set` instead of `keys_config.json.bk_nodes[i].bls_pubkey`). Fix the seed file, restart. Do **not** wipe state.
+- **Wrong network's seed file selected:** fix `BRIDGE_BK_SET_CONFIG`, restart. No JSON edits, no state wipe.
+- **Never hand-edit `state/prover_bk_set.json`** — it is driven exclusively by the cold-boot seed and runtime GQL diffs.
+
+The two JSONs (`state/prover_bk_set.json` and `bk_set.*.json`) are **not** kept in sync after cold boot. The seed file is a bootstrap input; the state file is the working record.
 
 ### BK-set resync on cluster rebuild — automatic (local devnet only)
 
@@ -258,7 +344,7 @@ A common concern for local-devnet operators: *after `make stop && make run` the 
 
 The committed `bk_set.local.json` in this repo is therefore just a placeholder / documentation snapshot — it is **overwritten before every local-devnet run**.
 
-*(Historical note: prior to 2026-07-22 the daemons preferred a GraphQL `bkSetUpdates` replay over the file. That path was disabled after it was found to reconstruct an incorrect set on any chain with rotations — see the shellnet section below. The file is now the only source at bootstrap; `bk_set_at_height` is the correct primitive for distant-block cold starts.)*
+*(Historical note: prior to 2026-07-22 the daemons preferred a GraphQL `bkSetUpdates` replay over the file. That path was disabled after it was found to reconstruct an incorrect set on any chain with rotations — see the shellnet section below. The 2026-07-27 refactor further inverted the startup: `state/prover_bk_set.json` is now the single source of truth, and `BRIDGE_BK_SET_CONFIG` is consulted only on cold boot and by the startup guard. `bk_set_at_height` remains the correct primitive for distant-block cold starts.)*
 
 **Shellnet is different — no auto-resync.** Shellnet has BK-set rotation *disabled* (Sehor confirmed 2026-07-08 for the `poseidon_dex@7ffec27` deployment): the genesis committee is fixed for the life of the chain and the GraphQL `bkSetUpdates` stream stays empty forever. The fetcher therefore always falls through to `bk_set.shellnet.json`, which is **hand-maintained** by transcribing the partner-posted `keys_config.json` (specifically the `bk_nodes[i].bls_pubkey` fields). There is no orchestrator materialiser for it. See [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson) for the full picture.
 
@@ -284,7 +370,7 @@ First-ever build: 10–20 min. Incremental: seconds-to-minutes via Docker cache.
 
 ### Step 2 — Sync `bk_set.local.json` to the cluster's BLS keys
 
-The daemons fall back to the file named by `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) if the GQL `bkSetUpdates` race loses at startup. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
+The daemons cold-boot from `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) when `state/prover_bk_set.json` is absent, and the startup guard also compares the two on every restart. The file must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`. If you've run before on the same chain branch, just restore the backup:
 
 ```bash
 cd /path/to/acki-nacki-to-eth-bridge-halo2-prover
@@ -308,10 +394,20 @@ print(json.dumps(out, indent=2))
 
 ### Step 3 — Keys (first run only)
 
+Before any key generation runs, materialize the Hermez PPoT KZG SRS files under `params/` (one-off; see [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot) for details):
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+Then generate the per-circuit VKs / PKs:
+
 | Circuit | Files produced under `params/` | Command |
 |---|---|---|
 | 4 — Event Prover (K=19) | `event_pk.bin`, `event_vk.bin`, `event_config_params.json` | `cargo run --release --bin bridge-event-halo2-prover -- --selftest` (~5 min). **Run this first** — the verifier bails on missing `event_vk.bin`. |
 | 1A — Primary (K=20) | `primary_pk.bin`, `primary_vk.bin` | generated by `bridge-prover-daemon` on first start (next step). |
+| 1B — Fallback (K=21) | `fallback_pk.bin`, `fallback_vk.bin` | same — generated by `bridge-prover-daemon` on first start. |
 | 2 — Layer (K=17) | `layer_pk.bin`, `layer_vk.bin` | same — generated by `bridge-prover-daemon` on first start. |
 
 ### Step 4 — Start prover + verifier
@@ -525,14 +621,23 @@ Pick the endpoint:
 | Local devnet | `http://localhost/graphql` (default — env var can be omitted) |
 | Shellnet | `https://shellnet.ackinacki.org/graphql` |
 
-### Step 1 — Build binaries
+### Step 1 — Build binaries + provision Hermez SRS
 
 ```bash
 cd /path/to/acki-nacki-to-eth-bridge-halo2-prover
 cargo build --release --bin bridge-prover-daemon --bin bridge-verifier-daemon
 ```
 
-The verifier loads all three VKs at startup, so Circuit 4 keys must exist on disk even when no event will be proven. If `params/event_*.bin` are absent:
+**First run only** — materialize the four Hermez PPoT KZG SRS files under `params/`:
+
+```bash
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs           # provisions K=17, 19, 20, 21
+```
+
+See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot) for what this does, when to add `--wipe-cached-keys`, and how to fetch the K=21 ptau (not auto-downloaded).
+
+The verifier loads all four VKs at startup, so Circuit 4 keys must exist on disk even when no event will be proven. If `params/event_*.bin` are absent:
 ```bash
 cargo run --release --bin bridge-event-halo2-prover -- --selftest
 ```
@@ -583,10 +688,10 @@ kill $(cat logs/pids.txt | cut -d= -f2)
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "block_seq_no": 1536,
   "last_seen_block_seqno": 1024,
-  "block_id_hex": "…",
+  "block_id_hex": "…",   // raw 32-byte BE chain hash = uint256(bytes32(blockId))
   "attestation_circuit": "primary",   // or "fallback" — picks the VK (1a vs 1b)
   "primary_proof_hex": "…",   "primary_proof_gen_ms": 102392,
   "layer_proof_hex":   "…",   "layer_proof_gen_ms":   137310,
@@ -598,6 +703,8 @@ kill $(cat logs/pids.txt | cut -d= -f2)
 ```
 
 Since v5 (2026-07-22, Circuit 1 byte-order fix), `block_id_hex` is a *single* field shared as Circuit 1 and Circuit 2 public instance [0] — both circuits emit `block_id_fr = uint256(bytes32(root))`. The pre-v5 `layer_block_id_hex` sibling field has been removed as redundant.
+
+Since v6 (2026-07-23), `block_id_hex` carries the **raw 32-byte BE chain hash** (= `Solidity uint256(bytes32(blockId))`), not the `Fr::to_repr()` LE bytes of the reduced public instance. This preserves the top 2 bits when the chain hash exceeds the Fr modulus (~3/4 of blocks). The Fr the Rust verifier consumes is derived on demand via `ipc::hash_hex_to_fr` (inner-product fold of reversed bytes, matching `attestation_bls_checker_circuit::attestation_data_parser::compute_block_id_fr`); the on-chain Halo2Verifier Yul does the equivalent via `mod(calldataload, f_q)`. Same convention applies to `BkUpdateRequest.block_id_hex`; the pre-v6 sibling `block_id_hash_hex` was dropped since the two fields were derivable from each other.
 
 `attestation_circuit` is the **path-selection tag** (see [docs/fallback_path.md](docs/fallback_path.md)). The 4-public-instance layout is identical for 1a and 1b; only the verifying key differs. Schema v3 added this tag; legacy v2 files deserialise as `"primary"`.
 
@@ -659,12 +766,16 @@ Verify times: ~5 ms (1A), ~3 ms (2), ~110 ms (4). All constant-time.
 
 | File | Size |
 |---|---|
-| `params/kzg_bn254_20.srs` | ~128 MB (K=17/19/20 share via degree truncation) |
+| `params/kzg_bn254_17.srs` | ~16 MB |
+| `params/kzg_bn254_19.srs` | ~64 MB |
+| `params/kzg_bn254_20.srs` | ~128 MB |
+| `params/kzg_bn254_21.srs` | ~256 MB |
 | `params/primary_pk.bin` | ~3.5 GB |
+| `params/fallback_pk.bin` | ~3.5 GB |
 | `params/layer_pk.bin` | ~2.7 GB |
 | `params/event_pk.bin` | ~2.65 GB |
 
-Peak RSS stays around the largest of the three (load-on-demand).
+Each circuit K keeps its own degree-matched SRS slice on disk (halo2-axiom requires `params.n() == 1 << circuit.k()`). All four SRS files come from the same Hermez ceremony — see [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). Peak RSS stays around the largest of the four PKs (load-on-demand).
 
 ---
 
@@ -688,7 +799,9 @@ cargo test -p bridge-event-prover-lib --test event_prover       -- --nocapture  
 
 | Symptom | Cause / Fix |
 |---|---|
-| Verifier exits with `"primary VK not found"` / `"layer VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/2 keys on initial start (~10 min). |
+| Daemon panics with `SRS … is not Hermez Perpetual Powers of Tau (s_g2 head … expected 928fafb3d0cc)` | `params/kzg_bn254_*.srs` was written by legacy `gen_srs` or the Acki Nacki chain ceremony (head starts with `c6028acf…`). Wipe stale artifacts and re-provision from Hermez: `./target/release/bootstrap_hermez_srs --wipe-cached-keys`. See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). |
+| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 3, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
+| Verifier exits with `"primary VK not found"` / `"layer VK not found"` / `"fallback VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/1B/2 keys on initial start (~10 min). |
 | Verifier exits with `"event VK not found"` | Run `cargo run --release --bin bridge-event-halo2-prover -- --selftest` once. |
 | Prover auto-mode never starts proving — seed seqno keeps moving | Should not happen (bugfix landed 2026-05-23: seed is pinned once at startup). If observed, file an issue. As a workaround, pin via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |
 | Circuit 1A fails with ~96 BLS pairing equality constraint violations | Genesis BK-set file stale (path selected by `BRIDGE_BK_SET_CONFIG`). Local devnet: re-sync `bk_set.local.json` from `acki-nacki/config/block_keeper*_bls.keys.json` (see local Step 2) or trust the GQL fetch by deleting the stale file. Shellnet: rebuild `bk_set.shellnet.json` from the partner-posted `keys_config.json` (`bk_nodes[i].bls_pubkey`) and `rm -rf state/ proofs/` before restart — see [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). Do **not** use `zs_bk_set` on the 2026-07-08 snapshot; it is stale. |

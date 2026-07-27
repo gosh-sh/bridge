@@ -1,4 +1,3 @@
-pub mod poseidon;
 pub mod poseidon_dense;
 pub mod keys;
 pub mod transcript;

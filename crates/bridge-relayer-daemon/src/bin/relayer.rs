@@ -2077,10 +2077,10 @@ async fn run_daemon_live(
         }
     };
 
-    // Prefer the persisted pubkey table once it exists.
-    let bk_set = prover_bk_set
-        .pubkeys()
-        .map_err(|e| anyhow::anyhow!("prover_bk_set.pubkeys: {e}"))?;
+    // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
+    // owns `prover_bk_set` as the sole BK-pubkey source and derives its
+    // in-driver pubkey table on demand via `prover_bk_set.pubkeys()`.
+    // The relayer no longer passes a separate `bk_set` argument.
 
     let seed_policy = match (bootstrap_seqno, state.initialized) {
         (_, true) => SeedPolicy::Resume,
@@ -2094,7 +2094,6 @@ async fn run_daemon_live(
         key_manager,
         state,
         prover_bk_set,
-        bk_set,
         LiveProverConfig {
             seed_policy,
             ..Default::default()

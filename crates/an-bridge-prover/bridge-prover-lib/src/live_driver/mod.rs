@@ -51,8 +51,11 @@
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
-//! 4. fetching the initial BK-set map via
-//!    [`bridge_gql_fetcher::bk_set_fetcher::fetch_bk_set`], and
+//! 4. bootstrapping the initial BK-set map by folding rotation events on top
+//!    of a genesis anchor via
+//!    [`bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height`] (the old
+//!    `fetch_bk_set` replayed the delta log from ∅ and missed the un-emitted
+//!    genesis committee — disabled 2026-07-22), and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!
@@ -85,10 +88,10 @@ use tracing::{info, warn};
 
 use bridge_gql_fetcher::attestation_fetcher::AttestationEvidence;
 use crate::bootstrap::BootstrapSeed;
-use crate::bridge_state::BridgeState;
+use crate::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
-use crate::poseidon;
+use bridge_poseidon as poseidon;
 use crate::prover_bk_set::ProverBkSet;
 
 mod bk_update;
@@ -172,9 +175,10 @@ pub enum DriverError {
         source: anyhow::Error,
     },
 
-    /// Anything not classifiable into the above buckets. Preserves the
-    /// original anyhow chain for `{:?}` reporting.
-    #[error("driver error: {0}")]
+    /// Anything not classifiable into the above buckets. Uses `{0:#}` so the
+    /// full anyhow context chain (all `.with_context(..)` frames) is included
+    /// in the Display output, not just the top-level message.
+    #[error("driver error: {0:#}")]
     Other(#[source] anyhow::Error),
 }
 
@@ -296,19 +300,23 @@ pub struct BundleProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_block_seq_no: u64,
-    /// Block ID as `Fr::to_repr()` bytes — a single value shared by both
-    /// circuits since the 2026-07-22 Circuit 1 byte-order fix. Both Circuit 1
-    /// (from the attestation payload) and Circuit 2 (from the SHA-256 8-leaf
-    /// Merkle root) now compute `block_id_fr = uint256(bytes32(root))`, so
-    /// the two derivation paths are provably equal for a valid block.
-    /// `bundle.rs` debug-asserts this equality at build time to page loudly
-    /// if either circuit's byte-order convention regresses.
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
+    /// depth-4 `block_merkle_tree_leaves` = GraphQL `Block.id` = Solidity
+    /// `uint256(bytes32(blockId))`). Since the 2026-07-22 Circuit 1 byte-order
+    /// fix, both Circuit 1 (from the attestation payload) and Circuit 2 (from
+    /// the SHA-256 root) bind `block_id_fr = fold(reverse(this))`, so the two
+    /// derivation paths are provably equal for a valid block; `bundle.rs`
+    /// debug-asserts this at build time. Carrying the full 256-bit hash (not
+    /// its `Fr::to_repr()` LE bytes) preserves the top 2 bits that would be
+    /// lost when the chain hash `>= p` (~3/4 of blocks). Rust verifiers
+    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain SHPLONK
+    /// auto-reduces via `mod(calldataload, f_q)`.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
     pub bk_set_commitment_be: [u8; 32],
     pub num_layers: u8,
-    pub layer_hashes_be: [[u8; 32]; 10],
+    pub layer_hashes_be: [[u8; 32]; MAX_LAYERS],
     pub prev_max_level_layer_hash_be: [u8; 32],
     // Proof bytes (Blake2b Fiat–Shamir — AN opcode-compatible flavour)
     pub attestation_proof: Vec<u8>,
@@ -324,26 +332,31 @@ pub struct BundleProofArtifacts {
 
 /// Payload for a proven bk-set rotation (Circuit 1A/1B against OLD set + the
 /// three SHA-256 Merkle siblings the on-chain verifier needs to reconstruct
-/// the block-id from L0/L2/L3).
+/// the block-id from L2/L3 up to the 16-leaf depth-4 tree root).
 #[derive(Debug, Clone)]
 pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
     pub last_seen_bk_update_seq_no: u64,
-    /// Attestation-circuit block_id, i.e. `Fr::to_repr()` bytes. May differ
-    /// from [`Self::block_id_hash_be`] in the top 2 bits because the chain
-    /// hash is reduced modulo the Fr prime when the circuit ingests it.
+    /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
+    /// depth-4 `block_merkle_tree_leaves` = Solidity
+    /// `uint256(bytes32(blockId))`). Same semantics as
+    /// [`BundleProofArtifacts::block_id_be`]: on-chain SHPLONK auto-reduces
+    /// mod p, and the depth-4 SHA-256 Merkle open (h01 / h4_7 / h8_15 +
+    /// l2/l3) checks against this raw root. The pre-v6 dual-field encoding
+    /// (attestation-circuit `Fr::to_repr` + separate raw hash) is gone —
+    /// callers derive Fr on demand.
     pub block_id_be: [u8; 32],
-    /// Raw 32-byte block hash = SHA-256 root of the 8-leaf
-    /// `block_merkle_tree_leaves`. This is what `applyBkSetUpdate` on the
-    /// Solidity side receives; the SHA-256 Merkle open (h0/h23 + l2/l3) is
-    /// verified against this root, NOT against [`Self::block_id_be`].
-    pub block_id_hash_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],
     pub new_bk_set_commitment_be: [u8; 32],
-    pub merkle_sibling_h0_be: [u8; 32],
-    pub merkle_sibling_h23_be: [u8; 32],
+    /// Depth-4 Merkle siblings needed to fold `sha(L2‖L3)` up to `block_id`:
+    ///   h0_3 = sha(h01 ‖ sha(L2‖L3))
+    ///   h0_7 = sha(h0_3 ‖ h4_7)
+    ///   root = sha(h0_7 ‖ h8_15)
+    pub merkle_sibling_h01_be: [u8; 32],
+    pub merkle_sibling_h4_7_be: [u8; 32],
+    pub merkle_sibling_h8_15_be: [u8; 32],
     pub attestation_proof: Vec<u8>,
     /// Post-rotation pubkey table so the caller can rotate its
     /// `ProverBkSet` snapshot. Same 48-byte compressed BLS pubkeys as the
@@ -411,7 +424,11 @@ pub struct LiveProverDriver {
     key_manager: KeyManager,
     state: BridgeState,
     prover_bk_set: ProverBkSet,
-    bk_set: HashMap<u16, Vec<u8>>,
+    /// Cached Poseidon commitment of `prover_bk_set` as `Fr`. Kept as a
+    /// field (not derived per-poll) because the underlying hash requires
+    /// BLS-G1 deserialization of every pubkey plus a full Poseidon fold —
+    /// re-computing per bundle poll would waste real cycles. Refreshed in
+    /// `ack_bk_update` alongside `prover_bk_set.rotate`.
     bk_set_commitment_fr: Fr,
     cfg: LiveProverConfig,
     stage: DriverStage,
@@ -427,10 +444,10 @@ impl LiveProverDriver {
     ///   driver does NOT eagerly re-load keys — it drives on-demand load /
     ///   unload during proof generation to stay within the single-PK memory
     ///   envelope.
-    /// * `bk_set` is normalized to 48-byte compressed BLS pubkeys and its
-    ///   Poseidon commitment agrees with `state.stored_bk_set_commitment`
-    ///   (on a warm start) or with the seed that will be applied (on a
-    ///   cold start).
+    /// * `prover_bk_set` is the sole authoritative BK-pubkey source. The
+    ///   ctor re-derives its Poseidon commitment from `prover_bk_set.pubkeys()`
+    ///   and cross-checks against `state.stored_bk_set_commitment` on a
+    ///   warm start.
     ///
     /// The `seed_policy` inside `cfg` is resolved lazily on the first
     /// poll — nothing is fetched or applied at construction time.
@@ -446,10 +463,9 @@ impl LiveProverDriver {
         key_manager: KeyManager,
         state: BridgeState,
         prover_bk_set: ProverBkSet,
-        bk_set: HashMap<u16, Vec<u8>>,
         cfg: LiveProverConfig,
     ) -> DriverResult<Self> {
-        Self::new_inner(gql, key_manager, state, prover_bk_set, bk_set, cfg)
+        Self::new_inner(gql, key_manager, state, prover_bk_set, cfg)
             .map_err(DriverError::StateInconsistent)
     }
 
@@ -462,11 +478,24 @@ impl LiveProverDriver {
         key_manager: KeyManager,
         state: BridgeState,
         prover_bk_set: ProverBkSet,
-        bk_set: HashMap<u16, Vec<u8>>,
         cfg: LiveProverConfig,
     ) -> anyhow::Result<Self> {
+        // Derive Fr + bytes commitment from prover_bk_set — the sole
+        // pubkey source. Also serves as a self-consistency check: if the
+        // persisted `commitment` field disagrees with the recomputed hash
+        // of `pubkeys_hex`, the file was hand-edited or corrupted.
+        let pubkeys = prover_bk_set
+            .pubkeys()
+            .context("prover_bk_set.pubkeys() decode failed")?;
         let (bk_set_commitment_fr, bk_set_commitment_bytes) =
-            poseidon::compute_bk_set_poseidon(&bk_set);
+            poseidon::compute_bk_set_poseidon(&pubkeys);
+        anyhow::ensure!(
+            bk_set_commitment_bytes == prover_bk_set.commitment,
+            "prover_bk_set self-inconsistent: pubkeys hash to {} but stored \
+             commitment is {}",
+            hex::encode(bk_set_commitment_bytes),
+            hex::encode(prover_bk_set.commitment),
+        );
 
         // Sanity check: on a warm start the caller's `state` must agree with
         // its `bk_set`. Refuse to run silently in a mixed state.
@@ -508,7 +537,6 @@ impl LiveProverDriver {
             key_manager,
             state,
             prover_bk_set,
-            bk_set,
             bk_set_commitment_fr,
             cfg,
             stage,
@@ -686,10 +714,11 @@ impl LiveProverDriver {
                 artifacts.block_seq_no,
             )
             .context("ack_bk_update: prover_bk_set.rotate failed")?;
-        // Refresh in-memory pubkey table + Poseidon commitment so
-        // subsequent bundle / bk-update proofs use the rotated set.
-        self.bk_set = artifacts.new_pubkeys.clone();
-        let (new_fr, _) = poseidon::compute_bk_set_poseidon(&self.bk_set);
+        // Refresh the cached Fr commitment so subsequent bundle /
+        // bk-update proofs use the rotated set. Callers reading the
+        // rotated pubkey table go through `prover_bk_set.pubkeys()`
+        // — no separate in-memory table to sync any more.
+        let (new_fr, _) = poseidon::compute_bk_set_poseidon(&artifacts.new_pubkeys);
         self.bk_set_commitment_fr = new_fr;
         Ok(())
     }
@@ -826,9 +855,6 @@ impl LiveProverDriver {
     }
     pub(crate) fn state(&self) -> &BridgeState {
         &self.state
-    }
-    pub(crate) fn bk_set(&self) -> &HashMap<u16, Vec<u8>> {
-        &self.bk_set
     }
     pub(crate) fn bk_set_commitment_fr(&self) -> Fr {
         self.bk_set_commitment_fr

@@ -104,6 +104,19 @@ Test-side mentions (`ShplonkAggregatorForgery.t.sol`, `MockPrimaryVerifier.sol`,
 
 ---
 
+## NB-Q6 — `poseidon-proof/` crate: last consumer is gone, still in-repo
+
+`poseidon-proof/` was kept as reference material for `Blake2bHalo2Verifier.t.sol`, but that Foundry test — and the entire `Blake2b*` verifier surface (`Blake2bHalo2Verifier.sol`, `Halo2Verifier.sol`) — is gone from `contracts/ethereum/`. Only `ShplonkHalo2Verifier.sol` / `IShplonkHalo2Verifier.sol` remain.
+
+Standing references to `poseidon-proof` are now only: `Cargo.toml` workspace member, `AGENTS.md`, `.gitignore`, `contracts/ethereum/foundry.toml`, `docs/BLAKE2B_HALO2_VERIFIER.md`, `bridge_updates_analysis_2026-06-25.md`, top-level `README.md`. No live consumer.
+
+**Questions.**
+
+1. OK to delete `poseidon-proof/` + `docs/BLAKE2B_HALO2_VERIFIER.md`, drop from workspace `Cargo.toml`, and prune the `foundry.toml` / `AGENTS.md` / `README.md` mentions? Nothing binds the crate any more.
+2. If a Blake2b regression fixture is still wanted, move `poseidon-proof/data/*.bin` under `contracts/ethereum/test/fixtures/` and delete everything else in the crate.
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

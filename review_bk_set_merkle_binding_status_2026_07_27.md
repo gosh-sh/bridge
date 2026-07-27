@@ -2,12 +2,6 @@
 
 **Scope.** Per-item status of the 7 recommendations from the 2026-06-08 review of the AN-side BK-set update Merkle binding, checked against `crates/an-bridge-prover/` at HEAD (branch `feture/block_id_16_leafs_support_plus_exta_bridge_prover_refactoring_and_cleaning`).
 
-## Changelog
-
-- **2026-07-27 (initial).** #5 landed as real fix (pagination). #2 landed as diagnostic. #3/#4 confirmed resolved by earlier refactors. #6a confirmed already covered by existing tests. #6b noted as partial (runtime check exists, no fixture). #1/#7 open, deferred.
-- **2026-07-27 (later, same day).** #6b upgraded to resolved — landed fixture-driven parity test + capture example (skip-on-missing-fixture behavior; fixture JSON itself needs one shellnet round-trip to commit).
-- **2026-07-27 (later, same day).** #7 upgraded to resolved — landed `probe_bk_updates` binary ahead of shellnet BK rotation being enabled. Quickstart at `crates/an-bridge-prover/bridge-prover-daemon/docs/PROBE_BK_UPDATES.md`. Only #1 remains open.
-
 ---
 
 ## 0. Structural drift since the review
@@ -31,22 +25,33 @@ Ranked by honest severity — most items in this review are defense-in-depth / d
 | 6a | Unit test open Merkle reconstruction | **Resolved** | Low. Three tests exist in `block_id_tree.rs`, rewritten for 16-leaf. |
 | 2 | Drain fail-fast `tree.root == upd_block.block_id` | **Resolved (this PR)** | **Low — diagnostic/fail-fast only, not a security fix.** See §#2 for the honest analysis. |
 | 4 | Layer-verifier cross-check `block_id` between C1a and C2 | **Resolved (by refactor)** | **Zero — invariant now enforced by IPC schema.** See §#4 for the surprise finding. |
-| 1 | Layer-path `verify_gql_block_merkle` off-circuit port | **Open** | Low. Failure mode is already loud (Circuit 2 witness builder / on-chain verifier rejects malformed leaves). Deferred. |
+| 1 | Layer-path `verify_gql_block_merkle` off-circuit port | **Resolved (this PR)** — narrower shape than the review asked for (see §#1) | Low-moderate. Fail-fast + release-build parity on the high-throughput layer path; not a security fix (verifier already rejects). |
 | 7 | `probe_bk_updates` binary | **Resolved (this PR)** — landed in advance of shellnet BK rotation being enabled | Zero today, will be moderate the day rotation goes live on shellnet — needed to size drain-loop batching and per-day rotation-proof budget. |
 
 ---
 
 ## 2. Per-item detail
 
-### #1 — Layer-path `verify_gql_block_merkle` **[Open]**
+### #1 — Layer-path `verify_gql_block_merkle` **[Resolved (this PR), narrower shape]**
 
 The review asked for a port of `acki-nacki/helpers/proof_helper/src/gql_proof.rs`'s `verify_gql_proof_block` / `verify_gql_block_merkle` into the AN prover, to be called before the Circuit 2 witness builder consumes GQL leaves.
 
-Grep across `bridge/crates/` for `verify_gql_block_merkle | verify_gql_proof_block | verify_gql | gql_proof | verify_bk_replay` finds zero hits in code — only a reference in `crates/an-bridge-prover/docs/bk_set_update_no_circuit3_plan.md`.
+**What actually landed** at `bridge-prover-lib/src/live_driver/bundle.rs` right after `let tree = BlockIdMerkleTree::from_leaves(leaves);`:
 
-Current layer path still relies on the `leaves[2] == bk_set_commitment` fail-fast (and Circuit 2 witness/on-chain verifier rejection) as the only defenses against malformed GQL leaves. The failure mode is loud, not silent, so this is a **defense-in-depth gap** rather than a correctness bug.
+```rust
+if tree.root != block.block_id {
+    anyhow::bail!(
+        "layer {}: reconstructed tree.root {} != block.block_id {} — \
+         GQL leaves inconsistent with block header", ...
+    );
+}
+```
 
-**Honest importance.** Low. Deferred until we see actual GQL-corruption incidents or the layer verifier grows enough surface that a shared helper pays for itself.
+Mirrors the same check on the bk-update path (item #2). Complements the pre-existing `leaves[2] == bk_set_commitment` cross-check further down.
+
+**Why not a full port of `verify_gql_block_merkle`.** The review's ask also implied an L0-open reconstruction (`sha_pair(L0, siblings...) == root`). That is algebraically implied by our own `BlockIdMerkleTree::from_leaves` fold — running it twice against the same input catches nothing. The load-bearing check is `tree.root == block.block_id`, which is what we added.
+
+**Honest importance: LOW-MODERATE.** Same rationale as #2 (fail-fast, release-build parity, diagnostic clarity), but on the layer path which runs every W·P blocks — much higher throughput than the bk-update path. More opportunities for GQL corruption to matter. Still not a security fix; verifier catches the failure mode either way.
 
 ### #2 — Drain fail-fast `upd_block.block_id == tree.root` **[Resolved (this PR)]**
 
@@ -176,18 +181,18 @@ You are about to enable BK rotation on shellnet. Having the probe already built 
 - `bridge-prover-lib/tests/parity_bk_update.rs` + `bridge-prover-lib/tests/fixtures/README.md` — fixture-driven parity test with skip-on-missing-fixture behavior. *(Item #6b, CI insurance scaffold.)*
 - `bridge-prover-daemon/examples/capture_bk_update_fixture.rs` — one-shot capture tool that produces the fixture from a live GQL endpoint. *(Item #6b.)*
 - `bridge-prover-daemon/src/bin/probe_bk_updates.rs` — cadence-study binary for a rotating deploy. *(Item #7, landed in advance of shellnet BK rotation being enabled.)*
+- `bridge-prover-lib/src/live_driver/bundle.rs` — `tree.root != block.block_id` bail-out on the layer path. *(Item #1, narrower shape than review asked for; the load-bearing check.)*
 - This status doc.
 
 ## 4. What remains open
 
-Ordered by suggested priority:
+All 7 review items are now resolved in code. Two follow-on operational tasks remain, both blocked on live-chain access rather than code:
 
 1. **#6b capture** — run `capture_bk_update_fixture` against shellnet and commit the resulting JSON. Trivial once shellnet access + a genesis anchor are available; not blocked on any code.
 2. **#7 first run** — after BK rotation is enabled on shellnet, run `probe_bk_updates --json` and pin the resulting cadence numbers somewhere durable (memory / status doc) so daemon sizing decisions have a real baseline.
-3. **#1 layer-path `verify_gql_block_merkle`.** Defer unless we see actual GQL-corruption incidents.
 
 ## 5. Overall honest read
 
-Of the 7 review items, **one** was a real bug (#5, silent-skip). **Two** were resolved by unrelated refactors (#3 comment cleanup, #4 IPC-schema unification making mismatched bundles unrepresentable). **Three** are diagnostic/fail-fast improvements that don't change security posture but do close CI gaps (#2 release-build parity, #6a existing tests confirmed, #6b fixture-based CI insurance). **Two** remain deferred as low-value operational polish (#1, #7).
+Of the 7 review items, **one** was a real bug (#5, silent-skip). **Two** were resolved by unrelated refactors (#3 comment cleanup, #4 IPC-schema unification making mismatched bundles unrepresentable). **Four** are diagnostic / fail-fast / CI-insurance improvements that don't change security posture (#1 layer-path fail-fast, #2 bk-update-path fail-fast, #6a existing tests confirmed, #6b fixture-based CI insurance). **#7** landed as operational tooling ahead of the shellnet BK-rotation enable.
 
 The review was useful primarily for surfacing #5; the remaining items were either already fixed by other work or shake out as defense-in-depth rather than correctness gaps. #6b in particular is scaffolded but inert until someone drops in a captured shellnet fixture — deliberately, to keep fresh-checkout CI green.

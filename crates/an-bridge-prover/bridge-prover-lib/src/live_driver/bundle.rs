@@ -250,6 +250,23 @@ async fn generate_layer_proof_for_key_block(
     // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves
     //    and pull the four siblings that open L0 up to `block_id`.
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
+
+    // Structural sanity: the tree we just folded must agree with the
+    // block_id the node reports in the same GQL response. The on-chain
+    // verifier already rejects mismatched openings, so this is not a
+    // correctness fix — it's fail-fast (skip Circuit 2 witness build +
+    // proof gen + IPC when leaves are broken) and release-build parity.
+    // Mirror of the same check on the bk-update path in bk_update.rs.
+    if tree.root != block.block_id {
+        anyhow::bail!(
+            "layer {}: reconstructed tree.root {} != block.block_id {} — \
+             GQL leaves inconsistent with block header",
+            target_seqno,
+            hex::encode(tree.root),
+            hex::encode(block.block_id),
+        );
+    }
+
     let siblings = tree.siblings_for_l0();
     info!(
         "block_id from GQL leaves merkle root: {}",

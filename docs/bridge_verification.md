@@ -437,7 +437,7 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 |---|---|
 | **ZK-1** | Production wires all three circuits to the R15 SHPLONK aggregator Yul (`PrimaryAggregatorVerifier.bin`, `FallbackAggregatorVerifier.bin`, `LayerHashesAggregatorVerifier.bin`), each `snark-verifier-sdk` output not subsequently edited. The retained 1A/2 gnark Groth16 test verifiers (`PrimaryGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) are likewise auto-generated; the 1B `FallbackGroth16VerifierGenerated` was deleted when Circuit 1B moved to SHPLONK. |
 | **ZK-2** | Each adapter normalises a failing verifier call to `false`: the SHPLONK adapters (`PrimaryAggregatorVerifier`, `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`) check the Yul `staticcall` result; the retained 1A/2 gnark adapters (`PrimaryVerifier`, `LayerHashesMovementVerifier`) wrap `verifyProof` in `try/catch`. |
-| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's 7 public inputs are consumed natively on the AN side, not on Ethereum.) |
+| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's **12 public inputs** — Track-2 chain-binding, 2026-07-23 — are consumed natively on the AN side, not on Ethereum.) |
 | **ZK-4** | Adapter constructors reject `address(0)` for the underlying Groth16 verifier. |
 | **ZK-5** | Each adapter rejects proofs of the wrong byte length (256 B for the v2 attestation/layer-hashes path). |
 

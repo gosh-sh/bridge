@@ -1,6 +1,12 @@
 HANDOFF F10 — deposit-prover и deposit-relayer-daemon
 Дата: 2026-07-17
 Источник: аудит off-chain pipeline (фаза F10), ветка audit
+
+[ВНИМАНИЕ 2026-07-23] Датированный snapshot; заменён Track-2 chain-binding.
+Все упоминания "11 PI" ниже — историчны. Текущая схема deposit-prover
+экспонирует 12 PI (chainId добавлен в слот 4, VkBlob de1dd3ab…7dd8d1).
+Оставлено как артефакт аудитного цикла.
+
 Детали и PoC: audit/reports/questions-cross-chain.md (§ QC-OFF, QC-PROV)
 Threat model: audit/reports/manual-audit/F10-offchain-deposit-pipeline.md
 Синтез: audit/reports/manual-audit/F10-subagent-synthesis.md

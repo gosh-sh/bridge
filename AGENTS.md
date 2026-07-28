@@ -505,6 +505,14 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 
 ### Shellnet E2E — EVM↔AN deposit path (updated 2026-06-13)
 
+> **⚠ Superseded by Track-2 chain-binding (2026-07-23).** This section documents the
+> 11-PI VkBlob (`304c1c4e…`) redeployed to shellnet in 2026-06/07. The current
+> `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4) and produces
+> VkBlob `de1dd3ab…7dd8d1` (5006 B); the follow-on shellnet redeploy is tracked in
+> `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. Preserve the tables below as a
+> historical snapshot — do not rewrite them.
+
+
 **Partner updates (2026-06-11 chat)**
 
 | Topic | Detail |
@@ -536,13 +544,16 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 | **AN node `tvm_vm`** | Base-only or pre-merge opcode | RLC reader (`circuit_shape=1`, `read_rlc_vk`) + nightly `gosh` feature |
 | **Smoke that works** | `fallback_vk_blob.bin` (4 PI) via `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` | Proves relayer keys / gas / ABI — **not** deposit proofs |
 
-**11 public inputs** (canonical for `deposit-prover` / `deposit-relayer-daemon` / shellnet redeploy; 11 × 32 B LE `Fr`):
+**12 public inputs** (canonical for `deposit-prover` / `deposit-relayer-daemon` / shellnet redeploy — **Track-2 chain-binding, 2026-07-23**; 12 × 32 B LE `Fr`):
 
 ```
-[0] depositId  [1] sender  [2] amount  [3] contractAddress
-[4] dappIdHigh  [5] dappIdLow  [6] anAccountHigh  [7] anAccountLow
-[8] blockHashHigh  [9] blockHashLow  [10] promiseCommit
+[0]  depositId       [1]  sender         [2]  amount           [3]  contractAddress
+[4]  chainId         [5]  dappIdHigh     [6]  dappIdLow        [7]  anAccountHigh
+[8]  anAccountLow    [9]  blockHashHigh  [10] blockHashLow     [11] promiseCommit
 ```
+
+> **Historical:** the pre-Track-2 layout was **11 PI** (no `chainId`). Any doc still
+> referencing "11 PI" or "7 PI" predates Track 2 and refers to a superseded VkBlob.
 
 Partner checklist (full redeploy steps): `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. VK gap analysis: `docs/deposit_finalize_vk_gap_2026-05-28.md`.
 
@@ -584,7 +595,7 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 |------|------|-------|----------|-----|
 | `deposit_10proofs/deposit_vk_blob.bin` | 3597 B | VkBlob v2 RLC | **11** | **Target for USDCBridge redeploy** — byte-identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (SHA-256 `147efe14…068abaf`) |
 | `deposit_10proofs/proof_00..09/{public_inputs,proof}.bin` | 352 B + ~8 KB each | — | 11 | Unit tests `test_zkhalo2_with_vk_deposit_10_real_proofs` — **no** `input.json` or `.srs` here (producer-only; sync via `scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`) |
-| `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 11-PI layout |
+| `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 12-PI Track-2 layout (also predates the 11-PI intermediate) |
 | `fallback_vk_blob.bin` | 6308 B | Base v1 | 4 | **Currently on shellnet** — Circuit 1B fallback; copy also in `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/` |
 | `dark_dex_w128_L{0,1,2}_*.bin` | — | — | — | Legacy `ZKHALO2VERIFY` opcode only (different KZG ceremony than deposit) |
 
@@ -658,6 +669,14 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 
 ### Shellnet E2E — EVM↔AN deposit path (updated 2026-06-13)
 
+> **⚠ Superseded by Track-2 chain-binding (2026-07-23).** This section documents the
+> 11-PI VkBlob (`304c1c4e…`) redeployed to shellnet in 2026-06/07. The current
+> `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4) and produces
+> VkBlob `de1dd3ab…7dd8d1` (5006 B); the follow-on shellnet redeploy is tracked in
+> `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. Preserve the tables below as a
+> historical snapshot — do not rewrite them.
+
+
 **Partner updates (2026-06-11 chat)**
 
 | Topic | Detail |
@@ -689,13 +708,16 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 | **AN node `tvm_vm`** | Base-only or pre-merge opcode | RLC reader (`circuit_shape=1`, `read_rlc_vk`) + nightly `gosh` feature |
 | **Smoke that works** | `fallback_vk_blob.bin` (4 PI) via `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` | Proves relayer keys / gas / ABI — **not** deposit proofs |
 
-**11 public inputs** (canonical for `deposit-prover` / `deposit-relayer-daemon` / shellnet redeploy; 11 × 32 B LE `Fr`):
+**12 public inputs** (canonical for `deposit-prover` / `deposit-relayer-daemon` / shellnet redeploy — **Track-2 chain-binding, 2026-07-23**; 12 × 32 B LE `Fr`):
 
 ```
-[0] depositId  [1] sender  [2] amount  [3] contractAddress
-[4] dappIdHigh  [5] dappIdLow  [6] anAccountHigh  [7] anAccountLow
-[8] blockHashHigh  [9] blockHashLow  [10] promiseCommit
+[0]  depositId       [1]  sender         [2]  amount           [3]  contractAddress
+[4]  chainId         [5]  dappIdHigh     [6]  dappIdLow        [7]  anAccountHigh
+[8]  anAccountLow    [9]  blockHashHigh  [10] blockHashLow     [11] promiseCommit
 ```
+
+> **Historical:** the pre-Track-2 layout was **11 PI** (no `chainId`). Any doc still
+> referencing "11 PI" or "7 PI" predates Track 2 and refers to a superseded VkBlob.
 
 Partner checklist (full redeploy steps): `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. VK gap analysis: `docs/deposit_finalize_vk_gap_2026-05-28.md`.
 
@@ -737,7 +759,7 @@ Post-merge fixes: `95055e85` restored W=128 embedded VK for legacy `ZKHALO2VERIF
 |------|------|-------|----------|-----|
 | `deposit_10proofs/deposit_vk_blob.bin` | 3597 B | VkBlob v2 RLC | **11** | **Target for USDCBridge redeploy** — byte-identical to `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (SHA-256 `147efe14…068abaf`) |
 | `deposit_10proofs/proof_00..09/{public_inputs,proof}.bin` | 352 B + ~8 KB each | — | 11 | Unit tests `test_zkhalo2_with_vk_deposit_10_real_proofs` — **no** `input.json` or `.srs` here (producer-only; sync via `scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`) |
-| `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 11-PI layout |
+| `deposit_rlc_vk_blob.bin` | 3725 B | VkBlob v1 | 7 | Older RLC smoke (`round_trip_deposit_rlc_*` tests) — **not** the production 12-PI Track-2 layout (also predates the 11-PI intermediate) |
 | `fallback_vk_blob.bin` | 6308 B | Base v1 | 4 | **Currently on shellnet** — Circuit 1B fallback; copy also in `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/` |
 | `dark_dex_w128_L{0,1,2}_*.bin` | — | — | — | Legacy `ZKHALO2VERIFY` opcode only (different KZG ceremony than deposit) |
 

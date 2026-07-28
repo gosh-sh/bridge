@@ -504,8 +504,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         builder.base.assigned_instances[0] = public_instances;
 
-        println!("   ✓ Set 11 public instances in Phase 0");
-        println!("   (promise_commit will be appended automatically)");
+        println!("   ✓ Set 11 explicit public instances in Phase 0 (chainId at PI[4])");
+        println!("   (promise_commit is appended automatically → 12 total, matches num_instance())");
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
         Phase0Output {

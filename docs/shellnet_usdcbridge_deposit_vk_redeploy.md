@@ -1,5 +1,16 @@
 # Shellnet `USDCBridge` deposit VK redeploy — partner checklist
 
+> # ⚠️ SUPERSEDED BY TRACK-2 CHAIN-BINDING (2026-07-23)
+> The current `deposit-prover` circuit exposes **12 public inputs**
+> (adds `chainId` at slot 4) and produces VkBlob `de1dd3ab…7dd8d1` (5006 B).
+> All 11-PI VkBlob references below (`147efe14…`, `20cf9018…`, `304c1c4e…`) are
+> **historical**. The next shellnet redeploy must embed the 12-PI VkBlob and
+> the corresponding `_buildPublicInputs`/`_parsePublicInputs` change to pass
+> through `chainId` — see `docs/deposit_max_key_byte_len.md` (fixture rotation
+> table) for the current fixture hash and `deposit-prover/src/types.rs`
+> (`NUM_PUBLIC_INPUTS = 12`). The 11-PI notes below are kept as a reference of
+> the last-actually-deployed state on shellnet.
+
 > # ⚠️ VK UPDATE REQUIRED (2026-06-25)
 > The currently deployed `USDCBridge` embeds VK `147efe14…` — keygen'd from
 > **synthetic 1-node fixtures** (`[10,10]`), which **cannot verify real deposits**

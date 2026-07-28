@@ -1,3 +1,12 @@
+> # ⚠️ SUPERSEDED BY TRACK-2 CHAIN-BINDING (2026-07-23)
+> All "11 PI" / `num_instance = [11]` claims below predate Track 2. The current
+> `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4,
+> `NUM_PUBLIC_INPUTS = 12` in `deposit-prover/src/types.rs`) and produces VkBlob
+> `de1dd3ab…7dd8d1` (5006 B). The reproducibility mechanics below (locked
+> `Cargo.lock`, witness-independent circuit, Hermez SRS pin) still apply — only
+> the PI count / VkBlob hash change. Canonical Track-2 hash + fixtures live in
+> `docs/deposit_max_key_byte_len.md` and `docs/partner_note_usdcbridge_chainid_hermez_2026-07-23.md`.
+
 > # ⚠️ PARTIALLY SUPERSEDED (corrected 2026-06-25)
 > The **`Cargo.lock`-is-now-tracked** reproducibility fix (§4.1) is correct and
 > retained. But the **`b1e5ce0b…` "canonical VkBlob" is NOT the production VK**:

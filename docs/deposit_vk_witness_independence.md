@@ -1,5 +1,14 @@
 # Deposit VK witness-independence — root cause + fix (authoritative)
 
+> **⚠ PI count updated by Track-2 chain-binding (2026-07-23).** The
+> witness-independence root-cause + fix documented below is still authoritative.
+> Only the PI count / VkBlob hash have moved: circuit now exposes **12 PI**
+> (adds `chainId` at slot 4, VkBlob `de1dd3ab…7dd8d1`, 5006 B). The 11-PI
+> `20cf9018…` blob referenced below is the last pre-Track-2 witness-independent
+> VkBlob and is preserved for historical context — the reproducibility argument
+> (cap=64, witness-independent, one embedded VK per circuit shape) carries over
+> unchanged to the 12-PI blob.
+
 **Date:** 2026-06-25
 **Status:** ✅ RESOLVED & validated end-to-end (production prover path).
 **Supersedes:** `deposit_vk_mpt_depth_witness_dependence_2026-06-25.md` (MPT-depth

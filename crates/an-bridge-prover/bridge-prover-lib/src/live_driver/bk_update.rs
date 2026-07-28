@@ -1,7 +1,5 @@
 //! Single-iteration bk-set-update handler.
-//!
-//! Ported from `bridge-prover-daemon/src/main.rs:418-709` (the "Phase 3
-//! BK-set-update drain" loop). This function does exactly one drain step:
+//! This function does exactly one drain step:
 //! it looks for the next rotation event past
 //! `state.stored_last_bk_set_update_seq_no`, validates the L2/L3 Merkle
 //! constraints, generates the Circuit 1A/1B proof against the OLD set, and
@@ -22,14 +20,13 @@
 //!   intended retry semantics.
 
 use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use tracing::{error, info, warn};
 use std::time::Instant;
 
-use crate::attestation_fetcher::{self, AttestationEvidence};
-use crate::bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED};
+use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
+use bridge_gql_fetcher::bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED};
 use crate::block_id_tree::BlockIdMerkleTree;
-use crate::poseidon;
+use bridge_poseidon as poseidon;
 use crate::prover;
 
 use super::{BkUpdateProofArtifacts, BundleFinalizationType, LiveProverDriver};
@@ -66,8 +63,8 @@ pub(super) async fn drive_next_bk_update(
 
     info!("=== bk-update drain: processing event at seq_no {} ===", upd_seqno);
 
-    // Fetch the bk-update block's 8 Merkle leaves to derive L2/L3 and the
-    // open siblings H0/H23.
+    // Fetch the bk-update block's 16 Merkle leaves to derive L2/L3 and the
+    // three open siblings h01 / h4_7 / h8_15 for the depth-4 fold.
     let upd_block = driver
         .gql()
         .query_proof_block_by_seqno(upd_seqno)
@@ -82,6 +79,24 @@ pub(super) async fn drive_next_bk_update(
             )
         })?;
     let tree = BlockIdMerkleTree::from_leaves(leaves);
+
+    // Structural sanity: the tree we just folded must agree with the
+    // block_id the node reports in the same GQL response. The verifier's
+    // step 2b (fold(root) == circuit-committed block_id_fr) already guards
+    // the security invariant end-to-end, so this is not a correctness fix.
+    // The value is fail-fast (skip Circuit 1a proof gen + IPC roundtrip on
+    // broken leaves) and release-build parity (the `debug_assert_eq!`
+    // further down is compiled out in release; this bail! stays in).
+    if tree.root != upd_block.block_id {
+        anyhow::bail!(
+            "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — \
+             GQL leaves inconsistent with block header",
+            upd_seqno,
+            hex::encode(tree.root),
+            hex::encode(upd_block.block_id),
+        );
+    }
+
     let l2 = tree.leaves[2];
     let l3 = tree.leaves[3];
 
@@ -216,19 +231,30 @@ pub(super) async fn drive_next_bk_update(
 
     // The pre-refactor daemon assembled an `ipc::BkUpdateRequest` here; we
     // return the same fields as a transport-agnostic payload. The caller
-    // maps this into the transport of its choice.
-    let block_id_be: [u8; 32] = upd_proof.block_id_fr.to_repr();
+    // maps this into the transport of its choice. Since schema v6 there is a
+    // single `block_id_be` (raw 32-byte SHA-256 root); the Fr form is
+    // derived on demand by the verifier via `ipc::hash_hex_to_fr` and by the
+    // on-chain Yul via `mod(calldataload, f_q)`. Debug-assert that the
+    // circuit's committed Fr agrees with the fold of the raw hash so a
+    // byte-order regression pages loudly at build time.
+    debug_assert_eq!(
+        crate::ipc::fold_hash_be_to_fr(&tree.root),
+        upd_proof.block_id_fr,
+        "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed \
+         block_id_fr; a mismatch means the wire hash and the proof disagree",
+    );
+    let l2_l3_siblings = tree.siblings_for_l2_l3();
     Ok(Some(BkUpdateProofArtifacts {
         block_seq_no: upd_seqno,
         block_height: upd_block.height,
         last_seen_bk_update_seq_no: last_seen_for_upd as u64,
-        block_id_be,
-        block_id_hash_be: tree.root,
+        block_id_be: tree.root,
         fin_type,
         old_bk_set_commitment_be: l2,
         new_bk_set_commitment_be: l3,
-        merkle_sibling_h0_be: tree.h0,
-        merkle_sibling_h23_be: tree.h23,
+        merkle_sibling_h01_be: l2_l3_siblings[0],
+        merkle_sibling_h4_7_be: l2_l3_siblings[1],
+        merkle_sibling_h8_15_be: l2_l3_siblings[2],
         attestation_proof: upd_proof.proof_bytes,
         new_pubkeys,
         primary_proof_gen_ms,

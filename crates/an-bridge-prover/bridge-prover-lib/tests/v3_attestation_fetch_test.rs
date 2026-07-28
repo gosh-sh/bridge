@@ -1,6 +1,6 @@
 //! v3 attestation-fetcher smoke test.
 //!
-//! Validates that `attestation_fetcher::fetch_attestation_for_block` against
+//! Validates that `attestation_fetcher::fetch_attestation_evidence` against
 //! the v3 GraphQL endpoint produces a `ParsedAttestation` whose `raw_bytes`
 //! pass the same layout-parsing the circuit performs, and whose BLS signature
 //! verifies off-circuit against the live bk_set.
@@ -30,7 +30,7 @@ async fn test_v3_fetch_attestation_envelope() {
         return;
     };
 
-    let gql = match bridge_prover_lib::gql_client::create_client(&endpoint) {
+    let gql = match bridge_gql_fetcher::gql_client::create_client(&endpoint) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Skipping: GQL client init failed: {e}");
@@ -38,16 +38,24 @@ async fn test_v3_fetch_attestation_envelope() {
         }
     };
 
-    let att = match bridge_prover_lib::attestation_fetcher::fetch_attestation_for_block(
+    let ev = match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(
         &gql, seq_no,
     )
     .await
     {
-        Ok(a) => a,
+        Ok(e) => e,
         Err(e) => {
-            eprintln!("Skipping: fetch_attestation_for_block({seq_no}) failed: {e}");
+            eprintln!("Skipping: fetch_attestation_evidence({seq_no}) failed: {e}");
             return;
         }
+    };
+    // This smoke test only validates the on-wire byte layout of a single
+    // `ParsedAttestation`; the primary entry is present in both variants.
+    let att = match ev {
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
+            primary, ..
+        } => primary,
     };
 
     println!(
@@ -64,17 +72,17 @@ async fn test_v3_fetch_attestation_envelope() {
     assert_eq!(att.block_seq_no, seq_no, "seq mismatch");
 
     // Validate raw_bytes layout matches the bincode(Envelope<AttestationData>) shape.
-    let sig_bytes = bridge_parsers::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
+    let sig_bytes = attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
     assert_eq!(sig_bytes.len(), 192, "sig bytes must be 192");
     let num_signers =
-        bridge_parsers::attestation_data_parser::parse_num_signers(&att.raw_bytes);
+        attestation_bls_checker_circuit::attestation_data_parser::parse_num_signers(&att.raw_bytes);
     assert_eq!(
         num_signers,
         att.signature_occurrences.values().copied().map(|c| c as usize).sum::<usize>(),
         "num_signers (summed counts) must match signature_occurrences entries",
     );
     let att_data =
-        bridge_parsers::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
+        attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
     assert_eq!(att_data.len(), 120, "AttestationData section must be 120 bytes");
 
     // Inner block_id at REL_OFFSET 48 must equal the parent_block_id field separator + value.
@@ -88,12 +96,12 @@ async fn test_v3_fetch_attestation_envelope() {
     assert_eq!(inner_target, att.target_type, "inner target_type mismatch");
 
     // Off-circuit BLS verification against live bk_set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     println!("bk_set has {} signers", bk_set.len());
 
     let entries =
-        bridge_parsers::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
+        attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
     let signature = gosh_bls_verification::helpers::deserialize_g2_signature(sig_bytes);
     let msg = &att_data[..120];
     let msg_hash = gosh_bls_verification::helpers::compute_msg_hash(msg);

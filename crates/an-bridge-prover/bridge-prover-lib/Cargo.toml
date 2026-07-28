@@ -8,7 +8,6 @@ halo2-base = { workspace = true }
 halo2-ecc = { workspace = true }
 attestation-bls-checker-circuit = { workspace = true }
 historical-layer-hashes-movement-checker-circuit = { workspace = true }
-bridge-parsers = { workspace = true }
 bridge-poseidon = { workspace = true }
 bridge-test-data-gen = { workspace = true }
 bridge-event-prove-circuit = { workspace = true }
@@ -16,6 +15,8 @@ gosh-bls-verification = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
 gosh-sha256-chip = { workspace = true }
 gosh-zk-snark-halo2-utils = { workspace = true }
+halo2_kzg_srs = { workspace = true }
+halo2_curves = { workspace = true }
 pse-poseidon = { workspace = true }
 num-bigint = { workspace = true }
 sha2 = { workspace = true }
@@ -31,6 +32,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 tvm_vm = { workspace = true }
+bridge-gql-fetcher = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

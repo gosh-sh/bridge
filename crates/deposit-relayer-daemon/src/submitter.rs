@@ -64,6 +64,10 @@ pub enum SubmitOutcome {
     /// AN rejected the submission (proof verification failed, malformed
     /// call). The relayer logs and records an attempt.
     Rejected { reason: String },
+    /// The tx was broadcast but confirmation timed out while still pending.
+    /// Distinct from [`Rejected`] — the relayer retries without treating it
+    /// as a verifier failure.
+    Pending { reason: String },
 }
 
 #[async_trait]
@@ -341,7 +345,10 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             params,
         };
 
-        let sent = self.client.call_contract(call).await?;
+        let sent = match self.client.call_contract(call).await {
+            Ok(hash) => hash,
+            Err(e) => return Ok(classify_call_error(&e.to_string())),
+        };
         let receipt = self
             .client
             .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
@@ -354,15 +361,66 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
                 })
             },
             TransactionStatus::Reverted | TransactionStatus::Failed => {
-                Ok(SubmitOutcome::Rejected {
-                    reason: format!("finalizeDeposit tx status = {:?}", receipt.status),
-                })
+                Ok(classify_reverted(receipt.exit_code, &format!("{:?}", receipt.status)))
             },
-            TransactionStatus::Pending => Ok(SubmitOutcome::Rejected {
+            TransactionStatus::Pending => Ok(SubmitOutcome::Pending {
                 reason: "finalizeDeposit tx still pending after timeout".to_string(),
             }),
         }
     }
+}
+
+/// StdContractError: DepositVoucher already deployed → deposit already finalized.
+const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
+/// USDCBridge `ERR_INVALID_ZKPROOF`.
+const EXIT_INVALID_ZKPROOF: i32 = 220;
+
+fn classify_reverted(exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
+    match exit_code {
+        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
+        Some(code) => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit reverted (exit_code={code}): {detail}"),
+        },
+        None => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit tx status = {detail}"),
+        },
+    }
+}
+
+fn classify_call_error(msg: &str) -> SubmitOutcome {
+    // Prefer acki_nacki_interface parser when the tvm-sdk feature is on; fall
+    // back to a local regex-free scan so this module still builds without it.
+    let code = parse_exit_code_loose(msg);
+    match code {
+        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
+        Some(EXIT_INVALID_ZKPROOF) => SubmitOutcome::Rejected {
+            reason: format!("ERR_INVALID_ZKPROOF (exit_code=220): {msg}"),
+        },
+        Some(code) => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit failed (exit_code={code}): {msg}"),
+        },
+        None => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit call failed: {msg}"),
+        },
+    }
+}
+
+fn parse_exit_code_loose(msg: &str) -> Option<i32> {
+    if let Some(c) = acki_nacki_interface::parse_exit_code_from_message(msg) {
+        return Some(c);
+    }
+    for marker in ["exit_code=Some(", "exit_code=", "local_exit_code="] {
+        if let Some(rest) = msg.split(marker).nth(1) {
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
 }
 
 #[async_trait]
@@ -518,6 +576,28 @@ mod tests {
                 tx_hash,
             } => assert!(tx_hash.is_some()),
             other => panic!("expected Finalized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_exit_51_as_already_finalized() {
+        assert!(matches!(
+            classify_call_error("contract call aborted (exit_code=Some(51))"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+        assert!(matches!(
+            classify_reverted(Some(51), "Reverted"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+    }
+
+    #[test]
+    fn classify_exit_220_as_rejected() {
+        match classify_call_error("contract call aborted (exit_code=220)") {
+            SubmitOutcome::Rejected { reason } => {
+                assert!(reason.contains("220") || reason.contains("ERR_INVALID_ZKPROOF"));
+            },
+            other => panic!("expected Rejected, got {other:?}"),
         }
     }
 }

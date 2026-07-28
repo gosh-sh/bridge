@@ -173,6 +173,34 @@ impl AnConfig {
             confirm_timeout_secs: self.confirm_timeout_secs,
         }
     }
+
+    /// Validate the GraphQL endpoint for live submission (QC-OFF-04).
+    ///
+    /// Production endpoints must use HTTPS unless loopback or
+    /// `allow_insecure` is set.
+    pub fn validate_live_graphql_endpoint(
+        &self,
+        allow_insecure: bool,
+    ) -> Result<(), RelayerError> {
+        if self.graphql_url.is_empty() {
+            return Ok(());
+        }
+        let lower = self.graphql_url.to_ascii_lowercase();
+        if lower.starts_with("https://") {
+            return Ok(());
+        }
+        if lower.starts_with("http://127.0.0.1") || lower.starts_with("http://localhost") {
+            return Ok(());
+        }
+        if allow_insecure {
+            return Ok(());
+        }
+        Err(RelayerError::other(format!(
+            "GraphQL URL must use HTTPS for live submit (got {}). \
+             Local dev may use http://127.0.0.1; pass --allow-insecure-graphql to override.",
+            self.graphql_url
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -230,5 +258,33 @@ mod tests {
     fn bk_set_client_builds() {
         let cfg = AnConfig::from_node_url("http://example.com:8600/");
         assert!(cfg.bk_set_client().is_ok());
+    }
+
+    #[test]
+    fn graphql_https_ok() {
+        let cfg = AnConfig {
+            graphql_url: "https://shellnet.ackinacki.org/graphql".into(),
+            ..AnConfig::default()
+        };
+        assert!(cfg.validate_live_graphql_endpoint(false).is_ok());
+    }
+
+    #[test]
+    fn graphql_http_rejected_without_override() {
+        let cfg = AnConfig {
+            graphql_url: "http://94.156.178.19:8600/graphql".into(),
+            ..AnConfig::default()
+        };
+        assert!(cfg.validate_live_graphql_endpoint(false).is_err());
+        assert!(cfg.validate_live_graphql_endpoint(true).is_ok());
+    }
+
+    #[test]
+    fn graphql_loopback_http_allowed() {
+        let cfg = AnConfig {
+            graphql_url: "http://127.0.0.1:11000/graphql".into(),
+            ..AnConfig::default()
+        };
+        assert!(cfg.validate_live_graphql_endpoint(false).is_ok());
     }
 }

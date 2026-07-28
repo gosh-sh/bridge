@@ -954,6 +954,7 @@ mod tests {
             an_account: [3u8; 32],
             timestamp: 1234567890,
             contract_address: [2u8; 20],
+            chain_id: 11155111,
         };
 
         let receipt_proof = ReceiptProof {

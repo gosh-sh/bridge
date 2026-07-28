@@ -7,51 +7,33 @@
 //! 32 bytes with a single trailing zero, interpreted as little-endian field
 //! elements, fed into the sponge, then the 32-byte LE output is returned.
 //!
-//! This is a separate surface from `crate::poseidon` (which re-exports
-//! `bridge_poseidon` for Circuit 1A's BK-set commitment). This module covers
-//! the dense Poseidon Merkle tree used by Circuit 2 (history layers) and
-//! Circuit 4 (event proofs).
+//! This module is layered on top of `bridge_poseidon` (which owns the
+//! byte-hashing primitive used for Circuit 1A's BK-set commitment) and
+//! adds the dense Poseidon Merkle-tree helpers used by Circuit 2 (history
+//! layers) and Circuit 4 (event proofs).
 
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::utils::ScalarField;
-use pse_poseidon::Poseidon;
-
-pub const FIELD_ELEMENT_SIZE_IN_BYTES: usize = 32;
 pub const HISTORY_PROOF_WINDOW_SIZE: usize = 128;
 pub type LayerNumber = u8;
 
-const T: usize = 3;
-const RATE: usize = 2;
-const R_F: usize = 8;
-const R_P: usize = 57;
-
-pub struct PoseidonHasher {
-    template: Poseidon<Fr, T, RATE>,
-}
-
-impl Default for PoseidonHasher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Marker for the dense-Merkle helpers.
+///
+/// Byte hashing is delegated to [`bridge_poseidon::poseidon_hash_bytes`], so
+/// this struct is stateless. Kept as a named type so call sites like
+/// `PoseidonHasher::new()` + `hasher.digest(&buf)` and function signatures
+/// like `dense_combine(&hasher, ...)` stay readable and unchanged.
+#[derive(Default, Clone, Copy)]
+pub struct PoseidonHasher;
 
 impl PoseidonHasher {
     pub fn new() -> Self {
-        Self { template: Poseidon::new(R_F, R_P) }
+        Self
     }
 
+    /// Poseidon-bn254 byte digest. Delegates to
+    /// [`bridge_poseidon::poseidon_hash_bytes`] — this is the *single*
+    /// byte-hashing surface for the whole prover workspace.
     pub fn digest(&self, bytes: &[u8]) -> [u8; 32] {
-        let field_elements: Vec<Fr> = bytes
-            .chunks(FIELD_ELEMENT_SIZE_IN_BYTES - 1)
-            .map(|c| {
-                let mut buf = [0u8; FIELD_ELEMENT_SIZE_IN_BYTES];
-                buf[..c.len()].copy_from_slice(c);
-                Fr::from_bytes_le(&buf)
-            })
-            .collect();
-        let mut sponge = self.template.clone();
-        sponge.update(&field_elements);
-        sponge.squeeze().to_bytes_le().try_into().expect("32 bytes")
+        bridge_poseidon::poseidon_hash_bytes(bytes)
     }
 }
 

@@ -29,7 +29,7 @@ use crate::{
     error::RelayerError,
     proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::fr_hex_to_u256,
+    withdrawal::{fr_hex_to_u256, hash_hex_to_u256},
 };
 
 /// Asynchronous source of AN block payloads.
@@ -450,7 +450,9 @@ impl ProverProofsBlockSource {
 
         let block = AnBlockData {
             fin_type: FinalizationType::Primary,
-            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash — decode
+            // as BE so the U256 matches `uint256(bytes32(blockId))` on-chain.
+            block_id: hash_hex_to_u256(&req.block_id_hex)?,
             bk_set_commitment: fr_hex_to_u256(&req.bk_set_poseidon_hash_hex)?,
             block_seq_no: seq_no,
             num_layers: req.num_layers,
@@ -481,7 +483,9 @@ impl BlockSource for ProverProofsBlockSource {
 // ─────────────────────────────────────────────────────────────────────
 
 /// JSON written by `acki-nacki-to-eth-bridge-halo2-prover/bridge-prover-daemon`
-/// (`bridge-prover-lib::ipc::BkUpdateRequest`).
+/// (`bridge-prover-lib::ipc::BkUpdateRequest`). Schema v6: single
+/// `block_id_hex` carries the raw 32-byte BE chain hash — the pre-v6 dual
+/// (`block_id_hex` Fr LE + `block_id_hash_hex` raw BE) has collapsed.
 #[derive(Deserialize)]
 struct PartnerBkUpdateRequest {
     #[serde(default, rename = "schema_version")]
@@ -492,15 +496,14 @@ struct PartnerBkUpdateRequest {
     #[serde(default, rename = "last_seen_bk_update_seqno")]
     _last_seen_bk_update_seqno: u32,
     block_id_hex: String,
-    #[serde(default, rename = "block_id_hash_hex")]
-    _block_id_hash_hex: String,
     #[serde(default = "default_attestation_primary")]
     attestation_circuit: String,
     primary_proof_hex: String,
     old_bk_set_poseidon_hash_hex: String,
     new_bk_set_poseidon_hash_hex: String,
-    merkle_sibling_h0_hex: String,
-    merkle_sibling_h23_hex: String,
+    merkle_sibling_h01_hex: String,
+    merkle_sibling_h4_7_hex: String,
+    merkle_sibling_h8_15_hex: String,
 }
 
 fn default_attestation_primary() -> String {
@@ -611,12 +614,16 @@ impl BkUpdateProofsSource {
 
         Ok(Some(crate::types::BkSetUpdateData {
             fin_type,
-            block_id: fr_hex_to_u256(&req.block_id_hex)?,
+            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash. Same
+            // semantics as the bundle path — matches
+            // `uint256(bytes32(blockId))` on-chain.
+            block_id: hash_hex_to_u256(&req.block_id_hex)?,
             block_seq_no: seq_no,
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
-            sibling_h0: hex32_to_array(&req.merkle_sibling_h0_hex, "merkle_sibling_h0")?,
-            sibling_h23: hex32_to_array(&req.merkle_sibling_h23_hex, "merkle_sibling_h23")?,
+            sibling_h01: hex32_to_array(&req.merkle_sibling_h01_hex, "merkle_sibling_h01")?,
+            sibling_h4_7: hex32_to_array(&req.merkle_sibling_h4_7_hex, "merkle_sibling_h4_7")?,
+            sibling_h8_15: hex32_to_array(&req.merkle_sibling_h8_15_hex, "merkle_sibling_h8_15")?,
             attestation_proof: Bytes::from(attestation_proof),
         }))
     }
@@ -756,7 +763,6 @@ mod tests {
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
-            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": [
@@ -799,7 +805,6 @@ mod tests {
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
-            "layer_block_id_hex": "0300000000000000000000000000000000000000000000000000000000000000",
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": vec![
@@ -846,15 +851,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proof_hex = "0x".to_string() + &"ab".repeat(256);
         let bkupd = serde_json::json!({
-            "schema_version": 4,
+            "schema_version": 7,
             "block_seq_no": 24,
             "attestation_circuit": "primary",
             "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
             "primary_proof_hex": proof_hex,
             "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
-            "merkle_sibling_h0_hex": "0x".to_string() + &"aa".repeat(32),
-            "merkle_sibling_h23_hex": "0x".to_string() + &"bb".repeat(32),
+            "merkle_sibling_h01_hex": "0x".to_string() + &"aa".repeat(32),
+            "merkle_sibling_h4_7_hex": "0x".to_string() + &"bb".repeat(32),
+            "merkle_sibling_h8_15_hex": "0x".to_string() + &"cc".repeat(32),
         });
         std::fs::write(
             dir.path().join("bkupd_000024.json"),
@@ -872,6 +878,8 @@ mod tests {
         assert_eq!(u.block_seq_no, 24);
         assert_eq!(u.fin_type, FinalizationType::Primary);
         assert_eq!(u.attestation_proof.len(), 256);
-        assert_eq!(u.sibling_h0[0], 0xaa);
+        assert_eq!(u.sibling_h01[0], 0xaa);
+        assert_eq!(u.sibling_h4_7[0], 0xbb);
+        assert_eq!(u.sibling_h8_15[0], 0xcc);
     }
 }

@@ -15,16 +15,16 @@
 //! a "max ticks" budget for tests; [`crate::daemon`] adds the long-running
 //! backoff + shutdown wrapper.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     error::RelayerError,
     prover::ProofGenerator,
     source::DepositSource,
-    state::RelayerState,
+    state::{DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
 };
 
@@ -44,6 +44,19 @@ pub struct RelayerConfig {
     /// warning. Doesn't stop the relayer; operator-visible only.
     #[serde(default = "default_max_attempts_warn")]
     pub max_attempts_warn: u32,
+    /// Deployment binding stamped into `state.json` (daemon only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentIdentity>,
+    /// Override a mismatched deployment binding in an existing state file.
+    #[serde(default)]
+    pub force_state: bool,
+    /// After this many consecutive failures on the same deposit, park it and
+    /// advance the cursor. `None` or `0` disables skipping (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_after_attempts: Option<u32>,
+    /// Shared with [`EthLogSource`] — highest safe head scanned so far.
+    #[serde(skip)]
+    pub scan_cursor: Option<Arc<Mutex<u64>>>,
 }
 
 fn default_poll_interval() -> Duration {
@@ -62,6 +75,10 @@ impl RelayerConfig {
             start_deposit_id: 0,
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: None,
         }
     }
 }
@@ -87,6 +104,12 @@ pub enum TickOutcome {
     /// AN rejected the finalize submission (verifier rejection, malformed
     /// call). Recorded as an attempt; a corrected re-prove may succeed.
     AnRejected { deposit_id: u64, reason: String },
+    /// AN accepted the tx but confirmation timed out while still pending.
+    /// Retried later without advancing the cursor.
+    AnPending { deposit_id: u64, reason: String },
+    /// The deposit was parked after `--skip-after-attempts`; cursor advanced
+    /// for liveness. Operator must run `finalize-one` manually.
+    Skipped { deposit_id: u64, reason: String },
 }
 
 /// Single relayer instance. Holds a [`DepositSource`], a [`ProofGenerator`]
@@ -108,7 +131,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         prover: Arc<P>,
         submitter: Arc<A>,
     ) -> Result<Self, RelayerError> {
-        let state = RelayerState::load(&config.state_path)?.unwrap_or_default();
+        let mut state = RelayerState::load(&config.state_path)?.unwrap_or_default();
+        if let Some(deployment) = &config.deployment {
+            state.ensure_deployment(deployment, config.force_state)?;
+        }
         Ok(Self {
             config,
             source,
@@ -146,8 +172,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let event = match self.source.fetch(target).await? {
             Some(e) => e,
             None => {
-                self.state.record_attempt(target);
-                self.persist_state()?;
+                if let Some(outcome) = self.record_failure(target, "deposit not yet confirmed on Ethereum")? {
+                    return Ok(outcome);
+                }
                 if self.state.attempts_since_progress >= self.config.max_attempts_warn {
                     warn!(
                         deposit_id = target,
@@ -173,8 +200,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let bundle = match self.prover.generate(&event).await {
             Ok(b) => b,
             Err(e) => {
-                self.state.record_attempt(target);
-                self.persist_state()?;
+                if let Some(outcome) =
+                    self.record_failure(target, &format!("proof generation: {e}"))?
+                {
+                    return Ok(outcome);
+                }
                 let reason = e.to_string();
                 warn!(deposit_id = target, reason = %reason, "proof generation failed");
                 return Ok(TickOutcome::ProofFailed {
@@ -216,8 +246,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Rejected {
                 reason,
             } => {
-                self.state.record_attempt(target);
-                self.persist_state()?;
+                if let Some(outcome) =
+                    self.record_failure(target, &format!("AN rejected: {reason}"))?
+                {
+                    return Ok(outcome);
+                }
                 warn!(
                     deposit_id = target,
                     attempts = self.state.attempts_since_progress,
@@ -225,6 +258,21 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     "AN rejected finalizeDeposit",
                 );
                 Ok(TickOutcome::AnRejected {
+                    deposit_id: target,
+                    reason,
+                })
+            },
+            SubmitOutcome::Pending {
+                reason,
+            } => {
+                self.state.record_attempt(target);
+                self.persist_state()?;
+                debug!(
+                    deposit_id = target,
+                    reason = %reason,
+                    "finalizeDeposit still pending; will retry",
+                );
+                Ok(TickOutcome::AnPending {
                     deposit_id: target,
                     reason,
                 })
@@ -252,8 +300,41 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         Ok(history)
     }
 
-    fn persist_state(&self) -> Result<(), RelayerError> {
+    fn persist_state(&mut self) -> Result<(), RelayerError> {
+        if let Some(cursor) = &self.config.scan_cursor {
+            self.state.scanned_through_block =
+                Some(*cursor.lock().map_err(|e| RelayerError::other(e.to_string()))?);
+        }
         self.state.save(&self.config.state_path)
+    }
+
+    /// Record a failed attempt and optionally park the deposit when the skip
+    /// threshold is reached.
+    fn record_failure(
+        &mut self,
+        deposit_id: u64,
+        reason: &str,
+    ) -> Result<Option<TickOutcome>, RelayerError> {
+        self.state.record_attempt(deposit_id);
+        if let Some(limit) = self.config.skip_after_attempts {
+            if limit > 0 && self.state.attempts_since_progress >= limit {
+                self.state.record_skip(deposit_id);
+                self.persist_state()?;
+                error!(
+                    deposit_id,
+                    attempts = limit,
+                    reason,
+                    parked = ?self.state.parked_deposit_ids,
+                    "deposit parked after max attempts; run finalize-one manually",
+                );
+                return Ok(Some(TickOutcome::Skipped {
+                    deposit_id,
+                    reason: reason.to_string(),
+                }));
+            }
+        }
+        self.persist_state()?;
+        Ok(None)
     }
 }
 
@@ -304,6 +385,10 @@ mod tests {
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: None,
         };
         Relayer::new(cfg, source, prover, submitter).unwrap()
     }
@@ -488,6 +573,39 @@ mod tests {
             ..
         }));
         assert_eq!(submitter.finalized_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn skips_stuck_deposit_after_max_attempts() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(1));
+        let prover = Arc::new(MockProofGenerator::new());
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            start_deposit_id: 0,
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: Some(3),
+            scan_cursor: None,
+        };
+        let mut relayer = Relayer::new(cfg, source, prover, submitter).unwrap();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                relayer.tick().await.unwrap(),
+                TickOutcome::NotYetAvailable { deposit_id: 0 }
+            ));
+        }
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Skipped { deposit_id, .. } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
+        assert_eq!(relayer.state().next_target(0), 1);
     }
 
     #[tokio::test]

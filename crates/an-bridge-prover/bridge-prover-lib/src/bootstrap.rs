@@ -62,19 +62,22 @@ pub struct BootstrapSeed {
 }
 
 impl BootstrapSeed {
-    /// Apply this seed to `state` exactly as if a verified key block had
-    /// arrived: append each per-layer hash, update cursors, mark initialized.
+    /// Apply this seed to `state` — genesis-stamp the BK-set commitment
+    /// (via `initialize_bk_set_commitment`, matching the Solidity
+    /// constructor's one-shot write) and then append the seed's layer
+    /// hashes + cursors via `append_bundle`.
     ///
-    /// Idempotent on a freshly-constructed `BridgeState`; calling it on an
-    /// already-initialized state advances cursors and will *not* unwind
-    /// existing history, so callers should guard with `!state.initialized`.
-    pub fn apply(&self, state: &mut BridgeState) {
+    /// Errors if `state` is already initialized: the commitment stamp is
+    /// a genesis-only operation and callers must guard with
+    /// `!state.initialized`.
+    pub fn apply(&self, state: &mut BridgeState) -> anyhow::Result<()> {
+        state.initialize_bk_set_commitment(self.bk_set_commitment)?;
         state.append_bundle(
             &self.layer_hashes,
             self.block_height,
             self.block_seq_no,
-            self.bk_set_commitment,
-        );
+        )?;
+        Ok(())
     }
 
     /// Atomically persist the seed to `path` (write `.tmp`, then `rename`).
@@ -123,7 +126,7 @@ impl BootstrapSeed {
 /// single-thread testbed). `bk_set_commitment` is computed by the caller from
 /// the BK set in effect at startup.
 pub async fn fetch_from_node(
-    gql: &crate::gql_client::GqlClient,
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
     first_key_seqno: u64,
     bk_set_commitment: [u8; 32],
 ) -> anyhow::Result<BootstrapSeed> {
@@ -163,13 +166,29 @@ mod tests {
             bk_set_commitment: [9u8; 32],
         };
         assert!(!state.initialized);
-        seed.apply(&mut state);
+        seed.apply(&mut state).unwrap();
         assert!(state.initialized);
         assert_eq!(state.stored_last_seen_block_seq_no, 8);
         assert_eq!(state.stored_last_seen_block_height, 8);
         assert_eq!(state.stored_bk_set_commitment, [9u8; 32]);
         assert_eq!(state.window(1).data_len, 1);
         assert_eq!(state.window(1).latest(), Some([7u8; 32]));
+    }
+
+    #[test]
+    fn apply_rejects_already_initialized_state() {
+        let mut state = BridgeState::new(8);
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([7u8; 32], 1)],
+            block_height: 8,
+            block_seq_no: 8,
+            bk_set_commitment: [9u8; 32],
+        };
+        seed.apply(&mut state).unwrap();
+        // Second apply must fail — the commitment stamp is genesis-only.
+        let err = seed.apply(&mut state).unwrap_err();
+        assert!(format!("{err}").contains("already-initialized"));
     }
 
     #[test]

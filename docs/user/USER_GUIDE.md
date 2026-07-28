@@ -80,6 +80,38 @@ Confirm in MetaMask and **save the transaction hash**.
 proof (**minutes, not seconds**), and calls `finalizeDeposit` on Acki Nacki. Your
 USDC appears on your AN account. You don't run anything.
 
+### What you'll see
+
+**On Etherscan** — a successful `deposit` emits exactly one `Deposit` event.
+Write down your **depositId** (you'll need it if you ever contact the operator).
+A real Sepolia deposit looks like this:
+
+| Field | Example |
+| --- | --- |
+| tx status | Success (1) |
+| gas used | ~58,600 |
+| `depositId` (indexed) | `9` |
+| `sender` (indexed) | `0x4A35…7592` |
+| `amount` | `1000000` (1 USDC) |
+| `anWorkchain` | `0` |
+| `anAccount` | `0x20c2db9c…834c9` |
+
+Event signature `Deposit(uint256,address,uint256,int8,bytes32,uint256)` =
+`0x8d5d0606…3d37ee`.
+
+**On Acki Nacki** (relayer-driven, a few minutes later) — the relayer proves the
+deposit and calls `finalizeDeposit`. On success the AN transaction has
+`exit_code 0`, a `DepositVoucher` is deployed, and `confirmDeposit` mints ECC
+currency **#3 (USDC)** to your account. You then see the balance on your AN
+account, e.g. `ecc{3:1000000}` = 1 USDC (last fully verified credit:
+depositId=9 → `0x20c2db9c…834c9`, AN tx `e217cc56…`, `exit_code 0`).
+
+> If your USDC hasn't arrived after several minutes, the AN side may be mid-
+> maintenance (e.g. a testnet reset temporarily invalidates the relayer's AN
+> account). Send your **tx hash + depositId** to the operator — the ETH-side
+> deposit is already final and will be credited once the relayer's AN account is
+> restored.
+
 ---
 
 ## 4. Withdraw: Acki Nacki → Ethereum
@@ -94,6 +126,27 @@ USDC appears on your AN account. You don't run anything.
 
 This direction is **operator-assisted** on testnet today — the relayer submits
 the proofs. Tell your operator you want a withdrawal.
+
+### What you'll see
+
+The relayer submits two Sepolia transactions on your behalf (no MetaMask action
+from you):
+
+| Step | What it does | Example tx |
+| --- | --- | --- |
+| `verifyBlock` | Registers the Acki Nacki block anchor on the bridge | `0x0f54a486…` |
+| `withdrawByProof` | Pays your USDC to your Ethereum address (once) | `0xdf01a367…` |
+
+When `withdrawByProof` succeeds you'll see a USDC `Transfer` to your address on
+Etherscan and the funds in your wallet. A second attempt on the same withdrawal
+reverts — each withdrawal is replay-protected (nullifier).
+
+> Behind the scenes the Acki-Nacki-side proof (`proof_event_*.json`, Circuit 4)
+> is produced by the partner prover and self-verifies (`"verified": true`) before
+> the relayer touches Ethereum. Because `verifyBlock` enforces a **monotonic**
+> Acki Nacki block seq_no, the on-chain payout requires the bridge's stored
+> `storedLastSeenBlockSeqNo` to be at or below the proof's block — a fresh bridge
+> deployment is needed after an Acki Nacki testnet reset.
 
 ---
 
@@ -143,6 +196,16 @@ share your MetaMask secret recovery phrase. Test USDC is not real money.
 | 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
 | Deploy scripts | `contracts/ethereum/script/` |
 | Env template (hosted relayer) | `scripts/ursus/deposit-relayer.env.example` |
+| Hermez KZG pins (repos/branches/blobs) | `docs/hermez_kzg_repos_and_branches.md` |
+
+> **Deposit prover must key on the Hermez ceremony.** Shellnet's `USDCBridge`
+> embeds the Hermez deposit `VkBlob` (`304c1c4e…`, 3982 B) and the AN node opcode
+> embeds Hermez `s_g2` (`928fafb3…`). A proof keyed on the old chain SRS
+> (`VkBlob 20cf9018…`) is rejected on-chain with `ERR_INVALID_ZKPROOF`
+> (TVM `exit_code 220`). Build the prover from the Hermez branch
+> (`pruvendo/hermez-kzg-fixtures`) with `deposit-prover/data/kzg_params_18.srs`
+> (Hermez), delete any stale PK so keygen re-writes the `…pk.bp.json` sidecar, and
+> confirm `vk_blob.bin` hashes to `304c1c4e…` before submitting.
 
 **Verify the bridge on Etherscan** (run from `contracts/ethereum/`, which pins
 solc 0.8.19 / optimizer / `via_ir`):

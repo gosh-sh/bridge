@@ -9,7 +9,7 @@
 //!   timestamp)` event, honouring a confirmation depth so only finalised
 //!   deposits are surfaced.
 
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{collections::BTreeMap, sync::{Arc, Mutex}, time::Duration};
 
 use alloy::{
     network::{Ethereum, Network},
@@ -183,6 +183,10 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     confirmations: u64,
     /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
     chain_id: Mutex<Option<u64>>,
+    /// Highest `safe_head` scanned on the previous fetch. When set, the next
+    /// scan starts at `scanned_through + 1` instead of re-walking from
+    /// `from_block`.
+    scan_cursor: Option<Arc<Mutex<u64>>>,
     _network: std::marker::PhantomData<N>,
 }
 
@@ -198,7 +202,28 @@ where
             from_block,
             confirmations,
             chain_id: Mutex::new(None),
+            scan_cursor: None,
             _network: std::marker::PhantomData,
+        }
+    }
+
+    /// Attach a shared scan cursor (typically backed by `RelayerState`).
+    pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<u64>>) -> Self {
+        self.scan_cursor = Some(cursor);
+        self
+    }
+
+    fn effective_scan_from(&self) -> u64 {
+        match &self.scan_cursor {
+            Some(cursor) => {
+                let last = *cursor.lock().expect("poisoned scan cursor");
+                if last >= self.from_block {
+                    last.saturating_add(1)
+                } else {
+                    self.from_block
+                }
+            },
+            None => self.from_block,
         }
     }
 
@@ -343,7 +368,7 @@ where
         // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
         let mut logs = Vec::new();
-        let mut chunk_start = self.from_block;
+        let mut chunk_start = self.effective_scan_from();
         while chunk_start <= safe_head {
             let chunk_end = chunk_start
                 .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
@@ -357,6 +382,10 @@ where
             let chunk = get_logs_with_retry(&self.provider, &filter).await?;
             logs.extend(chunk);
             chunk_start = chunk_end.saturating_add(1);
+        }
+
+        if let Some(cursor) = &self.scan_cursor {
+            *cursor.lock().expect("poisoned scan cursor") = safe_head;
         }
 
         for log in logs {

@@ -299,11 +299,11 @@ To make the migration painless, `bridge-prover-lib::gql_client` should expose th
 |---|---|---|
 | `BkSetClient::fetch_bk_set()` (compact snapshot) | `gql_client::query_current_bk_set_compact(&gql) → CompactBkSetSnapshot` | `{ seq_no, entries: Vec<CompactBkEntry { node_id, node_owner_pk, epoch_start_seq_no }> }` |
 | `BkSetClient::fetch_bk_set_update()` (full snapshot with 48-byte BLS pubkeys) | `gql_client::query_current_bk_set_full(&gql) → FullBkSetSnapshot` | `{ seq_no, entries: Vec<FullBkEntry { pubkey_48, signer_index, epoch_finish_seq_no, address, stake, owner_address, … }> }` |
-| `BkSetClient::fetch_signer_index_bk_set()` (`HashMap<u32, Vec<u8>>`) | `gql_client::query_current_signer_index_bk_set(&gql) → HashMap<u16, Vec<u8>>` | Same shape (note: signer_index widened from `u32` → `u16` to match `bridge-prover-lib`'s existing convention; documented) |
+| `BkSetClient::fetch_signer_index_bk_set()` (`HashMap<u32, Vec<u8>>`) | `bk_set_fetcher::fetch_bk_set(&gql) → HashMap<u16, Vec<u8>>` | Same shape (note: signer_index widened from `u32` → `u16` to match `bridge-prover-lib`'s existing convention; documented) |
 
 The three shortcuts all compose from the same three primitives already inside `bridge-prover-lib`: `bk_set_fetcher::fetch_bk_set` (checked-in genesis-like snapshot as the starting point), `gql_client::query_bk_set_updates_last` (walk forward from that snapshot's seqno), `bk_set_fetcher::parse_bk_set_changes_pub` (apply each update). Total new code: ~120 LOC of format-adaptation on top of already-tested internals — no new GraphQL queries, no new witness assembly.
 
-Sergey then rewrites `BkSetSentry` to poll `query_current_signer_index_bk_set` every N seconds and diff against the previous snapshot's membership hash — same detection logic he has today, just a different transport. His `acki-nacki-interface` crate's `BkSetClient` can be retired in the same PR (or kept as an offline debug tool if he prefers, but not wired into the sentry).
+Sergey then rewrites `BkSetSentry` to poll `bk_set_fetcher::fetch_bk_set` every N seconds and diff against the previous snapshot's membership hash — same detection logic he has today, just a different transport. His `acki-nacki-interface` crate's `BkSetClient` can be retired in the same PR (or kept as an offline debug tool if he prefers, but not wired into the sentry).
 
 Any *extra* field Sergey needs that we don't expose today: add it as an additional GQL shortcut in the same module. The rule is: `bridge-prover-lib::gql_client` is the single authoritative AN-facing surface for both daemons.
 
@@ -511,7 +511,7 @@ His existing `Relayer::tick()`, `BackoffConfig`, `SentryGuardedRelayer`, `Relaye
 
 **Sergey's `BkSetSentry` and `acki-nacki-interface::BkSetClient` retirement.** Per §3.8, GraphQL is now authoritative for all BK-set data. Sergey has two options:
 
-- **5.1a (recommended long-term).** Rewrite `BkSetSentry` to poll `bridge_prover_lib::gql_client::query_current_signer_index_bk_set` and diff membership hashes — same detection logic he has today, GQL transport instead of REST. `acki-nacki-interface::BkSetClient` is deleted (or preserved as an offline debug tool, unwired). Landing in the same PR as the `live_source.rs` swap keeps his crate's AN-facing surface single-sourced.
+- **5.1a (recommended long-term).** Rewrite `BkSetSentry` to poll `bridge_prover_lib::bk_set_fetcher::fetch_bk_set` and diff membership hashes — same detection logic he has today, GQL transport instead of REST. `acki-nacki-interface::BkSetClient` is deleted (or preserved as an offline debug tool, unwired). Landing in the same PR as the `live_source.rs` swap keeps his crate's AN-facing surface single-sourced.
 - **5.1b (short-term, if he doesn't want the sentry churn).** Keep the REST-backed sentry as an early-warning latency optimisation (pause the ETH submit lane the moment REST sees a rotation, don't wait for the GQL cursor to catch up — typically 1-2 blocks). The driver remains authoritative for the actual rotation proof. Delete `BkSetClient` when convenient.
 
 Either way, his `bk_set_sentry.rs` semantics stay the same; only the poller trait's backing impl changes.

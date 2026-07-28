@@ -26,7 +26,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge_state::BridgeState;
-use crate::poseidon;
+use bridge_poseidon as poseidon;
 
 /// Current `ProverBkSet` schema version. Bumped if the on-disk shape changes.
 pub const PROVER_BK_SET_SCHEMA_VERSION: u32 = 1;

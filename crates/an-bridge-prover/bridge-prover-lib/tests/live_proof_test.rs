@@ -33,7 +33,7 @@ fn test_live_proof_generation_and_verification() {
     let t_total = Instant::now();
 
     // 1. Load BK set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     println!("BK set: {} signers", bk_set.len());
 

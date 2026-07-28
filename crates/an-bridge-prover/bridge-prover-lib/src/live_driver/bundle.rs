@@ -27,8 +27,9 @@ use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use tracing::{info, warn};
 use std::time::Instant;
 
-use crate::attestation_fetcher::{self, AttestationEvidence};
+use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
 use crate::block_id_tree;
+use crate::bridge_state::MAX_LAYERS;
 use crate::layer_prover;
 use crate::prover;
 use crate::real_chain_builder;
@@ -61,12 +62,22 @@ pub(super) async fn drive_next_bundle(
         }
     };
 
+    // Decode the prover's BK pubkey table once from `prover_bk_set`
+    // (the sole in-driver source of truth). `pubkeys()` re-hexes
+    // ~N × 48 bytes — negligible next to ~75-second proof generation
+    // that follows. Owned local so it coexists with `key_manager_mut()`
+    // borrows below without an extra clone.
+    let bk_set = driver
+        .prover_bk_set()
+        .pubkeys()
+        .context("prover_bk_set.pubkeys() decode failed")?;
+
     // Defensive BK-set-membership warning. In-circuit checks are
     // authoritative; this surfaces obviously-stale sets earlier.
     let signer_indices = evidence.signer_indices();
     let missing: Vec<u16> = signer_indices
         .iter()
-        .filter(|idx| !driver.bk_set().contains_key(idx))
+        .filter(|idx| !bk_set.contains_key(idx))
         .copied()
         .collect();
     if !missing.is_empty() {
@@ -91,7 +102,6 @@ pub(super) async fn drive_next_bundle(
                 .key_manager_mut()
                 .load_primary_pk()
                 .with_context(|| format!("key block {}: load_primary_pk", target_seqno))?;
-            let bk_set = driver.bk_set().clone();
             let res = prover::generate_primary_proof(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
@@ -107,7 +117,6 @@ pub(super) async fn drive_next_bundle(
                 .key_manager_mut()
                 .load_fallback_pk()
                 .with_context(|| format!("key block {}: load_fallback_pk", target_seqno))?;
-            let bk_set = driver.bk_set().clone();
             let res = prover::generate_fallback_proof(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,
@@ -135,18 +144,34 @@ pub(super) async fn drive_next_bundle(
     let t_layer = Instant::now();
     let layer_result = generate_layer_proof_for_key_block(driver, target_seqno).await;
     driver.key_manager_mut().unload_layer_pk();
-    let (layer_proof, state_layer_hashes, observed_height) = layer_result?;
+    let (layer_proof, state_layer_hashes, observed_height, block_id_be) = layer_result?;
     let layer_proof_gen_ms = t_layer.elapsed().as_millis() as u64;
     info!(
         "key block {}: Circuit 2 proof generated in {} ms",
         target_seqno, layer_proof_gen_ms,
     );
 
-    // Assemble the transport-agnostic artifacts.
-    let block_id_be: [u8; 32] = primary_proof.block_id_fr.to_repr();
-    let layer_block_id_be: [u8; 32] = layer_proof.block_id_fr.to_repr();
+    // Post-2026-07-22 both circuits emit `block_id_fr = uint256(bytes32(root))`.
+    // Debug-assert three-way agreement between:
+    //   * Circuit 1 witness   (`primary_proof.block_id_fr`)
+    //   * Circuit 2 witness   (`layer_proof.block_id_fr`)
+    //   * raw hash reduction  (`ipc::fold_hash_be_to_fr(block_id_be)`)
+    // so a byte-order regression on either circuit — or a divergence between
+    // the wire hash and either circuit's committed Fr — pages loudly at
+    // proof-build time instead of silently mis-mirroring state on-chain.
+    debug_assert_eq!(
+        primary_proof.block_id_fr, layer_proof.block_id_fr,
+        "Circuit 1 and Circuit 2 must agree on block_id_fr; a mismatch means \
+         one of the circuits regressed to the pre-fix byte-order convention",
+    );
+    debug_assert_eq!(
+        crate::ipc::fold_hash_be_to_fr(&block_id_be),
+        primary_proof.block_id_fr,
+        "fold(reverse(raw_hash)) must equal Circuit 1's committed block_id_fr; \
+         a mismatch means bundle.block_id_be is not the raw chain hash BE",
+    );
     let bk_set_commitment_be: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
-    let mut layer_hashes_be: [[u8; 32]; 10] = [[0u8; 32]; 10];
+    let mut layer_hashes_be: [[u8; 32]; MAX_LAYERS] = [[0u8; 32]; MAX_LAYERS];
     for (i, fr) in layer_proof.layer_hash_frs.iter().enumerate() {
         layer_hashes_be[i] = fr.to_repr();
     }
@@ -159,7 +184,6 @@ pub(super) async fn drive_next_bundle(
         block_height: observed_height,
         last_seen_block_seq_no: driver.state().stored_last_seen_block_seq_no,
         block_id_be,
-        layer_block_id_be,
         fin_type,
         bk_set_commitment_be,
         num_layers: layer_proof.num_layers,
@@ -175,13 +199,20 @@ pub(super) async fn drive_next_bundle(
 
 /// Port of `generate_layer_proof_for_key_block` from the pre-refactor
 /// `main.rs:1093-1195`. Additionally returns the per-layer bundle
-/// (`state_layer_hashes`) and the authoritative block height, both needed
-/// by [`super::LiveProverDriver::ack_bundle`] to advance the in-memory
+/// (`state_layer_hashes`), the authoritative block height, and the raw
+/// 32-byte BE chain block hash (SHA-256 root of the 16-leaf depth-4 tree), all
+/// needed by the bundle assembler and by
+/// [`super::LiveProverDriver::ack_bundle`] to advance the in-memory
 /// [`crate::bridge_state::BridgeState`].
 async fn generate_layer_proof_for_key_block(
     driver: &LiveProverDriver,
     target_seqno: u64,
-) -> anyhow::Result<(layer_prover::LayerProofOutput, Vec<([u8; 32], u8)>, u64)> {
+) -> anyhow::Result<(
+    layer_prover::LayerProofOutput,
+    Vec<([u8; 32], u8)>,
+    u64,
+    [u8; 32],
+)> {
     info!("fetching block proof data for seq={}...", target_seqno);
     let block = driver
         .gql()
@@ -206,8 +237,8 @@ async fn generate_layer_proof_for_key_block(
 
     // 1. Build layer_hashes_preimage from history_proofs.
     let num_layers = block.history_proofs.len() as u8;
-    let mut root_hashes: Vec<[u8; 32]> = Vec::with_capacity(10);
-    for i in 1..=10u8 {
+    let mut root_hashes: Vec<[u8; 32]> = Vec::with_capacity(MAX_LAYERS);
+    for i in 1..=MAX_LAYERS as u8 {
         if let Some(root) = block.history_proofs.get(&i) {
             root_hashes.push(*root);
         } else {
@@ -216,8 +247,26 @@ async fn generate_layer_proof_for_key_block(
     }
     let preimage = block_id_tree::build_layer_hashes_preimage(num_layers as usize, &root_hashes);
 
-    // 2. Build the 8-leaf SHA-256 Merkle tree from the GQL leaves.
+    // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves
+    //    and pull the four siblings that open L0 up to `block_id`.
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
+
+    // Structural sanity: the tree we just folded must agree with the
+    // block_id the node reports in the same GQL response. The on-chain
+    // verifier already rejects mismatched openings, so this is not a
+    // correctness fix — it's fail-fast (skip Circuit 2 witness build +
+    // proof gen + IPC when leaves are broken) and release-build parity.
+    // Mirror of the same check on the bk-update path in bk_update.rs.
+    if tree.root != block.block_id {
+        anyhow::bail!(
+            "layer {}: reconstructed tree.root {} != block.block_id {} — \
+             GQL leaves inconsistent with block header",
+            target_seqno,
+            hex::encode(tree.root),
+            hex::encode(block.block_id),
+        );
+    }
+
     let siblings = tree.siblings_for_l0();
     info!(
         "block_id from GQL leaves merkle root: {}",
@@ -264,12 +313,16 @@ async fn generate_layer_proof_for_key_block(
     )?;
 
     // 6. Extract the per-layer bundle + authoritative block height for
-    //    ack_bundle to feed BridgeState::append_bundle.
+    //    ack_bundle to feed BridgeState::append_bundle. Also surface the raw
+    //    SHA-256 root (= chain `Block.id`) so the caller can populate
+    //    `BundleProofArtifacts.block_id_be` from the ground-truth hash, not
+    //    from any circuit's `Fr::to_repr()` (which would lose the top 2 bits
+    //    when the hash `>= p`).
     let state_layer_hashes: Vec<([u8; 32], u8)> = block
         .history_proofs
         .iter()
         .map(|(&layer, root)| (*root, layer))
         .collect();
 
-    Ok((layer_proof, state_layer_hashes, block.height))
+    Ok((layer_proof, state_layer_hashes, block.height, tree.block_id()))
 }

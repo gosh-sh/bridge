@@ -18,4 +18,11 @@ spec; it **changes the circuit shape** (new VkBlob).
 | `max_key=3` + Track 2 chain binding (Sepolia) | `de1dd3ab…7dd8d1` | 5006 B | #19; `--chain-id 11155111`; advice `[17,13]` |
 
 Current `fixtures/deposit_10proofs/deposit_vk_blob.bin` is the Track 2 Sepolia row.
-See `docs/deposit_chain_binding_track2.md`.
+See `docs/deposit_chain_binding_track2.md` for the regeneration command (Track 2
+adds `--chain-id`, tx-trie witnesses, and 12 public inputs, so it does **not**
+share the `EthCircuitParams` shape used by the pre-#19 rows).
+
+**Follow-up:** re-embed the current VkBlob (`de1dd3ab…7dd8d1`, 5006 B, 12 PI)
+into shellnet `USDCBridge` — the on-chain blob is still the pre-chain-binding
+11-PI `304c1c4e…` — and sync `tvm-sdk` `deposit_10proofs`
+(`scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).

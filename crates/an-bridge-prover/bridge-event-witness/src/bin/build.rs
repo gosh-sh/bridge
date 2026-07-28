@@ -70,7 +70,7 @@ use bridge_prover_lib::bridge_state::BridgeState;
 use bridge_prover_lib::chain_proof_builder::{
     build_tree_and_proof, pad_leaves_to_power_of_2,
 };
-use bridge_prover_lib::gql_client::{self, GqlClient};
+use bridge_gql_fetcher::gql_client::{self, GqlClient};
 
 use bridge_event_witness::schema::{
     AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION,
@@ -615,7 +615,11 @@ async fn build_block_tree_proof(
             .query_proof_block_by_seqno(seq)
             .await
             .with_context(|| format!("fetching block seq={seq} in L1 window"))?;
-        block_leaves.push(b.block_leaf_hash());
+        block_leaves.push(bridge_prover_lib::poseidon_dense::compute_block_leaf_hash(
+            &b.block_id,
+            &b.envelope_hash,
+            &b.tracked_ext_out_messages_root,
+        ));
     }
 
     let mut leaves = Vec::with_capacity(2 + block_leaves.len() + 2);

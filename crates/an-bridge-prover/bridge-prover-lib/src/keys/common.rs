@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
+    halo2curves::{
+        bn256::{Bn256, Fr, G1Affine},
+        serde::SerdeObject,
+    },
     plonk::{ProvingKey, VerifyingKey},
     poly::{commitment::Params, kzg::commitment::ParamsKZG},
     SerdeFormat,
@@ -108,20 +111,11 @@ pub(crate) fn save_pk(
 }
 
 /// Load a KZG SRS whose `params.k()` is exactly `k`.
-///
-/// halo2-axiom's `create_proof` asserts `params.n() == 1 << circuit.k()`, so
-/// a shared larger-degree ceremony (partner dirs often ship only
-/// `kzg_bn254_20.srs`) cannot be passed straight through — it must be
-/// downsized. `ParamsKZG::downsize` keeps the same toxic waste / `s_g2`, so
-/// proofs stay compatible with PKs keygen'd against the parent ceremony.
-///
 /// Resolution order:
 /// 1. Exact `kzg_bn254_{k}.srs` whose header `k` matches (or is larger →
 ///    downsize in place and rewrite).
 /// 2. Largest on-disk `kzg_bn254_*.srs` with header degree ≥ `k`, downsized
 ///    and written to the exact path for the next load.
-/// 3. Last resort: `gen_srs(k)` (may synthesise a ChaCha20 trapdoor SRS —
-///    **not** the chain ceremony; production must pre-populate files).
 pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     let exact_path = params_dir.join(format!("kzg_bn254_{k}.srs"));
 
@@ -199,17 +193,24 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
 }
 
 /// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects Acki Nacki chain ceremony
-/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor.
-const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
+/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Re-exported from
+/// `bridge_prover_lib::keys` so the `bootstrap_hermez_srs` binary can share
+/// the same anchor byte-string.
+pub const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
 
 fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
-    // Re-read raw file tail — ParamsKZG doesn't expose s_g2 bytes directly
-    // without serialization; the on-disk layout ends with 128-byte s_g2.
-    let bytes = std::fs::read(path).unwrap_or_default();
-    if bytes.len() < 128 {
-        panic!("SRS file {} too small to contain s_g2", path.display());
+    let mut buf = Vec::with_capacity(128);
+    srs.s_g2()
+        .write_raw(&mut buf)
+        .expect("write to Vec cannot fail");
+    if buf.len() < HERMEZ_S_G2_HEAD.len() {
+        panic!(
+            "SRS {} s_g2 encoding too small ({} bytes)",
+            path.display(),
+            buf.len()
+        );
     }
-    let head = &bytes[bytes.len() - 128..bytes.len() - 122];
+    let head = &buf[..HERMEZ_S_G2_HEAD.len()];
     if head != HERMEZ_S_G2_HEAD {
         panic!(
             "SRS {} is not Hermez Perpetual Powers of Tau (s_g2 head {:02x?}, \
@@ -220,7 +221,6 @@ fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
             HERMEZ_S_G2_HEAD
         );
     }
-    let _ = srs; // degree already checked by caller
 }
 
 fn read_srs_file(path: &Path) -> std::io::Result<ParamsKZG<Bn256>> {

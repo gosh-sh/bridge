@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Number of public inputs the deposit circuit commits to. Must match
+/// `DepositEventCircuitV2::num_instance()` and the AN-side opcode layout.
+pub const NUM_PUBLIC_INPUTS: usize = 12;
+
 /// Deposit event data from Ethereum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositEventData {
@@ -29,6 +33,13 @@ pub struct DepositEventData {
     pub timestamp: u64,
     /// Contract address that emitted the event
     pub contract_address: [u8; 20],
+    /// EIP-155 chain id of the source L1/L2 network. Committed as public
+    /// input #4 (see [`NUM_PUBLIC_INPUTS`]); populated by
+    /// [`ethereum_fetcher`](crate::ethereum_fetcher) from `eth_chainId`.
+    /// `#[serde(default)]` keeps pre-12-PI fixture JSON loadable (falls back
+    /// to `0`, which the AN-side allowlist rejects).
+    #[serde(default)]
+    pub chain_id: u64,
 }
 
 /// Receipt proof data for Merkle-Patricia Trie verification
@@ -105,6 +116,10 @@ pub struct DepositProofOutput {
     pub contract_address: [u8; 20],
     /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
     pub block_hash: [u8; 32],
+    /// EIP-155 chain id of the source L1/L2 (committed as public input #4).
+    /// `#[serde(default)]` keeps pre-12-PI output JSON loadable.
+    #[serde(default)]
+    pub chain_id: u64,
 }
 
 impl DepositProofOutput {
@@ -119,6 +134,7 @@ impl DepositProofOutput {
         an_account: [u8; 32],
         contract_address: [u8; 20],
         block_hash: [u8; 32],
+        chain_id: u64,
     ) -> Self {
         let proof_bytes = format!("0x{}", hex::encode(&proof));
         Self {
@@ -131,6 +147,7 @@ impl DepositProofOutput {
             an_account,
             contract_address,
             block_hash,
+            chain_id,
         }
     }
 }

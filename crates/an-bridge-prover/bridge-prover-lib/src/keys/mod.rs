@@ -11,6 +11,7 @@
 //! compiling; new code should reach for the per-circuit types directly.
 
 mod common;
+pub use common::HERMEZ_S_G2_HEAD;
 pub mod event;
 pub mod fallback;
 pub mod layer;
@@ -29,29 +30,25 @@ use std::path::{Path, PathBuf};
 
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, G1Affine},
+    halo2curves::bn256::G1Affine,
     plonk::{ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
 };
 
-/// Facade that owns all four per-circuit managers plus a shared SRS sized
-/// at the **maximum** circuit degree across the four circuits.
+/// Facade that owns all four per-circuit managers.
 ///
 /// Prove/verify paths use **per-circuit** SRS accessors
 /// (`key_manager.primary.srs()`, `.fallback.srs()`, `.layer.srs()`,
-/// `.event.srs()`). halo2-axiom requires `params.n() == 1 << circuit.k()` —
-/// a larger shared ceremony cannot be passed through without
-/// [`ParamsKZG::downsize`] (see `keys::common::load_srs`).
+/// `.event.srs()`). halo2-axiom requires `params.n() == 1 << circuit.k()`,
+/// so each sub-manager holds its own degree-matched SRS slice loaded via
+/// `keys::common::load_srs` (which downsizes from the largest on-disk
+/// ceremony when an exact match is not present).
 ///
-/// The `pub srs` field stays at `FallbackKeyManager::DEFAULT_K` (= 21) for
-/// orchestrator / exporter callers that still clone+downsize from the max
-/// ceremony. Sizing it at K=20 left `generate_fallback_proof` unable to
-/// prove the K=21 fallback circuit (AB-Q5, 2026-07-06).
+/// Callers that need the max-degree (K=21) ceremony to downsize from —
+/// e.g. the Poseidon-transcript exporters that provision per-circuit
+/// `kzg_bn254_{k}.srs` files on disk — should read `.fallback.srs()`
+/// directly.
 pub struct KeyManager {
     pub params_dir: PathBuf,
-    /// Max-degree (K=21) ceremony SRS for callers that downsize per circuit.
-    /// Per-circuit managers hold their own degree-matched slices.
-    pub srs: ParamsKZG<Bn256>,
     pub primary: PrimaryKeyManager,
     pub fallback: FallbackKeyManager,
     pub layer: LayerHashesKeyManager,
@@ -63,13 +60,8 @@ impl KeyManager {
     /// SRS + any cached VK/config off disk; PKs stay on disk.
     pub fn new(params_dir: &Path) -> Self {
         std::fs::create_dir_all(params_dir).ok();
-        // Size the shared SRS at the MAX circuit degree (Fallback's K=21).
-        // Per-circuit managers load their own degree-matched slices via
-        // `load_srs` (downsizing from this ceremony when needed).
-        let srs = common::load_srs(params_dir, FallbackKeyManager::DEFAULT_K);
         Self {
             params_dir: params_dir.to_path_buf(),
-            srs,
             primary: PrimaryKeyManager::new(params_dir),
             fallback: FallbackKeyManager::new(params_dir),
             layer: LayerHashesKeyManager::new(params_dir),

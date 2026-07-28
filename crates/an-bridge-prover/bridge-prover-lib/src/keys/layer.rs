@@ -16,7 +16,7 @@ use halo2_base::halo2_proofs::{
     poly::kzg::commitment::ParamsKZG,
 };
 use historical_layer_hashes_movement_checker_circuit::{
-    circuit::LayerHashesMovementCheckerCircuit, LAYER_PREIMAGE_SIZE,
+    circuit::LayerHashesMovementCheckerCircuit, LAYER_PREIMAGE_SIZE, NUM_MERKLE_SIBLINGS,
 };
 use tracing::info;
 
@@ -107,7 +107,13 @@ impl LayerHashesKeyManager {
             REF_TREE_DEPTH,
         );
         let preimage = build_reference_preimage(&chain_data);
-        let siblings = [[0x10u8; 32], [0x20u8; 32], [0x30u8; 32]];
+        // One opaque SHA sibling per depth level (NUM_MERKLE_SIBLINGS = 4
+        // for the canonical 16-leaf block-id tree). Any admissible witness
+        // drives keygen the same, so distinct-value bytes are fine.
+        let mut siblings = [[0u8; 32]; NUM_MERKLE_SIBLINGS];
+        for (i, sib) in siblings.iter_mut().enumerate() {
+            *sib = [((i as u8) + 1) * 0x10; 32];
+        }
         let prev_hash_fr =
             gosh_dense_balanced_tree::bytes_to_fr(&chain_data.prev_max_level_layer_hash);
         let chain_links = chain_data_to_dense_links(&chain_data);

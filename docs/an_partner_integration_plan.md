@@ -279,8 +279,9 @@ Recommend (2) for this milestone: get the trust-anchor right first; the burn-pro
   ```
   loop {
       target_seqno = contract.storedLastSeenBlockSeqNo() + 1;
-      attestation = fetch_attestation_for_block(gql, target_seqno);
-      finalization_type = detect_finalization_type(attestation);
+      evidence = fetch_attestation_evidence(gql, target_seqno);
+      // AttestationEvidence::{Primary(_), Fallback { primary, fallback }} —
+      // classification is structural (not heuristic) inside the fetcher.
       bk_set = fetch_current_bk_set(gql);                 // Phase 1
       layer_data = fetch_layer_hashes(gql, block);        // Phase 2
       effective_changes = compute_effective_changes(...); // spec §4

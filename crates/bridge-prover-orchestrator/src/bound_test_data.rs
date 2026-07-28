@@ -261,15 +261,12 @@ pub fn promote_bridge_test_data(
 ) -> anyhow::Result<BoundBlockTestData> {
     let block_id_bytes = td.block_id;
     // `td.block_id` is the raw SHA-256 envelope-tree root (big-endian byte
-    // string). Both Circuit 1A/1B and Circuit 2 emit the block id as the
-    // integer value of that BE digest, i.e. `bytes_le_to_fr(reverse(root))`
-    // (see the synthetic builder in
-    // `bridge_test_data_gen::layer_hashes::build_synthetic_layer_hashes_input`,
-    // which mirrors the circuit and reverses before `bytes_le_to_fr`).
-    // Interpreting the raw
-    // BE bytes as little-endian (no reverse) yields a byte-reversed scalar that
-    // fails the circuit's `block_id` instance equality. Reverse here so the
-    // single shared `block_id_fr` matches what both circuits reconstruct.
+    // string). All three circuits (1A/1B/2) emit `block_id_fr =
+    // uint256(bytes32(root))` — the natural integer value of the BE digest —
+    // which equals `bytes_le_to_fr(reverse(root))`. Circuit 1's parser and
+    // `attestation_data_parser::compute_block_id_fr` now reverse internally
+    // (`fix/circuit1-block-id-byte-order`), so the shared expected value on
+    // this side matches directly.
     let block_id_fr = {
         let mut le = block_id_bytes;
         le.reverse();
@@ -313,7 +310,7 @@ pub fn promote_bridge_test_data(
     let prev_max_level_layer_hash = bytes_le_to_fr(&td.layer_hash_chain.prev_max_level_layer_hash);
     // Off-by-one bridge between partner-generator and circuit semantics.
     //
-    // The partner's `generate_layer_hash_chain(num_layers, num_prev_chain_steps)`
+    // The partner's `generate_layer_hash_chain_with_depth(num_layers, num_prev_chain_steps, TREE_DEPTH)`
     // builds `num_prev_chain_steps + 1` ACTIVE trees (the trailing `+1` is the
     // current block's tree, whose root *is* `root_hashes[num_layers-1]`) but
     // records only the count of *previous* steps in
@@ -352,15 +349,15 @@ pub fn promote_bridge_test_data(
     let layer_hashes_expected_instances: [Fr; LAYER_HASHES_NUM_PUBLIC_INPUTS] =
         instances.try_into().expect("instance count mismatch");
 
-    // ---- Re-sign the Primary attestation over the LE block_id ----
-    // The generator-built `td.attestation_bytes` store the raw big-endian root,
-    // which makes Circuit 1A emit a byte-reversed block_id (see
-    // `build_attestation_envelope`). Re-sign over the LE root with the original
-    // signers so Circuit 1A's block_id matches Circuit 2 + the on-chain anchor.
+    // ---- Re-sign the Primary attestation with the correct target_type ----
+    // The generator's `td.attestation_bytes` are Primary-target only. Re-sign
+    // the (natural-BE) block_id under both Primary and Fallback target types
+    // with the original signers so each circuit gets an envelope whose
+    // AttestationData carries the target_type it expects.
     let attestation_primary_bytes =
         build_attestation_envelope(&td, AttestationTargetType::Primary)?;
 
-    // ---- Optional fallback attestation (same LE block_id) ----
+    // ---- Optional fallback attestation (same natural-BE block_id) ----
     let attestation_fallback_bytes = if with_fallback {
         Some(build_attestation_envelope(&td, AttestationTargetType::Fallback)?)
     } else {
@@ -387,31 +384,25 @@ pub fn promote_bridge_test_data(
     })
 }
 
-/// Re-sign an attestation envelope over the **little-endian** block_id with the
-/// given target type, reusing `td.keypairs` (the original signers; the
+/// Re-sign an attestation envelope over the **natural big-endian** block_id
+/// with the given target type, reusing `td.keypairs` (the original signers; the
 /// partner's generator appends one extra keypair after the BK set was modified,
 /// which we must skip here so we sign with exactly the *current* set).
 ///
-/// Why re-sign and reverse the block_id? Circuit 1A/1B extract the block_id as
-/// `LE-pack(raw attestation bytes)` (no reverse — see `primary_circuit.rs`
-/// `build_primary_constraints` §A), whereas Circuit 2 reconstructs the SHA-256
-/// envelope root and reverses BE→LE before packing
-/// (`circuit.rs` §C: `LE-pack(reverse(root))`), which is also the value the
-/// on-chain `uint256(sha256_root)` Merkle binding in `applyBkSetUpdate`
-/// produces. The partner's generator stores the *raw* big-endian root in the
-/// attestation, so a generator-built Circuit 1A proof emits a byte-reversed
-/// block_id that can never equal Circuit 2's — `verifyBlock` feeds a single
-/// `blockId` to both verifiers and requires equality. We therefore store the
-/// block_id little-endian here so all three circuits emit the canonical
-/// big-endian-digest integer. `td.block_id` keeps the raw root so Circuit 2's
-/// sibling reconstruction and the shared `block_id_fr` stay consistent.
+/// Byte-order convention: `td.block_id` is the raw SHA-256 envelope-tree root
+/// (natural big-endian bytes, exactly what acki-nacki writes to
+/// `BlockIdentifier` and hex-encodes for external publication). All three
+/// circuits fold it as `uint256(bytes32(root))`: Circuit 1A/1B via
+/// `attestation_data_parser::compute_block_id_fr` (branch
+/// `fix/circuit1-block-id-byte-order`, which reverses inside the parser and
+/// inside `primary_circuit`/`fallback_circuit`); Circuit 2 via its own
+/// `reverse(root) → LE-fold`; on-chain via Solidity's
+/// `uint256(bytes32(blockId))`. We therefore store `td.block_id` verbatim in
+/// the AttestationData payload — no reversal needed here.
 fn build_attestation_envelope(
     td: &BridgeTestData,
     target_type: AttestationTargetType,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut block_id_le = td.block_id;
-    block_id_le.reverse();
-
     // td.keypairs has one extra entry at the end (the new signer for the BK
     // change scenario). Use only the original `bk_set.len()` signers.
     let original_signer_count = td.bk_set.len();
@@ -422,7 +413,7 @@ fn build_attestation_envelope(
         .map(|(secret, _, idx)| (*idx, secret))
         .collect();
 
-    let attestation_data = create_attestation_data(block_id_le, target_type);
+    let attestation_data = create_attestation_data(td.block_id, target_type);
     let envelope = sign_attestation_multi(attestation_data, &signers)
         .context("signing attestation failed")?;
     let bytes = bincode::serialize(&envelope).context("bincoding attestation envelope failed")?;
@@ -463,7 +454,7 @@ pub fn compose_layer_hashes_input<'a>(
 /// Mirror of `prover.rs::extract_block_seq_no`. Re-implemented to keep this
 /// module's surface independent of the prover's private helpers.
 fn extract_block_seq_no(attestation_bytes: &[u8]) -> u32 {
-    use bridge_parsers::attestation_data_parser::{attestation_data_offset, parse_num_signers};
+    use attestation_bls_checker_circuit::attestation_data_parser::{attestation_data_offset, parse_num_signers};
     const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;
 
     let num_signers = parse_num_signers(attestation_bytes);

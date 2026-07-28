@@ -25,4 +25,5 @@ pub use supported_chains::{
 };
 pub use types::{
     DepositEventData, DepositProofInput, DepositProofOutput, ReceiptProof, TransactionProof,
+    NUM_PUBLIC_INPUTS,
 };

@@ -155,6 +155,10 @@ impl EthereumFetcher {
             an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
+            // `chain_id` is not part of the log — the caller
+            // (`fetch_deposit_proof`) stamps the RPC `eth_chainId` on the
+            // returned `DepositEventData` after this parse.
+            chain_id: 0,
         })
     }
 
@@ -188,7 +192,9 @@ impl EthereumFetcher {
 
         // 2. Parse the Deposit event
         println!("  - Parsing Deposit event...");
-        let event_data = self.parse_deposit_event(&receipt, contract_address, log_index)?;
+        let mut event_data = self.parse_deposit_event(&receipt, contract_address, log_index)?;
+        // Stamp RPC `eth_chainId` — required for PI #4 (chain-binding).
+        event_data.chain_id = chain_id;
         println!("    ✓ Event parsed (depositId: {})", event_data.deposit_id);
 
         // 3. Generate MPT proof using the existing implementation

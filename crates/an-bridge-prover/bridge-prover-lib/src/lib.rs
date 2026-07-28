@@ -1,9 +1,4 @@
-pub mod gql_client;
-pub mod attestation_fetcher;
-pub mod bk_set_fetcher;
-pub mod poseidon;
 pub mod poseidon_dense;
-pub mod types;
 pub mod keys;
 pub mod transcript;
 pub mod prover;

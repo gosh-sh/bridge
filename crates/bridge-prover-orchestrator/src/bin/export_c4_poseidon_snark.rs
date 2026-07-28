@@ -44,23 +44,25 @@ use clap::Parser;
 use halo2_base::halo2_proofs::poly::commitment::Params;
 
 /// Ensure `params/kzg_bn254_{k}.srs` exists for the event circuit degree,
-/// downsized from the KeyManager's shared (K=21) ceremony SRS. Without this,
-/// `export_poseidon_snark`'s internal `gen_srs(k)` would synthesise a *random*
-/// SRS on cache miss — a different `s_g2` than the keygen ceremony, which makes
-/// the aggregator unable to verify the inner proof. The downsize preserves
-/// `g2`/`s_g2` (degree-independent) so the K=19 file shares the K=21 ceremony.
+/// downsized from the fallback manager's K=21 ceremony SRS (the largest across
+/// the four circuits). Without this, `export_poseidon_snark`'s internal
+/// `gen_srs(k)` would synthesise a *random* SRS on cache miss — a different
+/// `s_g2` than the keygen ceremony, which makes the aggregator unable to verify
+/// the inner proof. The downsize preserves `g2`/`s_g2` (degree-independent) so
+/// the K=19 file shares the K=21 ceremony.
 fn ensure_srs_for_event(km: &KeyManager, params_dir: &std::path::Path, event_k: u32) -> anyhow::Result<()> {
     use std::io::Write;
     let srs_path = params_dir.join(format!("kzg_bn254_{event_k}.srs"));
     if srs_path.exists() {
         return Ok(());
     }
-    let src_k = km.srs.k();
+    let src = km.fallback.srs();
+    let src_k = src.k();
     anyhow::ensure!(
         src_k >= event_k,
         "shared SRS (K={src_k}) is smaller than the event circuit degree (K={event_k})"
     );
-    let mut p = km.srs.clone();
+    let mut p = src.clone();
     if src_k > event_k {
         p.downsize(event_k);
     }
@@ -120,31 +122,16 @@ fn main() -> anyhow::Result<()> {
     let snark_dir = PathBuf::from(&args.snark_dir);
     std::fs::create_dir_all(&snark_dir)?;
 
-    // One monolithic KeyManager owns the K=21 shared SRS + per-circuit
-    // sub-managers; the event sub-manager keygens at K=19.
+    // KeyManager owns four per-circuit sub-managers; the event sub-manager
+    // keygens at K=19 with its own degree-matched SRS.
     let mut km = KeyManager::new(&params_dir);
     km.ensure_event_keys().context("ensure_event_keys failed (keygen)")?;
 
     // Provision the event-degree SRS (same ceremony as keygen) before the
-    // Snark export re-loads it via gen_srs. Written from the pristine (K=21)
-    // shared SRS so the K=19 file shares the ceremony's g2/s_g2.
+    // Snark export re-loads it via gen_srs. Downsized from the fallback
+    // manager's K=21 slice so the K=19 file shares the ceremony's g2/s_g2.
     let event_k = km.event_config().k as u32;
     ensure_srs_for_event(&km, &params_dir, event_k)?;
-
-    // halo2-axiom's `create_proof` asserts `params.n() == circuit_domain.n()`
-    // (plonk/prover.rs:101) — it does NOT tolerate an over-sized SRS. The
-    // monolithic KeyManager holds a single shared SRS sized at K=21 (the max
-    // circuit degree, for the fallback), so proving the K=19 event circuit with
-    // it would panic `524288 != 2097152`. Downsize the in-memory working copy to
-    // the event degree before proving; `downsize` keeps the same ceremony toxic
-    // waste so the proof still verifies against the K=19 file provisioned above.
-    // NOTE (flag to prover-lib owner): `run_kzg_create_proof` / the event prover
-    // pass `&key_manager.srs` directly, so this exact-degree requirement makes
-    // the shared-SRS design broken for every circuit with k < 21 (primary K=20,
-    // layer, event K=19) until the prover funcs downsize per-circuit upstream.
-    if km.srs.k() > event_k {
-        km.srs.downsize(event_k);
-    }
 
     km.load_event_pk().context("load_event_pk failed")?;
 

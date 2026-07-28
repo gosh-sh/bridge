@@ -364,6 +364,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // left-pad to 32, compare as Fr against the public-input encoding below.
         let to_idx = ctx.load_constant(Fr::from(5u64));
         let to_field = tx_chip.extract_field(ctx, tx_witness.clone(), to_idx);
+        // review finding #3: constraining `len == 20` first is what makes reading
+        // exactly `field_bytes[0..20]` sound — we only ever consume the first `len`
+        // bytes (extract_field's documented value region), never any padding beyond
+        // it, and rejecting `len != 20` also rejects contract-create (empty `to`).
         let twenty = ctx.load_constant(Fr::from(20u64));
         ctx.constrain_equal(&to_field.len, &twenty);
         let mut to_bytes_32 = vec![ctx.load_constant(Fr::zero()); 12];
@@ -372,14 +376,21 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         let to_as_fr = bytes_to_field(ctx, tx_chip.gate(), &to_bytes_32);
 
-        // Get MPT root from receipt proof
-        let mpt_root_bytes: Vec<AssignedValue<Fr>> = self
-            .inputs
-            .receipt_proof
-            .receipt_root
-            .iter()
-            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
-            .collect();
+        // MPT root the receipt inclusion was ACTUALLY verified against, taken from
+        // `receipt_witness` (set by `parse_receipt_proof_phase0` above) rather than
+        // reloaded as a fresh, prover-controlled witness from
+        // `receipt_proof.receipt_root`. This is what binds the proven receipt to
+        // *this* block's header: in Phase 1 it is constrained byte-for-byte equal to
+        // the header's receiptsRoot (field 5). Mirrors the tx path
+        // (`tx_witness.mpt_witness().root_hash_bytes` == transactionsRoot).
+        //
+        // Review finding #1 (CRITICAL): previously `mpt_root_bytes` was an
+        // independent witness only tied to the header receiptsRoot, never to the
+        // root the MPT chip verified against — so a prover could prove a real
+        // receipt under root R_A while binding the header (and thus the blockHash
+        // public input) of an unrelated block B, decoupling the event from its block.
+        let mpt_root_bytes: Vec<AssignedValue<Fr>> =
+            receipt_witness.mpt_witness().root_hash_bytes.to_vec();
 
         // ============================================================================
         // FIX BC-CIRCUIT-004: Compute public instances in Phase 0
@@ -725,6 +736,14 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Convert depositId (32 bytes from topics[1])
         let deposit_id_field = bytes_to_field(ctx_gate, gate, &deposit_id_bytes);
+        // review finding #2: `bytes_to_field` folds 32 BE bytes into one Fr, which is
+        // injective only for values below the BN254 scalar modulus. depositId is the
+        // AN-side anti-replay anchor; pin its top byte to zero (value < 2^248 « p) so
+        // two distinct on-chain ids can never collide mod p.
+        if deposit_id_bytes.len() == 32 {
+            let zero = ctx_gate.load_constant(Fr::zero());
+            ctx_gate.constrain_equal(&deposit_id_bytes[0], &zero);
+        }
         println!("   ✓ Converted depositId to field element");
 
         // Convert sender (32 bytes from topics[2], but only last 20 bytes are the
@@ -737,6 +756,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Convert amount (data word 0: bytes 0..32)
         let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
         let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
+        // review finding #2: the AN contract reads `amount` as uint128. Require the
+        // high 16 bytes to be zero (amount < 2^128 « p): this makes the 32-byte→Fr
+        // fold injective AND rejects any deposit whose amount would silently truncate
+        // to uint128 on the contract side.
+        {
+            let zero = ctx_gate.load_constant(Fr::zero());
+            for b in amount_bytes.iter().take(16) {
+                ctx_gate.constrain_equal(b, &zero);
+            }
+        }
         println!("   ✓ Converted amount to field element");
 
         // Data word 1 (bytes 32..64) is the event's `anWorkchain` field. As of
@@ -756,16 +785,25 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // (Block hash and receiptsRoot were already computed in Phase 0)
         println!("🔧 Verifying block header...");
 
-        // Convert receiptsRoot from Phase 0 to field element
-        let receipts_root_field =
-            bytes_to_field(ctx_gate, gate, &phase0_output.receipts_root_bytes);
-
-        // Convert MPT root from Phase 0 to field element
-        let mpt_root_field = bytes_to_field(ctx_gate, gate, &phase0_output.mpt_root_bytes);
-
-        // CRITICAL: Constrain that receiptsRoot from block header equals MPT root
-        ctx_gate.constrain_equal(&receipts_root_field, &mpt_root_field);
-        println!("   ✓ Verified receiptsRoot matches MPT root");
+        // CRITICAL: bind the block-header receiptsRoot to the root the MPT chip
+        // actually verified the receipt inclusion against (`mpt_root_bytes`, set in
+        // Phase 0 from `receipt_witness.mpt_witness().root_hash_bytes`).
+        //
+        // Compare byte-for-byte rather than folding each 32-byte root into a single
+        // Fr with `bytes_to_field`: a keccak root can exceed the BN254 scalar
+        // modulus, so the fold is non-injective and two distinct roots could collide
+        // mod p (review finding #2). Byte-wise equality is exact and mirrors the
+        // transactionsRoot binding on the tx path.
+        assert_eq!(phase0_output.receipts_root_bytes.len(), 32);
+        assert_eq!(phase0_output.mpt_root_bytes.len(), 32);
+        for (hdr_byte, mpt_byte) in phase0_output
+            .receipts_root_bytes
+            .iter()
+            .zip(phase0_output.mpt_root_bytes.iter())
+        {
+            ctx_gate.constrain_equal(hdr_byte, mpt_byte);
+        }
+        println!("   ✓ Verified receiptsRoot == MPT-verified receipt root (byte-wise)");
 
         // 15. Use block hash from Phase 0
         println!("🔧 Using block hash from Phase 0...");

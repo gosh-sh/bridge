@@ -16,6 +16,10 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeApplyBkSetUpdateTest
+/// @notice Covers the BK-set rotation entry point against the canonical
+///         **16-leaf, depth-4** block-id tree: three open siblings
+///         (`h01` / `h4_7` / `h8_15`) and an LE `Fr` preimage for the L2/L3
+///         leaf pair.
 contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     AckiNackiBridge internal bridge;
     MockPrimaryVerifier internal primary;
@@ -23,6 +27,10 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     uint256 internal constant L2 = 0xA11CE;
     uint256 internal constant L3 = 0xB0B;
     uint64 internal constant SEQ = 42;
+
+    bytes32 internal constant SIB_H01 = bytes32(uint256(0x1234));
+    bytes32 internal constant SIB_H4_7 = bytes32(uint256(0x5678));
+    bytes32 internal constant SIB_H8_15 = bytes32(uint256(0x9ABC));
 
     event BkSetUpdated(uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo);
 
@@ -55,70 +63,166 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_happyPath() public {
-        (uint256 blockId, bytes32 h0, bytes32 h23) = _merkleWitness(L2, L3);
+        uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectEmit(true, true, true, true);
         emit BkSetUpdated(L2, L3, SEQ);
 
-        bridge.applyBkSetUpdate(
-            AckiNackiBridge.FinalizationType.Primary,
-            hex"00",
-            blockId,
-            SEQ,
-            L2,
-            L3,
-            h0,
-            h23
-        );
+        _apply(blockId, SEQ, L2, L3);
 
         assertEq(bridge.storedBkSetCommitment(), L3);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
     }
 
-    function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
-        (uint256 blockId,,) = _merkleWitness(L2, L3);
+    /// @notice Pins the on-chain fold against a vector computed independently
+    ///         of this contract (python `hashlib`, same construction as
+    ///         `bridge-verifier-daemon`'s pre-flight fold):
+    ///
+    ///         ```
+    ///         h23  = SHA256(LE(0xA11CE) ‖ LE(0xB0B))
+    ///         h0_3 = SHA256(0x11..11 ‖ h23)
+    ///         h0_7 = SHA256(h0_3 ‖ 0x22..22)
+    ///         root = SHA256(h0_7 ‖ 0x33..33)
+    ///         ```
+    ///
+    ///         Catches both regressions the 16-leaf migration can hide: a
+    ///         fold at the wrong depth, and a big-endian L2/L3 preimage (which
+    ///         would yield `0xd37275f3…` instead).
+    function test_applyBkSetUpdate_matchesOffChainVector() public {
+        bytes32 h01 =
+            bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
+        bytes32 h4_7 =
+            bytes32(uint256(0x2222222222222222222222222222222222222222222222222222222222222222));
+        bytes32 h8_15 =
+            bytes32(uint256(0x3333333333333333333333333333333333333333333333333333333333333333));
+        uint256 expectedRoot =
+            uint256(0x28ee9f98c4d654e9e4b33712fa1652ecd9fecd2a591fac1370b1b51e2b65fba4);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.BkUpdateMerkleMismatch.selector, blockId, blockId + 1)
-        );
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
-            blockId + 1,
+            expectedRoot,
             SEQ,
             L2,
             L3,
-            bytes32(uint256(0x1234)),
-            bytes32(uint256(0x5678))
+            h01,
+            h4_7,
+            h8_15
         );
+
+        assertEq(bridge.storedBkSetCommitment(), L3);
+    }
+
+    /// @notice A depth-3 (8-leaf) fold must no longer be accepted — the old
+    ///         two-sibling root is not a valid `blockId` any more.
+    function test_applyBkSetUpdate_rejectsLegacyDepth3Root() public {
+        bytes32 h23 = sha256(abi.encodePacked(_le(L2), _le(L3)));
+        bytes32 legacyRoot =
+            sha256(abi.encodePacked(sha256(abi.encodePacked(SIB_H01, h23)), SIB_H4_7));
+        uint256 expectedRoot = _merkleRoot(L2, L3);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.BkUpdateMerkleMismatch.selector, expectedRoot, uint256(legacyRoot)
+            )
+        );
+        _apply(uint256(legacyRoot), SEQ, L2, L3);
+    }
+
+    function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
+        uint256 blockId = _merkleRoot(L2, L3);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.BkUpdateMerkleMismatch.selector, blockId, blockId + 1
+            )
+        );
+        _apply(blockId + 1, SEQ, L2, L3);
     }
 
     function test_applyBkSetUpdate_revertsWhenAttestationRejected() public {
         primary.setShouldAccept(false);
-        (uint256 blockId, bytes32 h0, bytes32 h23) = _merkleWitness(L2, L3);
+        uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        _apply(blockId, SEQ, L2, L3);
+    }
+
+    function test_applyBkSetUpdate_revertsOnStaleOldCommitment() public {
+        uint256 wrongL2 = L2 + 1;
+        uint256 blockId = _merkleRoot(wrongL2, L3);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.StaleBkSetCommitment.selector, wrongL2, L2)
+        );
+        _apply(blockId, SEQ, wrongL2, L3);
+    }
+
+    function test_applyBkSetUpdate_revertsOnReplay() public {
+        uint256 blockId = _merkleRoot(L2, L3);
+        _apply(blockId, SEQ, L2, L3);
+
+        // Second submission of the same rotation: the commitment has moved on,
+        // so the stale-commitment guard fires before the seq-no guard.
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.StaleBkSetCommitment.selector, L2, L3)
+        );
+        _apply(blockId, SEQ, L2, L3);
+    }
+
+    function test_applyBkSetUpdate_revertsOnNonMonotonicSeqNo() public {
+        uint256 l4 = 0xC0FFEE;
+        uint256 secondBlockId = _merkleRoot(L3, l4);
+
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.BkUpdateSeqNoNotMonotonic.selector, SEQ, SEQ)
+        );
+        _apply(secondBlockId, SEQ, L3, l4);
+    }
+
+    function test_applyBkSetUpdate_chainsTwoRotations() public {
+        uint256 l4 = 0xC0FFEE;
+
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+        _apply(_merkleRoot(L3, l4), SEQ + 1, L3, l4);
+
+        assertEq(bridge.storedBkSetCommitment(), l4);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ + 1);
+    }
+
+    function _apply(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
             blockId,
-            SEQ,
-            L2,
-            L3,
-            h0,
-            h23
+            seqNo,
+            oldL2,
+            newL3,
+            SIB_H01,
+            SIB_H4_7,
+            SIB_H8_15
         );
     }
 
-    function _merkleWitness(uint256 l2, uint256 l3)
-        internal
-        pure
-        returns (uint256 blockId, bytes32 h0, bytes32 h23)
-    {
-        bytes32 h1 = sha256(abi.encodePacked(l2, l3));
-        h0 = bytes32(uint256(0x1234));
-        bytes32 h01 = sha256(abi.encodePacked(h0, h1));
-        h23 = bytes32(uint256(0x5678));
-        blockId = uint256(sha256(abi.encodePacked(h01, h23)));
+    /// @dev Depth-4 fold of the L2/L3 pair up to the block-id root, mirroring
+    ///      `BlockIdMerkleTree::siblings_for_l2_l3` on the prover side.
+    function _merkleRoot(uint256 l2, uint256 l3) internal pure returns (uint256) {
+        bytes32 h23 = sha256(abi.encodePacked(_le(l2), _le(l3)));
+        bytes32 h0_3 = sha256(abi.encodePacked(SIB_H01, h23));
+        bytes32 h0_7 = sha256(abi.encodePacked(h0_3, SIB_H4_7));
+        return uint256(sha256(abi.encodePacked(h0_7, SIB_H8_15)));
+    }
+
+    /// @dev Little-endian `Fr::to_repr()` image, matching the bytes the AN node
+    ///      hashes into leaves L2/L3.
+    function _le(uint256 value) internal pure returns (bytes32) {
+        uint256 reversed;
+        for (uint256 i = 0; i < 32; i++) {
+            reversed = (reversed << 8) | (value & 0xff);
+            value >>= 8;
+        }
+        return bytes32(reversed);
     }
 }

@@ -91,9 +91,13 @@ impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpda
         // Schema v7: single `block_id_be` = raw 32-byte BE chain hash, so
         // `U256::from_be_bytes` matches Solidity's `uint256(bytes32(...))`
         // that `applyBkSetUpdate` receives. Commitments remain
-        // `Fr::to_repr()` LE bytes (open cleanup item). The three open
-        // siblings walk the depth-4 authentication path of L2/L3 in the
-        // 16-leaf block-id tree: `h01` (depth 3), `h4_7` (depth 2), and
+        // `Fr::to_repr()` LE bytes (open cleanup item), and go on-chain as the
+        // numeric field element — the same convention as
+        // `storedBkSetCommitment` and the attestation verifier's public
+        // input. The contract re-derives the LE repr the block-id tree hashes
+        // (`AckiNackiBridge._frToLeBytes`), so no byte-flip belongs here. The
+        // three open siblings walk the depth-4 authentication path of L2/L3 in
+        // the 16-leaf block-id tree: `h01` (depth 3), `h4_7` (depth 2), and
         // `h8_15` (depth 1).
         BkSetUpdateData {
             fin_type: u.fin_type.into(),

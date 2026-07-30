@@ -726,10 +726,27 @@ contract AckiNackiBridge {
 
     /// @notice Apply an Acki Nacki BK-set rotation on Ethereum after verifying
     ///         a Circuit 1A/1B attestation and an open SHA-256 Merkle binding
-    ///         `blockId == SHA256(SHA256(H0 ‖ SHA256(L2 ‖ L3)) ‖ H23)`.
+    ///         of the `(L2, L3)` leaf pair to `blockId`.
     ///
     /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
     ///      the full pubkey table stays off-chain (prover working set).
+    ///
+    ///      `blockId` is the root of the canonical **16-leaf, depth-4**
+    ///      block-id tree (`poseidon_profile_new`; leaves L2/L3 carry the old
+    ///      and new BK-set Poseidon commitments). Opening that pair therefore
+    ///      needs **three** siblings, and the fold is:
+    ///
+    ///      ```
+    ///      h23  = SHA256(L2 ‖ L3)              // both in LE `Fr` repr
+    ///      h0_3 = SHA256(siblingH01  ‖ h23)
+    ///      h0_7 = SHA256(h0_3        ‖ siblingH4_7)
+    ///      root = SHA256(h0_7        ‖ siblingH8_15)   // == blockId
+    ///      ```
+    ///
+    ///      Mirrors `bridge-prover-lib/src/block_id_tree.rs`
+    ///      (`siblings_for_l2_l3`) and the off-chain pre-flight in
+    ///      `bridge-verifier-daemon`. The pre-16-leaf variant took two
+    ///      siblings and folded one level less.
     ///
     /// @param finType Primary or Fallback attestation path for the update block.
     /// @param attestationProof SHPLONK attestation proof bytes.
@@ -737,8 +754,9 @@ contract AckiNackiBridge {
     /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
     /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
     /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
-    /// @param siblingH0 Merkle sibling at level 0 (from prover `bkupd_*.json`).
-    /// @param siblingH23 Merkle sibling combining levels 2–3.
+    /// @param siblingH01 Depth-3 sibling of `h23` (from prover `bkupd_*.json`).
+    /// @param siblingH4_7 Depth-2 sibling of `h0_3`.
+    /// @param siblingH8_15 Depth-1 sibling of `h0_7`.
     function applyBkSetUpdate(
         FinalizationType finType,
         bytes calldata attestationProof,
@@ -746,8 +764,9 @@ contract AckiNackiBridge {
         uint64 blockSeqNo,
         uint256 oldCommitmentL2,
         uint256 newCommitmentL3,
-        bytes32 siblingH0,
-        bytes32 siblingH23
+        bytes32 siblingH01,
+        bytes32 siblingH4_7,
+        bytes32 siblingH8_15
     ) external nonReentrant {
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -782,9 +801,11 @@ contract AckiNackiBridge {
         }
         if (!attOk) revert AttestationProofRejected();
 
-        bytes32 h1 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
-        bytes32 h01 = sha256(abi.encodePacked(siblingH0, h1));
-        bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
+        bytes32 h23 =
+            sha256(abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3)));
+        bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
+        bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
+        bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
         if (uint256(root) != blockId) {
             revert BkUpdateMerkleMismatch(uint256(root), blockId);
         }
@@ -793,6 +814,26 @@ contract AckiNackiBridge {
         storedLastBkSetUpdateSeqNo = blockSeqNo;
 
         emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
+    }
+
+    /// @dev Little-endian 32-byte image of a BN254 `Fr` — i.e. what
+    ///      `Fr::to_repr()` produces on the Rust side.
+    ///
+    ///      The Acki Nacki block-id tree hashes BK-set Poseidon commitments in
+    ///      that canonical LE repr, while every other on-chain use of a
+    ///      commitment (`storedBkSetCommitment`, the attestation verifier's
+    ///      public input) is the numeric field element. `applyBkSetUpdate` is
+    ///      the single place where the two conventions meet, so the reversal
+    ///      lives here and nowhere else. Deploy-time counterpart: the runbook
+    ///      byte-reverses the prover's LE `bk_set_poseidon_hash_hex` to get
+    ///      `GENESIS_BK_SET_COMMITMENT`.
+    function _frToLeBytes(uint256 value) internal pure returns (bytes32) {
+        uint256 reversed;
+        for (uint256 i = 0; i < 32; i++) {
+            reversed = (reversed << 8) | (value & 0xff);
+            value >>= 8;
+        }
+        return bytes32(reversed);
     }
 
     /// @dev Append each non-zero layer hash from a successful `verifyBlock`

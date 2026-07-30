@@ -14,8 +14,8 @@ pragma solidity ^0.8.19;
 ///      circuit's `expose_public` order in
 ///      `historical-layer-hashes-movement-checker-circuit/src/circuit.rs`):
 ///      ```
-///      [0]      blockId                   keccak/SHA-256 root of the 8-leaf
-///                                         envelope tree, bound to Circuit 1A/1B
+///      [0]      blockId                   SHA-256 root of the 16-leaf, depth-4
+///                                         block-id tree, bound to Circuit 1A/1B
 ///      [1]      bkSetCommitment           Poseidon commitment to the active BK set
 ///      [2]      numLayers                 1..=10 active layers
 ///      [3..=12] layerHashes[0..10]        per-layer Poseidon Merkle roots; the

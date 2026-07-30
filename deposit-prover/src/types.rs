@@ -93,6 +93,34 @@ pub struct DepositProofInput {
     pub dapp_id: [u8; 32],
 }
 
+impl DepositProofInput {
+    /// The `chain_id` the circuit will bind, decoded from the enclosing
+    /// EIP-1559 transaction's RLP.
+    pub fn witness_chain_id(&self) -> anyhow::Result<u64> {
+        crate::rlp_utils::typed_tx_chain_id(&self.tx_proof.tx_bytes)
+    }
+
+    /// Fail if the witness proves a different chain than the caller selected.
+    ///
+    /// `--chain-id` picks the fetch network, but a witness loaded from disk
+    /// carries its own chain; without this check the two silently disagree and
+    /// the operator learns about it from an AN-side allowlist rejection.
+    pub fn require_chain_id(&self, expected: u64) -> anyhow::Result<()> {
+        if self.tx_proof.tx_bytes.is_empty() {
+            // Pre-Track-2 witness; the circuit rejects it with its own message.
+            return Ok(());
+        }
+        let actual = self.witness_chain_id()?;
+        if actual != expected {
+            anyhow::bail!(
+                "witness proves chain_id {actual}, but --chain-id says {expected}; \
+                 re-fetch the witness or pass --chain-id {actual}"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Output of deposit proof generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepositProofOutput {

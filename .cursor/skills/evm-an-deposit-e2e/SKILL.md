@@ -91,12 +91,13 @@ new `deposit_vk_blob.bin` bytes into `TokenBridge.sol`'s `VK_BLOB` constant.
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
 the **byte-identical** production VkBlob. Current production VkBlob (12-PI, Hermez,
-5006 B) = **`3e2a2db2…bf0d049c`** — rotated 2026-07-28 by the PR #26 soundness fixes
-(receipt bound to the verified MPT root, byte-wise root compare, `depositId`/`amount`
-range checks); before that `006cca5d…191dec05`, which itself superseded the 11-PI
-chain-ceremony `20cf9018…` on 2026-07-23 when `chainId` was added + the SRS moved to
+5006 B) = **`7322fb82…93f92541`** — rotated 2026-07-30 for Prague header support
+(21-field header table incl. EIP-7685 `requestsHash`, `MAX_BLOCK_HEADER_BYTES` 668 →
+705, 8-byte `gasLimit` for Arbitrum); before that `3e2a2db2…bf0d049c` (PR #26 soundness
+fixes), `006cca5d…191dec05`, and the 11-PI chain-ceremony `20cf9018…` superseded on
+2026-07-23 when `chainId` was added + the SRS moved to
 Hermez. Note that only the constraint system moves — PI layout, count and shape are
-stable across the last two rotations. Regenerate the
+stable across the last three rotations. Regenerate the
 whole `deposit_10proofs` regression set in one shot with
 `cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 256 --max-log-num 20`
 then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).

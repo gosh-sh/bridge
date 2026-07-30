@@ -56,18 +56,27 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 /// length is still bound cryptographically via the `keccak_var_len` length
 /// witness.
 ///
-/// Sized for axiom-eth's Cancun/Ecotone 20-field header table
-/// (`MAINNET_HEADER_FIELDS_MAX_BYTES` / `get_block_header_rlp_max_lens_from_extra(32)`
-/// → 668 B). Covers post-Shanghai (17 fields) and OP Stack Ecotone (20 fields:
-/// + `blobGasUsed` / `excessBlobGas` / `parentBeaconBlockRoot`). No Prague
-/// `requestsHash` — axiom's table stops at the Cancun 20th slot. The receipt +
-/// MPT proof are already fixed-size (axiom-eth pads them to
+/// Sized for the Prague/Isthmus 21-field header table: axiom-eth's
+/// Cancun/Ecotone `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the
+/// EIP-7685 `requestsHash`, and with `gasLimit` widened to 8 bytes so Arbitrum
+/// One's 2^50 limit fits. Covers every shape the supported chains emit today:
+/// Arbitrum (16 fields, no `withdrawalsRoot`), post-Shanghai (17), OP Stack
+/// Ecotone (20: + `blobGasUsed` / `excessBlobGas` / `parentBeaconBlockRoot`),
+/// and Prague / OP Isthmus (21: + `requestsHash` — Base, Mantle, World Chain,
+/// OP Mainnet and Sepolia are all here as of 2026-07).
+///
+/// The value is the RLP-encoded worst case implied by
+/// [`BLOCK_HEADER_MAX_FIELD_LENS`]: each field costs `max_len` plus its
+/// string prefix, and the list itself costs a 3-byte prefix.
+///
+/// The receipt + MPT proof are already fixed-size (axiom-eth pads them to
 /// `value_max_byte_len` / `max_depth`).
-pub const MAX_BLOCK_HEADER_BYTES: usize = 668;
+pub const MAX_BLOCK_HEADER_BYTES: usize = 705;
 
-/// Per-field max byte lengths for `decompose_rlp_array_*`, copied from
-/// axiom-eth `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 Cancun/Ecotone slots).
-pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 20] = [
+/// Per-field max byte lengths for `decompose_rlp_array_*`. Slots 0–19 follow
+/// axiom-eth `MAINNET_HEADER_FIELDS_MAX_BYTES` (Cancun/Ecotone) except
+/// `gasLimit`; slot 20 is the Prague / OP Isthmus `requestsHash`.
+pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 21] = [
     32,  // 0: parentHash
     32,  // 1: ommersHash
     20,  // 2: beneficiary (coinbase)
@@ -77,7 +86,7 @@ pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 20] = [
     256, // 6: logsBloom
     7,   // 7: difficulty
     4,   // 8: number
-    4,   // 9: gasLimit
+    8,   // 9: gasLimit (Arbitrum One runs at 2^50 — 7 bytes)
     4,   // 10: gasUsed
     4,   // 11: timestamp
     32,  // 12: extraData (mainnet / OP Stack max)
@@ -88,7 +97,33 @@ pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 20] = [
     8,   // 17: blobGasUsed (post-Cancun / Ecotone)
     8,   // 18: excessBlobGas (post-Cancun / Ecotone)
     32,  // 19: parentBeaconBlockRoot (post-Cancun / Ecotone)
+    32,  // 20: requestsHash (post-Prague / OP Isthmus, EIP-7685)
 ];
+
+/// Worst-case RLP length implied by [`BLOCK_HEADER_MAX_FIELD_LENS`], so a
+/// future slot change can't silently outgrow [`MAX_BLOCK_HEADER_BYTES`].
+const fn max_block_header_rlp_len() -> usize {
+    let mut payload = 0;
+    let mut i = 0;
+    while i < BLOCK_HEADER_MAX_FIELD_LENS.len() {
+        let len = BLOCK_HEADER_MAX_FIELD_LENS[i];
+        // Single-byte strings < 0x80 encode bare, but no header field is
+        // capped at 1 byte, so every field carries a prefix.
+        let prefix = if len <= 55 {
+            1
+        } else if len <= 255 {
+            2
+        } else {
+            3
+        };
+        payload += len + prefix;
+        i += 1;
+    }
+    // Payload > 255 → 0xf9 + two length bytes.
+    payload + 3
+}
+
+const _: () = assert!(max_block_header_rlp_len() == MAX_BLOCK_HEADER_BYTES);
 
 /// Expected event signature:
 /// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
@@ -278,7 +313,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Computed block hash (32 bytes)");
 
         // Parse block header RLP to extract receiptsRoot (field index 5).
-        // 20-slot Cancun/Ecotone table (axiom-eth MAINNET_HEADER_FIELDS_MAX_BYTES).
+        // 21-slot Prague/Isthmus table (see `BLOCK_HEADER_MAX_FIELD_LENS`).
         let rlp_chip = chip.rlp();
         let block_header_max_field_lens = BLOCK_HEADER_MAX_FIELD_LENS.to_vec();
 
@@ -286,7 +321,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             ctx,
             block_header_rlp_bytes,
             &block_header_max_field_lens,
-            true, // variable length (15–20 fields)
+            true, // variable length (16–21 fields)
         );
 
         // Extract receiptsRoot (field 5)

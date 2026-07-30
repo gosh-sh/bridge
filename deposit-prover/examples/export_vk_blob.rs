@@ -108,8 +108,9 @@ struct Args {
     #[arg(long, default_value = "20")]
     max_log_num: usize,
 
-    /// Fetch / network selector only (not baked into VK; proven chainId is a PI).
-    /// Must be a supported deposit chain (see `SUPPORTED_DEPOSIT_CHAIN_IDS`).
+    /// Source network (not baked into VK; proven chainId is a PI). Must be in
+    /// `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111) and must match the
+    /// chain the loaded witness actually proves.
     #[arg(long, default_value = "11155111")]
     chain_id: u64,
 }
@@ -122,6 +123,7 @@ fn main() -> anyhow::Result<()> {
     println!("Loading input from {}...", args.input);
     let json = fs::read_to_string(&args.input)?;
     let input: DepositProofInput = serde_json::from_str(&json)?;
+    input.require_chain_id(args.chain_id)?;
 
     let config = CircuitConfig {
         degree: args.degree,

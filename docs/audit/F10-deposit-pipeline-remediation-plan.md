@@ -2,8 +2,9 @@
 
 > **⚠ Dated snapshot — superseded by Track-2 chain-binding (2026-07-23).**
 > Any PI-count claims below (11 PI) predate Track 2; the current circuit
-> exposes **12 PI** (adds `chainId` at slot 4, VkBlob `3e2a2db2…bf0d049c` as of
-> 2026-07-28; the 12-PI blobs `de1dd3ab…` / `006cca5d…` are superseded).
+> exposes **12 PI** (adds `chainId` at slot 4, VkBlob `7322fb82…93f92541` as of
+> 2026-07-30; the 12-PI blobs `de1dd3ab…` / `006cca5d…` / `3e2a2db2…` are
+> superseded).
 > Preserved as a historical audit-cycle artifact.
 
 **Source:** `HANDOFF-f10-prover-relayer-ru.txt` (2026-07-17, audit branch)  

@@ -3,9 +3,9 @@
 > **⚠ PI count updated by Track-2 chain-binding (2026-07-23).** The
 > witness-independence root-cause + fix documented below is still authoritative.
 > Only the PI count / VkBlob hash have moved: circuit now exposes **12 PI**
-> (adds `chainId` at slot 4, VkBlob `3e2a2db2…bf0d049c`, 5006 B — rotated
-> 2026-07-28 by the PR #26 soundness fixes; earlier 12-PI blobs
-> `de1dd3ab…7dd8d1` / `006cca5d…191dec05` are superseded). The 11-PI
+> (adds `chainId` at slot 4, VkBlob `7322fb82…93f92541`, 5006 B — rotated
+> 2026-07-30 by the Prague header fix; earlier 12-PI blobs `de1dd3ab…7dd8d1` /
+> `006cca5d…191dec05` / `3e2a2db2…bf0d049c` are superseded). The 11-PI
 > `20cf9018…` blob referenced below is the last pre-Track-2 witness-independent
 > VkBlob and is preserved for historical context — the reproducibility argument
 > (cap=64, witness-independent, one embedded VK per circuit shape) carries over

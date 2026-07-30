@@ -17,18 +17,19 @@ spec; it **changes the circuit shape** (new VkBlob).
 | `max_key=3` only | `724687a4…e79b9c` | 3982 B | #18 |
 | `max_key=3` + Track 2 chain binding (Sepolia), VK-baked `chain_id` | `de1dd3ab…7dd8d1` | 5006 B | #19 (commit `c29f30c`); `--chain-id 11155111`; advice `[17,13]`; **superseded by next row** |
 | `max_key=3` + Track 2 + `chainId` as pure PI + Cancun/Ecotone 20-field header | `006cca5d…191dec05` | 5006 B | commit `c0da8a3`. Same shape (12 PI, advice `[17,13]`, Sepolia) but different constraint system: `expected_chain_id` VK-baked constant removed; `MAX_BLOCK_HEADER_BYTES` 640 → 668; multi-L2 support. **Superseded by next row** |
-| … + circuit soundness fixes (receipt bound to the verified MPT root, byte-wise root compare, `depositId`/`amount` range checks) | **`3e2a2db2…bf0d049c`** | **5006 B** | commit `5b0e79a` (PR #26) — current on-disk fixture. Shape unchanged (12 PI, advice `[17,13]`, Hermez k=18); only the constraint system, VK points and the 10 proofs differ |
+| … + circuit soundness fixes (receipt bound to the verified MPT root, byte-wise root compare, `depositId`/`amount` range checks) | `3e2a2db2…bf0d049c` | 5006 B | commit `5b0e79a` (PR #26). Shape unchanged (12 PI, advice `[17,13]`, Hermez k=18); only the constraint system, VK points and the 10 proofs differ. **Superseded by next row** |
+| … + Prague header support (21-field table incl. `requestsHash`, `MAX_BLOCK_HEADER_BYTES` 668 → 705, 8-byte `gasLimit` for Arbitrum) | **`7322fb82…93f92541`** | **5006 B** | 2026-07-30, PR #20 review R1/R3 — current on-disk fixture. Shape still unchanged (12 PI, advice `[17,13]`, Hermez k=18). The 10 witnesses were re-canonicalised at the same time (R2), so their `blockHash` PI is now the real Sepolia block hash rather than the hash of a header with `requestsHash` dropped |
 
-Current `fixtures/deposit_10proofs/deposit_vk_blob.bin` is the **`3e2a2db2…`** row
+Current `fixtures/deposit_10proofs/deposit_vk_blob.bin` is the **`7322fb82…`** row
 (bottom of the table). See `docs/deposit_chain_binding_track2.md` for the
 regeneration command (Track 2 adds `--chain-id`, tx-trie witnesses, and 12
 public inputs, so it does **not** share the `EthCircuitParams` shape used by the
 pre-#19 rows).
 
-**Follow-up:** re-embed the current VkBlob (`3e2a2db2…bf0d049c`, 5006 B, 12 PI)
+**Follow-up:** re-embed the current VkBlob (`7322fb82…93f92541`, 5006 B, 12 PI)
 into shellnet `USDCBridge` — the on-chain blob is still the pre-chain-binding
-11-PI `304c1c4e…`. `tvm-sdk` `deposit_10proofs` is already synced to this blob
-(`scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`, committed there as
-`33a5cae3`). Cross-check hashes with
+11-PI `304c1c4e…`. `tvm-sdk` `deposit_10proofs` is **one rotation behind** — it
+carries `3e2a2db2…` (committed there as `33a5cae3`) and needs a re-sync via
+`scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`. Cross-check hashes with
 `docs/partner_note_usdcbridge_chainid_hermez_2026-07-23.md` §"Change 1 —
 `VK_BLOB`" and `.cursor/skills/evm-an-deposit-e2e/SKILL.md`.

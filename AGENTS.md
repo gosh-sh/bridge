@@ -508,9 +508,10 @@ Run `make pre-push` before any non-trivial push — it mirrors every job CI runs
 > **⚠ Superseded by Track-2 chain-binding (2026-07-23).** This section documents the
 > 11-PI VkBlob (`304c1c4e…`) redeployed to shellnet in 2026-06/07. The current
 > `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4) and produces
-> VkBlob `3e2a2db2…bf0d049c` (5006 B, rotated 2026-07-28 by the PR #26 in-circuit
-> soundness fixes; earlier 12-PI blobs `de1dd3ab…` / `006cca5d…` are superseded —
-> same PI layout, different constraint system); the follow-on shellnet redeploy is tracked in
+> VkBlob `7322fb82…93f92541` (5006 B, rotated 2026-07-30 by the Prague header fix —
+> 21-field header table + `keccak(header) == block.hash` assertion; earlier 12-PI
+> blobs `de1dd3ab…` / `006cca5d…` / `3e2a2db2…` are superseded — same PI layout,
+> different constraint system); the follow-on shellnet redeploy is tracked in
 > `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. Preserve the tables below as a
 > historical snapshot — do not rewrite them.
 
@@ -674,9 +675,10 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 > **⚠ Superseded by Track-2 chain-binding (2026-07-23).** This section documents the
 > 11-PI VkBlob (`304c1c4e…`) redeployed to shellnet in 2026-06/07. The current
 > `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4) and produces
-> VkBlob `3e2a2db2…bf0d049c` (5006 B, rotated 2026-07-28 by the PR #26 in-circuit
-> soundness fixes; earlier 12-PI blobs `de1dd3ab…` / `006cca5d…` are superseded —
-> same PI layout, different constraint system); the follow-on shellnet redeploy is tracked in
+> VkBlob `7322fb82…93f92541` (5006 B, rotated 2026-07-30 by the Prague header fix —
+> 21-field header table + `keccak(header) == block.hash` assertion; earlier 12-PI
+> blobs `de1dd3ab…` / `006cca5d…` / `3e2a2db2…` are superseded — same PI layout,
+> different constraint system); the follow-on shellnet redeploy is tracked in
 > `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`. Preserve the tables below as a
 > historical snapshot — do not rewrite them.
 

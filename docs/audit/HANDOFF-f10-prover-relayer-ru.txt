@@ -4,8 +4,9 @@ HANDOFF F10 — deposit-prover и deposit-relayer-daemon
 
 [ВНИМАНИЕ 2026-07-23] Датированный snapshot; заменён Track-2 chain-binding.
 Все упоминания "11 PI" ниже — историчны. Текущая схема deposit-prover
-экспонирует 12 PI (chainId добавлен в слот 4, VkBlob 3e2a2db2…bf0d049c
-по состоянию на 2026-07-28; 12-PI блобы de1dd3ab… и 006cca5d… устарели).
+экспонирует 12 PI (chainId добавлен в слот 4, VkBlob 7322fb82…93f92541
+по состоянию на 2026-07-30; 12-PI блобы de1dd3ab…, 006cca5d… и 3e2a2db2…
+устарели).
 Оставлено как артефакт аудитного цикла.
 
 Детали и PoC: audit/reports/questions-cross-chain.md (§ QC-OFF, QC-PROV)

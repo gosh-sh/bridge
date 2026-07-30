@@ -98,6 +98,9 @@ ff = "0.13"
 # halo2curves is provided transitively by the gosh halo2-axiom backend via the
 # `halo2_base::halo2_proofs::halo2curves` re-export (no direct PSE dep needed).
 
+# Deposit-source allowlist, shared verbatim with `deposit-relayer-daemon`.
+deposit-chain-ids = { path = "../crates/deposit-chain-ids" }
+
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

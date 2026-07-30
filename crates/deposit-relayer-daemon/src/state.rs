@@ -187,10 +187,13 @@ impl StateLock {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // The lock file is a sentinel — only the flock matters, so keep whatever
+        // bytes are already there rather than rewriting it on every acquire.
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .map_err(RelayerError::from)?;
         file.try_lock_exclusive()

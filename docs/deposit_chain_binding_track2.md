@@ -44,19 +44,27 @@ Sibling `acki-nacki` must:
    Blast (81457), plus Sepolia (11155111) for shellnet.
 3. Re-embed the regenerated deposit VkBlob after fixture regen lands.
 
-## Regenerated fixtures (2026-07-28, 12-PI + Cancun header table + soundness fixes)
+## Regenerated fixtures (2026-07-30, 12-PI + Prague header table)
 
 `fixtures/deposit_10proofs/` rebuilt from Sepolia deposit inputs with
-`--chain-id 11155111`. Rotated on 2026-07-28 (was
-`006cca5d…191dec05` from 2026-07-22) after the in-circuit soundness fixes in
-`gosh-sh/bridge` PR [#26](https://github.com/gosh-sh/bridge/pull/26) — receipt
-bound to the MPT root the chip actually verified, byte-wise root comparison,
-`depositId`/`amount` range checks. Shape and PI layout are unchanged; only the
-constraint system, VK points and the 10 proofs differ.
+`--chain-id 11155111`. Two rotations landed in quick succession, both leaving
+the shape and PI layout untouched — only the constraint system, VK points and
+the 10 proofs differ:
+
+- **2026-07-28, `3e2a2db2…bf0d049c`** — in-circuit soundness fixes from
+  `gosh-sh/bridge` PR [#26](https://github.com/gosh-sh/bridge/pull/26): receipt
+  bound to the MPT root the chip actually verified, byte-wise root comparison,
+  `depositId`/`amount` range checks.
+- **2026-07-30, `7322fb82…93f92541`** (current) — Prague header support from the
+  PR #20 review: the header field table grows to 21 slots for the EIP-7685
+  `requestsHash`, `MAX_BLOCK_HEADER_BYTES` 668 → 705, `gasLimit` widened to 8
+  bytes for Arbitrum One. The witnesses were re-canonicalised at the same time,
+  so each proof's `blockHash` public input is now the block hash Sepolia
+  actually reports (previously it hashed a header with `requestsHash` dropped).
 
 | | Value |
 |---|---|
-| VkBlob SHA-256 | `3e2a2db2deb19bf80331677ef9c4747198af15ce76868581bd47be52bf0d049c` |
+| VkBlob SHA-256 | `7322fb8257a3ab9024a6cff2317452b91dbf5c5b7dcd7584564eabc293f92541` |
 | VkBlob size | 5006 B |
 | Public inputs | **384 B** (12 × 32) |
 | Proof size | 11072 B each |

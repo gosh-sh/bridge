@@ -90,7 +90,8 @@ pub use submitter::{
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use supported_chains::{
-    is_supported_deposit_chain, SUPPORTED_DEPOSIT_CHAIN_IDS, CHAIN_ID_SEPOLIA,
+    is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
+    CHAIN_ID_SEPOLIA, SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
 pub use types::{
     parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,

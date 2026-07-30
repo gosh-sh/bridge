@@ -7,11 +7,9 @@
 //! remain for CI / operator one-shots.
 
 pub mod aggregator;
-pub mod bk_set_sentry;
 pub mod bridge;
 pub mod daemon;
 pub mod error;
-pub mod guarded_relayer;
 pub mod history_consistency;
 pub mod live_source;
 pub mod proof_validation;
@@ -28,7 +26,6 @@ pub use aggregator::{
     SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
     WITHDRAWAL_VERIFIER_NAME,
 };
-pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
     MockBridgeClient, SubmitOutcome, WithdrawSubmitOutcome,
@@ -37,7 +34,6 @@ pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
 pub use error::RelayerError;
-pub use guarded_relayer::{GuardedOutcome, SentryGuardedRelayer};
 pub use history_consistency::{
     check_chain_monotonicity, check_history_consistency, check_startup_drift, HistoryDrift,
 };

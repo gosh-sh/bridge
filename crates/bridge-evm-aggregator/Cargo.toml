@@ -57,10 +57,6 @@ name = "export-inner-aggregator"
 path = "src/bin/export_inner_aggregator.rs"
 
 [[bin]]
-name = "export-halo2-poseidon-snark"
-path = "src/bin/export_halo2_poseidon_snark.rs"
-
-[[bin]]
 name = "aggregate-proof"
 path = "src/bin/aggregate_proof.rs"
 

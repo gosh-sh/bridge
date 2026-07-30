@@ -68,7 +68,7 @@ pub mod state;
 pub mod submitter;
 pub mod types;
 
-pub use an_config::{AnConfig, AnPreflight, DEFAULT_AN_NODE_URL, DEFAULT_LOCAL_AN_NODE_URL};
+pub use an_config::AnConfig;
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };

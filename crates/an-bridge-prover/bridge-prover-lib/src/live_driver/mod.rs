@@ -38,9 +38,9 @@
 //!   The caller must drain via [`poll_next_bk_update`](LiveProverDriver::poll_next_bk_update)
 //!   before bundles can advance past that height.
 //!
-//! See `an_bridge_prover_live_driver_refactor_plan_2026-07-08.md` in the repo
-//! root for the full extraction rationale and the two-daemon integration
-//! contract.
+//! See `bridge/docs/archive/an_bridge_prover_live_driver_refactor_plan_2026-07-08.md`
+//! for the full extraction rationale and the two-daemon integration contract
+//! (archived after the integration landed on 2026-07-30).
 //!
 //! ## Downstream-consumer contract (Sergey's `bridge-relayer-daemon`)
 //!
@@ -488,6 +488,27 @@ impl LiveProverDriver {
     /// `Cargo.lock` and link-time. The public payloads themselves stay
     /// halo2-free — you only feel the dep at build time, not at type
     /// boundaries.
+    ///
+    /// Which methods touch halo2 keys:
+    ///
+    /// * **Proof-generating (require `ensure_*_keys` up front, drive
+    ///   on-demand PK load/unload internally):** [`poll_next_bundle`],
+    ///   [`poll_next_bk_update`].
+    /// * **State-only, no key access:** [`ack_bundle`], [`ack_bk_update`]
+    ///   (cursor advance + in-memory commitment rotation only),
+    ///   [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only
+    ///   reads for the caller to persist).
+    ///
+    /// A read-only consumer that only calls the `snapshot_*` / `ack_*`
+    /// surface still transitively links halo2 (see above) but never
+    /// materialises a proving key at runtime.
+    ///
+    /// [`poll_next_bundle`]: Self::poll_next_bundle
+    /// [`poll_next_bk_update`]: Self::poll_next_bk_update
+    /// [`ack_bundle`]: Self::ack_bundle
+    /// [`ack_bk_update`]: Self::ack_bk_update
+    /// [`snapshot_state`]: Self::snapshot_state
+    /// [`snapshot_prover_bk_set`]: Self::snapshot_prover_bk_set
     pub fn new(
         gql: GqlClient,
         key_manager: KeyManager,

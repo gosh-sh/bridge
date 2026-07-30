@@ -12,8 +12,8 @@
 //!   * verifier IPC (`./proofs/{proof,result,bkupd,bkupd_result}_NNN.json`), and
 //!   * the `self-verify` feature gate that inline-verifies proofs in-process.
 //!
-//! See `an_bridge_prover_live_driver_refactor_plan_2026-07-08.md` for the
-//! extraction rationale and the two-daemon contract.
+//! See `bridge/docs/archive/an_bridge_prover_live_driver_refactor_plan_2026-07-08.md`
+//! for the extraction rationale and the two-daemon contract.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

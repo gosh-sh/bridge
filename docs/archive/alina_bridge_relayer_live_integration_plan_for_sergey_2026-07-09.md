@@ -165,6 +165,8 @@ Three tiny things. All small, all deferred from the July-08 plan pending Sergey'
 
 ### 3.1 Three `gql_client` shortcut queries (~120 LOC total)
 
+> **SUPERSEDED (2026-07-30).** Phase A landed the shared `bridge_prover_lib::bk_set_bootstrap::load_bk_set` helper, which both `bridge-prover-daemon` and `bridge-relayer-daemon::run_daemon_live` call directly (see `src/bin/relayer.rs:1799`). Sergey no longer needs the three shortcut queries described below, and `acki-nacki-interface::BkSetClient` has already been deleted (Phase D, commit `3d98215`). The `bk_set_fetcher::load_bk_set_from_config` + `bk_set_at_height` primitives that the bootstrap helper composes are already public. Kept below for historical context only.
+
 Add to `crates/an-bridge-prover/bridge-prover-lib/src/gql_client.rs`. Purpose: single AN-facing surface for both daemons — Sergey can retire `acki-nacki-interface::BkSetClient` when he's ready, without waiting for anything from us later.
 
 | Signature | Composes from |
@@ -811,6 +813,8 @@ Startup sequence (mirrors `bridge-prover-daemon/main.rs`):
 ---
 
 ## 7. BK-set sentry — migration path (optional, incremental)
+
+> **MOOT (2026-07-30).** The sentry stack was deleted outright in Phase C (commit `82ecf9a`): `bridge-relayer-daemon/src/bk_set_sentry.rs`, `guarded_relayer.rs`, and the `SentryWatch` subcommand are gone. `acki-nacki-interface::BkSetClient`/`BkSetTracker` followed in Phase D (commit `3d98215`). BK rotation is now handled by the driver's own bk-update lane (§4.4 two-phase tick), so nothing needs migrating. Section retained for historical context.
 
 Once §3.1 GQL shortcuts land, Sergey can retire `acki-nacki-interface::BkSetClient` at his convenience. Recommended sequence (each landable independently):
 

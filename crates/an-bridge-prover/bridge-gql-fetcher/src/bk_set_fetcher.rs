@@ -311,7 +311,33 @@ pub const BK_CHANGE_VARIANT_REMOVED: u32 = BK_CHANGE_REMOVED;
 
 /// Load BK set from a JSON config file (fallback).
 ///
-/// Format: `{ "0": "hex-pubkey", "1": "hex-pubkey", ... }`
+/// # File schema
+///
+/// A flat JSON object mapping **decimal signer index** (as a string) to a
+/// **hex-encoded BLS12-381 G1 pubkey**:
+///
+/// ```json
+/// {
+///   "0": "8f1a...c2",
+///   "1": "b73e...41",
+///   "2": "a509...ff"
+/// }
+/// ```
+///
+/// * Keys parse as `u16` — the string wrapper is just JSON's map-key
+///   constraint, values are the raw signer indices used everywhere else
+///   in the pipeline.
+/// * Values may be **48-byte compressed** (canonical) or **96-byte
+///   uncompressed**; both encodings are accepted and [`normalize_bk_set_pubkeys`]
+///   collapses uncompressed keys to the compressed form before returning.
+///   Any other length errors.
+///
+/// This is the format both `bridge-prover-daemon` and `bridge-relayer-daemon`
+/// consume via `bridge_prover_lib::bk_set_bootstrap::load_bk_set`; the
+/// pointed-to file is named by the `BRIDGE_BK_SET_CONFIG` env var (or a
+/// clap flag on the relayer side). It represents either the **current** BK
+/// set (`mode=file`) or a **genesis anchor** to be folded forward
+/// (`mode=fold_at_height`).
 pub fn load_bk_set_from_config(path: &str) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
     let data = std::fs::read_to_string(path).context("failed to read BK set config")?;
     let map: HashMap<String, String> = serde_json::from_str(&data)?;

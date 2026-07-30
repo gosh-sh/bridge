@@ -8,7 +8,7 @@
 
 The deposit circuit now exposes **12 public inputs** (adds a **proven `chainId`**) and is keyed on the **Hermez** trusted setup. Our side (deposit-prover, deposit-relayer, tvm-sdk `ZKHALO2VERIFYWITHVK` opcode + fixtures) is done and green. To finish the deposit path you need three changes in `USDCBridge.sol` + a recompile/redeploy:
 
-1. Swap `VK_BLOB` → the new 12-PI Hermez VkBlob (`006cca5d…`).
+1. Swap `VK_BLOB` → the new 12-PI Hermez VkBlob (`3e2a2db2…`).
 2. Fix `_parsePublicInputs` for the new 12-slot offsets (everything after `contractAddr` shifts by one).
 3. **Add a `(chainId → expected bridge Fr)` allowlist** — this is the security point: `chainId` and the bridge address are *proven in-circuit*, and the contract must **reject** any proof whose `(chainId, contractAddr)` pair is not allow-listed, instead of trusting config.
 
@@ -47,9 +47,17 @@ Replace the embedded `VK_BLOB` with the new blob:
 |---|---|
 | file | `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (byte-identical to `tvm-sdk/tvm_vm/halo2_test_data/deposit_10proofs/deposit_vk_blob.bin`) |
 | size | 5006 B |
-| sha256 | `006cca5ddd457065bef8469fc10dd231ad8fd13c895877c9deff5c51191dec05` |
-| shape | v2 RLC, `circuit_shape=1`, k=18, `num_advice_per_phase=[13,10]`, 12 PI |
+| sha256 | `3e2a2db2deb19bf80331677ef9c4747198af15ce76868581bd47be52bf0d049c` |
+| shape | v2 RLC, `circuit_shape=1`, k=18, `num_advice_per_phase=[17,13]`, 12 PI |
 | SRS | **Hermez** Powers of Tau (see "Opcode" below) |
+
+> **Blob rotated 2026-07-28.** If you already picked up `006cca5d…` from an
+> earlier copy of this note, discard it: the in-circuit soundness fixes from
+> `gosh-sh/bridge` PR [#26](https://github.com/gosh-sh/bridge/pull/26) (receipt
+> bound to the MPT root the chip actually verified, byte-wise root comparison,
+> `depositId`/`amount` range checks) changed the constraint system. Public-input
+> layout, size and shape are identical — only the VK points and the 10
+> regression proofs differ, so nothing below this line changes.
 
 ## Change 2 — `_parsePublicInputs` offsets
 
@@ -98,7 +106,7 @@ Without this, exposing `chainId`/bridge as public inputs buys nothing — the co
 
 ## Opcode / SRS (our side — already done)
 
-- tvm-sdk PR **[tvmlabs/tvm-sdk#279](https://github.com/tvmlabs/tvm-sdk/pull/279)** (branch `pruvendo/deposit-chainid-12pi-hermez-srs`, commit `dff52fd1`, base `full_dex_and_bridge_test_with_final_halo2_circuit`).
+- tvm-sdk PR **[tvmlabs/tvm-sdk#279](https://github.com/tvmlabs/tvm-sdk/pull/279)** (branch `pruvendo/deposit-chainid-12pi-hermez-srs`, tip `33a5cae3` — carries the rotated `3e2a2db2…` fixtures; opcode change itself is `dff52fd1`, base `full_dex_and_bridge_test_with_final_halo2_circuit`).
 - `ZKHALO2VERIFYWITHVK` verifier params (`build_shared_kzg_params` → `KZG_S_G2_BYTES`) switched from the AN chain ceremony to the **Hermez** `[s]·G2` (`92 8f af b3 …`). Deposit proofs are now keyed on `deposit-prover/data/kzg_params_18.srs` (Hermez), NOT the chain ceremony.
 - Legacy Dark DEX `ZKHALO2VERIFY` path is **unchanged** (`DARK_DEX_KZG_S_G2_BYTES` = chain ceremony). The two constants now differ by design.
 - Verified: `cargo +nightly test -p tvm_vm --features gosh deposit_rlc` → **3/3 green** (`round_trip_deposit_rlc_real_proof_returns_true`, flipped-byte reject, cache reuse).
@@ -107,7 +115,7 @@ Without this, exposing `chainId`/bridge as public inputs buys nothing — the co
 
 ```bash
 sha256sum tvm_vm/halo2_test_data/deposit_10proofs/deposit_vk_blob.bin
-# 006cca5ddd457065bef8469fc10dd231ad8fd13c895877c9deff5c51191dec05
+# 3e2a2db2deb19bf80331677ef9c4747198af15ce76868581bd47be52bf0d049c
 cargo +nightly test -p tvm_vm --features gosh deposit_rlc   # 3/3
 ```
 The 10 proof/PI pairs in `deposit_10proofs/proof_00..09/` are the 12-PI regression set (each `public_inputs.bin` = 384 B = 12 × 32).

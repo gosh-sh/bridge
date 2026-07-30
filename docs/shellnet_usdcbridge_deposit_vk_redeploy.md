@@ -2,7 +2,9 @@
 
 > # ⚠️ SUPERSEDED BY TRACK-2 CHAIN-BINDING (2026-07-23)
 > The current `deposit-prover` circuit exposes **12 public inputs**
-> (adds `chainId` at slot 4) and produces VkBlob `de1dd3ab…7dd8d1` (5006 B).
+> (adds `chainId` at slot 4) and produces VkBlob `3e2a2db2…bf0d049c` (5006 B,
+> rotated 2026-07-28 by the PR #26 soundness fixes; earlier 12-PI blobs
+> `de1dd3ab…7dd8d1` and `006cca5d…191dec05` are superseded).
 > All 11-PI VkBlob references below (`147efe14…`, `20cf9018…`, `304c1c4e…`) are
 > **historical**. The next shellnet redeploy must embed the 12-PI VkBlob and
 > the corresponding `_buildPublicInputs`/`_parsePublicInputs` change to pass

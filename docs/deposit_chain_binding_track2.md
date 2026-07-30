@@ -44,14 +44,19 @@ Sibling `acki-nacki` must:
    Blast (81457), plus Sepolia (11155111) for shellnet.
 3. Re-embed the regenerated deposit VkBlob after fixture regen lands.
 
-## Regenerated fixtures (2026-07-22, 12-PI + Cancun header table)
+## Regenerated fixtures (2026-07-28, 12-PI + Cancun header table + soundness fixes)
 
 `fixtures/deposit_10proofs/` rebuilt from Sepolia deposit inputs with
-`--chain-id 11155111`:
+`--chain-id 11155111`. Rotated on 2026-07-28 (was
+`006cca5d…191dec05` from 2026-07-22) after the in-circuit soundness fixes in
+`gosh-sh/bridge` PR [#26](https://github.com/gosh-sh/bridge/pull/26) — receipt
+bound to the MPT root the chip actually verified, byte-wise root comparison,
+`depositId`/`amount` range checks. Shape and PI layout are unchanged; only the
+constraint system, VK points and the 10 proofs differ.
 
 | | Value |
 |---|---|
-| VkBlob SHA-256 | `006cca5ddd457065bef8469fc10dd231ad8fd13c895877c9deff5c51191dec05` |
+| VkBlob SHA-256 | `3e2a2db2deb19bf80331677ef9c4747198af15ce76868581bd47be52bf0d049c` |
 | VkBlob size | 5006 B |
 | Public inputs | **384 B** (12 × 32) |
 | Proof size | 11072 B each |

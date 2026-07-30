@@ -54,7 +54,8 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
     let inner_snark = prove_inner(&params_inner, a, b)?;
     let c = inner_snark.instances[0][0];
 
-    let export = export_aggregated_snark(workdir, "MultiplierSpikeVerifier", inner_snark, config)?;
+    let export =
+        aggregate_and_prove("MultiplierSpikeVerifier", inner_snark, config, Some(workdir))?;
     std::fs::write(workdir.join("multiplier_spike_calldata.bin"), &export.evm_calldata)?;
 
     let meta = serde_json::json!({
@@ -93,15 +94,22 @@ pub struct AggregatorExportResult {
     pub evm_calldata: Vec<u8>,
 }
 
-/// Aggregate `inner_snark`, emit Yul + `.bin` + calldata under `workdir`.
-pub fn export_aggregated_snark(
-    workdir: &Path,
+/// Aggregate `inner_snark` and produce the outer verifier bytecode + EVM calldata.
+///
+/// If `artifacts_dir` is `Some(dir)`, the deployable `<base_name>.sol` +
+/// `<base_name>.bin` are written under `dir` — the `export-inner-aggregator`
+/// path that regenerates the on-chain verifier artifacts.
+///
+/// If `None`, no disk writes happen — bytecode and calldata are returned in
+/// memory only. This is the `aggregate-proof` runtime path, which byte-compares
+/// the in-memory `verifier_bytecode` against the committed on-chain `.bin`
+/// itself and then only persists the calldata the caller chose.
+pub fn aggregate_and_prove(
     base_name: &str,
     inner_snark: Snark,
     config: AggregatorConfig,
+    artifacts_dir: Option<&Path>,
 ) -> anyhow::Result<AggregatorExportResult> {
-    std::fs::create_dir_all(workdir)?;
-
     let params_outer = halo2_base::utils::fs::gen_srs(config.k_outer);
 
     let agg_config = AggregationConfigParams {
@@ -137,20 +145,28 @@ pub fn export_aggregated_snark(
 
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
-    let sol_path = workdir.join(format!("{base_name}.sol"));
+    let sol_path = if let Some(dir) = artifacts_dir {
+        std::fs::create_dir_all(dir)?;
+        Some(dir.join(format!("{base_name}.sol")))
+    } else {
+        None
+    };
     let verifier_bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
         &params_outer,
         pk.get_vk(),
         num_instance,
-        Some(&sol_path),
+        sol_path.as_deref(),
     );
-    let bin_path = sol_path.with_extension("bin");
-    std::fs::write(&bin_path, &verifier_bytecode)?;
-
-    let verifier_size = eip170::assert_eip170(&verifier_bytecode, &bin_path.display().to_string())?;
+    let bin_ref = if let Some(dir) = artifacts_dir {
+        let bin_path = dir.join(format!("{base_name}.bin"));
+        std::fs::write(&bin_path, &verifier_bytecode)?;
+        bin_path.display().to_string()
+    } else {
+        format!("{base_name}.bin")
+    };
+    let verifier_size = eip170::assert_eip170(&verifier_bytecode, &bin_ref)?;
 
     let evm_calldata = encode_calldata(&instances, &evm_proof);
-    std::fs::write(workdir.join(format!("{base_name}_calldata.bin")), &evm_calldata)?;
 
     Ok(AggregatorExportResult {
         verifier_bytecode,

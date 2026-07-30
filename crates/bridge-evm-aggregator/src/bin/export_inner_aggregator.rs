@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use bridge_evm_aggregator::{
     aggregator::AggregatorConfig,
-    evm_export::export_aggregated_snark,
+    evm_export::aggregate_and_prove,
 };
 use snark_verifier_sdk::Snark;
 
@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     let inner_bytes = std::fs::read(&inner_path)?;
     let inner_snark: Snark = bincode::deserialize(&inner_bytes)?;
     let config = AggregatorConfig::for_verifier_name_with_overrides(&name, k_outer, universality);
-    let export = export_aggregated_snark(&out_dir, &name, inner_snark, config)?;
+    let export = aggregate_and_prove(&name, inner_snark, config, Some(&out_dir))?;
 
     println!(
         "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?})",

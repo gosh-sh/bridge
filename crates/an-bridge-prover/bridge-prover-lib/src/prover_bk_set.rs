@@ -56,8 +56,10 @@ pub struct ProverBkSet {
 
 impl ProverBkSet {
     /// Build from a fresh `HashMap` (e.g. the output of
-    /// `bk_set_fetcher::fetch_bk_set`). Computes the Poseidon commitment
-    /// from the provided pubkeys.
+    /// `bk_set_fetcher::bk_set_at_height` for cold-start against a
+    /// specific chain height, or `bk_set_fetcher::load_bk_set_from_config`
+    /// for the genesis anchor). Computes the Poseidon commitment from
+    /// the provided pubkeys.
     pub fn from_pubkeys(
         pubkeys: &HashMap<u16, Vec<u8>>,
         last_applied_update_seq_no: u64,

@@ -15,18 +15,18 @@
 //! See `an_bridge_prover_live_driver_refactor_plan_2026-07-08.md` for the
 //! extraction rationale and the two-daemon contract.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use tracing::{error, info, warn};
 
+use bridge_prover_lib::bk_set_bootstrap;
 use bridge_prover_lib::bootstrap;
 use bridge_prover_lib::bridge_state::BridgeState;
-use bridge_gql_fetcher::gql_client::{self, GqlClient};
+use bridge_gql_fetcher::gql_client;
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
 use bridge_prover_lib::live_driver::{
@@ -49,23 +49,6 @@ use bridge_prover_lib::Fr;
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
 const ENV_BOOTSTRAP_SEQNO: &str = "BRIDGE_BOOTSTRAP_SEQNO";
-const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
-const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
-
-/// Selects how the initial BK set is derived on first-ever startup.
-///   - `file` (default): treat the JSON file as the current BK set (correct
-///     on fresh chains and on rotating chains booted from genesis).
-///   - `fold_at_height`: treat the JSON file as the *genesis* snapshot and
-///     apply all `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (or the
-///     daemon's bootstrap seqno if that env is unset) via `bk_set_at_height`.
-///     Use this when cold-starting the prover against a long-running chain
-///     whose committee has rotated many times since genesis.
-///
-/// Consulted only on first bootstrap; a persisted `prover_bk_set.json` is
-/// the source of truth on Resume regardless of this setting.
-const ENV_BK_SET_BOOTSTRAP: &str = "BRIDGE_BK_SET_BOOTSTRAP";
-const ENV_BK_SET_TARGET_SEQNO: &str = "BRIDGE_BK_SET_TARGET_SEQNO";
-
 const PARAMS_DIR: &str = "./params";
 const LOGS_DIR: &str = "./logs";
 const STATE_FILE: &str = "./state/prover_state.json";
@@ -144,7 +127,12 @@ async fn main() -> anyhow::Result<()> {
         None => {
             // Cold boot: this is the ONLY code path that reads the seed
             // file directly. Once saved, `prover_bk_set.json` takes over.
-            let bk_set_from_file = load_bk_set(&gql, explicit_bootstrap_seqno).await?;
+            let bk_set_from_file = bk_set_bootstrap::load_bk_set(
+                &gql,
+                &bk_set_bootstrap::resolve_bk_set_config_path(),
+                explicit_bootstrap_seqno,
+            )
+            .await?;
             let pbs = ProverBkSet::from_pubkeys(&bk_set_from_file, 0);
             pbs.save(PROVER_BK_SET_FILE)?;
             info!(
@@ -165,7 +153,10 @@ async fn main() -> anyhow::Result<()> {
     // chain instance and must be wiped. On shellnet the file is a
     // genesis snapshot, so mismatch + prover has rotated is expected
     // and only logged.
-    verify_prover_bk_set_matches_config_file(&prover_bk_set)?;
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
+        &bk_set_bootstrap::resolve_bk_set_config_path(),
+        &prover_bk_set,
+    )?;
 
     let bk_set = prover_bk_set
         .pubkeys()
@@ -314,138 +305,6 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
         }
         Err(_) => Ok(None),
     }
-}
-
-/// Load the initial BK set. Mode is selected via `BRIDGE_BK_SET_BOOTSTRAP`:
-///
-///   - `file` (default): read JSON verbatim — correct for fresh chains and
-///     for cold starts anchored at genesis.
-///   - `fold_at_height`: read JSON as the *genesis* snapshot, then apply all
-///     `bkSetUpdates` up to `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to
-///     `explicit_bootstrap_seqno` if unset) via
-///     `bk_set_fetcher::bk_set_at_height`.
-///
-/// A persisted `prover_bk_set.json` (loaded downstream) overrides this on
-/// Resume, so this function is only load-bearing on first-ever startup.
-async fn load_bk_set(
-    gql: &GqlClient,
-    explicit_bootstrap_seqno: Option<u64>,
-) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
-    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
-        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    let json = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(&bk_set_config)
-        .with_context(|| format!("failed to load BK set from config file {}", bk_set_config))?;
-
-    let mode = std::env::var(ENV_BK_SET_BOOTSTRAP).unwrap_or_else(|_| "file".to_string());
-    match mode.as_str() {
-        "file" => {
-            info!(
-                "BK-set bootstrap: mode=file, loaded {} signers from {}",
-                json.len(),
-                bk_set_config
-            );
-            Ok(json)
-        }
-        "fold_at_height" => {
-            let target = match std::env::var(ENV_BK_SET_TARGET_SEQNO) {
-                Ok(s) => s.parse::<u64>().with_context(|| {
-                    format!("{} must be a u64, got '{}'", ENV_BK_SET_TARGET_SEQNO, s)
-                })?,
-                Err(_) => explicit_bootstrap_seqno.ok_or_else(|| {
-                    anyhow::format_err!(
-                        "BRIDGE_BK_SET_BOOTSTRAP=fold_at_height requires either \
-                         {} or {} to be set",
-                        ENV_BK_SET_TARGET_SEQNO,
-                        ENV_BOOTSTRAP_SEQNO
-                    )
-                })?,
-            };
-            info!(
-                "BK-set bootstrap: mode=fold_at_height, genesis={} signers, target_height={}",
-                json.len(),
-                target
-            );
-            bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height(gql, json, target)
-                .await
-                .with_context(|| format!("bk_set_at_height failed for target_height={}", target))
-        }
-        other => bail!(
-            "unknown {}='{}', expected 'file' or 'fold_at_height'",
-            ENV_BK_SET_BOOTSTRAP,
-            other
-        ),
-    }
-}
-
-/// File-first startup guard: if `BRIDGE_BK_SET_CONFIG` points to a
-/// readable file, compare its Poseidon commitment against
-/// `prover_bk_set.commitment`. Runs before any GQL call — cheap and
-/// catches the common devnet stale-state footgun immediately.
-///
-/// Behaviour:
-/// * Match — silent pass.
-/// * File missing — silent pass (config was hand-set to a path we don't
-///   own; the runtime L2 check in `bk_update.rs` remains as a safety net).
-/// * Mismatch AND `last_applied_update_seq_no == 0` — BAIL. The prover
-///   has never processed a rotation, so a fresh chain overwriting the
-///   seed file while `./state/` persisted from the previous chain
-///   instance is the overwhelmingly likely explanation.
-/// * Mismatch AND `last_applied_update_seq_no > 0` — INFO log only.
-///   Expected on any chain where BK rotation is enabled and the seed
-///   file is only the genesis snapshot; the prover has legitimately
-///   moved past it via the bk-update lane.
-fn verify_prover_bk_set_matches_config_file(
-    prover_bk_set: &ProverBkSet,
-) -> anyhow::Result<()> {
-    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
-        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
-    if !Path::new(&bk_set_config).exists() {
-        info!(
-            "chain-config check skipped: {} not found (this is fine on \
-             warm restarts where the file is intentionally absent)",
-            bk_set_config,
-        );
-        return Ok(());
-    }
-    let file_pubkeys = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(
-        &bk_set_config,
-    )
-    .with_context(|| format!("load {} for startup guard", bk_set_config))?;
-    let (_, file_commitment) = poseidon::compute_bk_set_poseidon(&file_pubkeys);
-    if file_commitment == prover_bk_set.commitment {
-        info!(
-            "chain-config check OK: {} matches prover_bk_set.commitment",
-            bk_set_config,
-        );
-        return Ok(());
-    }
-    if prover_bk_set.last_applied_update_seq_no == 0 {
-        anyhow::bail!(
-            "chain-config check FAILED:\n  \
-             {} commitment: {}\n  \
-             prover_bk_set:      {}\n\
-             prover_bk_set.last_applied_update_seq_no == 0 — the prover \
-             has never processed a rotation, so this almost certainly \
-             means the chain was re-initialised (fresh devnet zerostate \
-             rewrote {}) while ./state/ persisted from the previous \
-             chain instance. Wipe ./state/ and restart, or restore the \
-             paired {} from backup.",
-            bk_set_config,
-            hex::encode(file_commitment),
-            hex::encode(prover_bk_set.commitment),
-            bk_set_config,
-            bk_set_config,
-        );
-    }
-    info!(
-        "chain-config check: {} commitment {} != prover_bk_set {} (cursor {}) \
-         — prover has rotated past the genesis snapshot; not an issue",
-        bk_set_config,
-        hex::encode(file_commitment),
-        hex::encode(prover_bk_set.commitment),
-        prover_bk_set.last_applied_update_seq_no,
-    );
-    Ok(())
 }
 
 // -------------------------------------------------------------------------

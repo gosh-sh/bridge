@@ -1994,11 +1994,9 @@ async fn run_daemon_live(
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
-    use bridge_gql_fetcher::{
-        bk_set_fetcher::load_bk_set_from_config,
-        gql_client::create_client,
-    };
+    use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
+        bk_set_bootstrap,
         bridge_state::BridgeState,
         keys::KeyManager,
         live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
@@ -2014,20 +2012,19 @@ async fn run_daemon_live(
     let gql = create_client(&gql_endpoint)
         .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
 
-    // Load genesis BK set from JSON config. The old GraphQL-first path
-    // (`fetch_bk_set`) was disabled on 2026-07-22 as architecturally broken:
-    // it replayed the `bkSetUpdates` delta log from ∅ but AN does not emit
-    // genesis as a synthetic `Added` event. Distant-block cold starts on
-    // long-lived rotating chains should use `bk_set_at_height` (planned).
-    let bk_set = {
-        let path = bk_set_config
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
-        let s = load_bk_set_from_config(path)
-            .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?;
-        info!(signers = s.len(), path = %path, "BK set loaded from config");
-        s
-    };
+    // Load BK set via the shared bootstrap helper (aligned with
+    // `bridge-prover-daemon/src/main.rs`). Mode is selected by
+    // `BRIDGE_BK_SET_BOOTSTRAP=file|fold_at_height`; `fold_at_height`
+    // uses `bk_set_at_height` to reconstruct the committee at
+    // `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to `bootstrap_seqno`)
+    // by folding `bkSetUpdates` onto the JSON genesis anchor.
+    let bk_set_config_str = bk_set_config
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?
+        .to_string();
+    let bk_set = bk_set_bootstrap::load_bk_set(&gql, &bk_set_config_str, bootstrap_seqno)
+        .await
+        .map_err(|e| anyhow::anyhow!("load BK set: {e}"))?;
 
     info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
     let mut key_manager = KeyManager::new(&params_dir);
@@ -2076,6 +2073,14 @@ async fn run_daemon_live(
             pbs
         }
     };
+
+    // Shared startup guard (parity with bridge-prover-daemon): reject the
+    // "stale ./state on top of a re-initialised chain" configuration
+    // before we hand off to LiveProverDriver.
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
+        &bk_set_config_str,
+        &prover_bk_set,
+    )?;
 
     // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
     // owns `prover_bk_set` as the sole BK-pubkey source and derives its

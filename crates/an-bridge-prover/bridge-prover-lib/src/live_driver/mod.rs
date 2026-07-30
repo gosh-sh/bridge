@@ -183,13 +183,43 @@ pub enum DriverError {
 }
 
 impl DriverError {
-    /// Wrap an arbitrary `anyhow::Error` as [`DriverError::Other`]. Used at
-    /// the public boundary of poll/ack methods to lift the internal
-    /// anyhow-based helpers into the structured public error type without
-    /// forcing a full site-by-site classification pass. Site-specific
-    /// variants (`GqlTransient`, `ProofGen`, etc.) are constructed
-    /// explicitly at the call sites that know their semantic kind.
-    pub(crate) fn other(err: anyhow::Error) -> Self {
+    /// Site-specific constructor for transient GQL / HTTP errors. Prefer
+    /// this over `other` at sites where the underlying call is a network
+    /// round-trip to the AN node (`GqlClient::query_*`) so that consumers
+    /// can implement retry policy without inspecting the error message.
+    pub(crate) fn gql_transient(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::GqlTransient(err.into())
+    }
+
+    /// Site-specific constructor for GQL schema mismatches / unexpected
+    /// field shapes. Not retryable — indicates the AN node's GraphQL
+    /// schema drifted from what `bridge-gql-fetcher` expects.
+    pub(crate) fn gql_schema(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::GqlSchema(err.into())
+    }
+
+    /// Site-specific constructor for halo2 proof-generation failures at a
+    /// known target `seq_no`. Callers should alert and halt the pipeline;
+    /// re-running the same witness will fail the same way.
+    pub(crate) fn proof_gen(seq_no: u64, err: impl Into<anyhow::Error>) -> Self {
+        DriverError::ProofGen { seq_no, source: err.into() }
+    }
+
+    /// Site-specific constructor for state-inconsistency errors (BK-set
+    /// commitment mismatches, L2 sibling ≠ current commitment, etc.).
+    pub(crate) fn state_inconsistent(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::StateInconsistent(err.into())
+    }
+}
+
+/// Blanket lift so internal `anyhow::Result` helpers can be `?`-chained into
+/// `DriverResult`. Sites that know their semantic kind should classify
+/// explicitly via [`DriverError::gql_transient`] / [`DriverError::proof_gen`]
+/// / [`DriverError::state_inconsistent`]; sites that don't fall back to
+/// [`DriverError::Other`] which is the safest default (surfaces the full
+/// anyhow context chain to the operator without misclassifying).
+impl From<anyhow::Error> for DriverError {
+    fn from(err: anyhow::Error) -> Self {
         DriverError::Other(err)
     }
 }
@@ -552,10 +582,10 @@ impl LiveProverDriver {
     /// blocking bundle advance), and [`LiveBundleEvent::Bundle`] when a
     /// fully-proven bundle is ready for the caller to submit downstream.
     pub async fn poll_next_bundle(&mut self) -> DriverResult<LiveBundleEvent> {
-        self.poll_next_bundle_inner().await.map_err(DriverError::other)
+        self.poll_next_bundle_inner().await
     }
 
-    async fn poll_next_bundle_inner(&mut self) -> anyhow::Result<LiveBundleEvent> {
+    async fn poll_next_bundle_inner(&mut self) -> DriverResult<LiveBundleEvent> {
         // Bootstrap gate: while `NeedsSeed`, drive the seed and either
         // apply it (transition to Steady) or return Bootstrapping.
         if let DriverStage::NeedsSeed { .. } = self.stage {
@@ -569,8 +599,13 @@ impl LiveProverDriver {
             // Fell through — bootstrap complete, transition already happened.
         }
 
-        // Poll chain head + compute the next thinned target.
-        let latest_blocks = self.gql.query_latest_blocks(5).await?;
+        // Poll chain head + compute the next thinned target. GQL round-trip
+        // — classify as transient so the caller retries on the next tick.
+        let latest_blocks = self
+            .gql
+            .query_latest_blocks(5)
+            .await
+            .map_err(DriverError::gql_transient)?;
         let chain_head_seqno = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
         let next_target_seqno = match find_next_thinned_key_block(
             self.state.stored_last_seen_block_seq_no,
@@ -623,10 +658,10 @@ impl LiveProverDriver {
     /// [`LiveBkUpdateEvent::BkUpdate`] when a fully-proven rotation is
     /// ready for the caller to submit downstream.
     pub async fn poll_next_bk_update(&mut self) -> DriverResult<LiveBkUpdateEvent> {
-        self.poll_next_bk_update_inner().await.map_err(DriverError::other)
+        self.poll_next_bk_update_inner().await
     }
 
-    async fn poll_next_bk_update_inner(&mut self) -> anyhow::Result<LiveBkUpdateEvent> {
+    async fn poll_next_bk_update_inner(&mut self) -> DriverResult<LiveBkUpdateEvent> {
         if let DriverStage::NeedsSeed { .. } = self.stage {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
@@ -780,8 +815,11 @@ impl LiveProverDriver {
 
     /// Query GQL for the next pending bk-set rotation and check whether its
     /// block-height is `<= max_height`. Cheap enough to call once per
-    /// bundle poll — sends one GQL request.
-    async fn pending_bk_update_below(&self, max_height: u64) -> anyhow::Result<bool> {
+    /// bundle poll — sends one GQL request. Transient errors are
+    /// swallowed with a warn (returning `false`) because a spurious GQL
+    /// hiccup here should not prevent bundle advance; the caller will
+    /// retry on the next tick and the correct answer will surface.
+    async fn pending_bk_update_below(&self, max_height: u64) -> DriverResult<bool> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
         match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
             Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
@@ -798,9 +836,13 @@ impl LiveProverDriver {
 
     /// Advance the bootstrap state machine. Returns
     /// `(chain_head_seqno, still_waiting_for_seed_seqno_opt)`.
-    async fn advance_bootstrap(&mut self) -> anyhow::Result<(u64, Option<u64>)> {
+    async fn advance_bootstrap(&mut self) -> DriverResult<(u64, Option<u64>)> {
         let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
-        let latest_blocks = self.gql.query_latest_blocks(5).await?;
+        let latest_blocks = self
+            .gql
+            .query_latest_blocks(5)
+            .await
+            .map_err(DriverError::gql_transient)?;
         let chain_head = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
 
         // Resolve the seed seqno (Auto: snap once and cache; Explicit:
@@ -824,14 +866,26 @@ impl LiveProverDriver {
         }
 
         // Chain has caught up. Fetch, apply, and transition to Steady.
+        // Both failures below are bootstrap-phase — classify explicitly so
+        // callers can distinguish "still waiting for chain head" from
+        // "bootstrap machinery itself failed".
         let bk_hash_bytes: [u8; 32] = self.bk_set_commitment_fr.to_repr();
         let seed = crate::bootstrap::fetch_from_node(
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
         )
-        .await?;
-        seed.apply(&mut self.state)?;
+        .await
+        .map_err(|e| DriverError::Bootstrapping {
+            seed_seqno,
+            chain_head_seqno: chain_head,
+            source: e,
+        })?;
+        seed.apply(&mut self.state).map_err(|e| DriverError::Bootstrapping {
+            seed_seqno,
+            chain_head_seqno: chain_head,
+            source: e,
+        })?;
         info!(
             "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
             seed.block_seq_no,
@@ -898,5 +952,37 @@ mod tests {
         // path label must not drift.
         assert_eq!(BundleFinalizationType::Primary.as_str(), "primary");
         assert_eq!(BundleFinalizationType::Fallback.as_str(), "fallback");
+    }
+
+    #[test]
+    fn driver_error_constructors_classify_correctly() {
+        // The four site-specific constructors must land on their intended
+        // variants so consumers pattern-matching on kind stay in sync with
+        // what the poll/ack sites emit. Also confirm the `From<anyhow::Error>`
+        // blanket lift routes to `Other` (fallback for `?`-chained internal
+        // helpers that don't classify explicitly).
+        let src = || anyhow::anyhow!("underlying failure");
+
+        assert!(matches!(
+            DriverError::gql_transient(src()),
+            DriverError::GqlTransient(_),
+        ));
+        assert!(matches!(
+            DriverError::gql_schema(src()),
+            DriverError::GqlSchema(_),
+        ));
+        assert!(matches!(
+            DriverError::proof_gen(42, src()),
+            DriverError::ProofGen { seq_no: 42, .. },
+        ));
+        assert!(matches!(
+            DriverError::state_inconsistent(src()),
+            DriverError::StateInconsistent(_),
+        ));
+        // Blanket `From<anyhow::Error>` lift → Other. This is what any
+        // `?`-chained internal `anyhow::Result` call collapses to when the
+        // site does not classify explicitly.
+        let via_from: DriverError = src().into();
+        assert!(matches!(via_from, DriverError::Other(_)));
     }
 }

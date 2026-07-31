@@ -55,7 +55,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_happyPath() public {
-        (uint256 blockId, bytes32 h0, bytes32 h23) = _merkleWitness(L2, L3);
+        (uint256 blockId, bytes32 h01, bytes32 h4_7, bytes32 h8_15) = _merkleWitness(L2, L3);
 
         vm.expectEmit(true, true, true, true);
         emit BkSetUpdated(L2, L3, SEQ);
@@ -67,8 +67,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             SEQ,
             L2,
             L3,
-            h0,
-            h23
+            h01,
+            h4_7,
+            h8_15
         );
 
         assertEq(bridge.storedBkSetCommitment(), L3);
@@ -76,7 +77,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
-        (uint256 blockId,,) = _merkleWitness(L2, L3);
+        (uint256 blockId,,,) = _merkleWitness(L2, L3);
 
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.BkUpdateMerkleMismatch.selector, blockId, blockId + 1)
@@ -89,13 +90,14 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             L2,
             L3,
             bytes32(uint256(0x1234)),
-            bytes32(uint256(0x5678))
+            bytes32(uint256(0x5678)),
+            bytes32(uint256(0x9abc))
         );
     }
 
     function test_applyBkSetUpdate_revertsWhenAttestationRejected() public {
         primary.setShouldAccept(false);
-        (uint256 blockId, bytes32 h0, bytes32 h23) = _merkleWitness(L2, L3);
+        (uint256 blockId, bytes32 h01, bytes32 h4_7, bytes32 h8_15) = _merkleWitness(L2, L3);
 
         vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
         bridge.applyBkSetUpdate(
@@ -105,20 +107,26 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             SEQ,
             L2,
             L3,
-            h0,
-            h23
+            h01,
+            h4_7,
+            h8_15
         );
     }
 
+    /// @dev Depth-4 / 16-leaf block-id tree with (l2, l3) at leaf positions 2 and 3.
+    ///      Arbitrary sibling literals — the test only checks that the
+    ///      contract reconstructs the same root the helper does.
     function _merkleWitness(uint256 l2, uint256 l3)
         internal
         pure
-        returns (uint256 blockId, bytes32 h0, bytes32 h23)
+        returns (uint256 blockId, bytes32 h01, bytes32 h4_7, bytes32 h8_15)
     {
-        bytes32 h1 = sha256(abi.encodePacked(l2, l3));
-        h0 = bytes32(uint256(0x1234));
-        bytes32 h01 = sha256(abi.encodePacked(h0, h1));
-        h23 = bytes32(uint256(0x5678));
-        blockId = uint256(sha256(abi.encodePacked(h01, h23)));
+        bytes32 h23 = sha256(abi.encodePacked(l2, l3));
+        h01 = bytes32(uint256(0x1234));
+        bytes32 h0_3 = sha256(abi.encodePacked(h01, h23));
+        h4_7 = bytes32(uint256(0x5678));
+        bytes32 h0_7 = sha256(abi.encodePacked(h0_3, h4_7));
+        h8_15 = bytes32(uint256(0x9abc));
+        blockId = uint256(sha256(abi.encodePacked(h0_7, h8_15)));
     }
 }

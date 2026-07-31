@@ -754,7 +754,9 @@ contract AckiNackiBridge {
 
     /// @notice Apply an Acki Nacki BK-set rotation on Ethereum after verifying
     ///         a Circuit 1A/1B attestation and an open SHA-256 Merkle binding
-    ///         `blockId == SHA256(SHA256(H0 ‖ SHA256(L2 ‖ L3)) ‖ H23)`.
+    ///         `blockId == SHA256(SHA256(SHA256(SHA256(H01 ‖ SHA256(L2 ‖ L3)) ‖ H4_7) ‖ H8_15))`
+    ///         against the depth-4 / 16-leaf block-id tree (`(L2, L3)` sit at
+    ///         leaf positions 2 and 3).
     ///
     /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
     ///      the full pubkey table stays off-chain (prover working set).
@@ -765,8 +767,9 @@ contract AckiNackiBridge {
     /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
     /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
     /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
-    /// @param siblingH0 Merkle sibling at level 0 (from prover `bkupd_*.json`).
-    /// @param siblingH23 Merkle sibling combining levels 2–3.
+    /// @param siblingH01 Merkle sibling `SHA256(L0 ‖ L1)` — depth-1 pair hash.
+    /// @param siblingH4_7 Merkle sibling `SHA256(SHA256(L4 ‖ L5) ‖ SHA256(L6 ‖ L7))` — depth-2 quad hash.
+    /// @param siblingH8_15 Merkle sibling covering leaves 8..15 — depth-3 oct hash.
     function applyBkSetUpdate(
         FinalizationType finType,
         bytes calldata attestationProof,
@@ -774,8 +777,9 @@ contract AckiNackiBridge {
         uint64 blockSeqNo,
         uint256 oldCommitmentL2,
         uint256 newCommitmentL3,
-        bytes32 siblingH0,
-        bytes32 siblingH23
+        bytes32 siblingH01,
+        bytes32 siblingH4_7,
+        bytes32 siblingH8_15
     ) external nonReentrant whenNotPaused {
         if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
@@ -808,9 +812,15 @@ contract AckiNackiBridge {
         }
         if (!attOk) revert AttestationProofRejected();
 
-        bytes32 h1 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
-        bytes32 h01 = sha256(abi.encodePacked(siblingH0, h1));
-        bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
+        // Depth-4 / 16-leaf block-id tree with (oldL2, newL3) at leaf positions 2 and 3.
+        //   round 1: h23   = SHA(L2 ‖ L3)              — depth-1 pair hash
+        //   round 2: h0_3  = SHA(siblingH01 ‖ h23)     — depth-2 quad hash (leaves 0..3)
+        //   round 3: h0_7  = SHA(h0_3 ‖ siblingH4_7)   — depth-3 oct hash  (leaves 0..7)
+        //   round 4: root  = SHA(h0_7 ‖ siblingH8_15)  — depth-4 root      (leaves 0..15)
+        bytes32 h23 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
+        bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
+        bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
+        bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
         if (uint256(root) != blockId) {
             revert BkUpdateMerkleMismatch(uint256(root), blockId);
         }

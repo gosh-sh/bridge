@@ -182,6 +182,64 @@ Meanwhile Circuits 1A/1B/2 are already in-processed via `bridge-prover-lib::live
 
 ---
 
+## NB-Q10 — Confirm Hermez PPoT SRS was used to generate the committed `contracts/ethereum/verifiers/*.bin`
+
+**State.**
+
+Ran a Hermez audit on the `PrimaryAggregatorVerifier` by regenerating it locally against a synthetic Circuit 1A witness (`bridge-test-data-gen::generate_test_data_all_sign(3)`) → Poseidon inner snark → `aggregate-proof --name PrimaryAggregatorVerifier` against `bridge/crates/an-bridge-prover/params/kzg_bn254_21.srs`.
+
+- Our-side outer SRS confirmed Hermez PPoT: `assert_hermez_ceremony(&params_outer)` at `bridge/crates/bridge-evm-aggregator/src/evm_export.rs:118` passed — `s_g2` head is `928fafb3d0cc…` (Hermez), not `c6028acf…` (AN chain-ceremony) and not a `gen_srs` toxic-waste stub.
+- solc version match: both regenerated and committed `.bin` carry CBOR tail `…solc C 00 08 13 00 33` ⇒ compiled with **solc 0.8.19**.
+- snark-verifier pin match: `snark-verifier = { git = "...", tag = "v0.1.7-git" }` at `bridge/crates/bridge-prover-orchestrator/Cargo.toml:47` — immutable tag, rev `4b733e0`.
+- Bytecode diff: regenerated **21494 B** vs committed **21493 B** for `PrimaryAggregatorVerifier.bin` — 1-byte drift.
+
+A 1-byte drift is **inconsistent** with SRS drift (a different ceremony's `s_g2` / `s_g1` powers would ripple through the embedded VK bytes and produce **kB** of divergence, not one byte). Toolchain (solc + snark-verifier rev) is aligned. So the delta is almost certainly cosmetic (metadata / lookup-config auto-tune / build-flag ordering) rather than a soundness-relevant SRS switch — but we want your explicit "last word" before we file the audit as clean.
+
+**Questions.**
+
+1. **Last-word confirmation:** for the committed `contracts/ethereum/verifiers/*.bin` (specifically `PrimaryAggregatorVerifier.bin`, and by extension the sibling Fallback / HistoryWindow / BridgeWithdrawalAggregator verifiers), can you confirm — on the record — that the K=21 outer aggregator SRS you used at generation time was sourced from **Hermez Perpetual Powers of Tau** (`powersOfTau28_hez_final_21.ptau`, `s_g2` head `928fafb3d0cc…`)?
+2. Explicitly **not** the AN chain-ceremony file (`c6028acf…`), and **not** a local `halo2_base::utils::fs::gen_srs(21)` fallback that would have silently generated a toxic-waste SRS if `$PARAMS_DIR/kzg_bn254_21.srs` was missing on your machine at the time?
+3. If yes: any recollection of what would explain the 1-byte bytecode drift (e.g. `AggregationConfigParams` auto-tune margin, `calculate_params(Some(N))` `N` differing, an intermediate solc patch version) — so we can pin it and close the audit line?
+
+---
+
+## NB-Q11 — Circuit 4 EVM-calldata generation on smartphone: role-split proposal
+
+**State.**
+
+Circuit 4 (`BridgeWithdrawalAggregatorVerifier`) inner proof at K=19 runs OK on modern smartphones (~30–90 s, matches what we already measured for raw halo2 inner proofs). The **outer K=21 SHPLONK aggregation wrapper** — `aggregate_and_prove` in `bridge/crates/bridge-evm-aggregator/src/evm_export.rs:112` — is a different story. Concrete blockers on iOS/Android:
+
+- Peak RAM during `gen_evm_proof_shplonk` at K=21 is ~6–10 GB. iPhone 15 Pro: 8 GB; iOS jetsam kills apps at ~3 GB. Android flagships marginal.
+- `gen_evm_verifier_shplonk` shells out to `solc` (`snark-verifier-sdk::evm::compile_solidity`). **There is no maintained `solc` for iOS/Android ARM64.** Cross-compiling the C++ Solidity compiler + shipping a ~30 MB binary inside a wallet app is not going to pass App Store / Play review.
+- Wall-clock at phone thermal budget: 20–60+ min per withdrawal, plus battery drain.
+- The Yul-regen self-check at `aggregate_proof.rs:84–104` is a *drift audit* against the deployed on-chain verifier — bytecode the phone already knows. Burning 30 s + hundreds of MB per withdrawal for zero calldata contribution is wasteful on server and hostile on phone. **Must be gated off on mobile unconditionally.**
+
+**Proposal — role split (industry pattern: Aztec / Nocturne / RailGun / zkSync client-side proving):**
+
+```
+phone  ── inner Circuit 4 proof (K=19, ~30–90 s) ──▶  aggregation relay
+                                                            │
+                                                            ▼
+                                                 K=21 SHPLONK on server
+                                                            │
+                                                            ▼
+                                                     EVM calldata
+                                                            │
+                                                            ▼
+                                              phone submits tx (or relay does)
+```
+
+Soundness argument: witness stays on-device (inner proof already commits to it). Under `VerifierUniversality::Full`, the outer aggregator is a **public-coin operation over the inner Snark bytes** with no secret witness input — it aggregates *any* inner satisfying the inner VK's shape. Outsourcing outer aggregation therefore leaks nothing and reduces trivially to inner-proof soundness. Standard "prove-once, aggregate-elsewhere" pattern.
+
+**Questions.**
+
+1. Is mobile-only end-to-end calldata generation (phone runs inner **and** outer aggregation) a hard product requirement, or is a **role-split** — phone emits inner Snark, server-side relay does K=21 SHPLONK + calldata — acceptable? Everything above says role-split is the only realistic path on today's phone hardware.
+2. If role-split is accepted: what is the intended relay topology — a single bridge-operated aggregation service (centralised, adds a liveness dependency), a small decentralised set of aggregation nodes, or user-selectable (BYO-aggregator)? This choice affects the withdrawal UX and the liveness model but not soundness.
+3. If mobile-only is truly required: this is a partner-scope re-engineering job (lower K_outer via a folding scheme like Nova/SuperNova, or GPU MSM via Metal/Vulkan in a forked snark-verifier-sdk) — is that on any roadmap, or should we lock in the role-split assumption now and design the wallet integration around it?
+4. Independent of (1)–(3): can we agree the `gen_evm_verifier_shplonk` self-check at `aggregate_proof.rs:84–104` should be gated behind a runtime flag defaulting **off** on any mobile / edge target (and ideally off by default everywhere except CI health checks)? It adds zero calldata and requires `solc`, which is a non-starter on ARM64 mobile.
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

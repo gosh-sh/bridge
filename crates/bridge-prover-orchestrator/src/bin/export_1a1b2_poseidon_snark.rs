@@ -45,11 +45,11 @@ use bridge_gql_fetcher::{
     attestation_fetcher::{self, AttestationEvidence},
     bk_set_fetcher, gql_client,
 };
+use bridge_poseidon::compute_bk_set_poseidon;
 use bridge_prover_lib::{
     block_id_tree,
     bridge_state::BridgeState,
     layer_prover,
-    poseidon::compute_bk_set_poseidon,
     poseidon_dense::HISTORY_PROOF_WINDOW_SIZE,
     prover, real_chain_builder,
     keys::KeyManager,

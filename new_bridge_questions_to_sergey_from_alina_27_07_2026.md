@@ -151,6 +151,37 @@ A default-off flag was a stopgap for the missing artefact. That artefact now exi
 
 ---
 
+## NB-Q9 — `bridge-prover-orchestrator` crate: only runtime consumer is one subprocess call, otherwise dead weight
+
+**State.** Cross-repo grep of `use bridge_prover_orchestrator::` returns **zero hits outside the crate itself** — its 1,401 LoC of library code (`halo2_snark.rs`, `halo2_tvm_bundle.rs`, `bound_test_data.rs`, `proof_export.rs`, `lib.rs`) is consumed only by its own 5 CLI binaries and tests. It is not a Cargo dep of any other bridge crate.
+
+The one runtime consumer is `bridge-relayer-daemon`, which shells out to **one** binary via `SubprocessCircuit4SnarkProver` (`aggregator.rs:55, 111-151`, wired in `bin/relayer.rs:1226-1235`):
+
+- `export-c4-poseidon-snark` — Circuit 4 (event) Poseidon inner snark. Called at runtime for every `ProveWithdrawShplonk` invocation.
+
+The other four bins (`export-1a1b2-poseidon-snark`, `export-bound-block-proofs`, `export-bound-poseidon-snarks`, `export-halo2-poseidon-snark`) are invoked only by shell scripts / manual runbooks for offline `.bin` verifier regeneration — never by any daemon.
+
+Meanwhile Circuits 1A/1B/2 are already in-processed via `bridge-prover-lib::live_driver::LiveProverDriver` (`prover::generate_primary_proof`, `prover::generate_fallback_proof`, `layer_prover::generate_layer_proof`). Circuit 4 didn't get the same treatment in the 2026-07-27 refactor and kept the subprocess wrapper as scaffolding.
+
+**Note.** `bridge-evm-aggregator` is a fully standalone cargo workspace and has **no** dependency on `bridge-prover-orchestrator` — the two communicate only via `.snark` files on disk. Deleting the orchestrator does not touch the aggregator.
+
+**Caveat — not necessarily a full delete.** The four offline bins (`export-1a1b2-poseidon-snark`, `export-bound-block-proofs`, `export-bound-poseidon-snarks`, `export-halo2-poseidon-snark`) genuinely are useful as dev/ops utilities — verifier `.bin` regeneration, fixture rebuilds, debug snarks on demand. What is wrong here is the *shape*: they are miscategorized under a crate called "orchestrator" (which no longer orchestrates anything at runtime) mixed with a few genuinely dead pieces. So the ask isn't "delete everything," it's **rework + rebrand**: keep what still earns its keep, move it to a crate whose name matches what it does (e.g. `bridge-dev-tools` / `bridge-snark-utils`), and drop the pieces that turn out to have no consumers. The runtime `SubprocessCircuit4SnarkProver` path is the one clearly-fixable architectural miss (Circuits 1A/1B/2 are already in-processed; Circuit 4 should follow).
+
+**Questions.**
+
+1. OK to lift `export_c4_poseidon_snark.rs` (~200 LoC) into `bridge-event-prover-lib` as `pub fn export_circuit4_poseidon_snark(...)` and have `bridge-relayer-daemon` call it in-process — same pattern as Circuits 1A/1B/2 today? (This part I'd argue is clear-cut.)
+2. For the rest — rather than deciding delete-vs-keep piecewise now, does it make sense to open a small design ticket "rework `bridge-prover-orchestrator`" whose outcome is one of:
+   - **Rebrand + slim:** rename to something like `bridge-snark-utils` / `bridge-dev-tools`, keep the offline bins that ops/dev actually still runs, drop the dead code. Library modules land where they naturally belong:
+     - `halo2_snark.rs` (97 LoC, gosh-VK → snark-verifier `Snark` wrapper) → `bridge-event-prover-lib` (same gosh-fork build unit), *if* still used by any surviving bin.
+     - `halo2_tvm_bundle.rs` (698 LoC, `VkBlob` for AN-side `ZKHALO2VERIFYWITHVK` opcode) → `bridge-prover-lib` (its natural AN-side home).
+     - `proof_export.rs` (101 LoC ser/de helpers) → wherever the callers land.
+     - `bound_test_data.rs` (464 LoC fixture generator) → `bridge-event-prover-lib/tests/` (test-support only).
+   - **Full delete:** only if every bin turns out to have no ops/dev consumer either.
+     The point is: the name "orchestrator" is now misleading (it orchestrates nothing at runtime post-refactor), and the crate has become a bag of loosely-related utilities — some load-bearing for ops, some genuinely dead. Worth a deliberate pass, not a piecewise decision.
+3. Any consumer I'm not seeing on the *library* side (`use bridge_prover_orchestrator::...`)? Only cross-repo hits outside the crate are doc examples (`docs/zkhalo2verifywithvk_reference.md:219`, `fixtures/circuit_1b_fallback/README.md:98`) — trivially retargetable. And on the *binary* side — which of the four offline bins are you (or ops) still running by hand, so we know what has to survive the rework?
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

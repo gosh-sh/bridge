@@ -50,6 +50,10 @@ pub fn export_poseidon_snark(
     if let Some(p) = prev {
         let _ = std::env::set_current_dir(p);
     }
+    // Refuse to run against toxic-waste SRS: `gen_srs` silently generates
+    // an unsafe SRS when PARAMS_DIR is missing kzg_bn254_{k}.srs. Same
+    // Hermez PPoT anchor used by bridge-prover-lib's `load_srs`.
+    bridge_prover_lib::keys::assert_hermez_srs(&params)?;
 
     let protocol = compile(
         &params,

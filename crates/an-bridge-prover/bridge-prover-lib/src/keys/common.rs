@@ -223,6 +223,41 @@ fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
     }
 }
 
+/// Public Result-based sibling of the private `assert_hermez_ceremony` above,
+/// for callers outside `load_srs` that want to bail rather than panic (e.g.
+/// the offline snark exporters in `bridge-prover-orchestrator` which call
+/// `gen_srs` directly). Same anchor bytes, same failure mode — no
+/// toxic-waste SRS proceeds past this check.
+pub fn assert_hermez_srs(srs: &ParamsKZG<Bn256>) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(128);
+    srs.s_g2()
+        .write_raw(&mut buf)
+        .expect("write to Vec cannot fail");
+    if buf.len() < HERMEZ_S_G2_HEAD.len() {
+        anyhow::bail!(
+            "SRS s_g2 encoding too small ({} bytes) — SRS at k={} is malformed",
+            buf.len(),
+            srs.k(),
+        );
+    }
+    let head = &buf[..HERMEZ_S_G2_HEAD.len()];
+    if head != HERMEZ_S_G2_HEAD {
+        anyhow::bail!(
+            "SRS (k={}) is NOT Hermez Perpetual Powers of Tau \
+             (s_g2 head {:02x?}, expected {:02x?}). PARAMS_DIR likely lacks \
+             kzg_bn254_{}.srs and `gen_srs` silently generated a toxic-waste \
+             SRS whose tau is known to the local process — every proof \
+             produced with it is forgeable. Bootstrap via \
+             `bootstrap_hermez_srs`. REFUSING to proceed.",
+            srs.k(),
+            head,
+            HERMEZ_S_G2_HEAD,
+            srs.k(),
+        );
+    }
+    Ok(())
+}
+
 fn read_srs_file(path: &Path) -> std::io::Result<ParamsKZG<Bn256>> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);

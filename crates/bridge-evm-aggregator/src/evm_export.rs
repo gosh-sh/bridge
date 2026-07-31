@@ -48,6 +48,10 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
     std::fs::create_dir_all(workdir)?;
 
     let params_inner = halo2_base::utils::fs::gen_srs(K_INNER_SPIKE);
+    // Hermez guard for the inner (multiply) SRS too. The outer path is
+    // separately guarded inside `aggregate_and_prove`, but keeping both
+    // sides consistent avoids a spike-only trapdoor path.
+    assert_hermez_ceremony(&params_inner)?;
     let config = AggregatorConfig::default();
 
     let a = Fr::from(7u64);

@@ -262,7 +262,7 @@ All other constants (poll intervals, file paths, `THINNING_FACTOR_P`) are hard-c
 
 Three cleanups the orchestrator does **not** enforce itself. Each surfaces as an opaque error deep in `tvm-cli` or witness-builder output, and each has cost hours in the past when skipped. Run them before every E2E:
 
-1. **Rebuild all six binaries whenever `bridge-prover-lib` changed.** Six binaries share `bridge-prover-lib`: `bridge-prover-daemon`, `bridge-verifier-daemon`, `bridge-event-halo2-prover`, `bridge-event-witness-builder`, `bridge-event-private-witness-export`, `bridge-event-halo2-selftest`. Partial rebuilds leave stale binaries embedding old assertions (e.g. `"block_merkle_tree_leaves must have 16 entries"` after the depth-4 → depth-3 migration). Quick check:
+1. **Rebuild all six binaries whenever `bridge-prover-lib` changed.** Six binaries share `bridge-prover-lib`: `bridge-prover-daemon`, `bridge-verifier-daemon`, `bridge-event-halo2-prover`, `bridge-event-witness-builder`, `bridge-event-private-witness-export`, `bridge-event-halo2-selftest`. Partial rebuilds leave stale binaries embedding old assertions (e.g. a pre-migration binary still says `"block_merkle_tree_leaves must have 8 entries"` after the depth-3 → depth-4 migration, whereas the current source emits `"must have 16 entries"`). Quick check:
 
    ```bash
    strings target/release/bridge-event-witness-builder | grep -E 'must have [0-9]+ entries'

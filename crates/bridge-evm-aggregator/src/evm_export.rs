@@ -28,6 +28,7 @@ use crate::{
     },
     eip170,
     multiply::build_multiply_circuit,
+    srs_guard::assert_hermez_ceremony,
 };
 
 /// Full M2 spike artefacts: inner multiply proof → aggregator → Yul verifier + EVM calldata.
@@ -111,6 +112,10 @@ pub fn aggregate_and_prove(
     artifacts_dir: Option<&Path>,
 ) -> anyhow::Result<AggregatorExportResult> {
     let params_outer = halo2_base::utils::fs::gen_srs(config.k_outer);
+    // Refuse to run against toxic-waste SRS: `gen_srs` silently generates
+    // an unsafe SRS when PARAMS_DIR is missing kzg_bn254_{k}.srs. Same
+    // Hermez PPoT anchor used by bridge-prover-lib.
+    assert_hermez_ceremony(&params_outer)?;
 
     let agg_config = AggregationConfigParams {
         degree: config.k_outer,

@@ -77,6 +77,10 @@ path = "src/bin/export_c4_poseidon_snark.rs"
 name = "export-1a1b2-poseidon-snark"
 path = "src/bin/export_1a1b2_poseidon_snark.rs"
 
+[[bin]]
+name = "export-synthetic-primary-snark"
+path = "src/bin/export_synthetic_primary_snark.rs"
+
 # ---------------------------------------------------------------------------
 # Patches: redirect every TRANSITIVE git dependency to a local sibling path.
 # The partner crates declare these via git URLs in their Cargo.toml; without

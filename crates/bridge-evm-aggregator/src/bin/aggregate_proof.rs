@@ -27,7 +27,9 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_evm_aggregator::{aggregator::AggregatorConfig, evm_export::aggregate_and_prove};
+use bridge_evm_aggregator::{
+    aggregator::AggregatorConfig, evm_export::aggregate_and_prove_cached,
+};
 use snark_verifier_sdk::Snark;
 
 fn main() -> anyhow::Result<()> {
@@ -41,6 +43,7 @@ fn main() -> anyhow::Result<()> {
     let mut k_outer = None;
     let mut universality = None;
     let mut allow_bin_drift = false;
+    let mut pk_cache_dir: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -59,6 +62,11 @@ fn main() -> anyhow::Result<()> {
             // Escape hatch for the very first bootstrap of a verifier whose .bin
             // is not committed yet. Never use once a verifier is deployed.
             "--allow-bin-drift" => allow_bin_drift = true,
+            // Optional persistent outer PK cache. First run against a new
+            // (name, k_outer, lookup_bits, universality, inner-shape) slot
+            // does full keygen (~3-5 min at K=21); subsequent runs load PK
+            // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
+            "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }
@@ -75,8 +83,15 @@ fn main() -> anyhow::Result<()> {
     let config = AggregatorConfig::for_verifier_name_with_overrides(&name, k_outer, universality);
 
     // Pure in-memory aggregation: no scratch dir, no .sol/.bin written.
-    let export = aggregate_and_prove(&name, inner_snark, config, None)
-        .context("aggregate + evm-proof (aggregate_and_prove)")?;
+    // `pk_cache_dir` (if set) memoises the outer keygen across runs.
+    let export = aggregate_and_prove_cached(
+        &name,
+        inner_snark,
+        config,
+        None,
+        pk_cache_dir.as_deref(),
+    )
+    .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
 
     // Self-check: regenerated Yul bytecode must match the committed/deployed one.
     let committed_bin = verifiers_dir.join(format!("{name}.bin"));

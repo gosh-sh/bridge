@@ -17,13 +17,17 @@ use snark_verifier_sdk::{
     evm::gen_evm_verifier_shplonk,
     gen_pk,
     halo2::{
-        aggregation::{AggregationCircuit, AggregationConfigParams, VerifierUniversality},
+        aggregation::{AggregationCircuit, VerifierUniversality},
         gen_snark_shplonk,
     },
-    CircuitExt, Snark, SHPLONK,
+    Snark, SHPLONK,
 };
 
-use crate::{eip170, multiply::build_multiply_circuit};
+use crate::{
+    aggregator_cache::{keygen_or_load, CachedKeygen},
+    eip170,
+    multiply::build_multiply_circuit,
+};
 
 /// Inner-circuit row count for the M2 multiply spike (`2^9` rows).
 pub const K_INNER_SPIKE: u32 = 9;
@@ -150,29 +154,37 @@ pub fn prove_inner_multiply(
 }
 
 /// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the aggregator.
+///
+/// Back-compat wrapper: delegates to [`aggregate_inner_cached`] with no PK
+/// cache directory. Every call runs full outer keygen. Prefer
+/// [`aggregate_inner_cached`] if repeatedly aggregating snarks of the same
+/// shape.
 pub fn aggregate_inner(
     agg_params: &ParamsKZG<Bn256>,
     inner_snark: Snark,
     config: AggregatorConfig,
 ) -> anyhow::Result<Snark> {
-    let agg_config = AggregationConfigParams {
-        degree: config.k_outer,
-        lookup_bits: config.lookup_bits_outer,
-        ..Default::default()
-    };
+    aggregate_inner_cached(agg_params, inner_snark, config, None, "aggregate_inner")
+}
 
-    let mut keygen_circuit = AggregationCircuit::new::<SHPLONK>(
-        CircuitBuilderStage::Keygen,
-        agg_config,
-        agg_params,
-        vec![inner_snark.clone()],
-        config.universality,
-    );
-    keygen_circuit.expose_previous_instances(false);
-    let calculated = keygen_circuit.calculate_params(Some(10));
-    let pk = gen_pk(agg_params, &keygen_circuit, None);
-    let break_points = keygen_circuit.break_points();
-    drop(keygen_circuit);
+/// Same as [`aggregate_inner`] but memoises the outer keygen bundle on disk
+/// when `pk_cache_dir` is `Some`. `base_name` labels the cache slot so
+/// distinct inner-shape flows don't collide -- pass the same string as the
+/// verifier-generation `--name` if you want the runtime aggregator to share
+/// slots with `export-inner-aggregator`.
+pub fn aggregate_inner_cached(
+    agg_params: &ParamsKZG<Bn256>,
+    inner_snark: Snark,
+    config: AggregatorConfig,
+    pk_cache_dir: Option<&Path>,
+    base_name: &str,
+) -> anyhow::Result<Snark> {
+    let CachedKeygen {
+        pk,
+        break_points,
+        calculated,
+        num_instance: _,
+    } = keygen_or_load(agg_params, base_name, config, &inner_snark, pk_cache_dir)?;
 
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,
@@ -203,27 +215,40 @@ pub fn generate_yul_verifier(
     config: AggregatorConfig,
     enforce_eip170: bool,
 ) -> anyhow::Result<usize> {
-    let agg_config = AggregationConfigParams {
-        degree: config.k_outer,
-        lookup_bits: config.lookup_bits_outer,
-        ..Default::default()
-    };
-    let mut keygen_circuit = AggregationCircuit::new::<SHPLONK>(
-        CircuitBuilderStage::Keygen,
-        agg_config,
+    generate_yul_verifier_cached(
         agg_params,
-        vec![inner_snark.clone()],
-        config.universality,
-    );
-    keygen_circuit.expose_previous_instances(false);
-    let _ = keygen_circuit.calculate_params(Some(10));
-    let pk = gen_pk(agg_params, &keygen_circuit, None);
-    let vk = pk.get_vk();
-    let num_instance = keygen_circuit.num_instance();
+        inner_snark,
+        output_path,
+        config,
+        enforce_eip170,
+        None,
+        "generate_yul_verifier",
+    )
+}
+
+/// Same as [`generate_yul_verifier`] but with an optional outer PK cache.
+///
+/// `base_name` labels the cache slot -- pass the verifier name (e.g.
+/// `"PrimaryAggregatorVerifier"`) to share slots with the runtime prover.
+pub fn generate_yul_verifier_cached(
+    agg_params: &ParamsKZG<Bn256>,
+    inner_snark: &Snark,
+    output_path: &Path,
+    config: AggregatorConfig,
+    enforce_eip170: bool,
+    pk_cache_dir: Option<&Path>,
+    base_name: &str,
+) -> anyhow::Result<usize> {
+    let CachedKeygen {
+        pk,
+        break_points: _,
+        calculated: _,
+        num_instance,
+    } = keygen_or_load(agg_params, base_name, config, inner_snark, pk_cache_dir)?;
 
     let bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
         agg_params,
-        vk,
+        pk.get_vk(),
         num_instance,
         Some(output_path),
     );

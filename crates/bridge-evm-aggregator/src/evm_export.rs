@@ -14,10 +14,7 @@ use halo2_base::{
 use snark_verifier_sdk::{
     evm::{encode_calldata, gen_evm_proof_shplonk, gen_evm_verifier_shplonk},
     gen_pk,
-    halo2::{
-        aggregation::{AggregationCircuit, AggregationConfigParams},
-        gen_snark_shplonk,
-    },
+    halo2::{aggregation::AggregationCircuit, gen_snark_shplonk},
     CircuitExt, Snark, SHPLONK,
 };
 
@@ -26,6 +23,7 @@ use crate::{
         aggregate_inner, prove_inner, AggregatorConfig, K_INNER_SPIKE, LOOKUP_BITS_INNER_SPIKE,
         NUM_ACCUMULATOR_INSTANCES,
     },
+    aggregator_cache::{keygen_or_load, CachedKeygen},
     eip170,
     multiply::build_multiply_circuit,
     srs_guard::assert_hermez_ceremony,
@@ -101,19 +99,36 @@ pub struct AggregatorExportResult {
 
 /// Aggregate `inner_snark` and produce the outer verifier bytecode + EVM calldata.
 ///
-/// If `artifacts_dir` is `Some(dir)`, the deployable `<base_name>.sol` +
-/// `<base_name>.bin` are written under `dir` — the `export-inner-aggregator`
-/// path that regenerates the on-chain verifier artifacts.
-///
-/// If `None`, no disk writes happen — bytecode and calldata are returned in
-/// memory only. This is the `aggregate-proof` runtime path, which byte-compares
-/// the in-memory `verifier_bytecode` against the committed on-chain `.bin`
-/// itself and then only persists the calldata the caller chose.
+/// Back-compat wrapper: delegates to [`aggregate_and_prove_cached`] with no PK
+/// cache directory, i.e. full outer keygen on every call. Existing call sites
+/// (spike, older tests) keep working unchanged. New call sites that want to
+/// skip the ~3-5 min outer keygen on rerun should switch to
+/// [`aggregate_and_prove_cached`].
 pub fn aggregate_and_prove(
     base_name: &str,
     inner_snark: Snark,
     config: AggregatorConfig,
     artifacts_dir: Option<&Path>,
+) -> anyhow::Result<AggregatorExportResult> {
+    aggregate_and_prove_cached(base_name, inner_snark, config, artifacts_dir, None)
+}
+
+/// Same as [`aggregate_and_prove`] but memoises the outer keygen bundle on
+/// disk when `pk_cache_dir` is `Some`. See
+/// [`crate::aggregator_cache::keygen_or_load`] for slot layout and cache-key
+/// invariants.
+///
+/// `pk_cache_dir` is orthogonal to `artifacts_dir`:
+/// - `artifacts_dir` controls whether the deployable `<name>.sol` / `.bin`
+///   are written (verifier-generation path, `export-inner-aggregator`).
+/// - `pk_cache_dir` controls whether the outer PK is persisted for reuse
+///   across runs (runtime aggregation path, `aggregate-proof`).
+pub fn aggregate_and_prove_cached(
+    base_name: &str,
+    inner_snark: Snark,
+    config: AggregatorConfig,
+    artifacts_dir: Option<&Path>,
+    pk_cache_dir: Option<&Path>,
 ) -> anyhow::Result<AggregatorExportResult> {
     let params_outer = halo2_base::utils::fs::gen_srs(config.k_outer);
     // Refuse to run against toxic-waste SRS: `gen_srs` silently generates
@@ -121,24 +136,12 @@ pub fn aggregate_and_prove(
     // Hermez PPoT anchor used by bridge-prover-lib.
     assert_hermez_ceremony(&params_outer)?;
 
-    let agg_config = AggregationConfigParams {
-        degree: config.k_outer,
-        lookup_bits: config.lookup_bits_outer,
-        ..Default::default()
-    };
-    let mut keygen_circuit = AggregationCircuit::new::<SHPLONK>(
-        CircuitBuilderStage::Keygen,
-        agg_config,
-        &params_outer,
-        vec![inner_snark.clone()],
-        config.universality,
-    );
-    keygen_circuit.expose_previous_instances(false);
-    let calculated = keygen_circuit.calculate_params(Some(10));
-    let pk = gen_pk(&params_outer, &keygen_circuit, None);
-    let break_points = keygen_circuit.break_points();
-    let num_instance = keygen_circuit.num_instance();
-    drop(keygen_circuit);
+    let CachedKeygen {
+        pk,
+        break_points,
+        calculated,
+        num_instance,
+    } = keygen_or_load(&params_outer, base_name, config, &inner_snark, pk_cache_dir)?;
 
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,

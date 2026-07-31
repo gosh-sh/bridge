@@ -22,13 +22,13 @@ pub use bound_test_data::{
     build_bound_test_data, compose_layer_hashes_input, load_bound_witness_cache,
     promote_bridge_test_data, save_bound_witness_cache, BoundBlockTestData,
 };
+pub use bridge_poseidon::compute_bk_set_poseidon;
 pub use bridge_prover_lib::{
     keys::{
         circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
         circuit_num_unusable_rows,
     },
     layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS,
-    poseidon::compute_bk_set_poseidon,
     Fr,
 };
 pub use halo2_tvm_bundle::{

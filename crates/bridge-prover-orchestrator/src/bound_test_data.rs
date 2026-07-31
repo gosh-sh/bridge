@@ -295,11 +295,11 @@ pub fn promote_bridge_test_data(
     // trust a comment).
     let l0_recomputed = poseidon_hash_bytes(&preimage);
     debug_assert_eq!(
-        l0_recomputed, td.merkle_tree.leaves[0],
+        l0_recomputed, td.block_merkle_leaves[0],
         "BUG: layer_hashes_preimage Poseidon must equal Merkle leaf L0"
     );
 
-    let merkle_siblings = td.merkle_tree.siblings_for_l0();
+    let merkle_siblings = td.l0_opening_siblings;
 
     // ---- Layer hash Fr per slot ----
     let mut layer_hash_frs = [Fr::zero(); MAX_LAYERS];

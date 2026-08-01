@@ -33,6 +33,26 @@ pub fn export_poseidon_snark(
     instances: &[Fr],
     out_path: &Path,
 ) -> anyhow::Result<()> {
+    export_poseidon_snark_with_srs_k(vk_path, config_path, None, proof_path, instances, out_path)
+}
+
+/// Same as [`export_poseidon_snark`] but with an explicit SRS degree override.
+///
+/// Required when `layer_config_params.json` records `k=17` but the layer VK
+/// was keygen'd against the shared K=20 ceremony (see
+/// `LayerHashesKeyManager::KEYGEN_SRS_K` in `bridge-prover-lib`). Loading SRS
+/// at `config.k = 17` makes `snark_verifier::system::halo2::compile` panic
+/// with `assertion left(20) == right(17)` because the VK's `domain.k = 20`
+/// disagrees with `params.k = 17`. Pass `Some(20)` for `layer_hashes`; leave
+/// `None` for circuits where `config.k` matches the SRS.
+pub fn export_poseidon_snark_with_srs_k(
+    vk_path: &Path,
+    config_path: &Path,
+    srs_k_override: Option<u32>,
+    proof_path: &Path,
+    instances: &[Fr],
+    out_path: &Path,
+) -> anyhow::Result<()> {
     let config: BaseCircuitParams = serde_json::from_str(
         &std::fs::read_to_string(config_path)
             .with_context(|| format!("read config {}", config_path.display()))?,
@@ -46,7 +66,8 @@ pub fn export_poseidon_snark(
     if let Some(parent) = vk_path.parent() {
         std::env::set_var("PARAMS_DIR", parent);
     }
-    let params = halo2_base::utils::fs::gen_srs(config.k as u32);
+    let srs_k = srs_k_override.unwrap_or(config.k as u32);
+    let params = halo2_base::utils::fs::gen_srs(srs_k);
     if let Some(p) = prev {
         let _ = std::env::set_current_dir(p);
     }

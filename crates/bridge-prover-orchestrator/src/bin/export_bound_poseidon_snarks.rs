@@ -15,8 +15,8 @@ use bridge_prover_lib::{
     Fr,
 };
 use bridge_prover_orchestrator::{
-    compose_layer_hashes_input, halo2_snark::export_poseidon_snark, load_bound_witness_cache,
-    proof_export::save_instances_binary,
+    compose_layer_hashes_input, halo2_snark::export_poseidon_snark_with_srs_k,
+    load_bound_witness_cache, proof_export::save_instances_binary,
 };
 use clap::Parser;
 use tracing::info;
@@ -39,6 +39,11 @@ struct CircuitExport<'a> {
     name: &'a str,
     vk_key: &'a str,
     config_key: &'a str,
+    /// SRS degree override for the snark-verifier compile step. `None` = use
+    /// `config.k`. Required for `layer_hashes`, whose VK was keygen'd at K=20
+    /// even though `config.k = 17` (see
+    /// `LayerHashesKeyManager::KEYGEN_SRS_K`).
+    srs_k_override: Option<u32>,
 }
 
 const CIRCUITS: &[CircuitExport<'static>] = &[
@@ -46,16 +51,19 @@ const CIRCUITS: &[CircuitExport<'static>] = &[
         name: "primary",
         vk_key: "primary_vk.bin",
         config_key: "primary_config_params.json",
+        srs_k_override: None,
     },
     CircuitExport {
         name: "fallback",
         vk_key: "fallback_vk.bin",
         config_key: "fallback_config_params.json",
+        srs_k_override: None,
     },
     CircuitExport {
         name: "layer_hashes",
         vk_key: "layer_hashes_vk.bin",
         config_key: "layer_hashes_config_params.json",
+        srs_k_override: Some(20),
     },
 ];
 
@@ -203,9 +211,10 @@ fn main() -> anyhow::Result<()> {
         let out_snark = snark_dir.join(format!("{}.snark", spec.name));
 
         info!(circuit = spec.name, "exporting Poseidon Snark");
-        export_poseidon_snark(
+        export_poseidon_snark_with_srs_k(
             &params_dir.join(spec.vk_key),
             &params_dir.join(spec.config_key),
+            spec.srs_k_override,
             proof_path,
             instances,
             &out_snark,

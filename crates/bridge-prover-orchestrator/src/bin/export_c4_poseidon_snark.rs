@@ -39,7 +39,9 @@ use bridge_event_prover_lib::{
     PrivateWitness,
 };
 use bridge_prover_lib::{keys::KeyManager, transcript::TranscriptKind};
-use bridge_prover_orchestrator::{halo2_snark::export_poseidon_snark, proof_export::save_instances_binary};
+use bridge_prover_orchestrator::{
+    halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary,
+};
 use clap::Parser;
 use halo2_base::halo2_proofs::poly::commitment::Params;
 
@@ -182,9 +184,13 @@ fn main() -> anyhow::Result<()> {
     save_instances_binary(&out.public_instances, &instances_path)?;
     let out_snark = snark_dir.join(format!("{}.snark", args.name));
 
-    export_poseidon_snark(
+    // Event circuit has config.k = 19 but VK was keygen'd against K=20
+    // (see `EventKeyManager::KEYGEN_SRS_K`). Pass explicit SRS override so
+    // snark-verifier's `compile()` sees `params.k = 20 == vk.domain.k`.
+    export_poseidon_snark_with_srs_k(
         &params_dir.join("event_vk.bin"),
         &params_dir.join("event_config_params.json"),
+        Some(bridge_prover_lib::keys::EventKeyManager::KEYGEN_SRS_K),
         &proof_path,
         &out.public_instances,
         &out_snark,

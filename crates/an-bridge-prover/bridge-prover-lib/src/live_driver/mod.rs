@@ -93,6 +93,7 @@ use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
 use bridge_poseidon as poseidon;
 use crate::prover_bk_set::ProverBkSet;
+use crate::transcript::TranscriptKind;
 
 mod bk_update;
 mod bundle;
@@ -241,6 +242,24 @@ pub struct LiveProverConfig {
     pub max_bk_updates_per_iter: usize,
     /// How the driver picks the bootstrap seed. See [`SeedPolicy`].
     pub seed_policy: SeedPolicy,
+    /// Fiat–Shamir transcript flavour for every proof this driver produces
+    /// ([`crate::prover::generate_primary_proof_with_transcript`] +
+    /// [`crate::layer_prover::generate_layer_proof_with_transcript`]).
+    ///
+    /// * [`TranscriptKind::Blake2b`] (default) — AN-side verifier flavour;
+    ///   accepted by the AN VM's `ZKHALO2VERIFYWITHVK` opcode and by our
+    ///   `bridge-prover-daemon` verifier.
+    /// * [`TranscriptKind::Poseidon`] — ETH-side aggregator flavour; the
+    ///   raw proof bytes are consumable by `snark-verifier-sdk`'s
+    ///   `AggregationCircuit` (see `crates/bridge-evm-aggregator`).
+    ///
+    /// One driver produces exactly one flavour per `poll_next_*` call —
+    /// callers wanting both must instantiate two drivers or repoll with a
+    /// mutated config. The output flavour is echoed on
+    /// [`BundleProofArtifacts::transcript_kind`] /
+    /// [`BkUpdateProofArtifacts::transcript_kind`] so downstream consumers
+    /// know which verifier / aggregator path to route to.
+    pub transcript: TranscriptKind,
 }
 
 impl Default for LiveProverConfig {
@@ -250,6 +269,7 @@ impl Default for LiveProverConfig {
             history_window_size: HISTORY_WINDOW_SIZE,
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
+            transcript: TranscriptKind::Blake2b,
         }
     }
 }
@@ -348,7 +368,15 @@ pub struct BundleProofArtifacts {
     pub num_layers: u8,
     pub layer_hashes_be: [[u8; 32]; MAX_LAYERS],
     pub prev_max_level_layer_hash_be: [u8; 32],
-    // Proof bytes (Blake2b Fiat–Shamir — AN opcode-compatible flavour)
+    /// Fiat–Shamir transcript flavour of the two proof-byte fields below.
+    /// Mirrors [`LiveProverConfig::transcript`] at the moment those proofs
+    /// were generated so downstream consumers can route to the matching
+    /// verifier / aggregator without inspecting proof-bytes headers. Both
+    /// `attestation_proof` and `layer_hashes_proof` share the same tag —
+    /// [`crate::live_driver::bundle::drive_next_bundle`] always drives them
+    /// with the same transcript in a single bundle.
+    pub transcript_kind: TranscriptKind,
+    // Proof bytes (Fiat–Shamir flavour tagged by `transcript_kind`)
     pub attestation_proof: Vec<u8>,
     pub layer_hashes_proof: Vec<u8>,
     // Diagnostic timings (for logs / stats)
@@ -387,6 +415,9 @@ pub struct BkUpdateProofArtifacts {
     pub merkle_sibling_h01_be: [u8; 32],
     pub merkle_sibling_h4_7_be: [u8; 32],
     pub merkle_sibling_h8_15_be: [u8; 32],
+    /// Fiat–Shamir transcript flavour of `attestation_proof`. Same
+    /// semantics as [`BundleProofArtifacts::transcript_kind`].
+    pub transcript_kind: TranscriptKind,
     pub attestation_proof: Vec<u8>,
     /// Post-rotation pubkey table so the caller can rotate its
     /// `ProverBkSet` snapshot. Same 48-byte compressed BLS pubkeys as the
@@ -964,6 +995,12 @@ mod tests {
         assert_eq!(cfg.thinning_factor_p, crate::THINNING_FACTOR_P);
         assert_eq!(cfg.history_window_size, HISTORY_WINDOW_SIZE);
         assert_eq!(cfg.seed_policy, SeedPolicy::Resume);
+        // Blake2b default preserves the AN-opcode-compatible flavour for
+        // every caller that doesn't override — both our own daemon and
+        // Sergey's `bridge-relayer-daemon` construct via
+        // `..Default::default()` today, so the pre-Poseidon behaviour is
+        // unchanged.
+        assert_eq!(cfg.transcript, TranscriptKind::Blake2b);
     }
 
     #[test]

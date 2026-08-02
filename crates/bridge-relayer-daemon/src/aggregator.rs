@@ -570,6 +570,405 @@ impl ProofAggregator for MockAggregator {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Circuit 1A/1B/2 (attestation + layer-hashes) — subprocess prover + pipeline
+// ─────────────────────────────────────────────────────────────────────
+//
+// The AN-side daemon proves Circuits 1A/1B/2 with a **Blake2b** transcript
+// (the `ZKHALO2VERIFYWITHVK` flavour). The ETH aggregator only consumes
+// **Poseidon** inner snarks, so — mirroring the `our_side_reprove`
+// architecture already in place for Circuit 4 — we shell out to
+// `bridge-prover-orchestrator`'s `export-1a1b2-poseidon-snark`, then feed the
+// resulting Poseidon snark into `bridge-evm-aggregator`'s `aggregate-proof`
+// (same [`SubprocessAggregator`] used for C4, different verifier name).
+//
+// Splitting from the C4 pipeline: C1a/C1b/C2 inputs are live GraphQL
+// (`--endpoint`, `--seqno`, `--last-seen`, and — layer only — a persisted
+// `state.json` path). The witness is fetched by the subprocess itself.
+
+/// Committed R15 aggregator verifier names (match the `.bin` files in
+/// `contracts/ethereum/verifiers/`). Names line up with
+/// `bridge_evm_aggregator::AggregatorConfig::for_verifier_name`.
+pub const PRIMARY_VERIFIER_NAME: &str = "PrimaryAggregatorVerifier";
+pub const FALLBACK_VERIFIER_NAME: &str = "FallbackAggregatorVerifier";
+pub const LAYER_HASHES_VERIFIER_NAME: &str = "LayerHashesAggregatorVerifier";
+
+/// Orchestrator binary that re-proves Circuit 1A/1B/2 with a Poseidon
+/// transcript. Emits a snark-verifier `.snark` + `.instances.bin` under
+/// `--snark-dir`.
+pub const SNARK_1A1B2_BIN: &str = "export-1a1b2-poseidon-snark";
+
+/// Which of the three attestation/layer sub-circuits to re-prove. Maps 1:1
+/// to `--circuit primary|fallback|layer` on the orchestrator CLI.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Circuit1a1b2Request {
+    /// Circuit 1A — primary attestation (`[PRIMARY]` evidence).
+    Primary,
+    /// Circuit 1B — fallback attestation (`[PRIMARY, FALLBACK]` evidence).
+    Fallback,
+    /// Circuit 2 — layer-hashes movement. Requires a `--state` file: the
+    /// snapshotted `BridgeState` the layer prover walks back from.
+    Layer,
+}
+
+impl Circuit1a1b2Request {
+    /// The CLI flag value for `--circuit`.
+    pub fn cli_flag(self) -> &'static str {
+        match self {
+            Circuit1a1b2Request::Primary => "primary",
+            Circuit1a1b2Request::Fallback => "fallback",
+            Circuit1a1b2Request::Layer => "layer",
+        }
+    }
+
+    /// The `.snark` basename produced by the orchestrator when no explicit
+    /// `--name` override is provided (matches the orchestrator's default).
+    pub fn default_snark_name(self) -> &'static str {
+        match self {
+            Circuit1a1b2Request::Primary => "circuit1a",
+            Circuit1a1b2Request::Fallback => "circuit1b",
+            Circuit1a1b2Request::Layer => "circuit2",
+        }
+    }
+
+    /// The committed R15 aggregator verifier this circuit's snark aggregates
+    /// into.
+    pub fn verifier_name(self) -> &'static str {
+        match self {
+            Circuit1a1b2Request::Primary => PRIMARY_VERIFIER_NAME,
+            Circuit1a1b2Request::Fallback => FALLBACK_VERIFIER_NAME,
+            Circuit1a1b2Request::Layer => LAYER_HASHES_VERIFIER_NAME,
+        }
+    }
+}
+
+/// Re-prove one of Circuits 1A/1B/2 with a Poseidon transcript against the
+/// live chain, emitting a snark-verifier `.snark` for the aggregator.
+#[async_trait]
+pub trait Circuit1a1b2SnarkProver: Send + Sync {
+    /// `state_path` is required for [`Circuit1a1b2Request::Layer`] and
+    /// ignored for the attestation variants. `last_seen` is the
+    /// `last_seen_block_seqno` public input the attestation circuits bind
+    /// against; for `Layer` the value is ignored.
+    async fn prove(
+        &self,
+        request: Circuit1a1b2Request,
+        seqno: u64,
+        last_seen: u32,
+        state_path: Option<&Path>,
+        snark_dir: &Path,
+        name: &str,
+    ) -> Result<SnarkArtefacts, RelayerError>;
+}
+
+/// Configuration for the out-of-process `export-1a1b2-poseidon-snark`
+/// invocation.
+#[derive(Clone, Debug)]
+pub struct SubprocessCircuit1a1b2SnarkProverConfig {
+    /// Path to the `crates/bridge-prover-orchestrator` root. The prebuilt
+    /// release binary is expected at
+    /// `<dir>/target/release/export-1a1b2-poseidon-snark`; if absent we fall
+    /// back to `cargo run --release --bin export-1a1b2-poseidon-snark`.
+    pub orchestrator_dir: PathBuf,
+    /// Directory holding `kzg_bn254_*.srs` + Circuit-1a/1b/2 keys. Passed as
+    /// `--params-dir` and exported as `PARAMS_DIR` for the subprocess.
+    pub params_dir: PathBuf,
+    /// Acki Nacki GraphQL endpoint (passed via `--endpoint`).
+    pub gql_endpoint: String,
+    /// Optional BK-set JSON fallback path (passed via `--bk-set-config`) for
+    /// endpoints that do not expose the set. `None` omits the flag.
+    pub bk_set_config: Option<PathBuf>,
+    /// Hard timeout for the (cold-PK) proving run.
+    pub timeout: Duration,
+}
+
+impl SubprocessCircuit1a1b2SnarkProverConfig {
+    pub fn new(
+        orchestrator_dir: impl Into<PathBuf>,
+        params_dir: impl Into<PathBuf>,
+        gql_endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            orchestrator_dir: orchestrator_dir.into(),
+            params_dir: params_dir.into(),
+            gql_endpoint: gql_endpoint.into(),
+            bk_set_config: None,
+            timeout: Duration::from_secs(1800),
+        }
+    }
+
+    pub fn with_bk_set_config(mut self, path: impl Into<PathBuf>) -> Self {
+        self.bk_set_config = Some(path.into());
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// Production snark prover. Shells out to the orchestrator binary.
+pub struct SubprocessCircuit1a1b2SnarkProver {
+    config: SubprocessCircuit1a1b2SnarkProverConfig,
+}
+
+impl SubprocessCircuit1a1b2SnarkProver {
+    pub fn new(mut config: SubprocessCircuit1a1b2SnarkProverConfig) -> Self {
+        if let Ok(abs) = config.orchestrator_dir.canonicalize() {
+            config.orchestrator_dir = abs;
+        }
+        if let Ok(abs) = config.params_dir.canonicalize() {
+            config.params_dir = abs;
+        }
+        if let Some(bk) = config.bk_set_config.as_ref() {
+            if let Ok(abs) = bk.canonicalize() {
+                config.bk_set_config = Some(abs);
+            }
+        }
+        Self {
+            config,
+        }
+    }
+
+    fn release_bin(&self) -> Option<PathBuf> {
+        let bin = self
+            .config
+            .orchestrator_dir
+            .join("target/release")
+            .join(SNARK_1A1B2_BIN);
+        bin.is_file().then_some(bin)
+    }
+
+    /// argv (program excluded) — pulled out for unit-testing flag
+    /// construction. `state_path` is included only for `Layer`; `last_seen`
+    /// is included only for `Primary` / `Fallback`.
+    fn args(
+        &self,
+        request: Circuit1a1b2Request,
+        seqno: u64,
+        last_seen: u32,
+        state_path: Option<&Path>,
+        snark_dir: &Path,
+        name: &str,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "--endpoint".to_string(),
+            self.config.gql_endpoint.clone(),
+            "--seqno".to_string(),
+            seqno.to_string(),
+            "--circuit".to_string(),
+            request.cli_flag().to_string(),
+            "--params-dir".to_string(),
+            self.config.params_dir.display().to_string(),
+            "--snark-dir".to_string(),
+            snark_dir.display().to_string(),
+            "--name".to_string(),
+            name.to_string(),
+        ];
+        match request {
+            Circuit1a1b2Request::Primary | Circuit1a1b2Request::Fallback => {
+                args.push("--last-seen".to_string());
+                args.push(last_seen.to_string());
+            }
+            Circuit1a1b2Request::Layer => {
+                if let Some(sp) = state_path {
+                    args.push("--state".to_string());
+                    args.push(sp.display().to_string());
+                }
+            }
+        }
+        if let Some(bk) = self.config.bk_set_config.as_ref() {
+            args.push("--bk-set-config".to_string());
+            args.push(bk.display().to_string());
+        }
+        args
+    }
+}
+
+#[async_trait]
+impl Circuit1a1b2SnarkProver for SubprocessCircuit1a1b2SnarkProver {
+    async fn prove(
+        &self,
+        request: Circuit1a1b2Request,
+        seqno: u64,
+        last_seen: u32,
+        state_path: Option<&Path>,
+        snark_dir: &Path,
+        name: &str,
+    ) -> Result<SnarkArtefacts, RelayerError> {
+        use tokio::process::Command;
+
+        if matches!(request, Circuit1a1b2Request::Layer) && state_path.is_none() {
+            return Err(RelayerError::other(
+                "Circuit1a1b2Request::Layer requires state_path (--state)",
+            ));
+        }
+
+        std::fs::create_dir_all(snark_dir)
+            .map_err(|e| RelayerError::other(format!("create snark dir: {e}")))?;
+        let args = self.args(request, seqno, last_seen, state_path, snark_dir, name);
+
+        let mut cmd = if let Some(bin) = self.release_bin() {
+            let mut c = Command::new(bin);
+            c.current_dir(&self.config.orchestrator_dir).args(&args);
+            c
+        } else {
+            let mut c = Command::new("cargo");
+            c.current_dir(&self.config.orchestrator_dir)
+                .args(["run", "--release", "--bin", SNARK_1A1B2_BIN, "--"])
+                .args(&args);
+            c
+        };
+        cmd.env("PARAMS_DIR", &self.config.params_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = tokio::time::timeout(self.config.timeout, cmd.output())
+            .await
+            .map_err(|_| {
+                RelayerError::other(format!(
+                    "{SNARK_1A1B2_BIN} timed out after {:?}",
+                    self.config.timeout
+                ))
+            })?
+            .map_err(|e| RelayerError::other(format!("failed to spawn {SNARK_1A1B2_BIN}: {e}")))?;
+
+        if !output.status.success() {
+            return Err(RelayerError::other(format!(
+                "{SNARK_1A1B2_BIN} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let artefacts = SnarkArtefacts {
+            snark_path: snark_dir.join(format!("{name}.snark")),
+            instances_path: snark_dir.join(format!("{name}.instances.bin")),
+        };
+        if !artefacts.snark_path.is_file() {
+            return Err(RelayerError::other(format!(
+                "{SNARK_1A1B2_BIN} did not produce {}",
+                artefacts.snark_path.display()
+            )));
+        }
+        Ok(artefacts)
+    }
+}
+
+/// Compose a [`Circuit1a1b2SnarkProver`] and a [`ProofAggregator`] into the
+/// full ETH-side attestation / layer-hashes path. Unlike
+/// [`Circuit4ShplonkPipeline`] the return type is just the aggregator
+/// calldata: the caller swaps it into the pre-existing
+/// [`crate::types::AnBlockData::attestation_proof`] /
+/// [`crate::types::AnBlockData::layer_hashes_proof`] fields (or
+/// [`crate::types::BkSetUpdateData::attestation_proof`] on the BK-update
+/// lane).
+pub struct Circuit12ShplonkPipeline<S: Circuit1a1b2SnarkProver, A: ProofAggregator> {
+    pub snark_prover: S,
+    pub aggregator: A,
+}
+
+impl<S: Circuit1a1b2SnarkProver, A: ProofAggregator> Circuit12ShplonkPipeline<S, A> {
+    pub fn new(snark_prover: S, aggregator: A) -> Self {
+        Self {
+            snark_prover,
+            aggregator,
+        }
+    }
+
+    /// Prove one attestation circuit (1A or 1B), aggregate, and return the
+    /// EVM calldata `instances ‖ proof`.
+    ///
+    /// `finalization` selects Primary (Circuit 1A) vs Fallback (Circuit 1B);
+    /// the appropriate committed aggregator verifier is used automatically.
+    pub async fn prove_attestation(
+        &self,
+        finalization: crate::types::FinalizationType,
+        seqno: u64,
+        last_seen: u32,
+        snark_dir: &Path,
+    ) -> Result<Vec<u8>, RelayerError> {
+        let request = match finalization {
+            crate::types::FinalizationType::Primary => Circuit1a1b2Request::Primary,
+            crate::types::FinalizationType::Fallback => Circuit1a1b2Request::Fallback,
+        };
+        let name = request.default_snark_name();
+        let artefacts = self
+            .snark_prover
+            .prove(request, seqno, last_seen, None, snark_dir, name)
+            .await?;
+        self.aggregator
+            .aggregate(&artefacts.snark_path, request.verifier_name())
+            .await
+    }
+
+    /// Prove Circuit 2 (layer hashes) against the caller-provided state
+    /// snapshot, aggregate, and return the EVM calldata.
+    pub async fn prove_layer(
+        &self,
+        seqno: u64,
+        state_path: &Path,
+        snark_dir: &Path,
+    ) -> Result<Vec<u8>, RelayerError> {
+        let request = Circuit1a1b2Request::Layer;
+        let name = request.default_snark_name();
+        let artefacts = self
+            .snark_prover
+            .prove(request, seqno, 0, Some(state_path), snark_dir, name)
+            .await?;
+        self.aggregator
+            .aggregate(&artefacts.snark_path, request.verifier_name())
+            .await
+    }
+}
+
+/// Deterministic C1/C2 snark prover for tests: writes an empty `<name>.snark`
+/// and a placeholder `.instances.bin` so downstream aggregation mocks have
+/// something to point at.
+#[derive(Clone, Debug, Default)]
+pub struct MockCircuit1a1b2SnarkProver {
+    pub fail: bool,
+}
+
+#[async_trait]
+impl Circuit1a1b2SnarkProver for MockCircuit1a1b2SnarkProver {
+    async fn prove(
+        &self,
+        request: Circuit1a1b2Request,
+        _seqno: u64,
+        _last_seen: u32,
+        state_path: Option<&Path>,
+        snark_dir: &Path,
+        name: &str,
+    ) -> Result<SnarkArtefacts, RelayerError> {
+        if self.fail {
+            return Err(RelayerError::other("mock c1/c2 snark prover configured to fail"));
+        }
+        if matches!(request, Circuit1a1b2Request::Layer) && state_path.is_none() {
+            return Err(RelayerError::other(
+                "mock c1/c2 snark prover: Layer requires state_path",
+            ));
+        }
+        std::fs::create_dir_all(snark_dir)
+            .map_err(|e| RelayerError::other(format!("mkdir: {e}")))?;
+        let snark_path = snark_dir.join(format!("{name}.snark"));
+        let instances_path = snark_dir.join(format!("{name}.instances.bin"));
+        std::fs::write(&snark_path, format!("mock-{}-snark", request.cli_flag()).as_bytes())
+            .map_err(|e| RelayerError::other(format!("write snark: {e}")))?;
+        // C1/C2 inner instance counts differ across circuits; write a single
+        // zero-Fr placeholder so [`MockAggregator`] has a sibling file to
+        // read. Consumers that need real instance layouts should build a
+        // dedicated mock aggregator.
+        std::fs::write(&instances_path, [0u8; 32])
+            .map_err(|e| RelayerError::other(format!("write instances: {e}")))?;
+        Ok(SnarkArtefacts {
+            snark_path,
+            instances_path,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +1101,198 @@ mod tests {
         );
         assert!(pipeline.prove(&witness, &dir, 0).await.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn subprocess_1a1b2_args_primary_are_stable() {
+        let cfg = SubprocessCircuit1a1b2SnarkProverConfig::new(
+            "/orch",
+            "/params",
+            "https://an.example/graphql",
+        );
+        let prover = SubprocessCircuit1a1b2SnarkProver {
+            config: cfg,
+        };
+        let args = prover.args(
+            Circuit1a1b2Request::Primary,
+            1_084_416,
+            1_083_904,
+            None,
+            Path::new("/tmp/snarks"),
+            "circuit1a",
+        );
+        assert_eq!(args, vec![
+            "--endpoint",
+            "https://an.example/graphql",
+            "--seqno",
+            "1084416",
+            "--circuit",
+            "primary",
+            "--params-dir",
+            "/params",
+            "--snark-dir",
+            "/tmp/snarks",
+            "--name",
+            "circuit1a",
+            "--last-seen",
+            "1083904",
+        ]);
+    }
+
+    #[test]
+    fn subprocess_1a1b2_args_fallback_are_stable() {
+        let cfg = SubprocessCircuit1a1b2SnarkProverConfig::new(
+            "/orch",
+            "/params",
+            "https://an.example/graphql",
+        )
+        .with_bk_set_config("/etc/bk_set.json");
+        let prover = SubprocessCircuit1a1b2SnarkProver {
+            config: cfg,
+        };
+        let args = prover.args(
+            Circuit1a1b2Request::Fallback,
+            1_084_416,
+            1_083_904,
+            None,
+            Path::new("/tmp/snarks"),
+            "circuit1b",
+        );
+        assert_eq!(args, vec![
+            "--endpoint",
+            "https://an.example/graphql",
+            "--seqno",
+            "1084416",
+            "--circuit",
+            "fallback",
+            "--params-dir",
+            "/params",
+            "--snark-dir",
+            "/tmp/snarks",
+            "--name",
+            "circuit1b",
+            "--last-seen",
+            "1083904",
+            "--bk-set-config",
+            "/etc/bk_set.json",
+        ]);
+    }
+
+    #[test]
+    fn subprocess_1a1b2_args_layer_are_stable() {
+        let cfg = SubprocessCircuit1a1b2SnarkProverConfig::new(
+            "/orch",
+            "/params",
+            "https://an.example/graphql",
+        );
+        let prover = SubprocessCircuit1a1b2SnarkProver {
+            config: cfg,
+        };
+        let args = prover.args(
+            Circuit1a1b2Request::Layer,
+            1_084_416,
+            0,
+            Some(Path::new("/state/prover_state.json")),
+            Path::new("/tmp/snarks"),
+            "circuit2",
+        );
+        assert_eq!(args, vec![
+            "--endpoint",
+            "https://an.example/graphql",
+            "--seqno",
+            "1084416",
+            "--circuit",
+            "layer",
+            "--params-dir",
+            "/params",
+            "--snark-dir",
+            "/tmp/snarks",
+            "--name",
+            "circuit2",
+            "--state",
+            "/state/prover_state.json",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn mock_1a1b2_pipeline_primary_returns_aggregated_calldata() {
+        let dir = std::env::temp_dir().join(format!("agg_c12_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipeline = Circuit12ShplonkPipeline::new(
+            MockCircuit1a1b2SnarkProver::default(),
+            MockAggregator::default(),
+        );
+        let cd = pipeline
+            .prove_attestation(
+                crate::types::FinalizationType::Primary,
+                1_084_416,
+                1_083_904,
+                &dir,
+            )
+            .await
+            .unwrap();
+        // MockAggregator returns 3616 bytes even when the sibling
+        // .instances.bin is a single zero Fr (unknown → fallback path).
+        assert_eq!(cd.len(), 3616);
+        assert!(dir.join("circuit1a.snark").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn mock_1a1b2_pipeline_layer_requires_state() {
+        let dir = std::env::temp_dir().join(format!("agg_c12_layer_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("state.json");
+        std::fs::write(&state, b"{}").unwrap();
+        let pipeline = Circuit12ShplonkPipeline::new(
+            MockCircuit1a1b2SnarkProver::default(),
+            MockAggregator::default(),
+        );
+        let cd = pipeline
+            .prove_layer(1_084_416, &state, &dir)
+            .await
+            .unwrap();
+        assert_eq!(cd.len(), 3616);
+        assert!(dir.join("circuit2.snark").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn mock_1a1b2_pipeline_propagates_prover_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("agg_c12_fail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipeline = Circuit12ShplonkPipeline::new(
+            MockCircuit1a1b2SnarkProver {
+                fail: true,
+            },
+            MockAggregator::default(),
+        );
+        let res = pipeline
+            .prove_attestation(
+                crate::types::FinalizationType::Primary,
+                42,
+                0,
+                &dir,
+            )
+            .await;
+        assert!(res.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn circuit_verifier_names_match_committed_bins() {
+        assert_eq!(
+            Circuit1a1b2Request::Primary.verifier_name(),
+            "PrimaryAggregatorVerifier",
+        );
+        assert_eq!(
+            Circuit1a1b2Request::Fallback.verifier_name(),
+            "FallbackAggregatorVerifier",
+        );
+        assert_eq!(
+            Circuit1a1b2Request::Layer.verifier_name(),
+            "LayerHashesAggregatorVerifier",
+        );
     }
 }

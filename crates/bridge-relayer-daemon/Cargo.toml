@@ -31,13 +31,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
 acki-nacki-interface = { path = "../../acki-nacki-interface" }
 bridge-prover-lib = { path = "../bridge-prover-lib" }
 bridge-gql-fetcher = { path = "../bridge-gql-fetcher" }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
-tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bin]]

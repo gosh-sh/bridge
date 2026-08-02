@@ -400,6 +400,27 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+        /// Enable ETH-side Poseidon re-prove + R15 SHPLONK aggregation
+        /// (Circuits 1A/1B/2). Wraps `LiveBlockSource` with
+        /// [`AggregatedBlockSource`]. Requires `--orchestrator-dir`,
+        /// `--aggregator-dir`, `--verifiers-dir`, `--snark-dir`.
+        #[arg(long, env = "BRIDGE_ENABLE_C12_AGGREGATION")]
+        enable_c12_aggregation: bool,
+        /// Path to the `crates/bridge-prover-orchestrator` root (used by the
+        /// `export-1a1b2-poseidon-snark` subprocess).
+        #[arg(long, env = "BRIDGE_ORCHESTRATOR_DIR")]
+        orchestrator_dir: Option<PathBuf>,
+        /// Path to the `crates/bridge-evm-aggregator` root (used by the
+        /// `aggregate-proof` subprocess).
+        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
+        aggregator_dir: Option<PathBuf>,
+        /// Directory of committed verifier `.bin` files (aggregator self-check).
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
+        verifiers_dir: Option<PathBuf>,
+        /// Working directory for intermediate `.snark` / `.instances.bin`.
+        /// Defaults to `{prover_state_dir}/aggregation_snarks`.
+        #[arg(long, env = "BRIDGE_SNARK_DIR")]
+        snark_dir: Option<PathBuf>,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -703,11 +724,42 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
+            enable_c12_aggregation,
+            orchestrator_dir,
+            aggregator_dir,
+            verifiers_dir,
+            snark_dir,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
+            };
+            let aggregation = if enable_c12_aggregation {
+                let orchestrator_dir = orchestrator_dir.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--enable-c12-aggregation set but --orchestrator-dir missing"
+                    )
+                })?;
+                let aggregator_dir = aggregator_dir.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--enable-c12-aggregation set but --aggregator-dir missing"
+                    )
+                })?;
+                let verifiers_dir = verifiers_dir.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--enable-c12-aggregation set but --verifiers-dir missing"
+                    )
+                })?;
+                Some(C12AggregationCfg {
+                    orchestrator_dir,
+                    aggregator_dir,
+                    verifiers_dir,
+                    snark_dir,
+                    bk_set_config_for_subprocess: bk_set_config.clone(),
+                })
+            } else {
+                None
             };
             run_daemon_live(
                 args.state,
@@ -720,6 +772,7 @@ async fn main() -> anyhow::Result<()> {
                 bk_set_config,
                 bootstrap_seqno,
                 backoff,
+                aggregation,
             )
             .await
             .map_err(|e| {
@@ -1756,6 +1809,19 @@ async fn submit_bk_update(
 
 /// Live GraphQL + `LiveProverDriver` → ETH `verifyBlock` / `applyBkSetUpdate`.
 #[allow(clippy::too_many_arguments)]
+/// Wiring for the ETH-side Poseidon re-prove + R15 SHPLONK aggregation
+/// pipeline. When present, `run_daemon_live` wraps `LiveBlockSource` in an
+/// [`AggregatedBlockSource`] so `AnBlockData.attestation_proof` /
+/// `AnBlockData.layer_hashes_proof` (and BK-update `attestation_proof`) carry
+/// the aggregator calldata the Solidity `AckiNackiBridge` accepts.
+struct C12AggregationCfg {
+    orchestrator_dir: PathBuf,
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    snark_dir: Option<PathBuf>,
+    bk_set_config_for_subprocess: PathBuf,
+}
+
 async fn run_daemon_live(
     state_path: PathBuf,
     rpc_url: String,
@@ -1767,6 +1833,7 @@ async fn run_daemon_live(
     bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
+    aggregation: Option<C12AggregationCfg>,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
@@ -1917,12 +1984,96 @@ async fn run_daemon_live(
     }
 
     let cfg = RelayerConfig::new(&state_path);
-    let mut relayer = Relayer::new(
-        cfg,
-        Arc::clone(&live_source),
-        Arc::clone(&live_source),
-        bridge,
-    )?;
+
+    // When C1/C2 aggregation is enabled, wrap the live source so the two
+    // proof-byte fields in AnBlockData carry Poseidon R15 SHPLONK calldata
+    // instead of the daemon's Blake2b bytes. The wrapper delegates ack /
+    // driver_snapshot back to LiveBlockSource so state persistence and
+    // ack-after-submit semantics are unchanged. Relayer's generic bounds
+    // require `Sized` sources, so each branch builds and runs its own
+    // Relayer via `spawn_and_run` (below) instead of unifying via `dyn`.
+    if let Some(agg_cfg) = aggregation {
+        use bridge_relayer_daemon::{
+            AggregatedBlockSource, Circuit12ShplonkPipeline,
+            SubprocessAggregator, SubprocessAggregatorConfig,
+            SubprocessCircuit1a1b2SnarkProver, SubprocessCircuit1a1b2SnarkProverConfig,
+        };
+        let snark_dir = agg_cfg
+            .snark_dir
+            .clone()
+            .unwrap_or_else(|| prover_state_dir.join("aggregation_snarks"));
+        std::fs::create_dir_all(&snark_dir)?;
+        let snark_prover_cfg = SubprocessCircuit1a1b2SnarkProverConfig::new(
+            &agg_cfg.orchestrator_dir,
+            &params_dir,
+            &gql_endpoint,
+        )
+        .with_bk_set_config(&agg_cfg.bk_set_config_for_subprocess);
+        let aggregator_cfg = SubprocessAggregatorConfig::new(
+            &agg_cfg.aggregator_dir,
+            &agg_cfg.verifiers_dir,
+            &params_dir,
+        );
+        let pipeline = Circuit12ShplonkPipeline::new(
+            SubprocessCircuit1a1b2SnarkProver::new(snark_prover_cfg),
+            SubprocessAggregator::new(aggregator_cfg),
+        );
+        let aggregated = Arc::new(AggregatedBlockSource::new(
+            Arc::clone(&live_source),
+            pipeline,
+            snark_dir,
+        ));
+        info!(
+            orchestrator_dir = %agg_cfg.orchestrator_dir.display(),
+            aggregator_dir = %agg_cfg.aggregator_dir.display(),
+            verifiers_dir = %agg_cfg.verifiers_dir.display(),
+            "daemon-live: C1/C2 R15 SHPLONK aggregation ENABLED",
+        );
+        spawn_and_run(
+            cfg,
+            Arc::clone(&aggregated),
+            aggregated,
+            bridge,
+            backoff,
+            &gql_endpoint,
+            &params_dir,
+            &prover_state_dir,
+        )
+        .await
+    } else {
+        spawn_and_run(
+            cfg,
+            Arc::clone(&live_source),
+            Arc::clone(&live_source),
+            bridge,
+            backoff,
+            &gql_endpoint,
+            &params_dir,
+            &prover_state_dir,
+        )
+        .await
+    }
+}
+
+/// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
+/// Generic over the source types so both aggregation-on and aggregation-off
+/// paths in [`run_daemon_live`] share the same startup + run wiring.
+async fn spawn_and_run<S, U, B>(
+    cfg: RelayerConfig,
+    source: Arc<S>,
+    bk_update_source: Arc<U>,
+    bridge: Arc<B>,
+    backoff: BackoffConfig,
+    gql_endpoint: &str,
+    params_dir: &Path,
+    prover_state_dir: &Path,
+) -> anyhow::Result<()>
+where
+    S: bridge_relayer_daemon::source::BlockSource + 'static,
+    U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
+    B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
+{
+    let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
 
     if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
         let actual = relayer.bridge().read_state().await?;

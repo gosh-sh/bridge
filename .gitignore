@@ -31,6 +31,8 @@ contracts/ethereum/lib/
 .env.local
 .env.production
 .env.*.local
+.env.shellnet
+.env.sepolia
 .secrets
 
 # IDE

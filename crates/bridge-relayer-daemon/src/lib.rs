@@ -6,6 +6,7 @@
 //! File-driven sources ([`ProverProofsBlockSource`], [`FixturesBlockSource`])
 //! remain for CI / operator one-shots.
 
+pub mod aggregated_source;
 pub mod aggregator;
 pub mod bridge;
 pub mod daemon;
@@ -20,11 +21,15 @@ pub mod types;
 pub mod withdraw_prover;
 pub mod withdrawal;
 
+pub use aggregated_source::AggregatedBlockSource;
 pub use aggregator::{
-    calldata_binds_instances, Circuit4ShplonkPipeline, Circuit4SnarkProver, MockAggregator,
-    MockCircuit4SnarkProver, ProofAggregator, SnarkArtefacts, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
-    WITHDRAWAL_VERIFIER_NAME,
+    calldata_binds_instances, Circuit12ShplonkPipeline, Circuit1a1b2Request,
+    Circuit1a1b2SnarkProver, Circuit4ShplonkPipeline, Circuit4SnarkProver, MockAggregator,
+    MockCircuit1a1b2SnarkProver, MockCircuit4SnarkProver, ProofAggregator, SnarkArtefacts,
+    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessCircuit1a1b2SnarkProver,
+    SubprocessCircuit1a1b2SnarkProverConfig, SubprocessCircuit4SnarkProver,
+    SubprocessCircuit4SnarkProverConfig, FALLBACK_VERIFIER_NAME, LAYER_HASHES_VERIFIER_NAME,
+    PRIMARY_VERIFIER_NAME, SNARK_1A1B2_BIN, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
     BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,

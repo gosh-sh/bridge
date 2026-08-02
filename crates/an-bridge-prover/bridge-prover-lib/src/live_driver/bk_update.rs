@@ -184,22 +184,29 @@ pub(super) async fn drive_next_bk_update(
         };
 
     // Generate Circuit 1A/1B proof, on-demand PK load/unload to stay within
-    // the single-PK memory envelope.
+    // the single-PK memory envelope. Pick the Fiat–Shamir flavour from the
+    // driver config so a Poseidon-configured driver emits aggregator-ready
+    // bytes here — same one-flavour-per-poll discipline as the bundle path.
     let last_seen_for_upd = driver.state().stored_last_bk_set_update_seq_no as u32;
+    let transcript = driver.cfg().transcript;
     let t_upd_proof = Instant::now();
     let (fin_type, upd_proof) = match &upd_evidence {
         AttestationEvidence::Primary(att) => {
-            info!("bk-update {}: PRIMARY path → Circuit 1a", upd_seqno);
+            info!(
+                "bk-update {}: PRIMARY path → Circuit 1a (transcript={:?})",
+                upd_seqno, transcript,
+            );
             driver
                 .key_manager_mut()
                 .load_primary_pk()
                 .with_context(|| format!("bk-update {}: load_primary_pk", upd_seqno))
                 .map_err(|e| DriverError::proof_gen(upd_seqno, e))?;
-            let res = prover::generate_primary_proof(
+            let res = prover::generate_primary_proof_with_transcript(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
                 &cur_pubkeys,
                 last_seen_for_upd,
+                transcript,
             );
             driver.key_manager_mut().unload_primary_pk();
             match res {
@@ -211,18 +218,22 @@ pub(super) async fn drive_next_bk_update(
             }
         }
         AttestationEvidence::Fallback { primary, fallback } => {
-            info!("bk-update {}: FALLBACK path → Circuit 1b", upd_seqno);
+            info!(
+                "bk-update {}: FALLBACK path → Circuit 1b (transcript={:?})",
+                upd_seqno, transcript,
+            );
             driver
                 .key_manager_mut()
                 .load_fallback_pk()
                 .with_context(|| format!("bk-update {}: load_fallback_pk", upd_seqno))
                 .map_err(|e| DriverError::proof_gen(upd_seqno, e))?;
-            let res = prover::generate_fallback_proof(
+            let res = prover::generate_fallback_proof_with_transcript(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,
                 &fallback.raw_bytes,
                 &cur_pubkeys,
                 last_seen_for_upd,
+                transcript,
             );
             driver.key_manager_mut().unload_fallback_pk();
             match res {
@@ -268,6 +279,7 @@ pub(super) async fn drive_next_bk_update(
         merkle_sibling_h01_be: l2_l3_siblings[0],
         merkle_sibling_h4_7_be: l2_l3_siblings[1],
         merkle_sibling_h8_15_be: l2_l3_siblings[2],
+        transcript_kind: transcript,
         attestation_proof: upd_proof.proof_bytes,
         new_pubkeys,
         primary_proof_gen_ms,

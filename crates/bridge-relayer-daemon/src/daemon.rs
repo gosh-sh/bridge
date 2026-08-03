@@ -31,7 +31,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     bridge::BridgeClient,
@@ -306,6 +306,16 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                         }
                     }
                     summary.tick_errors += 1;
+                    if matches!(e, RelayerError::Stuck { .. }) {
+                        // Hard stop: same seqNo has been rejected past the
+                        // abort threshold. Log loudly and break out of the
+                        // loop so the operator has to intervene instead of
+                        // watching us retry the same broken block forever.
+                        // `summary` is discarded on Err — caller receives
+                        // the RelayerError directly.
+                        error!(error = ?e, "daemon: stuck — hard aborting");
+                        return Err(e);
+                    }
                     warn!(error = ?e, "daemon: tick failed, will back off");
                     (false, LastOutcome::TickError)
                 },
@@ -386,6 +396,9 @@ mod tests {
             // with the rest of the test rig.
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            // Tests want soft-retry semantics: mock bridge tests exercise
+            // long revert streaks and would trip the abort gate.
+            max_attempts_abort: u32::MAX,
         };
         Relayer::new(
             cfg,

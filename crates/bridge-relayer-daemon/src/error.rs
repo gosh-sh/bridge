@@ -50,6 +50,18 @@ pub enum RelayerError {
     #[error("acki-nacki interface error: {0}")]
     AckiNacki(String),
 
+    /// The same target seqNo has been rejected `attempts` times in a row
+    /// — treated as terminal so the daemon loop breaks out of the
+    /// exponential-backoff retry cycle instead of spinning forever on a
+    /// genuinely broken block. Operator has to intervene (fix the proof,
+    /// bump `state.json`, or restart).
+    #[error("relayer stuck on seqNo={seq_no} after {attempts} rejects: {reason}")]
+    Stuck {
+        seq_no: u64,
+        attempts: u32,
+        reason: String,
+    },
+
     /// An unexpected condition we don't have a finer-grained variant
     /// for. Use sparingly.
     #[error("relayer error: {0}")]

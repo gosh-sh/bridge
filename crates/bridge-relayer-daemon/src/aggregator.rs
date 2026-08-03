@@ -675,9 +675,11 @@ pub struct SubprocessCircuit1a1b2SnarkProverConfig {
     pub params_dir: PathBuf,
     /// Acki Nacki GraphQL endpoint (passed via `--endpoint`).
     pub gql_endpoint: String,
-    /// Optional BK-set JSON fallback path (passed via `--bk-set-config`) for
-    /// endpoints that do not expose the set. `None` omits the flag.
-    pub bk_set_config: Option<PathBuf>,
+    /// BK-set JSON path (passed via `--bk-set-config`). Required: the
+    /// orchestrator hard-errors ("GraphQL BK-set fetch is disabled") if
+    /// this flag is missing, so we surface it as mandatory in the type
+    /// rather than let the daemon discover it at first live prove.
+    pub bk_set_config: PathBuf,
     /// Hard timeout for the (cold-PK) proving run.
     pub timeout: Duration,
 }
@@ -687,19 +689,15 @@ impl SubprocessCircuit1a1b2SnarkProverConfig {
         orchestrator_dir: impl Into<PathBuf>,
         params_dir: impl Into<PathBuf>,
         gql_endpoint: impl Into<String>,
+        bk_set_config: impl Into<PathBuf>,
     ) -> Self {
         Self {
             orchestrator_dir: orchestrator_dir.into(),
             params_dir: params_dir.into(),
             gql_endpoint: gql_endpoint.into(),
-            bk_set_config: None,
+            bk_set_config: bk_set_config.into(),
             timeout: Duration::from_secs(1800),
         }
-    }
-
-    pub fn with_bk_set_config(mut self, path: impl Into<PathBuf>) -> Self {
-        self.bk_set_config = Some(path.into());
-        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -721,10 +719,8 @@ impl SubprocessCircuit1a1b2SnarkProver {
         if let Ok(abs) = config.params_dir.canonicalize() {
             config.params_dir = abs;
         }
-        if let Some(bk) = config.bk_set_config.as_ref() {
-            if let Ok(abs) = bk.canonicalize() {
-                config.bk_set_config = Some(abs);
-            }
+        if let Ok(abs) = config.bk_set_config.canonicalize() {
+            config.bk_set_config = abs;
         }
         Self {
             config,
@@ -778,10 +774,8 @@ impl SubprocessCircuit1a1b2SnarkProver {
                 }
             }
         }
-        if let Some(bk) = self.config.bk_set_config.as_ref() {
-            args.push("--bk-set-config".to_string());
-            args.push(bk.display().to_string());
-        }
+        args.push("--bk-set-config".to_string());
+        args.push(self.config.bk_set_config.display().to_string());
         args
     }
 }
@@ -1109,6 +1103,7 @@ mod tests {
             "/orch",
             "/params",
             "https://an.example/graphql",
+            "/etc/bk_set.json",
         );
         let prover = SubprocessCircuit1a1b2SnarkProver {
             config: cfg,
@@ -1136,6 +1131,8 @@ mod tests {
             "circuit1a",
             "--last-seen",
             "1083904",
+            "--bk-set-config",
+            "/etc/bk_set.json",
         ]);
     }
 
@@ -1145,8 +1142,8 @@ mod tests {
             "/orch",
             "/params",
             "https://an.example/graphql",
-        )
-        .with_bk_set_config("/etc/bk_set.json");
+            "/etc/bk_set.json",
+        );
         let prover = SubprocessCircuit1a1b2SnarkProver {
             config: cfg,
         };
@@ -1184,6 +1181,7 @@ mod tests {
             "/orch",
             "/params",
             "https://an.example/graphql",
+            "/etc/bk_set.json",
         );
         let prover = SubprocessCircuit1a1b2SnarkProver {
             config: cfg,
@@ -1211,6 +1209,8 @@ mod tests {
             "circuit2",
             "--state",
             "/state/prover_state.json",
+            "--bk-set-config",
+            "/etc/bk_set.json",
         ]);
     }
 

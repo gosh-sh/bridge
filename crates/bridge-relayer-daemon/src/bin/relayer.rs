@@ -2007,8 +2007,8 @@ async fn run_daemon_live(
             &agg_cfg.orchestrator_dir,
             &params_dir,
             &gql_endpoint,
-        )
-        .with_bk_set_config(&agg_cfg.bk_set_config_for_subprocess);
+            &agg_cfg.bk_set_config_for_subprocess,
+        );
         let aggregator_cfg = SubprocessAggregatorConfig::new(
             &agg_cfg.aggregator_dir,
             &agg_cfg.verifiers_dir,

@@ -56,7 +56,7 @@ use bridge_prover_lib::{
     transcript::TranscriptKind,
     verifier, Fr,
 };
-use bridge_prover_orchestrator::{halo2_snark::export_poseidon_snark, proof_export::save_instances_binary};
+use bridge_prover_orchestrator::{halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary};
 use clap::{Parser, ValueEnum};
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use halo2_base::halo2_proofs::poly::commitment::Params;
@@ -476,9 +476,21 @@ fn finish(
     save_instances_binary(instances, &instances_path)?;
     let out_snark = snark_dir.join(format!("{name}.snark"));
 
-    export_poseidon_snark(
+    // The layer VK is keygen'd against the shared K=20 ceremony SRS while
+    // `layer_config_params.json` records k=17 — see the doc-comment on
+    // `export_poseidon_snark_with_srs_k`. Without this override the call
+    // panics with `assertion left(20) == right(17)` inside snark_verifier's
+    // `compile()`. Primary/fallback have config.k matching their keygen SRS,
+    // so no override is needed there.
+    let srs_k_override = match key_prefix {
+        "layer" => Some(20u32),
+        _ => None,
+    };
+
+    export_poseidon_snark_with_srs_k(
         &params_dir.join(format!("{key_prefix}_vk.bin")),
         &params_dir.join(format!("{key_prefix}_config_params.json")),
+        srs_k_override,
         &proof_path,
         instances,
         &out_snark,

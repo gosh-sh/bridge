@@ -1,44 +1,49 @@
 //! [`BlockSource`] / [`BkUpdateSource`] wrapper that swaps the daemon's
-//! Blake2b Circuit 1A/1B/2 proof bytes for **Poseidon** R15 SHPLONK aggregator
-//! calldata, produced out-of-process via
-//! [`crate::aggregator::Circuit12ShplonkPipeline`].
+//! Circuit 1A/1B/2 Poseidon proof bytes for **R15 SHPLONK aggregator
+//! calldata**, produced by [`crate::aggregator::Circuit12ShplonkPipeline`]
+//! (in-process snark wrap + `aggregate-proof` subprocess).
 //!
-//! Motivation. The AN-side daemon (`bridge-prover-lib`) proves Circuits 1A/1B/2
-//! with a Blake2b Fiat–Shamir transcript — the flavour AN's own
-//! `ZKHALO2VERIFYWITHVK` VM opcode expects. The Ethereum-side aggregator only
-//! consumes **Poseidon** inner snarks. Rather than re-plumb the daemon to also
-//! prove Poseidon (which would double proving cost per bundle and break AN-side
-//! self-verify), we shell out to the orchestrator's
-//! `export-1a1b2-poseidon-snark` binary to re-prove the same live witness with
-//! the ETH-side flavour, then wrap the snark in
-//! `bridge-evm-aggregator::aggregate-proof`. This mirrors the pattern already
-//! working for Circuit 4 (see [`crate::aggregator::Circuit4ShplonkPipeline`]),
-//! and keeps the two toolchains in separate cargo workspaces (the daemon uses
-//! the gosh halo2-base fork; the aggregator uses axiom-crypto/halo2-lib — mixing
-//! them in one build unit does not compile).
+//! Motivation. `bridge-prover-lib`'s [`LiveProverDriver`] proves Circuits
+//! 1A/1B/2 with whichever transcript the caller selects via
+//! [`LiveProverConfig::transcript`]; the relayer's `run_daemon_live` requests
+//! [`TranscriptKind::Poseidon`] so the delivered [`BundleProofArtifacts`]
+//! already carry Poseidon-transcript proof bytes — exactly the flavour the
+//! ETH aggregator consumes. All this wrapper does is take those bytes plus
+//! the peek fields, wrap them into a snark-verifier `Snark` **in-process**
+//! (via `bridge-snark-wrap`), and hand the bincode Snark to
+//! `bridge-evm-aggregator::aggregate-proof`.
+//!
+//! What this replaces. The former design shelled out to
+//! `bridge-prover-orchestrator/export-1a1b2-poseidon-snark`, which
+//! independently re-fetched from GraphQL, re-ran `real_chain_builder`, and
+//! re-proved the same witness — doubling the GQL fetches, chain builds, and
+//! Halo2 proves per key block. The subprocess is gone; only the
+//! `aggregate-proof` subprocess remains (its `snark-verifier` transitive
+//! graph resolves halo2-base to axiom's crate, which cannot coexist in one
+//! build unit with the gosh fork the daemon links).
 //!
 //! Wiring. [`AggregatedBlockSource`] wraps an existing [`Arc<LiveBlockSource>`]:
 //!
 //! - `fetch(target)` — delegate to the inner [`BlockSource::fetch`]. If a
 //!   bundle came back, [`peek_pending_bundle`] the raw
-//!   [`BundleProofArtifacts`] (needed for `last_seen_block_seq_no`, which the
-//!   shape-preserving [`AnBlockData::from`] conversion drops); snapshot the
-//!   driver's [`BridgeState`] to a per-bundle temp JSON so the C2 subprocess
-//!   has a `--state` argument free from state.json races (the daemon persists
-//!   its state.json only after ack); run the two calldata pipelines; splice
-//!   the results into `AnBlockData.attestation_proof` /
-//!   `AnBlockData.layer_hashes_proof`. Ack semantics are unchanged — the
-//!   inner [`LiveBlockSource`] retains the pending [`BundleProofArtifacts`]
-//!   and clears it only when [`ack_last_bundle`] fires after the ETH tx.
+//!   [`BundleProofArtifacts`] (source of the Poseidon proof bytes + the
+//!   public-input fields the shape-preserving [`AnBlockData::from`]
+//!   conversion drops); run the wrap+aggregate pipeline for the attestation
+//!   proof and again for the layer proof; splice the resulting calldata
+//!   into `AnBlockData.attestation_proof` / `AnBlockData.layer_hashes_proof`.
+//!   Ack semantics are unchanged — the inner [`LiveBlockSource`] retains
+//!   the pending [`BundleProofArtifacts`] and clears it only when
+//!   [`ack_last_bundle`] fires after the ETH tx.
 //!
 //! - `fetch_bk_update(target)` — same shape, minus C2: BK-set rotations only
-//!   consume an attestation proof (Solidity `applyBkSetUpdate`). Snapshot is
-//!   not needed; the attestation subprocess is stateless.
+//!   consume an attestation proof (Solidity `applyBkSetUpdate`).
 //!
 //! [`peek_pending_bundle`]: crate::live_source::LiveBlockSource::peek_pending_bundle
-//! [`BridgeState`]: bridge_prover_lib::bridge_state::BridgeState
+//! [`LiveProverDriver`]: bridge_prover_lib::live_driver::LiveProverDriver
+//! [`LiveProverConfig::transcript`]: bridge_prover_lib::live_driver::LiveProverConfig
+//! [`TranscriptKind::Poseidon`]: bridge_prover_lib::transcript::TranscriptKind
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bridge_prover_lib::{
@@ -48,7 +53,7 @@ use bridge_prover_lib::{
 use tracing::info;
 
 use crate::{
-    aggregator::{Circuit12ShplonkPipeline, Circuit1a1b2SnarkProver, ProofAggregator},
+    aggregator::{Circuit12ShplonkPipeline, ProofAggregator, SnarkWrapper},
     error::RelayerError,
     live_source::LiveBlockSource,
     source::{BkUpdateSource, BlockSource},
@@ -89,37 +94,26 @@ impl LiveArtifactPeek for LiveBlockSource {
 /// the inner source so integration tests can plug in a stub implementing
 /// [`BlockSource`] + [`BkUpdateSource`] + [`LiveArtifactPeek`] without
 /// standing up a real `LiveProverDriver`.
-///
-/// `snark_dir` is the working directory for per-bundle `.snark` /
-/// `.instances.bin` artefacts (created if missing). It is reused across
-/// invocations — subsequent runs simply overwrite the fixed-name files
-/// (`circuit1a.snark`, `circuit1b.snark`, `circuit2.snark`).
-pub struct AggregatedBlockSource<I, S, A>
+pub struct AggregatedBlockSource<I, W, A>
 where
     I: BlockSource + BkUpdateSource + LiveArtifactPeek,
-    S: Circuit1a1b2SnarkProver,
+    W: SnarkWrapper,
     A: ProofAggregator,
 {
     inner: Arc<I>,
-    pipeline: Circuit12ShplonkPipeline<S, A>,
-    snark_dir: PathBuf,
+    pipeline: Circuit12ShplonkPipeline<W, A>,
 }
 
-impl<I, S, A> AggregatedBlockSource<I, S, A>
+impl<I, W, A> AggregatedBlockSource<I, W, A>
 where
     I: BlockSource + BkUpdateSource + LiveArtifactPeek,
-    S: Circuit1a1b2SnarkProver,
+    W: SnarkWrapper,
     A: ProofAggregator,
 {
-    pub fn new(
-        inner: Arc<I>,
-        pipeline: Circuit12ShplonkPipeline<S, A>,
-        snark_dir: impl Into<PathBuf>,
-    ) -> Self {
+    pub fn new(inner: Arc<I>, pipeline: Circuit12ShplonkPipeline<W, A>) -> Self {
         Self {
             inner,
             pipeline,
-            snark_dir: snark_dir.into(),
         }
     }
 
@@ -128,46 +122,23 @@ where
     pub fn inner(&self) -> &Arc<I> {
         &self.inner
     }
-
-    /// Snapshot the driver's current `BridgeState` to a per-bundle temp file
-    /// so the C2 subprocess reads a stable view even if a concurrent ack
-    /// rewrites the daemon's state.json. Path lifetime is bounded by the
-    /// caller's `TempFile` binding — we return an absolute path.
-    async fn snapshot_state_to_temp(
-        &self,
-        seq_no: u64,
-    ) -> Result<tempfile::NamedTempFile, RelayerError> {
-        let snap = self.inner.snapshot_bridge_state().await;
-        let file = tempfile::Builder::new()
-            .prefix(&format!("bridge_state_{seq_no}_"))
-            .suffix(".json")
-            .tempfile()
-            .map_err(|e| RelayerError::other(format!("tempfile: {e}")))?;
-        let path = file
-            .path()
-            .to_str()
-            .ok_or_else(|| RelayerError::other("tempfile path is not UTF-8"))?
-            .to_string();
-        snap.save(&path)
-            .map_err(|e| RelayerError::other(format!("save snapshot state: {e}")))?;
-        Ok(file)
-    }
 }
 
 #[async_trait]
-impl<I, S, A> BlockSource for AggregatedBlockSource<I, S, A>
+impl<I, W, A> BlockSource for AggregatedBlockSource<I, W, A>
 where
     I: BlockSource + BkUpdateSource + LiveArtifactPeek + 'static,
-    S: Circuit1a1b2SnarkProver + 'static,
+    W: SnarkWrapper + 'static,
     A: ProofAggregator + 'static,
 {
     async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
         let Some(mut block) = self.inner.fetch(target).await? else {
             return Ok(None);
         };
-        // Recover the raw pending artifacts to source `last_seen_block_seq_no`
-        // — that public input is required by the attestation circuits but
-        // does not survive the shape-preserving `AnBlockData::from`.
+        // Recover the raw pending artifacts. Beyond `last_seen_block_seq_no`
+        // (dropped by the shape-preserving `AnBlockData::from`), we also need
+        // the Poseidon proof bytes and the byte-form public inputs to
+        // reconstruct the Fr instance vectors the aggregator wrap consumes.
         let pending = self.inner.peek_pending_bundle().await.ok_or_else(|| {
             RelayerError::other(
                 "aggregated_source: fetch returned a block but peek_pending_bundle is empty \
@@ -185,18 +156,30 @@ where
         info!(
             seq_no = seqno,
             last_seen = last_seen,
-            "aggregated_source: re-proving attestation + layer with Poseidon",
+            "aggregated_source: wrap+aggregate attestation + layer (Poseidon)",
         );
-
-        let state_file = self.snapshot_state_to_temp(seqno).await?;
 
         let attestation_calldata = self
             .pipeline
-            .prove_attestation(block.fin_type, seqno, last_seen, &self.snark_dir)
+            .aggregate_attestation(
+                block.fin_type,
+                &pending.attestation_proof,
+                &pending.block_id_be,
+                &pending.bk_set_commitment_be,
+                seqno,
+                last_seen,
+            )
             .await?;
         let layer_calldata = self
             .pipeline
-            .prove_layer(seqno, state_file.path(), &self.snark_dir)
+            .aggregate_layer(
+                &pending.layer_hashes_proof,
+                &pending.block_id_be,
+                &pending.bk_set_commitment_be,
+                pending.num_layers,
+                &pending.layer_hashes_be,
+                &pending.prev_max_level_layer_hash_be,
+            )
             .await?;
 
         block.attestation_proof = alloy::primitives::Bytes::from(attestation_calldata);
@@ -216,10 +199,10 @@ where
 }
 
 #[async_trait]
-impl<I, S, A> BkUpdateSource for AggregatedBlockSource<I, S, A>
+impl<I, W, A> BkUpdateSource for AggregatedBlockSource<I, W, A>
 where
     I: BlockSource + BkUpdateSource + LiveArtifactPeek + 'static,
-    S: Circuit1a1b2SnarkProver + 'static,
+    W: SnarkWrapper + 'static,
     A: ProofAggregator + 'static,
 {
     async fn fetch_bk_update(
@@ -246,12 +229,22 @@ where
         info!(
             seq_no = seqno,
             last_seen = last_seen,
-            "aggregated_source: re-proving bk-update attestation with Poseidon",
+            "aggregated_source: wrap+aggregate bk-update attestation (Poseidon)",
         );
 
+        // For bk-update, the attestation is against the OLD BK-set commitment
+        // (Circuit 1A/1B binds `bk_set_commitment_fr` = old set); the layer
+        // proof is not part of this lane.
         let attestation_calldata = self
             .pipeline
-            .prove_attestation(upd.fin_type, seqno, last_seen, &self.snark_dir)
+            .aggregate_attestation(
+                upd.fin_type,
+                &pending.attestation_proof,
+                &pending.block_id_be,
+                &pending.old_bk_set_commitment_be,
+                seqno,
+                last_seen,
+            )
             .await?;
         upd.attestation_proof = alloy::primitives::Bytes::from(attestation_calldata);
         Ok(Some(upd))
@@ -264,22 +257,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    //! Integration coverage for the peek → prove → swap path — proves the
-    //! wiring between [`BlockSource`] / [`BkUpdateSource`] delegation,
-    //! [`LiveArtifactPeek`] extraction, and
+    //! Integration coverage for the peek → wrap → aggregate → swap path —
+    //! proves the wiring between [`BlockSource`] / [`BkUpdateSource`]
+    //! delegation, [`LiveArtifactPeek`] extraction, and
     //! [`Circuit12ShplonkPipeline`] stays intact if any of the three arms
-    //! change. Uses a stubbed inner source + [`MockCircuit1a1b2SnarkProver`]
-    //! + [`MockAggregator`] so no real halo2 / subprocess plumbing runs.
+    //! change. Uses a stubbed inner source + [`MockSnarkWrapper`] +
+    //! [`RecordingAggregator`] wrapper around [`MockAggregator`] so no real
+    //! halo2 / subprocess plumbing runs.
     //!
-    //! What is NOT covered here: the aggregator subprocess itself (unit-
-    //! tested in `aggregator.rs`), the `LiveBlockSource` GQL/driver plumbing
-    //! (covered by prover-lib integration tests), and end-to-end Solidity
-    //! calldata acceptance (covered by anvil harness).
+    //! What is NOT covered here: the real snark-verifier wrap (which needs
+    //! params_dir + VK + SRS + config on disk; validated at the
+    //! `bridge-snark-wrap` crate level), the `aggregate-proof` subprocess
+    //! itself, the `LiveBlockSource` GQL/driver plumbing (covered by
+    //! prover-lib integration tests), and end-to-end Solidity calldata
+    //! acceptance (covered by anvil harness).
     use super::*;
-    use crate::aggregator::{
-        Circuit1a1b2Request, Circuit1a1b2SnarkProver, MockAggregator,
-        MockCircuit1a1b2SnarkProver, SnarkArtefacts,
-    };
+    use crate::aggregator::{MockAggregator, MockSnarkWrapper, ProofAggregator};
     use crate::types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
     use alloy::primitives::{Bytes, U256};
     use bridge_prover_lib::{
@@ -290,36 +283,31 @@ mod tests {
         transcript::TranscriptKind,
     };
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    /// Records `prove` invocations so tests can assert the pipeline
-    /// received the expected `(request, seqno, last_seen, state_path?)`
-    /// tuple after passing through [`AggregatedBlockSource`].
+    /// Records `aggregate` invocations so tests can assert the pipeline
+    /// received the expected `(verifier_name, snark_path)` after passing
+    /// through [`AggregatedBlockSource`]. Wraps [`MockAggregator`] so the
+    /// downstream `BlockSource` calldata swap still sees valid bytes.
     #[derive(Default)]
-    struct RecordingSnarkProver {
-        inner: MockCircuit1a1b2SnarkProver,
-        calls: Mutex<Vec<(Circuit1a1b2Request, u64, u32, bool)>>,
+    struct RecordingAggregator {
+        inner: MockAggregator,
+        calls: Mutex<Vec<(String, PathBuf)>>,
     }
 
     #[async_trait]
-    impl Circuit1a1b2SnarkProver for RecordingSnarkProver {
-        async fn prove(
+    impl ProofAggregator for RecordingAggregator {
+        async fn aggregate(
             &self,
-            request: Circuit1a1b2Request,
-            seqno: u64,
-            last_seen: u32,
-            state_path: Option<&Path>,
-            snark_dir: &Path,
-            name: &str,
-        ) -> Result<SnarkArtefacts, RelayerError> {
+            inner_snark: &Path,
+            verifier_name: &str,
+        ) -> Result<Vec<u8>, RelayerError> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((request, seqno, last_seen, state_path.is_some()));
-            self.inner
-                .prove(request, seqno, last_seen, state_path, snark_dir, name)
-                .await
+                .push((verifier_name.to_string(), inner_snark.to_path_buf()));
+            self.inner.aggregate(inner_snark, verifier_name).await
         }
     }
 
@@ -478,20 +466,18 @@ mod tests {
 
     fn make_aggregated(
         stub: Arc<StubInnerSource>,
-        snark_dir: &Path,
-    ) -> AggregatedBlockSource<StubInnerSource, RecordingSnarkProver, MockAggregator> {
+    ) -> AggregatedBlockSource<StubInnerSource, MockSnarkWrapper, RecordingAggregator> {
         let pipeline = crate::aggregator::Circuit12ShplonkPipeline::new(
-            RecordingSnarkProver::default(),
-            MockAggregator::default(),
+            MockSnarkWrapper::default(),
+            RecordingAggregator::default(),
         );
-        AggregatedBlockSource::new(stub, pipeline, snark_dir.to_path_buf())
+        AggregatedBlockSource::new(stub, pipeline)
     }
 
     #[tokio::test]
     async fn fetch_returns_none_when_inner_returns_none() {
         let stub = Arc::new(StubInnerSource::default());
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(stub, dir.path());
+        let src = make_aggregated(stub);
         assert!(src.fetch(1).await.unwrap().is_none());
     }
 
@@ -503,8 +489,7 @@ mod tests {
         // wrongly-labeled proof.
         let stub = Arc::new(StubInnerSource::default());
         stub.stage_bundle_without_pending(stub_block(42, FinalizationType::Primary));
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(stub, dir.path());
+        let src = make_aggregated(stub);
         let err = src.fetch(42).await.unwrap_err();
         assert!(
             format!("{err}").contains("peek_pending_bundle is empty"),
@@ -519,8 +504,7 @@ mod tests {
             stub_block(100, FinalizationType::Primary),
             stub_bundle_artifacts(100, 99, BundleFinalizationType::Primary),
         );
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(Arc::clone(&stub), dir.path());
+        let src = make_aggregated(Arc::clone(&stub));
 
         let out = src.fetch(100).await.unwrap().expect("fetch must return Some");
 
@@ -531,33 +515,28 @@ mod tests {
         assert_eq!(out.block_seq_no, 100);
         assert_eq!(out.fin_type, FinalizationType::Primary);
 
-        // Two prove() calls: attestation (Primary) then layer.
-        let calls = src.pipeline.snark_prover.calls.lock().unwrap().clone();
+        // Two aggregate() calls: attestation (Primary verifier) then layer.
+        let calls = src.pipeline.aggregator.calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0], (Circuit1a1b2Request::Primary, 100, 99, false));
-        assert_eq!(calls[1].0, Circuit1a1b2Request::Layer);
-        assert_eq!(calls[1].1, 100);
-        assert!(calls[1].3, "layer prove must receive a state_path");
+        assert_eq!(calls[0].0, crate::aggregator::PRIMARY_VERIFIER_NAME);
+        assert_eq!(calls[1].0, crate::aggregator::LAYER_HASHES_VERIFIER_NAME);
     }
 
     #[tokio::test]
     async fn fetch_routes_fallback_to_fallback_verifier() {
-        // The Blake2b→Poseidon re-prove has to select the right attestation
-        // circuit (1A vs 1B). `AggregatedBlockSource::fetch` reads
-        // `block.fin_type` — verifying the mapping here catches accidental
+        // `AggregatedBlockSource::fetch` reads `block.fin_type` to pick the
+        // aggregator verifier — verifying the mapping here catches accidental
         // hardcodes to Primary.
         let stub = Arc::new(StubInnerSource::default());
         stub.stage_bundle(
             stub_block(200, FinalizationType::Fallback),
             stub_bundle_artifacts(200, 150, BundleFinalizationType::Fallback),
         );
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(Arc::clone(&stub), dir.path());
+        let src = make_aggregated(Arc::clone(&stub));
 
         let _ = src.fetch(200).await.unwrap().unwrap();
-        let calls = src.pipeline.snark_prover.calls.lock().unwrap().clone();
-        assert_eq!(calls[0].0, Circuit1a1b2Request::Fallback);
-        assert_eq!(calls[0].2, 150, "last_seen must plumb through unchanged");
+        let calls = src.pipeline.aggregator.calls.lock().unwrap().clone();
+        assert_eq!(calls[0].0, crate::aggregator::FALLBACK_VERIFIER_NAME);
     }
 
     #[tokio::test]
@@ -567,8 +546,7 @@ mod tests {
             stub_bkupd_data(300, FinalizationType::Primary),
             stub_bkupd_artifacts(300, 299, BundleFinalizationType::Primary),
         );
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(Arc::clone(&stub), dir.path());
+        let src = make_aggregated(Arc::clone(&stub));
 
         let out = src
             .fetch_bk_update(300)
@@ -579,17 +557,16 @@ mod tests {
         assert_eq!(out.block_seq_no, 300);
         assert_eq!(out.fin_type, FinalizationType::Primary);
 
-        // Exactly one prove() call — the bk-update lane never runs Circuit 2.
-        let calls = src.pipeline.snark_prover.calls.lock().unwrap().clone();
+        // Exactly one aggregate() call — the bk-update lane never runs Circuit 2.
+        let calls = src.pipeline.aggregator.calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], (Circuit1a1b2Request::Primary, 300, 299, false));
+        assert_eq!(calls[0].0, crate::aggregator::PRIMARY_VERIFIER_NAME);
     }
 
     #[tokio::test]
     async fn fetch_bk_update_returns_none_when_inner_returns_none() {
         let stub = Arc::new(StubInnerSource::default());
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(stub, dir.path());
+        let src = make_aggregated(stub);
         assert!(src.fetch_bk_update(1).await.unwrap().is_none());
     }
 
@@ -599,8 +576,7 @@ mod tests {
         // pending BundleProofArtifacts still lives in `LiveBlockSource`
         // and only its ack clears it.
         let stub = Arc::new(StubInnerSource::default());
-        let dir = tempfile::tempdir().unwrap();
-        let src = make_aggregated(Arc::clone(&stub), dir.path());
+        let src = make_aggregated(Arc::clone(&stub));
 
         src.ack_last_bundle(7).await.unwrap();
         src.ack_last_bk_update(42).await.unwrap();

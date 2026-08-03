@@ -400,16 +400,14 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Enable ETH-side Poseidon re-prove + R15 SHPLONK aggregation
-        /// (Circuits 1A/1B/2). Wraps `LiveBlockSource` with
-        /// [`AggregatedBlockSource`]. Requires `--orchestrator-dir`,
-        /// `--aggregator-dir`, `--verifiers-dir`, `--snark-dir`.
+        /// Enable ETH-side R15 SHPLONK aggregation (Circuits 1A/1B/2).
+        /// Wraps `LiveBlockSource` with [`AggregatedBlockSource`], which
+        /// consumes the Poseidon proof bytes emitted directly by
+        /// `LiveProverDriver` (with `TranscriptKind::Poseidon`) via
+        /// in-process `bridge_snark_wrap`. Requires `--aggregator-dir`
+        /// and `--verifiers-dir`.
         #[arg(long, env = "BRIDGE_ENABLE_C12_AGGREGATION")]
         enable_c12_aggregation: bool,
-        /// Path to the `crates/bridge-prover-orchestrator` root (used by the
-        /// `export-1a1b2-poseidon-snark` subprocess).
-        #[arg(long, env = "BRIDGE_ORCHESTRATOR_DIR")]
-        orchestrator_dir: Option<PathBuf>,
         /// Path to the `crates/bridge-evm-aggregator` root (used by the
         /// `aggregate-proof` subprocess).
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
@@ -417,10 +415,6 @@ enum Cmd {
         /// Directory of committed verifier `.bin` files (aggregator self-check).
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: Option<PathBuf>,
-        /// Working directory for intermediate `.snark` / `.instances.bin`.
-        /// Defaults to `{prover_state_dir}/aggregation_snarks`.
-        #[arg(long, env = "BRIDGE_SNARK_DIR")]
-        snark_dir: Option<PathBuf>,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -725,10 +719,8 @@ async fn main() -> anyhow::Result<()> {
             backoff_max_secs,
             backoff_multiplier,
             enable_c12_aggregation,
-            orchestrator_dir,
             aggregator_dir,
             verifiers_dir,
-            snark_dir,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -736,11 +728,6 @@ async fn main() -> anyhow::Result<()> {
                 multiplier: backoff_multiplier,
             };
             let aggregation = if enable_c12_aggregation {
-                let orchestrator_dir = orchestrator_dir.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--enable-c12-aggregation set but --orchestrator-dir missing"
-                    )
-                })?;
                 let aggregator_dir = aggregator_dir.ok_or_else(|| {
                     anyhow::anyhow!(
                         "--enable-c12-aggregation set but --aggregator-dir missing"
@@ -752,11 +739,8 @@ async fn main() -> anyhow::Result<()> {
                     )
                 })?;
                 Some(C12AggregationCfg {
-                    orchestrator_dir,
                     aggregator_dir,
                     verifiers_dir,
-                    snark_dir,
-                    bk_set_config_for_subprocess: bk_set_config.clone(),
                 })
             } else {
                 None
@@ -1815,11 +1799,8 @@ async fn submit_bk_update(
 /// `AnBlockData.layer_hashes_proof` (and BK-update `attestation_proof`) carry
 /// the aggregator calldata the Solidity `AckiNackiBridge` accepts.
 struct C12AggregationCfg {
-    orchestrator_dir: PathBuf,
     aggregator_dir: PathBuf,
     verifiers_dir: PathBuf,
-    snark_dir: Option<PathBuf>,
-    bk_set_config_for_subprocess: PathBuf,
 }
 
 async fn run_daemon_live(
@@ -1842,6 +1823,7 @@ async fn run_daemon_live(
         keys::KeyManager,
         live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
         prover_bk_set::ProverBkSet,
+        transcript::TranscriptKind,
     };
     use tokio::sync::Mutex;
 
@@ -1942,6 +1924,11 @@ async fn run_daemon_live(
         prover_bk_set,
         LiveProverConfig {
             seed_policy,
+            // Emit Poseidon-transcript proofs directly. Consumed in-process
+            // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
+            // the old `export-1a1b2-poseidon-snark` subprocess that
+            // independently re-fetched + re-proved every bundle.
+            transcript: TranscriptKind::Poseidon,
             ..Default::default()
         },
     )
@@ -1994,37 +1981,23 @@ async fn run_daemon_live(
     // Relayer via `spawn_and_run` (below) instead of unifying via `dyn`.
     if let Some(agg_cfg) = aggregation {
         use bridge_relayer_daemon::{
-            AggregatedBlockSource, Circuit12ShplonkPipeline,
+            AggregatedBlockSource, Circuit12ShplonkPipeline, PoseidonSnarkWrapper,
             SubprocessAggregator, SubprocessAggregatorConfig,
-            SubprocessCircuit1a1b2SnarkProver, SubprocessCircuit1a1b2SnarkProverConfig,
         };
-        let snark_dir = agg_cfg
-            .snark_dir
-            .clone()
-            .unwrap_or_else(|| prover_state_dir.join("aggregation_snarks"));
-        std::fs::create_dir_all(&snark_dir)?;
-        let snark_prover_cfg = SubprocessCircuit1a1b2SnarkProverConfig::new(
-            &agg_cfg.orchestrator_dir,
-            &params_dir,
-            &gql_endpoint,
-            &agg_cfg.bk_set_config_for_subprocess,
-        );
         let aggregator_cfg = SubprocessAggregatorConfig::new(
             &agg_cfg.aggregator_dir,
             &agg_cfg.verifiers_dir,
             &params_dir,
         );
         let pipeline = Circuit12ShplonkPipeline::new(
-            SubprocessCircuit1a1b2SnarkProver::new(snark_prover_cfg),
+            PoseidonSnarkWrapper::new(&params_dir),
             SubprocessAggregator::new(aggregator_cfg),
         );
         let aggregated = Arc::new(AggregatedBlockSource::new(
             Arc::clone(&live_source),
             pipeline,
-            snark_dir,
         ));
         info!(
-            orchestrator_dir = %agg_cfg.orchestrator_dir.display(),
             aggregator_dir = %agg_cfg.aggregator_dir.display(),
             verifiers_dir = %agg_cfg.verifiers_dir.display(),
             "daemon-live: C1/C2 R15 SHPLONK aggregation ENABLED",

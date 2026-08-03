@@ -111,7 +111,7 @@ Without this, exposing `chainId`/bridge as public inputs buys nothing — the co
 
 ## Opcode / SRS (our side — already done)
 
-- tvm-sdk PR **[tvmlabs/tvm-sdk#279](https://github.com/tvmlabs/tvm-sdk/pull/279)** (branch `pruvendo/deposit-chainid-12pi-hermez-srs`, tip `e6d8c3dd` — carries the rotated `7322fb82…` fixtures; opcode change itself is `dff52fd1`, base `full_dex_and_bridge_test_with_final_halo2_circuit`).
+- tvm-sdk PR **[tvmlabs/tvm-sdk#279](https://github.com/tvmlabs/tvm-sdk/pull/279)** (branch `pruvendo/deposit-chainid-12pi-hermez-srs`, tip `4cebf481` — carries the rotated `9dacd998…` fixtures; opcode change itself is `dff52fd1`, base `full_dex_and_bridge_test_with_final_halo2_circuit`).
 - `ZKHALO2VERIFYWITHVK` verifier params (`build_shared_kzg_params` → `KZG_S_G2_BYTES`) switched from the AN chain ceremony to the **Hermez** `[s]·G2` (`92 8f af b3 …`). Deposit proofs are now keyed on `deposit-prover/data/kzg_params_18.srs` (Hermez), NOT the chain ceremony.
 - Legacy Dark DEX `ZKHALO2VERIFY` path is **unchanged** (`DARK_DEX_KZG_S_G2_BYTES` = chain ceremony). The two constants now differ by design.
 - Verified: `cargo +nightly test -p tvm_vm --features gosh deposit_rlc` → **3/3 green** (`round_trip_deposit_rlc_real_proof_returns_true`, flipped-byte reject, cache reuse).

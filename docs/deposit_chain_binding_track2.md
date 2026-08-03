@@ -44,32 +44,41 @@ Sibling `acki-nacki` must:
    Blast (81457), plus Sepolia (11155111) for shellnet.
 3. Re-embed the regenerated deposit VkBlob after fixture regen lands.
 
-## Regenerated fixtures (2026-07-30, 12-PI + Prague header table)
+## Regenerated fixtures (2026-08-03, 12-PI + audit fixes)
 
 `fixtures/deposit_10proofs/` rebuilt from Sepolia deposit inputs with
-`--chain-id 11155111`. Two rotations landed in quick succession, both leaving
-the shape and PI layout untouched — only the constraint system, VK points and
-the 10 proofs differ:
+`--chain-id 11155111`. Three rotations have landed in quick succession, all
+leaving the shape and PI layout untouched — only the constraint system, VK
+points and the 10 proofs differ:
 
 - **2026-07-28, `3e2a2db2…bf0d049c`** — in-circuit soundness fixes from
   `gosh-sh/bridge` PR [#26](https://github.com/gosh-sh/bridge/pull/26): receipt
   bound to the MPT root the chip actually verified, byte-wise root comparison,
   `depositId`/`amount` range checks.
-- **2026-07-30, `7322fb82…93f92541`** (current) — Prague header support from the
-  PR #20 review: the header field table grows to 21 slots for the EIP-7685
+- **2026-07-30, `7322fb82…93f92541`** — Prague header support from the PR #20
+  review: the header field table grows to 21 slots for the EIP-7685
   `requestsHash`, `MAX_BLOCK_HEADER_BYTES` 668 → 705, `gasLimit` widened to 8
   bytes for Arbitrum One. The witnesses were re-canonicalised at the same time,
   so each proof's `blockHash` public input is now the block hash Sepolia
   actually reports (previously it hashed a header with `requestsHash` dropped).
+- **2026-08-03, `9dacd998…8360fae3`** (current) — deposit-circuit audit fixes,
+  `docs/reviews/deposit_circuit_audit_2026-08-03.md`: dropped the
+  `tx.to == contractAddress` constraint (BC-D02, unblocks Safe / ERC-4337 /
+  router deposits), tied the keccak'd header length to the RLP list length
+  (BC-D03), pinned the log topics/data payload lengths to 99/128 (BC-D04),
+  range-checked the `dappId` bytes (BC-D05), and widened the `number` /
+  `gasUsed` / `timestamp` header slots to 8 bytes with
+  `MAX_BLOCK_HEADER_BYTES` 705 → 717 (BC-D06). Witnesses are unchanged — the
+  10 saved `input.json` were re-proved as-is.
 
 | | Value |
 |---|---|
-| VkBlob SHA-256 | `7322fb8257a3ab9024a6cff2317452b91dbf5c5b7dcd7584564eabc293f92541` |
+| VkBlob SHA-256 | `9dacd998af5fd03af8097cb80a571df098c925bba235af61d920cc808360fae3` |
 | VkBlob size | 5006 B |
 | Public inputs | **384 B** (12 × 32) |
 | Proof size | 11072 B each |
 | Verify | **10/10** against shared VkBlob |
-| Sepolia MockProver | PASS (`chain_binding_sepolia_dep0`) |
+| `ZKHALO2VERIFYWITHVK` | **10/10 ACCEPTED** (`tvm_vm` `test_zkhalo2_with_vk_deposit_10_real_proofs`) |
 
 ```bash
 cd deposit-prover

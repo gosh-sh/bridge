@@ -208,8 +208,8 @@ share your MetaMask secret recovery phrase. Test USDC is not real money.
 > confirm `vk_blob.bin` matches the shellnet-deployed hash before submitting.
 >
 > **Track-2 follow-up (2026-07-23):** the current `deposit-prover` circuit exposes
-> **12 PI** (adds `chainId` at slot 4) and produces VkBlob `7322fb82…93f92541`
-> (5006 B, rotated 2026-07-30 by the Prague header fix; the earlier 12-PI blobs
+> **12 PI** (adds `chainId` at slot 4) and produces VkBlob `9dacd998…8360fae3`
+> (5006 B, rotated 2026-08-03 by the deposit-circuit audit fixes; the earlier 12-PI blobs
 > `de1dd3ab…7dd8d1` / `006cca5d…191dec05` / `3e2a2db2…bf0d049c` are superseded —
 > same PI layout, different constraint system).
 > This blob is **not yet redeployed to shellnet** — the on-chain

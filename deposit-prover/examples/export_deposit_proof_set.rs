@@ -119,7 +119,6 @@ fn main() -> anyhow::Result<()> {
         max_data_byte_len: args.max_data_byte_len,
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
-        expected_chain_id: args.chain_id,
     };
 
     let srs = load_kzg_params_from_trusted_setup(args.degree).map_err(|e| anyhow::anyhow!("{e}"))?;

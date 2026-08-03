@@ -304,17 +304,28 @@ pub fn typed_tx_chain_id(tx_bytes: &[u8]) -> Result<u64> {
     if prefix < 0xc0 {
         return Err(anyhow!("typed transaction payload is not an RLP list"));
     }
+    // Every slice below goes through `get` — this function is reachable from
+    // `DepositProofInput::require_chain_id`, i.e. from loading any witness off
+    // disk, so a truncated or hand-edited `tx_bytes` must surface as an error
+    // rather than unwind the process (BC-D09).
     let body = if prefix <= 0xf7 {
-        &rest[1..]
+        rest.get(1..)
+            .ok_or_else(|| anyhow!("truncated typed transaction"))?
     } else {
-        &rest[1 + (prefix - 0xf7) as usize..]
+        let len_len = (prefix - 0xf7) as usize;
+        rest.get(1 + len_len..)
+            .ok_or_else(|| anyhow!("truncated RLP list header"))?
     };
     let first = *body
         .first()
         .ok_or_else(|| anyhow!("transaction RLP list is empty"))?;
     let chain_id_bytes = match first {
         0x00..=0x7f => &body[..1],
-        0x80..=0xb7 => &body[1..1 + (first - 0x80) as usize],
+        0x80..=0xb7 => {
+            let n = (first - 0x80) as usize;
+            body.get(1..1 + n)
+                .ok_or_else(|| anyhow!("truncated chain_id field"))?
+        }
         _ => return Err(anyhow!("chain_id field is not a short RLP string")),
     };
     if chain_id_bytes.len() > 8 {
@@ -707,6 +718,36 @@ mod tests {
         assert!(typed_tx_chain_id(&[]).is_err());
     }
 
+    /// BC-D09: a truncated typed-tx must error, never panic. Both inputs are the
+    /// audit's fuzz reproducers — `0xff` claims an 8-byte list-length header that
+    /// isn't there, and `0x85` claims a 5-byte chain_id string that isn't there.
+    #[test]
+    fn typed_tx_chain_id_errors_on_truncated_input() {
+        for bytes in [
+            vec![0x02, 0xff],
+            vec![0x02, 0xc0, 0x85],
+            vec![0x02, 0xf8],
+            vec![0x02, 0xc0],
+        ] {
+            assert!(
+                typed_tx_chain_id(&bytes).is_err(),
+                "expected Err for {bytes:02x?}"
+            );
+        }
+    }
+
+    /// Exhaustive over every 2- and 3-byte typed-tx prefix: the decoder must
+    /// terminate with Ok or Err for all of them, and never unwind.
+    #[test]
+    fn typed_tx_chain_id_never_panics_on_short_input() {
+        for a in 0u8..=255 {
+            let _ = typed_tx_chain_id(&[0x02, a]);
+            for b in 0u8..=255 {
+                let _ = typed_tx_chain_id(&[0x02, a, b]);
+            }
+        }
+    }
+
     /// Arbitrum's `gasLimit` is 2^50; the circuit's per-field cap must cover it.
     #[test]
     fn arbitrum_gas_limit_fits_the_circuit_field_cap() {
@@ -719,5 +760,52 @@ mod tests {
             "gasLimit needs {gas_limit_bytes} bytes, field cap is {}",
             crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS[9]
         );
+    }
+
+    /// BC-D06: every integer header slot must be able to hold the widest value
+    /// its own `gasLimit` permits, not merely the widest value observed. A slot
+    /// that is too narrow makes the RLP decode fail, so deposits in such a block
+    /// become permanently unprovable — and unrefundable, since `withdraw()` was
+    /// retired in Phase 4.3.
+    ///
+    /// Empirical context for the sizing (sampled 2026-08-03, 32 blocks spread
+    /// across Arbitrum One's history): max `gasUsed` 2 719 399 (3 bytes) against
+    /// a `gasLimit` of 2^50. The 8-byte slot leaves the protocol no way to
+    /// overflow it at all, which is the property worth having.
+    #[test]
+    fn integer_header_slots_cover_their_own_gas_limit() {
+        use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
+        for (slot, name) in [(8, "number"), (10, "gasUsed"), (11, "timestamp")] {
+            assert!(
+                BLOCK_HEADER_MAX_FIELD_LENS[slot] >= BLOCK_HEADER_MAX_FIELD_LENS[9],
+                "slot {slot} ({name}) caps at {} bytes while gasLimit (slot 9) allows {} — \
+                 a chain may emit a value the circuit cannot decode",
+                BLOCK_HEADER_MAX_FIELD_LENS[slot],
+                BLOCK_HEADER_MAX_FIELD_LENS[9],
+            );
+        }
+    }
+
+    /// Every sample header must still decode inside the per-field caps, so a
+    /// slot can never be narrowed below live data by accident.
+    #[test]
+    fn sample_headers_fit_every_integer_slot() {
+        use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
+        for (name, raw, _) in HEADER_SAMPLES {
+            let block: Block<H256> = serde_json::from_str(raw).unwrap();
+            for (slot, width, field) in [
+                (8, block.number.unwrap().as_u64().into(), "number"),
+                (9, block.gas_limit, "gasLimit"),
+                (10, block.gas_used, "gasUsed"),
+                (11, block.timestamp, "timestamp"),
+            ] {
+                let need = ((width.bits() + 7) / 8).max(1);
+                assert!(
+                    need <= BLOCK_HEADER_MAX_FIELD_LENS[slot],
+                    "{name}: {field} needs {need} bytes, slot {slot} caps at {}",
+                    BLOCK_HEADER_MAX_FIELD_LENS[slot]
+                );
+            }
+        }
     }
 }

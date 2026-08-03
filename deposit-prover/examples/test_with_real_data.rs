@@ -54,21 +54,21 @@ struct Args {
     /// Source network (not baked into VK; proven chainId is a PI). Must be in
     /// `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111) and must match the
     /// chain the loaded witness actually proves.
-    #[arg(long, default_value = "11155111")]
-    chain_id: u64,
+    #[arg(long)]
+    chain_id: Option<u64>,
 }
 
 fn main() -> anyhow::Result<()> {
     println!("=== Test Circuit with Real Data ===\n");
 
     let args = Args::parse();
-    deposit_prover::require_supported_deposit_chain(args.chain_id)?;
 
     // Load input data
     println!("Loading input from {}...", args.input);
     let json = fs::read_to_string(&args.input)?;
     let input: DepositProofInput = serde_json::from_str(&json)?;
-    input.require_chain_id(args.chain_id)?;
+    let chain_id = input.resolve_chain_id(args.chain_id)?;
+    println!("Proving a deposit on chain {chain_id}");
     println!("✓ Input loaded\n");
 
     println!("Event Data:");
@@ -85,7 +85,6 @@ fn main() -> anyhow::Result<()> {
         max_data_byte_len: args.max_data_byte_len,
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
-        expected_chain_id: args.chain_id,
     };
 
     println!("Circuit Configuration:");

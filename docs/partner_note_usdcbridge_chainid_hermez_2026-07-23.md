@@ -8,7 +8,8 @@
 
 The deposit circuit now exposes **12 public inputs** (adds a **proven `chainId`**) and is keyed on the **Hermez** trusted setup. Our side (deposit-prover, deposit-relayer, tvm-sdk `ZKHALO2VERIFYWITHVK` opcode + fixtures) is done and green. To finish the deposit path you need three changes in `USDCBridge.sol` + a recompile/redeploy:
 
-1. Swap `VK_BLOB` → the new 12-PI Hermez VkBlob (`7322fb82…`).
+1. Swap `VK_BLOB` → the new 12-PI Hermez VkBlob (`9dacd998…`). Do not hand-edit
+   the hex — run `scripts/embed_deposit_vk_blob.py <USDCBridge.sol>`.
 2. Fix `_parsePublicInputs` for the new 12-slot offsets (everything after `contractAddr` shifts by one).
 3. **Add a `(chainId → expected bridge Fr)` allowlist** — this is the security point: `chainId` and the bridge address are *proven in-circuit*, and the contract must **reject** any proof whose `(chainId, contractAddr)` pair is not allow-listed, instead of trusting config.
 
@@ -47,7 +48,7 @@ Replace the embedded `VK_BLOB` with the new blob:
 |---|---|
 | file | `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (byte-identical to `tvm-sdk/tvm_vm/halo2_test_data/deposit_10proofs/deposit_vk_blob.bin`) |
 | size | 5006 B |
-| sha256 | `7322fb8257a3ab9024a6cff2317452b91dbf5c5b7dcd7584564eabc293f92541` |
+| sha256 | `9dacd998af5fd03af8097cb80a571df098c925bba235af61d920cc808360fae3` |
 | shape | v2 RLC, `circuit_shape=1`, k=18, `num_advice_per_phase=[17,13]`, 12 PI |
 | SRS | **Hermez** Powers of Tau (see "Opcode" below) |
 
@@ -119,7 +120,7 @@ Without this, exposing `chainId`/bridge as public inputs buys nothing — the co
 
 ```bash
 sha256sum tvm_vm/halo2_test_data/deposit_10proofs/deposit_vk_blob.bin
-# 7322fb8257a3ab9024a6cff2317452b91dbf5c5b7dcd7584564eabc293f92541
+# 9dacd998af5fd03af8097cb80a571df098c925bba235af61d920cc808360fae3
 cargo +nightly test -p tvm_vm --features gosh deposit_rlc   # 3/3
 ```
 The 10 proof/PI pairs in `deposit_10proofs/proof_00..09/` are the 12-PI regression set (each `public_inputs.bin` = 384 B = 12 × 32).

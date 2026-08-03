@@ -78,7 +78,7 @@ use halo2_base::{
 use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark};
 
 use crate::{
-    circuit_v2::{self, DepositEventCircuitV2},
+    circuit_v2::DepositEventCircuitV2,
     types::{DepositProofInput, DepositProofOutput, NUM_PUBLIC_INPUTS},
 };
 
@@ -116,11 +116,6 @@ pub struct CircuitConfig {
 
     /// Bounds on number of topics per log (min, max)
     pub topic_num_bounds: (usize, usize),
-
-    /// Fetch / network selector only (mainnet = 1, Sepolia = 11155111).
-    /// **Demoted**: no longer constrained in-circuit or baked into the VK.
-    /// Proven `chainId` is a public input; AN allowlists bind it to the bridge.
-    pub expected_chain_id: u64,
 }
 
 impl Default for CircuitConfig {
@@ -133,7 +128,6 @@ impl Default for CircuitConfig {
             max_log_num: 3, /* Max logs per receipt (OPTION B+: Ultra-aggressive - most deposit
                              * txs have 1-3 logs) */
             topic_num_bounds: (0, 4), // 0-4 topics per log
-            expected_chain_id: circuit_v2::EXPECTED_L1_CHAIN_ID,
         }
     }
 }
@@ -186,12 +180,20 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     // Get public instances
     let instances = circuit.instances();
 
-    // Run MockProver
+    // Run MockProver. `verify()` rather than `assert_satisfied()`: the latter
+    // panics, which makes an unsatisfied circuit indistinguishable from a crash
+    // and defeats the point of returning a `Result` — negative tests need to
+    // observe the rejection, not unwind through it.
     MockProver::run(k, &circuit, instances)
-        .map_err(|e| format!("MockProver failed: {:?}", e))?
-        .assert_satisfied();
-
-    Ok(())
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })
 }
 
 /// Load KZG parameters from disk

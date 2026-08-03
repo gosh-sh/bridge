@@ -2,9 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Number of public inputs the deposit circuit commits to. Must match
-/// `DepositEventCircuitV2::num_instance()` and the AN-side opcode layout.
-pub const NUM_PUBLIC_INPUTS: usize = 12;
+/// Number of public inputs the deposit circuit commits to.
+///
+/// Derived from [`crate::circuit_v2::DEPOSIT_PUBLIC_INPUT_LAYOUT`] rather than
+/// written out again, so this and `num_instance()` cannot disagree — the layout
+/// moved 7 → 10 → 11 → 12 in one quarter and every hand-maintained copy of the
+/// count was a drift waiting to happen (BC-D08).
+pub const NUM_PUBLIC_INPUTS: usize = crate::circuit_v2::DEPOSIT_NUM_PUBLIC_INPUTS;
 
 /// Deposit event data from Ethereum
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +123,30 @@ impl DepositProofInput {
         }
         Ok(())
     }
+
+    /// Resolve which chain this run is about, and check it is one we accept.
+    ///
+    /// `selected` is the optional `--chain-id` flag. When it is absent the chain
+    /// is taken from the witness, which is the only correct default: the flag
+    /// used to default to Sepolia while `require_chain_id` ran unconditionally,
+    /// so a perfectly valid Base or Arbitrum witness was rejected by a tool that
+    /// had simply guessed the wrong network — and the relayer never passes the
+    /// flag at all, which made that the production path for every chain except
+    /// Sepolia.
+    pub fn resolve_chain_id(&self, selected: Option<u64>) -> anyhow::Result<u64> {
+        let chain_id = match selected {
+            Some(expected) => {
+                self.require_chain_id(expected)?;
+                expected
+            }
+            None if self.tx_proof.tx_bytes.is_empty() => anyhow::bail!(
+                "witness has no tx_proof.tx_bytes, so its chain_id cannot be read; \
+                 re-fetch it with fetch_deposit_data (Track 2) or pass --chain-id"
+            ),
+            None => self.witness_chain_id()?,
+        };
+        crate::supported_chains::require_supported_deposit_chain(chain_id)
+    }
 }
 
 /// Output of deposit proof generation
@@ -177,5 +205,83 @@ impl DepositProofOutput {
             block_hash,
             chain_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supported_chains::{CHAIN_ID_BASE, CHAIN_ID_SEPOLIA};
+
+    /// Minimal witness carrying only what the chain-id logic reads: an
+    /// EIP-1559 typed-tx prefix whose RLP field 0 is `chain_id`.
+    fn input_for_chain(chain_id: u64) -> DepositProofInput {
+        let mut rlp = vec![0x02u8, 0xc0 + 5, 0x84];
+        rlp.extend_from_slice(&(chain_id as u32).to_be_bytes());
+        DepositProofInput {
+            event_data: DepositEventData {
+                block_number: 1,
+                transaction_index: 0,
+                log_index: 0,
+                deposit_id: 0,
+                sender: [0u8; 20],
+                amount: [0u8; 32],
+                an_workchain: 0,
+                an_account: [0u8; 32],
+                timestamp: 0,
+                contract_address: [0u8; 20],
+                chain_id,
+            },
+            receipt_proof: ReceiptProof {
+                receipt_rlp: vec![],
+                proof_nodes: vec![],
+                receipt_root: [0u8; 32],
+                block_header_rlp: vec![],
+            },
+            tx_proof: TransactionProof {
+                tx_bytes: rlp,
+                proof_nodes: vec![],
+                transactions_root: [0u8; 32],
+            },
+            dapp_id: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn resolve_chain_id_reads_the_witness_when_no_flag_is_given() {
+        // The regression this guards: `--chain-id` used to default to Sepolia
+        // and be enforced unconditionally, so a valid Base witness was rejected
+        // by a tool that had merely guessed. The relayer passes no flag at all.
+        let input = input_for_chain(CHAIN_ID_BASE);
+        assert_eq!(input.resolve_chain_id(None).unwrap(), CHAIN_ID_BASE);
+    }
+
+    #[test]
+    fn resolve_chain_id_cross_checks_an_explicit_flag() {
+        let input = input_for_chain(CHAIN_ID_SEPOLIA);
+        assert_eq!(
+            input.resolve_chain_id(Some(CHAIN_ID_SEPOLIA)).unwrap(),
+            CHAIN_ID_SEPOLIA
+        );
+        let err = input
+            .resolve_chain_id(Some(CHAIN_ID_BASE))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("witness proves chain_id"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_chain_id_rejects_a_chain_outside_the_allowlist() {
+        let input = input_for_chain(31337);
+        assert!(input.resolve_chain_id(None).is_err());
+        assert!(input.resolve_chain_id(Some(31337)).is_err());
+    }
+
+    #[test]
+    fn resolve_chain_id_explains_a_pre_track2_witness() {
+        let mut input = input_for_chain(CHAIN_ID_SEPOLIA);
+        input.tx_proof.tx_bytes.clear();
+        let err = input.resolve_chain_id(None).unwrap_err().to_string();
+        assert!(err.contains("fetch_deposit_data"), "got: {err}");
     }
 }

@@ -9,6 +9,8 @@
 use alloy::primitives::{Bytes, U256};
 use serde::{Deserialize, Serialize};
 
+use crate::withdrawal::BN254_FR_MODULUS;
+
 /// Maximum number of layer hashes per AN block (mirrors
 /// `AckiNackiBridge.MAX_LAYER_HASHES`).
 pub const MAX_LAYER_HASHES: usize = 10;
@@ -53,16 +55,20 @@ impl From<bridge_prover_lib::live_driver::BundleFinalizationType> for Finalizati
 
 impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData {
     fn from(b: &bridge_prover_lib::live_driver::BundleProofArtifacts) -> Self {
-        // Schema v6: `block_id_be` is the raw 32-byte BE chain hash, so it
-        // decodes as `U256::from_be_bytes` — matches Solidity
-        // `uint256(bytes32(blockId))` exactly, which is what the on-chain
-        // SHA-256 Merkle open compares and what the SHPLONK verifier
-        // auto-reduces mod p. The remaining `*_be` fields
-        // (`bk_set_commitment_be`, `layer_hashes_be[i]`,
-        // `prev_max_level_layer_hash_be`) are still `Fr::to_repr()` LE
-        // bytes — those wire fields have not yet been unified with the raw
-        // hash convention (tracked as an open item alongside the schema v6
-        // block_id fix).
+        // Schema v6: `block_id_be` is the raw 32-byte BE chain hash. The
+        // on-chain SHPLONK adapter compares this against a canonical Fr
+        // representative stored in the proof (`_readInstance(proof, 12)`),
+        // so we reduce mod BN254 `r` here — the earlier "SHPLONK verifier
+        // auto-reduces mod p" belief was wrong (auto-reduction happens
+        // inside the pairing, not in the Solidity adapter's equality
+        // prelude). Roughly ~19% of blocks have a chain hash `≥ r` and
+        // would otherwise revert `AttestationProofRejected()` before the
+        // pairing runs. `BkSetUpdateData::block_id` below deliberately
+        // keeps the un-reduced form because `applyBkSetUpdate` compares it
+        // against a raw SHA-256 Merkle root (`AckiNackiBridge.sol:834`).
+        // The remaining `*_be` fields (`bk_set_commitment_be`,
+        // `layer_hashes_be[i]`, `prev_max_level_layer_hash_be`) are already
+        // `Fr::to_repr()` LE bytes (canonical `< r`).
         let mut layer_hashes = [U256::ZERO; MAX_LAYER_HASHES];
         for (i, h) in b
             .layer_hashes_be
@@ -74,7 +80,7 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
         }
         AnBlockData {
             fin_type: b.fin_type.into(),
-            block_id: U256::from_be_bytes(b.block_id_be),
+            block_id: U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS,
             bk_set_commitment: U256::from_le_bytes(b.bk_set_commitment_be),
             block_seq_no: b.block_seq_no,
             num_layers: b.num_layers,

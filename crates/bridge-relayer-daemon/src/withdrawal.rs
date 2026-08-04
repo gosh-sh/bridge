@@ -211,9 +211,12 @@ pub fn fr_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
 
 /// Partner schema v6 `block_id_hex` carries the raw 32-byte BE chain hash
 /// (= `Solidity uint256(bytes32(blockId))`). Decode as big-endian so the
-/// `U256` we hand to `verifyBlock` / `applyBkSetUpdate` matches the value
-/// on-chain SHPLONK auto-reduces via `mod(calldataload, f_q)` and the value
-/// the SHA-256 Merkle open compares against.
+/// `U256` we hand to `applyBkSetUpdate` matches the value the SHA-256
+/// Merkle open compares against on-chain (`AckiNackiBridge.sol:834`).
+///
+/// **Do not** pass the result of this function to `verifyBlock` — the
+/// aggregator adapter compares blockId against a canonical Fr representative
+/// stored in the proof, so use [`hash_hex_to_fr_reduced_u256`] there.
 pub fn hash_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
     let bytes = decode_hex(hex_str)?;
     if bytes.len() != 32 {
@@ -225,9 +228,69 @@ pub fn hash_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
     Ok(U256::from_be_slice(&bytes))
 }
 
+/// BN254 scalar field modulus `r`. Halo2 SHPLONK proof instances are stored
+/// as canonical Fr representatives (`< r`), so any SHA-256-typed 256-bit
+/// hash we want to compare bytewise against a proof instance must be
+/// reduced first.
+///
+/// Value: `0x30644e72e131a029_b85045b68181585d_2833e84879b97091_43e1f593f0000001`
+pub const BN254_FR_MODULUS: U256 = U256::from_limbs([
+    0x43e1f593f0000001,
+    0x2833e84879b97091,
+    0xb85045b68181585d,
+    0x30644e72e131a029,
+]);
+
+/// Same as [`hash_hex_to_u256`] but additionally reduces the decoded value
+/// mod [`BN254_FR_MODULUS`]. Use this when the resulting `U256` will be
+/// bytewise-compared against a Halo2 proof instance.
+///
+/// On-chain, `PrimaryAggregatorVerifier.verifyPrimaryAttestation` (and the
+/// fallback / layer variants) do `_readInstance(proof, 12) != blockId`
+/// where `_readInstance` returns the raw 32 calldata bytes as `uint256`.
+/// The bytes were written by the prover as canonical Fr, i.e. `< r`. If we
+/// hand the on-chain adapter an un-reduced 256-bit SHA-256 chain hash
+/// (~19% of blocks have top byte `≥ 0x30` and are `≥ r`), the equality
+/// check trips and `AckiNackiBridge.verifyBlock` reverts
+/// `AttestationProofRejected()` before the pairing runs. Reducing here
+/// matches what the prover-side `compute_block_id_fr(attestation_bytes)`
+/// did when it wrote `inst[12]`.
+pub fn hash_hex_to_fr_reduced_u256(hex_str: &str) -> Result<U256, RelayerError> {
+    let raw = hash_hex_to_u256(hex_str)?;
+    Ok(raw % BN254_FR_MODULUS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real shellnet block 4,888,576 chain hash exceeds BN254 `r` so the
+    /// reduced form differs from the raw form. Captured from
+    /// `diag/instances_4888576.txt` inst[12] alongside the GQL
+    /// `block.block_id`, confirmed independently by hand-subtraction.
+    #[test]
+    fn hash_hex_reduces_above_modulus() {
+        let raw = "3151be4d584a014e66bbe4f9d2713ff8ac6a2455db7b191c41d5cb452e05bdad";
+        let reduced_hex = "00ed6fda77186124ae6b9f4350efe79b84363c0d61c1a88afdf3d5b13e05bdac";
+        let expected = U256::from_be_slice(&hex::decode(reduced_hex).unwrap());
+        assert_eq!(hash_hex_to_fr_reduced_u256(raw).unwrap(), expected);
+        // The un-reduced helper must not touch it — this is what
+        // `applyBkSetUpdate` still needs.
+        assert_ne!(hash_hex_to_u256(raw).unwrap(), expected);
+    }
+
+    /// Block 4,888,064 chain hash was already `< r`, which is why that
+    /// key-block succeeded on-chain before the fix. Reduction must be
+    /// a no-op for such values.
+    #[test]
+    fn hash_hex_reduce_below_modulus_is_identity() {
+        let raw = "1234abcd5678ef00112233445566778899aabbccddeeff001122334455667788";
+        assert!(U256::from_be_slice(&hex::decode(raw).unwrap()) < BN254_FR_MODULUS);
+        assert_eq!(
+            hash_hex_to_fr_reduced_u256(raw).unwrap(),
+            hash_hex_to_u256(raw).unwrap(),
+        );
+    }
 
     #[test]
     fn parses_proof_event_shape() {

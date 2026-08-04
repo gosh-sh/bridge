@@ -29,7 +29,7 @@ use crate::{
     error::RelayerError,
     proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::{fr_hex_to_u256, hash_hex_to_u256},
+    withdrawal::{fr_hex_to_u256, hash_hex_to_fr_reduced_u256, hash_hex_to_u256},
 };
 
 /// Asynchronous source of AN block payloads.
@@ -450,9 +450,17 @@ impl ProverProofsBlockSource {
 
         let block = AnBlockData {
             fin_type: FinalizationType::Primary,
-            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash — decode
-            // as BE so the U256 matches `uint256(bytes32(blockId))` on-chain.
-            block_id: hash_hex_to_u256(&req.block_id_hex)?,
+            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash. The
+            // on-chain SHPLONK adapter compares this against a canonical Fr
+            // representative stored in the proof (`_readInstance(proof, 12)`),
+            // so we must reduce mod BN254 `r` here. Roughly ~19% of blocks
+            // have a chain hash `≥ r` and would otherwise revert with
+            // `AttestationProofRejected()` before the pairing runs. See
+            // `hash_hex_to_fr_reduced_u256` in `withdrawal.rs` for the full
+            // rationale. The BK-update path below deliberately keeps the
+            // un-reduced form because `applyBkSetUpdate` compares blockId
+            // against a raw SHA-256 Merkle root (`AckiNackiBridge.sol:834`).
+            block_id: hash_hex_to_fr_reduced_u256(&req.block_id_hex)?,
             bk_set_commitment: fr_hex_to_u256(&req.bk_set_poseidon_hash_hex)?,
             block_seq_no: seq_no,
             num_layers: req.num_layers,

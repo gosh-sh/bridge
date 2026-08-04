@@ -278,6 +278,10 @@ enum Cmd {
         /// Seqno stamped into the proof_event.
         #[arg(long, default_value_t = 0)]
         seq_no: u64,
+        /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
+        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live --pk-cache-dir`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
     },
     /// Long-running daemon reading partner `proof_event_*.json` bundles from
     /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
@@ -406,6 +410,13 @@ enum Cmd {
         /// Directory of committed verifier `.bin` files (aggregator self-check).
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: PathBuf,
+        /// Persistent outer-PK cache directory for the `aggregate-proof`
+        /// subprocess (`--pk-cache-dir`). Without this, every bundle re-runs
+        /// the full K=21 outer keygen (~3–5 min); with it, only the first
+        /// bundle pays keygen and subsequent bundles hit the disk cache
+        /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -614,15 +625,20 @@ async fn main() -> anyhow::Result<()> {
             snark_dir,
             out,
             seq_no,
-        } => prove_withdraw_shplonk(
-            witness,
-            aggregator_dir,
-            verifiers_dir,
-            params_dir,
-            snark_dir,
-            out,
-            seq_no,
-        )
+            pk_cache_dir,
+        } => {
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            prove_withdraw_shplonk(
+                witness,
+                aggregator_dir,
+                verifiers_dir,
+                params_dir,
+                snark_dir,
+                out,
+                seq_no,
+                pk_cache_dir,
+            )
+        }
         .await
         .map_err(|e| {
             error!(?e, "prove-withdraw-shplonk failed");
@@ -709,15 +725,20 @@ async fn main() -> anyhow::Result<()> {
             backoff_multiplier,
             aggregator_dir,
             verifiers_dir,
+            pk_cache_dir,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
             };
+            // Default the outer-PK cache alongside the SRS so a single
+            // params_dir carries every artefact the aggregator needs.
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
             let aggregation = C12AggregationCfg {
                 aggregator_dir,
                 verifiers_dir,
+                pk_cache_dir,
             };
             run_daemon_live(
                 args.state,
@@ -1249,15 +1270,15 @@ async fn prove_withdraw_shplonk(
     snark_dir: PathBuf,
     out: PathBuf,
     seq_no: u64,
+    pk_cache_dir: PathBuf,
 ) -> anyhow::Result<()> {
     // NB-Q9 PR-B: in-process Circuit 4 Poseidon re-prove (no more subprocess
     // shell-out to `export-c4-poseidon-snark`).
     let snark_prover = InProcessCircuit4SnarkProver::new(&params_dir);
-    let aggregator = SubprocessAggregator::new(SubprocessAggregatorConfig::new(
-        &aggregator_dir,
-        &verifiers_dir,
-        &params_dir,
-    ));
+    let aggregator = SubprocessAggregator::new(
+        SubprocessAggregatorConfig::new(&aggregator_dir, &verifiers_dir, &params_dir)
+            .with_pk_cache_dir(&pk_cache_dir),
+    );
     let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
 
     info!(
@@ -1784,6 +1805,9 @@ async fn submit_bk_update(
 struct C12AggregationCfg {
     aggregator_dir: PathBuf,
     verifiers_dir: PathBuf,
+    /// Persistent outer-PK cache directory for `aggregate-proof`. When
+    /// present, memoises the K=21 outer keygen across bundles.
+    pk_cache_dir: PathBuf,
 }
 
 async fn run_daemon_live(
@@ -1970,7 +1994,8 @@ async fn run_daemon_live(
         &aggregation.aggregator_dir,
         &aggregation.verifiers_dir,
         &params_dir,
-    );
+    )
+    .with_pk_cache_dir(&aggregation.pk_cache_dir);
     let pipeline = Circuit12ShplonkPipeline::new(
         PoseidonSnarkWrapper::new(&params_dir),
         SubprocessAggregator::new(aggregator_cfg),
@@ -1982,6 +2007,7 @@ async fn run_daemon_live(
     info!(
         aggregator_dir = %aggregation.aggregator_dir.display(),
         verifiers_dir = %aggregation.verifiers_dir.display(),
+        pk_cache_dir = %aggregation.pk_cache_dir.display(),
         "daemon-live: C1/C2 R15 SHPLONK aggregation",
     );
     spawn_and_run(

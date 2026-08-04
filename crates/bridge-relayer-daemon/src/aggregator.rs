@@ -307,6 +307,12 @@ pub struct SubprocessAggregatorConfig {
     pub params_dir: PathBuf,
     /// Hard timeout for the (K=21) aggregation run.
     pub timeout: Duration,
+    /// Persistent outer PK cache directory. When set, forwarded to
+    /// `aggregate-proof` as `--pk-cache-dir`, which memoises the K=21 outer
+    /// keygen. First bundle against a fresh slot still pays the full ~3–5 min
+    /// keygen; subsequent bundles hit the on-disk PK (~15–60 s). Without this,
+    /// every bundle re-keygens from scratch — see `aggregator_cache.rs`.
+    pub pk_cache_dir: Option<PathBuf>,
 }
 
 impl SubprocessAggregatorConfig {
@@ -320,7 +326,14 @@ impl SubprocessAggregatorConfig {
             verifiers_dir: verifiers_dir.into(),
             params_dir: params_dir.into(),
             timeout: Duration::from_secs(1800),
+            pk_cache_dir: None,
         }
+    }
+
+    /// Enable persistent outer-PK caching across `aggregate-proof` invocations.
+    pub fn with_pk_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.pk_cache_dir = Some(dir.into());
+        self
     }
 }
 
@@ -340,6 +353,22 @@ impl SubprocessAggregator {
         if let Ok(abs) = config.params_dir.canonicalize() {
             config.params_dir = abs;
         }
+        if let Some(dir) = config.pk_cache_dir.as_mut() {
+            // Create if missing so canonicalize() can succeed and the
+            // subprocess can write PK files on the very first bundle.
+            if !dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(&*dir) {
+                    tracing::warn!(
+                        pk_cache_dir = %dir.display(),
+                        error = %e,
+                        "failed to create pk_cache_dir; subprocess will attempt to create it",
+                    );
+                }
+            }
+            if let Ok(abs) = dir.canonicalize() {
+                *dir = abs;
+            }
+        }
         Self {
             config,
         }
@@ -357,7 +386,7 @@ impl SubprocessAggregator {
     /// argv (program excluded) for a given inner snark, verifier name and
     /// output path — pulled out for unit-testing flag construction.
     fn args(&self, inner_snark: &Path, verifier_name: &str, out_path: &Path) -> Vec<String> {
-        vec![
+        let mut v = vec![
             "--inner-snark".to_string(),
             inner_snark.display().to_string(),
             "--name".to_string(),
@@ -366,7 +395,12 @@ impl SubprocessAggregator {
             out_path.display().to_string(),
             "--verifiers-dir".to_string(),
             self.config.verifiers_dir.display().to_string(),
-        ]
+        ];
+        if let Some(dir) = self.config.pk_cache_dir.as_ref() {
+            v.push("--pk-cache-dir".to_string());
+            v.push(dir.display().to_string());
+        }
+        v
     }
 }
 
@@ -1063,6 +1097,32 @@ mod tests {
             "/tmp/out.bin",
             "--verifiers-dir",
             "/verifiers",
+        ]);
+    }
+
+    #[test]
+    fn subprocess_aggregate_args_include_pk_cache_when_set() {
+        let cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params")
+            .with_pk_cache_dir("/params/pk_cache");
+        let agg = SubprocessAggregator {
+            config: cfg,
+        };
+        let args = agg.args(
+            Path::new("/s/circuit4.snark"),
+            WITHDRAWAL_VERIFIER_NAME,
+            Path::new("/tmp/out.bin"),
+        );
+        assert_eq!(args, vec![
+            "--inner-snark",
+            "/s/circuit4.snark",
+            "--name",
+            WITHDRAWAL_VERIFIER_NAME,
+            "--out",
+            "/tmp/out.bin",
+            "--verifiers-dir",
+            "/verifiers",
+            "--pk-cache-dir",
+            "/params/pk_cache",
         ]);
     }
 

@@ -73,9 +73,6 @@ contract AckiNackiBridge {
     /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
 
-    /// @notice L1-only anchor layer for Circuit 4 until `anchorLayer` PI lands.
-    uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;
-
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
     ///         binary split: Primary (>= 2/3 quorum) or Fallback (>1/2 split).
@@ -242,9 +239,15 @@ contract AckiNackiBridge {
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
-    ///         Each `withdrawByProof` checks `finalRoot` against the L1
-    ///         window (`WITHDRAW_ANCHOR_LAYER`) — matching the partner
-    ///         event-witness builder (`layer_idx = 0`).
+    ///         Each `withdrawByProof` checks `finalRoot` against *any* layer
+    ///         window via `_isKnownAnchor` (NB-Q1 2026-08-04 — was previously
+    ///         pinned to L1 via a `WITHDRAW_ANCHOR_LAYER` constant that would
+    ///         `revert UnknownAnchor` for every partner L≥2 witness). Every
+    ///         window entry was written by a verified `verifyBlock`, so the
+    ///         layer index adds specificity, not security. Option A (Circuit 4
+    ///         PI slot `anchorLayer` + range-checked scan of the specific
+    ///         window) remains the ultimate target once the Circuit 4
+    ///         re-keygen lands.
     ///
     /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
     struct HistoryWindow {
@@ -948,7 +951,13 @@ contract AckiNackiBridge {
         return _expectedPrevAnchor(numLayers);
     }
 
-    /// @dev Legacy flat membership — true if `anchor` appears in any layer window.
+    /// @dev Flat membership — true if `anchor` appears in any layer window.
+    ///      This is the anchor check consumed by `withdrawByProof` (NB-Q1
+    ///      2026-08-04): every window entry was written by a verified
+    ///      `verifyBlock`, so the layer index adds specificity, not security.
+    ///      Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan
+    ///      of the specific window) remains the ultimate target once the
+    ///      Circuit 4 re-keygen lands.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {
@@ -1072,9 +1081,13 @@ contract AckiNackiBridge {
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // L1-only witness builder (`layer_idx = 0`). Future: read `anchorLayer`
-        // from Circuit 4 public input slot [10] when partner extends the layout.
-        if (!_isKnownLayerAnchor(WITHDRAW_ANCHOR_LAYER, pub.finalRoot)) {
+        // NB-Q1 (2026-08-04): flat scan across every layer window. Option A
+        // (Circuit 4 PI slot `anchorLayer` + range-checked scan of the
+        // specific window) remains the ultimate target — this unblocks
+        // partner L≥2 witnesses today without waiting for the Circuit 4
+        // re-keygen. Every window entry was written by a verified
+        // `verifyBlock`, so the layer index adds specificity, not security.
+        if (!_isKnownAnchor(pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 

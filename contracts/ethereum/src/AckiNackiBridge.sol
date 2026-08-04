@@ -462,6 +462,15 @@ contract AckiNackiBridge {
         ///         (no prior layer-hash chain to anchor against — the very
         ///         first verified block uses the zero anchor).
         uint256 genesisPrevMaxLevelLayerHash;
+        /// @notice Initial `storedLastSeenBlockSeqNo`. Must equal the AN-side
+        ///         `last_seen_block_seqno` baked into the very first
+        ///         verifyBlock proof (i.e. the bootstrap seed seq_no emitted by
+        ///         `compute_bridge_anchors`). Pass `0` only if the first proof
+        ///         will also carry `last_seen = 0`; otherwise the first
+        ///         `verifyBlock` reverts with `AttestationProofRejected` because
+        ///         instance[15] (the proof's baked-in `last_seen`) will not
+        ///         match `storedLastSeenBlockSeqNo`.
+        uint64 genesisLastSeenBlockSeqNo;
     }
 
     /// @notice Argument bundle for the AN→ETH Circuit 4 (single-final-root)
@@ -543,6 +552,7 @@ contract AckiNackiBridge {
         layerHashesVerifier = _vb.layerHashesVerifier;
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
+        storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
 
         // Circuit 4 (single-final-root) wiring — independent of `_vb`.
         // Verifier address is the toggle; if non-zero, both Fr identifiers

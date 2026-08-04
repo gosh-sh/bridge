@@ -30,6 +30,7 @@ contract DeployShellnetE2EBridge is Script {
         ILayerHashesMovementVerifier layerHashes;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevMaxLevelLayerHash;
+        uint64 genesisLastSeenBlockSeqNo;
     }
 
     struct WithdrawWiring {
@@ -47,7 +48,12 @@ contract DeployShellnetE2EBridge is Script {
             fallback_: IFallbackVerifier(address(0)),
             layerHashes: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
-            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH")
+            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
+            // Must equal the AN-side `last_seen_block_seqno` baked into the very
+            // first verifyBlock proof (i.e. the daemon's BRIDGE_BOOTSTRAP_SEQNO).
+            // Defaults to 0 for legacy deploys where the first proof also
+            // carries `last_seen = 0`.
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
         bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);
         WithdrawWiring memory wd = WithdrawWiring({
@@ -130,7 +136,8 @@ contract DeployShellnetE2EBridge is Script {
                 fallbackVerifier: vb.fallback_,
                 layerHashesVerifier: vb.layerHashes,
                 genesisBkSetCommitment: vb.genesisBkSetCommitment,
-                genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash
+                genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash,
+                genesisLastSeenBlockSeqNo: vb.genesisLastSeenBlockSeqNo
             }),
             AckiNackiBridge.BridgeWithdrawConfig({
                 bridgeWithdrawalVerifier: wd.verifier,

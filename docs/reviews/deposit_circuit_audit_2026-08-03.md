@@ -9,7 +9,7 @@ architectural gap that no code change in this repository can close** — decided
 
 | ID | Severity | Status |
 |----|----------|--------|
-| BC-D01 | blocker to launch | **interim closed** — anchor-set gate landed on AN (`acki-nacki` `7992ce26`); M-of-N attesters are the target (§1) |
+| BC-D01 | blocker to launch | **closed, one operational step outstanding** — anchor-set gate (`7992ce26`) + M-of-N attesters (`1fb5b28c`) + per-chain mint cap (`993af815`) on AN; the trust root is still the owner key until `disableOwnerAnchors()` is called (§1) |
 | BC-D02 | P1 | fixed — constraint removed |
 | BC-D03 | P2 | fixed — constraint added, negative test |
 | BC-D04 | P3 | fixed — both field lengths pinned |
@@ -119,17 +119,42 @@ as `hi << 128 | lo` exactly as `an_account` is reassembled. Notes:
   `gosh.zkhalo2VerifyWithVK` builtin, so the check was repeated with that call
   stubbed to get a clean `.tvc` and confirm the new ABI entries).
 
-The gate deliberately takes a **hash, not a header**: moving to M-of-N means
-adding a second writer (`attestBlockHash(chainId, blockHash, sigs)` that stores
-the anchor once the threshold is met) and changing nothing in `finalizeDeposit`.
-The owner setter then becomes a break-glass path or is dropped.
+The gate deliberately takes a **hash, not a header**, so moving to M-of-N meant
+adding a second writer and changing nothing in `finalizeDeposit`. That landed the
+same day — see "M-of-N attesters" below.
 
-### What the owner key is now trusted for
+### M-of-N attesters — `acki-nacki` `1fb5b28c`
 
-The trust root for source-chain canonicality is the owner key, and this is a
-trust assumption to state rather than a design: whoever holds it can mint by
-admitting a hash from a chain that does not exist. Two obligations come with it
-that no contract can enforce:
+`attestBlockHash(chainId, blockHash)`, called as an external message signed by an
+attester key, so the vote is attributed to `msg.pubkey()`. A key outside the set
+cannot vote; a key inside it cannot vote twice; once `_attesterThreshold` distinct
+keys agree, the anchor is admitted. `finalizeDeposit` is untouched, as intended.
+
+The call that actually changes the trust assumption is **`disableOwnerAnchors()`**.
+Until it is made, the attester set is decoration — the owner can still admit any
+hash alone, so the effective root is still one key. It is one-way, with no
+re-enable, because a switch back would leave the owner key on the path regardless
+of where it sits in the sequence; it requires a satisfiable attester set first so
+it cannot brick the only working writer. `getAttesterConfig()` returns
+`(threshold, attesterCount, ownerAnchorsEnabled)` — read the third field before
+believing the first.
+
+Thresholds are kept satisfiable at both ends: `setAttesterThreshold` rejects 0
+(admits on one vote) and anything above the key count, and removing a key
+re-checks the bound, since otherwise a removal silently freezes every future
+anchor.
+
+What the threshold does **not** buy: independence. N keys held by one operator, or
+N attesters all polling the same RPC provider, is one key wearing N hats. Each
+attester still owes the two obligations below in its own right.
+
+### What the anchor writer is trusted for
+
+The trust root for source-chain canonicality is whoever can write the anchor set —
+the owner key while `ownerAnchorsEnabled`, a threshold of attesters after
+`disableOwnerAnchors()`. Either way this is a trust assumption to state rather
+than a design: the writers can mint by admitting a hash from a chain that does not
+exist. Two obligations come with it that no contract can enforce:
 
 - **Independence** — read the hash from a source the party that produced the
   proof does not control. Verifying against the same RPC that built the witness
@@ -139,9 +164,12 @@ that no contract can enforce:
 
 `scripts/deposit_anchor_params.py` exists so discharging both is one command
 rather than a judgement call: it decodes `(chainId, blockHash)` out of a
-`public_inputs.bin` and, with `--verify`, refuses to print the setter arguments
+`public_inputs.bin` and, with `--verify`, refuses to print the call arguments
 unless an independent node agrees the block is canonical (its number maps back to
 the same hash) and buried at least `--min-confirmations` deep (default 64).
+`--call attestBlockHash` prints an attester's vote instead of the owner setter;
+each attester should run it against its own endpoint rather than copy a peer's
+output, which is the only way the threshold means anything.
 
 ```
 $ scripts/deposit_anchor_params.py deposit-prover/fixtures/deposit_10proofs/proof_00 --verify
@@ -154,16 +182,70 @@ It doubles as a check on the R2 fix from the PR-20 review: all ten regression
 fixtures now carry real canonical Sepolia hashes, so `--verify` passes on them.
 Flipping one byte of PI[10] is rejected as "node does not know this block hash".
 
+### Per-chain mint cap — `acki-nacki` `993af815`
+
+`setMintCap(chainId, cap)`, 0 = unlimited, checked in `finalizeDeposit` and
+tallied in `confirmDeposit`. Orthogonal to everything above: those guards try to
+make forgery impossible, this one bounds what a forgery is worth if one of them
+turns out to be wrong anyway.
+
+The split across the two calls is deliberate. Checking before the voucher is
+deployed keeps an over-cap deposit **retryable** once the cap is raised, where
+checking at mint time would consume the voucher and strand that deposit forever;
+tallying only where a mint lands keeps replays from eating headroom. The
+consequence, documented at the call site: N in-flight deposits can overshoot by
+their combined amount. It is a bound on damage, not an exact invariant.
+
 ### Still open
 
-- **M-of-N attesters** — the actual removal of the single key.
-- **Per-chain mint cap.** Orthogonal to the trust root and cheap: it bounds the
-  loss from a successful forgery instead of relying on the gate being perfect.
-  `_totalMintedBridgeByToken` is already tracked but no invariant is enforced.
+- **`disableOwnerAnchors()` has not been called on any deployment.** Until it is,
+  the trust root is the owner key and the attester set is decoration. It needs an
+  attester set with independent operators and independent RPC providers first —
+  otherwise it trades one key for a quorum that fails together.
 - **L2 canonicality.** An L2 block hash is only settled once its output root is
   posted to L1, so option A does not generalise: L1 gets a light client, the L2s
   in the allowlist stay on attesters unless someone builds per-L2 settlement
   verification.
+
+---
+
+## 1b. Found while fixing BC-D01: the deposit identity did not separate chains
+
+Not in the audit, and worth more than most of what is: the anti-replay identity
+was `(depositId, contractAddr, dappId)`, which does not include the source chain.
+
+- `dappId` is one constant per deployment — identical for every chain.
+- `depositId` is a per-chain counter that every chain starts at 0.
+- One bridge address routinely serves several chains, whether by CREATE2 or just
+  the same deployer nonce.
+
+So the first deposit on a second allowlisted chain that shares a bridge address
+with the first collides: the voucher address is already occupied, its constructor
+is a no-op, `confirmDeposit` never fires, nothing mints. With the ETH-side refund
+path retired in Phase 4.3 the user's funds have no way out. It needs no attacker —
+it fires on ordinary multi-chain operation, which is exactly what the 12-PI
+`chainId` work was for.
+
+Fixed in `acki-nacki` `21a781e7`: `chainId` (already public input #4, already in
+scope at the hash site) joins the identity, and rides through the voucher callback
+and `DepositFinalized` so per-chain accounting and monitoring can tell chains
+apart. The hash now lives in one helper, `_depositIdentity`.
+
+**This changes `DepositVoucher`'s ABI**, which is the failure mode from
+2026-07-02: bridge and voucher must agree byte-for-byte, and a mismatch is not a
+compile error — the voucher aborts on cell underflow (`exit_code 9`) before
+reaching `confirmDeposit`, so deposits just silently stop minting. Both artefacts
+must be recompiled and redeployed as a pair, with the bridge re-embedding the
+fresh `_depositVoucherCode`.
+
+`scripts/check_voucher_abi_consistency.py` now makes that class of bug detectable
+rather than a war story: it compares all three copies of the signature (the
+`new DepositVoucher` call, the constructor, `confirmDeposit`) in the sources and in
+the compiled ABIs. Run against the tree today it fails, and usefully so — the
+artefacts tracked in `acki-nacki/contracts/0.79.3_compiled/exchange/` are
+**pre-#2271**: they still carry `int8 anWorkchain`, so they predate the 256-bit
+recipient fix, the source allowlist and the anchor gate. Anything deployed from
+that directory as-is would ship known-broken logic.
 
 > The audit read the AN side from a checkout of `acki-nacki` @ `history_cursor`
 > (11 PI, pre-allowlist). Re-confirm against whatever ships to deploy.

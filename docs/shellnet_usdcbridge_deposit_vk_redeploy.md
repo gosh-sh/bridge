@@ -272,11 +272,31 @@ Deliver updated `USDCBridge.tvc` + `USDCBridge.abi.json` to the shellnet deploye
 - [ ] Fund relayer multisig if needed (`AN_SENDER` on ursus:
       `20c2db9c…::20c2db9c…`).
 - [ ] Publish the Sepolia `contractAddress` constant the contract enforces.
-- [ ] **Post-deploy configuration — all three are fail-closed and none survive an
-      upgrade** (`_expectedBridgeFr`, `_expectedAnDappId` and `_acceptedBlockHash`
-      are deliberately not threaded through `onCodeUpgrade`). Skipping any of them
-      makes every deposit revert, which looks like a broken bridge rather than a
-      missing config:
+- [ ] **Recompile `USDCBridge.sol` and `DepositVoucher.sol` as a pair, and deploy
+      a bridge that embeds the fresh voucher code.** `DepositVoucher`'s
+      constructor gained `srcChainId` (`acki-nacki` `21a781e7`), and a bridge
+      carrying a stale `_depositVoucherCode` does not fail to compile or deploy —
+      the voucher constructor aborts on cell underflow (`exit_code 9`) before
+      reaching `confirmDeposit`, so deposits stop minting with no obvious cause.
+      That is the 2026-07-02 outage, verbatim. Confirm before deploying:
+      ```bash
+      # compares the signature in the sources and in both compiled ABIs
+      scripts/check_voucher_abi_consistency.py --compiled <dir with the fresh .abi.json>
+      ```
+      Note that the artefacts tracked at `contracts/0.79.3_compiled/exchange/`
+      are **stale and pre-#2271** (they still carry `int8 anWorkchain`): they
+      predate the 256-bit recipient fix, the source allowlist and the anchor
+      gate, so deploying them as-is ships known-broken logic. Regenerate them, or
+      deploy from a build you made yourself.
+      After deploy, check `getDepositVoucherCodeHash()` against the hash of the
+      voucher `.tvc` you just built, and `getVersion()` — the pair should read
+      `1.2.0` / `2.0.0`.
+- [ ] **Post-deploy configuration — every one of these is fail-closed and none
+      survive an upgrade** (`_expectedBridgeFr`, `_expectedAnDappId`,
+      `_acceptedBlockHash`, the attester set and the mint caps are deliberately
+      not threaded through `onCodeUpgrade`). Skipping any of the first three makes
+      every deposit revert, which looks like a broken bridge rather than a missing
+      config; the relayer names the missing setter in its rejection message:
       - `setExpectedBridge(11155111, <Sepolia bridge Fr>)`
       - `setExpectedAnDappId(<this deployment's dapp id>)`
       - `setAcceptedBlockHash(chainId, blockHash, true)` for the block of every
@@ -287,8 +307,19 @@ Deliver updated `USDCBridge.tvc` + `USDCBridge.abi.json` to the shellnet deploye
         scripts/deposit_anchor_params.py \
             deposit-prover/fixtures/deposit_10proofs/proof_0{0..9} --verify
         ```
-        Why this gate exists and what the owner key is trusted for: BC-D01 in
+        Why this gate exists and what the writer is trusted for: BC-D01 in
         `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1.
+      - `setMintCap(chainId, cap)` per allowlisted chain. 0 means unlimited, so
+        this one fails *open* — an unset cap is not an error, it is an unbounded
+        one. Set it to something the deployment can afford to lose.
+      - Optionally `setAttester(pubkey, true)` per attester and
+        `setAttesterThreshold(M)`. Note that registering attesters changes
+        nothing on its own: while `getAttesterConfig().ownerAnchorsEnabled` is
+        true, the owner key can still admit any hash alone, so the trust root is
+        unchanged. `disableOwnerAnchors()` is the call that makes it M-of-N, it
+        is **one-way**, and it should only be made once the attesters are run by
+        different operators against different RPC providers — a quorum that fails
+        together is one key wearing N hats.
 
 **Current shellnet bridge address (zero dapp_id):**
 

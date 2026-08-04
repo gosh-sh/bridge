@@ -15,12 +15,19 @@ that discharging them is one command rather than a judgement call:
 
     scripts/deposit_anchor_params.py deposit-prover/fixtures/deposit_10proofs/proof_00
     scripts/deposit_anchor_params.py <dir-or-public_inputs.bin>... --verify
+    scripts/deposit_anchor_params.py <...> --verify --call attestBlockHash
 
 `--verify` resolves the hash over JSON-RPC and fails unless the node agrees the
 block is canonical (its number maps back to the same hash) and buried at least
 `--min-confirmations` deep. Point `--rpc` at a node you trust and that the
 relayer does not control; verifying against the same endpoint that produced the
 witness proves nothing.
+
+`--call` picks which writer's arguments to print: `setAcceptedBlockHash` for the
+owner path, `attestBlockHash` for one attester's vote under the M-of-N path. The
+obligations are identical either way — the threshold distributes the trust, it
+does not discharge the checks, and N attesters reading one RPC provider are one
+attester. Run this yourself rather than copying a peer's output.
 """
 
 import argparse
@@ -145,6 +152,12 @@ def main() -> int:
         help="proof directories or public_inputs.bin files",
     )
     ap.add_argument("--verify", action="store_true", help="check canonicality over RPC")
+    ap.add_argument(
+        "--call",
+        choices=("setAcceptedBlockHash", "attestBlockHash"),
+        default="setAcceptedBlockHash",
+        help="which anchor writer to print arguments for (default owner path)",
+    )
     ap.add_argument("--rpc", help="JSON-RPC endpoint (default: per-chain public node)")
     ap.add_argument(
         "--min-confirmations",
@@ -179,16 +192,15 @@ def main() -> int:
                 print(f"    REJECT: {problem}")
             continue
 
-        print(
-            "    setAcceptedBlockHash "
-            + json.dumps(
-                {
-                    "chainId": str(chain_id),
-                    "blockHash": f"0x{block_hash:064x}",
-                    "accepted": True,
-                }
-            )
-        )
+        call_args: dict[str, object] = {
+            "chainId": str(chain_id),
+            "blockHash": f"0x{block_hash:064x}",
+        }
+        # `attestBlockHash` has no `accepted` flag: a vote is only ever for
+        # admission, and retraction stays an owner action.
+        if args.call == "setAcceptedBlockHash":
+            call_args["accepted"] = True
+        print(f"    {args.call} " + json.dumps(call_args))
 
     if rejected:
         print(f"\n{rejected} anchor(s) must NOT be admitted", file=sys.stderr)

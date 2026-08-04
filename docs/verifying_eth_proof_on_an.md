@@ -120,14 +120,19 @@ A valid proof certifies, given the witness, that:
   the prover supplies the header and every trie node itself, so a
   self-consistent but entirely fabricated chain satisfies items 1–4 above
   (**BC-D01**). Canonicality is a fact about Ethereum consensus and is asserted
-  from outside the proof: since `acki-nacki` `7992ce26`, `finalizeDeposit`
-  requires the reassembled hash to sit in `_acceptedBlockHash[chainId]`, an
-  anchor set the owner populates via `setAcceptedBlockHash` — mirroring what
-  `AckiNackiBridge._knownAnchors` does for the opposite direction. So the owner
-  key, not the proof, is what certifies canonicality today; M-of-N attesters are
-  the planned replacement. See `docs/reviews/deposit_circuit_audit_2026-08-03.md`
-  §1, and use `scripts/deposit_anchor_params.py --verify` to derive an anchor and
-  check it against an independent node before admitting it.
+    from outside the proof: since `acki-nacki` `7992ce26`, `finalizeDeposit`
+    requires the reassembled hash to sit in `_acceptedBlockHash[chainId]` —
+    mirroring what `AckiNackiBridge._knownAnchors` does for the opposite
+    direction. Two writers can populate that set: the owner
+    (`setAcceptedBlockHash`) and a threshold of attesters (`attestBlockHash`,
+    `1fb5b28c`). Which one is the real trust root depends on
+    `getAttesterConfig().ownerAnchorsEnabled`: while it is true the answer is the
+    owner key alone, no matter how many attesters are registered;
+    `disableOwnerAnchors()` is what makes it M-of-N. Either way it is a key, not
+    the proof, that certifies canonicality. See
+    `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1, and use
+    `scripts/deposit_anchor_params.py --verify` to derive an anchor and check it
+    against an independent node before admitting it.
 - That the *enclosing transaction* called the bridge directly. The `tx.to ==
   contractAddress` constraint was removed (BC-D02) so that Safe / multisig,
   ERC-4337, EIP-7702 and router-mediated deposits remain provable; the emitter
@@ -160,7 +165,7 @@ A complete acceptance flow has 5 stages (V1–V5). Stages V1–V3 can be exercis
 
 If any RPC disagrees, abort. This guards against the cryptographic verifier accepting a proof tied to a phantom block hash.
 
-Since `acki-nacki` `7992ce26` this stage has an on-chain counterpart: the outcome of V1 is what the owner records with `setAcceptedBlockHash`, and `finalizeDeposit` will not credit a deposit whose block hash is absent from that set. `scripts/deposit_anchor_params.py --verify` performs the hash half of the check above (canonical at its number, ≥ `--min-confirmations` deep) and prints the setter arguments only if it passes.
+Since `acki-nacki` `7992ce26` this stage has an on-chain counterpart: the outcome of V1 is what the anchor writer records — `setAcceptedBlockHash` on the owner path, or `attestBlockHash` from each attester under the threshold path — and `finalizeDeposit` will not credit a deposit whose block hash is absent from that set. `scripts/deposit_anchor_params.py --verify` performs the hash half of the check above (canonical at its number, ≥ `--min-confirmations` deep) and prints the call arguments only if it passes; `--call attestBlockHash` selects the attester form. Under the threshold path this stage is run once per attester, against endpoints that do not share a provider — a quorum reading one RPC is one attester.
 
 ### V2 — MPT cross-check (off-chain)
 
@@ -236,7 +241,7 @@ When generating a proof to submit:
 
 | ID | Risk | Mitigation |
 | --- | --- | ---------- |
-| ETH-AN-1 | Producer feeds a proof tied to a non-canonical Ethereum block hash (re-org, alt-chain) | On-chain: `finalizeDeposit` requires the hash in `_acceptedBlockHash[chainId]` (BC-D01). Off-chain: V1 RPC quorum before admitting the anchor, ≥ 64 confirmations. Residual: the owner key can admit a hash from a chain that does not exist — M-of-N attesters are the planned replacement. |
+| ETH-AN-1 | Producer feeds a proof tied to a non-canonical Ethereum block hash (re-org, alt-chain) | On-chain: `finalizeDeposit` requires the hash in `_acceptedBlockHash[chainId]` (BC-D01), and `_mintCapByChain` bounds the loss if it is admitted anyway. Off-chain: V1 RPC quorum before admitting the anchor, ≥ 64 confirmations. Residual: the anchor writer can admit a hash from a chain that does not exist — the owner key alone while `ownerAnchorsEnabled`, a threshold of attesters after `disableOwnerAnchors()`. |
 | ETH-AN-2 | Producer omits MPT proof step and forges receipt | V3 catches it — the in-circuit MPT inclusion is a hard binding. |
 | ETH-AN-3 | Replay of an already-credited deposit | V5 nullifier check. |
 | ETH-AN-4 | Wrong-bridge spoofing (`contractAddress` of an attacker contract) | V4 enforces `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR`. |

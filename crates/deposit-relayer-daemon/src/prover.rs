@@ -7,9 +7,9 @@
 //! this crate keeps proof generation behind a trait with two backends:
 //!
 //! - [`MockProofGenerator`] — deterministic, no halo2. Derives the twelve
-//!   public inputs (including proven `chainId`, the AN destination account,
-//!   and the config dappId tag) straight from the event so the relayer +
-//!   submitter can be driven end-to-end in unit tests in microseconds.
+//!   public inputs (including proven `chainId`, the AN destination account, and
+//!   the config dappId tag) straight from the event so the relayer + submitter
+//!   can be driven end-to-end in unit tests in microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the

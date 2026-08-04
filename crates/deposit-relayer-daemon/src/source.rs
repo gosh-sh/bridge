@@ -9,7 +9,11 @@
 //!   timestamp)` event, honouring a confirmation depth so only finalised
 //!   deposits are surfaced.
 
-use std::{collections::BTreeMap, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use alloy::{
     network::{Ethereum, Network},

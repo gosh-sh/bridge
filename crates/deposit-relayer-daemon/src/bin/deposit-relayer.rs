@@ -19,7 +19,12 @@
 //!
 //! - `status` — print the state file path.
 
-use std::{path::PathBuf, str::FromStr, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
@@ -28,8 +33,8 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -358,9 +363,8 @@ async fn main() -> anyhow::Result<()> {
             allow_insecure_graphql,
             expect_chain_id,
         } => {
-            let dapp_id =
-                parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
+                .map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
@@ -687,9 +691,7 @@ async fn run_daemon(
 
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
     let scan_cursor = Arc::new(Mutex::new(
-        existing_state
-            .scanned_through_block
-            .unwrap_or(from_block),
+        existing_state.scanned_through_block.unwrap_or(from_block),
     ));
 
     // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs

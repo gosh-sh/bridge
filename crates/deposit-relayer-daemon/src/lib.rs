@@ -10,14 +10,14 @@
 //!    ([`source::EthLogSource`]).
 //! 2. **Prove** that the deposit event was emitted — the `deposit-prover` Halo2
 //!    circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof plus the
-//!    twelve public inputs `[depositId, sender, amount, contractAddress, chainId,
-//!    dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh,
-//!    blockHashLow, promiseCommit]` — the Acki Nacki destination account is
-//!    bound in-circuit so the AN side credits a proven account, proven `chainId`
-//!    is allowlisted by USDCBridge, and `dappId` (a config tag, replaced
-//!    `anWorkchain` on 2026-06-02) is checked by the AN-side bridge. Because
-//!    `deposit-prover` is its own cargo workspace, the proof is generated
-//!    out-of-process ([`prover::SubprocessProofGenerator`]).
+//!    twelve public inputs `[depositId, sender, amount, contractAddress,
+//!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
+//!    blockHashHigh, blockHashLow, promiseCommit]` — the Acki Nacki destination
+//!    account is bound in-circuit so the AN side credits a proven account,
+//!    proven `chainId` is allowlisted by USDCBridge, and `dappId` (a config
+//!    tag, replaced `anWorkchain` on 2026-06-02) is checked by the AN-side
+//!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
+//!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
 //!    `proof`) to the AN-side `TokenBridge.finalizeDeposit(...)`, which
 //!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and consumes

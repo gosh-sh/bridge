@@ -7,35 +7,46 @@
 //! every runtime call to `aggregate-proof` paid that cost from scratch.
 //!
 //! This module memoises the outer
-//! `(pk, break_points, calculated, num_instance)` bundle on disk, keyed by
-//! `(base_name, k_outer, lookup_bits, universality, inner-shape hash)`.
+//! `(pk, break_points, calculated, num_instance)` bundle on disk, keyed by a
+//! **content hash** over the inputs that actually determine the outer PK:
+//! `AggregatorConfig`, the SRS `s_g2` head, and `bincode(inner_snark.protocol)`
+//! (a stable function of the inner VK).
 //!
 //! Cache slot layout under `<cache_dir>`:
 //! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
-//! The inner-shape hash is a 64-bit `SipHash` of `bincode::serialize(&snark.protocol)`.
-//! `PlonkProtocol` bytes are a stable function of the inner VK, so a different
-//! inner circuit shape allocates a fresh slot even if the caller reuses
-//! `base_name`. Collision safety is not cryptographic here -- if two
-//! shape-different snarks ever collide on the 64-bit hash and get pointed at
-//! the same slot, the byte-drift check in `bin/aggregate_proof.rs:82-104`
-//! still catches it before calldata is emitted on-chain.
+//! Slot stem: `<base_name>__v2__<content_hash:hex[..32]>`. `base_name` is
+//! a human-readable label only — it is **not** trusted for correctness. Two
+//! callers using the same `base_name` with distinct inner VKs, distinct
+//! aggregator configs, or a distinct SRS produce distinct content hashes, so
+//! they can never share a slot. Conversely, two callers producing identical
+//! content share a slot even under different names (deemed acceptable — this
+//! is the classical cache-dedup property).
+//!
+//! Format tag `v2` in the stem gates against silent breakage if the hash
+//! preimage layout ever changes; bump to `v3` to invalidate all v2 slots.
+//!
+//! History: v1 used a 64-bit `SipHash` of the protocol bytes alone plus
+//! trusted `base_name`; the SRS was **not** in the key. That meant a
+//! re-bootstrapped SRS or an unlucky hash collision under the same
+//! `base_name` could silently serve stale keys. The `bin/aggregate_proof.rs`
+//! byte-drift check would catch it before on-chain use, but the cache-side
+//! precondition is now enforced properly.
 
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::Hasher,
     path::{Path, PathBuf},
 };
 
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
-        halo2curves::bn256::{Bn256, G1Affine},
+        halo2curves::{bn256::{Bn256, G1Affine}, serde::SerdeObject},
         plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
 };
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use snark_verifier_sdk::{
     gen_pk,
@@ -108,31 +119,77 @@ impl From<MirrorConfigParams> for AggregationConfigParams {
     }
 }
 
-fn universality_tag(u: VerifierUniversality) -> &'static str {
+fn universality_byte(u: VerifierUniversality) -> u8 {
     match u {
-        VerifierUniversality::None => "none",
-        VerifierUniversality::PreprocessedAsWitness => "preprocessed",
-        VerifierUniversality::Full => "full",
+        VerifierUniversality::None => 0,
+        VerifierUniversality::PreprocessedAsWitness => 1,
+        VerifierUniversality::Full => 2,
     }
 }
 
-fn inner_shape_hash(inner_snark: &Snark) -> u64 {
-    let protocol_bytes = bincode::serialize(&inner_snark.protocol)
-        .expect("PlonkProtocol serialization is infallible for well-formed snarks");
-    let mut hasher = DefaultHasher::new();
-    hasher.write(&protocol_bytes);
-    hasher.finish()
+/// SRS `s_g2` bytes — the public MPC-ceremony fingerprint. Fresh SRS ⇒ fresh
+/// bytes ⇒ fresh cache slot. Same encoding path as `srs_guard::assert_hermez_ceremony`.
+fn srs_s_g2_bytes(params: &ParamsKZG<Bn256>) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(128);
+    params
+        .s_g2()
+        .write_raw(&mut buf)
+        .expect("write to Vec cannot fail");
+    buf
 }
 
-/// Deterministic slot stem: `<base_name>__k<k>__lb<lb>__<univ>__<shape:016x>`.
-pub fn cache_stem(base_name: &str, config: &AggregatorConfig, inner_snark: &Snark) -> String {
-    format!(
-        "{base_name}__k{}__lb{}__{}__{:016x}",
-        config.k_outer,
-        config.lookup_bits_outer,
-        universality_tag(config.universality),
-        inner_shape_hash(inner_snark),
-    )
+fn snark_protocol_bytes(inner_snark: &Snark) -> Vec<u8> {
+    bincode::serialize(&inner_snark.protocol)
+        .expect("PlonkProtocol serialization is infallible for well-formed snarks")
+}
+
+/// Content hash — SHA-256 over the domain-tagged, length-prefixed concatenation
+/// of every input that determines the outer PK. Two calls collide iff the
+/// caller passed identical config + SRS + inner-snark protocol bytes.
+///
+/// Preimage layout (all little-endian):
+/// ```text
+///   b"bridge-evm-aggregator-cache-v2"
+///   u32(k_outer) || u32(lookup_bits_outer) || u8(universality)
+///   u32(s_g2_len)     || s_g2_bytes
+///   u32(protocol_len) || protocol_bytes
+/// ```
+fn content_hash(
+    config: &AggregatorConfig,
+    s_g2_bytes: &[u8],
+    protocol_bytes: &[u8],
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"bridge-evm-aggregator-cache-v2");
+    h.update((config.k_outer as u32).to_le_bytes());
+    h.update((config.lookup_bits_outer as u32).to_le_bytes());
+    h.update([universality_byte(config.universality)]);
+    h.update((s_g2_bytes.len() as u32).to_le_bytes());
+    h.update(s_g2_bytes);
+    h.update((protocol_bytes.len() as u32).to_le_bytes());
+    h.update(protocol_bytes);
+    h.finalize().into()
+}
+
+/// Deterministic slot stem: `<base_name>__v2__<content_hash[..32]>`.
+///
+/// `base_name` is a human-readable label only. Correctness is enforced by the
+/// content hash — see module-level docs.
+pub fn cache_stem(
+    base_name: &str,
+    config: &AggregatorConfig,
+    srs: &ParamsKZG<Bn256>,
+    inner_snark: &Snark,
+) -> String {
+    let hash = content_hash(
+        config,
+        &srs_s_g2_bytes(srs),
+        &snark_protocol_bytes(inner_snark),
+    );
+    // 128 bits of the 256-bit digest keeps filenames short; a full collision
+    // there is still infeasible and the byte-drift check in aggregate_proof
+    // provides defence in depth.
+    format!("{base_name}__v2__{}", hex::encode(&hash[..16]))
 }
 
 fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
@@ -162,7 +219,7 @@ pub fn keygen_or_load(
     let slots = match cache_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
-            let stem = cache_stem(base_name, &config, inner_snark);
+            let stem = cache_stem(base_name, &config, agg_params, inner_snark);
             Some(slot_paths(dir, &stem))
         }
         None => None,
@@ -253,4 +310,83 @@ pub fn keygen_or_load(
         calculated,
         num_instance,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the content-addressed cache key. These exercise
+    //! `content_hash` directly with hand-crafted bytes — building a real
+    //! `Snark` + `ParamsKZG` is prohibitively expensive for a unit test, and
+    //! the correctness properties Sergey flagged live entirely at the
+    //! hash-preimage layer.
+    use super::*;
+
+    fn base_cfg() -> AggregatorConfig {
+        AggregatorConfig::default()
+    }
+
+    #[test]
+    fn content_hash_is_deterministic() {
+        let cfg = base_cfg();
+        let s_g2 = b"srs-s-g2-bytes";
+        let proto = b"protocol-bytes";
+        assert_eq!(content_hash(&cfg, s_g2, proto), content_hash(&cfg, s_g2, proto));
+    }
+
+    #[test]
+    fn content_hash_diverges_on_protocol_change() {
+        let cfg = base_cfg();
+        let s_g2 = b"srs-s-g2-bytes";
+        let a = content_hash(&cfg, s_g2, b"protocol-A");
+        let b = content_hash(&cfg, s_g2, b"protocol-B");
+        assert_ne!(a, b, "distinct inner protocols must not share a cache slot");
+    }
+
+    #[test]
+    fn content_hash_diverges_on_srs_change() {
+        // The v1 SipHash-only key omitted SRS entirely. A re-bootstrapped SRS
+        // under an unchanged base_name would silently serve stale keys. The
+        // v2 key must catch this.
+        let cfg = base_cfg();
+        let proto = b"protocol-bytes";
+        let hermez_head = content_hash(&cfg, b"hermez-srs", proto);
+        let toxic_head = content_hash(&cfg, b"toxic-waste-srs", proto);
+        assert_ne!(
+            hermez_head, toxic_head,
+            "distinct SRS ceremonies must not share a cache slot"
+        );
+    }
+
+    #[test]
+    fn content_hash_diverges_on_config_change() {
+        let s_g2 = b"srs-s-g2-bytes";
+        let proto = b"protocol-bytes";
+        let base = content_hash(&base_cfg(), s_g2, proto);
+
+        let mut c = base_cfg();
+        c.k_outer = base_cfg().k_outer + 1;
+        assert_ne!(base, content_hash(&c, s_g2, proto), "k_outer must be in key");
+
+        let mut c = base_cfg();
+        c.lookup_bits_outer = base_cfg().lookup_bits_outer + 1;
+        assert_ne!(base, content_hash(&c, s_g2, proto), "lookup_bits_outer must be in key");
+
+        let mut c = base_cfg();
+        c.universality = match c.universality {
+            VerifierUniversality::None => VerifierUniversality::Full,
+            _ => VerifierUniversality::None,
+        };
+        assert_ne!(base, content_hash(&c, s_g2, proto), "universality must be in key");
+    }
+
+    #[test]
+    fn content_hash_length_prefix_prevents_boundary_ambiguity() {
+        // Without length prefixes, ("ab", "cd") and ("a", "bcd") would hash
+        // identically. The v2 preimage encodes u32-le length before each
+        // variable-length field.
+        let cfg = base_cfg();
+        let a = content_hash(&cfg, b"ab", b"cd");
+        let b = content_hash(&cfg, b"a", b"bcd");
+        assert_ne!(a, b, "field lengths must be encoded to disambiguate boundaries");
+    }
 }

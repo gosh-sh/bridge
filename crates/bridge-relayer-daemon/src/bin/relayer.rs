@@ -41,9 +41,9 @@ use bridge_relayer_daemon::{
     BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
     DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
     LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
-    RelayerMetrics, StatePaths, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
+    RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
+    TickOutcome,
     WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
@@ -246,20 +246,17 @@ enum Cmd {
     },
     /// M7 ETH-side path: generate one Circuit 4 withdrawal proof as **SHPLONK
     /// aggregator calldata** the deployed `BridgeWithdrawalAggregatorVerifier`
-    /// accepts. Re-proves the `PrivateWitness` with a Poseidon transcript
-    /// (`export-c4-poseidon-snark --fixture`), aggregates the inner snark
-    /// (`aggregate-proof`, which self-checks the regenerated Yul == committed
-    /// `.bin`), cross-checks the calldata binds the ten public inputs, and
-    /// writes a `proof_event` JSON that `submit-withdraw` / `daemon-withdraw`
-    /// consume unchanged.
+    /// accepts. Re-proves the `PrivateWitness` in-process with a Poseidon
+    /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
+    /// the historical `export-c4-poseidon-snark --fixture` subprocess),
+    /// aggregates the inner snark (`aggregate-proof`, which self-checks the
+    /// regenerated Yul == committed `.bin`), cross-checks the calldata binds
+    /// the ten public inputs, and writes a `proof_event` JSON that
+    /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/bridge-prover-orchestrator` root (holds
-        /// `target/release/export-c4-poseidon-snark`).
-        #[arg(long, env = "ORCHESTRATOR_DIR")]
-        orchestrator_dir: PathBuf,
         /// `crates/bridge-evm-aggregator` root (holds
         /// `target/release/aggregate-proof`).
         #[arg(long, env = "AGGREGATOR_DIR")]
@@ -611,7 +608,6 @@ async fn main() -> anyhow::Result<()> {
             }),
         Cmd::ProveWithdrawShplonk {
             witness,
-            orchestrator_dir,
             aggregator_dir,
             verifiers_dir,
             params_dir,
@@ -620,7 +616,6 @@ async fn main() -> anyhow::Result<()> {
             seq_no,
         } => prove_withdraw_shplonk(
             witness,
-            orchestrator_dir,
             aggregator_dir,
             verifiers_dir,
             params_dir,
@@ -1239,7 +1234,6 @@ async fn prove_withdraw(
 #[allow(clippy::too_many_arguments)]
 async fn prove_withdraw_shplonk(
     witness: PathBuf,
-    orchestrator_dir: PathBuf,
     aggregator_dir: PathBuf,
     verifiers_dir: PathBuf,
     params_dir: PathBuf,
@@ -1247,9 +1241,9 @@ async fn prove_withdraw_shplonk(
     out: PathBuf,
     seq_no: u64,
 ) -> anyhow::Result<()> {
-    let snark_prover = SubprocessCircuit4SnarkProver::new(
-        SubprocessCircuit4SnarkProverConfig::new(&orchestrator_dir, &params_dir),
-    );
+    // NB-Q9 PR-B: in-process Circuit 4 Poseidon re-prove (no more subprocess
+    // shell-out to `export-c4-poseidon-snark`).
+    let snark_prover = InProcessCircuit4SnarkProver::new(&params_dir);
     let aggregator = SubprocessAggregator::new(SubprocessAggregatorConfig::new(
         &aggregator_dir,
         &verifiers_dir,
@@ -1259,7 +1253,7 @@ async fn prove_withdraw_shplonk(
 
     info!(
         witness = %witness.display(),
-        "M7: re-proving Circuit 4 (Poseidon) → aggregating → calldata (this may take minutes)"
+        "M7: re-proving Circuit 4 (Poseidon, in-process) → aggregating → calldata (this may take minutes)"
     );
     let proof = pipeline.prove(&witness, &snark_dir, seq_no).await?;
 

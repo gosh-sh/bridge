@@ -24,11 +24,10 @@ pub mod withdrawal;
 pub use aggregated_source::AggregatedBlockSource;
 pub use aggregator::{
     calldata_binds_instances, Circuit12ShplonkPipeline, Circuit4ShplonkPipeline,
-    Circuit4SnarkProver, MockAggregator, MockCircuit4SnarkProver, MockSnarkWrapper,
-    PoseidonSnarkWrapper, ProofAggregator, SnarkArtefacts, SnarkWrapper, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver,
-    SubprocessCircuit4SnarkProverConfig, FALLBACK_VERIFIER_NAME, LAYER_HASHES_VERIFIER_NAME,
-    PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
+    Circuit4SnarkProver, InProcessCircuit4SnarkProver, MockAggregator, MockCircuit4SnarkProver,
+    MockSnarkWrapper, PoseidonSnarkWrapper, ProofAggregator, SnarkArtefacts, SnarkWrapper,
+    SubprocessAggregator, SubprocessAggregatorConfig, FALLBACK_VERIFIER_NAME,
+    LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
     BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,

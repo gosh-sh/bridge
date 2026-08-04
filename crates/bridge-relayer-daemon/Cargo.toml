@@ -41,6 +41,14 @@ bridge-gql-fetcher = { path = "../bridge-gql-fetcher" }
 # independently re-fetched + re-proved every bundle). Must be resolved through
 # the an-bridge-prover workspace so its halo2-base [patch] rewrites apply.
 bridge-snark-wrap = { path = "../bridge-snark-wrap" }
+# In-process Circuit 4 (event) Poseidon prover — replaces the historical
+# `SubprocessCircuit4SnarkProver` shell-out to `export-c4-poseidon-snark`
+# (NB-Q9 PR-B). Same shape as the 1A/1B/2 lane above.
+bridge-event-prover-lib = { path = "../bridge-event-prover-lib" }
+# Direct halo2-base dep pulls in `Params` / `ParamsProver` traits needed for
+# SRS downsize + serialize in `ensure_srs_for_event`. Workspace = ensures the
+# same halo2-axiom rev as bridge-prover-lib / bridge-snark-wrap resolve to.
+halo2-base = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }

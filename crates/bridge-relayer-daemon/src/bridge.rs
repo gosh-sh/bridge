@@ -30,10 +30,14 @@
 //! abstract over the alloy [`Provider`] trait the same way it used to
 //! abstract over ethers' `Middleware`.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use alloy::{
     contract::Error as AlloyContractError,
+    eips::BlockId,
     network::{Network, ReceiptResponse},
     primitives::{Address, B256, U256},
     providers::Provider,
@@ -338,6 +342,11 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
+            /// Post-submit verification: is `anchor` present in layer `L`'s
+            /// rolling `_layerWindows[L]` buffer? Called after `verifyBlock`
+            /// to confirm the layer-hash append side-effect actually landed.
+            function isKnownLayerAnchor(uint8 layer, uint256 anchor) external view returns (bool);
+
             event BlockVerified(
                 uint256 indexed blockId,
                 uint64 indexed blockSeqNo,
@@ -538,6 +547,51 @@ where
             .await
             .map_err(map_contract_err)
     }
+
+    /// Read the four top-level anchor slots pinned to a specific block.
+    ///
+    /// The trait's [`BridgeClient::read_state`] reads at `"latest"`, which
+    /// can race behind a load-balanced public RPC (backend A gives us the
+    /// receipt for block N; backend B still on block N-1 answers the
+    /// follow-up eth_call). After a successful `verifyBlock` receipt we
+    /// pin the reads to `receipt.block_number` so Tier 1 drift checks
+    /// cannot false-fire on that lag.
+    async fn read_state_at(&self, at: BlockId) -> Result<BridgeOnChainState, RelayerError> {
+        let last = self
+            .contract
+            .storedLastSeenBlockSeqNo()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let bk = self
+            .contract
+            .storedBkSetCommitment()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let anchor = self
+            .contract
+            .storedPrevMaxLevelLayerHash()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let last_bk = self
+            .contract
+            .storedLastBkSetUpdateSeqNo()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok(BridgeOnChainState {
+            last_seen_block_seq_no: last,
+            bk_set_commitment: bk,
+            prev_max_level_layer_hash: anchor,
+            last_bk_set_update_seq_no: last_bk,
+        })
+    }
 }
 
 /// Outcome of [`EthBridgeClient::submit_withdraw`].
@@ -616,6 +670,59 @@ where
     async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError> {
         block.validate_shape()?;
 
+        // DEBUG: dump verifyBlock args to disk for offline replay via
+        // `cast call` (env-gated so it never fires in production runs).
+        //   BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions cargo run … daemon-live
+        // File format is a JSON object with hex-encoded proofs + numeric
+        // uint256 anchors, directly consumable by an eth_call replay:
+        //   cast call --rpc-url … <BRIDGE> "verifyBlock(...)" $(jq -r … dump.json)
+        if let Ok(dir) = std::env::var("BRIDGE_DUMP_SUBMISSIONS_DIR") {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let fname = format!(
+                "verifyBlock_seq{}_fin{}_{}.json",
+                block.block_seq_no,
+                block.fin_type.tag(),
+                ts
+            );
+            let path = std::path::PathBuf::from(&dir).join(&fname);
+            let layer_hashes: Vec<String> = block
+                .layer_hashes
+                .iter()
+                .map(|h| format!("0x{:064x}", h))
+                .collect();
+            let payload = serde_json::json!({
+                "bridge_address": format!("{:?}", self.contract.address()),
+                "fin_type": block.fin_type.tag(),
+                "attestation_proof_hex": format!("0x{}", hex::encode(&block.attestation_proof)),
+                "layer_hashes_proof_hex": format!("0x{}", hex::encode(&block.layer_hashes_proof)),
+                "block_id_uint256": format!("0x{:064x}", block.block_id),
+                "bk_set_commitment_uint256": format!("0x{:064x}", block.bk_set_commitment),
+                "block_seq_no": block.block_seq_no,
+                "num_layers": block.num_layers,
+                "layer_hashes_uint256": layer_hashes,
+                "prev_max_level_layer_hash_uint256":
+                    format!("0x{:064x}", block.prev_max_level_layer_hash),
+            });
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::warn!("dump-submissions: mkdir {dir} failed: {e}");
+            } else {
+                match serde_json::to_string_pretty(&payload)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => tracing::info!(
+                        target: "bridge_relayer_daemon::bridge",
+                        "dumped verifyBlock submission to {}",
+                        path.display()
+                    ),
+                    Err(e) => tracing::warn!("dump-submissions: write {} failed: {e}", path.display()),
+                }
+            }
+        }
+
         let call = self.contract.verifyBlock(
             block.fin_type.tag(),
             block.attestation_proof.clone(),
@@ -628,15 +735,29 @@ where
             block.prev_max_level_layer_hash,
         );
 
+        // Timeout on get_receipt: alloy's default is None (wait forever).
+        // We cap at 180 s (~15 Sepolia blocks) so a stuck / dropped tx
+        // surfaces as `SubmitOutcome::Reverted { reason: "timeout" }` and
+        // counts toward `max_attempts_abort` instead of hanging the daemon.
+        const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+
         let send_res = call.send().await;
-        let tx_hash = match send_res {
-            Ok(pending) => match pending.get_receipt().await {
-                Ok(receipt) => Some(receipt.transaction_hash()),
-                Err(e) => {
-                    return Ok(SubmitOutcome::Reverted {
-                        reason: format!("tx confirmation error: {e}"),
-                    });
-                },
+        let (tx_hash, receipt_block) = match send_res {
+            Ok(pending) => {
+                let pending = pending.with_timeout(Some(RECEIPT_TIMEOUT));
+                match pending.get_receipt().await {
+                    Ok(receipt) => {
+                        let bn = receipt.block_number().ok_or_else(|| {
+                            RelayerError::other("verifyBlock receipt missing block_number")
+                        })?;
+                        (Some(receipt.transaction_hash()), bn)
+                    },
+                    Err(e) => {
+                        return Ok(SubmitOutcome::Reverted {
+                            reason: format!("tx confirmation error: {e}"),
+                        });
+                    },
+                }
             },
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {
@@ -645,7 +766,77 @@ where
             },
         };
 
-        let new_state = self.read_state().await?;
+        // Pin all post-submit reads to the block that mined our tx. This
+        // sidesteps read-after-write lag on load-balanced public RPCs
+        // (see doc on `read_state_at`).
+        let at = BlockId::from(receipt_block);
+        let new_state = self.read_state_at(at).await?;
+
+        // ---- Tier 1: top-level storage-slot drift -----------------------------
+        // The receipt only proves the tx did not revert. Cross-check that the
+        // three storage slots verifyBlock is documented to touch (see
+        // AckiNackiBridge.sol:738/749 and the bkSetCommitment invariant) match
+        // what we submitted. A mismatch here means the contract accepted the tx
+        // but the on-chain state disagrees with our view of the block — treat
+        // it as a revert so the daemon does not advance its cursor.
+        if new_state.last_seen_block_seq_no != block.block_seq_no {
+            return Ok(SubmitOutcome::Reverted {
+                reason: format!(
+                    "post-submit drift: chain last_seen_block_seq_no={} != submitted={}",
+                    new_state.last_seen_block_seq_no, block.block_seq_no
+                ),
+            });
+        }
+        let expected_anchor = block.layer_hashes[(block.num_layers - 1) as usize];
+        if new_state.prev_max_level_layer_hash != expected_anchor {
+            return Ok(SubmitOutcome::Reverted {
+                reason: format!(
+                    "post-submit drift: chain prev_max_level_layer_hash={} != expected={} \
+                     (top layer of submitted block)",
+                    new_state.prev_max_level_layer_hash, expected_anchor
+                ),
+            });
+        }
+        if new_state.bk_set_commitment != block.bk_set_commitment {
+            return Ok(SubmitOutcome::Reverted {
+                reason: format!(
+                    "post-submit drift: chain bk_set_commitment={} != submitted={}",
+                    new_state.bk_set_commitment, block.bk_set_commitment
+                ),
+            });
+        }
+
+        // ---- Tier 2: per-layer _layerWindows[L] append verification -----------
+        // verifyBlock's _appendLayerHashes (AckiNackiBridge.sol:840) walks
+        // L = 1..=numLayers and appends layerHashes[L-1] into _layerWindows[L]
+        // iff the hash is non-zero. Confirm each non-zero layer hash we
+        // submitted is now findable via isKnownLayerAnchor(L, hash).
+        for i in 0..block.num_layers {
+            let hash = block.layer_hashes[i as usize];
+            if hash == U256::ZERO {
+                // Contract skips zero-valued layer hashes, so don't assert
+                // membership for them.
+                continue;
+            }
+            let layer_idx: u8 = i + 1; // layers are 1-indexed in the contract
+            let ok = self
+                .contract
+                .isKnownLayerAnchor(layer_idx, hash)
+                .block(at)
+                .call()
+                .await
+                .map_err(map_contract_err)?;
+            if !ok {
+                return Ok(SubmitOutcome::Reverted {
+                    reason: format!(
+                        "post-submit: layer {} hash {} not registered in _layerWindows \
+                         (verifyBlock append side-effect missing)",
+                        layer_idx, hash
+                    ),
+                });
+            }
+        }
+
         Ok(SubmitOutcome::Verified {
             new_state,
             tx_hash,

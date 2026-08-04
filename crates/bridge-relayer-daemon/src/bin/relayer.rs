@@ -1328,8 +1328,9 @@ async fn shutdown_signal() {
 ///
 /// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
 /// submit revert), signalling the caller to back off before the next scan.
-/// Permanent per-proof problems (parse errors, bad public inputs, non-256-B
-/// proofs, or an ACK that isn't accepted) park the proof in `st.done` and
+/// Permanent per-proof problems (parse errors, bad public inputs, proofs
+/// that fail the SHPLONK aggregator shape gate, or an ACK that isn't
+/// accepted) park the proof in `st.done` and
 /// the scan drains the rest of the directory. Lower-level infra failures
 /// (RPC down during dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<P, N>(
@@ -1421,7 +1422,7 @@ where
         let proof_bytes = match bundle.proof_bytes() {
             Ok(b) => b,
             Err(e) => {
-                warn!(?e, proof = %proof_path.display(), "proof not 256-B Groth16 (gnark-wrap first); parking");
+                warn!(?e, proof = %proof_path.display(), "proof fails SHPLONK aggregator shape gate; parking");
                 st.done.insert(proof_path);
                 continue;
             },

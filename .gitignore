@@ -222,3 +222,16 @@ docs/user/USER_GUIDE.md.bak.*
 docs/partner_handoff_*.md
 
 .temp/*
+
+# Runtime state + debug artefacts emitted by the relayer / prover binaries.
+# Never commit — the .stale_* variants are ad-hoc backups from crash-recovery
+# sessions; the submissions/ and diag/ dirs are env-gated dumps for offline
+# replay (BRIDGE_DUMP_SUBMISSIONS_DIR, BRIDGE_DIAG_INSTANCES_FILE); the top
+# `proofs/` dir is halo2 proof output. Mirrors the existing
+# `crates/bridge-prover-orchestrator/proofs/` rule.
+/proofs/
+crates/an-bridge-prover/relayer-state.json
+crates/an-bridge-prover/relayer-state.json.stale_*
+crates/an-bridge-prover/state.stale_*/
+crates/an-bridge-prover/submissions/
+crates/an-bridge-prover/diag/

@@ -18,7 +18,7 @@ pragma solidity ^0.8.19;
 ///      [3] lastSeenBlockSeqNo   monotonic anchor: the contract's currently stored seqno
 interface IPrimaryVerifier {
     /// @notice Verify a Circuit 1A (Primary attestation) proof.
-    /// @param proof 256-byte Groth16 proof (8 × uint256, gnark MarshalSolidity layout)
+    /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof)
     /// @param blockId 32-byte AN block identifier (was envelopeHash before 2026-05-10)
     /// @param bkSetCommitment Poseidon commitment to the BK set
     /// @param blockSeqNo AN block sequence number

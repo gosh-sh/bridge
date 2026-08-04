@@ -14,7 +14,7 @@ import "./ShplonkDeployLib.sol";
 /**
  * @title DeployRealBridge
  * @notice Deployment script for the production bridge contract.
- * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 2; gnark Groth16 for 1B fallback.
+ * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 1B + 2 (1B hybrid was retired on e2a962b).
  *
  * Oracle mode:
  *   - USE_AXIOM_ORACLE=true → AxiomBlockHeaderOracle (production)
@@ -190,7 +190,7 @@ contract DeployRealBridge is Script {
         console.log("startPaused:", w.startPaused);
         if (w.wireVerifyBlock) {
             console.log("PrimaryAggregatorVerifier:", r.primaryVerifierAddr);
-            console.log("FallbackVerifier (Groth16):", r.fallbackVerifierAddr);
+            console.log("FallbackAggregatorVerifier:", r.fallbackVerifierAddr);
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
         if (w.wireWithdraw) {

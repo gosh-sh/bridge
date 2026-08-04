@@ -76,6 +76,11 @@ contract AckiNackiBridge {
     /// @notice L1-only anchor layer for Circuit 4 until `anchorLayer` PI lands.
     uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;
 
+    /// @notice BN254 scalar field order — the modulus every circuit public
+    ///         input lives in.
+    uint256 internal constant BN254_R =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
     ///         binary split: Primary (>= 2/3 quorum) or Fallback (>1/2 split).
@@ -740,7 +745,8 @@ contract AckiNackiBridge {
     ///      h23  = SHA256(L2 ‖ L3)              // both in LE `Fr` repr
     ///      h0_3 = SHA256(siblingH01  ‖ h23)
     ///      h0_7 = SHA256(h0_3        ‖ siblingH4_7)
-    ///      root = SHA256(h0_7        ‖ siblingH8_15)   // == blockId
+    ///      root = SHA256(h0_7        ‖ siblingH8_15)
+    ///      blockId == root mod BN254_R         // canonical `Fr` image
     ///      ```
     ///
     ///      Mirrors `bridge-prover-lib/src/block_id_tree.rs`
@@ -750,7 +756,10 @@ contract AckiNackiBridge {
     ///
     /// @param finType Primary or Fallback attestation path for the update block.
     /// @param attestationProof SHPLONK attestation proof bytes.
-    /// @param blockId Block identifier shared with the attestation public inputs.
+    /// @param blockId Block identifier shared with the attestation public inputs,
+    ///        so it is the canonical `Fr` image of the tree root (`root mod
+    ///        BN254_R`) rather than the raw SHA-256 root — the same convention
+    ///        `verifyBlock` uses.
     /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
     /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
     /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
@@ -806,8 +815,18 @@ contract AckiNackiBridge {
         bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
         bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
-        if (uint256(root) != blockId) {
-            revert BkUpdateMerkleMismatch(uint256(root), blockId);
+        // The fold produces a raw 256-bit SHA-256 output, but `blockId` was
+        // just handed to the attestation adapter, which compares it byte-for-byte
+        // against the circuit's public instance — necessarily a canonical `Fr`,
+        // i.e. `< BN254_R`. Only ~18.9% of 256-bit values are, so without this
+        // reduction the two consumers of `blockId` disagree for roughly four out
+        // of five rotations and no argument can satisfy both at once. Reducing
+        // here keeps `blockId` meaning one thing everywhere (the field element
+        // the circuit committed to, same as in `verifyBlock`) and leaves the
+        // raw root confined to this fold.
+        uint256 rootFr = uint256(root) % BN254_R;
+        if (rootFr != blockId) {
+            revert BkUpdateMerkleMismatch(rootFr, blockId);
         }
 
         storedBkSetCommitment = newCommitmentL3;

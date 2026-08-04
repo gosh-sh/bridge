@@ -28,6 +28,10 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     uint256 internal constant L3 = 0xB0B;
     uint64 internal constant SEQ = 42;
 
+    /// @dev BN254 scalar field order.
+    uint256 internal constant R =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
     bytes32 internal constant SIB_H01 = bytes32(uint256(0x1234));
     bytes32 internal constant SIB_H4_7 = bytes32(uint256(0x5678));
     bytes32 internal constant SIB_H8_15 = bytes32(uint256(0x9ABC));
@@ -87,7 +91,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///
     ///         Catches both regressions the 16-leaf migration can hide: a
     ///         fold at the wrong depth, and a big-endian L2/L3 preimage (which
-    ///         would yield `0xd37275f3…` instead).
+    ///         would yield `0xd37275f3…` instead). This particular root happens
+    ///         to be below the field order already, so the `Fr` reduction is a
+    ///         no-op here and the vector stays a pure statement about the fold.
     function test_applyBkSetUpdate_matchesOffChainVector() public {
         bytes32 h01 =
             bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
@@ -114,19 +120,52 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     /// @notice A depth-3 (8-leaf) fold must no longer be accepted — the old
-    ///         two-sibling root is not a valid `blockId` any more.
+    ///         two-sibling root is not a valid `blockId` any more. Reduced into
+    ///         `Fr` like any real argument would be, so this stays a statement
+    ///         about the fold depth and not about field canonicality (which
+    ///         `test_applyBkSetUpdate_rejectsUnreducedRoot` covers separately).
     function test_applyBkSetUpdate_rejectsLegacyDepth3Root() public {
         bytes32 h23 = sha256(abi.encodePacked(_le(L2), _le(L3)));
-        bytes32 legacyRoot =
-            sha256(abi.encodePacked(sha256(abi.encodePacked(SIB_H01, h23)), SIB_H4_7));
+        uint256 legacyRoot = uint256(
+            sha256(abi.encodePacked(sha256(abi.encodePacked(SIB_H01, h23)), SIB_H4_7))
+        ) % R;
         uint256 expectedRoot = _merkleRoot(L2, L3);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.BkUpdateMerkleMismatch.selector, expectedRoot, uint256(legacyRoot)
+                AckiNackiBridge.BkUpdateMerkleMismatch.selector, expectedRoot, legacyRoot
             )
         );
-        _apply(uint256(legacyRoot), SEQ, L2, L3);
+        _apply(legacyRoot, SEQ, L2, L3);
+    }
+
+    /// @notice `blockId` has two consumers inside `applyBkSetUpdate`: the
+    ///         attestation adapter, which compares it byte-for-byte against a
+    ///         public instance read out of the proof, and the SHA-256 fold. The
+    ///         first can only ever match a canonical `Fr`; the second produces a
+    ///         raw 256-bit hash, and only `R / 2^256 = 18.9%` of those are
+    ///         canonical. Unless the contract reduces before comparing, no
+    ///         single argument satisfies both for the other ~81% of rotations —
+    ///         this fixture's root among them — and the entry point is dead.
+    function test_applyBkSetUpdate_reducesRootIntoFieldBeforeComparing() public {
+        uint256 rawRoot = _rawMerkleRoot(L2, L3);
+        assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
+
+        _apply(rawRoot % R, SEQ, L2, L3);
+
+        assertEq(bridge.storedBkSetCommitment(), L3);
+    }
+
+    /// @notice The mirror of the above: the raw root is what the fold literally
+    ///         produces, and it is still not a valid `blockId`. No circuit can
+    ///         have committed to it, so the attestation gate rejects it before
+    ///         the fold is even reached.
+    function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
+        uint256 rawRoot = _rawMerkleRoot(L2, L3);
+        assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
+
+        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        _apply(rawRoot, SEQ, L2, L3);
     }
 
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
@@ -207,8 +246,15 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     /// @dev Depth-4 fold of the L2/L3 pair up to the block-id root, mirroring
-    ///      `BlockIdMerkleTree::siblings_for_l2_l3` on the prover side.
+    ///      `BlockIdMerkleTree::siblings_for_l2_l3` on the prover side, reduced
+    ///      into BN254 `Fr` the way the contract and the circuit both see it.
     function _merkleRoot(uint256 l2, uint256 l3) internal pure returns (uint256) {
+        return _rawMerkleRoot(l2, l3) % R;
+    }
+
+    /// @dev The unreduced SHA-256 root, before it is mapped into `Fr`. Only the
+    ///      tests that care about the difference use this.
+    function _rawMerkleRoot(uint256 l2, uint256 l3) internal pure returns (uint256) {
         bytes32 h23 = sha256(abi.encodePacked(_le(l2), _le(l3)));
         bytes32 h0_3 = sha256(abi.encodePacked(SIB_H01, h23));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, SIB_H4_7));

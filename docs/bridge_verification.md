@@ -30,7 +30,7 @@ This doc is the **end-to-end view**. Every section follows the pattern: *what th
 
 - ETH → AN: `AckiNackiBridge.deposit()` (ETH side), the Halo2 deposit-prover proof (off-chain), and the future `VERHALO2SHPLONK`-based AN-side `TokenBridge.finalizeDeposit(...)` + nullifier. The legacy refund-style `withdraw(...)` was retired in Phase 4.3.
 - AN → ETH: `AckiNackiBridge.verifyBlock()` and the tuple of two cross-circuit-bound ZK proofs (Circuit 1A or 1B + Circuit 2).
-- BK-set commitment lifecycle: deferred to Phase 1.C (Circuit 3 / `bkSetUpdateProof`); the legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2**. Until Phase 1.C ships, `storedBkSetCommitment` only changes via redeployment.
+- BK-set commitment lifecycle: rotation runs today through the interim `applyBkSetUpdate` (attestation + SHA-256 opening of the `(L2, L3)` leaf pair, §6); Circuit 3 (`bkSetUpdateProof`) is still owed for a statement about the rotation's contents. The legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2** and no owner path replaced it.
 - Block-hash oracle (`AxiomBlockHeaderOracle` + the EVM `blockhash()` opcode) — currently unused by the public surface; preserved for a future burn-proof / ETH-side withdrawal flow.
 - Cross-cutting properties: ZK verifier integrity, reentrancy, access control, fork resistance.
 - AAVE V3 integration: covered in detail in `docs/aave_integration.md`; this doc only summarises how it interacts with the rest.
@@ -316,9 +316,9 @@ The legacy `LayerHashBridge.rotateBkSet` (ZK-proven via a 2-input Halo2 stub) **
 
 The v2 plan is **Phase 1.C**: extend `verifyBlock` (or add a sibling `verifyBkSetUpdate`) with an optional `bkSetUpdateProof` argument that, on a successful Circuit 3 pairing, advances `storedBkSetCommitment` from old → new in the same transaction. Until Phase 1.C ships:
 
-- `storedBkSetCommitment` is **immutable post-deployment** in practice — there is no setter.
-- BK-set rotation requires a **redeployment** of `AckiNackiBridge` with a new `genesisBkSetCommitment` until Circuit 3 is wired (and the relayer can produce the proof).
-- This is intentional: it removes the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` introduced.
+- An **interim** `applyBkSetUpdate` has since shipped: it takes a Circuit 1A/1B attestation plus a three-sibling SHA-256 opening of the `(L2, L3)` leaf pair in the 16-leaf, depth-4 block-id tree, and advances `storedBkSetCommitment` when the fold reproduces `blockId`. It is permissionless and needs no Circuit 3 — the rotation is authorised by the attested block itself, not by a dedicated proof. So `storedBkSetCommitment` is no longer immutable post-deployment, and BK-set rotation no longer requires a redeployment.
+- What Circuit 3 still buys is a statement about the rotation's *contents* (that the new committee legitimately succeeds the old one). `applyBkSetUpdate` only shows that the attested block commits to this pair of commitments at those tree positions.
+- No owner path was reintroduced: the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` carried stays retired.
 
 ### 6.2 What must hold (target invariants for Phase 1.C)
 
@@ -332,9 +332,21 @@ The following list is **forward-looking** and will be re-verified once Circuit 3
 | **BK-4** | After success, `storedBkSetCommitment = newCommitment` and a `BkSetCommitmentRotated(oldCommitment, newCommitment)` event is emitted. |
 | **BK-5** | The transition is single-step: there is no "pending"/"executed" two-phase flow (the v1 timelock was a workaround for the absence of Circuit 3). |
 
+The one invariant below is **not** forward-looking — it constrains `applyBkSetUpdate` as shipped, and it is the kind that fails silently in the direction of "nothing works" rather than "anything passes":
+
+| Property | Statement (holds today) |
+|---|---|
+| **BK-6** | `blockId` means the same thing to both of its consumers inside `applyBkSetUpdate`: the canonical `Fr` image of the block-id tree root. The attestation adapter compares it byte-for-byte against an instance read out of the proof, which is always `< r`; the fold produces a raw SHA-256 root, of which only `r / 2^256 = 18.9%` are. The contract therefore reduces the root (`% BN254_R`) before comparing, and the relayer sends the reduced value on both this path and `verifyBlock`. |
+
+- **BK-6**: worth stating because the failure is not a security hole but a dead entry point — without the reduction the two consumers are unsatisfiable at once for ~81% of rotations, and the mismatch surfaces as `AttestationProofRejected` or `BkUpdateMerkleMismatch` depending on which convention the caller picked. It stayed invisible for a while because the mock verifiers accepted any argument; they now mirror the adapter and reject non-canonical inputs, so the suite fails if either side drifts back. Contract side: `AckiNackiBridge.applyBkSetUpdate`. Relayer side: `types::block_id_to_field` / `withdrawal::hash_hex_to_block_id_fr`. Note the older claim in this tree that "the on-chain verifier auto-reduces via `mod(calldataload, f_q)`" was true of the direct Yul verifier and stopped being true with the R15 aggregator adapters, which compare before they pair.
+
 ### 6.3 How to verify (today)
 
-There are no BK-set rotation tests at HEAD — the surface doesn't exist yet. The closest thing is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+`AckiNackiBridgeApplyBkSetUpdateTest` (11 tests) covers the shipped interim surface: the depth-4 fold against a vector computed independently in Python, rejection of the legacy depth-3 root, the `Fr` reduction in both directions (BK-6), replay, non-monotonic sequence numbers, stale old commitment, and a two-rotation chain. For the Circuit 3 target invariants above, the closest thing at HEAD is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+
+```bash
+cd contracts/ethereum && forge test --match-contract ApplyBkSetUpdate -vv
+```
 
 ```bash
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"   # static between deployments
@@ -619,7 +631,7 @@ To be explicit about the trust boundary:
 | Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
 | Acki Nacki BFT economic security | not a bridge concern; the bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds |
 | Off-chain relayer liveness / censorship | a malicious relayer can stall but cannot forge state; multiple competing relayers are sufficient |
-| Phase 1.C BK-set rotation circuit + on-chain wiring | not yet shipped; until then `storedBkSetCommitment` is effectively immutable post-deployment |
+| Phase 1.C BK-set rotation **circuit** (Circuit 3) | not yet shipped; the interim `applyBkSetUpdate` rotates the commitment against an attested block's Merkle tree, but proves nothing about the succession itself |
 
 When any of these change, this doc must be revisited and the affected sections updated.
 

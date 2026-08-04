@@ -155,6 +155,39 @@ pub fn aggregate_and_prove_cached(
     let instances = prover_circuit.instances();
     let flat: Vec<Fr> = instances.iter().flat_map(|col| col.iter().copied()).collect();
 
+    // DIAG: dump instance layout so we can confirm what actually lives at each
+    // slot (esp. positions 12..NUM_ACCUMULATOR_INSTANCES+N_inner). When
+    // BRIDGE_DIAG_INSTANCES_FILE is set, appends `base_name`, column count,
+    // and every Fr in column 0 as BE hex (matches Solidity `_readInstance`).
+    // Env var (not env=1) because the daemon's SubprocessAggregator swallows
+    // subprocess stderr on success.
+    if let Ok(diag_path) = std::env::var("BRIDGE_DIAG_INSTANCES_FILE") {
+        use std::io::Write;
+        let mut buf = String::new();
+        buf.push_str(&format!(
+            "BRIDGE_DIAG_INSTANCES base_name={base_name} num_instance_cols={} col0_len={}\n",
+            instances.len(),
+            instances.first().map(|c| c.len()).unwrap_or(0),
+        ));
+        if let Some(col0) = instances.first() {
+            for (i, fr) in col0.iter().enumerate() {
+                let bytes = bincode::serialize(fr).unwrap_or_default();
+                let mut le = [0u8; 32];
+                let n = bytes.len().min(32);
+                le[..n].copy_from_slice(&bytes[..n]);
+                let mut be = le;
+                be.reverse();
+                buf.push_str(&format!(
+                    "  inst[{i:>2}] BE=0x{}\n",
+                    be.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                ));
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&diag_path) {
+            let _ = f.write_all(buf.as_bytes());
+        }
+    }
+
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
     let sol_path = if let Some(dir) = artifacts_dir {

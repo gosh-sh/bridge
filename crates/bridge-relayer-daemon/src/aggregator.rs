@@ -30,11 +30,12 @@
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use tracing::info;
 
 use crate::{
     error::RelayerError,
@@ -399,6 +400,7 @@ impl ProofAggregator for SubprocessAggregator {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        let t_agg = Instant::now();
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
             .map_err(|_| {
@@ -408,6 +410,7 @@ impl ProofAggregator for SubprocessAggregator {
                 ))
             })?
             .map_err(|e| RelayerError::other(format!("failed to spawn {AGGREGATE_BIN}: {e}")))?;
+        let agg_subprocess_ms = t_agg.elapsed().as_millis() as u64;
 
         if !output.status.success() {
             return Err(RelayerError::other(format!(
@@ -424,6 +427,11 @@ impl ProofAggregator for SubprocessAggregator {
             ))
         })?;
         std::fs::remove_file(&out_path).ok();
+        info!(
+            "aggregate-proof subprocess ({verifier_name}) took {} ms, calldata={} bytes",
+            agg_subprocess_ms,
+            calldata.len()
+        );
         Ok(calldata)
     }
 }
@@ -806,6 +814,7 @@ impl PoseidonSnarkWrapper {
         let config_path = self
             .params_dir
             .join(format!("{key_prefix}_config_params.json"));
+        let t_wrap = Instant::now();
         let bytes = bridge_snark_wrap::wrap_poseidon_snark_in_memory(
             &vk_path,
             &config_path,
@@ -816,6 +825,12 @@ impl PoseidonSnarkWrapper {
         .map_err(|e| {
             RelayerError::other(format!("wrap_poseidon_snark_in_memory({key_prefix}): {e:?}"))
         })?;
+        let wrap_ms = t_wrap.elapsed().as_millis() as u64;
+        info!(
+            "wrap_poseidon_snark_in_memory({key_prefix}) took {} ms, snark={} bytes",
+            wrap_ms,
+            bytes.len()
+        );
         let file = tempfile::Builder::new()
             .prefix(&format!("{key_prefix}_snark_"))
             .suffix(".snark")
@@ -906,6 +921,7 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
         block_seq_no: u64,
         last_seen: u32,
     ) -> Result<Vec<u8>, RelayerError> {
+        let t_total = Instant::now();
         let snark = self
             .wrapper
             .wrap_attestation(
@@ -921,7 +937,13 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
             crate::types::FinalizationType::Primary => PRIMARY_VERIFIER_NAME,
             crate::types::FinalizationType::Fallback => FALLBACK_VERIFIER_NAME,
         };
-        self.aggregator.aggregate(snark.path(), verifier_name).await
+        let calldata = self.aggregator.aggregate(snark.path(), verifier_name).await?;
+        info!(
+            "aggregate_attestation ({verifier_name}) total {} ms, calldata={} bytes",
+            t_total.elapsed().as_millis(),
+            calldata.len()
+        );
+        Ok(calldata)
     }
 
     /// Wrap the Circuit 2 layer proof, aggregate, and return EVM calldata.
@@ -935,6 +957,7 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
                  bridge_prover_lib::bridge_state::MAX_LAYERS],
         prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<Vec<u8>, RelayerError> {
+        let t_total = Instant::now();
         let snark = self
             .wrapper
             .wrap_layer(
@@ -946,9 +969,16 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
                 prev_max_level_layer_hash_be,
             )
             .await?;
-        self.aggregator
+        let calldata = self
+            .aggregator
             .aggregate(snark.path(), LAYER_HASHES_VERIFIER_NAME)
-            .await
+            .await?;
+        info!(
+            "aggregate_layer ({LAYER_HASHES_VERIFIER_NAME}) total {} ms, calldata={} bytes",
+            t_total.elapsed().as_millis(),
+            calldata.len()
+        );
+        Ok(calldata)
     }
 }
 

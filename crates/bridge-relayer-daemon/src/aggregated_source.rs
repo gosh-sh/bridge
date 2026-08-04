@@ -159,6 +159,7 @@ where
             "aggregated_source: wrap+aggregate attestation + layer (Poseidon)",
         );
 
+        let t_bundle = std::time::Instant::now();
         let attestation_calldata = self
             .pipeline
             .aggregate_attestation(
@@ -181,6 +182,11 @@ where
                 &pending.prev_max_level_layer_hash_be,
             )
             .await?;
+        info!(
+            seq_no = seqno,
+            "aggregated_source: bundle wrap+aggregate (attestation + layer) total {} ms",
+            t_bundle.elapsed().as_millis(),
+        );
 
         block.attestation_proof = alloy::primitives::Bytes::from(attestation_calldata);
         block.layer_hashes_proof = alloy::primitives::Bytes::from(layer_calldata);

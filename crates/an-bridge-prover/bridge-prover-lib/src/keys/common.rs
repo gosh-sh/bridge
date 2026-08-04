@@ -225,7 +225,7 @@ fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
 
 /// Public Result-based sibling of the private `assert_hermez_ceremony` above,
 /// for callers outside `load_srs` that want to bail rather than panic (e.g.
-/// the offline snark exporters in `bridge-prover-orchestrator` which call
+/// the offline snark exporters in `bridge-snark-utils` which call
 /// `gen_srs` directly). Same anchor bytes, same failure mode — no
 /// toxic-waste SRS proceeds past this check.
 pub fn assert_hermez_srs(srs: &ParamsKZG<Bn256>) -> anyhow::Result<()> {

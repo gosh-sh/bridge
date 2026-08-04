@@ -68,7 +68,7 @@ aggregator pairing could never pass), caused by two bound-witness drifts vs the 
 Circuit 2 real SHPLONK aggregator proofs) and asserts the cross-circuit binding + state advance.
 All four `AckiNackiBridgeProductionVerifyBlockTest` cases pass; the full Foundry suite is green
 (163 passed). The bound witness is guarded against this drift class by
-`cargo run -p bridge-prover-orchestrator --bin mock-prove-bound-layer` (~30 s MockProver).
+`cargo run -p bridge-snark-utils --bin mock-prove-bound-layer` (~30 s MockProver).
 
 ### 1.1 Generate artefacts (n14 or local)
 
@@ -79,7 +79,7 @@ All four `AckiNackiBridgeProductionVerifyBlockTest` cases pass; the full Foundry
 ```
 
 The fallback 1B inner snark keygens at `K=21` (`FALLBACK_K` in
-`crates/bridge-prover-orchestrator/src/keys.rs`); delete `params/fallback_*.bin` to force a
+`crates/bridge-snark-utils/src/keys.rs`); delete `params/fallback_*.bin` to force a
 re-keygen if the degree ever changes.
 
 ### 1.2 Preflight
@@ -114,12 +114,12 @@ script deploys a verifyBlock-only (paused) bridge and does **not** require the C
 ```bash
 # Anchor alignment (no key)
 cargo run --bin relayer -- verify-fixture \
-  --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+  --fixtures-dir ../bridge-snark-utils/proofs/bound \
   --rpc-url "$SEPOLIA_RPC" --bridge-address "$BRIDGE"
 
 # One bound block (needs RELAYER_PRIVATE_KEY)
 cargo run --bin relayer -- smoke-fixture \
-  --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+  --fixtures-dir ../bridge-snark-utils/proofs/bound \
   --rpc-url "$SEPOLIA_RPC" --bridge-address "$BRIDGE" \
   --private-key "$RELAYER_PRIVATE_KEY" --max-ticks 1
 ```

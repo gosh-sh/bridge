@@ -23,7 +23,7 @@ KZG commitment scheme byte-for-byte.
 
 To rebuild these fixtures yourself, place Hermez
 `params/kzg_bn254_21.srs` under the orchestrator crate, then:
-`EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-prover-orchestrator`
+`EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-snark-utils`
 (nightly toolchain required).
 
 [ppot]: https://github.com/privacy-scaling-explorations/perpetualpowersoftau
@@ -32,14 +32,14 @@ To rebuild these fixtures yourself, place Hermez
 
 | Artefact | Source |
 |---|---|
-| `fallback_vk.bin` | `crates/bridge-prover-orchestrator/params/fallback_vk.bin` — written by `FallbackKeyManager::ensure_keys(..)` via `vk.write(.., SerdeFormat::RawBytes)`. K=21. |
-| `fallback_config_params.json` | `crates/bridge-prover-orchestrator/params/fallback_config_params.json` — `BaseCircuitParams` of the fallback circuit, serialised compactly via `serde_json::to_vec`. |
+| `fallback_vk.bin` | `crates/bridge-snark-utils/params/fallback_vk.bin` — written by `FallbackKeyManager::ensure_keys(..)` via `vk.write(.., SerdeFormat::RawBytes)`. K=21. |
+| `fallback_config_params.json` | `crates/bridge-snark-utils/params/fallback_config_params.json` — `BaseCircuitParams` of the fallback circuit, serialised compactly via `serde_json::to_vec`. |
 | `fallback_vk_blob.bin` | `VkBlob::from_native(config, vk).to_bytes()` — the exact byte payload of the `vk_cell` operand. Magic `"VKBLOB\x00\x00"`, version 1, transcript Blake2b. |
 | `fallback_public_inputs.bin` | `encode_instances(&proof.instances())` — raw `N × 32` LE `Fr::to_repr()` (no header). N = 4. |
 | `fallback_proof.bin` | `proof.proof_bytes` — SHPLONK proof with Blake2b transcript, K=21. |
 
 All five files were emitted in one run of
-`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs::halo2_tvm_operands_round_trip_fallback_circuit`
+`crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs::halo2_tvm_operands_round_trip_fallback_circuit`
 with `EXPORT_HALO2_FIXTURE_DIR=…/fixtures/circuit_1b_fallback`. The
 same test verifies the proof end-to-end via `verify_proof::<KZG,
 VerifierSHPLONK, Challenge255, Blake2bRead, SingleStrategy>` before
@@ -95,7 +95,7 @@ let proof = std::fs::read("fallback_proof.bin")?;
 ### Option 2: build your own `VkBlob` from the raw VK + config
 
 ```rust
-use bridge_prover_orchestrator::VkBlob;
+use bridge_snark_utils::VkBlob;
 use halo2_base::gates::circuit::BaseCircuitParams;
 
 let config: BaseCircuitParams =

@@ -57,7 +57,7 @@ deliberately a **separate cargo workspace** (note the empty `[workspace]`
 section in `Cargo.toml` — same pattern as `deposit-prover/`) because it
 depends on `axiom-crypto/halo2-lib`, which clashes with the
 gosh-fork (`halo2-lib-zkevm-sha256-and-bls12-381`) used by
-`crates/bridge-prover-orchestrator/`.
+`crates/bridge-snark-utils/`.
 
 ## Run M2 acceptance test
 
@@ -91,7 +91,7 @@ Two reasons:
 
 ## Pointers to next steps
 
-- M3 — switch the partner's prover in `bridge-prover-orchestrator` from
+- M3 — switch the partner's prover in `bridge-snark-utils` from
   Blake2b to Poseidon transcript, so aggregator can in-circuit verify.
 - M4 — partner finishes Circuit 4, we wire it into orchestrator.
 - M5 — `expose_previous_instances(false)` is **done and validated on the

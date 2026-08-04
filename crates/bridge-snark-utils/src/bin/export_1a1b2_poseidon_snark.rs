@@ -12,7 +12,7 @@
 //! is fetched live from an Acki Nacki GraphQL endpoint.
 //!
 //! ```bash
-//! cd crates/bridge-prover-orchestrator
+//! cd crates/bridge-snark-utils
 //!
 //! # 1A / 1B — attestation (stateless: attestation bytes + bk_set + last_seen)
 //! cargo run --release --bin export-1a1b2-poseidon-snark -- \

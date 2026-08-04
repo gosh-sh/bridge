@@ -9,7 +9,7 @@ file-based deployment keeps working in parallel.
 Cross-repo scope:
 - `acki-nacki-to-eth-bridge-halo2-prover` — `bridge-prover-lib`,
   `bridge-prover-daemon`, `bridge-event-prover-lib`, `bridge-event-witness`
-- `bridge-EVM` — `bridge-relayer-daemon`, `bridge-prover-orchestrator`
+- `bridge-EVM` — `bridge-relayer-daemon`, `bridge-snark-utils`
   (gnark-wrappers/*), new `bridge-gnark-wrap` crate
 - `acki-nacki-to-eth-bridge-halo2-circuits` — no changes; consumed via the
   prover-lib as today
@@ -21,7 +21,7 @@ a thin shell over it. `bridge-relayer-daemon` adds an optional `live-prover`
 feature that links `bridge-prover-lib` directly.**
 
 Justification:
-- `bridge-prover-orchestrator/Cargo.toml:10-18` already proves the Cargo
+- `bridge-snark-utils/Cargo.toml:10-18` already proves the Cargo
   graph resolves with both circuit crates and `bridge-prover-lib` linked
   together on `bump-halo2-lib-v0.4.1`. The relayer adopting the same deps
   is mechanically feasible.
@@ -157,7 +157,7 @@ impl EventProverPipeline {
 1. Read `bridge-prover-daemon/src/main.rs` end-to-end. Produce a function-
    by-function move-list with line numbers and the exact signatures the
    new lib API needs to expose.
-2. Read `bridge-prover-orchestrator`'s gnark-wrappers invocation code.
+2. Read `bridge-snark-utils`'s gnark-wrappers invocation code.
    Document the stdin/stdout contract — that's what `bridge-gnark-wrap`
    re-packages.
 3. Confirm on-disk shape of `proof_<seqno>.json` and `proof_event_<seqno>.json`
@@ -232,13 +232,13 @@ matching today's orchestrator format; stdout = 256-byte Groth16 + PI order.
 `build.rs` builds the Go binaries on first compile (calls `go build`),
 stores under `target/<profile>/gnark-wrappers/`. Cached for CI.
 
-Optional: switch `bridge-prover-orchestrator` to use this same crate
+Optional: switch `bridge-snark-utils` to use this same crate
 instead of inlining the subprocess calls — reduces two call sites to one.
 
 Acceptance: round-trip test in `bridge-gnark-wrap/tests/` — record a
 Halo2 proof bundle in a fixture, wrap, verify the 256-byte output against
 the deployed `*Groth16VerifierGenerated.sol` on local Anvil. Fixtures
-reusable from `bridge-prover-orchestrator/fixtures/`.
+reusable from `bridge-snark-utils/fixtures/`.
 
 ### Phase 3 — `live-prover` feature on `bridge-relayer-daemon`
 

@@ -5,7 +5,7 @@
 //!   tests in this crate to drive multi-block scenarios in < 10 ms each.
 //! - [`FixturesBlockSource`] — reads pre-generated bound proof artefacts from
 //!   disk (the Phase 4.1 outputs of
-//!   `bridge-prover-orchestrator/proofs/bound/...` plus the gnark JSON produced
+//!   `bridge-snark-utils/proofs/bound/...` plus the gnark JSON produced
 //!   by `circuit-1a/circuit-2`). Yields a single canned block keyed by
 //!   `block_seq_no = 1`.
 //!
@@ -117,7 +117,7 @@ impl BlockSource for InMemoryBlockSource {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Reads a single bound block from
-/// `bridge-prover-orchestrator/proofs/bound/{primary,layer-hashes}` plus
+/// `bridge-snark-utils/proofs/bound/{primary,layer-hashes}` plus
 /// the gnark `groth16_output.json` files produced by
 /// `circuit-1a`/`circuit-2` wrappers.
 ///

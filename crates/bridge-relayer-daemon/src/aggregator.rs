@@ -84,7 +84,7 @@ pub trait Circuit4SnarkProver: Send + Sync {
 /// In-process Circuit 4 (event) Poseidon prover (NB-Q9 PR-B, 2026-08-04).
 ///
 /// Replaces the historical `SubprocessCircuit4SnarkProver` that shelled out
-/// to `bridge-prover-orchestrator`'s `export-c4-poseidon-snark --fixture`.
+/// to `bridge-snark-utils`'s `export-c4-poseidon-snark --fixture`.
 /// Same pipeline flow as [`crate::live_prover`]-style in-process proving of
 /// Circuits 1A/1B/2 (they were in-processed earlier in the 2026-07 refactor;
 /// C4 kept the subprocess wrapper as scaffolding until this PR).
@@ -717,7 +717,7 @@ impl PoseidonSnarkWrapper {
 
     /// Reconstruct the 4-element Circuit 1A/1B public-instance vector.
     /// Mirrors the `instances` construction in `prove_primary` /
-    /// `prove_fallback` in `bridge-prover-orchestrator/src/bin/export_1a1b2_poseidon_snark.rs`.
+    /// `prove_fallback` in `bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs`.
     fn attestation_instances(
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],

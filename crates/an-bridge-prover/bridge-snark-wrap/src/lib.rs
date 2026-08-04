@@ -5,7 +5,7 @@
 //! # Why this crate exists
 //!
 //! Historically, `bridge-relayer-daemon` shelled out to
-//! `bridge-prover-orchestrator/src/bin/export_1a1b2_poseidon_snark.rs` to obtain
+//! `bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs` to obtain
 //! the Poseidon `.snark` for each Circuit 1A/1B/2 bundle. That binary
 //! independently re-fetched the block from GraphQL, re-ran
 //! `real_chain_builder`, and re-proved the same witness — doubling the
@@ -33,7 +33,7 @@
 //! would resolve halo2-base to axiom's crate, which cannot read the partner
 //! `*_vk.bin` VK bytes emitted by `bridge-prover-lib` (`SerdeFormat::RawBytesUnchecked`
 //! against `BaseCircuitBuilder<Fr>` from the gosh fork). Same reason
-//! `halo2_snark.rs` lives inside `bridge-prover-orchestrator` and not
+//! `halo2_snark.rs` lives inside `bridge-snark-utils` and not
 //! `bridge-evm-aggregator`.
 //!
 //! # API
@@ -136,7 +136,7 @@ pub fn wrap_poseidon_snark_in_memory(
 }
 
 /// File-oriented variant of [`wrap_poseidon_snark_in_memory`]. Byte-identical
-/// output to the original `bridge-prover-orchestrator::halo2_snark::export_poseidon_snark_with_srs_k`,
+/// output to the original `bridge-snark-utils::halo2_snark::export_poseidon_snark_with_srs_k`,
 /// kept so existing paths that already have proof + snark on disk can migrate
 /// off the subprocess incrementally.
 pub fn wrap_poseidon_snark_from_files(

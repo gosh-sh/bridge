@@ -30,7 +30,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     string internal constant FALLBACK_CALLDATA = "verifiers/FallbackAggregatorVerifier_calldata.bin";
     string internal constant LAYER_CALLDATA = "verifiers/LayerHashesAggregatorVerifier_calldata.bin";
     string internal constant BOUND_SCENARIO =
-        "../../crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json";
+        "../../crates/bridge-snark-utils/proofs/bound/bound_scenario.json";
 
     struct BoundScenario {
         uint256 blockId;

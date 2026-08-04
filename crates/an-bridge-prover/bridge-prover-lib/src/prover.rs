@@ -266,7 +266,7 @@ pub fn generate_fallback_proof_with_transcript(
 /// `generate_fallback_proof`, `generate_layer_proof`) hard-wire the Blake2b
 /// transcript via [`run_kzg_create_proof`]. This helper exposes the
 /// underlying `create_proof` call so consumers outside this crate (e.g. the
-/// gnark-wrapping pipeline in `bridge-prover-orchestrator`, which needs both
+/// gnark-wrapping pipeline in `bridge-snark-utils`, which needs both
 /// Blake2b — for the AN-side `ZKHALO2VERIFYWITHVK` opcode — and a Poseidon
 /// transcript for snark-verifier consumption) can plug in their own
 /// transcript flavour without re-implementing the proving plumbing.

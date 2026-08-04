@@ -43,7 +43,7 @@ bridge reverts if X is wrong" enforcement, or simply doesn't exist anymore.
 | K-1 | Halo2 SHPLONK soundness | Standard, well-studied. We don't have an alternative SNARK on the AN side. | None |
 | K-2 | Groth16 / BN254 pairing soundness | Standard. Used for AN→ETH wraps only (v2). The v1 deposit-side use was retired in Phase 4.3 (2026-05-17). | None |
 | K-3 | KZG trusted setup (`kzg_bn254_19.srs`) | Community-generated; verify checksum on download. Shared across all four AN→ETH circuits. | None |
-| K-4 | gnark wrapping circuit honesty (per circuit) | One Groth16 wrapper per AN→ETH circuit under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`, auto-generated from the Halo2 verifying key + a small shim. | **R15 (Phase 8 R&D track)** — as of 2026-05-17 each `circuit.go` `Define` is a no-op identity stub, so the on-chain Groth16 verifier does not yet cryptographically constrain the Halo2 SHPLONK proof. Tracked under `an_partner_integration_plan.md` Phase 8; mainnet `v2.0.0` is explicitly gated on closing it. |
+| K-4 | gnark wrapping circuit honesty (per circuit) | One Groth16 wrapper per AN→ETH circuit under `crates/bridge-snark-utils/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`, auto-generated from the Halo2 verifying key + a small shim. | **R15 (Phase 8 R&D track)** — as of 2026-05-17 each `circuit.go` `Define` is a no-op identity stub, so the on-chain Groth16 verifier does not yet cryptographically constrain the Halo2 SHPLONK proof. Tracked under `an_partner_integration_plan.md` Phase 8; mainnet `v2.0.0` is explicitly gated on closing it. |
 | K-5 | `gosh-sha256-chip` correctness | Used by Circuit 1A/1B (envelope SHA-256) and Circuit 2 (layer-hash preimage SHA-256). Identical chip as v1; audit findings unchanged. | None outstanding |
 | K-6 | `gosh-bls-verification` correctness, including the BLS12-381 G2 subgroup gap | Used by Circuit 1A (≥ 2/3 threshold) and Circuit 1B (> 1/2 threshold). | **BLS-1 / FORK-2** (medium): `load_private_g2_unchecked` skips on-curve and subgroup checks; calling code adds on-curve but not subgroup. G2 cofactor ≠ 1. **Carries over to v2 unchanged.** Severity: medium. Mitigation in next circuit revision. |
 | K-7 | `gosh-dense-balanced-tree` correctness | Used by Circuit 2 for the Poseidon Merkle chain anchor verification. Identical chip as v1. | None outstanding |
@@ -73,7 +73,7 @@ What v2 *does* introduce is a **larger code surface**:
 | `IPrimaryVerifier.sol` + `PrimaryVerifier.sol` + `PrimaryGroth16VerifierGenerated.sol` | 3 files | The first two are internal (try/catch length-check shim); the generated one is gnark output, ZK-1 |
 | `IFallbackVerifier.sol` + `FallbackAggregatorVerifier.sol` (+ `verifiers/FallbackAggregatorVerifier.bin`) | adapter + Yul `.bin` | Production 1B path — R15 SHPLONK aggregator (inner `K=21`). The retired `FallbackVerifier.sol` + `FallbackGroth16VerifierGenerated.sol` were deleted 2026-06-22. Aggregator Yul is `snark-verifier-sdk` output (analogous to ZK-1). |
 | `ILayerHashesMovementVerifier.sol` + `LayerHashesMovementVerifier.sol` + `LayerHashesGroth16VerifierGenerated.sol` | 3 files | Same |
-| `crates/bridge-prover-orchestrator/` | New Rust crate (excluded from main workspace) | Internal — bound test-data generator; per-circuit gnark wrappers under `gnark-wrappers/` |
+| `crates/bridge-snark-utils/` | New Rust crate (excluded from main workspace) | Internal — bound test-data generator; per-circuit gnark wrappers under `gnark-wrappers/` |
 | `crates/bridge-relayer-daemon/` | New Rust crate (excluded; Phase 5.1 done with mock sources) | Internal — replaces v1's "no relayer" placeholder. A byzantine relayer can stall but cannot forge state (assumption K-9 is unaffected). |
 
 The retired v1 code surface (Phase 4.2 deletion):
@@ -85,7 +85,7 @@ The retired v1 code surface (Phase 4.2 deletion):
 | `BkSetRotationVerifier.sol` + `IBkSetRotationVerifier.sol` + `BkSetRotationGroth16Verifier.sol` | ~28k LoC | Deferred to Phase 1.C (Circuit 3) |
 | `LayerHashBridge.t.sol` | 35 tests | Replaced by `AckiNackiBridgeVerifyBlockTest` (17) + `AckiNackiBridgeRelayerLoopTest` (6) |
 | `LayerHashE2E.t.sol` | 14 tests with real proofs from 4 fixtures | Single-block bound real-proof test (`testHappyPathPrimary`) at HEAD; multi-block real-proof coverage deferred to Phase 5.3 |
-| `layer-hashes-prover/` Rust crate | Halo2 → JSON exporter + gnark wrapper | `crates/bridge-prover-orchestrator/` + `gnark-wrappers/` |
+| `layer-hashes-prover/` Rust crate | Halo2 → JSON exporter + gnark wrapper | `crates/bridge-snark-utils/` + `gnark-wrappers/` |
 | `bk-set-rotation-prover/` Rust crate | spec + Go gnark wrapper for 2-PI rotation | Deferred to Phase 1.C |
 
 **Net code-surface impact (Phase 4.2)**: -49 Foundry tests (`LayerHashBridge.t.sol` + `LayerHashE2E.t.sol`), +23 Foundry tests (verify-block + relayer-loop + per-adapter sanity). 135 tests total after Phase 4.2.

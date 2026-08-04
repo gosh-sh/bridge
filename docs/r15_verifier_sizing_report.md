@@ -46,7 +46,7 @@ halo2-lib auto-configures **22 advice columns** (primary-like) and the aggregato
 **21 493 B** — identical to Primary, comfortably under EIP-170. The fallback inner snark shares
 the degree-21 Hermez SRS slice (tau-compatible with the degree-20 primary/layer slice), so
 on-chip aggregation stays consistent. The earlier gnark Groth16 hybrid for Circuit 1B is
-retired. The knob lives in `crates/bridge-prover-orchestrator/src/keys.rs::FALLBACK_K`.
+retired. The knob lives in `crates/bridge-snark-utils/src/keys.rs::FALLBACK_K`.
 
 ## CI gate
 

@@ -15,7 +15,7 @@ Halo2 proof  →  gnark wrapper circuit (Define())  →  Groth16 proof  →  Sol
 
 The wrapper circuit's `Define()` is supposed to encode the Halo2 SHPLONK verifier algorithm as R1CS constraints; producing a Groth16 proof of that circuit attests *"a valid Halo2 proof exists for these PIs"*. The on-chain Solidity verifier itself is dumb — one BN254 pairing check, identical to any Groth16 verifier.
 
-**Today on this repo:** all four `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2,4}/circuit.go` files have **identity-stub `Define()` bodies** (`api.AssertIsEqual(PI[i], PI[i])`). Byte-for-byte identical across every open branch on `gosh-sh/bridge-EVM` (verified 2026-06-18). The on-chain Groth16 proof attests to *nothing about the Halo2 layer* — the wrapper PK holder can mint a valid Groth16 proof for any PI tuple.
+**Today on this repo:** all four `crates/bridge-snark-utils/gnark-wrappers/circuit-{1a,1b,2,4}/circuit.go` files have **identity-stub `Define()` bodies** (`api.AssertIsEqual(PI[i], PI[i])`). Byte-for-byte identical across every open branch on `gosh-sh/bridge-EVM` (verified 2026-06-18). The on-chain Groth16 proof attests to *nothing about the Halo2 layer* — the wrapper PK holder can mint a valid Groth16 proof for any PI tuple.
 
 ### Path B — Yul Halo2 verifier (R15 target, **spike-only**)
 

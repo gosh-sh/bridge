@@ -33,7 +33,7 @@ Future genuine cross-chain withdrawals (token burn on AN → ETH release on Ethe
 
                   Acki Nacki → Ethereum (State attestation)
 ┌─────────────────────────┐         ┌──────────────────────────────┐
-│ AN node + relayer       │ ──▶     │ bridge-prover-orchestrator   │
+│ AN node + relayer       │ ──▶     │ bridge-snark-utils   │
 │ • blocks, attestations, │  data   │ • Circuit 1A/1B (attestation)│
 │   layer-hashes, BK sets │         │ • Circuit 2 (layer hashes)   │
 └─────────────────────────┘         │ • Halo2 SHPLONK + gnark wrap │
@@ -59,10 +59,10 @@ Future genuine cross-chain withdrawals (token burn on AN → ETH release on Ethe
 ### Pipeline detail — Acki Nacki → Ethereum (state attestation)
 
 1. Acki Nacki blocks carry an 8-leaf SHA-256 Merkle `block_id`, a Poseidon commitment to the BK set, BLS-aggregated attestations (Primary or Fallback finalization), and layer-hash data tied to a dense balanced Poseidon Merkle chain.
-2. `bridge-prover-orchestrator` (Rust crate, excluded from the root workspace) drives the partner's four-circuit Halo2 stack to produce:
+2. `bridge-snark-utils` (Rust crate, excluded from the root workspace) drives the partner's four-circuit Halo2 stack to produce:
    - Circuit 1A (Primary attestation) **or** Circuit 1B (Fallback attestation) — public inputs `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`.
    - Circuit 2 (Layer-hashes movement) — 14 public inputs `[block_id, bk_set_poseidon, num_layers, layer_hash[0..10], prev_max_level_layer_hash]`.
-3. Each Halo2 proof is wrapped via the per-circuit gnark Groth16 wrappers under `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-{1a,1b,2}/` to produce a ~256-byte Groth16 proof and an auto-generated Solidity verifier (~26 KB source / ~7 KB runtime) under `contracts/ethereum/src/*Groth16VerifierGenerated.sol`.
+3. Each Halo2 proof is wrapped via the per-circuit gnark Groth16 wrappers under `crates/bridge-snark-utils/gnark-wrappers/circuit-{1a,1b,2}/` to produce a ~256-byte Groth16 proof and an auto-generated Solidity verifier (~26 KB source / ~7 KB runtime) under `contracts/ethereum/src/*Groth16VerifierGenerated.sol`.
 4. The relayer (`crates/bridge-relayer-daemon`) submits the proof tuple to `AckiNackiBridge.verifyBlock(...)`, which enforces:
    - `bkSetCommitment == storedBkSetCommitment` (BK-set anchor),
    - `blockSeqNo > storedLastSeenBlockSeqNo` (strict monotonicity),
@@ -91,7 +91,7 @@ acki-nacki-bridge/
 ├── crates/                     # Main Cargo workspace + standalone crates
 │   ├── acki-nacki-interface/           # AN client traits + mock implementations (workspace member)
 │   ├── eth-frontend/                   # Ethereum client wrapper (workspace member, deposit-only)
-│   ├── bridge-prover-orchestrator/     # 4-circuit Halo2 prover + gnark wrappers (standalone)
+│   ├── bridge-snark-utils/     # 4-circuit Halo2 prover + gnark wrappers (standalone)
 │   │   └── gnark-wrappers/
 │   │       ├── circuit-1a/             # Primary attestation Groth16 wrapper
 │   │       ├── circuit-1b/             # Fallback attestation Groth16 wrapper
@@ -122,7 +122,7 @@ Three Cargo workspaces, kept separate because of dependency-tree conflicts in th
 | ------------------------------------------ | ------------------------------ | -------------------------------------- |
 | Root (`Cargo.toml`)                        | —                              | Workspace; `eth-frontend`, `acki-nacki-interface` |
 | `deposit-prover/`                          | axiom-eth + halo2-pse 2023_04  | ETH→AN deposit-event Halo2 circuit     |
-| `crates/bridge-prover-orchestrator/`       | halo2-axiom 0.4.x (gosh fork)  | AN→ETH 4-circuit Halo2 prover (excluded from root, own `Cargo.lock`) |
+| `crates/bridge-snark-utils/`       | halo2-axiom 0.4.x (gosh fork)  | AN→ETH 4-circuit Halo2 prover (excluded from root, own `Cargo.lock`) |
 | `crates/bridge-relayer-daemon/`            | —                              | Relayer (excluded from root, mirrors the orchestrator layout) |
 | `frontend/`                                | —                              | Yew WASM frontend (excluded)            |
 
@@ -144,7 +144,7 @@ All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19
 | `IPrimaryVerifier.sol` / `PrimaryVerifier.sol`    | Interface + adapter for Circuit 1A (Primary attestation, ≥2/3 BLS quorum). Adapter assembles the 4 public inputs and calls the gnark verifier in a `try/catch`.            |
 | `IFallbackVerifier.sol` / `FallbackVerifier.sol`  | Same shape, for Circuit 1B (Fallback attestation, >1/2 split).                                                                                                              |
 | `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` | Adapter for Circuit 2 (Layer-hashes movement). Assembles 14 public inputs.                                                                                |
-| `PrimaryGroth16VerifierGenerated.sol`             | gnark-generated Groth16 verifier (BN254), produced by `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a/`. **Do not edit manually**.                            |
+| `PrimaryGroth16VerifierGenerated.sol`             | gnark-generated Groth16 verifier (BN254), produced by `crates/bridge-snark-utils/gnark-wrappers/circuit-1a/`. **Do not edit manually**.                            |
 | `FallbackGroth16VerifierGenerated.sol`            | Same, produced from `gnark-wrappers/circuit-1b/`.                                                                                                                           |
 | `LayerHashesGroth16VerifierGenerated.sol`         | Same, produced from `gnark-wrappers/circuit-2/`.                                                                                                                            |
 
@@ -168,7 +168,7 @@ All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19
 | Solidity (Foundry) — 12 suites                              | 109                  | `cd contracts/ethereum && forge test`                                |
 | Rust workspace (`eth-frontend`, `acki-nacki-interface`)     | small unit suite     | `cargo test --workspace`                                             |
 | `bridge-relayer-daemon` unit tests                          | 13                   | `cd crates/bridge-relayer-daemon && cargo test`                      |
-| `bridge-prover-orchestrator` round-trip tests               | several              | `cd crates/bridge-prover-orchestrator && cargo test`                 |
+| `bridge-snark-utils` round-trip tests               | several              | `cd crates/bridge-snark-utils && cargo test`                 |
 | `deposit-prover` lib tests                                  | (depends on Ethereum RPC) | `cd deposit-prover && cargo test`                              |
 
 ### Foundry suites (current)
@@ -200,7 +200,7 @@ forge test --match-contract LayerHashesMovementVerifierTest -vv
 ```bash
 cargo test --workspace                                # eth-frontend + acki-nacki-interface
 cd crates/bridge-relayer-daemon && cargo test         # relayer (13 unit tests)
-cd crates/bridge-prover-orchestrator && cargo test    # 4-circuit prover round-trips
+cd crates/bridge-snark-utils && cargo test    # 4-circuit prover round-trips
 cd deposit-prover && cargo test                       # ETH→AN deposit circuit
 ```
 
@@ -248,7 +248,7 @@ Or manually: install Rust via rustup, Foundry via `foundryup`, and Go from <http
 ./build.sh --all                                      # Build + fmt + clippy + tests
 
 cargo build --workspace                               # Main workspace
-cd crates/bridge-prover-orchestrator && cargo build   # AN→ETH 4-circuit prover
+cd crates/bridge-snark-utils && cargo build   # AN→ETH 4-circuit prover
 cd crates/bridge-relayer-daemon && cargo build        # Relayer
 cd deposit-prover && cargo build                      # ETH→AN deposit prover
 cd contracts/ethereum && forge build                  # Solidity contracts
@@ -257,7 +257,7 @@ cd contracts/ethereum && forge build                  # Solidity contracts
 ### gnark wrappers (AN→ETH side, one-time per circuit)
 
 ```bash
-cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2
+cd crates/bridge-snark-utils/gnark-wrappers/circuit-2
 go build .
 ./circuit-2 setup ../../proofs/.../halo2_proof.json    # generates Groth16Verifier.sol + keys
 ./circuit-2 prove ../../proofs/.../halo2_proof.json    # 256-byte Groth16 proof
@@ -301,7 +301,7 @@ Key settings in `contracts/ethereum/foundry.toml`:
 | ETH→AN transcript        | Keccak256                                                                 |
 | AN-side verification     | Native Halo2 SHPLONK via `VERHALO2SHPLONK` TVM opcode (in `tvm-sdk`, WIP) |
 | ETH→AN deposit prover    | axiom-eth (Rust)                                                          |
-| AN→ETH state prover      | `bridge-prover-orchestrator` (Rust + gosh halo2 fork)                     |
+| AN→ETH state prover      | `bridge-snark-utils` (Rust + gosh halo2 fork)                     |
 | Poseidon hash            | T=3, RATE=2, R_F=8, R_P=57                                                |
 | Block hash oracle        | Axiom V2 (production), `blockhash()` (recent)                             |
 | Ethereum client          | ethers-rs                                                                 |

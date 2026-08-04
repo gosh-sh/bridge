@@ -14,7 +14,7 @@
 //! `bridge-evm-aggregator::aggregate-proof`.
 //!
 //! What this replaces. The former design shelled out to
-//! `bridge-prover-orchestrator/export-1a1b2-poseidon-snark`, which
+//! `bridge-snark-utils/export-1a1b2-poseidon-snark`, which
 //! independently re-fetched from GraphQL, re-ran `real_chain_builder`, and
 //! re-proved the same witness — doubling the GQL fetches, chain builds, and
 //! Halo2 proves per key block. The subprocess is gone; only the

@@ -15,7 +15,7 @@
 //! prover leg of the M7 pipeline (`our_side_reprove`).
 //!
 //! ```bash
-//! cd crates/bridge-prover-orchestrator
+//! cd crates/bridge-snark-utils
 //! cargo run --release --bin export-c4-poseidon-snark -- \
 //!   --params-dir ../../params \
 //!   --snark-dir ../../proofs/bound/poseidon-snark

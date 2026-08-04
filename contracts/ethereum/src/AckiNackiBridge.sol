@@ -830,7 +830,17 @@ contract AckiNackiBridge {
         //   round 2: h0_3  = SHA(siblingH01 ‖ h23)     — depth-2 quad hash (leaves 0..3)
         //   round 3: h0_7  = SHA(h0_3 ‖ siblingH4_7)   — depth-3 oct hash  (leaves 0..7)
         //   round 4: root  = SHA(h0_7 ‖ siblingH8_15)  — depth-4 root      (leaves 0..15)
-        bytes32 h23 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
+        //
+        // L2 and L3 are numeric `uint256` Fr scalars on the wire; the AN side
+        // (bridge-prover-lib `block_id_tree.rs:30-31`) hashes them as canonical
+        // 32-byte little-endian `Fr::to_repr()`. Solidity's default
+        // `abi.encodePacked(uint256)` is big-endian, so we byte-reverse both
+        // operands with `_frToLeBytes` before the round-1 SHA. Siblings at
+        // rounds 2..4 are opaque SHA-256 outputs (already `bytes32`) and need
+        // no reversal.
+        bytes32 h23 = sha256(
+            abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3))
+        );
         bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
         bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
@@ -1288,6 +1298,32 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
+
+    /// @dev Convert a numeric `uint256` (a BN254 Fr scalar value) into its
+    ///      canonical 32-byte little-endian `Fr::to_repr()` byte layout.
+    ///
+    ///      Solidity's `bytes32(v)` / `abi.encodePacked(uint256)` yields the
+    ///      big-endian byte order (byte 0 = MSB). The AN side, however, feeds
+    ///      Poseidon commitments into the block-id SHA-256 tree as
+    ///      `Fr::to_repr()` bytes, which are little-endian (byte 0 = LSB —
+    ///      see `bridge-prover-lib/src/block_id_tree.rs:30-31`).
+    ///
+    ///      Reversing byte-by-byte lets the on-chain fold in `applyBkSetUpdate`
+    ///      match the off-chain root the AN prover commits to. Without this,
+    ///      every real `bkupd_*.json` would revert `BkUpdateMerkleMismatch`
+    ///      even though the underlying scalar values agree.
+    function _frToLeBytes(uint256 v) internal pure returns (bytes32 out) {
+        bytes32 be = bytes32(v);
+        // `byte(i, be)` = the i-th byte of `be` counted from the MSB (byte 0
+        // is MSB). Shifting it left by `8 * i` places it at bit position
+        // `8 * i`, i.e. byte (31 - i) of the resulting bytes32 — the
+        // reversal we want.
+        assembly {
+            for { let i := 0 } lt(i, 32) { i := add(i, 1) } {
+                out := or(out, shl(mul(8, i), byte(i, be)))
+            }
+        }
+    }
 
     /// @dev USDC that may be supplied to AAVE without dipping below the liquid reserve.
     function _amountSupplyable() internal view returns (uint256) {

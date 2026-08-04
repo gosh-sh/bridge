@@ -177,24 +177,25 @@ contract AckiNackiBridge {
     ///         verified on-chain. Strictly monotonic via `verifyBlock`.
     uint64 public storedLastSeenBlockSeqNo;
 
-    /// @notice Number of active layer slots committed by the most recent
-    ///         layer-hashes proof. Range 1..=`MAX_LAYER_HASHES` (`MAX_LAYERS`).
-    uint8 public storedNumLayers;
-
-    /// @notice Per-layer Poseidon Merkle roots committed by the most recent
-    ///         layer-hashes proof. Indices `>= storedNumLayers` are zero.
-    uint256[MAX_LAYER_HASHES] public storedLayerHashes;
-
-    /// @notice The most recent block's max-level layer hash, plus the genesis
-    ///         bootstrap seed before any block is verified (set at
-    ///         construction).
-    /// @dev NOT the anchor source for the next `verifyBlock` — the chain anchor
-    ///      is derived per layer from `_layerWindows` via `_expectedPrevAnchor`
-    ///      (see AB-Q4). This field is read only as the genesis seed while no
-    ///      layer is populated; afterwards it is informational (mirrored by the
-    ///      `expectedPrevAnchor(numLayers)` view for relayers). Kept for
-    ///      backward-compatible reads.
-    uint256 public storedPrevMaxLevelLayerHash;
+    /// @notice Immutable genesis seed for the layer-hash chain anchor. Set
+    ///         once at construction from `VerifyBlockConfig.genesisPrevMaxLevelLayerHash`
+    ///         and never mutated post-deploy.
+    /// @dev **Deprecated in storage v2.0**: this is now the immutable genesis
+    ///      seed only — no longer tracks per-block max-layer values. Use
+    ///      `getLatestPerLayer()` for per-block per-layer state, and
+    ///      `expectedPrevAnchor(numLayers)` for the chain anchor that the
+    ///      next `verifyBlock` will require.
+    ///
+    ///      Read only by `_expectedPrevAnchor` as the pre-first-block bootstrap
+    ///      seed (before any layer window is populated). Every subsequent call
+    ///      sources the anchor from the per-layer rolling windows in
+    ///      `_layerWindows` — see AB-Q4 / `_expectedPrevAnchor`.
+    ///
+    ///      Storage v2.0 (2026-08-04): removed the hot-path SSTORE and made
+    ///      this immutable; also removed the sibling `storedNumLayers` and
+    ///      `storedLayerHashes[10]` flat cache — indexers migrate to
+    ///      `getLatestPerLayer()` and `_highestActiveLayer()`.
+    uint256 public immutable storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
     // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
@@ -642,11 +643,17 @@ contract AckiNackiBridge {
     ///
     /// State updates after success:
     ///   - `storedLastSeenBlockSeqNo = blockSeqNo`
-    ///   - `storedNumLayers = numLayers`
-    ///   - `storedLayerHashes[i] = layerHashes[i]` for all 0..MAX_LAYER_HASHES
-    ///   - `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]`
-    ///     (informational mirror; the *next* call's anchor is derived per-layer
-    ///     from the rolling windows via `_expectedPrevAnchor`)
+    ///   - Per-layer rolling windows: for each `L in 1..=numLayers` with
+    ///     `layerHashes[L-1] != 0`, `_layerWindows[L].append(layerHashes[L-1], blockSeqNo)`.
+    ///     These are the authoritative per-layer state; observe via
+    ///     `getLatestPerLayer()` / `isKnownLayerAnchor(L, hash)` and derive
+    ///     the next block's expected anchor via `expectedPrevAnchor(numLayers)`.
+    ///
+    /// **Storage v2.0 (2026-08-04)**: the flat `storedNumLayers` +
+    /// `storedLayerHashes[10]` cache and the `storedPrevMaxLevelLayerHash`
+    /// SSTORE are no longer written on the hot path (SSTORE savings ≈ 32k gas
+    /// per call). `storedPrevMaxLevelLayerHash` is now the immutable genesis
+    /// seed. See `docs/storage_v2_abi_note.md`.
     ///   - each non-zero `layerHashes[i]` appended to its layer's rolling window
     ///
     /// @param finType            Primary or Fallback finalization path.
@@ -748,18 +755,13 @@ contract AckiNackiBridge {
         if (!lhOk) revert LayerHashesProofRejected();
 
         // ---- Effects (CEI): commit the new state. ----
+        // Storage v2.0 (2026-08-04): the flat `storedNumLayers` + `storedLayerHashes[10]`
+        // cache and the `storedPrevMaxLevelLayerHash` SSTORE are gone from the
+        // hot path — the authoritative per-layer state lives in `_layerWindows`
+        // and is written exclusively by `_appendLayer` below. Off-chain readers
+        // migrate to `getLatestPerLayer()` / `_highestActiveLayer()` /
+        // `expectedPrevAnchor(numLayers)`. See `docs/storage_v2_abi_note.md`.
         storedLastSeenBlockSeqNo = blockSeqNo;
-        storedNumLayers = numLayers;
-        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
-            storedLayerHashes[i] = layerHashes[i];
-        }
-        // Record this block's max-level layer hash. This is now informational
-        // only (the per-layer windows below are the anchor source — see
-        // `_expectedPrevAnchor` / AB-Q4); kept for backward-compatible reads.
-        // Then push each layer into its window (via a helper to keep this
-        // function's stack frame small enough to compile cleanly under
-        // `forge coverage`, which runs without `--via-ir`).
-        storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
         _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
@@ -935,8 +937,9 @@ contract AckiNackiBridge {
     ///      prover's `BridgeState::prev_max_level_layer_hash_for`
     ///      (`bridge-prover-lib/src/bridge_state.rs`):
     ///        * `t = _highestActiveLayer()` (active-layer count);
-    ///        * before any block (`t == 0`): the genesis seed
-    ///          (`storedPrevMaxLevelLayerHash`, set at construction);
+    ///        * before any block (`t == 0`): the immutable genesis seed
+    ///          (`storedPrevMaxLevelLayerHash`, set at construction — the
+    ///          only remaining reader of the field after storage v2.0);
     ///        * otherwise `pick = min(numLayers, t)` and the anchor is the
     ///          latest hash of layer `pick`.
     ///      This is the AB-Q4 fix: a flat `layerHashes[numLayers - 1]` anchor
@@ -946,7 +949,7 @@ contract AckiNackiBridge {
     function _expectedPrevAnchor(uint8 numLayers) internal view returns (uint256) {
         uint8 t = _highestActiveLayer();
         if (t == 0) {
-            return storedPrevMaxLevelLayerHash; // genesis bootstrap seed
+            return storedPrevMaxLevelLayerHash; // immutable genesis bootstrap seed
         }
         uint8 pick = numLayers >= t ? t : numLayers;
         return _layerLatest(pick);
@@ -977,13 +980,26 @@ contract AckiNackiBridge {
         return false;
     }
 
-    /// @notice View helper: returns the full `storedLayerHashes` array as a
-    ///         memory copy. Public mappings give per-index access; this is
-    ///         convenient for off-chain reads in one RPC call.
-    function getStoredLayerHashes() external view returns (uint256[MAX_LAYER_HASHES] memory) {
+    /// @notice Latest anchor written into each layer window. Entry `[L-1]`
+    ///         is the head of `_layerWindows[L]`, i.e. the most recent
+    ///         Poseidon Merkle root committed for layer `L` across all
+    ///         `verifyBlock` calls so far — *not* just the last block's
+    ///         array. Empty windows return zero.
+    ///
+    ///         Storage v2.0 (2026-08-04): replaces `getStoredLayerHashes()`
+    ///         (removed). The per-layer view over `_layerWindows` is the
+    ///         authoritative source; a shallow-successor-after-deep block no
+    ///         longer overwrites deeper layers with zero. See
+    ///         `docs/storage_v2_abi_note.md`.
+    function getLatestPerLayer() external view returns (uint256[MAX_LAYER_HASHES] memory) {
         uint256[MAX_LAYER_HASHES] memory out;
-        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
-            out[i] = storedLayerHashes[i];
+        for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
+            HistoryWindow storage w = _layerWindows[L];
+            if (w.dataLen > 0) {
+                uint16 head = (w.writeCursor + uint16(HISTORY_PROOF_WINDOW) - 1)
+                              % uint16(HISTORY_PROOF_WINDOW);
+                out[L - 1] = w.data[head];
+            }
         }
         return out;
     }

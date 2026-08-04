@@ -5,15 +5,22 @@
 //!
 //! - [`EthBridgeClient`] — production. Wraps an alloy-rs `sol!`-generated
 //!   contract binding. Reads `storedLastSeenBlockSeqNo` /
-//!   `storedBkSetCommitment` / `storedPrevMaxLevelLayerHash` from chain and
-//!   submits `verifyBlock(...)` transactions.
+//!   `storedBkSetCommitment` (mutable) and `expectedPrevAnchor(numLayers)`
+//!   (per-layer anchor pick) from chain, plus the immutable
+//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits
+//!   `verifyBlock(...)` transactions. `storedPrevMaxLevelLayerHash` is
+//!   the storage v2.0 immutable genesis seed (2026-08-04) — never
+//!   mutated post-deploy; use `expectedPrevAnchor` for the actual chain
+//!   anchor going forward.
 //! - [`MockBridgeClient`] — a deterministic in-memory mirror of the contract's
 //!   state machine, exposed to unit tests so we can drive the relayer through
 //!   5+ blocks in microseconds without spawning Anvil. The mock reproduces
 //!   *exactly* the cheap pre-flight checks the real contract performs
 //!   (numLayers range, tail zero, BK-set match, monotonic seqNo, anchor match)
 //!   — so any consumer that passes the mock will also pass the real bridge
-//!   unless ZK proofs are bad.
+//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock
+//!   tracks per-layer window heads and implements `expectedPrevAnchor` with
+//!   the same `min(numLayers, highestActiveLayer)` pick used on-chain.
 //!
 //! ZK verification itself is *not* mocked here in the way the Solidity
 //! `MockPrimaryVerifier` etc. mocks do; the [`MockBridgeClient`] takes
@@ -60,6 +67,14 @@ use crate::{
 pub struct BridgeOnChainState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: U256,
+    /// Storage v2.0 (2026-08-04): mirrors the on-chain **immutable**
+    /// `storedPrevMaxLevelLayerHash()` getter — a constant genesis seed
+    /// set by the constructor, never mutated by `verifyBlock`. This
+    /// field is retained for backward compatibility with persisted
+    /// relayer state files and for indexers that inspect the historical
+    /// commitment. Callers doing a pre-submit drift check must use
+    /// [`BridgeClient::expected_prev_anchor`] instead — the runtime
+    /// anchor lives in per-layer rolling windows now.
     pub prev_max_level_layer_hash: U256,
     /// Highest seq_no applied via `applyBkSetUpdate` (0 if none yet).
     #[serde(default)]
@@ -106,6 +121,16 @@ pub trait BridgeClient: Send + Sync {
         &self,
         update: &BkSetUpdateData,
     ) -> Result<BkSetUpdateSubmitOutcome, RelayerError>;
+
+    /// Storage v2.0 (2026-08-04): the anchor a future
+    /// `verifyBlock(.., numLayers, ..)` will require as
+    /// `prevMaxLevelLayerHash`. Sourced from `_layerWindows` on-chain with
+    /// the same `min(numLayers, highestActiveLayer)` per-layer pick the
+    /// prover uses (`BridgeState::prev_max_level_layer_hash_for`). Callers
+    /// must use this — not the immutable `storedPrevMaxLevelLayerHash`
+    /// genesis seed exposed via [`BridgeOnChainState`] — for the pre-submit
+    /// drift check.
+    async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -130,9 +155,17 @@ struct MockBridgeInner {
     last_seen_block_seq_no: u64,
     bk_set_commitment: U256,
     last_bk_set_update_seq_no: u64,
-    num_layers: u8,
-    layer_hashes: [U256; MAX_LAYER_HASHES],
-    prev_max_level_layer_hash: U256,
+    /// Storage v2.0 (2026-08-04): immutable genesis seed set by
+    /// [`MockBridgeClient::with_genesis`]. Corresponds to the on-chain
+    /// `immutable storedPrevMaxLevelLayerHash`.
+    genesis_prev_max_level_layer_hash: U256,
+    /// Per-layer head (most recent append). Index `L-1` mirrors the
+    /// contract's `_layerWindows[L]` head. Zero means "layer L never
+    /// appended to". Fed by [`AnBlockData`] on every `submit_block`.
+    latest_per_layer: [U256; MAX_LAYER_HASHES],
+    /// Highest layer index (1-based) ever populated. Used by the
+    /// per-layer anchor pick `min(numLayers, highestActiveLayer)`.
+    highest_active_layer: u8,
     /// Receipt of every accepted block, in insertion order. Used by
     /// tests to assert the exact stream the relayer produced.
     accepted_log: Vec<AnBlockData>,
@@ -150,9 +183,9 @@ impl MockBridgeClient {
                 last_seen_block_seq_no: 0,
                 bk_set_commitment,
                 last_bk_set_update_seq_no: 0,
-                num_layers: 0,
-                layer_hashes: [U256::ZERO; MAX_LAYER_HASHES],
-                prev_max_level_layer_hash,
+                genesis_prev_max_level_layer_hash: prev_max_level_layer_hash,
+                latest_per_layer: [U256::ZERO; MAX_LAYER_HASHES],
+                highest_active_layer: 0,
                 accepted_log: Vec::new(),
             }),
             verifier,
@@ -174,6 +207,21 @@ impl MockBridgeClient {
     }
 }
 
+impl MockBridgeInner {
+    /// Mirror the on-chain `expectedPrevAnchor(numLayers)`:
+    /// `pick = min(numLayers, highestActiveLayer)`, return
+    /// `latest_per_layer[pick - 1]` if `pick > 0`, else the immutable
+    /// genesis seed.
+    fn expected_prev_anchor(&self, num_layers: u8) -> U256 {
+        let pick = num_layers.min(self.highest_active_layer);
+        if pick == 0 {
+            self.genesis_prev_max_level_layer_hash
+        } else {
+            self.latest_per_layer[(pick - 1) as usize]
+        }
+    }
+}
+
 #[async_trait]
 impl BridgeClient for MockBridgeClient {
     async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError> {
@@ -181,9 +229,18 @@ impl BridgeClient for MockBridgeClient {
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: inner.last_seen_block_seq_no,
             bk_set_commitment: inner.bk_set_commitment,
-            prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+            // Storage v2.0: `prev_max_level_layer_hash` is the *immutable
+            // genesis seed* mirror of `storedPrevMaxLevelLayerHash()`.
+            // For the per-layer anchor query used by the pre-submit drift
+            // check, call [`BridgeClient::expected_prev_anchor`].
+            prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
             last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
         })
+    }
+
+    async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError> {
+        let inner = self.inner.lock().expect("poisoned lock");
+        Ok(inner.expected_prev_anchor(num_layers))
     }
 
     async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError> {
@@ -209,11 +266,13 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
-        if block.prev_max_level_layer_hash != inner.prev_max_level_layer_hash {
+        // Storage v2.0: prev-anchor pick mirrors `expectedPrevAnchor(num_layers)`.
+        let expected = inner.expected_prev_anchor(block.num_layers);
+        if block.prev_max_level_layer_hash != expected {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "PrevAnchorMismatch(supplied={:#x}, stored={:#x})",
-                    block.prev_max_level_layer_hash, inner.prev_max_level_layer_hash
+                    "PrevAnchorMismatch(supplied={:#x}, expected={:#x})",
+                    block.prev_max_level_layer_hash, expected
                 ),
             });
         }
@@ -224,18 +283,26 @@ impl BridgeClient for MockBridgeClient {
             });
         }
 
-        // Effects.
+        // Effects: mirror `_appendLayerHashes` — for L=1..=num_layers,
+        // overwrite the per-layer head with the incoming hash (skipping
+        // zero entries, like the contract does).
         inner.last_seen_block_seq_no = block.block_seq_no;
-        inner.num_layers = block.num_layers;
-        inner.layer_hashes = block.layer_hashes;
-        inner.prev_max_level_layer_hash = block.next_anchor();
+        for i in 0..block.num_layers {
+            let h = block.layer_hashes[i as usize];
+            if h != U256::ZERO {
+                inner.latest_per_layer[i as usize] = h;
+            }
+        }
+        if block.num_layers > inner.highest_active_layer {
+            inner.highest_active_layer = block.num_layers;
+        }
         inner.accepted_log.push(block.clone());
 
         Ok(SubmitOutcome::Verified {
             new_state: BridgeOnChainState {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
-                prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+                prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
                 last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
             tx_hash: None,
@@ -269,7 +336,7 @@ impl BridgeClient for MockBridgeClient {
             new_state: BridgeOnChainState {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
-                prev_max_level_layer_hash: inner.prev_max_level_layer_hash,
+                prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
                 last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
             tx_hash: None,
@@ -320,7 +387,25 @@ mod sol_bindings {
             function storedLastSeenBlockSeqNo() external view returns (uint64);
             function storedBkSetCommitment() external view returns (uint256);
             function storedLastBkSetUpdateSeqNo() external view returns (uint64);
+            /// Storage v2.0 (2026-08-04): immutable genesis seed. Retained
+            /// so historical indexers reading the constructor value keep
+            /// working. Use `expectedPrevAnchor(numLayers)` for the anchor
+            /// query and `getLatestPerLayer()` for per-layer state.
             function storedPrevMaxLevelLayerHash() external view returns (uint256);
+
+            /// The chain anchor a future `verifyBlock(.., numLayers, ..)`
+            /// will require as `prevMaxLevelLayerHash`. Sourced from the
+            /// per-layer rolling windows (`_layerWindows`) with the same
+            /// `min(numLayers, highestActiveLayer)` pick the prover uses
+            /// (`prev_max_level_layer_hash_for`).
+            function expectedPrevAnchor(uint8 numLayers) external view returns (uint256);
+
+            /// Storage v2.0 (2026-08-04): replaces the removed
+            /// `getStoredLayerHashes()`. Entry `[L-1]` is the most recent
+            /// Poseidon Merkle root appended to layer `L` across all
+            /// `verifyBlock` calls so far — not just the last block's
+            /// array. Empty windows return zero.
+            function getLatestPerLayer() external view returns (uint256[10] memory);
 
             struct WithdrawalPublicInputs {
                 uint256 tokenId;
@@ -787,13 +872,29 @@ where
                 ),
             });
         }
-        let expected_anchor = block.layer_hashes[(block.num_layers - 1) as usize];
-        if new_state.prev_max_level_layer_hash != expected_anchor {
+        // Storage v2.0 (2026-08-04): `storedPrevMaxLevelLayerHash` is now
+        // the immutable genesis seed — the mutable "top layer of last block"
+        // signal it used to expose is gone. Instead, verify the per-layer
+        // rolling window head: after `verifyBlock(numLayers, layerHashes, ..)`
+        // succeeds, `expectedPrevAnchor(numLayers)` must return
+        // `layerHashes[numLayers - 1]` because the just-appended top-layer
+        // hash is now the head of `_layerWindows[numLayers]` and the
+        // per-layer pick with `pick == numLayers` returns exactly that. This
+        // is a strictly stronger post-submit invariant than v1's flat
+        // `storedPrevMaxLevelLayerHash` comparison.
+        let expected_top = block.layer_hashes[(block.num_layers - 1) as usize];
+        let post_anchor = self
+            .contract
+            .expectedPrevAnchor(block.num_layers)
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        if post_anchor != expected_top {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: chain prev_max_level_layer_hash={} != expected={} \
-                     (top layer of submitted block)",
-                    new_state.prev_max_level_layer_hash, expected_anchor
+                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted block={}",
+                    block.num_layers, post_anchor, expected_top
                 ),
             });
         }
@@ -849,6 +950,14 @@ where
     ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
         self.send_bk_set_update(update).await
     }
+
+    async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError> {
+        self.contract
+            .expectedPrevAnchor(num_layers)
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
 }
 
 fn map_contract_err(e: AlloyContractError) -> RelayerError {
@@ -892,14 +1001,22 @@ mod tests {
             MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
 
         for seq in 1..=3 {
-            let st = bridge.read_state().await.unwrap();
-            let b = block(seq, st.prev_max_level_layer_hash);
+            // Storage v2.0: pull the per-layer anchor pick, not the
+            // genesis-seed getter (`read_state` now returns the immutable
+            // genesis for `prev_max_level_layer_hash`).
+            let anchor = bridge.expected_prev_anchor(1).await.unwrap();
+            let b = block(seq, anchor);
             match bridge.submit_block(&b).await.unwrap() {
                 SubmitOutcome::Verified {
                     new_state, ..
                 } => {
                     assert_eq!(new_state.last_seen_block_seq_no, seq);
-                    assert_eq!(new_state.prev_max_level_layer_hash, b.next_anchor());
+                    // v2: read_state's `prev_max_level_layer_hash` is the
+                    // immutable genesis (unchanged across blocks). The
+                    // actual per-layer anchor lives behind
+                    // `expected_prev_anchor(num_layers)`.
+                    let expected = bridge.expected_prev_anchor(1).await.unwrap();
+                    assert_eq!(expected, b.next_anchor());
                 },
                 SubmitOutcome::Reverted {
                     reason,
@@ -914,9 +1031,9 @@ mod tests {
         let bridge =
             MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
         bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
-        let st = bridge.read_state().await.unwrap();
+        let anchor = bridge.expected_prev_anchor(1).await.unwrap();
         let outcome = bridge
-            .submit_block(&block(1, st.prev_max_level_layer_hash))
+            .submit_block(&block(1, anchor))
             .await
             .unwrap();
         match outcome {

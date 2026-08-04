@@ -273,14 +273,20 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let seq_no = block.block_seq_no;
         block.validate_shape()?;
 
-        if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+        // Storage v2.0 (2026-08-04): compare against the per-layer anchor
+        // pick, not the immutable genesis seed. The prover derives
+        // `block.prev_max_level_layer_hash` from
+        // `min(num_layers, highest_active_layer)`; the contract's
+        // `expectedPrevAnchor(num_layers)` mirrors that exactly.
+        let chain_anchor = self.bridge.expected_prev_anchor(block.num_layers).await?;
+        if block.prev_max_level_layer_hash != chain_anchor {
             self.state.record_attempt(target);
             self.persist_state()?;
             return Ok(TickOutcome::BridgeReverted {
                 target_seq_no: target,
                 reason: format!(
-                    "off-chain prev_max_level_layer_hash {:#x} != on-chain {:#x}",
-                    block.prev_max_level_layer_hash, on_chain.prev_max_level_layer_hash
+                    "off-chain prev_max_level_layer_hash {:#x} != on-chain expectedPrevAnchor({})={:#x}",
+                    block.prev_max_level_layer_hash, block.num_layers, chain_anchor
                 ),
             });
         }

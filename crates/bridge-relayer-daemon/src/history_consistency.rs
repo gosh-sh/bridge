@@ -35,14 +35,20 @@ fn drift(field: &'static str, expected: impl Into<String>, actual: impl Into<Str
 }
 
 /// Check A — driver post-ack state vs freshly-read on-chain anchors.
+///
+/// Storage v2.0 (2026-08-04): the per-layer top-hash cross-check moved to
+/// [`EthBridgeClient::submit_block`], which asserts on-chain
+/// `expectedPrevAnchor(numLayers) == layerHashes[numLayers-1]` right after
+/// the receipt lands. That is a *strictly stronger* invariant than the old
+/// flat `storedPrevMaxLevelLayerHash` compare — and it uses the same block
+/// pin (`receipt.block_number`) that avoids read-after-write RPC lag. This
+/// helper therefore no longer touches
+/// [`BridgeOnChainState::prev_max_level_layer_hash`] (which is now the
+/// immutable genesis seed, not the runtime anchor).
 pub fn check_history_consistency(
     expected: &BridgeState,
     actual: &BridgeOnChainState,
 ) -> Result<(), HistoryDrift> {
-    let expected_prev_max = expected
-        .highest_layer_latest_hash()
-        .unwrap_or([0u8; 32]);
-
     if expected.stored_last_seen_block_seq_no != actual.last_seen_block_seq_no {
         return Err(drift(
             "last_seen_block_seq_no",
@@ -56,16 +62,6 @@ pub fn check_history_consistency(
             "bk_set_commitment",
             hex::encode(expected.stored_bk_set_commitment),
             hex::encode(actual_bk),
-        ));
-    }
-    // On-chain Fr public inputs are LE `uint256`; BridgeState stores the same
-    // `Fr::to_repr()` / raw hash bytes.
-    let actual_prev = actual.prev_max_level_layer_hash.to_le_bytes::<32>();
-    if expected_prev_max != actual_prev {
-        return Err(drift(
-            "prev_max_level_layer_hash",
-            hex::encode(expected_prev_max),
-            hex::encode(actual_prev),
         ));
     }
     if expected.stored_last_bk_set_update_seq_no != actual.last_bk_set_update_seq_no {

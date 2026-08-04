@@ -276,7 +276,7 @@ forge test --match-test "test_verifyBlock_primary_bound_succeeds|test_verifyBloc
 
 - `BlockVerified(blockId=…, blockSeqNo=…, finType=0 [Primary], numLayers=…)` event in the trace.
 - ~440k gas total (two pairing checks + storage updates).
-- `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedPrevMaxLevelLayerHash` advance after the call.
+- `storedLastSeenBlockSeqNo` advances after the call; the per-layer window head returned by `getLatestPerLayer()` matches `layerHashes[L-1]` for every active `L`. Storage v2.0 (2026-08-04): `storedNumLayers` and the mutable `storedPrevMaxLevelLayerHash` were removed — the anchor query is now `expectedPrevAnchor(numLayers)`.
 
 To regenerate the bound proofs from scratch (~30-45 min as of v2.2 — keygen + Halo2 prove + gnark wrap for all three circuits 1A, 1B, 2):
 
@@ -576,7 +576,7 @@ You will see, in order:
 1. The cheap shape & anchor checks (revert before crypto if any fail).
 2. The first pairing check via `PrimaryVerifier` → `PrimaryGroth16VerifierGenerated`.
 3. The second pairing check via `LayerHashesMovementVerifier` → `LayerHashesGroth16VerifierGenerated`.
-4. The state writes (`storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes`, `storedPrevMaxLevelLayerHash`).
+4. The state writes: `storedLastSeenBlockSeqNo` plus per-layer `_layerWindows[L]` appends via `_appendLayerHashes`. Storage v2.0 (2026-08-04): the flat `storedNumLayers` / `storedLayerHashes` / mutable `storedPrevMaxLevelLayerHash` writes were removed.
 5. The `BlockVerified` event.
 
 Total cost: ~440k gas (two pairings dominate).

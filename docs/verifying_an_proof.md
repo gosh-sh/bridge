@@ -260,10 +260,13 @@ forge script script/DeployRealBridge.s.sol --broadcast --rpc-url http://localhos
 cargo run -p bridge-relayer-daemon -- one-shot --block-seq-no $SEQ \
     --rpc-url http://localhost:8545 --bridge $BRIDGE
 
-# 3. Inspect on-chain state
+# 3. Inspect on-chain state (Storage v2.0, 2026-08-04)
 cast call $BRIDGE "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+# `storedPrevMaxLevelLayerHash()` is now the immutable genesis seed; for the
+# next-block anchor use `expectedPrevAnchor(numLayers)`.
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
+# Per-layer rolling window heads (replaces the flat `getStoredLayerHashes`).
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"
 ```
 
 ### 8.3 Production (mainnet)

@@ -172,7 +172,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
     }
 
@@ -301,7 +301,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO + 1,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         assertTrue(bridge.isKnownLayerAnchor(1, expectedL1));
@@ -482,7 +482,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO,
             ACTIVE_LAYERS,
             layers,
-            shellnetBridge.storedPrevMaxLevelLayerHash()
+            shellnetBridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
@@ -609,7 +609,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO + 1,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =

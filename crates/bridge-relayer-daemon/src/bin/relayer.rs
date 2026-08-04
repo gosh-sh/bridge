@@ -984,16 +984,22 @@ async fn verify_fixture(
         );
     }
 
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): the on-chain
+    // `storedPrevMaxLevelLayerHash()` field is now the immutable genesis
+    // seed. The runtime anchor lives in `_layerWindows[L]` and is exposed
+    // via `expectedPrevAnchor(numLayers)`.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         ok = false;
         diagnostics.push(format!(
-            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain = {:#x}",
-            block.prev_max_level_layer_hash, on_chain.prev_max_level_layer_hash
+            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain expectedPrevAnchor({}) = {:#x}",
+            block.prev_max_level_layer_hash, block.num_layers, chain_anchor
         ));
     } else {
         info!(
             prev_anchor = ?block.prev_max_level_layer_hash,
-            "PrevAnchor matches on-chain",
+            num_layers = block.num_layers,
+            "PrevAnchor matches on-chain expectedPrevAnchor",
         );
     }
 
@@ -1172,11 +1178,14 @@ async fn verify_prover_proof(
             on_chain.last_seen_block_seq_no
         );
     }
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): compare against per-layer anchor pick.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         anyhow::bail!(
-            "prev anchor mismatch: proof={} chain={}",
+            "prev anchor mismatch: proof={} chain_expectedPrevAnchor({})={}",
             block.prev_max_level_layer_hash,
-            on_chain.prev_max_level_layer_hash
+            block.num_layers,
+            chain_anchor
         );
     }
 

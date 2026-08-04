@@ -15,6 +15,14 @@
 
 pub mod bound_test_data;
 pub mod halo2_snark;
+// NB-Q9 PR-A (2026-08-04): canonical home of this module is now
+// `deposit-prover/src/halo2_tvm_bundle.rs`. It is pulled here via `#[path]`
+// so this crate (halo2-axiom 0.5.x gosh backend) can still re-export the
+// `VkBlob` types + so the in-crate `halo2_tvm_bundle_round_trip` test keeps
+// consuming the same source file the deposit-prover examples do. Cross-repo
+// PR-C (orchestrator rebrand → `bridge-snark-utils`) will collapse this
+// indirection once the orchestrator's own bins are triaged.
+#[path = "../../../deposit-prover/src/halo2_tvm_bundle.rs"]
 pub mod halo2_tvm_bundle;
 pub mod proof_export;
 

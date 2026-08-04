@@ -94,3 +94,4 @@ in case there's an operator scenario I'm missing.
    lands.
 4. Any git history you want preserved on the gnark-wrappers pre-deletion
    (they're not in the repo now, but they were at some point — worth a tag?).
+

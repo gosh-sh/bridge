@@ -56,7 +56,7 @@ use bridge_prover_lib::{
     transcript::TranscriptKind,
     verifier, Fr,
 };
-use bridge_prover_orchestrator::{halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary};
+use bridge_snark_utils::{halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary};
 use clap::{Parser, ValueEnum};
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 use halo2_base::halo2_proofs::poly::commitment::Params;

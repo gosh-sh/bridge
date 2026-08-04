@@ -25,7 +25,7 @@ use bridge_prover_lib::{
     transcript::TranscriptKind,
     verifier, Fr,
 };
-use bridge_prover_orchestrator::{halo2_snark::export_poseidon_snark, proof_export::save_instances_binary};
+use bridge_snark_utils::{halo2_snark::export_poseidon_snark, proof_export::save_instances_binary};
 use bridge_test_data_gen::generator::generate_test_data_all_sign;
 use clap::Parser;
 use halo2_base::halo2_proofs::poly::commitment::Params;

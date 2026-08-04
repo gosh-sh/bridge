@@ -20,7 +20,7 @@ def main() -> None:
 
     proof_path = Path(sys.argv[1]).resolve()
     repo = Path(__file__).resolve().parents[1]
-    w4 = repo / "crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4"
+    w4 = repo / "crates/bridge-snark-utils/gnark-wrappers/circuit-4"
 
     data = json.loads(proof_path.read_text())
     backup = proof_path.with_suffix(proof_path.suffix + ".bak")

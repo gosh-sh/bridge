@@ -6,7 +6,7 @@ members = ["crates/eth-frontend", "crates/acki-nacki-interface"]
 exclude = [
     "deposit-prover",
     "frontend",
-    "crates/bridge-prover-orchestrator",
+    "crates/bridge-snark-utils",
     "crates/bridge-relayer-daemon",
     "crates/deposit-relayer-daemon",
     # Sub-workspace migrated from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover

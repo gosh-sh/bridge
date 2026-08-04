@@ -1,8 +1,15 @@
 [package]
-name = "bridge-prover-orchestrator"
+name = "bridge-snark-utils"
 version = "0.1.0"
 edition = "2021"
-description = "Wraps the partner's halo2 circuits with key/prover/verifier helpers for the AN→ETH bridge. Phase 1.A: Circuit 1B (Fallback attestation)."
+# Renamed 2026-08-04 from `bridge-prover-orchestrator` (NB-Q9 PR-C).
+# Runtime "orchestration" role migrated into `bridge-relayer-daemon` +
+# `bridge-prover-lib::live_driver`; what remains here are offline SNARK
+# utility binaries (bound test-data proof export, Poseidon Snark wrapping,
+# synthetic-primary generation) plus the shared halo2-snark / VkBlob lib
+# also consumed by the deposit-prover examples and the R15 aggregator
+# input pipeline.
+description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline: bound test-data proof export, Poseidon-transcript Snark wrapping, and synthetic-primary generation. Shares halo2-snark / VkBlob helpers with deposit-prover."
 
 [dependencies]
 # Partner circuits / parsers / test-data-gen — fetched from public GitHub.
@@ -64,10 +71,6 @@ path = "src/bin/export_bound_block_proofs.rs"
 [[bin]]
 name = "export-bound-poseidon-snarks"
 path = "src/bin/export_bound_poseidon_snarks.rs"
-
-[[bin]]
-name = "export-halo2-poseidon-snark"
-path = "src/bin/export_halo2_poseidon_snark.rs"
 
 [[bin]]
 name = "export-c4-poseidon-snark"

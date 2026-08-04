@@ -14,7 +14,7 @@ use bridge_prover_lib::{
     verifier::{verify_fallback_proof_with_transcript, verify_layer_proof_with_transcript},
     Fr,
 };
-use bridge_prover_orchestrator::{
+use bridge_snark_utils::{
     compose_layer_hashes_input, halo2_snark::export_poseidon_snark_with_srs_k,
     load_bound_witness_cache, proof_export::save_instances_binary,
 };

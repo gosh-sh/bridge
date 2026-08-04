@@ -12,7 +12,7 @@
 //!    public inputs as raw `N × 32` LE `Fr`, keep the proof bytes raw.
 //! 3. **Round-trip**: serialise the `VkBlob` to bytes, parse it back via
 //!    [`VkBlob::read`], decode public inputs via
-//!    [`bridge_prover_orchestrator::decode_instances`].
+//!    [`bridge_snark_utils::decode_instances`].
 //! 4. **Verify**: reassemble `vk` + `instances` and run `verify_proof::<KZG,
 //!    VerifierSHPLONK, Blake2bRead, SingleStrategy>` using the freshly-loaded
 //!    `ParamsKZG<Bn256>` (chain-wide shared SRS, Q-WIRE-2 in the design memo).
@@ -33,7 +33,7 @@
 use std::path::PathBuf;
 
 use bridge_prover_lib::{keys::KeyManager, prover::generate_fallback_proof};
-use bridge_prover_orchestrator::{Fr, Halo2TvmOperands, TranscriptKind, VkBlob};
+use bridge_snark_utils::{Fr, Halo2TvmOperands, TranscriptKind, VkBlob};
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
 fn params_dir() -> PathBuf {
@@ -112,7 +112,7 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
 
     // Decoded public inputs must match the originals bit-for-bit
     // (strict 32-byte LE).
-    let recovered_instances = bridge_prover_orchestrator::decode_instances(&operands.public_inputs)
+    let recovered_instances = bridge_snark_utils::decode_instances(&operands.public_inputs)
         .expect("public inputs must decode");
     assert_eq!(recovered_instances, instances);
 

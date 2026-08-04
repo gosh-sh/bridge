@@ -39,7 +39,7 @@ use bridge_event_prover_lib::{
     PrivateWitness,
 };
 use bridge_prover_lib::{keys::KeyManager, transcript::TranscriptKind};
-use bridge_prover_orchestrator::{
+use bridge_snark_utils::{
     halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary,
 };
 use clap::Parser;

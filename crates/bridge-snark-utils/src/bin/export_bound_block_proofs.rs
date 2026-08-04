@@ -1,7 +1,7 @@
 //! Phase 4 — Export a *cross-circuit-bound* block scenario.
 //!
 //! Drives one synthetic AN block scenario via
-//! [`bridge_prover_orchestrator::build_bound_test_data`] and emits proofs for
+//! [`bridge_snark_utils::build_bound_test_data`] and emits proofs for
 //! all three live AN→ETH circuits:
 //!  - **Circuit 1A** (Primary attestation, K=20) — 4 public inputs.
 //!  - **Circuit 1B** (Fallback attestation, K=21) — 4 public inputs.
@@ -41,7 +41,7 @@ use bridge_prover_lib::{
     layer_prover::generate_layer_proof_with_input as generate_layer_hashes_proof,
     prover::{generate_fallback_proof, generate_primary_proof},
 };
-use bridge_prover_orchestrator::{
+use bridge_snark_utils::{
     build_bound_test_data, compose_layer_hashes_input, format_field_element,
     proof_export::{build_proof_data, save_instances_binary, save_proof_data_json},
     save_bound_witness_cache, BoundBlockTestData, Fr,

@@ -400,21 +400,15 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Enable ETH-side R15 SHPLONK aggregation (Circuits 1A/1B/2).
-        /// Wraps `LiveBlockSource` with [`AggregatedBlockSource`], which
-        /// consumes the Poseidon proof bytes emitted directly by
-        /// `LiveProverDriver` (with `TranscriptKind::Poseidon`) via
-        /// in-process `bridge_snark_wrap`. Requires `--aggregator-dir`
-        /// and `--verifiers-dir`.
-        #[arg(long, env = "BRIDGE_ENABLE_C12_AGGREGATION")]
-        enable_c12_aggregation: bool,
         /// Path to the `crates/bridge-evm-aggregator` root (used by the
-        /// `aggregate-proof` subprocess).
+        /// `aggregate-proof` subprocess). C1/C2 R15 SHPLONK aggregation is
+        /// mandatory — the on-chain `AckiNackiBridge` verifier only accepts
+        /// aggregated calldata, so `daemon-live` refuses to start without it.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
-        aggregator_dir: Option<PathBuf>,
+        aggregator_dir: PathBuf,
         /// Directory of committed verifier `.bin` files (aggregator self-check).
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
-        verifiers_dir: Option<PathBuf>,
+        verifiers_dir: PathBuf,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -718,7 +712,6 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
-            enable_c12_aggregation,
             aggregator_dir,
             verifiers_dir,
         } => {
@@ -727,23 +720,9 @@ async fn main() -> anyhow::Result<()> {
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
             };
-            let aggregation = if enable_c12_aggregation {
-                let aggregator_dir = aggregator_dir.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--enable-c12-aggregation set but --aggregator-dir missing"
-                    )
-                })?;
-                let verifiers_dir = verifiers_dir.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--enable-c12-aggregation set but --verifiers-dir missing"
-                    )
-                })?;
-                Some(C12AggregationCfg {
-                    aggregator_dir,
-                    verifiers_dir,
-                })
-            } else {
-                None
+            let aggregation = C12AggregationCfg {
+                aggregator_dir,
+                verifiers_dir,
             };
             run_daemon_live(
                 args.state,
@@ -1814,7 +1793,7 @@ async fn run_daemon_live(
     bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
-    aggregation: Option<C12AggregationCfg>,
+    aggregation: C12AggregationCfg,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
@@ -1972,60 +1951,46 @@ async fn run_daemon_live(
 
     let cfg = RelayerConfig::new(&state_path);
 
-    // When C1/C2 aggregation is enabled, wrap the live source so the two
-    // proof-byte fields in AnBlockData carry Poseidon R15 SHPLONK calldata
-    // instead of the daemon's Blake2b bytes. The wrapper delegates ack /
-    // driver_snapshot back to LiveBlockSource so state persistence and
-    // ack-after-submit semantics are unchanged. Relayer's generic bounds
-    // require `Sized` sources, so each branch builds and runs its own
-    // Relayer via `spawn_and_run` (below) instead of unifying via `dyn`.
-    if let Some(agg_cfg) = aggregation {
-        use bridge_relayer_daemon::{
-            AggregatedBlockSource, Circuit12ShplonkPipeline, PoseidonSnarkWrapper,
-            SubprocessAggregator, SubprocessAggregatorConfig,
-        };
-        let aggregator_cfg = SubprocessAggregatorConfig::new(
-            &agg_cfg.aggregator_dir,
-            &agg_cfg.verifiers_dir,
-            &params_dir,
-        );
-        let pipeline = Circuit12ShplonkPipeline::new(
-            PoseidonSnarkWrapper::new(&params_dir),
-            SubprocessAggregator::new(aggregator_cfg),
-        );
-        let aggregated = Arc::new(AggregatedBlockSource::new(
-            Arc::clone(&live_source),
-            pipeline,
-        ));
-        info!(
-            aggregator_dir = %agg_cfg.aggregator_dir.display(),
-            verifiers_dir = %agg_cfg.verifiers_dir.display(),
-            "daemon-live: C1/C2 R15 SHPLONK aggregation ENABLED",
-        );
-        spawn_and_run(
-            cfg,
-            Arc::clone(&aggregated),
-            aggregated,
-            bridge,
-            backoff,
-            &gql_endpoint,
-            &params_dir,
-            &prover_state_dir,
-        )
-        .await
-    } else {
-        spawn_and_run(
-            cfg,
-            Arc::clone(&live_source),
-            Arc::clone(&live_source),
-            bridge,
-            backoff,
-            &gql_endpoint,
-            &params_dir,
-            &prover_state_dir,
-        )
-        .await
-    }
+    // Wrap the live source so the two proof-byte fields in AnBlockData carry
+    // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.
+    // The wrapper delegates ack / driver_snapshot back to LiveBlockSource so
+    // state persistence and ack-after-submit semantics are unchanged.
+    // Aggregation is unconditional: the on-chain `AckiNackiBridge` verifier
+    // only accepts aggregated calldata (raw halo2 bytes revert with
+    // `AttestationProofRejected()`).
+    use bridge_relayer_daemon::{
+        AggregatedBlockSource, Circuit12ShplonkPipeline, PoseidonSnarkWrapper,
+        SubprocessAggregator, SubprocessAggregatorConfig,
+    };
+    let aggregator_cfg = SubprocessAggregatorConfig::new(
+        &aggregation.aggregator_dir,
+        &aggregation.verifiers_dir,
+        &params_dir,
+    );
+    let pipeline = Circuit12ShplonkPipeline::new(
+        PoseidonSnarkWrapper::new(&params_dir),
+        SubprocessAggregator::new(aggregator_cfg),
+    );
+    let aggregated = Arc::new(AggregatedBlockSource::new(
+        Arc::clone(&live_source),
+        pipeline,
+    ));
+    info!(
+        aggregator_dir = %aggregation.aggregator_dir.display(),
+        verifiers_dir = %aggregation.verifiers_dir.display(),
+        "daemon-live: C1/C2 R15 SHPLONK aggregation",
+    );
+    spawn_and_run(
+        cfg,
+        Arc::clone(&aggregated),
+        aggregated,
+        bridge,
+        backoff,
+        &gql_endpoint,
+        &params_dir,
+        &prover_state_dir,
+    )
+    .await
 }
 
 /// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.

@@ -107,8 +107,6 @@ acki-nacki-bridge/
 │   │   └── types.rs
 │   └── configs/                # Circuit configuration files
 │
-├── poseidon-proof/             # Standalone Rust crate (Poseidon + Blake2b transcript demo)
-│
 ├── frontend/                   # WASM web frontend (Yew + Rust, excluded from workspace)
 │
 ├── docs/                       # Architecture + audit + protocol documents
@@ -124,7 +122,6 @@ Three Cargo workspaces, kept separate because of dependency-tree conflicts in th
 | ------------------------------------------ | ------------------------------ | -------------------------------------- |
 | Root (`Cargo.toml`)                        | —                              | Workspace; `eth-frontend`, `acki-nacki-interface` |
 | `deposit-prover/`                          | axiom-eth + halo2-pse 2023_04  | ETH→AN deposit-event Halo2 circuit     |
-| `poseidon-proof/`                          | halo2-axiom 0.5.x              | Poseidon preimage Blake2b-transcript demo |
 | `crates/bridge-prover-orchestrator/`       | halo2-axiom 0.4.x (gosh fork)  | AN→ETH 4-circuit Halo2 prover (excluded from root, own `Cargo.lock`) |
 | `crates/bridge-relayer-daemon/`            | —                              | Relayer (excluded from root, mirrors the orchestrator layout) |
 | `frontend/`                                | —                              | Yew WASM frontend (excluded)            |
@@ -227,10 +224,6 @@ cd deposit-prover && cargo test                       # ETH→AN deposit circuit
   - Circuit 1A/1B (4 Fr): `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`.
   - Circuit 2 (14 Fr): `[block_id, bk_set_poseidon, num_layers, layer_hash[0..10], prev_max_level_layer_hash]`.
 - **On-chain gas**: ~225 k per 1A/1B + ~293 k for Circuit 2 + ~180 k wrapper overhead ≈ 700 k per `verifyBlock` call.
-
-### Poseidon + Blake2b demo (`poseidon-proof/`)
-
-Reference implementation of a Halo2 circuit with a Blake2b Fiat–Shamir transcript and an on-chain `Blake2bHalo2Verifier.sol` consumer using the EIP-152 precompile. Useful as the foundation for the production AN-transcript machinery; see `docs/BLAKE2B_HALO2_VERIFIER.md`.
 
 ## Prerequisites
 

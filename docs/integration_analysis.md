@@ -39,7 +39,6 @@ The `acki-nacki-bridge` repository implements the **Ethereum side** of a cross-c
 - **deposit-prover** (Rust + axiom-eth) — Halo2 circuit proving Ethereum deposit events; the proof is consumed natively on the AN side (no gnark wrapper — retired in Phase 4.3 2026-05-17).
 - **`crates/bridge-prover-orchestrator/`** (Rust + Go) — drives the partner's 4-circuit Halo2 stack (Circuit 1A / 1B / 2 / [3]) and the per-circuit gnark Groth16 wrappers under `gnark-wrappers/circuit-{1a,1b,2}/`. These wrappers stay because the AN→ETH side is gated by EIP-170.
 - **`crates/bridge-relayer-daemon/`** (Rust) — Phase 5.1 relayer skeleton (`Relayer::tick()` / `run_loop()`).
-- **poseidon-proof** (Rust) — Halo2 circuit with Blake2b transcript; reference / demo material.
 - **acki-nacki-interface** (Rust) — trait definitions for Acki Nacki blockchain interaction (mock-only).
 
 ### 1.2 Smart Contracts
@@ -132,7 +131,6 @@ Two main Cargo workspaces plus three excluded crates due to dependency incompati
 |---|---|---|
 | Root `Cargo.toml` | `crates/eth-frontend`, `crates/acki-nacki-interface` | None |
 | `deposit-prover/` (excluded) | `deposit-prover` | axiom-eth + halo2-pse v2023_04_20 |
-| `poseidon-proof/` (excluded) | `poseidon-proof` | halo2-axiom 0.5.x |
 | `crates/bridge-prover-orchestrator/` (excluded) | orchestrator + per-circuit gnark wrappers | partner's `bridge-prover-lib` (halo2-axiom 0.5.x via gosh fork) |
 | `crates/bridge-relayer-daemon/` (excluded) | relayer daemon (Phase 5.1, mock sources) | none — pure orchestration + ethers-rs |
 

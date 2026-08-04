@@ -272,6 +272,23 @@ Deliver updated `USDCBridge.tvc` + `USDCBridge.abi.json` to the shellnet deploye
 - [ ] Fund relayer multisig if needed (`AN_SENDER` on ursus:
       `20c2db9c…::20c2db9c…`).
 - [ ] Publish the Sepolia `contractAddress` constant the contract enforces.
+- [ ] **Post-deploy configuration — all three are fail-closed and none survive an
+      upgrade** (`_expectedBridgeFr`, `_expectedAnDappId` and `_acceptedBlockHash`
+      are deliberately not threaded through `onCodeUpgrade`). Skipping any of them
+      makes every deposit revert, which looks like a broken bridge rather than a
+      missing config:
+      - `setExpectedBridge(11155111, <Sepolia bridge Fr>)`
+      - `setExpectedAnDappId(<this deployment's dapp id>)`
+      - `setAcceptedBlockHash(chainId, blockHash, true)` for the block of every
+        deposit to be finalized, including the regression fixtures. Derive the
+        arguments — and verify the block is canonical on an independent node and
+        ≥ 64 confirmations deep — with:
+        ```bash
+        scripts/deposit_anchor_params.py \
+            deposit-prover/fixtures/deposit_10proofs/proof_0{0..9} --verify
+        ```
+        Why this gate exists and what the owner key is trusted for: BC-D01 in
+        `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1.
 
 **Current shellnet bridge address (zero dapp_id):**
 

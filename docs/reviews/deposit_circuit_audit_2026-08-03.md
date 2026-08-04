@@ -4,12 +4,12 @@ Audit source: `BUG_SUMMARY_DEPOSIT_CIRCUIT.md` against branch
 `pruvendo/deposit-circuit-soundness-fixes` (9 findings + a documentation note).
 
 All nine findings reproduce. Eight are fixed in this commit; **BC-D01 is an
-architectural gap that no code change in this repository can close** — it needs a
-decision recorded in §1 below and work on the AN side.
+architectural gap that no code change in this repository can close** — decided
+2026-08-04 and closed on the AN side, see §1.
 
 | ID | Severity | Status |
 |----|----------|--------|
-| BC-D01 | blocker to launch | **OPEN** — options in §1, needs a team decision |
+| BC-D01 | blocker to launch | **interim closed** — anchor-set gate landed on AN (`acki-nacki` `7992ce26`); M-of-N attesters are the target (§1) |
 | BC-D02 | P1 | fixed — constraint removed |
 | BC-D03 | P2 | fixed — constraint added, negative test |
 | BC-D04 | P3 | fixed — both field lengths pinned |
@@ -24,7 +24,7 @@ Every circuit-level fix landed in **one** batch so they cost **one** VK rotation
 
 ---
 
-## 1. BC-D01 — no binding to the canonical Ethereum chain (OPEN)
+## 1. BC-D01 — no binding to the canonical Ethereum chain (decided 2026-08-04)
 
 ### Why the circuit cannot fix this
 
@@ -79,22 +79,91 @@ direction**, and the options below differ only in who is trusted to populate it.
 | **C** | Timelock + challenge window, bonded watchers | ≥1 honest watcher online | medium, needs a dispute path | uniform, but adds latency to every deposit |
 | **D** | M-of-N attesters sign `(chainId, blockHash)`; contract checks a threshold and stores the anchor | M-of-N honest | small–medium | uniform across chains |
 
-**Recommendation: keep the `finalizeDeposit` gate closed (B) as the interim, and
-build D.** Rationale:
+### Decision (2026-08-04)
 
-- D is the smallest change that puts the check *on* the trust path, and it reuses
-  a shape the codebase already has (an anchor set consulted at payout time).
-- It degrades gracefully to A later: swap the attester signature check for a
-  light-client proof and the rest of the contract is unchanged.
-- B alone is acceptable only if written down as an explicit trust assumption —
-  today it is not documented as one, which is the actual problem with the status
-  quo. A reader of `bridge_verification.md` DEP-N-4 cannot tell that the whole
-  ETH→AN direction rests on it.
-- C's latency lands on every user for a risk that D removes outright.
+**Land D's mechanism now with the owner as its writer; move to M-of-N attesters
+next; keep A as the long-run target for L1.** C was rejected because its latency
+lands on every user for a risk D removes outright.
 
-**Prerequisite for any option**: `_parsePublicInputs` must stop ignoring
-PI[9]/PI[10]. Whatever authority decides canonicality, the contract has to read
-the value first. Until a decision lands, do not open `finalizeDeposit`.
+One correction to the framing above: B was never available as an interim.
+"Keeping the gate closed" presumes a gate, and there was none —
+`finalizeDeposit` is `public` with no modifier in both the deployed contract and
+the 12-PI patch, and `_parsePublicInputs` stopped reading at `fr[8]`. Since the
+prover and its SRS are public, the ETH→AN direction was forgeable by anyone,
+including on shellnet where the path has been live since 2026-07-01. The interim
+had to *add* something, not withhold it.
+
+### What landed — `acki-nacki` `7992ce26`
+
+`USDCBridge` gained the mirror of `AckiNackiBridge._knownAnchors`:
+
+```solidity
+mapping(uint256 => mapping(uint256 => bool)) _acceptedBlockHash;  // chainId → blockHash → ok
+
+// in finalizeDeposit, after accept + verify + the allowlist checks:
+require(_acceptedBlockHash[f.chainId][_parseBlockHash(publicInputs)], ERR_UNKNOWN_BLOCK);
+```
+
+plus `setAcceptedBlockHash(chainId, blockHash, accepted)` (owner), the
+`isAcceptedBlockHash` view, and `_parseBlockHash`, which reassembles PI[9]/PI[10]
+as `hi << 128 | lo` exactly as `an_account` is reassembled. Notes:
+
+- The block hash is parsed **after** `tvm.accept()`, so the pre-accept gas
+  profile of the already-working path does not move.
+- **Fail-closed, and not carried through `onCodeUpgrade`** (same as
+  `_expectedBridgeFr`): after deploy or upgrade, no deposit finalizes until its
+  block is admitted. This will look like a broken bridge to anyone who misses
+  the step — including the partner's `tests/exchange/test_usdcbridge_*.py`.
+- Compile-verified with `sold 0.79.2` (differential against the parent commit;
+  the only error either side is the older compiler not knowing the
+  `gosh.zkhalo2VerifyWithVK` builtin, so the check was repeated with that call
+  stubbed to get a clean `.tvc` and confirm the new ABI entries).
+
+The gate deliberately takes a **hash, not a header**: moving to M-of-N means
+adding a second writer (`attestBlockHash(chainId, blockHash, sigs)` that stores
+the anchor once the threshold is met) and changing nothing in `finalizeDeposit`.
+The owner setter then becomes a break-glass path or is dropped.
+
+### What the owner key is now trusted for
+
+The trust root for source-chain canonicality is the owner key, and this is a
+trust assumption to state rather than a design: whoever holds it can mint by
+admitting a hash from a chain that does not exist. Two obligations come with it
+that no contract can enforce:
+
+- **Independence** — read the hash from a source the party that produced the
+  proof does not control. Verifying against the same RPC that built the witness
+  proves nothing.
+- **Reorg depth** — an honest attestation of a block that later reorgs out loses
+  funds exactly like a dishonest one.
+
+`scripts/deposit_anchor_params.py` exists so discharging both is one command
+rather than a judgement call: it decodes `(chainId, blockHash)` out of a
+`public_inputs.bin` and, with `--verify`, refuses to print the setter arguments
+unless an independent node agrees the block is canonical (its number maps back to
+the same hash) and buried at least `--min-confirmations` deep (default 64).
+
+```
+$ scripts/deposit_anchor_params.py deposit-prover/fixtures/deposit_10proofs/proof_00 --verify
+chainId=11155111 blockHash=0x34fbf8176bf9d318a360f2106568446a81ba2a460e9f4a32b9b263baa25d5436
+    number=11025192 confirmations=392065 latest=11417257
+    setAcceptedBlockHash {"chainId": "11155111", "blockHash": "0x34fb…5436", "accepted": true}
+```
+
+It doubles as a check on the R2 fix from the PR-20 review: all ten regression
+fixtures now carry real canonical Sepolia hashes, so `--verify` passes on them.
+Flipping one byte of PI[10] is rejected as "node does not know this block hash".
+
+### Still open
+
+- **M-of-N attesters** — the actual removal of the single key.
+- **Per-chain mint cap.** Orthogonal to the trust root and cheap: it bounds the
+  loss from a successful forgery instead of relying on the gate being perfect.
+  `_totalMintedBridgeByToken` is already tracked but no invariant is enforced.
+- **L2 canonicality.** An L2 block hash is only settled once its output root is
+  posted to L1, so option A does not generalise: L1 gets a light client, the L2s
+  in the allowlist stay on attesters unless someone builds per-L2 settlement
+  verification.
 
 > The audit read the AN side from a checkout of `acki-nacki` @ `history_cursor`
 > (11 PI, pre-allowlist). Re-confirm against whatever ships to deploy.

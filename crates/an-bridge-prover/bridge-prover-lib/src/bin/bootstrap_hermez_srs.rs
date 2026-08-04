@@ -58,21 +58,14 @@ const DEFAULT_KS: &[u32] = &[17, 19, 20, 21];
 const WIPE_STEMS: &[&str] = &["primary", "layer", "event", "fallback"];
 const WIPE_SUFFIXES: &[&str] = &["_vk.bin", "_pk.bin", "_config_params.json"];
 
-const HERMEZ_K21_PTAU_FILENAME: &str = "powersOfTau28_hez_final_21.ptau";
-const HERMEZ_K22_PTAU_FILENAME: &str = "powersOfTau28_hez_final_22.ptau";
-
-fn default_ptau21_cache_path() -> PathBuf {
+/// Default `$HOME/.cache/halo2-kzg-srs/powersOfTau28_hez_final_{k}.ptau`
+/// cache path for the direct-ptau K values (K=21, K=22 — the ones the
+/// utils crate can't provision because its K=20 anchor doesn't reach them).
+fn default_hermez_ptau_cache_path(k: u32) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
     PathBuf::from(home)
         .join(".cache/halo2-kzg-srs")
-        .join(HERMEZ_K21_PTAU_FILENAME)
-}
-
-fn default_ptau22_cache_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home)
-        .join(".cache/halo2-kzg-srs")
-        .join(HERMEZ_K22_PTAU_FILENAME)
+        .join(format!("powersOfTau28_hez_final_{k}.ptau"))
 }
 
 struct Args {
@@ -141,8 +134,8 @@ fn parse_args() -> Result<Args> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../params")
     });
     let ptau_path = ptau_path.unwrap_or_else(default_ptau_cache_path);
-    let ptau21_path = ptau21_path.unwrap_or_else(default_ptau21_cache_path);
-    let ptau22_path = ptau22_path.unwrap_or_else(default_ptau22_cache_path);
+    let ptau21_path = ptau21_path.unwrap_or_else(|| default_hermez_ptau_cache_path(21));
+    let ptau22_path = ptau22_path.unwrap_or_else(|| default_hermez_ptau_cache_path(22));
     let ks = if ks.is_empty() { DEFAULT_KS.to_vec() } else { ks };
 
     Ok(Args {
@@ -227,50 +220,27 @@ fn wipe_cached_keys(params_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Materialize a K=21 raw SRS directly from `powersOfTau28_hez_final_21.ptau`
-/// via `halo2_kzg_srs`. No shared trust anchor exists at K=21 (utils crate
-/// caps at K=20), so we rely on the Hermez `s_g2` head byte-level check
-/// downstream.
-fn materialize_k21_raw_srs(ptau21_path: &Path) -> Result<Vec<u8>> {
-    if !ptau21_path.exists() {
+/// Materialize a raw SRS directly from a Hermez ptau file via
+/// `halo2_kzg_srs::Srs::read_partial` + `write_raw`. Used for K values
+/// where no shared trust anchor exists (utils crate caps at K=20 — so
+/// K=21 fallback and K=22 outer aggregator take this no-anchor path).
+/// Correctness relies on the Hermez `s_g2` head byte-level check
+/// enforced by `assert_hermez_head` downstream.
+fn materialize_raw_srs_from_ptau(ptau_path: &Path, k: u32) -> Result<Vec<u8>> {
+    if !ptau_path.exists() {
         bail!(
-            "K=21 ptau not found at {}. Download it with:\n  \
+            "K={k} ptau not found at {}. Download it with:\n  \
              curl -L --fail --progress-bar \\\n    \
-             https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \\\n    \
+             https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_{k}.ptau \\\n    \
              -o {}",
-            ptau21_path.display(),
-            ptau21_path.display(),
+            ptau_path.display(),
+            ptau_path.display(),
         );
     }
-    let mut file = fs::File::open(ptau21_path)
-        .with_context(|| format!("opening K=21 ptau {}", ptau21_path.display()))?;
-    let srs = Srs::<Bn256>::read_partial(&mut file, SrsFormat::SnarkJs, 21);
-    let n = 1usize << 21;
-    let mut buf: Vec<u8> = Vec::with_capacity(4 + 2 * n * 64 + 256);
-    srs.write_raw(&mut buf);
-    Ok(buf)
-}
-
-/// Materialize a K=22 raw SRS directly from `powersOfTau28_hez_final_22.ptau`
-/// via `halo2_kzg_srs`. Sibling of [`materialize_k21_raw_srs`] — same
-/// no-anchor path (utils crate caps at K=20), same reliance on the Hermez
-/// `s_g2` head byte-level check downstream. K=22 is required only for the
-/// outer `LayerHashesAggregatorVerifier` (aggregator preset `K_outer=22`).
-fn materialize_k22_raw_srs(ptau22_path: &Path) -> Result<Vec<u8>> {
-    if !ptau22_path.exists() {
-        bail!(
-            "K=22 ptau not found at {}. Download it with:\n  \
-             curl -L --fail --progress-bar \\\n    \
-             https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \\\n    \
-             -o {}",
-            ptau22_path.display(),
-            ptau22_path.display(),
-        );
-    }
-    let mut file = fs::File::open(ptau22_path)
-        .with_context(|| format!("opening K=22 ptau {}", ptau22_path.display()))?;
-    let srs = Srs::<Bn256>::read_partial(&mut file, SrsFormat::SnarkJs, 22);
-    let n = 1usize << 22;
+    let mut file = fs::File::open(ptau_path)
+        .with_context(|| format!("opening K={k} ptau {}", ptau_path.display()))?;
+    let srs = Srs::<Bn256>::read_partial(&mut file, SrsFormat::SnarkJs, k);
+    let n = 1usize << k;
     let mut buf: Vec<u8> = Vec::with_capacity(4 + 2 * n * 64 + 256);
     srs.write_raw(&mut buf);
     Ok(buf)
@@ -314,17 +284,18 @@ fn main() -> Result<()> {
             println!("[K={k}] reading + verifying + downsizing K=20 ptau...");
             let mat = read_hermez_ptau_and_verify(&mut file, k);
             mat.raw_srs
-        } else if k == 21 {
-            println!(
-                "[K={k}] reading K=21 ptau via halo2_kzg_srs (no anchor — relying on s_g2 head)..."
-            );
-            materialize_k21_raw_srs(&args.ptau21_path)?
         } else {
-            // k == 22 (parse_args caps at 22).
+            // K=21 (fallback proving) and K=22 (outer aggregator) — both take
+            // the direct-ptau no-anchor path. parse_args caps K at 22.
+            let ptau_path: &Path = match k {
+                21 => &args.ptau21_path,
+                22 => &args.ptau22_path,
+                _ => unreachable!("parse_args enforces k in 1..=22"),
+            };
             println!(
-                "[K={k}] reading K=22 ptau via halo2_kzg_srs (no anchor — relying on s_g2 head)..."
+                "[K={k}] reading K={k} ptau via halo2_kzg_srs (no anchor — relying on s_g2 head)..."
             );
-            materialize_k22_raw_srs(&args.ptau22_path)?
+            materialize_raw_srs_from_ptau(ptau_path, k)?
         };
         // Byte-level sanity: s_g2 head must be Hermez.
         assert_hermez_head(&out, &raw_srs)?;

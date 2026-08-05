@@ -691,9 +691,15 @@ contract AckiNackiBridge {
         // A flat `layerHashes[numLayers - 1]` anchor diverges from the prover
         // whenever `numLayers` *decreases* across consecutive key blocks, which
         // would halt `verifyBlock` forever (AB-Q4). See `_expectedPrevAnchor`.
-        uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
-        if (prevMaxLevelLayerHash != expectedAnchor) {
-            revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+        //
+        // Scoped so `expectedAnchor` is freed before the tail `emit`, keeping
+        // this function's live-stack-slot count under 16 so it also compiles
+        // under `forge coverage` (which runs without the optimizer / `--via-ir`).
+        {
+            uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
+            if (prevMaxLevelLayerHash != expectedAnchor) {
+                revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+            }
         }
 
         // ---- Crypto: verify both proofs. The shared (blockId, bkSetCommitment,
@@ -701,35 +707,42 @@ contract AckiNackiBridge {
         //      mismatch between the two proofs surfaces here as one of the two
         //      verifications failing (their public inputs are computed from
         //      these values byte-for-byte).
-        bool attOk;
-        if (finType == FinalizationType.Primary) {
-            attOk = primaryVerifier.verifyPrimaryAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
-        } else {
-            attOk = fallbackVerifier.verifyFallbackAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
+        //
+        //      Each verification is in its own scope so the `bool` result is
+        //      freed before the tail `emit` (same stack-slot reason as above).
+        {
+            bool attOk;
+            if (finType == FinalizationType.Primary) {
+                attOk = primaryVerifier.verifyPrimaryAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            } else {
+                attOk = fallbackVerifier.verifyFallbackAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            }
+            if (!attOk) revert AttestationProofRejected();
         }
-        if (!attOk) revert AttestationProofRejected();
 
-        bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
-            layerHashesProof,
-            blockId,
-            bkSetCommitment,
-            uint256(numLayers),
-            layerHashes,
-            prevMaxLevelLayerHash
-        );
-        if (!lhOk) revert LayerHashesProofRejected();
+        {
+            bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
+                layerHashesProof,
+                blockId,
+                bkSetCommitment,
+                uint256(numLayers),
+                layerHashes,
+                prevMaxLevelLayerHash
+            );
+            if (!lhOk) revert LayerHashesProofRejected();
+        }
 
         // ---- Effects (CEI): commit the new state. ----
         // Storage v2.0 (2026-08-04): the flat `storedNumLayers` + `storedLayerHashes[10]`

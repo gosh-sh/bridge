@@ -1810,6 +1810,9 @@ struct C12AggregationCfg {
     pk_cache_dir: PathBuf,
 }
 
+// Daemon wiring handler: the args mirror distinct CLI flags, so grouping them
+// into a struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
 async fn run_daemon_live(
     state_path: PathBuf,
     rpc_url: String,
@@ -2026,6 +2029,7 @@ async fn run_daemon_live(
 /// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
 /// Generic over the source types so both aggregation-on and aggregation-off
 /// paths in [`run_daemon_live`] share the same startup + run wiring.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_run<S, U, B>(
     cfg: RelayerConfig,
     source: Arc<S>,

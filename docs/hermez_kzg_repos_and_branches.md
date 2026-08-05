@@ -58,7 +58,7 @@ Alina migration doc:
 | Deposit VkBlob + 10 proofs | `tvm_vm/halo2_test_data/deposit_10proofs/` | VkBlob sha256 **`304c1c4ed1e4cf09a00fb1d83a0ae2ba42db2afead035ae089a4faa85346251a`** (3982 B) |
 | Same (producer) | `bridge` → `deposit-prover/fixtures/deposit_10proofs/` | same sha256 |
 | Circuit 1B operands | `tvm_vm/halo2_test_data/fallback_{vk_blob,public_inputs,proof,vk,config_params}.*` | vk_blob **`9ba63795…6444c9`** (3364 B), proof 7616 B, **k=21** |
-| Same (producer) | `bridge` → `crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/` | same |
+| Same (producer) | `bridge` → `crates/bridge-snark-utils/fixtures/circuit_1b_fallback/` | same |
 | USDCBridge constant | `acki-nacki` → `contracts/exchange/USDCBridge.sol` | `VK_BLOB` byte-identical to deposit VkBlob |
 | Partner zip (gitignored) | `hermez_usdcbridge_vk_for_alina_2026-07-14.zip` | drop for Alina/Serhii |
 | Partner pack manifest | `scripts/partner_packs/hermez_usdcbridge_vk_for_alina.manifest` | rebuild via `scripts/build_partner_pack.sh` |

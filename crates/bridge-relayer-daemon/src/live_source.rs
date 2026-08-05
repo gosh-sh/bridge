@@ -74,6 +74,21 @@ impl LiveBlockSource {
         self.driver.lock().await.snapshot_prover_bk_set().clone()
     }
 
+    /// Read-only clone of the pending bundle artifact, if any. Used by the
+    /// aggregation wrapper ([`crate::aggregated_source::AggregatedBlockSource`])
+    /// to obtain the raw `BundleProofArtifacts` — including
+    /// `last_seen_block_seq_no` and the Blake2b proof bytes — that the shape-
+    /// preserving `AnBlockData::from` conversion drops. This is a peek: it does
+    /// NOT clear `pending_bundle`; the wrapper's ack path unchanged.
+    pub async fn peek_pending_bundle(&self) -> Option<BundleProofArtifacts> {
+        self.pending_bundle.lock().await.clone()
+    }
+
+    /// Symmetric peek for the BK-update lane. See [`peek_pending_bundle`].
+    pub async fn peek_pending_bk_update(&self) -> Option<BkUpdateProofArtifacts> {
+        self.pending_bk_update.lock().await.clone()
+    }
+
     /// Advance the driver cursor after ETH `verifyBlock` succeeded.
     pub async fn ack_last_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
         self.do_ack_bundle(seq_no).await

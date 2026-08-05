@@ -2,11 +2,9 @@
 //!
 //! Circuit 1A, 1B, and 2 are all R15 SHPLONK aggregator calldata
 //! (`instances ‖ proof`). Circuit 1B is keygen'd at K=21 so its aggregated Yul
-//! fits EIP-170 — the gnark Groth16 fallback hybrid is retired. A legacy
-//! 256-byte Groth16 blob is still accepted for back-compat with the per-circuit
-//! Groth16 adapters retained for test coverage.
+//! fits EIP-170 — the gnark Groth16 fallback hybrid is retired.
 
-use crate::{error::RelayerError, types::FinalizationType, withdrawal::GROTH16_PROOF_SIZE};
+use crate::{error::RelayerError, types::FinalizationType};
 
 /// Minimum instance prefix for an attestation SHPLONK bundle (12 acc + 4
 /// inner). Both Circuit 1A (primary) and Circuit 1B (fallback) expose 4 public
@@ -20,9 +18,6 @@ pub fn validate_attestation_proof(
     fin_type: FinalizationType,
     proof: &[u8],
 ) -> Result<(), RelayerError> {
-    if proof.len() == GROTH16_PROOF_SIZE {
-        return Ok(());
-    }
     if proof.len() < SHPLONK_MIN_ATTESTATION_INSTANCES {
         let circuit = match fin_type {
             FinalizationType::Primary => "primary (1A)",
@@ -30,7 +25,7 @@ pub fn validate_attestation_proof(
         };
         return Err(RelayerError::other(format!(
             "{circuit} attestation proof too short for SHPLONK aggregator calldata: {} bytes \
-             (need >= {SHPLONK_MIN_ATTESTATION_INSTANCES} or {GROTH16_PROOF_SIZE} Groth16)",
+             (need >= {SHPLONK_MIN_ATTESTATION_INSTANCES})",
             proof.len()
         )));
     }
@@ -38,13 +33,10 @@ pub fn validate_attestation_proof(
 }
 
 pub fn validate_layer_hashes_proof(proof: &[u8]) -> Result<(), RelayerError> {
-    if proof.len() == GROTH16_PROOF_SIZE {
-        return Ok(());
-    }
     if proof.len() < SHPLONK_MIN_LAYER_INSTANCES {
         return Err(RelayerError::other(format!(
             "layer-hashes proof too short for SHPLONK aggregator calldata: {} bytes (need >= \
-             {SHPLONK_MIN_LAYER_INSTANCES} or {GROTH16_PROOF_SIZE} Groth16)",
+             {SHPLONK_MIN_LAYER_INSTANCES})",
             proof.len()
         )));
     }
@@ -80,12 +72,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groth16_attestation_ok() {
-        validate_attestation_proof(FinalizationType::Fallback, &[0u8; 256]).unwrap();
-        validate_attestation_proof(FinalizationType::Primary, &[0u8; 256]).unwrap();
-    }
-
-    #[test]
     fn shplonk_attestation_ok() {
         validate_attestation_proof(FinalizationType::Primary, &[0u8; 3840]).unwrap();
         validate_attestation_proof(FinalizationType::Fallback, &[0u8; 3840]).unwrap();
@@ -93,7 +79,11 @@ mod tests {
 
     #[test]
     fn attestation_rejects_short_blob() {
+        // Below SHPLONK_MIN_ATTESTATION_INSTANCES (=512). Post-NB-Q7 there is
+        // no 256-byte back-compat lane — the retired Groth16 shape now fails
+        // the same short-blob gate as any other undersized input.
         assert!(validate_attestation_proof(FinalizationType::Fallback, &[0u8; 300]).is_err());
         assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 300]).is_err());
+        assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 256]).is_err());
     }
 }

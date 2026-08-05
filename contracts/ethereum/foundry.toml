@@ -12,7 +12,6 @@ fs_permissions = [
     { access = "read-write", path = "./" },
     { access = "read", path = "../contracts/" },
     { access = "read", path = "../../crates/" },
-    { access = "read", path = "../../poseidon-proof/data/" },
 ]
 
 [profile.ci]

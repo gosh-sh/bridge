@@ -39,6 +39,10 @@ import "./mocks/MockERC20.sol";
 ///         with mock verifiers and asserts the per-layer pick is accepted, that
 ///         higher-layer roots survive a shallower successor, and that the old
 ///         flat top-layer anchor is now rejected for the shrink step.
+///
+///         Storage v2.0 (2026-08-04): the removed `storedNumLayers()` view is
+///         replaced by counting non-zero entries in `getLatestPerLayer()`
+///         via `_highestActiveLayer()` (see helper below).
 contract AckiNackiBridgeLayerAnchorTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
@@ -93,6 +97,21 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
         }
     }
 
+    /// @dev Highest 1-indexed layer whose window is non-empty. Replaces the
+    ///      removed `storedNumLayers()` view; layers fill contiguously, so
+    ///      the last non-zero entry of `getLatestPerLayer()` is the active
+    ///      layer count.
+    function _highestActiveLayer() internal view returns (uint8) {
+        uint256[10] memory latest = bridge.getLatestPerLayer();
+        uint8 hi = 0;
+        for (uint8 L = 1; L <= 10; L++) {
+            if (latest[L - 1] != 0) {
+                hi = L;
+            }
+        }
+        return hi;
+    }
+
     function _submit(
         uint256 blockId,
         uint64 seqNo,
@@ -131,7 +150,8 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
 
         assertEq(bridge.expectedPrevAnchor(3), GENESIS_PREV_ANCHOR, "A anchor = genesis");
         _submit(0xA, 1, 3, layersA, GENESIS_PREV_ANCHOR);
-        assertEq(bridge.storedNumLayers(), 3, "A numLayers");
+        // After A, layers 1..3 each have exactly one entry: A1, A2, A3.
+        assertEq(_highestActiveLayer(), 3, "highest active layer after A");
 
         // ── Block B: 1 layer (a DECREASE from 3). ──
         // Old (buggy) contract demanded A3 (A's top). The prover anchors B's L1
@@ -147,7 +167,9 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
 
         // The correct per-layer anchor (A1) is accepted.
         _submit(0xB, 2, 1, layersB, A1);
-        assertEq(bridge.storedNumLayers(), 1, "B numLayers");
+        // Storage v2.0: the shallow successor did NOT zero deeper layers —
+        // layers 2 and 3 still hold A2 and A3. Highest active layer remains 3.
+        assertEq(_highestActiveLayer(), 3, "deeper layers survive shallow B");
 
         // ── Block C: 2 layers (a regrow). ──
         // pick = min(2, t=3) = 2 -> latest of layer 2. A's L2 (A2) must have
@@ -160,7 +182,8 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
         cActive[1] = C2;
         uint256[10] memory layersC = _layers(cActive);
         _submit(0xC, 3, 2, layersC, A2);
-        assertEq(bridge.storedNumLayers(), 2, "C numLayers");
+        // Still 3 — nothing shrinks the per-layer windows.
+        assertEq(_highestActiveLayer(), 3, "layer-3 window still populated");
 
         // Layer-1 window now holds A1, B1, C1 (C is a 2-layer block, so its L1
         // root C1 was appended too); the latest is C1, so a future 1-layer
@@ -225,7 +248,9 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
 
         // Higher layers untouched by the shallow successors survive.
         assertTrue(bridge.isKnownLayerAnchor(4, _lh(3, 4)), "blk3 L4 preserved in layer-4 window");
-        assertEq(bridge.storedNumLayers(), 2, "final numLayers = 2");
+        // Storage v2.0: layer-4 window was populated by blk3 and never
+        // cleared; highest active layer remains 4 across the whole walk.
+        assertEq(_highestActiveLayer(), 4, "layer-4 window persists");
     }
 
     /// @notice A non-decreasing sequence keeps the previous behaviour exactly:

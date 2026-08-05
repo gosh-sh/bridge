@@ -206,7 +206,7 @@ Thanks!
 > "Yes — today, when I'm folding this into the node, I'll produce a test vector."
 
 **Implications**:
-- The numeric vector arrives today (2026-05-06). When it does, drop it into `crates/bridge-prover-orchestrator/tests/fixtures/bk_set_poseidon_vector.json` and add a CI test that recomputes both via `bridge_prover_lib::poseidon::compute_bk_set_poseidon` and our own re-implementation; both must match the partner's bytes exactly.
+- The numeric vector arrives today (2026-05-06). When it does, drop it into `crates/bridge-snark-utils/tests/fixtures/bk_set_poseidon_vector.json` and add a CI test that recomputes both via `bridge_prover_lib::poseidon::compute_bk_set_poseidon` and our own re-implementation; both must match the partner's bytes exactly.
 - **No blocker** for starting Phase 1.A — algorithm is already unambiguous from `bridge-prover-lib/src/poseidon.rs`.
 
 ### Test Node Provided (2026-05-06)

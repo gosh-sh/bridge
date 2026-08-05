@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod bridge_state;
 pub mod prover_bk_set;
 pub mod bootstrap;
+pub mod bk_set_bootstrap;
 pub mod block_id_tree;
 pub mod chain_proof_builder;
 pub mod real_chain_builder;

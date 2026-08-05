@@ -59,7 +59,7 @@ do_sync() {
     "${LOCAL_ROOT}/" \
     "${N14}:${REMOTE_ROOT}/"
   for lock in \
-    crates/bridge-prover-orchestrator/Cargo.lock \
+    crates/bridge-snark-utils/Cargo.lock \
     crates/bridge-evm-aggregator/Cargo.lock; do
     if [[ -f "${LOCAL_ROOT}/${lock}" ]]; then
       echo "    ${lock}"
@@ -104,7 +104,7 @@ do_start() {
     elif [[ -f \"\${WITNESS}\" ]] && [[ \"${skip_phase_a}\" == \"1\" ]]; then
       echo \"--- Phase A: SKIP (found \${WITNESS}) ---\"
     else
-      cd crates/bridge-prover-orchestrator
+      cd crates/bridge-snark-utils
       echo \"--- Phase A: cargo +nightly build export-bound-block-proofs ---\"
       cargo +nightly build --release --locked --bin export-bound-block-proofs
       echo \"--- Phase A: export-bound-block-proofs ---\"
@@ -120,11 +120,9 @@ do_start() {
       --bin export-inner-aggregator \
       --bin export-spike-artifacts
 
-    cd ${REMOTE_ROOT}/crates/bridge-prover-orchestrator
+    cd ${REMOTE_ROOT}/crates/bridge-snark-utils
     echo \"--- Phase A2: export-bound-poseidon-snarks (in-process Snark export) ---\"
-    cargo +nightly build --release --locked \
-      --bin export-bound-poseidon-snarks \
-      --bin export-halo2-poseidon-snark
+    cargo +nightly build --release --locked --bin export-bound-poseidon-snarks
     cargo +nightly run --release --locked --bin export-bound-poseidon-snarks -- \
       --params-dir ../../params \
       --bound-dir ../../proofs/bound \
@@ -150,7 +148,7 @@ do_start() {
     # emits 1A/1B/2, so without this the export_one circuit4 line always SKIPs.
     # Runs in every mode (incl. continue-c) whenever circuit4.snark is missing.
     if [[ ! -f \"\${SNARK_DIR}/circuit4.snark\" ]]; then
-      cd ${REMOTE_ROOT}/crates/bridge-prover-orchestrator
+      cd ${REMOTE_ROOT}/crates/bridge-snark-utils
       echo \"--- Phase A2b: export-c4-poseidon-snark ---\"
       cargo +nightly build --release --locked --bin export-c4-poseidon-snark
       cargo +nightly run --release --locked --bin export-c4-poseidon-snark -- \
@@ -195,12 +193,12 @@ do_status() {
 
 do_pull() {
   echo "==> pull proofs + verifiers + logs"
-  mkdir -p "${LOCAL_ROOT}/crates/bridge-prover-orchestrator/proofs/bound"
+  mkdir -p "${LOCAL_ROOT}/crates/bridge-snark-utils/proofs/bound"
   mkdir -p "${LOCAL_ROOT}/contracts/ethereum/verifiers"
   mkdir -p "${LOCAL_ROOT}/logs"
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/proofs/bound/" \
-    "${LOCAL_ROOT}/crates/bridge-prover-orchestrator/proofs/bound/" || true
+    "${LOCAL_ROOT}/crates/bridge-snark-utils/proofs/bound/" || true
   rsync -avz -e "ssh -p 22488" \
     "${N14}:${REMOTE_ROOT}/contracts/ethereum/verifiers/" \
     "${LOCAL_ROOT}/contracts/ethereum/verifiers/" || true

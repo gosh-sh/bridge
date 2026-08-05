@@ -5,7 +5,7 @@ _Session handoff, 2026-07-10._
 ## Context / repo
 - Repo: `/home/sergey/Pruvendo/gosh/acki-nacki-bridge` (dual remotes: GitLab `origin`, GitHub `github`).
 - Heavy halo2 builds/runs go on **n14** (`ssh -p 22488 gosh@94.156.178.14`), workspace `/mnt/data/gosh/sergey-bridge/acki-nacki-bridge`. Use `cargo +nightly` + `export PATH="$HOME/bin:$PATH"` (for `solc`) + `CARGO_NET_OFFLINE=true`.
-- Excluded crates (own `target/`, not in workspace): `crates/bridge-prover-orchestrator`, `crates/bridge-evm-aggregator`, `crates/bridge-relayer-daemon`, `crates/an-bridge-prover/*`.
+- Excluded crates (own `target/`, not in workspace): `crates/bridge-snark-utils`, `crates/bridge-evm-aggregator`, `crates/bridge-relayer-daemon`, `crates/an-bridge-prover/*`.
 
 ## Key architectural fact established this session
 **"Alina's library" = `crates/an-bridge-prover/bridge-prover-lib`** does ALL real AN-block proving. Every module is `pub` (`gql_client`, `attestation_fetcher`, `bk_set_fetcher`, `real_chain_builder`, `block_id_tree`, `bridge_state`, `layer_prover`, `prover`, `verifier`, `keys`). `bridge-prover-daemon/src/main.rs` is **pure orchestration** over those pub fns (proves Blake2b for the AN VM). A prior doc claim that "1A/1B/2 live→Poseidon is blocked because the daemon is binary-only" was **WRONG and has been corrected** — the fetchers are reusable public API.
@@ -14,14 +14,14 @@ Proof flavours: AN side = Blake2b (`ZKHALO2VERIFYWITHVK` opcode); ETH aggregator
 
 ## What was built this session (committed locally, NOT yet pushed)
 1. **`docs/m7_eth_side_prover_status_2026-07-07.md`** — removed the false blocker; documented the new 1A/1B/2 exporter, the n14 live-run result, and the precise partner ask.
-2. **`crates/bridge-prover-orchestrator/src/bin/export_1a1b2_poseidon_snark.rs`** (NEW) — ETH-side re-prove of Circuits 1A/1B/2, mirror of `export_c4_poseidon_snark.rs`:
+2. **`crates/bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs`** (NEW) — ETH-side re-prove of Circuits 1A/1B/2, mirror of `export_c4_poseidon_snark.rs`:
    - `--circuit primary|fallback|layer|auto` (auto classifies attestation evidence: `[PRIMARY]`→1A, `[PRIMARY,FALLBACK]`→1B).
    - 1A/1B: `gql_client::create_client` → `fetch_attestation_evidence` + `fetch_bk_set` (config fallback `--bk-set-config`) → `generate_{primary,fallback}_proof_with_transcript(Poseidon)` → native self-verify → `export_poseidon_snark`.
    - Circuit 2: replays daemon's `generate_layer_proof_for_key_block` over pub lib fns (`query_proof_block_by_seqno`, `block_id_tree`, `real_chain_builder::build_real_chain` over `--state daemon_state.json`) → `generate_layer_proof_with_transcript(Poseidon)`.
    - **`--check-bk-set`**: fast (~1s, no proving) pre-flight comparing `compute_bk_set_poseidon(loaded_set)` vs block's `block_merkle_tree_leaves[2]`.
    - Same SRS downsize workaround as C4 (shared K=21 SRS → downsize in-memory to circuit k; halo2-axiom asserts exact `params.n()`). Key file prefixes: `primary_*`, `fallback_*`, `layer_*`, `event_*` (VK `{prefix}_vk.bin`, config `{prefix}_config_params.json`).
    - **NOTE**: layer keys on n14 are named `layer_hashes_*` (old orchestrator naming) but the lib's `LayerHashesKeyManager` PREFIX is `"layer"` → `ensure_layer_keys` would keygen fresh `layer_*` keys (heavy). Not exercised yet.
-3. **`crates/bridge-prover-orchestrator/Cargo.toml`** — added `hex`, `tokio` deps + `[[bin]] export-1a1b2-poseidon-snark`.
+3. **`crates/bridge-snark-utils/Cargo.toml`** — added `hex`, `tokio` deps + `[[bin]] export-1a1b2-poseidon-snark`.
 - Local `cargo check` + `clippy` clean (warm 3.0G target). n14 `cargo +nightly build --release` clean.
 
 ## n14 live-run result (2026-07-08)

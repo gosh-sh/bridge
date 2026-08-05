@@ -179,9 +179,12 @@ matches the stored commitment.
 
 ### 2.3 Bootstrap path
 
-Today the prover materialises the BK set from `bkSetUpdates` at startup
-and holds it in memory (`bk_set_fetcher::fetch_bk_set`). With schema v7 the
-flow becomes:
+Today the prover materialises the BK set at startup by loading a genesis
+snapshot from JSON (`bk_set_fetcher::load_bk_set_from_config`) and, when
+starting from a non-genesis height, folding rotation events forward with
+`bk_set_fetcher::bk_set_at_height` (paginated over `bkSetUpdates` with
+`height <= target`). It then holds the resulting table in memory. With
+schema v7 the flow becomes:
 
 1. Load `state.json` (contract mirror) → `stored_bk_set_commitment`.
 2. Load `prover_bk_set.json` → in-memory pubkey table, sanity-check
@@ -202,11 +205,12 @@ Two signals are available and we should use both:
 
 ### 3.1 `bkSetUpdates` GraphQL stream (cheap polling)
 
-Already wired (`gql.query_bk_set_updates_light`, `_last`). Each edge carries
-a `bk_set_update` blob with adds/removes and (importantly) a block ref. We
-add a daemon-side cursor `last_processed_bk_update_seq_no` that is initialised
-from `BridgeState::stored_last_bk_set_update_seq_no` at startup and walks
-edges forward.
+Already wired (`bk_set_fetcher::next_update_after`, which does a
+single-step cursor walk over `bkSetUpdates` past a given seq_no). Each
+edge carries a `bk_set_update` blob with adds/removes and (importantly)
+a block ref. We add a daemon-side cursor `last_processed_bk_update_seq_no`
+that is initialised from `BridgeState::stored_last_bk_set_update_seq_no`
+at startup and walks edges forward.
 
 * Poll interval: same cadence as the block-tip poll (already 1 s in the
   main loop).

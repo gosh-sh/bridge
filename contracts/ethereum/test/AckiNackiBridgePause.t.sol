@@ -114,7 +114,7 @@ contract AckiNackiBridgePauseTest is Test {
             FIRST_SEQ_NO,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
     }
 
@@ -219,9 +219,9 @@ contract AckiNackiBridgePauseTest is Test {
         bridge.pause();
         uint256[10] memory layers = _block2Layers();
         // Read prev-anchor BEFORE arming expectRevert — otherwise the
-        // staticcall to `storedPrevMaxLevelLayerHash()` (which succeeds)
+        // staticcall to `expectedPrevAnchor(..)` (which succeeds)
         // is what `vm.expectRevert` matches against.
-        uint256 prev = bridge.storedPrevMaxLevelLayerHash();
+        uint256 prev = bridge.expectedPrevAnchor(ACTIVE_LAYERS);
         vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -266,7 +266,7 @@ contract AckiNackiBridgePauseTest is Test {
             FIRST_SEQ_NO + 1,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         // withdrawByProof works again.

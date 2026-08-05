@@ -11,7 +11,7 @@
 # - tvm-sdk PR #243 (Lint + Test/Priority Units + Test/tvm_client all
 #   green): https://github.com/tvmlabs/tvm-sdk/pull/243
 # - 12 integration tests + 9 VkBlob unit tests green on tvm-sdk
-# - Producer-side round-trip green on bridge-prover-orchestrator
+# - Producer-side round-trip green on bridge-snark-utils
 # - v3: All artefacts now use the **Hermez Perpetual Powers of Tau**
 #   production trusted setup (BN254, K=20 slice of
 #   `powersOfTau28_hez_final.ptau`). Test SRS retired.
@@ -20,19 +20,19 @@
 docs/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
 
 # Producer-side ref impl (the bytes you'll see on the wire are produced by this).
-crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs => 02_producer_halo2_tvm_bundle.rs
-crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs => 03_producer_round_trip_test.rs
+crates/bridge-snark-utils/src/halo2_tvm_bundle.rs => 02_producer_halo2_tvm_bundle.rs
+crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs => 03_producer_round_trip_test.rs
 
 # Trusted setup bootstrap (idempotent; downloads Hermez ceremony + converts to halo2 raw).
 scripts/bootstrap_hermez_srs.sh => 04_bootstrap_hermez_srs.sh
 
 # Real Circuit 1B fallback fixture — drop-in ready for ZKHALO2VERIFYWITHVK.
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/README.md => fixtures/README.md
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_vk_blob.bin => fixtures/fallback_vk_blob.bin
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_public_inputs.bin => fixtures/fallback_public_inputs.bin
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_proof.bin => fixtures/fallback_proof.bin
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_vk.bin => fixtures/fallback_vk.bin
-crates/bridge-prover-orchestrator/fixtures/circuit_1b_fallback/fallback_config_params.json => fixtures/fallback_config_params.json
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/README.md => fixtures/README.md
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/fallback_vk_blob.bin => fixtures/fallback_vk_blob.bin
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/fallback_public_inputs.bin => fixtures/fallback_public_inputs.bin
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/fallback_proof.bin => fixtures/fallback_proof.bin
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/fallback_vk.bin => fixtures/fallback_vk.bin
+crates/bridge-snark-utils/fixtures/circuit_1b_fallback/fallback_config_params.json => fixtures/fallback_config_params.json
 
 ---
 ## TL;DR — what changed since v2 (2026-05-25)
@@ -44,7 +44,7 @@ ceremony snarkjs, iden3 and Polygon zkEVM use.
 
 The `[s]·G2` point embedded in
 `tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES` is
-sourced from the same ceremony, so prover (`bridge-prover-orchestrator`)
+sourced from the same ceremony, so prover (`bridge-snark-utils`)
 and verifier (the AN-side `ZKHALO2VERIFYWITHVK` handler) agree on the
 KZG commitment scheme byte-for-byte. `KZG_G0_BYTES` and `KZG_G2_BYTES`
 are curve generators (BN254 constants) and didn't change.
@@ -63,8 +63,8 @@ and verifies the canonical halo2 SRS via SHA-256
 Then re-keygen + reprove if you want to regenerate the fixtures:
 
 ```bash
-rm -f crates/bridge-prover-orchestrator/params/{fallback_pk,fallback_vk,fallback_config_params}.{bin,json}
-cd crates/bridge-prover-orchestrator
+rm -f crates/bridge-snark-utils/params/{fallback_pk,fallback_vk,fallback_config_params}.{bin,json}
+cd crates/bridge-snark-utils
 EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback \
   cargo test --release --test halo2_tvm_bundle_round_trip -- --nocapture
 ```
@@ -121,7 +121,7 @@ self-describing bundle:
 `SerdeFormat::RawBytes` runs the on-curve check on every G1 element of
 the VK — **mandatory** because the VK is supplied by an untrusted
 contract. The producer side at
-`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::VkBlob::from_native`
+`crates/bridge-snark-utils/src/halo2_tvm_bundle.rs::VkBlob::from_native`
 mirrors this byte layout exactly.
 
 ### `public_inputs_cell` payload
@@ -162,8 +162,8 @@ The same three fixture files are checked in on the consumer side at
 
 ```bash
 cd acki-nacki-bridge
-cargo test -p bridge-prover-orchestrator --lib   # 6 unit tests, ~1 s
-cargo test -p bridge-prover-orchestrator --test halo2_tvm_bundle_round_trip --release  # ~5 min with cached keys
+cargo test -p bridge-snark-utils --lib   # 6 unit tests, ~1 s
+cargo test -p bridge-snark-utils --test halo2_tvm_bundle_round_trip --release  # ~5 min with cached keys
 ```
 
 ## Smoke test (Rust consumer side, tvm-sdk PR #243)

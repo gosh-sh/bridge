@@ -13,8 +13,7 @@
 //! 4. expose **structured metrics** for an external scrape / log aggregator.
 //!
 //! This module adds [`RelayerMetrics`] + [`BackoffConfig`] +
-//! [`Relayer::run_until_shutdown`] +
-//! [`SentryGuardedRelayer::run_until_shutdown`] without modifying the testable
+//! [`Relayer::run_until_shutdown`] without modifying the testable
 //! single-step `tick()` entry points.
 //!
 //! The shutdown future is passed in by the caller (so tests can pass a
@@ -32,13 +31,11 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
-    bk_set_sentry::BkSetPoller,
     bridge::BridgeClient,
     error::RelayerError,
-    guarded_relayer::{GuardedOutcome, SentryGuardedRelayer},
     relayer::{Relayer, TickOutcome},
     source::BlockSource,
 };
@@ -123,9 +120,6 @@ pub struct RelayerMetrics {
     pub last_verified_seq_no: AtomicU64,
     /// Last observed on-chain seq_no (gauge).
     pub last_observed_on_chain_seq_no: AtomicU64,
-    /// Total number of detected BK rotations (sentry-guarded mode only;
-    /// stays `0` for plain `Relayer::run_until_shutdown`).
-    pub rotations_detected_total: AtomicU64,
 }
 
 impl RelayerMetrics {
@@ -148,7 +142,6 @@ impl RelayerMetrics {
             last_observed_on_chain_seq_no: self
                 .last_observed_on_chain_seq_no
                 .load(Ordering::Relaxed),
-            rotations_detected: self.rotations_detected_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -168,7 +161,6 @@ pub struct RelayerMetricsSnapshot {
     pub current_backoff_secs: u64,
     pub last_verified_seq_no: u64,
     pub last_observed_on_chain_seq_no: u64,
-    pub rotations_detected: u64,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -187,7 +179,6 @@ pub struct DaemonRunSummary {
     pub tick_errors: u64,
     /// Outcome of the *final* tick — useful for logs at shutdown time.
     pub last_outcome: Option<LastOutcome>,
-    pub rotations_detected: u64,
 }
 
 /// Tag for [`DaemonRunSummary::last_outcome`]. Avoids embedding the full
@@ -201,8 +192,6 @@ pub enum LastOutcome {
     BridgeReverted { seq_no: u64 },
     BkUpdateReverted { seq_no: u64 },
     TickError,
-    RotationDetected { new_seq_no: u64 },
-    Paused,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -317,6 +306,16 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                         }
                     }
                     summary.tick_errors += 1;
+                    if matches!(e, RelayerError::Stuck { .. }) {
+                        // Hard stop: same seqNo has been rejected past the
+                        // abort threshold. Log loudly and break out of the
+                        // loop so the operator has to intervene instead of
+                        // watching us retry the same broken block forever.
+                        // `summary` is discarded on Err — caller receives
+                        // the RelayerError directly.
+                        error!(error = ?e, "daemon: stuck — hard aborting");
+                        return Err(e);
+                    }
                     warn!(error = ?e, "daemon: tick failed, will back off");
                     (false, LastOutcome::TickError)
                 },
@@ -339,183 +338,6 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                 biased;
                 _ = &mut shutdown => {
                     info!(?summary, "daemon: shutdown signalled, exiting");
-                    return Ok(summary);
-                }
-                _ = tokio::time::sleep(current_delay) => {}
-            }
-        }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// SentryGuardedRelayer::run_until_shutdown
-// ──────────────────────────────────────────────────────────────────────
-
-impl<S, U, B, P> SentryGuardedRelayer<S, U, B, P>
-where
-    S: BlockSource,
-    U: crate::source::BkUpdateSource,
-    B: BridgeClient,
-    P: BkSetPoller + Send + Sync,
-{
-    /// Sentry-aware variant of [`Relayer::run_until_shutdown`]. Same
-    /// backoff + shutdown semantics, but the loop **stops driving the
-    /// inner relayer** as soon as the sentry reports a rotation —
-    /// matching the existing `SentryGuardedRelayer::tick` contract
-    /// (`PausedAwaitingRotationReconcile` until `resume()` is called).
-    ///
-    /// In Phase 5.2 this is the natural seam for "trigger Circuit 3 +
-    /// call `resume()` on the same guard"; for Phase 5.1 the loop just
-    /// keeps logging `Paused` ticks until shutdown.
-    pub async fn run_until_shutdown<F>(
-        &mut self,
-        backoff: BackoffConfig,
-        metrics: Option<Arc<RelayerMetrics>>,
-        shutdown: F,
-    ) -> Result<DaemonRunSummary, RelayerError>
-    where
-        F: Future<Output = ()>,
-    {
-        let mut summary = DaemonRunSummary::default();
-        let mut current_delay = backoff.initial;
-        if let Some(m) = &metrics {
-            m.current_backoff_secs
-                .store(current_delay.as_secs(), Ordering::Relaxed);
-        }
-        tokio::pin!(shutdown);
-
-        loop {
-            // 1. Single guarded tick.
-            let outcome_or_err = self.tick().await;
-            summary.ticks += 1;
-            if let Some(m) = &metrics {
-                m.ticks_total.fetch_add(1, Ordering::Relaxed);
-            }
-
-            // 2. Classify.
-            let (success, last_tag) = match outcome_or_err {
-                Ok(GuardedOutcome::SentryBootstrapped {
-                    inner, ..
-                })
-                | Ok(GuardedOutcome::SentryQuiet {
-                    inner, ..
-                }) => match inner {
-                    TickOutcome::Verified {
-                        seq_no, ..
-                    } => {
-                        if let Some(m) = &metrics {
-                            m.verified_total.fetch_add(1, Ordering::Relaxed);
-                            m.last_verified_seq_no.store(seq_no, Ordering::Relaxed);
-                        }
-                        summary.verified += 1;
-                        info!(seq_no, "daemon[guarded]: verified");
-                        (true, LastOutcome::Verified {
-                            seq_no,
-                        })
-                    },
-                    TickOutcome::BkUpdateApplied {
-                        seq_no, ..
-                    } => {
-                        if let Some(m) = &metrics {
-                            m.bk_update_applied_total.fetch_add(1, Ordering::Relaxed);
-                        }
-                        summary.verified += 1;
-                        info!(seq_no, "daemon[guarded]: bk-set update applied");
-                        (true, LastOutcome::BkUpdateApplied {
-                            seq_no,
-                        })
-                    },
-                    TickOutcome::NotYetAvailable {
-                        target_seq_no,
-                    } => {
-                        if let Some(m) = &metrics {
-                            m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
-                        }
-                        summary.not_yet_available += 1;
-                        (false, LastOutcome::NotYetAvailable {
-                            seq_no: target_seq_no,
-                        })
-                    },
-                    TickOutcome::BridgeReverted {
-                        target_seq_no,
-                        reason,
-                    } => {
-                        if let Some(m) = &metrics {
-                            m.reverted_total.fetch_add(1, Ordering::Relaxed);
-                        }
-                        summary.reverted += 1;
-                        warn!(
-                            target_seq_no, reason = %reason,
-                            "daemon[guarded]: bridge reverted",
-                        );
-                        (false, LastOutcome::BridgeReverted {
-                            seq_no: target_seq_no,
-                        })
-                    },
-                    TickOutcome::BkUpdateReverted {
-                        seq_no,
-                        reason,
-                    } => {
-                        if let Some(m) = &metrics {
-                            m.reverted_total.fetch_add(1, Ordering::Relaxed);
-                        }
-                        summary.reverted += 1;
-                        warn!(
-                            seq_no, reason = %reason,
-                            "daemon[guarded]: bk-set update reverted",
-                        );
-                        (false, LastOutcome::BkUpdateReverted {
-                            seq_no,
-                        })
-                    },
-                },
-                Ok(GuardedOutcome::RotationDetected {
-                    new_seq_no, ..
-                }) => {
-                    if let Some(m) = &metrics {
-                        m.rotations_detected_total.fetch_add(1, Ordering::Relaxed);
-                    }
-                    summary.rotations_detected += 1;
-                    warn!(
-                        new_seq_no,
-                        "daemon[guarded]: rotation detected; relayer is now paused, awaiting \
-                         Phase 5.2 reconcile."
-                    );
-                    (false, LastOutcome::RotationDetected {
-                        new_seq_no,
-                    })
-                },
-                Ok(GuardedOutcome::PausedAwaitingRotationReconcile) => {
-                    summary.rotations_detected += 0;
-                    (false, LastOutcome::Paused)
-                },
-                Err(e) => {
-                    if let Some(m) = &metrics {
-                        m.tick_errors_total.fetch_add(1, Ordering::Relaxed);
-                    }
-                    summary.tick_errors += 1;
-                    warn!(error = ?e, "daemon[guarded]: tick failed, will back off");
-                    (false, LastOutcome::TickError)
-                },
-            };
-            summary.last_outcome = Some(last_tag);
-
-            // 3. Backoff.
-            if success {
-                current_delay = backoff.initial;
-            } else {
-                current_delay = backoff.bump(current_delay);
-            }
-            if let Some(m) = &metrics {
-                m.current_backoff_secs
-                    .store(current_delay.as_secs(), Ordering::Relaxed);
-            }
-
-            // 4. Sleep with shutdown.
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!(?summary, "daemon[guarded]: shutdown signalled, exiting");
                     return Ok(summary);
                 }
                 _ = tokio::time::sleep(current_delay) => {}
@@ -574,6 +396,9 @@ mod tests {
             // with the rest of the test rig.
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            // Tests want soft-retry semantics: mock bridge tests exercise
+            // long revert streaks and would trip the abort gate.
+            max_attempts_abort: u32::MAX,
         };
         Relayer::new(
             cfg,

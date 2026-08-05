@@ -5,8 +5,6 @@
 //! Nacki team.
 
 pub mod address;
-pub mod bk_set_client;
-pub mod bk_set_tracker;
 pub mod error;
 pub mod mock;
 pub mod traits;
@@ -15,11 +13,6 @@ pub mod tvm_client;
 pub mod types;
 
 pub use address::ExtendedAddress;
-pub use bk_set_client::{
-    BkEntry, BkSetClient, BkSetResponse, BkSetUpdateResponse, BkUpdateEntry, BLS_PUBKEY_LEN,
-    ID32_LEN,
-};
-pub use bk_set_tracker::{BkSetChange, BkSetSnapshot, BkSetTracker, MembershipDelta};
 pub use error::{AckiNackiError, Result};
 pub use mock::{MockAckiNacki, MockTransactionSender};
 pub use traits::{IAckiNacki, TransactionSender};

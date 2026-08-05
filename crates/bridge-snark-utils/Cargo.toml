@@ -1,0 +1,126 @@
+[package]
+name = "bridge-snark-utils"
+version = "0.1.0"
+edition = "2021"
+# Renamed 2026-08-04 from `bridge-prover-orchestrator` (NB-Q9 PR-C).
+# Runtime "orchestration" role migrated into `bridge-relayer-daemon` +
+# `bridge-prover-lib::live_driver`; what remains here are offline SNARK
+# utility binaries (bound test-data proof export, Poseidon Snark wrapping,
+# synthetic-primary generation) plus the shared halo2-snark / VkBlob lib
+# also consumed by the deposit-prover examples and the R15 aggregator
+# input pipeline.
+description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline: bound test-data proof export, Poseidon-transcript Snark wrapping, and synthetic-primary generation. Shares halo2-snark / VkBlob helpers with deposit-prover."
+
+[dependencies]
+# Partner circuits / parsers / test-data-gen — fetched from public GitHub.
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
+# Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
+# the sibling `crates/an-bridge-prover/` sub-workspace.
+bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
+# GraphQL fetchers (attestation, bk_set, gql_client) live here — split out of
+# bridge-prover-lib during the same 2026-06-18 migration.
+bridge-gql-fetcher = { path = "../an-bridge-prover/bridge-gql-fetcher" }
+# Circuit 4 (bridge event / withdrawal) prover surface — source of the inner
+# Poseidon SHPLONK snark that `export-c4-poseidon-snark` wraps for the R15
+# `BridgeWithdrawalAggregatorVerifier` Yul.
+bridge-event-prover-lib = { path = "../an-bridge-prover/bridge-event-prover-lib" }
+
+# Halo2 backend — must match the partner's fork; pinned to the `bump-halo2-lib-v0.4.1` branch.
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+halo2-ecc  = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+
+anyhow = "1"
+bincode = "1.3"
+clap = { version = "4", features = ["derive"] }
+num-bigint = "0.4"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# snark-verifier for gosh-VK → PlonkProtocol → bincode Snark (R15 aggregator input).
+# Patched to gosh halo2-base via [patch] below — must NOT live in bridge-evm-aggregator.
+snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }
+snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }
+
+[dev-dependencies]
+# Already available via [dependencies] above; integration tests need them re-listed.
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+
+[[bin]]
+name = "export-bound-block-proofs"
+path = "src/bin/export_bound_block_proofs.rs"
+
+[[bin]]
+name = "export-bound-poseidon-snarks"
+path = "src/bin/export_bound_poseidon_snarks.rs"
+
+[[bin]]
+name = "export-c4-poseidon-snark"
+path = "src/bin/export_c4_poseidon_snark.rs"
+
+[[bin]]
+name = "export-1a1b2-poseidon-snark"
+path = "src/bin/export_1a1b2_poseidon_snark.rs"
+
+[[bin]]
+name = "export-synthetic-primary-snark"
+path = "src/bin/export_synthetic_primary_snark.rs"
+
+# ---------------------------------------------------------------------------
+# Patches: redirect every TRANSITIVE git dependency to a local sibling path.
+# The partner crates declare these via git URLs in their Cargo.toml; without
+# these patches Cargo would try to fetch from private GitHub repos.
+# ---------------------------------------------------------------------------
+
+[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
+attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
+bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
+bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
+historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
+
+[patch."https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381"]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+
+[patch."https://github.com/gosh-sh/gosh-halo2-crypto-lib"]
+gosh-sha256-chip = { path = "../../../gosh-halo2-crypto-lib/sha256-chip" }
+gosh-bls-verification = { path = "../../../gosh-halo2-crypto-lib/bls-verification" }
+gosh-dense-balanced-tree = { path = "../../../gosh-halo2-crypto-lib/dense-balanced-tree" }
+
+[patch."https://github.com/gosh-sh/dense-balanced-tree"]
+dense-balanced-tree = { path = "../../../dense-balanced-tree" }
+
+[patch.crates-io]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }
+halo2-ecc = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-ecc" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/axiom-eth"]
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment" }
+
+# Performance: keygen & proof gen require optimized debug builds.
+[profile.dev]
+opt-level = 3

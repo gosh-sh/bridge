@@ -15,9 +15,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-bytes.workspace = true
 hex.workspace = true
-reqwest.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tvm_client = { workspace = true, optional = true, default-features = false, features = [

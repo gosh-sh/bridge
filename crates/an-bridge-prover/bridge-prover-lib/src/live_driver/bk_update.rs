@@ -29,7 +29,7 @@ use crate::block_id_tree::BlockIdMerkleTree;
 use bridge_poseidon as poseidon;
 use crate::prover;
 
-use super::{BkUpdateProofArtifacts, BundleFinalizationType, LiveProverDriver};
+use super::{BkUpdateProofArtifacts, BundleFinalizationType, DriverError, DriverResult, LiveProverDriver};
 
 /// Drive one bk-set-update step. Returns `Some(artifacts)` when a rotation
 /// is ready for downstream submission, `None` when the prover is caught up
@@ -37,10 +37,12 @@ use super::{BkUpdateProofArtifacts, BundleFinalizationType, LiveProverDriver};
 ///
 /// On any transient GQL / decode failure, returns `Ok(None)` after logging
 /// so the caller can retry on the next poll cycle. Only genuinely fatal
-/// errors (proof gen failure, structural mismatch) propagate.
+/// errors (proof gen failure, structural mismatch) propagate. Fatal errors
+/// are classified into [`DriverError`] variants at each site so consumers
+/// can pattern-match on failure kind without inspecting the message.
 pub(super) async fn drive_next_bk_update(
     driver: &mut LiveProverDriver,
-) -> anyhow::Result<Option<BkUpdateProofArtifacts>> {
+) -> DriverResult<Option<BkUpdateProofArtifacts>> {
     let cursor = driver.state().stored_last_bk_set_update_seq_no;
     let upd = match bk_set_fetcher::next_update_after(driver.gql(), cursor).await {
         Ok(Some(u)) => u,
@@ -69,14 +71,15 @@ pub(super) async fn drive_next_bk_update(
         .gql()
         .query_proof_block_by_seqno(upd_seqno)
         .await
-        .with_context(|| format!("bk-update {}: GQL block fetch", upd_seqno))?;
+        .with_context(|| format!("bk-update {}: GQL block fetch", upd_seqno))
+        .map_err(DriverError::gql_transient)?;
     let leaves = upd_block
         .block_merkle_tree_leaves
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            DriverError::gql_schema(anyhow::anyhow!(
                 "bk-update {}: block has no block_merkle_tree_leaves",
                 upd_seqno,
-            )
+            ))
         })?;
     let tree = BlockIdMerkleTree::from_leaves(leaves);
 
@@ -88,13 +91,13 @@ pub(super) async fn drive_next_bk_update(
     // broken leaves) and release-build parity (the `debug_assert_eq!`
     // further down is compiled out in release; this bail! stays in).
     if tree.root != upd_block.block_id {
-        anyhow::bail!(
+        return Err(DriverError::gql_schema(anyhow::anyhow!(
             "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — \
              GQL leaves inconsistent with block header",
             upd_seqno,
             hex::encode(tree.root),
             hex::encode(upd_block.block_id),
-        );
+        )));
     }
 
     let l2 = tree.leaves[2];
@@ -105,26 +108,31 @@ pub(super) async fn drive_next_bk_update(
     // an operator investigates.
     let cur_commitment = driver.prover_bk_set().commitment;
     if l2 != cur_commitment {
-        anyhow::bail!(
+        return Err(DriverError::state_inconsistent(anyhow::anyhow!(
             "bk-update {}: L2 {} != prover_bk_set.commitment {} — prover out of sync",
             upd_seqno,
             hex::encode(l2),
             hex::encode(cur_commitment),
-        );
+        )));
     }
 
     // Apply the bk_set_update_hex deltas to the OLD pubkey table to derive
     // the NEW one, and verify it hashes to L3.
     let blob = hex::decode(&upd.bk_set_update_hex)
-        .with_context(|| format!("bk-update {}: bk_set_update_hex decode", upd_seqno))?;
+        .with_context(|| format!("bk-update {}: bk_set_update_hex decode", upd_seqno))
+        .map_err(DriverError::gql_schema)?;
     let changes = bk_set_fetcher::parse_bk_set_changes_pub(&blob);
     if changes.is_empty() {
-        anyhow::bail!("bk-update {}: parsed 0 changes from blob", upd_seqno);
+        return Err(DriverError::gql_schema(anyhow::anyhow!(
+            "bk-update {}: parsed 0 changes from blob",
+            upd_seqno,
+        )));
     }
     let cur_pubkeys = driver
         .prover_bk_set()
         .pubkeys()
-        .with_context(|| format!("bk-update {}: prover_bk_set.pubkeys()", upd_seqno))?;
+        .with_context(|| format!("bk-update {}: prover_bk_set.pubkeys()", upd_seqno))
+        .map_err(DriverError::state_inconsistent)?;
     let mut new_pubkeys = cur_pubkeys.clone();
     for (variant, idx, pk) in &changes {
         match *variant {
@@ -146,15 +154,16 @@ pub(super) async fn drive_next_bk_update(
     // set is 48-byte compressed. Normalize before feeding to any BLS-aware
     // helper.
     let new_pubkeys = bk_set_fetcher::normalize_bk_set_pubkeys(new_pubkeys)
-        .with_context(|| format!("bk-update {}: pubkey normalization", upd_seqno))?;
+        .with_context(|| format!("bk-update {}: pubkey normalization", upd_seqno))
+        .map_err(DriverError::gql_schema)?;
     let (_, recomp_c) = poseidon::compute_bk_set_poseidon(&new_pubkeys);
     if recomp_c != l3 {
-        anyhow::bail!(
+        return Err(DriverError::gql_schema(anyhow::anyhow!(
             "bk-update {}: Poseidon(new_pubkeys) {} != L3 {}",
             upd_seqno,
             hex::encode(recomp_c),
             hex::encode(l3),
-        );
+        )));
     }
 
     // Fetch attestation evidence for the bk-update block. These signatures
@@ -175,48 +184,63 @@ pub(super) async fn drive_next_bk_update(
         };
 
     // Generate Circuit 1A/1B proof, on-demand PK load/unload to stay within
-    // the single-PK memory envelope.
+    // the single-PK memory envelope. Pick the Fiat–Shamir flavour from the
+    // driver config so a Poseidon-configured driver emits aggregator-ready
+    // bytes here — same one-flavour-per-poll discipline as the bundle path.
     let last_seen_for_upd = driver.state().stored_last_bk_set_update_seq_no as u32;
+    let transcript = driver.cfg().transcript;
     let t_upd_proof = Instant::now();
     let (fin_type, upd_proof) = match &upd_evidence {
         AttestationEvidence::Primary(att) => {
-            info!("bk-update {}: PRIMARY path → Circuit 1a", upd_seqno);
-            driver.key_manager_mut().load_primary_pk().with_context(|| {
-                format!("bk-update {}: load_primary_pk", upd_seqno)
-            })?;
-            let res = prover::generate_primary_proof(
+            info!(
+                "bk-update {}: PRIMARY path → Circuit 1a (transcript={:?})",
+                upd_seqno, transcript,
+            );
+            driver
+                .key_manager_mut()
+                .load_primary_pk()
+                .with_context(|| format!("bk-update {}: load_primary_pk", upd_seqno))
+                .map_err(|e| DriverError::proof_gen(upd_seqno, e))?;
+            let res = prover::generate_primary_proof_with_transcript(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
                 &cur_pubkeys,
                 last_seen_for_upd,
+                transcript,
             );
             driver.key_manager_mut().unload_primary_pk();
             match res {
                 Ok(o) => (BundleFinalizationType::Primary, o),
                 Err(e) => {
                     error!("bk-update {}: Circuit 1a proof failed: {}", upd_seqno, e);
-                    return Err(e);
+                    return Err(DriverError::proof_gen(upd_seqno, e));
                 }
             }
         }
         AttestationEvidence::Fallback { primary, fallback } => {
-            info!("bk-update {}: FALLBACK path → Circuit 1b", upd_seqno);
-            driver.key_manager_mut().load_fallback_pk().with_context(|| {
-                format!("bk-update {}: load_fallback_pk", upd_seqno)
-            })?;
-            let res = prover::generate_fallback_proof(
+            info!(
+                "bk-update {}: FALLBACK path → Circuit 1b (transcript={:?})",
+                upd_seqno, transcript,
+            );
+            driver
+                .key_manager_mut()
+                .load_fallback_pk()
+                .with_context(|| format!("bk-update {}: load_fallback_pk", upd_seqno))
+                .map_err(|e| DriverError::proof_gen(upd_seqno, e))?;
+            let res = prover::generate_fallback_proof_with_transcript(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,
                 &fallback.raw_bytes,
                 &cur_pubkeys,
                 last_seen_for_upd,
+                transcript,
             );
             driver.key_manager_mut().unload_fallback_pk();
             match res {
                 Ok(o) => (BundleFinalizationType::Fallback, o),
                 Err(e) => {
                     error!("bk-update {}: Circuit 1b proof failed: {}", upd_seqno, e);
-                    return Err(e);
+                    return Err(DriverError::proof_gen(upd_seqno, e));
                 }
             }
         }
@@ -233,10 +257,12 @@ pub(super) async fn drive_next_bk_update(
     // return the same fields as a transport-agnostic payload. The caller
     // maps this into the transport of its choice. Since schema v6 there is a
     // single `block_id_be` (raw 32-byte SHA-256 root); the Fr form is
-    // derived on demand by the verifier via `ipc::hash_hex_to_fr` and by the
-    // on-chain Yul via `mod(calldataload, f_q)`. Debug-assert that the
-    // circuit's committed Fr agrees with the fold of the raw hash so a
-    // byte-order regression pages loudly at build time.
+    // derived on demand by the verifier via `ipc::hash_hex_to_fr`, and by the
+    // relayer's `block_id_to_field` (`% BN254_R`) before submission — the R15
+    // SHPLONK adapter on-chain does NOT auto-reduce, it byte-compares against
+    // a canonical `Fr` instance. Debug-assert that the circuit's committed Fr
+    // agrees with the fold of the raw hash so a byte-order regression pages
+    // loudly at build time.
     debug_assert_eq!(
         crate::ipc::fold_hash_be_to_fr(&tree.root),
         upd_proof.block_id_fr,
@@ -255,6 +281,7 @@ pub(super) async fn drive_next_bk_update(
         merkle_sibling_h01_be: l2_l3_siblings[0],
         merkle_sibling_h4_7_be: l2_l3_siblings[1],
         merkle_sibling_h8_15_be: l2_l3_siblings[2],
+        transcript_kind: transcript,
         attestation_proof: upd_proof.proof_bytes,
         new_pubkeys,
         primary_proof_gen_ms,

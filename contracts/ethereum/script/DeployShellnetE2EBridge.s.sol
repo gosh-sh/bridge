@@ -17,10 +17,12 @@ import "./ShplonkDeployLib.sol";
 ///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
 ///      (or `SHPLONK_BIN_*` overrides). Bridge starts paused unless `START_PAUSED=false`.
 ///
-///      withdrawByProof (Circuit 4) wiring is OFF by default — set `WIRE_WITHDRAW_BY_PROOF=true`
-///      (and provide `WITHDRAW_ACC_FR` + `verifiers/BridgeWithdrawalAggregatorVerifier.bin`) once
-///      partner M4 lands. Until then this script deploys a verifyBlock-only (paused) bridge so it
-///      does not depend on the not-yet-existing C4 `.bin`.
+///      withdrawByProof (Circuit 4) wiring is on by default and MUST stay on for any
+///      chain other than local anvil (chainid 31337). The C4 `.bin` is committed and the
+///      Yul adapter is production-ready — silently shipping with `address(0)` on Sepolia
+///      or any other real chain bricks user withdrawals (NB-Q8). The `WIRE_WITHDRAW_BY_PROOF`
+///      env var is kept only so CI runs against a fresh anvil can opt out; setting it to
+///      `false` off anvil reverts.
 contract DeployShellnetE2EBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -30,6 +32,7 @@ contract DeployShellnetE2EBridge is Script {
         ILayerHashesMovementVerifier layerHashes;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevMaxLevelLayerHash;
+        uint64 genesisLastSeenBlockSeqNo;
     }
 
     struct WithdrawWiring {
@@ -47,9 +50,19 @@ contract DeployShellnetE2EBridge is Script {
             fallback_: IFallbackVerifier(address(0)),
             layerHashes: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
-            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH")
+            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
+            // Must equal the AN-side `last_seen_block_seqno` baked into the very
+            // first verifyBlock proof (i.e. the daemon's BRIDGE_BOOTSTRAP_SEQNO).
+            // Defaults to 0 for legacy deploys where the first proof also
+            // carries `last_seen = 0`.
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
-        bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);
+        // NB-Q8: default ON; `false` only tolerated on local anvil (chainid 31337).
+        bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", true);
+        require(
+            wireWithdraw || block.chainid == 31337,
+            "WIRE_WITHDRAW_BY_PROOF=false only allowed on anvil (chainid 31337)"
+        );
         WithdrawWiring memory wd = WithdrawWiring({
             verifier: IBridgeWithdrawalVerifier(address(0)),
             dappFr: wireWithdraw ? vm.envOr("WITHDRAW_DAPP_FR", uint256(0)) : uint256(0),
@@ -130,7 +143,8 @@ contract DeployShellnetE2EBridge is Script {
                 fallbackVerifier: vb.fallback_,
                 layerHashesVerifier: vb.layerHashes,
                 genesisBkSetCommitment: vb.genesisBkSetCommitment,
-                genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash
+                genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash,
+                genesisLastSeenBlockSeqNo: vb.genesisLastSeenBlockSeqNo
             }),
             AckiNackiBridge.BridgeWithdrawConfig({
                 bridgeWithdrawalVerifier: wd.verifier,

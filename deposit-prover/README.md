@@ -6,7 +6,7 @@ Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Pro
 
 ## Why Separate from Main Workspace?
 
-This crate uses **axiom-crypto's halo2-lib v0.4.1** (via axiom-eth), which is incompatible with the halo2-axiom 0.5.x used by `poseidon-proof`. They cannot coexist in the same Cargo workspace.
+This crate uses **axiom-crypto's halo2-lib v0.4.1** (via axiom-eth), which is incompatible with the halo2-axiom 0.5.x used by other Halo2 experiments in this repo. They cannot coexist in the same Cargo workspace.
 
 ## Circuit: `DepositEventCircuitV2`
 

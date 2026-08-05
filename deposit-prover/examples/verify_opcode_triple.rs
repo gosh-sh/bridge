@@ -21,9 +21,6 @@
 //!     --pubin     /tmp/deposit_e2e/deposit_public_inputs.bin \
 //!     --degree 18
 
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
-
 use std::fs;
 
 use axiom_eth::{
@@ -48,7 +45,7 @@ use halo2_base::halo2_proofs::{
     transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
     SerdeFormat,
 };
-use halo2_tvm_bundle::{decode_instances, CircuitShape, VkBlob, VkConfig};
+use deposit_prover::halo2_tvm_bundle::{decode_instances, CircuitShape, VkBlob, VkConfig};
 
 #[derive(Clone)]
 struct Noop;

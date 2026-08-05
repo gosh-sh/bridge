@@ -172,7 +172,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
     }
 
@@ -301,7 +301,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO + 1,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         assertTrue(bridge.isKnownLayerAnchor(1, expectedL1));
@@ -482,7 +482,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO,
             ACTIVE_LAYERS,
             layers,
-            shellnetBridge.storedPrevMaxLevelLayerHash()
+            shellnetBridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
@@ -525,6 +525,73 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
+    /// @notice NB-Q1 regression: an anchor recorded in a non-L1 layer window
+    ///         (L2, L3, or any L in `1..MAX_LAYER_HASHES`) must be accepted
+    ///         by `withdrawByProof`. Before NB-Q1 (2026-08-04) the scan was
+    ///         pinned to L1 via `WITHDRAW_ANCHOR_LAYER = 1` — every partner
+    ///         L≥2 witness would revert `UnknownAnchor` here.
+    function test_withdrawByProof_anchorRecordedInL2Window_isAccepted() public {
+        // Seed block records `layers[0..ACTIVE_LAYERS]` into L1..L3 windows.
+        // `_seedFirstBlock` uses `keccak256(abi.encode("wd-seed-layer", i))`;
+        // reconstruct the L2 anchor (i=1) and prove against it.
+        uint256 l2Anchor = uint256(keccak256(abi.encode("wd-seed-layer", uint256(1))));
+
+        // Sanity: the seed block did populate the L2 window with this value.
+        assertTrue(
+            bridge.isKnownLayerAnchor(2, l2Anchor),
+            "seed block should have written L2 window"
+        );
+        assertFalse(
+            bridge.isKnownLayerAnchor(1, l2Anchor),
+            "L2 anchor must not appear in L1 window (rules out false positive)"
+        );
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("l2-anchor-withdraw")));
+        pub.finalRoot = l2Anchor;
+
+        bool ok = bridge.withdrawByProof(_dummyProof(), pub);
+        assertTrue(ok, "L2 anchor withdrawal must succeed under flat _isKnownAnchor");
+    }
+
+    /// @notice NB-Q1 regression (L3 variant): coverage at the highest active
+    ///         layer of the seed block, exercising the loop's upper end.
+    function test_withdrawByProof_anchorRecordedInL3Window_isAccepted() public {
+        uint256 l3Anchor = uint256(keccak256(abi.encode("wd-seed-layer", uint256(2))));
+
+        assertTrue(bridge.isKnownLayerAnchor(3, l3Anchor), "L3 seeded");
+        assertFalse(bridge.isKnownLayerAnchor(1, l3Anchor), "not in L1");
+        assertFalse(bridge.isKnownLayerAnchor(2, l3Anchor), "not in L2");
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("l3-anchor-withdraw")));
+        pub.finalRoot = l3Anchor;
+
+        bool ok = bridge.withdrawByProof(_dummyProof(), pub);
+        assertTrue(ok, "L3 anchor withdrawal must succeed under flat _isKnownAnchor");
+    }
+
+    /// @notice NB-Q1 regression: a `finalRoot` that matches no layer window
+    ///         still reverts `UnknownAnchor` (flat scan didn't accidentally
+    ///         become permissive).
+    function test_withdrawByProof_anchorInNoLayerWindow_reverts() public {
+        uint256 stranger = uint256(keccak256("this-anchor-was-never-written"));
+        // Explicit belt-and-suspenders: every layer window must reject it.
+        for (uint8 L = 1; L <= 10; L++) {
+            assertFalse(
+                bridge.isKnownLayerAnchor(L, stranger),
+                "stranger anchor must be absent from every window"
+            );
+        }
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("stranger-withdraw")));
+        pub.finalRoot = stranger;
+
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, stranger));
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
     function test_withdrawByProof_anchorRecordedByLaterVerifyBlock_isAccepted() public {
         // Submit a second block and prove withdrawal against its L1 root.
         uint256[10] memory layers;
@@ -542,7 +609,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             FIRST_SEQ_NO + 1,
             ACTIVE_LAYERS,
             layers,
-            bridge.storedPrevMaxLevelLayerHash()
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =

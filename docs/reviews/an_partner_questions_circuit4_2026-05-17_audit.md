@@ -5,7 +5,7 @@
 five Phase B blocker questions before the doc is sent to Alina.
 **Method**: cross-checked every claim against the live codebase
 (`AckiNackiBridge.sol`, `BridgeEventVerifier.sol`,
-`crates/bridge-prover-orchestrator/`), the partner sibling repo
+`crates/bridge-snark-utils/`), the partner sibling repo
 (`../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit/`),
 the integration plan's risk register, and `docs/circuit_4_open_questions.md`.
 
@@ -52,19 +52,19 @@ on first read (the 103-input layout) actually checks out — the partner's own
 
 ### B1. Wrong file path for `Halo2ProofData` (lines 117–119)
 
-> «см. `crates/bridge-prover-orchestrator/src/layer_hashes_prover.rs`,
+> «см. `crates/bridge-snark-utils/src/layer_hashes_prover.rs`,
 > структура `Halo2ProofData` с полями `public_inputs`, `proof_bytes`,
 > `protocol`»
 
 `Halo2ProofData` lives at
-`crates/bridge-prover-orchestrator/src/proof_export.rs:17-22`.
+`crates/bridge-snark-utils/src/proof_export.rs:17-22`.
 `layer_hashes_prover.rs` only declares
 `LayerHashesProofOutput { proof_bytes, instances }` — Alina won't find the
 JSON struct there.
 
 **Fix**: change the cite to `proof_export.rs`.
 
-```17:22:crates/bridge-prover-orchestrator/src/proof_export.rs
+```17:22:crates/bridge-snark-utils/src/proof_export.rs
 pub struct Halo2ProofData {
     pub public_inputs: Vec<String>,
     pub proof_bytes: Vec<u8>,
@@ -82,7 +82,7 @@ R14 and R15 are different problems and the doc only describes R14:
 - **R14** = single-party `groth16.Setup` → toxic-waste leak risk
   (the trusted-setup ceremony issue this section is asking Alina about).
 - **R15** = wrapper R1CS itself is a no-op identity stub. I checked
-  `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/circuit.go:40-46`
+  `crates/bridge-snark-utils/gnark-wrappers/circuit-4/circuit.go:40-46`
   — `Define()` literally is:
 
   ```go
@@ -262,9 +262,9 @@ wording polish.
   `contracts/ethereum/src/BridgeEventVerifier.sol`,
   `contracts/ethereum/test/AckiNackiBridgeVerifyEvent.t.sol`
 - Phase A gnark wrapper (R15 stub):
-  `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/circuit.go`
+  `crates/bridge-snark-utils/gnark-wrappers/circuit-4/circuit.go`
 - `Halo2ProofData` (correct path):
-  `crates/bridge-prover-orchestrator/src/proof_export.rs:17-22`
+  `crates/bridge-snark-utils/src/proof_export.rs:17-22`
 - Partner circuit:
   `../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs`
 - Partner layout doc (note: §5.9 is stale vs the implementation):

@@ -116,7 +116,7 @@ Each chunk is a `u32` little-endian length followed by exactly that many bytes. 
 
 `SerdeFormat::RawBytesUnchecked` skips curve-membership checks on every group element of the verifying key. This is fine when the VK comes from your own trusted prover. It is **not** fine when the VK is supplied by the caller of an on-chain opcode: a maliciously-crafted off-curve point in the VK lets the attacker produce verifications that don't actually correspond to any valid proof.
 
-The opcode handler uses `SerdeFormat::RawBytes`, which runs the on-curve check on every group element. The producer side mirrors this byte layout (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::VkBlob::from_native`) so producer and consumer agree.
+The opcode handler uses `SerdeFormat::RawBytes`, which runs the on-curve check on every group element. The producer side mirrors this byte layout (see `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs::VkBlob::from_native`) so producer and consumer agree.
 
 This costs a few hundred milliseconds per first-time VK deserialisation. The per-VK cache (§5) amortises that across calls.
 
@@ -210,13 +210,13 @@ The bridge ships a producer that emits exactly the bytes `ZKHALO2VERIFYWITHVK` c
 
 | Path | Role |
 |---|---|
-| `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` | `VkBlob` (encoder + decoder) + `Halo2TvmOperands` (full three-operand bundle for round-trip testing) + `encode_instances` / `decode_instances`. |
-| `crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs` | Round-trip test: prove with `FallbackKeyManager`, serialise three operand byte streams, deserialise each, verify against the reconstructed `(vk, instances, proof)` triple. Green; this is the ground truth for the format. |
+| `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` | `VkBlob` (encoder + decoder) + `Halo2TvmOperands` (full three-operand bundle for round-trip testing) + `encode_instances` / `decode_instances`. |
+| `crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs` | Round-trip test: prove with `FallbackKeyManager`, serialise three operand byte streams, deserialise each, verify against the reconstructed `(vk, instances, proof)` triple. Green; this is the ground truth for the format. |
 
 ### 9.1 Reference encoder snippet
 
 ```rust
-use bridge_prover_orchestrator::{Halo2TvmOperands, VkBlob};
+use bridge_snark_utils::{Halo2TvmOperands, VkBlob};
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Fr, G1Affine},
@@ -353,7 +353,7 @@ The contract is responsible for assembling `public_inputs_cell` so that its cont
 | Symptom (caller view) | Likely cause | Where to look |
 |---|---|---|
 | `FatalError` immediately, before any verification work | `vk_cell` bytes don't start with `b"VKBLOB\x00\x00"`, or `version != 0x01`, or `transcript_kind != 0x00`, or a chunk length runs past the end of the VkBlob | Producer-side encoding bug; check `VkBlob::to_bytes()` succeeded |
-| `FatalError` with "public_inputs_cell length .. is not a multiple of 32" | Contract concatenated public inputs with the wrong stride (e.g. u64 shortcut, or non-32-byte Fr encoding) | Use `encode_instances(&[Fr])` from `bridge_prover_orchestrator` |
+| `FatalError` with "public_inputs_cell length .. is not a multiple of 32" | Contract concatenated public inputs with the wrong stride (e.g. u64 shortcut, or non-32-byte Fr encoding) | Use `encode_instances(&[Fr])` from `bridge_snark_utils` |
 | `FatalError` with "Fr::from_repr rejected" | A public input is ≥ Fr modulus | Reduce the value mod p on the contract side; use canonical `Fr::from(value).to_repr()` |
 | `FatalError` deserialising VK | VK bytes were written with the wrong `SerdeFormat`, or VK was for a different curve, or an off-curve point was injected | Re-emit VK via `vk.write(&mut buf, SerdeFormat::RawBytes)` |
 | `false` on the stack (no exception) | The proof is well-formed but doesn't satisfy the relation. Either the prover was given the wrong witness, or the public inputs in the cell don't match what the proof was generated against, or VK ↔ proof drift between deploys | Re-run `Halo2TvmOperands::verify` locally — if it returns `false` there too, it's a prover-side issue, not an opcode issue |
@@ -376,8 +376,8 @@ The contract is responsible for assembling `public_inputs_cell` so that its cont
 - `docs/vm-instructions/acki-nacki-vm-instructions.md` — canonical VM-instructions doc.
 
 ### Bridge side (producer)
-- `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` — producer-side `VkBlob` + `Halo2TvmOperands` types.
-- `crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs` — full round-trip ground-truth + fixture export.
+- `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` — producer-side `VkBlob` + `Halo2TvmOperands` types.
+- `crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs` — full round-trip ground-truth + fixture export.
 
 ### Pull requests
 - [`tvm-sdk` PR #243 — ZKHALO2VERIFYWITHVK on main](https://github.com/tvmlabs/tvm-sdk/pull/243) — landed and refactored to 3-operand ABI (Variant A).
@@ -416,7 +416,7 @@ A `circuit_shape` byte is carried at **offset 10** (the first byte of the old `r
 - **Backward compatible**: a v1 blob (`version = 0x01`) pins `circuit_shape = 0` and is read exactly as before. A v1 blob carrying a non-zero shape byte is rejected (a shape-tagged blob must set `version = 0x02`).
 - The `Rlc` `EthCircuitParams` JSON is the value returned by `EthCircuitImpl::calculate_params()` at keygen, serialised with `serde_json`.
 - `EthCircuitImpl<Fr, Noop>` uses an **empty** `EthCircuitInstructions` body: `VerifyingKey::read` rebuilds the constraint system purely from `EthCircuitParams` via `Circuit::configure_with_params`, so the instructions are never invoked on the read path. The same `Noop` type therefore covers *every* RLC/keccak circuit (deposit, future bridge circuits) — only the params differ.
-- This mirrors the producer-side `VK_BLOB_VERSION_V2` / `CircuitShape { Base = 0, Rlc = 1 }` in `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`.
+- This mirrors the producer-side `VK_BLOB_VERSION_V2` / `CircuitShape { Base = 0, Rlc = 1 }` in `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`.
 
 > **Format-variant note.** This `tvm-sdk` branch ships the original **single self-describing `HALO2TVM` bundle** opcode (`config + vk + instances + proof` in one cell — see `zk_halo2_with_vk_bundle.rs`), whereas §2/§3 above and `main`'s PR #243 describe the **3-operand Variant A** (`VKBLOB` `vk_cell` + `public_inputs_cell` + `proof_cell`). The `circuit_shape` byte and the RLC read path are defined **identically** for both; whichever variant the team settles on, the deposit shape support is the same. Reconciling the two opcode ABIs is tracked separately (out of scope for this change).
 

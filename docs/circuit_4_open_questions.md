@@ -18,7 +18,7 @@ This document is the running checklist of design questions blocking Phase B (rea
 | `IBridgeEventVerifier.sol` + `BridgeEventVerifier.sol` adapter (103 public inputs) | ✅ landed |
 | `IBridgeEventGroth16Verifier.sol` interface (against gnark-generated output) | ✅ landed |
 | Foundry tests: 16 in `AckiNackiBridgeVerifyEventTest` (constructor, ring buffer wrap, verifyEvent paths, identity/window forwarding) | ✅ 16/16 green |
-| gnark wrapper skeleton (`crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/`) | ✅ builds (identity stub mirror of `circuit-2`) |
+| gnark wrapper skeleton (`crates/bridge-snark-utils/gnark-wrappers/circuit-4/`) | ✅ builds (identity stub mirror of `circuit-2`) |
 
 Phase A is intentionally **non-paying**: a successful `verifyEvent` only emits `BridgeEventVerified(tokenId, msg.sender)`. No ETH moves.
 
@@ -108,7 +108,7 @@ Bridge-side cost is identical either way; the question is logistical.
 ## What needs to land before flipping `withdraw()` on
 
 1. Partner publishes Circuit 4 v2 with public `amount`/`recipient`/`dstChainId` and a nullifier (Q-CIRC4-{1,2,3}).
-2. `bridge-prover-orchestrator` grows a `bridge_event_prover` module (mirror of `layer_hashes_prover`).
+2. `bridge-snark-utils` grows a `bridge_event_prover` module (mirror of `layer_hashes_prover`).
 3. `gnark-wrappers/circuit-4/` reruns `setup` against the v2 R1CS; output `BridgeEventGroth16VerifierGenerated.sol` lands at `contracts/ethereum/src/`.
 4. `AckiNackiBridge` gains:
    - `withdraw(proof, tokenId, amount, recipient, dstChainId, nullifier)` — 6 args + 256-byte proof bytes.
@@ -123,5 +123,5 @@ Bridge-side cost is identical either way; the question is logistical.
 - Partner event layout: `bridge-event-prove-circuit/src/EVENT_LAYOUT_COMPARISON.md`
 - Bridge Phase A code: `contracts/ethereum/src/AckiNackiBridge.sol` (search `verifyEvent` / `_layerWindow`)
 - Bridge Phase A tests: `contracts/ethereum/test/AckiNackiBridgeVerifyEvent.t.sol`
-- gnark wrapper Phase A skeleton: `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/README.md`
+- gnark wrapper Phase A skeleton: `crates/bridge-snark-utils/gnark-wrappers/circuit-4/README.md`
 - Decision Log: `docs/an_partner_integration_plan.md` entry 2026-05-17 (Phase A — Circuit 4 scaffolding)

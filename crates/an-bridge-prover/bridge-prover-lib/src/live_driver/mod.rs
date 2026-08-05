@@ -38,9 +38,9 @@
 //!   The caller must drain via [`poll_next_bk_update`](LiveProverDriver::poll_next_bk_update)
 //!   before bundles can advance past that height.
 //!
-//! See `an_bridge_prover_live_driver_refactor_plan_2026-07-08.md` in the repo
-//! root for the full extraction rationale and the two-daemon integration
-//! contract.
+//! See `bridge/docs/archive/an_bridge_prover_live_driver_refactor_plan_2026-07-08.md`
+//! for the full extraction rationale and the two-daemon integration contract
+//! (archived after the integration landed on 2026-07-30).
 //!
 //! ## Downstream-consumer contract (Sergey's `bridge-relayer-daemon`)
 //!
@@ -93,6 +93,7 @@ use bridge_gql_fetcher::gql_client::GqlClient;
 use crate::keys::KeyManager;
 use bridge_poseidon as poseidon;
 use crate::prover_bk_set::ProverBkSet;
+use crate::transcript::TranscriptKind;
 
 mod bk_update;
 mod bundle;
@@ -183,13 +184,43 @@ pub enum DriverError {
 }
 
 impl DriverError {
-    /// Wrap an arbitrary `anyhow::Error` as [`DriverError::Other`]. Used at
-    /// the public boundary of poll/ack methods to lift the internal
-    /// anyhow-based helpers into the structured public error type without
-    /// forcing a full site-by-site classification pass. Site-specific
-    /// variants (`GqlTransient`, `ProofGen`, etc.) are constructed
-    /// explicitly at the call sites that know their semantic kind.
-    pub(crate) fn other(err: anyhow::Error) -> Self {
+    /// Site-specific constructor for transient GQL / HTTP errors. Prefer
+    /// this over `other` at sites where the underlying call is a network
+    /// round-trip to the AN node (`GqlClient::query_*`) so that consumers
+    /// can implement retry policy without inspecting the error message.
+    pub(crate) fn gql_transient(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::GqlTransient(err.into())
+    }
+
+    /// Site-specific constructor for GQL schema mismatches / unexpected
+    /// field shapes. Not retryable — indicates the AN node's GraphQL
+    /// schema drifted from what `bridge-gql-fetcher` expects.
+    pub(crate) fn gql_schema(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::GqlSchema(err.into())
+    }
+
+    /// Site-specific constructor for halo2 proof-generation failures at a
+    /// known target `seq_no`. Callers should alert and halt the pipeline;
+    /// re-running the same witness will fail the same way.
+    pub(crate) fn proof_gen(seq_no: u64, err: impl Into<anyhow::Error>) -> Self {
+        DriverError::ProofGen { seq_no, source: err.into() }
+    }
+
+    /// Site-specific constructor for state-inconsistency errors (BK-set
+    /// commitment mismatches, L2 sibling ≠ current commitment, etc.).
+    pub(crate) fn state_inconsistent(err: impl Into<anyhow::Error>) -> Self {
+        DriverError::StateInconsistent(err.into())
+    }
+}
+
+/// Blanket lift so internal `anyhow::Result` helpers can be `?`-chained into
+/// `DriverResult`. Sites that know their semantic kind should classify
+/// explicitly via [`DriverError::gql_transient`] / [`DriverError::proof_gen`]
+/// / [`DriverError::state_inconsistent`]; sites that don't fall back to
+/// [`DriverError::Other`] which is the safest default (surfaces the full
+/// anyhow context chain to the operator without misclassifying).
+impl From<anyhow::Error> for DriverError {
+    fn from(err: anyhow::Error) -> Self {
         DriverError::Other(err)
     }
 }
@@ -211,6 +242,24 @@ pub struct LiveProverConfig {
     pub max_bk_updates_per_iter: usize,
     /// How the driver picks the bootstrap seed. See [`SeedPolicy`].
     pub seed_policy: SeedPolicy,
+    /// Fiat–Shamir transcript flavour for every proof this driver produces
+    /// ([`crate::prover::generate_primary_proof_with_transcript`] +
+    /// [`crate::layer_prover::generate_layer_proof_with_transcript`]).
+    ///
+    /// * [`TranscriptKind::Blake2b`] (default) — AN-side verifier flavour;
+    ///   accepted by the AN VM's `ZKHALO2VERIFYWITHVK` opcode and by our
+    ///   `bridge-prover-daemon` verifier.
+    /// * [`TranscriptKind::Poseidon`] — ETH-side aggregator flavour; the
+    ///   raw proof bytes are consumable by `snark-verifier-sdk`'s
+    ///   `AggregationCircuit` (see `crates/bridge-evm-aggregator`).
+    ///
+    /// One driver produces exactly one flavour per `poll_next_*` call —
+    /// callers wanting both must instantiate two drivers or repoll with a
+    /// mutated config. The output flavour is echoed on
+    /// [`BundleProofArtifacts::transcript_kind`] /
+    /// [`BkUpdateProofArtifacts::transcript_kind`] so downstream consumers
+    /// know which verifier / aggregator path to route to.
+    pub transcript: TranscriptKind,
 }
 
 impl Default for LiveProverConfig {
@@ -220,6 +269,7 @@ impl Default for LiveProverConfig {
             history_window_size: HISTORY_WINDOW_SIZE,
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
+            transcript: TranscriptKind::Blake2b,
         }
     }
 }
@@ -308,9 +358,11 @@ pub struct BundleProofArtifacts {
     /// derivation paths are provably equal for a valid block; `bundle.rs`
     /// debug-asserts this at build time. Carrying the full 256-bit hash (not
     /// its `Fr::to_repr()` LE bytes) preserves the top 2 bits that would be
-    /// lost when the chain hash `>= p` (~3/4 of blocks). Rust verifiers
-    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain SHPLONK
-    /// auto-reduces via `mod(calldataload, f_q)`.
+    /// lost when the chain hash `>= p` (~81% of blocks). Rust verifiers
+    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain the
+    /// relayer applies the same `% BN254_R` before submission — the R15
+    /// SHPLONK adapter does NOT auto-reduce, it byte-compares canonical `Fr`
+    /// instances read out of the proof before the pairing runs.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
@@ -318,7 +370,15 @@ pub struct BundleProofArtifacts {
     pub num_layers: u8,
     pub layer_hashes_be: [[u8; 32]; MAX_LAYERS],
     pub prev_max_level_layer_hash_be: [u8; 32],
-    // Proof bytes (Blake2b Fiat–Shamir — AN opcode-compatible flavour)
+    /// Fiat–Shamir transcript flavour of the two proof-byte fields below.
+    /// Mirrors [`LiveProverConfig::transcript`] at the moment those proofs
+    /// were generated so downstream consumers can route to the matching
+    /// verifier / aggregator without inspecting proof-bytes headers. Both
+    /// `attestation_proof` and `layer_hashes_proof` share the same tag —
+    /// [`crate::live_driver::bundle::drive_next_bundle`] always drives them
+    /// with the same transcript in a single bundle.
+    pub transcript_kind: TranscriptKind,
+    // Proof bytes (Fiat–Shamir flavour tagged by `transcript_kind`)
     pub attestation_proof: Vec<u8>,
     pub layer_hashes_proof: Vec<u8>,
     // Diagnostic timings (for logs / stats)
@@ -341,11 +401,13 @@ pub struct BkUpdateProofArtifacts {
     /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
     /// depth-4 `block_merkle_tree_leaves` = Solidity
     /// `uint256(bytes32(blockId))`). Same semantics as
-    /// [`BundleProofArtifacts::block_id_be`]: on-chain SHPLONK auto-reduces
-    /// mod p, and the depth-4 SHA-256 Merkle open (h01 / h4_7 / h8_15 +
-    /// l2/l3) checks against this raw root. The pre-v6 dual-field encoding
-    /// (attestation-circuit `Fr::to_repr` + separate raw hash) is gone —
-    /// callers derive Fr on demand.
+    /// [`BundleProofArtifacts::block_id_be`]: the relayer reduces this via
+    /// `% BN254_R` before handing it to the contract (the R15 SHPLONK adapter
+    /// byte-compares canonical `Fr` instances, does NOT auto-reduce), and the
+    /// contract applies the same reduction to the depth-4 SHA-256 Merkle open
+    /// root (h01 / h4_7 / h8_15 + l2/l3) before comparing so both consumers
+    /// agree. The pre-v6 dual-field encoding (attestation-circuit `Fr::to_repr`
+    /// + separate raw hash) is gone — callers derive Fr on demand.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],
@@ -357,6 +419,9 @@ pub struct BkUpdateProofArtifacts {
     pub merkle_sibling_h01_be: [u8; 32],
     pub merkle_sibling_h4_7_be: [u8; 32],
     pub merkle_sibling_h8_15_be: [u8; 32],
+    /// Fiat–Shamir transcript flavour of `attestation_proof`. Same
+    /// semantics as [`BundleProofArtifacts::transcript_kind`].
+    pub transcript_kind: TranscriptKind,
     pub attestation_proof: Vec<u8>,
     /// Post-rotation pubkey table so the caller can rotate its
     /// `ProverBkSet` snapshot. Same 48-byte compressed BLS pubkeys as the
@@ -458,6 +523,27 @@ impl LiveProverDriver {
     /// `Cargo.lock` and link-time. The public payloads themselves stay
     /// halo2-free — you only feel the dep at build time, not at type
     /// boundaries.
+    ///
+    /// Which methods touch halo2 keys:
+    ///
+    /// * **Proof-generating (require `ensure_*_keys` up front, drive
+    ///   on-demand PK load/unload internally):** [`poll_next_bundle`],
+    ///   [`poll_next_bk_update`].
+    /// * **State-only, no key access:** [`ack_bundle`], [`ack_bk_update`]
+    ///   (cursor advance + in-memory commitment rotation only),
+    ///   [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only
+    ///   reads for the caller to persist).
+    ///
+    /// A read-only consumer that only calls the `snapshot_*` / `ack_*`
+    /// surface still transitively links halo2 (see above) but never
+    /// materialises a proving key at runtime.
+    ///
+    /// [`poll_next_bundle`]: Self::poll_next_bundle
+    /// [`poll_next_bk_update`]: Self::poll_next_bk_update
+    /// [`ack_bundle`]: Self::ack_bundle
+    /// [`ack_bk_update`]: Self::ack_bk_update
+    /// [`snapshot_state`]: Self::snapshot_state
+    /// [`snapshot_prover_bk_set`]: Self::snapshot_prover_bk_set
     pub fn new(
         gql: GqlClient,
         key_manager: KeyManager,
@@ -552,10 +638,10 @@ impl LiveProverDriver {
     /// blocking bundle advance), and [`LiveBundleEvent::Bundle`] when a
     /// fully-proven bundle is ready for the caller to submit downstream.
     pub async fn poll_next_bundle(&mut self) -> DriverResult<LiveBundleEvent> {
-        self.poll_next_bundle_inner().await.map_err(DriverError::other)
+        self.poll_next_bundle_inner().await
     }
 
-    async fn poll_next_bundle_inner(&mut self) -> anyhow::Result<LiveBundleEvent> {
+    async fn poll_next_bundle_inner(&mut self) -> DriverResult<LiveBundleEvent> {
         // Bootstrap gate: while `NeedsSeed`, drive the seed and either
         // apply it (transition to Steady) or return Bootstrapping.
         if let DriverStage::NeedsSeed { .. } = self.stage {
@@ -569,8 +655,13 @@ impl LiveProverDriver {
             // Fell through — bootstrap complete, transition already happened.
         }
 
-        // Poll chain head + compute the next thinned target.
-        let latest_blocks = self.gql.query_latest_blocks(5).await?;
+        // Poll chain head + compute the next thinned target. GQL round-trip
+        // — classify as transient so the caller retries on the next tick.
+        let latest_blocks = self
+            .gql
+            .query_latest_blocks(5)
+            .await
+            .map_err(DriverError::gql_transient)?;
         let chain_head_seqno = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
         let next_target_seqno = match find_next_thinned_key_block(
             self.state.stored_last_seen_block_seq_no,
@@ -623,10 +714,10 @@ impl LiveProverDriver {
     /// [`LiveBkUpdateEvent::BkUpdate`] when a fully-proven rotation is
     /// ready for the caller to submit downstream.
     pub async fn poll_next_bk_update(&mut self) -> DriverResult<LiveBkUpdateEvent> {
-        self.poll_next_bk_update_inner().await.map_err(DriverError::other)
+        self.poll_next_bk_update_inner().await
     }
 
-    async fn poll_next_bk_update_inner(&mut self) -> anyhow::Result<LiveBkUpdateEvent> {
+    async fn poll_next_bk_update_inner(&mut self) -> DriverResult<LiveBkUpdateEvent> {
         if let DriverStage::NeedsSeed { .. } = self.stage {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
@@ -780,8 +871,11 @@ impl LiveProverDriver {
 
     /// Query GQL for the next pending bk-set rotation and check whether its
     /// block-height is `<= max_height`. Cheap enough to call once per
-    /// bundle poll — sends one GQL request.
-    async fn pending_bk_update_below(&self, max_height: u64) -> anyhow::Result<bool> {
+    /// bundle poll — sends one GQL request. Transient errors are
+    /// swallowed with a warn (returning `false`) because a spurious GQL
+    /// hiccup here should not prevent bundle advance; the caller will
+    /// retry on the next tick and the correct answer will surface.
+    async fn pending_bk_update_below(&self, max_height: u64) -> DriverResult<bool> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
         match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
             Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
@@ -798,9 +892,13 @@ impl LiveProverDriver {
 
     /// Advance the bootstrap state machine. Returns
     /// `(chain_head_seqno, still_waiting_for_seed_seqno_opt)`.
-    async fn advance_bootstrap(&mut self) -> anyhow::Result<(u64, Option<u64>)> {
+    async fn advance_bootstrap(&mut self) -> DriverResult<(u64, Option<u64>)> {
         let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
-        let latest_blocks = self.gql.query_latest_blocks(5).await?;
+        let latest_blocks = self
+            .gql
+            .query_latest_blocks(5)
+            .await
+            .map_err(DriverError::gql_transient)?;
         let chain_head = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
 
         // Resolve the seed seqno (Auto: snap once and cache; Explicit:
@@ -824,14 +922,26 @@ impl LiveProverDriver {
         }
 
         // Chain has caught up. Fetch, apply, and transition to Steady.
+        // Both failures below are bootstrap-phase — classify explicitly so
+        // callers can distinguish "still waiting for chain head" from
+        // "bootstrap machinery itself failed".
         let bk_hash_bytes: [u8; 32] = self.bk_set_commitment_fr.to_repr();
         let seed = crate::bootstrap::fetch_from_node(
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
         )
-        .await?;
-        seed.apply(&mut self.state)?;
+        .await
+        .map_err(|e| DriverError::Bootstrapping {
+            seed_seqno,
+            chain_head_seqno: chain_head,
+            source: e,
+        })?;
+        seed.apply(&mut self.state).map_err(|e| DriverError::Bootstrapping {
+            seed_seqno,
+            chain_head_seqno: chain_head,
+            source: e,
+        })?;
         info!(
             "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
             seed.block_seq_no,
@@ -889,6 +999,12 @@ mod tests {
         assert_eq!(cfg.thinning_factor_p, crate::THINNING_FACTOR_P);
         assert_eq!(cfg.history_window_size, HISTORY_WINDOW_SIZE);
         assert_eq!(cfg.seed_policy, SeedPolicy::Resume);
+        // Blake2b default preserves the AN-opcode-compatible flavour for
+        // every caller that doesn't override — both our own daemon and
+        // Sergey's `bridge-relayer-daemon` construct via
+        // `..Default::default()` today, so the pre-Poseidon behaviour is
+        // unchanged.
+        assert_eq!(cfg.transcript, TranscriptKind::Blake2b);
     }
 
     #[test]
@@ -898,5 +1014,37 @@ mod tests {
         // path label must not drift.
         assert_eq!(BundleFinalizationType::Primary.as_str(), "primary");
         assert_eq!(BundleFinalizationType::Fallback.as_str(), "fallback");
+    }
+
+    #[test]
+    fn driver_error_constructors_classify_correctly() {
+        // The four site-specific constructors must land on their intended
+        // variants so consumers pattern-matching on kind stay in sync with
+        // what the poll/ack sites emit. Also confirm the `From<anyhow::Error>`
+        // blanket lift routes to `Other` (fallback for `?`-chained internal
+        // helpers that don't classify explicitly).
+        let src = || anyhow::anyhow!("underlying failure");
+
+        assert!(matches!(
+            DriverError::gql_transient(src()),
+            DriverError::GqlTransient(_),
+        ));
+        assert!(matches!(
+            DriverError::gql_schema(src()),
+            DriverError::GqlSchema(_),
+        ));
+        assert!(matches!(
+            DriverError::proof_gen(42, src()),
+            DriverError::ProofGen { seq_no: 42, .. },
+        ));
+        assert!(matches!(
+            DriverError::state_inconsistent(src()),
+            DriverError::StateInconsistent(_),
+        ));
+        // Blanket `From<anyhow::Error>` lift → Other. This is what any
+        // `?`-chained internal `anyhow::Result` call collapses to when the
+        // site does not classify explicitly.
+        let via_from: DriverError = src().into();
+        assert!(matches!(via_from, DriverError::Other(_)));
     }
 }

@@ -28,11 +28,12 @@ import "./mocks/MockERC20.sol";
 /// - `storedLastSeenBlockSeqNo` advances monotonically and **exactly** by one
 ///   per accepted block (so the relayer's `target = last_seen + 1` query is
 ///   reliable);
-/// - `storedNumLayers` and `storedLayerHashes[..]` follow the latest accepted
-///   block (so external readers see a consistent post-state);
-/// - `storedPrevMaxLevelLayerHash` follows the chain anchor convention used by
-///   the relayer (it's `layerHashes[numLayers - 1]` of the previously accepted
-///   block, threaded into the new block's `prevMaxLevelLayerHash` argument);
+/// - `getLatestPerLayer()` reflects the per-layer head across the accepted
+///   blocks (storage v2.0 replacement for the removed `storedNumLayers` +
+///   `storedLayerHashes[..]` flat cache);
+/// - `expectedPrevAnchor(numLayers)` returns the correct chain anchor to
+///   thread into the next block's `prevMaxLevelLayerHash` argument (per-layer
+///   pick — see AB-Q4 and `docs/storage_v2_abi_note.md`);
 /// - mixing Primary and Fallback finalization types in the same loop works;
 /// - one `BlockVerified(blockId, blockSeqNo, finType, numLayers)` event fires
 ///   per block (no duplicates, no holes).
@@ -109,11 +110,13 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     }
 
     /// @dev Pulls the current chain anchor that the next block must thread in
-    ///      as `prevMaxLevelLayerHash`. Mirrors the Solidity contract's own
-    ///      update logic (`storedPrevMaxLevelLayerHash =
-    ///      layerHashes[numLayers - 1]`).
+    ///      as `prevMaxLevelLayerHash`. Storage v2.0 (2026-08-04): sourced
+    ///      from `expectedPrevAnchor(numLayers)`, which does the per-layer
+    ///      pick `min(numLayers, highestActiveLayer)` off `_layerWindows`.
+    ///      All blocks in this suite use `ACTIVE_LAYERS`, so the per-layer
+    ///      pick equals `ACTIVE_LAYERS`.
     function _currentAnchor() internal view returns (uint256) {
-        return bridge.storedPrevMaxLevelLayerHash();
+        return bridge.expectedPrevAnchor(ACTIVE_LAYERS);
     }
 
     function _submit(uint256 blockIdx, AckiNackiBridge.FinalizationType finType)
@@ -159,17 +162,22 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
             uint256[10] memory layers = _submit(idx, ft);
 
             assertEq(bridge.storedLastSeenBlockSeqNo(), uint64(idx), "seqNo");
-            assertEq(bridge.storedNumLayers(), ACTIVE_LAYERS, "numLayers");
+            // Storage v2.0: per-layer state observed via `getLatestPerLayer()`.
+            // Each layer's head is the just-submitted block's layer hash;
+            // slots >= ACTIVE_LAYERS are empty windows -> zero.
+            uint256[10] memory latest = bridge.getLatestPerLayer();
             for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-                assertEq(bridge.storedLayerHashes(i), layers[i], "layer");
+                assertEq(latest[i], layers[i], "layer head");
             }
             for (uint256 i = ACTIVE_LAYERS; i < 10; i++) {
-                assertEq(bridge.storedLayerHashes(i), 0, "tail-zero");
+                assertEq(latest[i], 0, "unused-layer stays zero");
             }
+            // The next block's expected anchor mirrors the just-committed
+            // top-layer head (constant-numLayers stream: pick = ACTIVE_LAYERS).
             assertEq(
-                bridge.storedPrevMaxLevelLayerHash(),
+                bridge.expectedPrevAnchor(ACTIVE_LAYERS),
                 layers[ACTIVE_LAYERS - 1],
-                "anchor follows last layer"
+                "next-anchor follows last layer"
             );
         }
     }
@@ -182,7 +190,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
         for (uint256 idx = 1; idx <= 5; idx++) {
             _submit(idx, AckiNackiBridge.FinalizationType.Primary);
         }
-        uint256 anchorAfter5 = bridge.storedPrevMaxLevelLayerHash();
+        uint256 anchorAfter5 = bridge.expectedPrevAnchor(ACTIVE_LAYERS);
 
         // "Restart": create a fresh test caller; the bridge state survives.
         address relayerB = address(0xBEEF);
@@ -203,9 +211,9 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
 
         assertEq(bridge.storedLastSeenBlockSeqNo(), 6, "seqNo after restart");
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS),
             layers6[ACTIVE_LAYERS - 1],
-            "anchor advanced after restart"
+            "next-anchor advanced after restart"
         );
     }
 
@@ -271,7 +279,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     ///         retrying or skipping.
     function test_relayerLoop_onAttestationReject_stateUntouched() public {
         _submit(1, AckiNackiBridge.FinalizationType.Primary);
-        uint256 anchor = bridge.storedPrevMaxLevelLayerHash();
+        uint256 anchor = bridge.expectedPrevAnchor(ACTIVE_LAYERS);
 
         primaryVerifier.setShouldAccept(false);
         uint256[10] memory layers2 = _layersFor(2);
@@ -288,7 +296,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
             anchor
         );
         assertEq(bridge.storedLastSeenBlockSeqNo(), 1, "seqNo unchanged");
-        assertEq(bridge.storedPrevMaxLevelLayerHash(), anchor, "anchor unchanged");
+        assertEq(bridge.expectedPrevAnchor(ACTIVE_LAYERS), anchor, "next-anchor unchanged");
 
         primaryVerifier.setShouldAccept(true);
         _submit(2, AckiNackiBridge.FinalizationType.Primary);
@@ -303,7 +311,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
         _submit(1, AckiNackiBridge.FinalizationType.Primary);
         uint256[10] memory layers2 = _layersFor(2);
         uint256 wrongAnchor = uint256(keccak256("wrong-anchor"));
-        uint256 storedAnchor = bridge.storedPrevMaxLevelLayerHash();
+        uint256 storedAnchor = bridge.expectedPrevAnchor(ACTIVE_LAYERS);
         vm.expectRevert(
             abi.encodeWithSelector(
                 AckiNackiBridge.PrevAnchorMismatch.selector, wrongAnchor, storedAnchor

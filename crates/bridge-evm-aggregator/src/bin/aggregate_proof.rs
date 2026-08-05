@@ -27,7 +27,9 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_evm_aggregator::{aggregator::AggregatorConfig, evm_export::export_aggregated_snark};
+use bridge_evm_aggregator::{
+    aggregator::AggregatorConfig, evm_export::aggregate_and_prove_cached,
+};
 use snark_verifier_sdk::Snark;
 
 fn main() -> anyhow::Result<()> {
@@ -41,6 +43,7 @@ fn main() -> anyhow::Result<()> {
     let mut k_outer = None;
     let mut universality = None;
     let mut allow_bin_drift = false;
+    let mut pk_cache_dir: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -59,6 +62,11 @@ fn main() -> anyhow::Result<()> {
             // Escape hatch for the very first bootstrap of a verifier whose .bin
             // is not committed yet. Never use once a verifier is deployed.
             "--allow-bin-drift" => allow_bin_drift = true,
+            // Optional persistent outer PK cache. First run against a new
+            // (name, k_outer, lookup_bits, universality, inner-shape) slot
+            // does full keygen (~3-5 min at K=21); subsequent runs load PK
+            // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
+            "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }
@@ -74,26 +82,29 @@ fn main() -> anyhow::Result<()> {
 
     let config = AggregatorConfig::for_verifier_name_with_overrides(&name, k_outer, universality);
 
-    // Aggregate into a scratch dir so we never clobber the committed verifier.
-    let scratch = std::env::temp_dir().join(format!("agg_proof_{}_{}", name, std::process::id()));
-    std::fs::create_dir_all(&scratch)?;
-    let export = export_aggregated_snark(&scratch, &name, inner_snark, config)
-        .context("aggregate + evm-proof (export_aggregated_snark)")?;
+    // Pure in-memory aggregation: no scratch dir, no .sol/.bin written.
+    // `pk_cache_dir` (if set) memoises the outer keygen across runs.
+    let export = aggregate_and_prove_cached(
+        &name,
+        inner_snark,
+        config,
+        None,
+        pk_cache_dir.as_deref(),
+    )
+    .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
 
     // Self-check: regenerated Yul bytecode must match the committed/deployed one.
     let committed_bin = verifiers_dir.join(format!("{name}.bin"));
     if committed_bin.exists() {
-        let regenerated = scratch.join(format!("{name}.bin"));
-        let a = std::fs::read(&committed_bin)?;
-        let b = std::fs::read(&regenerated)?;
-        if a != b {
+        let committed = std::fs::read(&committed_bin)?;
+        if committed != export.verifier_bytecode {
             let msg = format!(
                 "regenerated {name}.bin ({} B) != committed {} ({} B): aggregator VK drift -- the \
                  deployed verifier would REJECT this calldata (check inner-snark shape / \
                  AggregatorConfig / SRS)",
-                b.len(),
+                export.verifier_bytecode.len(),
                 committed_bin.display(),
-                a.len(),
+                committed.len(),
             );
             if allow_bin_drift {
                 eprintln!("WARNING (--allow-bin-drift): {msg}");
@@ -101,7 +112,10 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!(msg);
             }
         } else {
-            println!("VK match: regenerated {name}.bin == committed ({} B) [OK]", a.len());
+            println!(
+                "VK match: regenerated {name}.bin == committed ({} B) [OK]",
+                committed.len()
+            );
         }
     } else if !allow_bin_drift {
         anyhow::bail!(
@@ -115,7 +129,6 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out_path, &export.evm_calldata)?;
-    std::fs::remove_dir_all(&scratch).ok();
 
     println!(
         "OK: {} -> {} ({} B calldata, {} instances, K_outer={})",

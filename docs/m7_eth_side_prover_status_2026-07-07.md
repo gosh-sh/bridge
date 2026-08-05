@@ -16,7 +16,7 @@ accepts on-chain, driven from **real Acki Nacki data**.
   committed `contracts/ethereum/verifiers/<name>.bin`. VK drift ⇒ hard error.
 
 ### 2. ETH-side Circuit-4 prover (`our_side_reprove`)
-`crates/bridge-prover-orchestrator/src/bin/export_c4_poseidon_snark.rs`
+`crates/bridge-snark-utils/src/bin/export_c4_poseidon_snark.rs`
 
 - New `--fixture <PrivateWitness.json>`: re-proves a **real** withdrawal witness
   (from the live `bridge-event-witness-builder`) with a **Poseidon** transcript
@@ -63,7 +63,7 @@ both regenerate the identical committed `.bin` and both calldata verify on-chain
 > needed.
 
 ### ETH-side 1A/1B/2 prover — `export-1a1b2-poseidon-snark`
-`crates/bridge-prover-orchestrator/src/bin/export_1a1b2_poseidon_snark.rs`
+`crates/bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs`
 
 Mirrors `export-c4-poseidon-snark` for the `verifyBlock` leg. Live fetch + prove
 via `bridge-prover-lib`'s public API, Poseidon transcript, snark-verifier `.snark`

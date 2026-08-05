@@ -782,24 +782,6 @@ contract AckiNackiBridge {
     /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
     ///      the full pubkey table stays off-chain (prover working set).
     ///
-    ///      `blockId` is the root of the canonical **16-leaf, depth-4**
-    ///      block-id tree (`poseidon_profile_new`; leaves L2/L3 carry the old
-    ///      and new BK-set Poseidon commitments). Opening that pair therefore
-    ///      needs **three** siblings, and the fold is:
-    ///
-    ///      ```
-    ///      h23  = SHA256(L2 ‖ L3)              // both in LE `Fr` repr
-    ///      h0_3 = SHA256(siblingH01  ‖ h23)
-    ///      h0_7 = SHA256(h0_3        ‖ siblingH4_7)
-    ///      root = SHA256(h0_7        ‖ siblingH8_15)
-    ///      blockId == root mod BN254_R         // canonical `Fr` image
-    ///      ```
-    ///
-    ///      Mirrors `bridge-prover-lib/src/block_id_tree.rs`
-    ///      (`siblings_for_l2_l3`) and the off-chain pre-flight in
-    ///      `bridge-verifier-daemon`. The pre-16-leaf variant took two
-    ///      siblings and folded one level less.
-    ///
     /// @param finType Primary or Fallback attestation path for the update block.
     /// @param attestationProof SHPLONK attestation proof bytes.
     /// @param blockId Block identifier shared with the attestation public inputs,

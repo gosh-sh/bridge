@@ -13,11 +13,11 @@ description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline:
 
 [dependencies]
 # Partner circuits / parsers / test-data-gen — fetched from public GitHub.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
 hex = "0.4"
@@ -62,7 +62,7 @@ snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git
 
 [dev-dependencies]
 # Already available via [dependencies] above; integration tests need them re-listed.
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "fix/circuit1-block-id-byte-order" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
 
 [[bin]]
 name = "export-bound-block-proofs"

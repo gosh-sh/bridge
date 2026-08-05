@@ -128,6 +128,15 @@ impl GqlClient {
 
     /// Fetch bkSetUpdates (light — no attestation subfields).
     /// `first_or_last`: true = first N (oldest), false = last N (newest).
+    ///
+    /// NOT for cold-start BK-set reconstruction. This is a windowed peek — it
+    /// returns at most N events from one end of the log, with no continuation
+    /// cursor. Combining "first N" + "last N" to synthesize the full history
+    /// is the deleted `fetch_bk_set` antipattern (truncated non-contiguous
+    /// sample, folded from ∅ which misses the un-emitted genesis committee).
+    /// For cold-start, use `bk_set_fetcher::bk_set_at_height` (which pages via
+    /// [`Self::query_bk_set_updates_paged`]) against a caller-supplied
+    /// genesis snapshot.
     pub async fn query_bk_set_updates_light(
         &self,
         count: u32,
@@ -177,7 +186,14 @@ impl GqlClient {
         Ok(updates)
     }
 
-    /// Fetch the last N bkSetUpdates (most recent).
+    /// Fetch the last N bkSetUpdates (most recent), including full
+    /// attestation subfields.
+    ///
+    /// Intended for diagnostic/probe use: dashboards, incident triage, and
+    /// monitoring recent rotation cadence + who signed each rotation. NOT
+    /// for cold-start BK-set reconstruction — see
+    /// [`Self::query_bk_set_updates_paged`] and
+    /// `bk_set_fetcher::bk_set_at_height` for that path.
     pub async fn query_bk_set_updates_last(
         &self,
         last: u32,

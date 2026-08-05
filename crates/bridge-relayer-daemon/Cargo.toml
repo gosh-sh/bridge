@@ -22,6 +22,7 @@ alloy = { version = "2.0", features = [
     "network",
     "sol-types",
     "transport-http",
+    "eips",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -31,13 +32,26 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
 acki-nacki-interface = { path = "../../acki-nacki-interface" }
 bridge-prover-lib = { path = "../bridge-prover-lib" }
 bridge-gql-fetcher = { path = "../bridge-gql-fetcher" }
+# In-process wrap of Poseidon-transcript proof bytes → snark-verifier `.snark`,
+# so the daemon no longer shells out to `export-1a1b2-poseidon-snark` (which
+# independently re-fetched + re-proved every bundle). Must be resolved through
+# the an-bridge-prover workspace so its halo2-base [patch] rewrites apply.
+bridge-snark-wrap = { path = "../bridge-snark-wrap" }
+# In-process Circuit 4 (event) Poseidon prover — replaces the historical
+# `SubprocessCircuit4SnarkProver` shell-out to `export-c4-poseidon-snark`
+# (NB-Q9 PR-B). Same shape as the 1A/1B/2 lane above.
+bridge-event-prover-lib = { path = "../bridge-event-prover-lib" }
+# Direct halo2-base dep pulls in `Params` / `ParamsProver` traits needed for
+# SRS downsize + serialize in `ensure_srs_for_event`. Workspace = ensures the
+# same halo2-axiom rev as bridge-prover-lib / bridge-snark-wrap resolve to.
+halo2-base = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
-tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bin]]

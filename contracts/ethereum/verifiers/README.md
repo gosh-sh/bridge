@@ -22,7 +22,7 @@ gnark Groth16 fallback hybrid is retired. See `docs/r15_verifier_sizing_report.m
 ## Generate SHPLONK `.bin` (1A + 1B + 2)
 
 ```bash
-cd crates/bridge-prover-orchestrator
+cd crates/bridge-snark-utils
 cargo run --release --bin export-bound-block-proofs -- \
   --params-dir ../../params --out-dir ../../proofs/bound
 cargo run --release --bin export-bound-poseidon-snarks -- \
@@ -48,7 +48,7 @@ K=21 ceremony, proves a synthetic-but-valid reference witness under a Poseidon
 transcript, and self-verifies before wrapping:
 
 ```bash
-cd crates/bridge-prover-orchestrator
+cd crates/bridge-snark-utils
 cargo run --release --bin export-c4-poseidon-snark -- \
   --params-dir ../../params --snark-dir ../../proofs/bound/poseidon-snark
 

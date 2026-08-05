@@ -27,7 +27,8 @@ contract DeployReuseVerifiersBridge is Script {
             fallbackVerifier: IFallbackVerifier(vm.envAddress("FALLBACK_VERIFIER")),
             layerHashesVerifier: ILayerHashesMovementVerifier(vm.envAddress("LAYER_HASHES_VERIFIER")),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
-            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH")
+            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = AckiNackiBridge.BridgeWithdrawConfig({

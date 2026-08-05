@@ -7,6 +7,7 @@
 pub mod aggregation;
 pub mod circuit_v2;
 pub mod ethereum_fetcher;
+pub mod halo2_tvm_bundle;
 pub mod mpt;
 pub mod prover;
 pub mod rlp_utils;

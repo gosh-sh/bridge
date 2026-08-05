@@ -9,10 +9,7 @@
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
 //! the 10 re-exposed Circuit-4 public inputs (≥
 //! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
-//! checks in [`crate::proof_validation`]. A legacy 256-byte blob
-//! (`GROTH16_PROOF_SIZE`) is still accepted for back-compat with the retired
-//! per-circuit Groth16 adapter / mock-verifier smoke path — it is **not** the
-//! production shape.
+//! checks in [`crate::proof_validation`].
 
 use std::path::{Path, PathBuf};
 
@@ -20,11 +17,6 @@ use alloy::primitives::{Bytes, U256};
 use serde::Deserialize;
 
 use crate::error::RelayerError;
-
-/// Legacy 256-byte proof size (retired per-circuit Groth16 adapter / mock
-/// verifier smoke path). Accepted for back-compat only; the production path is
-/// the SHPLONK aggregator calldata (`SHPLONK_MIN_WITHDRAWAL_INSTANCES`).
-pub const GROTH16_PROOF_SIZE: usize = 256;
 
 /// Ten public inputs for Circuit 4 (single-final-root layout).
 pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 10;
@@ -73,17 +65,13 @@ impl PartnerWithdrawalProof {
     pub fn proof_bytes(&self) -> Result<Bytes, RelayerError> {
         let raw = decode_hex(&self.proof_hex)?;
         // Production shape: R15 SHPLONK aggregator calldata (`instances ‖ proof`).
-        // Legacy 256-byte blob accepted only for the retired Groth16 adapter /
-        // mock-verifier smoke path.
-        if raw.len() != GROTH16_PROOF_SIZE && raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
+        if raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
             return Err(RelayerError::other(format!(
                 "withdrawal proof is {} bytes; expected SHPLONK aggregator calldata (>= {} bytes: \
-                 12 accumulator limbs + {} Circuit-4 public inputs, then the outer proof) or a \
-                 legacy {}-byte blob",
+                 12 accumulator limbs + {} Circuit-4 public inputs, then the outer proof)",
                 raw.len(),
                 SHPLONK_MIN_WITHDRAWAL_INSTANCES,
                 WITHDRAWAL_PUBLIC_INPUTS,
-                GROTH16_PROOF_SIZE
             )));
         }
         Ok(Bytes::from(raw))
@@ -245,6 +233,34 @@ pub fn hash_hex_to_block_id_fr(hex_str: &str) -> Result<U256, RelayerError> {
 mod tests {
     use super::*;
 
+    /// Real shellnet block 4,888,576 chain hash exceeds BN254 `r` so the
+    /// reduced form differs from the raw form. Captured from
+    /// `diag/instances_4888576.txt` inst[12] alongside the GQL
+    /// `block.block_id`, confirmed independently by hand-subtraction.
+    #[test]
+    fn hash_hex_reduces_above_modulus() {
+        let raw = "3151be4d584a014e66bbe4f9d2713ff8ac6a2455db7b191c41d5cb452e05bdad";
+        let reduced_hex = "00ed6fda77186124ae6b9f4350efe79b84363c0d61c1a88afdf3d5b13e05bdac";
+        let expected = U256::from_be_slice(&hex::decode(reduced_hex).unwrap());
+        assert_eq!(hash_hex_to_block_id_fr(raw).unwrap(), expected);
+        // The un-reduced helper must not touch it — this is what
+        // `applyBkSetUpdate` still needs.
+        assert_ne!(hash_hex_to_u256(raw).unwrap(), expected);
+    }
+
+    /// Block 4,888,064 chain hash was already `< r`, which is why that
+    /// key-block succeeded on-chain before the fix. Reduction must be
+    /// a no-op for such values.
+    #[test]
+    fn hash_hex_reduce_below_modulus_is_identity() {
+        let raw = "1234abcd5678ef00112233445566778899aabbccddeeff001122334455667788";
+        assert!(U256::from_be_slice(&hex::decode(raw).unwrap()) < crate::types::BN254_FR_MODULUS);
+        assert_eq!(
+            hash_hex_to_block_id_fr(raw).unwrap(),
+            hash_hex_to_u256(raw).unwrap(),
+        );
+    }
+
     #[test]
     fn parses_proof_event_shape() {
         let json = r#"{
@@ -283,13 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_bytes_accepts_shplonk_and_legacy_rejects_between() {
-        // Legacy 256-byte back-compat blob.
-        let legacy =
-            PartnerWithdrawalProof::from_json_bytes(proof_json_with(GROTH16_PROOF_SIZE).as_bytes())
-                .unwrap();
-        assert_eq!(legacy.proof_bytes().unwrap().len(), GROTH16_PROOF_SIZE);
-
+    fn proof_bytes_accepts_shplonk_rejects_short() {
         // Production SHPLONK aggregator calldata (instances + outer proof).
         let shplonk = PartnerWithdrawalProof::from_json_bytes(
             proof_json_with(SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200).as_bytes(),
@@ -297,7 +307,14 @@ mod tests {
         .unwrap();
         assert!(shplonk.proof_bytes().is_ok());
 
-        // A blob that is neither legacy-256 nor a valid SHPLONK prefix is rejected.
+        // Post-NB-Q7: the retired 256-byte back-compat lane is gone, so a
+        // legacy-sized blob now fails the same short-blob gate as any other
+        // undersized input.
+        let legacy = PartnerWithdrawalProof::from_json_bytes(proof_json_with(256).as_bytes())
+            .unwrap();
+        assert!(legacy.proof_bytes().is_err());
+
+        // A blob shorter than the SHPLONK instance prefix is rejected.
         let bad = PartnerWithdrawalProof::from_json_bytes(proof_json_with(300).as_bytes()).unwrap();
         assert!(bad.proof_bytes().is_err());
     }

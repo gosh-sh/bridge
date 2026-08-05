@@ -152,7 +152,7 @@ acki-nacki-to-eth-bridge-halo2-prover/
 The library is designed to serve two independent binaries:
 
 1. **This repo's `bridge-prover-daemon`** — the reference consumer, drives Circuits 1A/1B + 2 + bk-updates against a real AN node and hands proofs to the paired `bridge-verifier-daemon` over IPC.
-2. **`crates/bridge-relayer-daemon` (Sergey's ETH-side relayer)** — a separate crate outside this workspace, adds `bridge-prover-lib` as a dep and drives the same [`LiveProverDriver`](bridge-prover-lib/src/live_driver/mod.rs) API against the ETH-side `AckiNackiBridge.sol` contract. See `bridge/alina_bridge_relayer_live_integration_plan_for_sergey_2026-07-09.md` for the integration contract (public API, poll/ack protocol, consistency-check invariants, halo2 transitive-dep note).
+2. **`crates/bridge-relayer-daemon` (Sergey's ETH-side relayer)** — a separate crate outside this workspace, adds `bridge-prover-lib` as a dep and drives the same [`LiveProverDriver`](bridge-prover-lib/src/live_driver/mod.rs) API against the ETH-side `AckiNackiBridge.sol` contract. See `bridge/docs/archive/alina_bridge_relayer_live_integration_plan_for_sergey_2026-07-09.md` for the integration contract (public API, poll/ack protocol, consistency-check invariants, halo2 transitive-dep note) — archived after the integration landed (2026-07-30); §3.1 GQL-shortcut and §7 sentry-migration sections are annotated SUPERSEDED / MOOT.
 
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
@@ -262,7 +262,7 @@ All other constants (poll intervals, file paths, `THINNING_FACTOR_P`) are hard-c
 
 Three cleanups the orchestrator does **not** enforce itself. Each surfaces as an opaque error deep in `tvm-cli` or witness-builder output, and each has cost hours in the past when skipped. Run them before every E2E:
 
-1. **Rebuild all six binaries whenever `bridge-prover-lib` changed.** Six binaries share `bridge-prover-lib`: `bridge-prover-daemon`, `bridge-verifier-daemon`, `bridge-event-halo2-prover`, `bridge-event-witness-builder`, `bridge-event-private-witness-export`, `bridge-event-halo2-selftest`. Partial rebuilds leave stale binaries embedding old assertions (e.g. `"block_merkle_tree_leaves must have 16 entries"` after the depth-4 → depth-3 migration). Quick check:
+1. **Rebuild all six binaries whenever `bridge-prover-lib` changed.** Six binaries share `bridge-prover-lib`: `bridge-prover-daemon`, `bridge-verifier-daemon`, `bridge-event-halo2-prover`, `bridge-event-witness-builder`, `bridge-event-private-witness-export`, `bridge-event-halo2-selftest`. Partial rebuilds leave stale binaries embedding old assertions (e.g. a pre-migration binary still says `"block_merkle_tree_leaves must have 8 entries"` after the depth-3 → depth-4 migration, whereas the current source emits `"must have 16 entries"`). Quick check:
 
    ```bash
    strings target/release/bridge-event-witness-builder | grep -E 'must have [0-9]+ entries'

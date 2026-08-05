@@ -252,7 +252,8 @@ contract DeployRealBridge is Script {
                 fallbackVerifier: IFallbackVerifier(address(0)),
                 layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
                 genesisBkSetCommitment: 0,
-                genesisPrevMaxLevelLayerHash: 0
+                genesisPrevMaxLevelLayerHash: 0,
+                genesisLastSeenBlockSeqNo: 0
             });
         }
 
@@ -265,7 +266,8 @@ contract DeployRealBridge is Script {
             fallbackVerifier: v.fallback_,
             layerHashesVerifier: v.layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
-            genesisPrevMaxLevelLayerHash: genesisPrevAnchor
+            genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
         console.log("  PrimaryAggregatorVerifier:", address(v.primary));
         console.log("  FallbackAggregatorVerifier:", address(v.fallback_));

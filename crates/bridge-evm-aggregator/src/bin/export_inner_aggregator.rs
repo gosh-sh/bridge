@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use bridge_evm_aggregator::{
     aggregator::AggregatorConfig,
-    evm_export::export_aggregated_snark,
+    evm_export::aggregate_and_prove_cached,
 };
 use snark_verifier_sdk::Snark;
 
@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     let mut name = None;
     let mut k_outer = None;
     let mut universality = None;
+    let mut pk_cache_dir: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -40,6 +41,11 @@ fn main() -> anyhow::Result<()> {
             "--inner-instances" => {
                 let _ = args.next();
             }
+            // Optional persistent outer PK cache. First run against a new
+            // (name, k_outer, lookup_bits, universality, inner-shape) slot
+            // does full keygen (~3-5 min at K=21); subsequent runs load PK
+            // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
+            "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }
@@ -50,7 +56,13 @@ fn main() -> anyhow::Result<()> {
     let inner_bytes = std::fs::read(&inner_path)?;
     let inner_snark: Snark = bincode::deserialize(&inner_bytes)?;
     let config = AggregatorConfig::for_verifier_name_with_overrides(&name, k_outer, universality);
-    let export = export_aggregated_snark(&out_dir, &name, inner_snark, config)?;
+    let export = aggregate_and_prove_cached(
+        &name,
+        inner_snark,
+        config,
+        Some(&out_dir),
+        pk_cache_dir.as_deref(),
+    )?;
 
     println!(
         "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?})",

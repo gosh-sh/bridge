@@ -36,7 +36,8 @@
 //! `tests/round_trip.rs` for the Rust-only acceptance check.
 
 pub mod aggregator;
+pub mod aggregator_cache;
 pub mod eip170;
 pub mod evm_export;
-pub mod halo2_snark;
 pub mod multiply;
+pub mod srs_guard;

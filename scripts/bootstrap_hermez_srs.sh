@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Bootstrap the Hermez Perpetual Powers of Tau KZG SRS (BN254, K=20)
-# into `crates/bridge-prover-orchestrator/params/kzg_bn254_20.srs`.
+# into `crates/bridge-snark-utils/params/kzg_bn254_20.srs`.
 #
 # Pulls the public ceremony output `powersOfTau28_hez_final_20.ptau`
 # from Polygon zkEVM's official Google Cloud mirror, then converts it
@@ -14,7 +14,7 @@
 # implies a well-formed BN254 KZG SRS.
 #
 # Outputs:
-#   crates/bridge-prover-orchestrator/params/kzg_bn254_20.srs
+#   crates/bridge-snark-utils/params/kzg_bn254_20.srs
 #     (~128 MB, SHA-256 80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608)
 #
 # Wall-clock cost: ~5 min download + ~20 min conversion = ~25 min.
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PARAMS_DIR="${REPO_ROOT}/crates/bridge-prover-orchestrator/params"
+PARAMS_DIR="${REPO_ROOT}/crates/bridge-snark-utils/params"
 SRS_PATH="${PARAMS_DIR}/kzg_bn254_20.srs"
 EXPECTED_SHA="80394564e2598883dbb5d7d61630287f34e29cdd806d7ef74f68acc6bffeb608"
 
@@ -107,5 +107,5 @@ echo "  - Delete stale cached keys to force regeneration against this SRS:"
 echo "      rm -f $PARAMS_DIR/{fallback,primary,layer_hashes}_{vk,pk}.bin"
 echo "      rm -f $PARAMS_DIR/{fallback,primary,layer_hashes}_config_params.json"
 echo "  - Run round-trip:"
-echo "      cd $REPO_ROOT/crates/bridge-prover-orchestrator"
+echo "      cd $REPO_ROOT/crates/bridge-snark-utils"
 echo "      cargo test --release --test halo2_tvm_bundle_round_trip -- --nocapture"

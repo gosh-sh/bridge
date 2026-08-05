@@ -50,7 +50,7 @@ Use the view `expectedPrevAnchor(numLayers)` (or the relayer helper that mirrors
 
 ### WD-Q4 — withdraw anchor layer
 
-`WITHDRAW_ANCHOR_LAYER = 1` (partner `layer_idx = 0`). Changing partner layer without a contract upgrade / future `anchorLayer` PI halts withdrawals fail-closed.
+NB-Q1 (2026-08-04): the `WITHDRAW_ANCHOR_LAYER = 1` pin was removed. `withdrawByProof` now scans every layer window via `_isKnownAnchor`, so partner L≥2 witnesses are accepted without a contract upgrade. Every window entry was written by a verified `verifyBlock`, so the layer index adds specificity, not security. Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan of the specific window) remains the ultimate target once the Circuit 4 re-keygen lands.
 
 ### A4-Q2 — pause
 

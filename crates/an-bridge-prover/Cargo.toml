@@ -7,6 +7,10 @@ members = [
     "bridge-event-witness",
     "bridge-event-prover-lib",
     "bridge-event-halo2-prover",
+    # In-process wrap of Poseidon proof bytes → snark-verifier `.snark`. Lets
+    # bridge-relayer-daemon skip the export-1a1b2-poseidon-snark subprocess
+    # (which independently re-fetched + re-proved every block).
+    "bridge-snark-wrap",
     # Symlink → ../bridge-relayer-daemon. Path deps in that crate are relative
     # to this member path (see its Cargo.toml header).
     "bridge-relayer-daemon",
@@ -79,6 +83,7 @@ rand = "0.8"
 bridge-prover-lib = { path = "bridge-prover-lib" }
 bridge-gql-fetcher = { path = "bridge-gql-fetcher" }
 bridge-event-prover-lib = { path = "bridge-event-prover-lib" }
+bridge-snark-wrap = { path = "bridge-snark-wrap" }
 
 # --- Halo2 backend unification (collapse to ONE halo2-base instance) ---
 #

@@ -26,7 +26,7 @@ pub const LAYER_HASHES_NUM_PUBLIC_INPUTS: usize = 1 + 1 + 1 + MAX_LAYERS + 1;
 
 /// Bundled inputs for [`generate_layer_proof_with_input`]. Mirrors the
 /// `LayerHashesProofInput<'a>` previously hand-rolled in
-/// `bridge-prover-orchestrator::layer_hashes_prover` so the orchestrator can
+/// `bridge-snark-utils::layer_hashes_prover` so the orchestrator can
 /// drop its local copy and import this directly.
 pub struct LayerHashesProofInput<'a> {
     pub layer_hashes_preimage: [u8; LAYER_PREIMAGE_SIZE],

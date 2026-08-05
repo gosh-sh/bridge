@@ -30,7 +30,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     string internal constant FALLBACK_CALLDATA = "verifiers/FallbackAggregatorVerifier_calldata.bin";
     string internal constant LAYER_CALLDATA = "verifiers/LayerHashesAggregatorVerifier_calldata.bin";
     string internal constant BOUND_SCENARIO =
-        "../../crates/bridge-prover-orchestrator/proofs/bound/bound_scenario.json";
+        "../../crates/bridge-snark-utils/proofs/bound/bound_scenario.json";
 
     struct BoundScenario {
         uint256 blockId;
@@ -187,11 +187,22 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         );
 
         assertEq(bridge.storedLastSeenBlockSeqNo(), scenario.blockSeqNo);
-        assertEq(bridge.storedNumLayers(), scenario.numLayers);
+        // Storage v2.0: per-layer state now lives in `_layerWindows` and is
+        // observed via `getLatestPerLayer()`; the flat `storedNumLayers` /
+        // `storedLayerHashes` cache is gone. Assert the per-layer head hashes
+        // instead — entry [L-1] is the most recent append for layer L.
+        uint256[10] memory latest = bridge.getLatestPerLayer();
+        for (uint8 L = 1; L <= scenario.numLayers; L++) {
+            assertEq(latest[L - 1], scenario.layerHashes[L - 1], "layer head");
+        }
+        for (uint8 L = scenario.numLayers + 1; L <= 10; L++) {
+            assertEq(latest[L - 1], 0, "unused layer stays zero");
+        }
+        // storedPrevMaxLevelLayerHash is now the immutable genesis seed.
         assertEq(
             bridge.storedPrevMaxLevelLayerHash(),
-            scenario.layerHashes[scenario.numLayers - 1],
-            "chain anchor = top active layer hash"
+            scenario.prevMaxLevelLayerHash,
+            "immutable genesis seed unchanged"
         );
         assertEq(bridge.storedBkSetCommitment(), scenario.bkSetPoseidon);
     }

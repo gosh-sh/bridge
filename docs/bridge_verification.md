@@ -211,19 +211,19 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000
 |---|---|
 | **LH-1** | Every successful `verifyBlock(...)` is preceded by **two** Groth16 proofs: one attestation proof (Circuit 1A or 1B, depending on `finType`) and one layer-hashes-movement proof (Circuit 2). |
 | **LH-2** | `bkSetCommitment` (the argument flowing into both verifier calls) equals the bridge's stored `storedBkSetCommitment` — proofs cannot be back-dated to a stale committee. |
-| **LH-3** | `prevMaxLevelLayerHash` (the argument flowing into Circuit 2) equals the bridge's stored `storedPrevMaxLevelLayerHash` — the **chain anchor**. For the very first call after deployment this equals `genesisPrevMaxLevelLayerHash` (typically 0). |
+| **LH-3** | `prevMaxLevelLayerHash` (the argument flowing into Circuit 2) equals the bridge's `expectedPrevAnchor(numLayers)` — the **chain anchor** derived from the per-layer rolling windows via `pick = min(numLayers, highestActiveLayer)`. For the very first call after deployment this falls back to the immutable `storedPrevMaxLevelLayerHash` genesis seed (typically 0). Storage v2.0 (2026-08-04): the flat mutable `storedPrevMaxLevelLayerHash` was removed; `expectedPrevAnchor` sources from `_layerWindows[pick]` instead. |
 | **LH-4** | `numLayers ∈ [1, MAX_LAYER_HASHES]` (i.e., 1..10) — out-of-range counts revert with `InvalidNumLayers`. |
 | **LH-5** | `layerHashes[i] == 0` for every `i ≥ numLayers`. The bridge will revert with `LayerHashTailNonZero(i)` — the unused tail must not carry silent garbage. |
 | **LH-6** | `blockSeqNo > storedLastSeenBlockSeqNo` — strict monotonicity. Replay attempts revert with `BlockSeqNoNotMonotonic`. |
 | **LH-7** | Each verifier adapter (`PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) returns `false` if `proof.length != 256`, and never reverts on invalid proofs — it normalises gnark reverts to `false` via try/catch so `verifyBlock` produces a clean `AttestationProofRejected` / `LayerHashesProofRejected` revert. |
-| **LH-8** | After a successful call, `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]` (the new top-of-chain becomes the anchor for the next call), `storedNumLayers = numLayers`, `storedLayerHashes = layerHashes`, `storedLastSeenBlockSeqNo = blockSeqNo`. There is no admin path that bypasses this. |
+| **LH-8** | Storage v2.0 (2026-08-04): after a successful call, `_layerWindows[L]` gets `layerHashes[L-1]` appended for every non-zero `L ∈ [1, numLayers]` (rolling window semantics); `storedLastSeenBlockSeqNo = blockSeqNo`. There is no admin path that bypasses this. The flat `storedNumLayers` / `storedLayerHashes` / mutable `storedPrevMaxLevelLayerHash` writes are gone — indexers observe per-layer heads via `getLatestPerLayer()` and query the next-block anchor via `expectedPrevAnchor(numLayers)`. |
 | **LH-9** | If any of the three verifier slots is `address(0)` at construction, `verifyBlock` reverts with `VerifyBlockDisabled`. The deposit/AAVE surface remains fully functional in that mode. |
 
 ### 5.2 Why each property holds
 
 - **LH-1**: `verifyBlock` directly calls both verifier adapters; the verifier addresses are `immutable` and set in the constructor's `VerifyBlockConfig`. There is no setter that can replace them post-deployment.
 - **LH-2**: `bkSetCommitment != storedBkSetCommitment ⇒ revert BkSetCommitmentMismatch`. The user-supplied `bkSetCommitment` is the same value passed to **both** verifier calls — the partner's circuits commit to it as a public input (offset 96 of the envelope tree), so a wrong value would also fail the gnark pairing.
-- **LH-3**: explicit `prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash ⇒ revert PrevAnchorMismatch`. The first-call genesis case is just `storedPrevMaxLevelLayerHash = genesisPrevMaxLevelLayerHash` seeded in the constructor.
+- **LH-3**: explicit `prevMaxLevelLayerHash != _expectedPrevAnchor(numLayers) ⇒ revert PrevAnchorMismatch`. Storage v2.0 (2026-08-04): `_expectedPrevAnchor` picks the head of `_layerWindows[min(numLayers, highestActiveLayer)]`; if `highestActiveLayer == 0` (very first call after deployment) it falls back to the immutable `storedPrevMaxLevelLayerHash` genesis seed.
 - **LH-4**: explicit `if (numLayers == 0 || numLayers > MAX_LAYER_HASHES) revert InvalidNumLayers(numLayers)`.
 - **LH-5**: explicit `for (i = numLayers; i < MAX_LAYER_HASHES; i++) if (layerHashes[i] != 0) revert LayerHashTailNonZero(i)` — guards against silent garbage in unused slots.
 - **LH-6**: explicit `blockSeqNo <= storedLastSeenBlockSeqNo ⇒ revert BlockSeqNoNotMonotonic`.
@@ -241,7 +241,7 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000
 2. Shape & range checks: `numLayers` in `[1, MAX_LAYER_HASHES]` (LH-4); `layerHashes` tail (LH-5).
 3. Anchor checks against stored state: `bkSetCommitment` (LH-2), `blockSeqNo` (LH-6), `prevMaxLevelLayerHash` (LH-3).
 4. Crypto: route to `primaryVerifier` or `fallbackVerifier` based on `finType`, then call `layerHashesVerifier`. Both must return `true` (LH-1, LH-7).
-5. Effects (CEI): commit `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes`, `storedPrevMaxLevelLayerHash` (LH-8).
+5. Effects (CEI): commit `storedLastSeenBlockSeqNo` and call `_appendLayerHashes(numLayers, layerHashes, blockSeqNo)` to push each non-zero `layerHashes[L-1]` into `_layerWindows[L]` (LH-8). Storage v2.0 (2026-08-04): the flat `storedNumLayers` / `storedLayerHashes` / mutable `storedPrevMaxLevelLayerHash` writes were removed.
 6. Emit `BlockVerified(blockId, blockSeqNo, finType, numLayers)`.
 
 ```bash
@@ -277,10 +277,10 @@ forge test --match-test "testHappyPathPrimary" -vv
 Drives `verifyBlock` end-to-end with a real bound proof set generated by:
 
 ```bash
-cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+cargo run -p bridge-snark-utils --bin export-bound-block-proofs --release
 ```
 
-The export binary writes `bound_scenario.json` plus `proof_*.bin` into `crates/bridge-prover-orchestrator/exports/`; the Foundry test loads them as hardcoded fixtures (regenerated on demand). Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue) is deferred to **Phase 5.3**.
+The export binary writes `bound_scenario.json` plus `proof_*.bin` into `crates/bridge-snark-utils/exports/`; the Foundry test loads them as hardcoded fixtures (regenerated on demand). Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue) is deferred to **Phase 5.3**.
 
 #### L5 — post-deployment
 
@@ -290,21 +290,29 @@ cast call $BRIDGE "fallbackVerifier()(address)"
 cast call $BRIDGE "layerHashesVerifier()(address)"
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"
 cast call $BRIDGE "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE "storedNumLayers()(uint8)"
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
+# Storage v2.0 (2026-08-04): `storedNumLayers` was removed; use
+# `getLatestPerLayer()` (see below) — the highest non-zero entry
+# is the current `highestActiveLayer`.
+# The `storedPrevMaxLevelLayerHash()` getter still exists but is the
+# immutable genesis seed; for the next-block anchor use
+# `expectedPrevAnchor(numLayers)`.
+cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"   # immutable genesis seed
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 cast call $BRIDGE "MAX_LAYER_HASHES()(uint256)"   # 10
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"   # replaces getStoredLayerHashes()
 ```
 
 #### L6 — monitoring invariants
 
 ```
-storedPrevMaxLevelLayerHash(t) == storedLayerHashes[storedNumLayers - 1](t)            # always
-prevMaxLevelLayerHash_in_event_t == storedPrevMaxLevelLayerHash(t-1)                   # event continuity
-storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                            # strict monotonicity
+# Storage v2.0 (2026-08-04): invariants restated over the per-layer window model.
+getLatestPerLayer()[L-1] == last-non-zero layerHashes[L-1] observed in verifyBlock so far  # rolling head
+expectedPrevAnchor(numLayers)(t) == layerHashes[pick-1] from most recent verifyBlock       # per-layer anchor
+prevMaxLevelLayerHash_in_event_t == expectedPrevAnchor(numLayers_t)(t-1)                    # event continuity
+storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                                  # strict monotonicity
 ```
 
-A relayer/monitor that sees a `BlockVerified` event with a `prevMaxLevelLayerHash` parameter that doesn't match the prior `storedPrevMaxLevelLayerHash` should alert — it would indicate a state-machine break.
+A relayer/monitor that sees a `BlockVerified` event with a `prevMaxLevelLayerHash` parameter that doesn't match the prior `expectedPrevAnchor(numLayers)` should alert — it would indicate a state-machine break.
 
 ---
 
@@ -465,7 +473,7 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 
 ```bash
 diff -u contracts/ethereum/src/LayerHashesGroth16VerifierGenerated.sol \
-  <(cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
+  <(cd crates/bridge-snark-utils/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
 ```
 
 This is a one-shot manual check whenever the corresponding circuit (or its `circuit.go` `Define`) changes. The same applies to `PrimaryGroth16VerifierGenerated.sol` (circuit-1a). (Circuit 1B no longer has a gnark Groth16 verifier — it uses the SHPLONK aggregator `.bin`; regenerate via `scripts/n14_r15_proving_run.sh`.)
@@ -570,7 +578,7 @@ forge test                # 135 tests across 15 suites, all green
 # ─── L3 — single-block real-proof bound test ──────────────────
 forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv
 # Drives verifyBlock with a real bound proof set generated by:
-#   cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+#   cargo run -p bridge-snark-utils --bin export-bound-block-proofs --release
 # Multi-block real-proof E2E is deferred to Phase 5.3 (relayer + Anvil).
 
 # ─── L0 — sanity grep for invariants ──────────────────────────
@@ -592,8 +600,10 @@ cast call $BRIDGE  "fallbackVerifier()(address)"
 cast call $BRIDGE  "layerHashesVerifier()(address)"
 cast call $BRIDGE  "storedBkSetCommitment()(uint256)"
 cast call $BRIDGE  "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE  "storedNumLayers()(uint8)"
-cast call $BRIDGE  "storedPrevMaxLevelLayerHash()(uint256)"
+# Storage v2.0 (2026-08-04): `storedNumLayers()` removed; use
+# `getLatestPerLayer()` and scan for the highest non-zero entry.
+cast call $BRIDGE  "storedPrevMaxLevelLayerHash()(uint256)"     # immutable genesis seed
+cast call $BRIDGE  "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 cast call $BRIDGE  "MAX_LAYER_HASHES()(uint256)"                 # 10
 cast call $ORACLE  "axiomV2Core()(address)"
 
@@ -605,11 +615,14 @@ echo "aWETHbal  = $(cast call $aWETH 'balanceOf(address)(uint256)' $BRIDGE)"
 # Invariant: balance + aWETHbal >= treasury
 
 # 2. AN→ETH chain integrity (poll every block)
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+# Storage v2.0 (2026-08-04): observe the per-layer window heads and the
+# per-numLayers anchor pick — the flat `getStoredLayerHashes()` cache is gone.
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 # Invariant: prevMaxLevelLayerHash in each new BlockVerified event must equal
-# the stored value at the time of the prior call. Strict monotonicity on
-# storedLastSeenBlockSeqNo is the second invariant — alert on any drop.
+# expectedPrevAnchor(numLayers) at the time of the prior call. Strict
+# monotonicity on storedLastSeenBlockSeqNo is the second invariant — alert
+# on any drop.
 
 # 3. No genesis drift
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"
@@ -628,7 +641,7 @@ To be explicit about the trust boundary:
 | Soundness of the Halo2 circuits (1A, 1B, 2, and 3 once it lands) | `docs/layer_hashes_circuit_audit.md`, partner audits, `docs/four_circuit_architecture.md` §3 |
 | BLS12-381 G2 subgroup gap (audit FORK-2 / BLS-1) | open audit finding; carries over to v2's Circuit 1A/1B (same `gosh-bls-verification` chip); will be addressed in next circuit revision |
 | Trusted setup of the KZG SRS for Halo2 | community-generated `kzg_bn254_19.srs` shared across all four circuits; verify checksum on download |
-| Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
+| Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-snark-utils/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
 | Acki Nacki BFT economic security | not a bridge concern; the bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds |
 | Off-chain relayer liveness / censorship | a malicious relayer can stall but cannot forge state; multiple competing relayers are sufficient |
 | Phase 1.C BK-set rotation **circuit** (Circuit 3) | not yet shipped; the interim `applyBkSetUpdate` rotates the commitment against an attested block's Merkle tree, but proves nothing about the succession itself |

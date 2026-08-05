@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SNARK="${1:-${ROOT}/crates/bridge-prover-orchestrator/proofs/bound/poseidon-snark/layer_hashes.snark}"
+SNARK="${1:-${ROOT}/crates/bridge-snark-utils/proofs/bound/poseidon-snark/layer_hashes.snark}"
 OUT="${ROOT}/contracts/ethereum/verifiers"
 
 if [[ ! -f "${SNARK}" ]]; then

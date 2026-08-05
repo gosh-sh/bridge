@@ -29,9 +29,11 @@ const PROOFS_DIR: &str = "proofs";
 /// `h8_15`) instead of the two v6 fields (`h0`, `h23`), and the layer-bundle
 /// `NUM_MERKLE_SIBLINGS` grew from 3 to 4 accordingly. The Fr value the halo2
 /// verifier consumes is derived on demand by inner-product-folding the
-/// reversed bytes (see [`hash_hex_to_fr`]); the on-chain Halo2Verifier Yul
-/// does the equivalent via `mod(calldataload, f_q)`. The verifier rejects
-/// mismatched versions instead of silently re-interpreting fields.
+/// reversed bytes (see [`hash_hex_to_fr`]). Note: the R15 SHPLONK aggregator
+/// adapter on-chain does *not* auto-reduce — it byte-compares the argument
+/// against the proof's instance before the pairing, so callers must send the
+/// canonical `Fr` image (see `bridge-relayer-daemon::withdrawal::hash_hex_to_block_id_fr`).
+/// The verifier rejects mismatched versions instead of silently re-interpreting fields.
 pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 7;
 
 fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
@@ -77,11 +79,14 @@ pub struct ProofRequest {
     /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
     /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
     /// `uint256(bytes32(blockId))`). Both Circuit 1a/1b and Circuit 2 bind
-    /// `block_id_fr = fold(reverse(this))` — the on-demand reduction mod p
-    /// happens inside [`hash_hex_to_fr`] (Rust verify) and inside
-    /// `Halo2Verifier.sol` Yul (`mod(calldataload, f_q)`, on-chain). Storing
-    /// the full 256-bit hash preserves the top 2 bits that a `Fr::to_repr()`
-    /// wire format would lose whenever the chain hash `>= p` (~3/4 of blocks).
+    /// `block_id_fr = fold(reverse(this))` — reduction mod `Fr` happens on the
+    /// caller side (Rust: [`hash_hex_to_fr`]; on-chain: the relayer sends the
+    /// already-reduced value, and `AckiNackiBridge` applies the same `% BN254_R`
+    /// before the SHA-256 fold compare, since the R15 SHPLONK adapter does NOT
+    /// auto-reduce — it byte-compares the argument against a canonical `Fr`
+    /// instance read out of the proof before the pairing runs). Storing the
+    /// full 256-bit hash preserves the top 2 bits that a `Fr::to_repr()` wire
+    /// format would lose whenever the chain hash `>= p` (~81% of blocks).
     /// Same value whether 1a or 1b emitted the proof — Circuit 1b's
     /// same-block_id constraint guarantees the two attestations in the
     /// fallback pair agree.
@@ -281,13 +286,15 @@ pub struct BkUpdateRequest {
     /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
     /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
     /// `uint256(bytes32(blockId))`). This is the single value
-    /// `applyBkSetUpdate` receives on-chain: SHPLONK auto-reduces mod p via
-    /// `mod(calldataload, f_q)`, while the SHA-256 Merkle open compares
-    /// against the raw bytes. Rust verify derives the Fr public instance on
-    /// demand via [`hash_hex_to_fr`]; the pre-v6 dual-field encoding
-    /// (`block_id_hex` = Fr LE repr + `block_id_hash_hex` = raw hash BE) is
-    /// gone — the Fr form was redundant since it's a pure function of the
-    /// raw hash.
+    /// `applyBkSetUpdate` receives on-chain: the R15 SHPLONK adapter does NOT
+    /// auto-reduce (it byte-compares against a canonical `Fr` instance before
+    /// the pairing), so the relayer must send the already-reduced value; the
+    /// contract applies the same `% BN254_R` to the SHA-256 fold root before
+    /// comparing so both consumers agree. Rust verify derives the Fr public
+    /// instance on demand via [`hash_hex_to_fr`]; the pre-v6 dual-field
+    /// encoding (`block_id_hex` = Fr LE repr + `block_id_hash_hex` = raw hash
+    /// BE) is gone — the Fr form was redundant since it's a pure function of
+    /// the raw hash.
     pub block_id_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
@@ -456,8 +463,10 @@ mod tests {
         // Both `hash_hex_to_fr` and the equivalent inline fold must produce
         // the same Fr for a 32-byte BE hash — this is the same construction
         // `attestation_bls_checker_circuit::attestation_data_parser::
-        // compute_block_id_fr` uses and the invariant the on-chain Yul
-        // `mod(calldataload, f_q)` mirrors.
+        // compute_block_id_fr` uses and the same reduction the contract
+        // applies (`% BN254_R`) before handing the value to the R15 SHPLONK
+        // adapter, which byte-compares canonical `Fr` instances rather than
+        // auto-reducing.
         let raw_be = [0xffu8; 32];
         let via_helper = hash_hex_to_fr(&hex::encode(raw_be)).unwrap();
         let via_inline = fold_hash_be_to_fr(&raw_be);

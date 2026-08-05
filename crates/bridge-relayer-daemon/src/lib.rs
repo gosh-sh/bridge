@@ -6,12 +6,11 @@
 //! File-driven sources ([`ProverProofsBlockSource`], [`FixturesBlockSource`])
 //! remain for CI / operator one-shots.
 
+pub mod aggregated_source;
 pub mod aggregator;
-pub mod bk_set_sentry;
 pub mod bridge;
 pub mod daemon;
 pub mod error;
-pub mod guarded_relayer;
 pub mod history_consistency;
 pub mod live_source;
 pub mod proof_validation;
@@ -22,13 +21,14 @@ pub mod types;
 pub mod withdraw_prover;
 pub mod withdrawal;
 
+pub use aggregated_source::AggregatedBlockSource;
 pub use aggregator::{
-    calldata_binds_instances, Circuit4ShplonkPipeline, Circuit4SnarkProver, MockAggregator,
-    MockCircuit4SnarkProver, ProofAggregator, SnarkArtefacts, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
-    WITHDRAWAL_VERIFIER_NAME,
+    calldata_binds_instances, Circuit12ShplonkPipeline, Circuit4ShplonkPipeline,
+    Circuit4SnarkProver, InProcessCircuit4SnarkProver, MockAggregator, MockCircuit4SnarkProver,
+    MockSnarkWrapper, PoseidonSnarkWrapper, ProofAggregator, SnarkArtefacts, SnarkWrapper,
+    SubprocessAggregator, SubprocessAggregatorConfig, FALLBACK_VERIFIER_NAME,
+    LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
-pub use bk_set_sentry::{BkSetPoller, BkSetSentry, SentryMetrics, SentryStatus};
 pub use bridge::{
     BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
     MockBridgeClient, SubmitOutcome, WithdrawSubmitOutcome,
@@ -37,7 +37,6 @@ pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
 pub use error::RelayerError;
-pub use guarded_relayer::{GuardedOutcome, SentryGuardedRelayer};
 pub use history_consistency::{
     check_chain_monotonicity, check_history_consistency, check_startup_drift, HistoryDrift,
 };
@@ -55,5 +54,5 @@ pub use withdraw_prover::{
 };
 pub use withdrawal::{
     discover_event_proofs, is_event_proof_file, result_path_for, PartnerWithdrawalProof,
-    WithdrawalPublicInputs, WithdrawalResultGate, GROTH16_PROOF_SIZE,
+    WithdrawalPublicInputs, WithdrawalResultGate,
 };

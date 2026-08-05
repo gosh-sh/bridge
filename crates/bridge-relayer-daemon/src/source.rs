@@ -5,7 +5,7 @@
 //!   tests in this crate to drive multi-block scenarios in < 10 ms each.
 //! - [`FixturesBlockSource`] — reads pre-generated bound proof artefacts from
 //!   disk (the Phase 4.1 outputs of
-//!   `bridge-prover-orchestrator/proofs/bound/...` plus the gnark JSON produced
+//!   `bridge-snark-utils/proofs/bound/...` plus the gnark JSON produced
 //!   by `circuit-1a/circuit-2`). Yields a single canned block keyed by
 //!   `block_seq_no = 1`.
 //!
@@ -117,7 +117,7 @@ impl BlockSource for InMemoryBlockSource {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Reads a single bound block from
-/// `bridge-prover-orchestrator/proofs/bound/{primary,layer-hashes}` plus
+/// `bridge-snark-utils/proofs/bound/{primary,layer-hashes}` plus
 /// the gnark `groth16_output.json` files produced by
 /// `circuit-1a`/`circuit-2` wrappers.
 ///
@@ -311,14 +311,16 @@ struct PartnerProofRequest {
 
 /// Reads proof bundles from the partner prover's `proofs/` directory.
 ///
-/// By default expects **256-byte Groth16** proofs in the JSON (post-gnark
-/// wrap). Set `accept_halo2_proofs` only for dry-runs against a local mock
-/// bridge — Sepolia production verifiers reject non-256-byte proofs.
+/// Expects **R15 SHPLONK aggregator calldata** (`instances ‖ proof`) in the
+/// JSON — see [`crate::proof_validation`] for the per-circuit length gates.
+/// Set `accept_halo2_proofs` only for dry-runs against a local mock bridge
+/// where the shape gates should be bypassed.
 pub struct ProverProofsBlockSource {
     proofs_dir: PathBuf,
     /// When true, skip `result_<seqno>.json` verification gate.
     skip_verified_gate: bool,
-    /// When true, allow non-256-byte proofs (Halo2) through — for diagnostics.
+    /// When true, bypass the SHPLONK shape gates — for diagnostics against a
+    /// local mock bridge.
     accept_halo2_proofs: bool,
 }
 
@@ -754,7 +756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prover_proofs_source_loads_groth16_bundle() {
+    async fn prover_proofs_source_loads_shplonk_bundle() {
         let dir = tempfile::tempdir().unwrap();
         let proof = serde_json::json!({
             "schema_version": 2,
@@ -762,8 +764,8 @@ mod tests {
             "block_height": 512,
             "last_seen_block_seqno": 0,
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
-            "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
-            "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
+            "primary_proof_hex": "0x".to_string() + &"ab".repeat(2048),
+            "layer_proof_hex": "0x".to_string() + &"cd".repeat(2048),
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": [
@@ -794,7 +796,7 @@ mod tests {
         let src = ProverProofsBlockSource::new(dir.path());
         let b = src.fetch(512).await.unwrap().unwrap();
         assert_eq!(b.block_seq_no, 512);
-        assert_eq!(b.attestation_proof.len(), 256);
+        assert_eq!(b.attestation_proof.len(), 2048);
     }
 
     fn write_bundle_proof(dir: &std::path::Path, seq_no: u64) {
@@ -804,8 +806,8 @@ mod tests {
             "block_height": seq_no,
             "last_seen_block_seqno": 0,
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
-            "primary_proof_hex": "0x".to_string() + &"ab".repeat(256),
-            "layer_proof_hex": "0x".to_string() + &"cd".repeat(256),
+            "primary_proof_hex": "0x".to_string() + &"ab".repeat(2048),
+            "layer_proof_hex": "0x".to_string() + &"cd".repeat(2048),
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
             "layer_hash_frs_hex": vec![
@@ -850,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn bkupd_source_parses_partner_json() {
         let dir = tempfile::tempdir().unwrap();
-        let proof_hex = "0x".to_string() + &"ab".repeat(256);
+        let proof_hex = "0x".to_string() + &"ab".repeat(2048);
         let bkupd = serde_json::json!({
             "schema_version": 7,
             "block_seq_no": 24,
@@ -878,7 +880,7 @@ mod tests {
         let u = src.fetch_bk_update(24).await.unwrap().unwrap();
         assert_eq!(u.block_seq_no, 24);
         assert_eq!(u.fin_type, FinalizationType::Primary);
-        assert_eq!(u.attestation_proof.len(), 256);
+        assert_eq!(u.attestation_proof.len(), 2048);
         assert_eq!(u.sibling_h01[0], 0xaa);
         assert_eq!(u.sibling_h4_7[0], 0xbb);
         assert_eq!(u.sibling_h8_15[0], 0xcc);

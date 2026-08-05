@@ -151,6 +151,95 @@ A default-off flag was a stopgap for the missing artefact. That artefact now exi
 
 ---
 
+## NB-Q9 — `bridge-prover-orchestrator` crate: only runtime consumer is one subprocess call, otherwise dead weight
+
+**State.** Cross-repo grep of `use bridge_prover_orchestrator::` returns **zero hits outside the crate itself** — its 1,401 LoC of library code (`halo2_snark.rs`, `halo2_tvm_bundle.rs`, `bound_test_data.rs`, `proof_export.rs`, `lib.rs`) is consumed only by its own 5 CLI binaries and tests. It is not a Cargo dep of any other bridge crate.
+
+The one runtime consumer is `bridge-relayer-daemon`, which shells out to **one** binary via `SubprocessCircuit4SnarkProver` (`aggregator.rs:55, 111-151`, wired in `bin/relayer.rs:1226-1235`):
+
+- `export-c4-poseidon-snark` — Circuit 4 (event) Poseidon inner snark. Called at runtime for every `ProveWithdrawShplonk` invocation.
+
+The other four bins (`export-1a1b2-poseidon-snark`, `export-bound-block-proofs`, `export-bound-poseidon-snarks`, `export-halo2-poseidon-snark`) are invoked only by shell scripts / manual runbooks for offline `.bin` verifier regeneration — never by any daemon.
+
+Meanwhile Circuits 1A/1B/2 are already in-processed via `bridge-prover-lib::live_driver::LiveProverDriver` (`prover::generate_primary_proof`, `prover::generate_fallback_proof`, `layer_prover::generate_layer_proof`). Circuit 4 didn't get the same treatment in the 2026-07-27 refactor and kept the subprocess wrapper as scaffolding.
+
+**Note.** `bridge-evm-aggregator` is a fully standalone cargo workspace and has **no** dependency on `bridge-prover-orchestrator` — the two communicate only via `.snark` files on disk. Deleting the orchestrator does not touch the aggregator.
+
+**Caveat — not necessarily a full delete.** The four offline bins (`export-1a1b2-poseidon-snark`, `export-bound-block-proofs`, `export-bound-poseidon-snarks`, `export-halo2-poseidon-snark`) genuinely are useful as dev/ops utilities — verifier `.bin` regeneration, fixture rebuilds, debug snarks on demand. What is wrong here is the *shape*: they are miscategorized under a crate called "orchestrator" (which no longer orchestrates anything at runtime) mixed with a few genuinely dead pieces. So the ask isn't "delete everything," it's **rework + rebrand**: keep what still earns its keep, move it to a crate whose name matches what it does (e.g. `bridge-dev-tools` / `bridge-snark-utils`), and drop the pieces that turn out to have no consumers. The runtime `SubprocessCircuit4SnarkProver` path is the one clearly-fixable architectural miss (Circuits 1A/1B/2 are already in-processed; Circuit 4 should follow).
+
+**Questions.**
+
+1. OK to lift `export_c4_poseidon_snark.rs` (~200 LoC) into `bridge-event-prover-lib` as `pub fn export_circuit4_poseidon_snark(...)` and have `bridge-relayer-daemon` call it in-process — same pattern as Circuits 1A/1B/2 today? (This part I'd argue is clear-cut.)
+2. For the rest — rather than deciding delete-vs-keep piecewise now, does it make sense to open a small design ticket "rework `bridge-prover-orchestrator`" whose outcome is one of:
+   - **Rebrand + slim:** rename to something like `bridge-snark-utils` / `bridge-dev-tools`, keep the offline bins that ops/dev actually still runs, drop the dead code. Library modules land where they naturally belong:
+     - `halo2_snark.rs` (97 LoC, gosh-VK → snark-verifier `Snark` wrapper) → `bridge-event-prover-lib` (same gosh-fork build unit), *if* still used by any surviving bin.
+     - `halo2_tvm_bundle.rs` (698 LoC, `VkBlob` for AN-side `ZKHALO2VERIFYWITHVK` opcode) → `bridge-prover-lib` (its natural AN-side home).
+     - `proof_export.rs` (101 LoC ser/de helpers) → wherever the callers land.
+     - `bound_test_data.rs` (464 LoC fixture generator) → `bridge-event-prover-lib/tests/` (test-support only).
+   - **Full delete:** only if every bin turns out to have no ops/dev consumer either.
+     The point is: the name "orchestrator" is now misleading (it orchestrates nothing at runtime post-refactor), and the crate has become a bag of loosely-related utilities — some load-bearing for ops, some genuinely dead. Worth a deliberate pass, not a piecewise decision.
+3. Any consumer I'm not seeing on the *library* side (`use bridge_prover_orchestrator::...`)? Only cross-repo hits outside the crate are doc examples (`docs/zkhalo2verifywithvk_reference.md:219`, `fixtures/circuit_1b_fallback/README.md:98`) — trivially retargetable. And on the *binary* side — which of the four offline bins are you (or ops) still running by hand, so we know what has to survive the rework?
+
+---
+
+## NB-Q10 — Confirm Hermez PPoT SRS was used to generate the committed `contracts/ethereum/verifiers/*.bin`
+
+**State.**
+
+Ran a Hermez audit on the `PrimaryAggregatorVerifier` by regenerating it locally against a synthetic Circuit 1A witness (`bridge-test-data-gen::generate_test_data_all_sign(3)`) → Poseidon inner snark → `aggregate-proof --name PrimaryAggregatorVerifier` against `bridge/crates/an-bridge-prover/params/kzg_bn254_21.srs`.
+
+- Our-side outer SRS confirmed Hermez PPoT: `assert_hermez_ceremony(&params_outer)` at `bridge/crates/bridge-evm-aggregator/src/evm_export.rs:118` passed — `s_g2` head is `928fafb3d0cc…` (Hermez), not `c6028acf…` (AN chain-ceremony) and not a `gen_srs` toxic-waste stub.
+- solc version match: both regenerated and committed `.bin` carry CBOR tail `…solc C 00 08 13 00 33` ⇒ compiled with **solc 0.8.19**.
+- snark-verifier pin match: `snark-verifier = { git = "...", tag = "v0.1.7-git" }` at `bridge/crates/bridge-prover-orchestrator/Cargo.toml:47` — immutable tag, rev `4b733e0`.
+- Bytecode diff: regenerated **21494 B** vs committed **21493 B** for `PrimaryAggregatorVerifier.bin` — 1-byte drift.
+
+A 1-byte drift is **inconsistent** with SRS drift (a different ceremony's `s_g2` / `s_g1` powers would ripple through the embedded VK bytes and produce **kB** of divergence, not one byte). Toolchain (solc + snark-verifier rev) is aligned. So the delta is almost certainly cosmetic (metadata / lookup-config auto-tune / build-flag ordering) rather than a soundness-relevant SRS switch — but we want your explicit "last word" before we file the audit as clean.
+
+**Questions.**
+
+1. **Last-word confirmation:** for the committed `contracts/ethereum/verifiers/*.bin` (specifically `PrimaryAggregatorVerifier.bin`, and by extension the sibling Fallback / HistoryWindow / BridgeWithdrawalAggregator verifiers), can you confirm — on the record — that the K=21 outer aggregator SRS you used at generation time was sourced from **Hermez Perpetual Powers of Tau** (`powersOfTau28_hez_final_21.ptau`, `s_g2` head `928fafb3d0cc…`)?
+2. Explicitly **not** the AN chain-ceremony file (`c6028acf…`), and **not** a local `halo2_base::utils::fs::gen_srs(21)` fallback that would have silently generated a toxic-waste SRS if `$PARAMS_DIR/kzg_bn254_21.srs` was missing on your machine at the time?
+3. If yes: any recollection of what would explain the 1-byte bytecode drift (e.g. `AggregationConfigParams` auto-tune margin, `calculate_params(Some(N))` `N` differing, an intermediate solc patch version) — so we can pin it and close the audit line?
+
+---
+
+## NB-Q11 — Circuit 4 EVM-calldata generation on smartphone: role-split proposal
+
+**State.**
+
+Circuit 4 (`BridgeWithdrawalAggregatorVerifier`) inner proof at K=19 runs OK on modern smartphones (~30–90 s, matches what we already measured for raw halo2 inner proofs). The **outer K=21 SHPLONK aggregation wrapper** — `aggregate_and_prove` in `bridge/crates/bridge-evm-aggregator/src/evm_export.rs:112` — is a different story. Concrete blockers on iOS/Android:
+
+- Peak RAM during `gen_evm_proof_shplonk` at K=21 is ~6–10 GB. iPhone 15 Pro: 8 GB; iOS jetsam kills apps at ~3 GB. Android flagships marginal.
+- `gen_evm_verifier_shplonk` shells out to `solc` (`snark-verifier-sdk::evm::compile_solidity`). **There is no maintained `solc` for iOS/Android ARM64.** Cross-compiling the C++ Solidity compiler + shipping a ~30 MB binary inside a wallet app is not going to pass App Store / Play review.
+- Wall-clock at phone thermal budget: 20–60+ min per withdrawal, plus battery drain.
+- The Yul-regen self-check at `aggregate_proof.rs:84–104` is a *drift audit* against the deployed on-chain verifier — bytecode the phone already knows. Burning 30 s + hundreds of MB per withdrawal for zero calldata contribution is wasteful on server and hostile on phone. **Must be gated off on mobile unconditionally.**
+
+**Proposal — role split (industry pattern: Aztec / Nocturne / RailGun / zkSync client-side proving):**
+
+```
+phone  ── inner Circuit 4 proof (K=19, ~30–90 s) ──▶  aggregation relay
+                                                            │
+                                                            ▼
+                                                 K=21 SHPLONK on server
+                                                            │
+                                                            ▼
+                                                     EVM calldata
+                                                            │
+                                                            ▼
+                                              phone submits tx (or relay does)
+```
+
+Soundness argument: witness stays on-device (inner proof already commits to it). Under `VerifierUniversality::Full`, the outer aggregator is a **public-coin operation over the inner Snark bytes** with no secret witness input — it aggregates *any* inner satisfying the inner VK's shape. Outsourcing outer aggregation therefore leaks nothing and reduces trivially to inner-proof soundness. Standard "prove-once, aggregate-elsewhere" pattern.
+
+**Questions.**
+
+1. Is mobile-only end-to-end calldata generation (phone runs inner **and** outer aggregation) a hard product requirement, or is a **role-split** — phone emits inner Snark, server-side relay does K=21 SHPLONK + calldata — acceptable? Everything above says role-split is the only realistic path on today's phone hardware.
+2. If role-split is accepted: what is the intended relay topology — a single bridge-operated aggregation service (centralised, adds a liveness dependency), a small decentralised set of aggregation nodes, or user-selectable (BYO-aggregator)? This choice affects the withdrawal UX and the liveness model but not soundness.
+3. If mobile-only is truly required: this is a partner-scope re-engineering job (lower K_outer via a folding scheme like Nova/SuperNova, or GPU MSM via Metal/Vulkan in a forked snark-verifier-sdk) — is that on any roadmap, or should we lock in the role-split assumption now and design the wallet integration around it?
+4. Independent of (1)–(3): can we agree the `gen_evm_verifier_shplonk` self-check at `aggregate_proof.rs:84–104` should be gated behind a runtime flag defaulting **off** on any mobile / edge target (and ideally off by default everywhere except CI health checks)? It adds zero calldata and requires `solc`, which is a non-starter on ARM64 mobile.
+
+---
+
 ## Cross-cutting
 
 Is there a single tracking issue that batches NB-Q2/3/4 so they land together with one ABI-break note? Would prefer one migration event over three.

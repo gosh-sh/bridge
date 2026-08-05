@@ -268,6 +268,44 @@ mod tests {
         );
     }
 
+    /// Cross-side pin: the exact 32-byte root that
+    /// `AckiNackiBridgeApplyBkSetUpdateTest.test_applyBkSetUpdate_pinnedVector_matchesRustSideFold`
+    /// asserts on the Solidity side.
+    ///
+    /// Both sides start from a numeric Fr scalar (`L2 = 1`, `L3 = 2`), serialise
+    /// it as canonical 32-byte little-endian `Fr::to_repr()` bytes, and fold
+    /// via the same SHA-256 pair combinator. If either side changes its
+    /// endianness convention, exactly one of the two tests fails and the drift
+    /// is caught before it ships. Do not update one root without regenerating
+    /// the other from the same numeric inputs.
+    #[test]
+    fn bk_set_l2_l3_pinned_vector_matches_solidity() {
+        // Numeric Fr scalars serialised as canonical Fr::to_repr() (LE).
+        let mut l2_le = [0u8; 32];
+        l2_le[0] = 1;
+        let mut l3_le = [0u8; 32];
+        l3_le[0] = 2;
+
+        // Opaque sibling values (BE-encoded uint256 in the .sol test, which for
+        // small values collapses to right-padded zeros then the byte).
+        let mut h01 = [0u8; 32];
+        h01[31] = 0x11;
+        let mut h4_7 = [0u8; 32];
+        h4_7[31] = 0x22;
+        let mut h8_15 = [0u8; 32];
+        h8_15[31] = 0x33;
+
+        let h23 = sha256_combine(&l2_le, &l3_le);
+        let h0_3 = sha256_combine(&h01, &h23);
+        let h0_7 = sha256_combine(&h0_3, &h4_7);
+        let root = sha256_combine(&h0_7, &h8_15);
+
+        // Must equal the constant in AckiNackiBridgeApplyBkSetUpdate.t.sol.
+        let expected_hex =
+            "8f698b0396c584252ab3a26b426baeb1349d473c21d81463e3c2552b795de3de";
+        assert_eq!(hex::encode(root), expected_hex);
+    }
+
     #[test]
     fn zero_padded_right_subtree_matches_spec() {
         // Only L0 populated; L1..L15 all zero. Ensures our fold agrees with the

@@ -39,6 +39,14 @@ pub struct RelayerConfig {
     /// emit a warning. Doesn't stop the relayer; operator-visible only.
     #[serde(default = "default_max_attempts_warn")]
     pub max_attempts_warn: u32,
+    /// After this many consecutive rejections on the same target seqNo,
+    /// return [`RelayerError::Stuck`] from `tick()`. The daemon loop
+    /// treats `Stuck` as terminal and exits (unlike a normal `Reverted`
+    /// which is soft-retried forever under exponential backoff). Applies
+    /// to both the verifyBlock lane (`attempts_since_progress`) and the
+    /// applyBkSetUpdate lane (`bk_update_attempts_since_progress`).
+    #[serde(default = "default_max_attempts_abort")]
+    pub max_attempts_abort: u32,
 }
 
 fn default_poll_interval() -> Duration {
@@ -47,15 +55,19 @@ fn default_poll_interval() -> Duration {
 fn default_max_attempts_warn() -> u32 {
     16
 }
+fn default_max_attempts_abort() -> u32 {
+    3
+}
 
 impl RelayerConfig {
     /// Sensible defaults: 2-second polling, warn after 16 attempts on
-    /// the same block.
+    /// the same block, hard-abort after 3.
     pub fn new(state_path: impl Into<PathBuf>) -> Self {
         Self {
             state_path: state_path.into(),
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
+            max_attempts_abort: default_max_attempts_abort(),
         }
     }
 }
@@ -210,6 +222,15 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         reason = %reason,
                         "bk-set update reverted",
                     );
+                    if self.state.bk_update_attempts_since_progress
+                        >= self.config.max_attempts_abort
+                    {
+                        return Err(RelayerError::Stuck {
+                            seq_no: upd.block_seq_no,
+                            attempts: self.state.bk_update_attempts_since_progress,
+                            reason: format!("applyBkSetUpdate: {reason}"),
+                        });
+                    }
                     return Ok(TickOutcome::BkUpdateReverted {
                         seq_no: upd.block_seq_no,
                         reason,
@@ -252,14 +273,20 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let seq_no = block.block_seq_no;
         block.validate_shape()?;
 
-        if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+        // Storage v2.0 (2026-08-04): compare against the per-layer anchor
+        // pick, not the immutable genesis seed. The prover derives
+        // `block.prev_max_level_layer_hash` from
+        // `min(num_layers, highest_active_layer)`; the contract's
+        // `expectedPrevAnchor(num_layers)` mirrors that exactly.
+        let chain_anchor = self.bridge.expected_prev_anchor(block.num_layers).await?;
+        if block.prev_max_level_layer_hash != chain_anchor {
             self.state.record_attempt(target);
             self.persist_state()?;
             return Ok(TickOutcome::BridgeReverted {
                 target_seq_no: target,
                 reason: format!(
-                    "off-chain prev_max_level_layer_hash {:#x} != on-chain {:#x}",
-                    block.prev_max_level_layer_hash, on_chain.prev_max_level_layer_hash
+                    "off-chain prev_max_level_layer_hash {:#x} != on-chain expectedPrevAnchor({})={:#x}",
+                    block.prev_max_level_layer_hash, block.num_layers, chain_anchor
                 ),
             });
         }
@@ -308,6 +335,13 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     reason = %reason,
                     "bridge reverted",
                 );
+                if self.state.attempts_since_progress >= self.config.max_attempts_abort {
+                    return Err(RelayerError::Stuck {
+                        seq_no: target,
+                        attempts: self.state.attempts_since_progress,
+                        reason: format!("verifyBlock: {reason}"),
+                    });
+                }
                 Ok(TickOutcome::BridgeReverted {
                     target_seq_no: target,
                     reason,
@@ -403,6 +437,9 @@ mod tests {
             state_path,
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            // Tests want soft-retry: assertions inspect state after long
+            // revert streaks and would trip the abort gate.
+            max_attempts_abort: u32::MAX,
         };
         Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge).unwrap()
     }

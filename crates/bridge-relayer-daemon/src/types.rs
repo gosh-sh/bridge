@@ -163,7 +163,10 @@ pub struct AnBlockData {
     /// Per-layer Poseidon roots; index ≥ `num_layers` must be 0.
     pub layer_hashes: [U256; MAX_LAYER_HASHES],
     /// Anchors `prev_max_level_layer_hash` from the previously verified
-    /// block (must equal the contract's `storedPrevMaxLevelLayerHash`).
+    /// block. Storage v2.0 (2026-08-04): must equal the contract's
+    /// `expectedPrevAnchor(num_layers)` — a per-layer pick from the
+    /// rolling `_layerWindows` — **not** the immutable
+    /// `storedPrevMaxLevelLayerHash` genesis seed.
     pub prev_max_level_layer_hash: U256,
     /// Attestation proof bytes (Circuit 1A or 1B SHPLONK calldata).
     pub attestation_proof: Bytes,
@@ -207,9 +210,13 @@ impl AnBlockData {
         Ok(())
     }
 
-    /// Returns the layer-hash that becomes the next block's anchor.
-    /// Mirrors the contract's update rule
-    /// `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]`.
+    /// Returns the layer-hash that becomes the next block's anchor when
+    /// the successor has the same `num_layers`. Mirrors the contract's
+    /// `_layerWindows[num_layers]` head after append. Under storage v2.0
+    /// (2026-08-04) the on-chain query for the anchor is
+    /// `expectedPrevAnchor(next_num_layers)`; when `next_num_layers ==
+    /// self.num_layers` and this layer is at or above
+    /// `highestActiveLayer`, this method returns the same value.
     pub fn next_anchor(&self) -> U256 {
         self.layer_hashes[(self.num_layers - 1) as usize]
     }

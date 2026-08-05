@@ -108,7 +108,7 @@ On-chain success ⇒ proof of Circuit 4 valid ⇒ payout authorised
 
 ### C-1. Transcript compatibility (BLOCKER → mitigation in M3)
 
-`bridge-prover-orchestrator/src/prover.rs:100` (and partner's
+`bridge-snark-utils/src/prover.rs:100` (and partner's
 `bridge-prover-lib::prover`) hardcodes **Blake2b** Fiat-Shamir transcript:
 
 ```rust
@@ -247,7 +247,7 @@ for why we did not depend on `snark-verifier` directly.
 
 **Deliverables (committed):**
 
-  - `crates/bridge-prover-orchestrator/src/poseidon_transcript.rs` — native
+  - `crates/bridge-snark-utils/src/poseidon_transcript.rs` — native
     `Poseidon<Fr, Fr, T=3, RATE=2>` permutation + `PoseidonRead<R>` /
     `PoseidonWrite<W>` implementing
     `halo2_proofs::transcript::{Transcript, TranscriptRead/Write,
@@ -255,19 +255,19 @@ for why we did not depend on `snark-verifier` directly.
     `(T, RATE, R_F, R_P, SECURE_MDS) = (3, 2, 8, 57, 0)` match
     `snark-verifier-sdk/src/halo2.rs` v0.1.7-git lines 54–58 so the
     Aggregator's in-circuit verifier (M5) will derive the same challenges.
-  - `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` — extended
+  - `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` — extended
     `TranscriptKind` with `Poseidon = 2`. `VkBlob` decoders still bail on
     anything ≠ Blake2b (AN-side opcode is unchanged).
-  - `crates/bridge-prover-orchestrator/src/{prover,verifier}.rs` — new
+  - `crates/bridge-snark-utils/src/{prover,verifier}.rs` — new
     `generate_fallback_proof_with_transcript(..., TranscriptKind)` and
     `verify_fallback_proof_with_transcript(..., TranscriptKind)` variants;
     the legacy `generate_fallback_proof` / `verify_fallback_proof` now
     delegate to them with `TranscriptKind::Blake2b`.
-  - `crates/bridge-prover-orchestrator/src/poseidon_transcript.rs::tests`
+  - `crates/bridge-snark-utils/src/poseidon_transcript.rs::tests`
     — five unit tests covering deterministic squeezes, scalar
     round-trip, EC point round-trip, tampered-byte detection, spec
     determinism (all green; sub-second).
-  - `crates/bridge-prover-orchestrator/tests/fallback_round_trip.rs`
+  - `crates/bridge-snark-utils/tests/fallback_round_trip.rs`
     — heavy integration test extended to prove + verify with BOTH
     transcripts, asserting (1) Poseidon proof verifies under
     Poseidon-Read, (2) mixing transcripts rejects, (3) the two proof byte
@@ -314,7 +314,7 @@ _>`.
 ### M4. Circuit 4 prover in orchestrator (depends on partner)
 
 When the partner's `circuit4-single-final-root` branch lands a stable
-verifying key + prover entry point, add `bridge-prover-orchestrator::
+verifying key + prover entry point, add `bridge-snark-utils::
 generate_circuit4_proof(...)` that mirrors `generate_fallback_proof` but
 calls `BridgeEventProveCircuit::new(...)` with Poseidon transcript.
 
@@ -379,7 +379,7 @@ This is the deliverable that **actually closes R15**.
 
 ### M8. Cleanup
 
-  - Remove `crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/`
+  - Remove `crates/bridge-snark-utils/gnark-wrappers/circuit-4/`
     (the identity stub) and replace any references to
     `IBridgeWithdrawalGroth16Verifier` with the new Yul aggregator.
   - Move circuit-1a/1b/2 wrappers to similar aggregator-based path if/when

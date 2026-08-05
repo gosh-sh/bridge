@@ -24,12 +24,6 @@
 //!     --output /tmp/deposit_e2e/deposit_vk_blob.bin \
 //!     --degree 18 --max-data-byte-len 256 --max-log-num 20
 
-// Reuse the REAL producer-side wire format (the same module the orchestrator
-// and the `vkblob-v2` isolation crate compile) so the bytes can never drift
-// from what the opcode expects.
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
-
 use std::fs;
 
 use axiom_eth::{
@@ -56,7 +50,7 @@ use halo2_base::{
         SerdeFormat,
     },
 };
-use halo2_tvm_bundle::{CircuitShape, VkBlob};
+use deposit_prover::halo2_tvm_bundle::{self, CircuitShape, VkBlob};
 
 /// Pinned keccak promise-loader capacity — makes the deposit VK
 /// witness-independent (one embedded VK verifies every deposit). MUST match the

@@ -3,7 +3,7 @@
 //!
 //! Wire encoding: this enum is `#[repr(u8)]` because it is serialised
 //! into on-wire structures (notably the `VkBlob` header in
-//! `bridge-prover-orchestrator::halo2_tvm_bundle`). The numeric values
+//! `bridge-snark-utils::halo2_tvm_bundle`). The numeric values
 //! MUST stay stable across releases:
 //!
 //! * `0` = Blake2b — the AN-side default and the only variant accepted by

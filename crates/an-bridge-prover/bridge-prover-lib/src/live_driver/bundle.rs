@@ -33,16 +33,20 @@ use crate::bridge_state::MAX_LAYERS;
 use crate::layer_prover;
 use crate::prover;
 use crate::real_chain_builder;
+use crate::transcript::TranscriptKind;
 
-use super::{BundleFinalizationType, BundleProofArtifacts, LiveProverDriver};
+use super::{BundleFinalizationType, BundleProofArtifacts, DriverError, DriverResult, LiveProverDriver};
 
 /// Drive one Circuit 1A/1B + Circuit 2 bundle. Returns `Some(artifacts)`
 /// on success, `None` on transient conditions the caller should retry
-/// (attestation not ready, signer mismatch).
+/// (attestation not ready, signer mismatch). Fatal errors are classified
+/// into [`DriverError`] variants at each site so consumers can
+/// pattern-match on failure kind (proof gen vs GQL schema vs state
+/// inconsistency) instead of inspecting messages.
 pub(super) async fn drive_next_bundle(
     driver: &mut LiveProverDriver,
     target_seqno: u64,
-) -> anyhow::Result<Option<BundleProofArtifacts>> {
+) -> DriverResult<Option<BundleProofArtifacts>> {
     info!("=== Processing key block at seq_no {} ===", target_seqno);
 
     // Fetch and classify attestation evidence.
@@ -70,7 +74,8 @@ pub(super) async fn drive_next_bundle(
     let bk_set = driver
         .prover_bk_set()
         .pubkeys()
-        .context("prover_bk_set.pubkeys() decode failed")?;
+        .context("prover_bk_set.pubkeys() decode failed")
+        .map_err(DriverError::state_inconsistent)?;
 
     // Defensive BK-set-membership warning. In-circuit checks are
     // authoritative; this surfaces obviously-stale sets earlier.
@@ -90,6 +95,11 @@ pub(super) async fn drive_next_bundle(
     }
 
     let last_seen_seqno_u32 = driver.state().stored_last_seen_block_seq_no as u32;
+    // Pick the Fiat–Shamir flavour once so Circuit 1 and Circuit 2 stay in
+    // lock-step — the artifacts carry a single `transcript_kind` tag that
+    // covers both proof-byte fields, and downstream aggregator / verifier
+    // routing keys off that one bit.
+    let transcript = driver.cfg().transcript;
 
     // ---- Circuit 1a / 1b: attestation proof ----
     // Load PK on demand, unload immediately after to stay inside the
@@ -97,35 +107,51 @@ pub(super) async fn drive_next_bundle(
     let t_primary = Instant::now();
     let (fin_type, primary_proof) = match &evidence {
         AttestationEvidence::Primary(att) => {
-            info!("key block {}: PRIMARY path → Circuit 1a", target_seqno);
+            info!(
+                "key block {}: PRIMARY path → Circuit 1a (transcript={:?})",
+                target_seqno, transcript,
+            );
             driver
                 .key_manager_mut()
                 .load_primary_pk()
-                .with_context(|| format!("key block {}: load_primary_pk", target_seqno))?;
-            let res = prover::generate_primary_proof(
+                .with_context(|| format!("key block {}: load_primary_pk", target_seqno))
+                .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
+            let res = prover::generate_primary_proof_with_transcript(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
                 &bk_set,
                 last_seen_seqno_u32,
+                transcript,
             );
             driver.key_manager_mut().unload_primary_pk();
-            (BundleFinalizationType::Primary, res?)
+            (
+                BundleFinalizationType::Primary,
+                res.map_err(|e| DriverError::proof_gen(target_seqno, e))?,
+            )
         }
         AttestationEvidence::Fallback { primary, fallback } => {
-            info!("key block {}: FALLBACK path → Circuit 1b", target_seqno);
+            info!(
+                "key block {}: FALLBACK path → Circuit 1b (transcript={:?})",
+                target_seqno, transcript,
+            );
             driver
                 .key_manager_mut()
                 .load_fallback_pk()
-                .with_context(|| format!("key block {}: load_fallback_pk", target_seqno))?;
-            let res = prover::generate_fallback_proof(
+                .with_context(|| format!("key block {}: load_fallback_pk", target_seqno))
+                .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
+            let res = prover::generate_fallback_proof_with_transcript(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,
                 &fallback.raw_bytes,
                 &bk_set,
                 last_seen_seqno_u32,
+                transcript,
             );
             driver.key_manager_mut().unload_fallback_pk();
-            (BundleFinalizationType::Fallback, res?)
+            (
+                BundleFinalizationType::Fallback,
+                res.map_err(|e| DriverError::proof_gen(target_seqno, e))?,
+            )
         }
     };
     let primary_proof_gen_ms = t_primary.elapsed().as_millis() as u64;
@@ -140,9 +166,11 @@ pub(super) async fn drive_next_bundle(
     driver
         .key_manager_mut()
         .load_layer_pk()
-        .with_context(|| format!("key block {}: load_layer_pk", target_seqno))?;
+        .with_context(|| format!("key block {}: load_layer_pk", target_seqno))
+        .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
     let t_layer = Instant::now();
-    let layer_result = generate_layer_proof_for_key_block(driver, target_seqno).await;
+    let layer_result =
+        generate_layer_proof_for_key_block(driver, target_seqno, transcript).await;
     driver.key_manager_mut().unload_layer_pk();
     let (layer_proof, state_layer_hashes, observed_height, block_id_be) = layer_result?;
     let layer_proof_gen_ms = t_layer.elapsed().as_millis() as u64;
@@ -189,6 +217,7 @@ pub(super) async fn drive_next_bundle(
         num_layers: layer_proof.num_layers,
         layer_hashes_be,
         prev_max_level_layer_hash_be,
+        transcript_kind: transcript,
         attestation_proof: primary_proof.proof_bytes,
         layer_hashes_proof: layer_proof.proof_bytes,
         primary_proof_gen_ms,
@@ -207,7 +236,8 @@ pub(super) async fn drive_next_bundle(
 async fn generate_layer_proof_for_key_block(
     driver: &LiveProverDriver,
     target_seqno: u64,
-) -> anyhow::Result<(
+    transcript: TranscriptKind,
+) -> DriverResult<(
     layer_prover::LayerProofOutput,
     Vec<([u8; 32], u8)>,
     u64,
@@ -218,13 +248,14 @@ async fn generate_layer_proof_for_key_block(
         .gql()
         .query_proof_block_by_seqno(target_seqno)
         .await
-        .context("failed to fetch block proof data")?;
+        .context("failed to fetch block proof data")
+        .map_err(DriverError::gql_transient)?;
 
     let leaves = block.block_merkle_tree_leaves.ok_or_else(|| {
-        anyhow::anyhow!(
+        DriverError::gql_schema(anyhow::anyhow!(
             "block {} has no block_merkle_tree_leaves in GQL — node must expose them",
             target_seqno,
-        )
+        ))
     })?;
 
     info!(
@@ -232,7 +263,10 @@ async fn generate_layer_proof_for_key_block(
         block.history_proofs.len(),
     );
     if block.history_proofs.is_empty() {
-        anyhow::bail!("block {} has no history_proofs", target_seqno);
+        return Err(DriverError::gql_schema(anyhow::anyhow!(
+            "block {} has no history_proofs",
+            target_seqno,
+        )));
     }
 
     // 1. Build layer_hashes_preimage from history_proofs.
@@ -258,13 +292,13 @@ async fn generate_layer_proof_for_key_block(
     // proof gen + IPC when leaves are broken) and release-build parity.
     // Mirror of the same check on the bk-update path in bk_update.rs.
     if tree.root != block.block_id {
-        anyhow::bail!(
+        return Err(DriverError::gql_schema(anyhow::anyhow!(
             "layer {}: reconstructed tree.root {} != block.block_id {} — \
              GQL leaves inconsistent with block header",
             target_seqno,
             hex::encode(tree.root),
             hex::encode(block.block_id),
-        );
+        )));
     }
 
     let siblings = tree.siblings_for_l0();
@@ -278,12 +312,12 @@ async fn generate_layer_proof_for_key_block(
     // `generate_layer_proof_for_key_block` did.
     let bk_hash_bytes: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
     if bk_hash_bytes != leaves[2] {
-        anyhow::bail!(
+        return Err(DriverError::state_inconsistent(anyhow::anyhow!(
             "loaded BK set Poseidon commitment ({}) does not match block.leaves[2] ({}) — \
              stale BK set or the chain rotated keys",
             hex::encode(bk_hash_bytes),
             hex::encode(leaves[2]),
-        );
+        )));
     }
     let bk_set_hash_fr = driver.bk_set_commitment_fr();
 
@@ -296,13 +330,14 @@ async fn generate_layer_proof_for_key_block(
         driver.cfg().history_window_size,
     )
     .await
-    .context("failed to build real chain proofs")?;
+    .context("failed to build real chain proofs")
+    .map_err(DriverError::gql_transient)?;
     info!("using REAL chain proofs ({} steps)", chain_result.num_steps);
 
     let prev_hash_fr = gosh_dense_balanced_tree::bytes_to_fr(&chain_result.prev_hash);
 
     // 5. Generate Circuit 2 proof.
-    let layer_proof = layer_prover::generate_layer_proof(
+    let layer_proof = layer_prover::generate_layer_proof_with_transcript(
         driver.key_manager(),
         &preimage,
         &siblings,
@@ -310,7 +345,9 @@ async fn generate_layer_proof_for_key_block(
         chain_result.num_steps,
         &chain_result.chain_links,
         bk_set_hash_fr,
-    )?;
+        transcript,
+    )
+    .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
 
     // 6. Extract the per-layer bundle + authoritative block height for
     //    ack_bundle to feed BridgeState::append_bundle. Also surface the raw

@@ -1,24 +1,14 @@
-//! Phase 5.1 — Relayer CLI binary.
+//! Relayer CLI binary.
 //!
-//! Four subcommands:
+//! Core subcommands:
 //!
 //! - `smoke-fixture` — submits one canned block from a Phase 4.1 bound-proof
 //!   fixture directory through the real
-//!   [`bridge_relayer_daemon::EthBridgeClient`]. Optionally wraps the relayer
-//!   in a [`bridge_relayer_daemon::SentryGuardedRelayer`] when `--an-node-url`
-//!   is provided, so a live AN-side BK rotation pauses the run end-to-end.
-//!
-//! - `sentry-watch` — a standalone BK-set sentry: polls `/v2/bk_set_update` on
-//!   the supplied AN node and prints structured `Bootstrapped` / `Quiet` /
-//!   `RotationDetected` events. No Ethereum side is touched — handy for
-//!   operators wanting to confirm that the committee they think is active
-//!   really is, before running the bridge relayer in earnest.
+//!   [`bridge_relayer_daemon::EthBridgeClient`].
 //!
 //! - `daemon` — long-running operator entry point. Drives `Relayer::tick`
-//!   forever with exponential backoff, until SIGINT/SIGTERM. Optionally wraps
-//!   in `SentryGuardedRelayer` when `--an-node-url` is supplied so the loop
-//!   pauses on a live BK rotation. Logs a structured metrics snapshot on every
-//!   shutdown.
+//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a
+//!   structured metrics snapshot on every shutdown.
 //!
 //! - `verify-fixture` — **read-only** pre-flight check. Loads a fixture, reads
 //!   the on-chain bridge anchors over RPC, and reports field-by-field whether
@@ -27,11 +17,11 @@
 //!   private key, no submission. Exits non-zero on any mismatch so it slots
 //!   into a pre-deploy shell pipeline.
 //!
-//! In Phase 5.2 the `daemon` subcommand will swap `FixturesBlockSource`
-//! for a real `LiveBlockSource` and the sentry's `resume()` gets wired
-//! into the rotation pipeline. For now,
-//! `cargo run -p bridge-relayer-daemon --bin relayer -- --help` is the
-//! best entry point.
+//! BK-set rotations are handled at the source seam by
+//! `bridge_prover_lib::live_driver::LiveProverDriver` (used by the
+//! `daemon-live` subcommand). The old REST-based `BkSetSentry` /
+//! `SentryGuardedRelayer` / `sentry-watch` surface was retired 2026-07-30:
+//! port 8600 REST is internal-only on public shellnet since AN v0.16.3.
 
 use std::{
     collections::HashSet,
@@ -47,13 +37,13 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    discover_event_proofs, result_path_for, BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome,
+    discover_event_proofs, result_path_for, BackoffConfig, BkSetUpdateSubmitOutcome,
     BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
+    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
     LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
-    RelayerMetrics, SentryGuardedRelayer, SentryStatus, StatePaths, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessCircuit4SnarkProver, SubprocessCircuit4SnarkProverConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome,
+    RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
+    TickOutcome,
     WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
@@ -99,27 +89,6 @@ enum Cmd {
         /// canned fixture).
         #[arg(long, default_value_t = 1)]
         max_ticks: usize,
-        /// Optional AN node base URL (e.g. `http://94.156.178.19:8600`).
-        /// When supplied, the relayer is wrapped in a
-        /// `SentryGuardedRelayer` that pauses verifyBlock submissions
-        /// on a live BK rotation. Without it the relayer runs blind
-        /// (Phase 5.1 behaviour, suitable only for canned fixtures).
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
-    },
-    /// Standalone BK-set sentry: poll `/v2/bk_set_update` on an AN
-    /// node and print structured events. No Ethereum side.
-    SentryWatch {
-        /// AN node base URL (e.g. `http://94.156.178.19:8600`).
-        #[arg(long, default_value = "http://94.156.178.19:8600")]
-        node_url: String,
-        /// Number of ticks before exiting. `0` means run forever
-        /// (Ctrl-C to stop).
-        #[arg(long, default_value_t = 5)]
-        ticks: u64,
-        /// Seconds between ticks.
-        #[arg(long, default_value_t = 30)]
-        interval_secs: u64,
     },
     /// Long-running daemon mode. Drives `Relayer::tick` forever with
     /// exponential backoff until SIGINT/SIGTERM. The fixture source is
@@ -146,11 +115,6 @@ enum Cmd {
         /// Hex-encoded private key of the relayer EOA.
         #[arg(long, env = "RELAYER_PRIVATE_KEY")]
         private_key: String,
-        /// Optional AN node base URL. When provided, the daemon runs
-        /// inside a `SentryGuardedRelayer` and pauses on a live BK
-        /// rotation (waiting for the future Phase 5.2 reconcile path).
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
         /// Initial backoff sleep on the first non-success outcome.
         #[arg(long, default_value_t = 2)]
         backoff_initial_secs: u64,
@@ -212,8 +176,6 @@ enum Cmd {
         bridge_address: Address,
         #[arg(long, env = "RELAYER_PRIVATE_KEY")]
         private_key: String,
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
         #[arg(long, default_value_t = 2)]
         backoff_initial_secs: u64,
         #[arg(long, default_value_t = 60)]
@@ -284,20 +246,17 @@ enum Cmd {
     },
     /// M7 ETH-side path: generate one Circuit 4 withdrawal proof as **SHPLONK
     /// aggregator calldata** the deployed `BridgeWithdrawalAggregatorVerifier`
-    /// accepts. Re-proves the `PrivateWitness` with a Poseidon transcript
-    /// (`export-c4-poseidon-snark --fixture`), aggregates the inner snark
-    /// (`aggregate-proof`, which self-checks the regenerated Yul == committed
-    /// `.bin`), cross-checks the calldata binds the ten public inputs, and
-    /// writes a `proof_event` JSON that `submit-withdraw` / `daemon-withdraw`
-    /// consume unchanged.
+    /// accepts. Re-proves the `PrivateWitness` in-process with a Poseidon
+    /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
+    /// the historical `export-c4-poseidon-snark --fixture` subprocess),
+    /// aggregates the inner snark (`aggregate-proof`, which self-checks the
+    /// regenerated Yul == committed `.bin`), cross-checks the calldata binds
+    /// the ten public inputs, and writes a `proof_event` JSON that
+    /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/bridge-prover-orchestrator` root (holds
-        /// `target/release/export-c4-poseidon-snark`).
-        #[arg(long, env = "ORCHESTRATOR_DIR")]
-        orchestrator_dir: PathBuf,
         /// `crates/bridge-evm-aggregator` root (holds
         /// `target/release/aggregate-proof`).
         #[arg(long, env = "AGGREGATOR_DIR")]
@@ -319,6 +278,10 @@ enum Cmd {
         /// Seqno stamped into the proof_event.
         #[arg(long, default_value_t = 0)]
         seq_no: u64,
+        /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
+        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live --pk-cache-dir`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
     },
     /// Long-running daemon reading partner `proof_event_*.json` bundles from
     /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
@@ -438,6 +401,22 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+        /// Path to the `crates/bridge-evm-aggregator` root (used by the
+        /// `aggregate-proof` subprocess). C1/C2 R15 SHPLONK aggregation is
+        /// mandatory — the on-chain `AckiNackiBridge` verifier only accepts
+        /// aggregated calldata, so `daemon-live` refuses to start without it.
+        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (aggregator self-check).
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
+        verifiers_dir: PathBuf,
+        /// Persistent outer-PK cache directory for the `aggregate-proof`
+        /// subprocess (`--pk-cache-dir`). Without this, every bundle re-runs
+        /// the full K=21 outer keygen (~3–5 min); with it, only the first
+        /// bundle pays keygen and subsequent bundles hit the disk cache
+        /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -490,7 +469,6 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
-            an_node_url,
         } => smoke_fixture(
             args.state,
             fixtures_dir,
@@ -499,23 +477,12 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
-            an_node_url,
         )
         .await
         .map_err(|e| {
             error!(?e, "smoke run failed");
             e
         }),
-        Cmd::SentryWatch {
-            node_url,
-            ticks,
-            interval_secs,
-        } => sentry_watch(node_url, ticks, interval_secs)
-            .await
-            .map_err(|e| {
-                error!(?e, "sentry watch failed");
-                e
-            }),
         Cmd::VerifyFixture {
             fixtures_dir,
             verifiers_dir,
@@ -540,7 +507,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             private_key,
-            an_node_url,
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
@@ -557,7 +523,6 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url,
                 bridge_address,
                 private_key,
-                an_node_url,
                 backoff,
             )
             .await
@@ -571,7 +536,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             private_key,
-            an_node_url,
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
@@ -588,7 +552,6 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url,
                 bridge_address,
                 private_key,
-                an_node_url,
                 backoff,
                 skip_verified_gate,
             )
@@ -656,23 +619,26 @@ async fn main() -> anyhow::Result<()> {
             }),
         Cmd::ProveWithdrawShplonk {
             witness,
-            orchestrator_dir,
             aggregator_dir,
             verifiers_dir,
             params_dir,
             snark_dir,
             out,
             seq_no,
-        } => prove_withdraw_shplonk(
-            witness,
-            orchestrator_dir,
-            aggregator_dir,
-            verifiers_dir,
-            params_dir,
-            snark_dir,
-            out,
-            seq_no,
-        )
+            pk_cache_dir,
+        } => {
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            prove_withdraw_shplonk(
+                witness,
+                aggregator_dir,
+                verifiers_dir,
+                params_dir,
+                snark_dir,
+                out,
+                seq_no,
+                pk_cache_dir,
+            )
+        }
         .await
         .map_err(|e| {
             error!(?e, "prove-withdraw-shplonk failed");
@@ -757,11 +723,22 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
+            aggregator_dir,
+            verifiers_dir,
+            pk_cache_dir,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
                 multiplier: backoff_multiplier,
+            };
+            // Default the outer-PK cache alongside the SRS so a single
+            // params_dir carries every artefact the aggregator needs.
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            let aggregation = C12AggregationCfg {
+                aggregator_dir,
+                verifiers_dir,
+                pk_cache_dir,
             };
             run_daemon_live(
                 args.state,
@@ -774,6 +751,7 @@ async fn main() -> anyhow::Result<()> {
                 bk_set_config,
                 bootstrap_seqno,
                 backoff,
+                aggregation,
             )
             .await
             .map_err(|e| {
@@ -818,7 +796,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // CLI surface; each arg maps to a flag
 async fn smoke_fixture(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
@@ -827,7 +804,6 @@ async fn smoke_fixture(
     bridge_address: Address,
     private_key: String,
     max_ticks: usize,
-    an_node_url: Option<String>,
 ) -> anyhow::Result<()> {
     // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
     // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
@@ -851,152 +827,12 @@ async fn smoke_fixture(
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
 
-    match an_node_url {
-        None => {
-            info!("running without sentry (BK rotations will NOT pause this relayer)");
-            let history = relayer
-                .run_loop(max_ticks, |outcome| {
-                    matches!(outcome, TickOutcome::Verified { .. })
-                })
-                .await?;
-            info!(?history, "smoke run complete");
-        },
-        Some(url) => {
-            info!(node_url = %url, "running with BkSetSentry guard");
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            for tick_idx in 1..=max_ticks {
-                let outcome = guarded.tick().await?;
-                match &outcome {
-                    GuardedOutcome::SentryBootstrapped {
-                        observed_seq_no,
-                        bk_count,
-                        inner,
-                    } => {
-                        info!(
-                            tick = tick_idx,
-                            observed_seq_no,
-                            bk_count,
-                            ?inner,
-                            "bootstrap + inner",
-                        );
-                        if matches!(inner, TickOutcome::Verified { .. }) {
-                            return Ok(());
-                        }
-                    },
-                    GuardedOutcome::SentryQuiet {
-                        observed_seq_no,
-                        future_changed,
-                        inner,
-                    } => {
-                        info!(
-                            tick = tick_idx,
-                            observed_seq_no,
-                            future_changed,
-                            ?inner,
-                            "quiet + inner",
-                        );
-                        if matches!(inner, TickOutcome::Verified { .. }) {
-                            return Ok(());
-                        }
-                    },
-                    GuardedOutcome::RotationDetected {
-                        old_seq_no,
-                        new_seq_no,
-                        added,
-                        removed,
-                        pubkey_mutations,
-                    } => {
-                        warn!(
-                            tick = tick_idx,
-                            old_seq_no,
-                            new_seq_no,
-                            added,
-                            removed,
-                            pubkey_mutations,
-                            "BK rotation detected — relayer paused; Phase 5.2 will trigger \
-                             Circuit 3 and call resume() here. Exiting the smoke run.",
-                        );
-                        return Ok(());
-                    },
-                    GuardedOutcome::PausedAwaitingRotationReconcile => {
-                        // Unreachable in the smoke binary (we exit on
-                        // the first RotationDetected above) — kept
-                        // for exhaustiveness.
-                        warn!(tick = tick_idx, "guard still paused; exiting");
-                        return Ok(());
-                    },
-                }
-            }
-            info!(
-                "smoke run complete (no verified block within {} ticks)",
-                max_ticks
-            );
-        },
-    }
-    Ok(())
-}
-
-async fn sentry_watch(node_url: String, ticks: u64, interval_secs: u64) -> anyhow::Result<()> {
-    let mut sentry = BkSetSentry::from_node_url(&node_url)?;
-    info!(%node_url, ticks, interval_secs, "starting BkSetSentry");
-
-    let interval = Duration::from_secs(interval_secs);
-    let cap = if ticks == 0 { u64::MAX } else { ticks };
-    for i in 1..=cap {
-        match sentry.tick().await {
-            Ok(SentryStatus::Bootstrapped {
-                observed_seq_no,
-                bk_count,
-            }) => {
-                info!(
-                    tick = i,
-                    observed_seq_no, bk_count, "BOOTSTRAP — first observation"
-                );
-            },
-            Ok(SentryStatus::Quiet {
-                observed_seq_no,
-                future_changed,
-            }) => {
-                info!(
-                    tick = i,
-                    observed_seq_no, future_changed, "QUIET — membership unchanged"
-                );
-            },
-            Ok(SentryStatus::RotationDetected {
-                old_seq_no,
-                new_seq_no,
-                delta,
-            }) => {
-                warn!(
-                    tick = i,
-                    old_seq_no,
-                    new_seq_no,
-                    added = delta.added.len(),
-                    removed = delta.removed.len(),
-                    pubkey_mutations = delta.pubkey_mutations.len(),
-                    "ROTATION — committee changed",
-                );
-            },
-            Err(e) => {
-                warn!(tick = i, error = ?e, "sentry tick failed; continuing");
-            },
-        }
-        let metrics = sentry.metrics();
-        info!(
-            tick = i,
-            total = metrics.total_ticks,
-            ok = metrics.successful_ticks,
-            rotations = metrics.rotations_observed,
-            last_seq_no = metrics.last_observed_seq_no,
-            "metrics snapshot",
-        );
-        if i < cap {
-            tokio::time::sleep(interval).await;
-        }
-    }
-    let metrics = sentry.metrics();
-    info!(?metrics, "sentry watch complete");
+    let history = relayer
+        .run_loop(max_ticks, |outcome| {
+            matches!(outcome, TickOutcome::Verified { .. })
+        })
+        .await?;
+    info!(?history, "smoke run complete");
     Ok(())
 }
 
@@ -1008,7 +844,6 @@ async fn run_daemon(
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
-    an_node_url: Option<String>,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -1054,26 +889,10 @@ async fn run_daemon(
         }
     };
 
-    info!(?backoff, ?an_node_url, "daemon starting");
-    let summary = match an_node_url {
-        None => {
-            warn!(
-                "running without sentry — a live BK rotation will NOT pause this daemon; \
-                 verifyBlock calls will start reverting until the operator restarts."
-            );
-            relayer
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-        Some(url) => {
-            info!(node_url = %url, "wrapping in SentryGuardedRelayer");
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            guarded
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-    };
+    info!(?backoff, "daemon starting");
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
 
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon stopped");
     Ok(())
@@ -1186,16 +1005,22 @@ async fn verify_fixture(
         );
     }
 
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): the on-chain
+    // `storedPrevMaxLevelLayerHash()` field is now the immutable genesis
+    // seed. The runtime anchor lives in `_layerWindows[L]` and is exposed
+    // via `expectedPrevAnchor(numLayers)`.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         ok = false;
         diagnostics.push(format!(
-            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain = {:#x}",
-            block.prev_max_level_layer_hash, on_chain.prev_max_level_layer_hash
+            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain expectedPrevAnchor({}) = {:#x}",
+            block.prev_max_level_layer_hash, block.num_layers, chain_anchor
         ));
     } else {
         info!(
             prev_anchor = ?block.prev_max_level_layer_hash,
-            "PrevAnchor matches on-chain",
+            num_layers = block.num_layers,
+            "PrevAnchor matches on-chain expectedPrevAnchor",
         );
     }
 
@@ -1246,14 +1071,12 @@ async fn verify_fixture(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_prover_daemon(
     state_path: PathBuf,
     proofs_dir: PathBuf,
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
-    an_node_url: Option<String>,
     backoff: BackoffConfig,
     skip_verified_gate: bool,
 ) -> anyhow::Result<()> {
@@ -1278,20 +1101,9 @@ async fn run_prover_daemon(
     };
 
     info!(?backoff, proofs_dir = %proofs_dir.display(), "daemon-prover starting");
-    let summary = match an_node_url {
-        None => {
-            relayer
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-        Some(url) => {
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            guarded
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-    };
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon-prover stopped");
     Ok(())
 }
@@ -1387,11 +1199,14 @@ async fn verify_prover_proof(
             on_chain.last_seen_block_seq_no
         );
     }
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): compare against per-layer anchor pick.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         anyhow::bail!(
-            "prev anchor mismatch: proof={} chain={}",
+            "prev anchor mismatch: proof={} chain_expectedPrevAnchor({})={}",
             block.prev_max_level_layer_hash,
-            on_chain.prev_max_level_layer_hash
+            block.num_layers,
+            chain_anchor
         );
     }
 
@@ -1449,27 +1264,26 @@ async fn prove_withdraw(
 #[allow(clippy::too_many_arguments)]
 async fn prove_withdraw_shplonk(
     witness: PathBuf,
-    orchestrator_dir: PathBuf,
     aggregator_dir: PathBuf,
     verifiers_dir: PathBuf,
     params_dir: PathBuf,
     snark_dir: PathBuf,
     out: PathBuf,
     seq_no: u64,
+    pk_cache_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let snark_prover = SubprocessCircuit4SnarkProver::new(
-        SubprocessCircuit4SnarkProverConfig::new(&orchestrator_dir, &params_dir),
+    // NB-Q9 PR-B: in-process Circuit 4 Poseidon re-prove (no more subprocess
+    // shell-out to `export-c4-poseidon-snark`).
+    let snark_prover = InProcessCircuit4SnarkProver::new(&params_dir);
+    let aggregator = SubprocessAggregator::new(
+        SubprocessAggregatorConfig::new(&aggregator_dir, &verifiers_dir, &params_dir)
+            .with_pk_cache_dir(&pk_cache_dir),
     );
-    let aggregator = SubprocessAggregator::new(SubprocessAggregatorConfig::new(
-        &aggregator_dir,
-        &verifiers_dir,
-        &params_dir,
-    ));
     let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
 
     info!(
         witness = %witness.display(),
-        "M7: re-proving Circuit 4 (Poseidon) → aggregating → calldata (this may take minutes)"
+        "M7: re-proving Circuit 4 (Poseidon, in-process) → aggregating → calldata (this may take minutes)"
     );
     let proof = pipeline.prove(&witness, &snark_dir, seq_no).await?;
 
@@ -1538,8 +1352,9 @@ async fn shutdown_signal() {
 ///
 /// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
 /// submit revert), signalling the caller to back off before the next scan.
-/// Permanent per-proof problems (parse errors, bad public inputs, non-256-B
-/// proofs, or an ACK that isn't accepted) park the proof in `st.done` and
+/// Permanent per-proof problems (parse errors, bad public inputs, proofs
+/// that fail the SHPLONK aggregator shape gate, or an ACK that isn't
+/// accepted) park the proof in `st.done` and
 /// the scan drains the rest of the directory. Lower-level infra failures
 /// (RPC down during dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<P, N>(
@@ -1631,7 +1446,7 @@ where
         let proof_bytes = match bundle.proof_bytes() {
             Ok(b) => b,
             Err(e) => {
-                warn!(?e, proof = %proof_path.display(), "proof not 256-B Groth16 (gnark-wrap first); parking");
+                warn!(?e, proof = %proof_path.display(), "proof fails SHPLONK aggregator shape gate; parking");
                 st.done.insert(proof_path);
                 continue;
             },
@@ -1982,6 +1797,19 @@ async fn submit_bk_update(
 
 /// Live GraphQL + `LiveProverDriver` → ETH `verifyBlock` / `applyBkSetUpdate`.
 #[allow(clippy::too_many_arguments)]
+/// Wiring for the ETH-side Poseidon re-prove + R15 SHPLONK aggregation
+/// pipeline. When present, `run_daemon_live` wraps `LiveBlockSource` in an
+/// [`AggregatedBlockSource`] so `AnBlockData.attestation_proof` /
+/// `AnBlockData.layer_hashes_proof` (and BK-update `attestation_proof`) carry
+/// the aggregator calldata the Solidity `AckiNackiBridge` accepts.
+struct C12AggregationCfg {
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    /// Persistent outer-PK cache directory for `aggregate-proof`. When
+    /// present, memoises the K=21 outer keygen across bundles.
+    pk_cache_dir: PathBuf,
+}
+
 async fn run_daemon_live(
     state_path: PathBuf,
     rpc_url: String,
@@ -1993,16 +1821,16 @@ async fn run_daemon_live(
     bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
+    aggregation: C12AggregationCfg,
 ) -> anyhow::Result<()> {
-    use bridge_gql_fetcher::{
-        bk_set_fetcher::load_bk_set_from_config,
-        gql_client::create_client,
-    };
+    use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
+        bk_set_bootstrap,
         bridge_state::BridgeState,
         keys::KeyManager,
         live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
         prover_bk_set::ProverBkSet,
+        transcript::TranscriptKind,
     };
     use tokio::sync::Mutex;
 
@@ -2014,20 +1842,19 @@ async fn run_daemon_live(
     let gql = create_client(&gql_endpoint)
         .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
 
-    // Load genesis BK set from JSON config. The old GraphQL-first path
-    // (`fetch_bk_set`) was disabled on 2026-07-22 as architecturally broken:
-    // it replayed the `bkSetUpdates` delta log from ∅ but AN does not emit
-    // genesis as a synthetic `Added` event. Distant-block cold starts on
-    // long-lived rotating chains should use `bk_set_at_height` (planned).
-    let bk_set = {
-        let path = bk_set_config
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?;
-        let s = load_bk_set_from_config(path)
-            .map_err(|e| anyhow::anyhow!("load BK set from {path}: {e}"))?;
-        info!(signers = s.len(), path = %path, "BK set loaded from config");
-        s
-    };
+    // Load BK set via the shared bootstrap helper (aligned with
+    // `bridge-prover-daemon/src/main.rs`). Mode is selected by
+    // `BRIDGE_BK_SET_BOOTSTRAP=file|fold_at_height`; `fold_at_height`
+    // uses `bk_set_at_height` to reconstruct the committee at
+    // `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to `bootstrap_seqno`)
+    // by folding `bkSetUpdates` onto the JSON genesis anchor.
+    let bk_set_config_str = bk_set_config
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?
+        .to_string();
+    let bk_set = bk_set_bootstrap::load_bk_set(&gql, &bk_set_config_str, bootstrap_seqno)
+        .await
+        .map_err(|e| anyhow::anyhow!("load BK set: {e}"))?;
 
     info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
     let mut key_manager = KeyManager::new(&params_dir);
@@ -2077,6 +1904,14 @@ async fn run_daemon_live(
         }
     };
 
+    // Shared startup guard (parity with bridge-prover-daemon): reject the
+    // "stale ./state on top of a re-initialised chain" configuration
+    // before we hand off to LiveProverDriver.
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
+        &bk_set_config_str,
+        &prover_bk_set,
+    )?;
+
     // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
     // owns `prover_bk_set` as the sole BK-pubkey source and derives its
     // in-driver pubkey table on demand via `prover_bk_set.pubkeys()`.
@@ -2096,6 +1931,11 @@ async fn run_daemon_live(
         prover_bk_set,
         LiveProverConfig {
             seed_policy,
+            // Emit Poseidon-transcript proofs directly. Consumed in-process
+            // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
+            // the old `export-1a1b2-poseidon-snark` subprocess that
+            // independently re-fetched + re-proved every bundle.
+            transcript: TranscriptKind::Poseidon,
             ..Default::default()
         },
     )
@@ -2138,12 +1978,70 @@ async fn run_daemon_live(
     }
 
     let cfg = RelayerConfig::new(&state_path);
-    let mut relayer = Relayer::new(
+
+    // Wrap the live source so the two proof-byte fields in AnBlockData carry
+    // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.
+    // The wrapper delegates ack / driver_snapshot back to LiveBlockSource so
+    // state persistence and ack-after-submit semantics are unchanged.
+    // Aggregation is unconditional: the on-chain `AckiNackiBridge` verifier
+    // only accepts aggregated calldata (raw halo2 bytes revert with
+    // `AttestationProofRejected()`).
+    use bridge_relayer_daemon::{
+        AggregatedBlockSource, Circuit12ShplonkPipeline, PoseidonSnarkWrapper,
+        SubprocessAggregator, SubprocessAggregatorConfig,
+    };
+    let aggregator_cfg = SubprocessAggregatorConfig::new(
+        &aggregation.aggregator_dir,
+        &aggregation.verifiers_dir,
+        &params_dir,
+    )
+    .with_pk_cache_dir(&aggregation.pk_cache_dir);
+    let pipeline = Circuit12ShplonkPipeline::new(
+        PoseidonSnarkWrapper::new(&params_dir),
+        SubprocessAggregator::new(aggregator_cfg),
+    );
+    let aggregated = Arc::new(AggregatedBlockSource::new(
+        Arc::clone(&live_source),
+        pipeline,
+    ));
+    info!(
+        aggregator_dir = %aggregation.aggregator_dir.display(),
+        verifiers_dir = %aggregation.verifiers_dir.display(),
+        pk_cache_dir = %aggregation.pk_cache_dir.display(),
+        "daemon-live: C1/C2 R15 SHPLONK aggregation",
+    );
+    spawn_and_run(
         cfg,
-        Arc::clone(&live_source),
-        Arc::clone(&live_source),
+        Arc::clone(&aggregated),
+        aggregated,
         bridge,
-    )?;
+        backoff,
+        &gql_endpoint,
+        &params_dir,
+        &prover_state_dir,
+    )
+    .await
+}
+
+/// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
+/// Generic over the source types so both aggregation-on and aggregation-off
+/// paths in [`run_daemon_live`] share the same startup + run wiring.
+async fn spawn_and_run<S, U, B>(
+    cfg: RelayerConfig,
+    source: Arc<S>,
+    bk_update_source: Arc<U>,
+    bridge: Arc<B>,
+    backoff: BackoffConfig,
+    gql_endpoint: &str,
+    params_dir: &Path,
+    prover_state_dir: &Path,
+) -> anyhow::Result<()>
+where
+    S: bridge_relayer_daemon::source::BlockSource + 'static,
+    U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
+    B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
+{
+    let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
 
     if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
         let actual = relayer.bridge().read_state().await?;

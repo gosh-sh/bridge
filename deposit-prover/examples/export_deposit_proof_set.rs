@@ -26,9 +26,6 @@
 //!     --set-dir fixtures/deposit_10proofs --count 10 \
 //!     --degree 18 --max-data-byte-len 256 --max-log-num 20
 
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
-
 use std::{fs, path::Path};
 
 use axiom_eth::utils::{
@@ -69,7 +66,7 @@ use halo2_base::{
         },
     },
 };
-use halo2_tvm_bundle::{CircuitShape, VkBlob};
+use deposit_prover::halo2_tvm_bundle::{CircuitShape, VkBlob};
 use rand::rngs::OsRng;
 use snark_verifier_sdk::CircuitExt;
 

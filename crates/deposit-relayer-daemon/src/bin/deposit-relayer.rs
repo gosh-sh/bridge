@@ -33,8 +33,8 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
-    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, DEFAULT_AN_NODE_URL,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
+    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -156,9 +156,6 @@ enum Cmd {
         /// Must be non-zero unless `--dry-run` (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
-        /// AN node REST base URL for BK-set preflight (`/v2/bk_set`).
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
         /// GraphQL endpoint for tvm_client 3.0 (live submit). Example:
         /// `http://127.0.0.1:11000/graphql`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
@@ -230,14 +227,6 @@ enum Cmd {
         /// Relayer signer address (`dapp_id::account_id`, SDK 3.0 form).
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
-    },
-    /// Probe the AN node's read endpoints (`/v2/bk_set`) and print the
-    /// current BK-set summary. Confirms an AN config points at a reachable
-    /// node before running the daemon.
-    AnPreflight {
-        /// AN node REST base URL.
-        #[arg(long, env = "AN_NODE_URL", default_value = DEFAULT_AN_NODE_URL)]
-        an_node_url: String,
     },
     /// Print the state file path and exit.
     Status,
@@ -331,11 +320,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         .map_err(log_err("finalize-one")),
-        Cmd::AnPreflight {
-            an_node_url,
-        } => an_preflight(an_node_url)
-            .await
-            .map_err(log_err("an-preflight")),
         Cmd::Daemon {
             rpc_url,
             bridge_address,
@@ -348,7 +332,6 @@ async fn main() -> anyhow::Result<()> {
             max_data_byte_len,
             max_log_num,
             dapp_id,
-            an_node_url,
             an_graphql_url,
             an_keys_path,
             an_bridge_abi_path,
@@ -381,9 +364,6 @@ async fn main() -> anyhow::Result<()> {
             };
             backoff.validate().map_err(|e| anyhow::anyhow!(e))?;
             let mut an_cfg = AnConfig::default();
-            if let Some(url) = an_node_url {
-                an_cfg.node_url = url;
-            }
             if let Some(url) = an_graphql_url {
                 an_cfg.graphql_url = url;
             }
@@ -490,20 +470,6 @@ async fn finalize_one(
             reason,
         } => anyhow::bail!("finalizeDeposit still pending on AN: {reason}"),
     }
-}
-
-async fn an_preflight(an_node_url: String) -> anyhow::Result<()> {
-    let cfg = AnConfig::from_node_url(an_node_url);
-    info!(node_url = %cfg.node_url, "probing AN node /v2/bk_set");
-    let pf = cfg.preflight().await?;
-    info!(
-        node_url = %pf.node_url,
-        seq_no = pf.seq_no,
-        bk_count = pf.bk_count,
-        future_bk_count = pf.future_bk_count,
-        "AN node reachable",
-    );
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -705,18 +671,6 @@ async fn run_daemon(
         "deposit source chain",
     );
     let deployment = DeploymentIdentity::new(chain_id, bridge_address, prover_cfg.dapp_id.clone());
-
-    if !an_cfg.node_url.is_empty() {
-        let pf = an_cfg.preflight().await?;
-        info!(
-            node_url = %pf.node_url,
-            seq_no = pf.seq_no,
-            bk_count = pf.bk_count,
-            "AN node preflight OK",
-        );
-    } else {
-        warn!("no AN node_url configured; skipping /v2/bk_set preflight");
-    }
 
     let source = Arc::new(
         EthLogSource::new(provider, bridge_address, from_block, confirmations)

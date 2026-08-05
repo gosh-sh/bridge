@@ -36,7 +36,7 @@ ETH→AN deposits are verified natively on Acki Nacki via `ZKHALO2VERIFYWITHVK` 
 
 1. **SHPLONK deploy only** — `DeployRealBridge.s.sol` / `DeployShellnetE2EBridge.s.sol` wire `ShplonkDeployLib.deployVerifyBlockProductionFromEnv()` (Primary + Fallback + LayerHashes `.bin`). Stub Groth16 for 1A/2 and mocks are test-only.
 2. **`pause()` by default** until Primary + LayerHashes `.bin` exist and C4 is ready; owner unpauses only after forgery tests pass on deployed bytecode.
-3. **Proving key hygiene** — gnark `proving.key` files under `crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key` are gitignored; restrict filesystem access on orchestrator hosts and CI artefact stores.
+3. **Proving key hygiene** — gnark `proving.key` files under `crates/bridge-snark-utils/gnark-wrappers/*/proving.key` are gitignored; restrict filesystem access on orchestrator hosts and CI artefact stores.
 4. **No real funds** — keep Sepolia/shellnet treasury capped; do not bridge mainnet value until SHPLONK `.bin` files pass EIP-170 ≤ 24 576 B and forgery tests are green.
 
 ## Exit criteria (R15 + shellnet E2E)

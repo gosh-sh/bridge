@@ -358,9 +358,11 @@ pub struct BundleProofArtifacts {
     /// derivation paths are provably equal for a valid block; `bundle.rs`
     /// debug-asserts this at build time. Carrying the full 256-bit hash (not
     /// its `Fr::to_repr()` LE bytes) preserves the top 2 bits that would be
-    /// lost when the chain hash `>= p` (~3/4 of blocks). Rust verifiers
-    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain SHPLONK
-    /// auto-reduces via `mod(calldataload, f_q)`.
+    /// lost when the chain hash `>= p` (~81% of blocks). Rust verifiers
+    /// derive the Fr on demand via `ipc::hash_hex_to_fr`; on-chain the
+    /// relayer applies the same `% BN254_R` before submission — the R15
+    /// SHPLONK adapter does NOT auto-reduce, it byte-compares canonical `Fr`
+    /// instances read out of the proof before the pairing runs.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     // Public inputs shared by Circuits 1A/1B + 2
@@ -399,11 +401,13 @@ pub struct BkUpdateProofArtifacts {
     /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
     /// depth-4 `block_merkle_tree_leaves` = Solidity
     /// `uint256(bytes32(blockId))`). Same semantics as
-    /// [`BundleProofArtifacts::block_id_be`]: on-chain SHPLONK auto-reduces
-    /// mod p, and the depth-4 SHA-256 Merkle open (h01 / h4_7 / h8_15 +
-    /// l2/l3) checks against this raw root. The pre-v6 dual-field encoding
-    /// (attestation-circuit `Fr::to_repr` + separate raw hash) is gone —
-    /// callers derive Fr on demand.
+    /// [`BundleProofArtifacts::block_id_be`]: the relayer reduces this via
+    /// `% BN254_R` before handing it to the contract (the R15 SHPLONK adapter
+    /// byte-compares canonical `Fr` instances, does NOT auto-reduce), and the
+    /// contract applies the same reduction to the depth-4 SHA-256 Merkle open
+    /// root (h01 / h4_7 / h8_15 + l2/l3) before comparing so both consumers
+    /// agree. The pre-v6 dual-field encoding (attestation-circuit `Fr::to_repr`
+    /// + separate raw hash) is gone — callers derive Fr on demand.
     pub block_id_be: [u8; 32],
     pub fin_type: BundleFinalizationType,
     pub old_bk_set_commitment_be: [u8; 32],

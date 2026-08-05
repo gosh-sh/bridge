@@ -257,10 +257,12 @@ pub(super) async fn drive_next_bk_update(
     // return the same fields as a transport-agnostic payload. The caller
     // maps this into the transport of its choice. Since schema v6 there is a
     // single `block_id_be` (raw 32-byte SHA-256 root); the Fr form is
-    // derived on demand by the verifier via `ipc::hash_hex_to_fr` and by the
-    // on-chain Yul via `mod(calldataload, f_q)`. Debug-assert that the
-    // circuit's committed Fr agrees with the fold of the raw hash so a
-    // byte-order regression pages loudly at build time.
+    // derived on demand by the verifier via `ipc::hash_hex_to_fr`, and by the
+    // relayer's `block_id_to_field` (`% BN254_R`) before submission — the R15
+    // SHPLONK adapter on-chain does NOT auto-reduce, it byte-compares against
+    // a canonical `Fr` instance. Debug-assert that the circuit's committed Fr
+    // agrees with the fold of the raw hash so a byte-order regression pages
+    // loudly at build time.
     debug_assert_eq!(
         crate::ipc::fold_hash_be_to_fr(&tree.root),
         upd_proof.block_id_fr,

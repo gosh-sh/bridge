@@ -238,7 +238,7 @@ pub const BN254_FR_MODULUS: U256 = U256::from_limbs([
 /// where `_readInstance` returns the raw 32 calldata bytes as `uint256`.
 /// The bytes were written by the prover as canonical Fr, i.e. `< r`. If we
 /// hand the on-chain adapter an un-reduced 256-bit SHA-256 chain hash
-/// (~19% of blocks have top byte `≥ 0x30` and are `≥ r`), the equality
+/// (~81% of chain hashes are `≥ r` — `r / 2^256 = 18.9%`), the equality
 /// check trips and `AckiNackiBridge.verifyBlock` reverts
 /// `AttestationProofRejected()` before the pairing runs. Reducing here
 /// matches what the prover-side `compute_block_id_fr(attestation_bytes)`

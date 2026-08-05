@@ -18,21 +18,33 @@ contract MockPrimaryVerifier is IPrimaryVerifier {
     /// @notice Toggle: when `true`, every call returns `true`; otherwise `false`.
     bool public shouldAccept;
 
+    /// @dev BN254 scalar field order. `shouldAccept` cannot wave through a
+    ///      non-canonical argument: the real adapter compares each one
+    ///      byte-for-byte against an instance read out of the proof
+    ///      (`PrimaryAggregatorVerifier._readInstance`), and instances are
+    ///      always `< R`, so anything `>= R` returns false there no matter how
+    ///      valid the proof is. A mock that ignored this would keep passing on
+    ///      encodings production rejects — which is exactly how the raw-vs-`Fr`
+    ///      `blockId` mismatch in `applyBkSetUpdate` stayed invisible.
+    uint256 internal constant R =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
     function setShouldAccept(bool v) external {
         shouldAccept = v;
     }
 
     function verifyPrimaryAttestation(
         bytes calldata, /* proof */
-        uint256, /* blockId */
-        uint256, /* bkSetCommitment */
-        uint256, /* blockSeqNo */
-        uint256 /* lastSeenBlockSeqNo */
+        uint256 blockId,
+        uint256 bkSetCommitment,
+        uint256 blockSeqNo,
+        uint256 lastSeenBlockSeqNo
     )
         external
         view
         returns (bool)
     {
-        return shouldAccept;
+        if (!shouldAccept) return false;
+        return blockId < R && bkSetCommitment < R && blockSeqNo < R && lastSeenBlockSeqNo < R;
     }
 }

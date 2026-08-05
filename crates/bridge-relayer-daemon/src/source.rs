@@ -29,7 +29,7 @@ use crate::{
     error::RelayerError,
     proof_validation,
     types::{AnBlockData, FinalizationType, MAX_LAYER_HASHES},
-    withdrawal::{fr_hex_to_u256, hash_hex_to_fr_reduced_u256, hash_hex_to_u256},
+    withdrawal::{fr_hex_to_u256, hash_hex_to_fr_reduced_u256},
 };
 
 /// Asynchronous source of AN block payloads.
@@ -455,13 +455,14 @@ impl ProverProofsBlockSource {
             // Schema v6: `block_id_hex` = raw 32-byte BE chain hash. The
             // on-chain SHPLONK adapter compares this against a canonical Fr
             // representative stored in the proof (`_readInstance(proof, 12)`),
-            // so we must reduce mod BN254 `r` here. Roughly ~19% of blocks
-            // have a chain hash `≥ r` and would otherwise revert with
+            // so we must reduce mod BN254 `r` here. Roughly ~81% of blocks
+            // have a chain hash `≥ r` (`r / 2^256 = 18.9%`, so it is the
+            // canonical ones that are the minority) and would otherwise revert with
             // `AttestationProofRejected()` before the pairing runs. See
             // `hash_hex_to_fr_reduced_u256` in `withdrawal.rs` for the full
-            // rationale. The BK-update path below deliberately keeps the
-            // un-reduced form because `applyBkSetUpdate` compares blockId
-            // against a raw SHA-256 Merkle root (`AckiNackiBridge.sol:834`).
+            // rationale. The BK-update path below reduces too: the contract
+            // reduces its folded SHA-256 root before comparing, so both
+            // consumers of `blockId` there agree on this one encoding.
             block_id: hash_hex_to_fr_reduced_u256(&req.block_id_hex)?,
             bk_set_commitment: fr_hex_to_u256(&req.bk_set_poseidon_hash_hex)?,
             block_seq_no: seq_no,
@@ -624,10 +625,10 @@ impl BkUpdateProofsSource {
 
         Ok(Some(crate::types::BkSetUpdateData {
             fin_type,
-            // Schema v6: `block_id_hex` = raw 32-byte BE chain hash. Same
-            // semantics as the bundle path — matches
-            // `uint256(bytes32(blockId))` on-chain.
-            block_id: hash_hex_to_u256(&req.block_id_hex)?,
+            // Same convention as the bundle path above: the `Fr` image, which
+            // is also what the contract's reduced Merkle root is compared
+            // against inside `applyBkSetUpdate`.
+            block_id: hash_hex_to_fr_reduced_u256(&req.block_id_hex)?,
             block_seq_no: seq_no,
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,

@@ -24,6 +24,10 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     uint256 internal constant L3 = 0xB0B;
     uint64 internal constant SEQ = 42;
 
+    /// @dev BN254 scalar field order.
+    uint256 internal constant R =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
     event BkSetUpdated(uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo);
 
     function setUp() public {
@@ -122,10 +126,25 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///      `block_id_tree.rs:30-31`) as canonical little-endian
     ///      `Fr::to_repr()` bytes. Byte-reverse here so the expected root
     ///      matches what `applyBkSetUpdate` now computes via `_frToLeBytes`.
+    ///      `blockId` comes back reduced into `Fr`, which is the form the
+    ///      contract compares against and the only form the attestation adapter
+    ///      can match — see `test_applyBkSetUpdate_reducesRootIntoFieldBeforeComparing`.
     function _merkleWitness(uint256 l2, uint256 l3)
         internal
         pure
         returns (uint256 blockId, bytes32 h01, bytes32 h4_7, bytes32 h8_15)
+    {
+        uint256 rawRoot;
+        (rawRoot, h01, h4_7, h8_15) = _rawMerkleWitness(l2, l3);
+        blockId = rawRoot % R;
+    }
+
+    /// @dev Same fold, stopping at the unreduced SHA-256 root. Only the tests
+    ///      that care about the difference between the two use this.
+    function _rawMerkleWitness(uint256 l2, uint256 l3)
+        internal
+        pure
+        returns (uint256 rawRoot, bytes32 h01, bytes32 h4_7, bytes32 h8_15)
     {
         bytes32 h23 = sha256(abi.encodePacked(_toLe(l2), _toLe(l3)));
         h01 = bytes32(uint256(0x1234));
@@ -133,7 +152,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         h4_7 = bytes32(uint256(0x5678));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, h4_7));
         h8_15 = bytes32(uint256(0x9abc));
-        blockId = uint256(sha256(abi.encodePacked(h0_7, h8_15)));
+        rawRoot = uint256(sha256(abi.encodePacked(h0_7, h8_15)));
     }
 
     /// @dev Test-local copy of `AckiNackiBridge._frToLeBytes`. Byte-reverses
@@ -199,13 +218,18 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         );
 
         // If the pinned root doesn't match the contract's fold, the call
-        // reverts BkUpdateMerkleMismatch(expected, expected+1); pass ==
-        // proof that _frToLeBytes matches sha256_combine of Fr::to_repr()
-        // bytes on the AN side.
+        // reverts BkUpdateMerkleMismatch; pass == proof that _frToLeBytes
+        // matches sha256_combine of Fr::to_repr() bytes on the AN side.
+        //
+        // The argument is the root's `Fr` image, not the root: this vector is
+        // one of the ~81% whose raw root exceeds the field order (it starts
+        // 0x8f, and `R` starts 0x3064), so the raw value is not something any
+        // circuit could have committed to.
+        assertGe(expectedRoot, R, "pinned vector should exercise the >= R case");
         pinnedBridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
-            expectedRoot,
+            expectedRoot % R,
             SEQ,
             pinnedL2,
             pinnedL3,
@@ -216,5 +240,54 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         assertEq(pinnedBridge.storedBkSetCommitment(), pinnedL3);
         assertEq(pinnedBridge.storedLastBkSetUpdateSeqNo(), SEQ);
+    }
+
+    /// @notice `blockId` has two consumers inside `applyBkSetUpdate`: the
+    ///         attestation adapter, which compares it byte-for-byte against a
+    ///         public instance read out of the proof, and the SHA-256 fold. The
+    ///         first can only ever match a canonical `Fr`; the second produces a
+    ///         raw 256-bit hash, and only `R / 2^256 = 18.9%` of those are
+    ///         canonical. Unless the contract reduces before comparing, no
+    ///         single argument satisfies both for the other ~81% of rotations —
+    ///         this fixture's root among them — and the entry point is dead.
+    function test_applyBkSetUpdate_reducesRootIntoFieldBeforeComparing() public {
+        (uint256 rawRoot, bytes32 h01, bytes32 h4_7, bytes32 h8_15) = _rawMerkleWitness(L2, L3);
+        assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
+
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            rawRoot % R,
+            SEQ,
+            L2,
+            L3,
+            h01,
+            h4_7,
+            h8_15
+        );
+
+        assertEq(bridge.storedBkSetCommitment(), L3);
+    }
+
+    /// @notice The mirror of the above: the raw root is what the fold literally
+    ///         produces, and it is still not a valid `blockId`. No circuit can
+    ///         have committed to it, so the attestation gate rejects it before
+    ///         the fold is even reached.
+    function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
+        (uint256 rawRoot, bytes32 h01, bytes32 h4_7, bytes32 h8_15) = _rawMerkleWitness(L2, L3);
+        assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
+
+        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            rawRoot,
+            SEQ,
+            L2,
+            L3,
+            h01,
+            h4_7,
+            h8_15
+        );
     }
 }

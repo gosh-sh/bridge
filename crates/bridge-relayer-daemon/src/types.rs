@@ -61,11 +61,12 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
         // so we reduce mod BN254 `r` here — the earlier "SHPLONK verifier
         // auto-reduces mod p" belief was wrong (auto-reduction happens
         // inside the pairing, not in the Solidity adapter's equality
-        // prelude). Roughly ~19% of blocks have a chain hash `≥ r` and
+        // prelude). Roughly ~81% of blocks have a chain hash `≥ r`
+        // (`r / 2^256 = 18.9%`, so the canonical ones are the minority) and
         // would otherwise revert `AttestationProofRejected()` before the
-        // pairing runs. `BkSetUpdateData::block_id` below deliberately
-        // keeps the un-reduced form because `applyBkSetUpdate` compares it
-        // against a raw SHA-256 Merkle root (`AckiNackiBridge.sol:834`).
+        // pairing runs. `BkSetUpdateData::block_id` below reduces as well:
+        // the contract reduces its folded SHA-256 root before comparing, so
+        // one encoding serves both consumers there.
         // The remaining `*_be` fields (`bk_set_commitment_be`,
         // `layer_hashes_be[i]`, `prev_max_level_layer_hash_be`) are already
         // `Fr::to_repr()` LE bytes (canonical `< r`).
@@ -94,16 +95,19 @@ impl From<&bridge_prover_lib::live_driver::BundleProofArtifacts> for AnBlockData
 
 impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpdateData {
     fn from(u: &bridge_prover_lib::live_driver::BkUpdateProofArtifacts) -> Self {
-        // Schema v7: single `block_id_be` = raw 32-byte BE chain hash, so
-        // `U256::from_be_bytes` matches Solidity's `uint256(bytes32(...))`
-        // that `applyBkSetUpdate` receives. Commitments remain
+        // Schema v7: single `block_id_be` = raw 32-byte BE chain hash, reduced
+        // into `Fr` for the same reason as the block path above — inside
+        // `applyBkSetUpdate` this value is handed to the attestation adapter
+        // *and* compared against the folded SHA-256 root, and the contract
+        // reduces that root before comparing so both consumers agree.
+        // Commitments remain
         // `Fr::to_repr()` LE bytes (open cleanup item). The three open
         // siblings walk the depth-4 authentication path of L2/L3 in the
         // 16-leaf block-id tree: `h01` (depth 3), `h4_7` (depth 2), and
         // `h8_15` (depth 1).
         BkSetUpdateData {
             fin_type: u.fin_type.into(),
-            block_id: U256::from_be_bytes(u.block_id_be),
+            block_id: U256::from_be_bytes(u.block_id_be) % BN254_FR_MODULUS,
             block_seq_no: u.block_seq_no,
             old_commitment_l2: U256::from_le_bytes(u.old_bk_set_commitment_be),
             new_commitment_l3: U256::from_le_bytes(u.new_bk_set_commitment_be),

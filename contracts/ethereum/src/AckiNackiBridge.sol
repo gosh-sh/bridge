@@ -990,6 +990,25 @@ contract AckiNackiBridge {
     ///      Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan
     ///      of the specific window) remains the ultimate target once the
     ///      Circuit 4 re-keygen lands.
+    ///
+    ///      **Soundness widening.** Dropping the layer index means the bridge
+    ///      no longer asserts which layer a withdrawal is anchored in. A
+    ///      Circuit 4 proof whose `finalRoot` equals a layer-2 window entry
+    ///      is accepted even if the withdrawal event was intended to anchor
+    ///      to layer 1 (or vice-versa). Correctness therefore rests entirely
+    ///      on Circuit 4's own binding of `finalRoot` to the event — Option A
+    ///      is what would restore per-layer specificity on-chain.
+    ///
+    ///      **Cost.** `_isKnownLayerAnchor` is O(W) with
+    ///      `HISTORY_PROOF_WINDOW = 128`; this flat scan calls it for all
+    ///      `MAX_LAYER_HASHES = 10` layers, so a miss is up to
+    ///      `10 × 128 = 1280` cold SLOADs (~2.7M gas) — ~10× the single-
+    ///      window scan it replaced — and is paid by the caller whose
+    ///      `withdrawByProof` then reverts. An `mapping(uint256 => bool)`
+    ///      written on append would give O(1) membership; the eviction on
+    ///      window rollover must delete the map entry too, or the map
+    ///      quietly becomes the unbounded bag the window was introduced to
+    ///      avoid.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {

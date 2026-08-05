@@ -7,9 +7,9 @@
 //! this crate keeps proof generation behind a trait with two backends:
 //!
 //! - [`MockProofGenerator`] — deterministic, no halo2. Derives the twelve
-//!   public inputs (including proven `chainId`, the AN destination account,
-//!   and the config dappId tag) straight from the event so the relayer +
-//!   submitter can be driven end-to-end in unit tests in microseconds.
+//!   public inputs (including proven `chainId`, the AN destination account, and
+//!   the config dappId tag) straight from the event so the relayer + submitter
+//!   can be driven end-to-end in unit tests in microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
@@ -274,6 +274,11 @@ impl ProofGenerator for SubprocessProofGenerator {
         let tx_hash = format!("{:#x}", event.tx_hash);
         let contract = format!("{:#x}", event.source_contract);
         let log_index = event.log_index.to_string();
+        // Pass the chain we believe this deposit is on, so the prover can fail
+        // fast if the witness it fetched proves a different one. Without it the
+        // prover falls back to whatever the witness says and the mismatch would
+        // only surface as an AN-side allowlist rejection.
+        let chain_id = event.source_chain_id.to_string();
 
         // 1. Fetch witness.
         self.run_example(&[
@@ -298,6 +303,8 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_example(&[
             "export_vk_blob".into(),
             "--".into(),
+            "--chain-id".into(),
+            chain_id.clone(),
             "--input".into(),
             input_json.display().to_string(),
             "--output".into(),
@@ -315,6 +322,8 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_example(&[
             "export_blake2b_proof".into(),
             "--".into(),
+            "--chain-id".into(),
+            chain_id.clone(),
             "--input".into(),
             input_json.display().to_string(),
             "--proof-out".into(),

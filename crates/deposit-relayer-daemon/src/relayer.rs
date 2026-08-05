@@ -15,7 +15,11 @@
 //! a "max ticks" budget for tests; [`crate::daemon`] adds the long-running
 //! backoff + shutdown wrapper.
 
-use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -172,7 +176,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let event = match self.source.fetch(target).await? {
             Some(e) => e,
             None => {
-                if let Some(outcome) = self.record_failure(target, "deposit not yet confirmed on Ethereum")? {
+                if let Some(outcome) =
+                    self.record_failure(target, "deposit not yet confirmed on Ethereum")?
+                {
                     return Ok(outcome);
                 }
                 if self.state.attempts_since_progress >= self.config.max_attempts_warn {
@@ -302,8 +308,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     fn persist_state(&mut self) -> Result<(), RelayerError> {
         if let Some(cursor) = &self.config.scan_cursor {
-            self.state.scanned_through_block =
-                Some(*cursor.lock().map_err(|e| RelayerError::other(e.to_string()))?);
+            self.state.scanned_through_block = Some(
+                *cursor
+                    .lock()
+                    .map_err(|e| RelayerError::other(e.to_string()))?,
+            );
         }
         self.state.save(&self.config.state_path)
     }
@@ -597,11 +606,15 @@ mod tests {
         for _ in 0..2 {
             assert!(matches!(
                 relayer.tick().await.unwrap(),
-                TickOutcome::NotYetAvailable { deposit_id: 0 }
+                TickOutcome::NotYetAvailable {
+                    deposit_id: 0
+                }
             ));
         }
         match relayer.tick().await.unwrap() {
-            TickOutcome::Skipped { deposit_id, .. } => assert_eq!(deposit_id, 0),
+            TickOutcome::Skipped {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
             other => panic!("expected Skipped, got {other:?}"),
         }
         assert_eq!(relayer.state().parked_deposit_ids, vec![0]);

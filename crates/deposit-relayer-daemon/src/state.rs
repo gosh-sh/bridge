@@ -53,7 +53,8 @@ impl DeploymentIdentity {
 /// Locally-persisted relayer progress.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RelayerState {
-    /// Set on first daemon start; must match the live config on subsequent runs.
+    /// Set on first daemon start; must match the live config on subsequent
+    /// runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment: Option<DeploymentIdentity>,
     /// Highest `depositId` known finalized on AN. `None` before the first
@@ -105,8 +106,8 @@ impl RelayerState {
                 Ok(())
             },
             Some(stored) => Err(RelayerError::other(format!(
-                "state.json deployment mismatch (stored chain={} bridge={} dapp_id={}; \
-                 expected chain={} bridge={} dapp_id={}). Use --force-state to override.",
+                "state.json deployment mismatch (stored chain={} bridge={} dapp_id={}; expected \
+                 chain={} bridge={} dapp_id={}). Use --force-state to override.",
                 stored.chain_id,
                 stored.bridge_address,
                 stored.dapp_id,
@@ -187,15 +188,20 @@ impl StateLock {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // The lock file is a sentinel — only the flock matters, so keep whatever
+        // bytes are already there rather than rewriting it on every acquire.
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .map_err(RelayerError::from)?;
         file.try_lock_exclusive()
             .map_err(|e| RelayerError::other(format!("state lock {:?}: {e}", lock_path)))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: file,
+        })
     }
 }
 

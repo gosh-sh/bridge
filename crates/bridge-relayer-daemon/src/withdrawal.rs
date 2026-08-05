@@ -210,10 +210,11 @@ pub fn fr_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
 }
 
 /// Partner schema v6 `block_id_hex` carries the raw 32-byte BE chain hash
-/// (= `Solidity uint256(bytes32(blockId))`). Decode as big-endian so the
-/// `U256` we hand to `verifyBlock` / `applyBkSetUpdate` matches the value
-/// on-chain SHPLONK auto-reduces via `mod(calldataload, f_q)` and the value
-/// the SHA-256 Merkle open compares against.
+/// (= `Solidity uint256(bytes32(blockId))`), decoded here as big-endian and
+/// left unreduced.
+///
+/// For anything that goes on-chain as a circuit public input, use
+/// [`hash_hex_to_block_id_fr`] instead — see the note there.
 pub fn hash_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
     let bytes = decode_hex(hex_str)?;
     if bytes.len() != 32 {
@@ -223,6 +224,21 @@ pub fn hash_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
         )));
     }
     Ok(U256::from_be_slice(&bytes))
+}
+
+/// The same hash reduced into BN254 `Fr` — the form `verifyBlock` and
+/// `applyBkSetUpdate` expect.
+///
+/// The older comments in this tree claimed the on-chain verifier reduces the
+/// argument itself via `mod(calldataload, f_q)`. That was true while the bridge
+/// called a Yul verifier directly, and stopped being true with the R15
+/// aggregator adapters: `PrimaryAggregatorVerifier` compares the argument
+/// against an instance read out of the proof *before* the pairing, byte for
+/// byte, and instances are canonical field elements. Since only
+/// `r / 2^256 = 18.9%` of chain hashes are canonical as-is, sending the raw
+/// value fails for roughly four blocks in five.
+pub fn hash_hex_to_block_id_fr(hex_str: &str) -> Result<U256, RelayerError> {
+    Ok(hash_hex_to_u256(hex_str)? % crate::types::BN254_FR_MODULUS)
 }
 
 #[cfg(test)]

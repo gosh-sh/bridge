@@ -138,7 +138,10 @@ impl IAckiNacki for TvmAckiNacki {
             .map_err(format_tvm_client_error)?;
 
         let (status, exit_code, aborted) = classify_tx_json(&result.transaction);
-        if !matches!(status, TransactionStatus::Confirmed | TransactionStatus::Included) {
+        if !matches!(
+            status,
+            TransactionStatus::Confirmed | TransactionStatus::Included
+        ) {
             return Err(AckiNackiError::TransactionFailed(format!(
                 "contract call aborted (exit_code={exit_code:?}, aborted={aborted})"
             )));
@@ -233,10 +236,7 @@ impl IAckiNacki for TvmAckiNacki {
 /// Prefers `compute.exit_code` (canonical process_message / GraphQL shape);
 /// falls back to a top-level `exit_code` for older fixtures.
 pub fn classify_tx_json(tx: &Value) -> (TransactionStatus, Option<i32>, bool) {
-    let aborted = tx
-        .get("aborted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let aborted = tx.get("aborted").and_then(|v| v.as_bool()).unwrap_or(false);
     let exit_code = tx
         .get("compute")
         .and_then(|c| c.get("exit_code"))
@@ -290,10 +290,7 @@ fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError 
     if let Some(code) = data
         .pointer("/transaction/compute/exit_code")
         .and_then(|v| v.as_i64())
-        .or_else(|| {
-            data.pointer("/compute/exit_code")
-                .and_then(|v| v.as_i64())
-        })
+        .or_else(|| data.pointer("/compute/exit_code").and_then(|v| v.as_i64()))
     {
         if !msg.contains("exit_code=") {
             msg.push_str(&format!(" (exit_code={code})"));

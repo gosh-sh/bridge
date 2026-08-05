@@ -178,10 +178,7 @@ impl AnConfig {
     ///
     /// Production endpoints must use HTTPS unless loopback or
     /// `allow_insecure` is set.
-    pub fn validate_live_graphql_endpoint(
-        &self,
-        allow_insecure: bool,
-    ) -> Result<(), RelayerError> {
+    pub fn validate_live_graphql_endpoint(&self, allow_insecure: bool) -> Result<(), RelayerError> {
         if self.graphql_url.is_empty() {
             return Ok(());
         }

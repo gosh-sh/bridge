@@ -2,7 +2,10 @@
 > All "11 PI" / `num_instance = [11]` claims below predate Track 2. The current
 > `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4,
 > `NUM_PUBLIC_INPUTS = 12` in `deposit-prover/src/types.rs`) and produces VkBlob
-> `de1dd3ab…7dd8d1` (5006 B). The reproducibility mechanics below (locked
+> `9dacd998…8360fae3` (5006 B, rotated 2026-08-03 by the deposit-circuit audit fixes;
+> earlier 12-PI blobs `de1dd3ab…7dd8d1` / `006cca5d…191dec05` / `3e2a2db2…bf0d049c`
+> are superseded).
+> The reproducibility mechanics below (locked
 > `Cargo.lock`, witness-independent circuit, Hermez SRS pin) still apply — only
 > the PI count / VkBlob hash change. Canonical Track-2 hash + fixtures live in
 > `docs/deposit_max_key_byte_len.md` and `docs/partner_note_usdcbridge_chainid_hermez_2026-07-23.md`.

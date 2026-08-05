@@ -1,29 +1,14 @@
-//! Supported EVM deposit-source chain IDs (mirror of
-//! `deposit-prover::supported_chains`). One WITHVK VkBlob verifies all;
-//! AN allowlists `(chainId → bridge Fr)`.
+//! Supported EVM deposit-source chain IDs.
+//!
+//! Re-exported verbatim from the dependency-free `deposit-chain-ids` crate,
+//! which `deposit-prover` depends on too — the relayer cannot accept a chain
+//! the prover would refuse to build a witness for.
 
-/// Ethereum Sepolia (shellnet / fixtures).
-pub const CHAIN_ID_SEPOLIA: u64 = 11_155_111;
-pub const CHAIN_ID_OP_MAINNET: u64 = 10;
-pub const CHAIN_ID_WORLD_CHAIN: u64 = 480;
-pub const CHAIN_ID_MANTLE: u64 = 5_000;
-pub const CHAIN_ID_BASE: u64 = 8_453;
-pub const CHAIN_ID_ARBITRUM_ONE: u64 = 42_161;
-pub const CHAIN_ID_BLAST: u64 = 81_457;
-
-pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
-    CHAIN_ID_OP_MAINNET,
-    CHAIN_ID_WORLD_CHAIN,
-    CHAIN_ID_MANTLE,
-    CHAIN_ID_BASE,
-    CHAIN_ID_ARBITRUM_ONE,
-    CHAIN_ID_BLAST,
-    CHAIN_ID_SEPOLIA,
-];
-
-pub fn is_supported_deposit_chain(chain_id: u64) -> bool {
-    SUPPORTED_DEPOSIT_CHAIN_IDS.contains(&chain_id)
-}
+pub use deposit_chain_ids::{
+    is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
+    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
+    CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
+};
 
 #[cfg(test)]
 mod tests {

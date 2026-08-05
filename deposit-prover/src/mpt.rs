@@ -102,8 +102,11 @@ pub async fn generate_receipt_proof(
     // RLP encode the receipt
     let receipt_rlp = encode_receipt(&receipt)?;
 
-    // RLP encode the block header
-    let block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
+    // RLP encode the block header, asserting it reproduces the canonical hash —
+    // a silently truncated header would still hash to something and become the
+    // circuit's `blockHash` public input.
+    let block_header_rlp = crate::rlp_utils::verify_block_header_rlp(&block)?;
+    println!("✅ Block header RLP reproduces the canonical block hash");
 
     Ok(ReceiptProof {
         receipt_rlp,
@@ -183,9 +186,12 @@ pub async fn generate_transaction_proof(
     let tx_bytes = target_tx_bytes.ok_or_else(|| anyhow!("target tx bytes missing"))?;
     // Reject non-EIP-1559 early so MockProver / prove fail with a clear error
     // rather than an opaque RLP constraint failure.
-    if tx_bytes.first() != Some(&0x02) {
+    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE) {
         return Err(anyhow!(
-            "deposit enclosing tx must be EIP-1559 (type 0x02); got first byte {:#x}",
+            "deposit enclosing tx must be EIP-1559 (type 0x02); got first byte {:#x}. \
+             The circuit binds chain_id from the typed-tx RLP, which only type 0x02 \
+             exposes, so this deposit cannot be proven as-is — the depositor must \
+             re-send with an EIP-1559 transaction.",
             tx_bytes.first().copied().unwrap_or(0)
         ));
     }

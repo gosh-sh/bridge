@@ -90,10 +90,17 @@ struct Args {
     #[arg(long, default_value = "20")]
     max_log_num: usize,
 
-    /// Fetch / network selector only (not baked into VK; proven chainId is a PI).
-    /// Must be in `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111).
+    /// Source network (not baked into VK; proven chainId is a PI). Must be in
+    /// `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111) and must match the
+    /// chain the loaded witness actually proves.
     #[arg(long, default_value = "11155111")]
     chain_id: u64,
+}
+
+fn load_input_checked(set_dir: &str, i: usize, chain_id: u64) -> anyhow::Result<DepositProofInput> {
+    let input = load_input(set_dir, i)?;
+    input.require_chain_id(chain_id)?;
+    Ok(input)
 }
 
 fn load_input(set_dir: &str, i: usize) -> anyhow::Result<DepositProofInput> {
@@ -112,14 +119,13 @@ fn main() -> anyhow::Result<()> {
         max_data_byte_len: args.max_data_byte_len,
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
-        expected_chain_id: args.chain_id,
     };
 
     let srs = load_kzg_params_from_trusted_setup(args.degree).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // ---- Keygen ONCE from proof_00, pinning params + break points + pk ----
     println!("Keygen (once) from proof_00/input.json ...");
-    let ref_input = load_input(&args.set_dir, 0)?;
+    let ref_input = load_input_checked(&args.set_dir, 0, args.chain_id)?;
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let mut kcircuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Keygen,
@@ -160,7 +166,7 @@ fn main() -> anyhow::Result<()> {
             println!("proof_{i:02}: SKIP (no input.json)");
             continue;
         }
-        let input = load_input(&args.set_dir, i)?;
+        let input = load_input_checked(&args.set_dir, i, args.chain_id)?;
         let circuit = EthCircuitImpl::<Fr, _>::new_impl(
             CircuitBuilderStage::Prover,
             DepositEventCircuitV2::new(input, &config),

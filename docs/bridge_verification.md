@@ -30,7 +30,7 @@ This doc is the **end-to-end view**. Every section follows the pattern: *what th
 
 - ETH → AN: `AckiNackiBridge.deposit()` (ETH side), the Halo2 deposit-prover proof (off-chain), and the future `VERHALO2SHPLONK`-based AN-side `TokenBridge.finalizeDeposit(...)` + nullifier. The legacy refund-style `withdraw(...)` was retired in Phase 4.3.
 - AN → ETH: `AckiNackiBridge.verifyBlock()` and the tuple of two cross-circuit-bound ZK proofs (Circuit 1A or 1B + Circuit 2).
-- BK-set commitment lifecycle: deferred to Phase 1.C (Circuit 3 / `bkSetUpdateProof`); the legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2**. Until Phase 1.C ships, `storedBkSetCommitment` only changes via redeployment.
+- BK-set commitment lifecycle: rotation runs today through the interim `applyBkSetUpdate` (attestation + SHA-256 opening of the `(L2, L3)` leaf pair, §6); Circuit 3 (`bkSetUpdateProof`) is still owed for a statement about the rotation's contents. The legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2** and no owner path replaced it.
 - Block-hash oracle (`AxiomBlockHeaderOracle` + the EVM `blockhash()` opcode) — currently unused by the public surface; preserved for a future burn-proof / ETH-side withdrawal flow.
 - Cross-cutting properties: ZK verifier integrity, reentrancy, access control, fork resistance.
 - AAVE V3 integration: covered in detail in `docs/aave_integration.md`; this doc only summarises how it interacts with the rest.
@@ -112,7 +112,9 @@ AN-side (planned, lands with the future `VERHALO2SHPLONK` opcode + `TokenBridge.
 | **DEP-N-1** | A successful `finalizeDeposit(halo2Proof, publicInputs, vk)` requires the Halo2 SHPLONK proof to verify natively under the immutable VK, binding `(depositId, sender, amount, bridgeAddr, anWorkchain, anAccount, blockHash, promiseCommit)` to a real `Deposit` event in the receipt trie of an Ethereum block. |
 | **DEP-N-2** | `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` — wrong-bridge proofs revert. |
 | **DEP-N-3** | The per-`depositId` nullifier in `TokenBridge` is set before any token mint; replay reverts. |
-| **DEP-N-4** | Producer pipeline waits ≥ 12 finality confirmations before generating the proof, and the ground-truth block hash is cross-checked against ≥ 2 Ethereum RPC providers. |
+| **DEP-N-4** | `finalizeDeposit` credits a deposit only if the proof-bound source block hash sits in the on-chain anchor set `_acceptedBlockHash[chainId]`. Admission is off-proof: the block must be canonical at its number on an independent node and ≥ 64 confirmations deep. |
+| **DEP-N-5** | One source deposit mints at most once, and deposits on different chains never share a voucher: the replay identity is `(srcChainId, depositId, contractAddr, dappId)`, and all three places that compute it agree. |
+| **DEP-N-6** | Per chain, cumulative minted amount stays within `_mintCapByChain[chainId]` when that cap is non-zero (bound on damage; overshoot possible by the amount of concurrently in-flight deposits). |
 | **DEP-N-5** | The AN recipient is a **proven** public input (`anWorkchain`, `anAccountHigh`, `anAccountLow`): `finalizeDeposit` credits `anWorkchain:(anAccountHigh<<128 \| anAccountLow)` reconstructed from the proof, never an EVM address or a relayer-supplied hint. The circuit `constrain_equal`s these to the RLP-parsed `Deposit` event data words. |
 
 ### 4.2 Why each property holds
@@ -129,7 +131,11 @@ AN-side (post-`VERHALO2SHPLONK`):
 - **DEP-N-1**: the Halo2 SHPLONK verifier inside the TVM opcode accepts only proofs whose transcript matches `vk` and whose public inputs match the supplied vector. The circuit's internal constraints chain receipt RLP, MPT inclusion, log selector + topics + data, block-hash binding, and the keccak coprocessor commitment.
 - **DEP-N-2**: explicit `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR, "wrong bridge contract");` in `TokenBridge.finalizeDeposit`.
 - **DEP-N-3**: `nullifier[depositId] = true` is set before `_mintTo(...)`; second call reverts.
-- **DEP-N-4**: producer responsibility, not contract. Documented in `docs/verifying_eth_proof_on_an.md` §3.
+- **DEP-N-4**: half contract, half trust assumption. The contract half is `require(_acceptedBlockHash[f.chainId][_parseBlockHash(publicInputs)], ERR_UNKNOWN_BLOCK)` in `USDCBridge.finalizeDeposit` (`acki-nacki` `7992ce26`), mirroring `AckiNackiBridge._knownAnchors` in the AN→ETH direction. No circuit can supply the other half — "this header is canonical" is a statement about Ethereum consensus, not about the witness (BC-D01) — so the anchor set is populated from outside the proof, by a key. Two writers exist: the owner (`setAcceptedBlockHash`) and a threshold of attesters (`attestBlockHash`, `1fb5b28c`). **Which one is the actual trust root is a deployment fact, not a code fact**: while `getAttesterConfig().ownerAnchorsEnabled` is true it is the owner key alone regardless of how many attesters are registered, and `disableOwnerAnchors()` (one-way) is what makes it M-of-N. Either way the writer can mint by admitting a hash from a chain that never existed; an ETH light client is the long-run target for L1, and L2s stay on attesters until someone verifies their settlement to L1. `scripts/deposit_anchor_params.py --verify` enforces the independence + confirmation-depth obligations before printing the call arguments. Full analysis: `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1.
+
+- **DEP-N-5** (new 2026-08-04, `acki-nacki` `21a781e7`): the anti-replay identity behind the deterministic `DepositVoucher` address is `(srcChainId, depositId, contractAddr, dappId)`. `srcChainId` is load-bearing rather than decorative: without it, two allowlisted chains sharing a bridge address (CREATE2, or the same deployer nonce) collide on their per-chain `depositId` counters, and the second chain's deposit is silently swallowed as a replay — funds in, nothing minted, no refund path. Checked mechanically across all three copies of the signature by `scripts/check_voucher_abi_consistency.py`, because a divergence between bridge and voucher aborts the voucher constructor on cell underflow (`exit_code 9`) rather than failing to compile.
+
+- **DEP-N-6** (new 2026-08-04, `acki-nacki` `993af815`): `_mintedByChain[chainId] <= _mintCapByChain[chainId]` for every chain with a non-zero cap — a bound on damage, not a soundness invariant. Enforced in `finalizeDeposit` (so an over-cap deposit reverts while staying retryable) and tallied in `confirmDeposit` (so replays consume no headroom), which means N in-flight deposits can overshoot by their combined amount. Read it as "a forgery cannot drain more than this per chain", not as an exact ceiling.
 - **DEP-N-5**: the deposit circuit (`deposit-prover/src/circuit_v2.rs`) exposes `anWorkchain`/`anAccountHigh`/`anAccountLow` as public inputs #4–#6 and constrains them equal to the RLP-parsed `Deposit` data words 1–2 (the same Phase-0/Phase-1 binding used for `amount`). `TokenBridge.finalizeDeposit` therefore credits a destination that is part of the proof, not trusted from the relayer (landed 2026-06-02; `num_instance` 7→10).
 
 ### 4.3 How to verify
@@ -310,9 +316,9 @@ The legacy `LayerHashBridge.rotateBkSet` (ZK-proven via a 2-input Halo2 stub) **
 
 The v2 plan is **Phase 1.C**: extend `verifyBlock` (or add a sibling `verifyBkSetUpdate`) with an optional `bkSetUpdateProof` argument that, on a successful Circuit 3 pairing, advances `storedBkSetCommitment` from old → new in the same transaction. Until Phase 1.C ships:
 
-- `storedBkSetCommitment` is **immutable post-deployment** in practice — there is no setter.
-- BK-set rotation requires a **redeployment** of `AckiNackiBridge` with a new `genesisBkSetCommitment` until Circuit 3 is wired (and the relayer can produce the proof).
-- This is intentional: it removes the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` introduced.
+- An **interim** `applyBkSetUpdate` has since shipped: it takes a Circuit 1A/1B attestation plus a three-sibling SHA-256 opening of the `(L2, L3)` leaf pair in the 16-leaf, depth-4 block-id tree, and advances `storedBkSetCommitment` when the fold reproduces `blockId`. It is permissionless and needs no Circuit 3 — the rotation is authorised by the attested block itself, not by a dedicated proof. So `storedBkSetCommitment` is no longer immutable post-deployment, and BK-set rotation no longer requires a redeployment.
+- What Circuit 3 still buys is a statement about the rotation's *contents* (that the new committee legitimately succeeds the old one). `applyBkSetUpdate` only shows that the attested block commits to this pair of commitments at those tree positions.
+- No owner path was reintroduced: the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` carried stays retired.
 
 ### 6.2 What must hold (target invariants for Phase 1.C)
 
@@ -326,9 +332,21 @@ The following list is **forward-looking** and will be re-verified once Circuit 3
 | **BK-4** | After success, `storedBkSetCommitment = newCommitment` and a `BkSetCommitmentRotated(oldCommitment, newCommitment)` event is emitted. |
 | **BK-5** | The transition is single-step: there is no "pending"/"executed" two-phase flow (the v1 timelock was a workaround for the absence of Circuit 3). |
 
+The one invariant below is **not** forward-looking — it constrains `applyBkSetUpdate` as shipped, and it is the kind that fails silently in the direction of "nothing works" rather than "anything passes":
+
+| Property | Statement (holds today) |
+|---|---|
+| **BK-6** | `blockId` means the same thing to both of its consumers inside `applyBkSetUpdate`: the canonical `Fr` image of the block-id tree root. The attestation adapter compares it byte-for-byte against an instance read out of the proof, which is always `< r`; the fold produces a raw SHA-256 root, of which only `r / 2^256 = 18.9%` are. The contract therefore reduces the root (`% BN254_R`) before comparing, and the relayer sends the reduced value on both this path and `verifyBlock`. |
+
+- **BK-6**: worth stating because the failure is not a security hole but a dead entry point — without the reduction the two consumers are unsatisfiable at once for ~81% of rotations, and the mismatch surfaces as `AttestationProofRejected` or `BkUpdateMerkleMismatch` depending on which convention the caller picked. It stayed invisible for a while because the mock verifiers accepted any argument; they now mirror the adapter and reject non-canonical inputs, so the suite fails if either side drifts back. Contract side: `AckiNackiBridge.applyBkSetUpdate`. Relayer side: `types::block_id_to_field` / `withdrawal::hash_hex_to_block_id_fr`. Note the older claim in this tree that "the on-chain verifier auto-reduces via `mod(calldataload, f_q)`" was true of the direct Yul verifier and stopped being true with the R15 aggregator adapters, which compare before they pair.
+
 ### 6.3 How to verify (today)
 
-There are no BK-set rotation tests at HEAD — the surface doesn't exist yet. The closest thing is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+`AckiNackiBridgeApplyBkSetUpdateTest` (11 tests) covers the shipped interim surface: the depth-4 fold against a vector computed independently in Python, rejection of the legacy depth-3 root, the `Fr` reduction in both directions (BK-6), replay, non-monotonic sequence numbers, stale old commitment, and a two-rotation chain. For the Circuit 3 target invariants above, the closest thing at HEAD is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+
+```bash
+cd contracts/ethereum && forge test --match-contract ApplyBkSetUpdate -vv
+```
 
 ```bash
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"   # static between deployments
@@ -613,7 +631,7 @@ To be explicit about the trust boundary:
 | Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
 | Acki Nacki BFT economic security | not a bridge concern; the bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds |
 | Off-chain relayer liveness / censorship | a malicious relayer can stall but cannot forge state; multiple competing relayers are sufficient |
-| Phase 1.C BK-set rotation circuit + on-chain wiring | not yet shipped; until then `storedBkSetCommitment` is effectively immutable post-deployment |
+| Phase 1.C BK-set rotation **circuit** (Circuit 3) | not yet shipped; the interim `applyBkSetUpdate` rotates the commitment against an attested block's Merkle tree, but proves nothing about the succession itself |
 
 When any of these change, this doc must be revisited and the affected sections updated.
 

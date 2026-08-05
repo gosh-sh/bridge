@@ -58,39 +58,96 @@ This doc covers the verification *as it will work once the opcode is live* (sect
 
 ## 1. What Each Proof Asserts
 
-A single deposit proof commits to **10 BN254 Fr public inputs** (the AN
-recipient `anWorkchain`/`anAccount` was bound in-circuit on 2026-06-02):
+A single deposit proof commits to **12 BN254 Fr public inputs**. The layout is
+generated from one place in code — `circuit_v2::DEPOSIT_PUBLIC_INPUT_LAYOUT`,
+pinned by `deposit_circuit_declares_twelve_public_inputs` and
+`num_instance_matches_the_declared_layout` — because it has moved three times
+(7 → 10 → 11 → 12) and `USDCBridge._parsePublicInputs` reads it by fixed offset:
 
-| # | Field | Type | Source |
-|---|---|---|---|
-| 0 | `depositId` | uint256 | Indexed value from `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` |
-| 1 | `sender` | uint256 (uint160 cast) | `msg.sender` of `deposit()` |
-| 2 | `amount` | uint256 | USDC `amount` argument of `deposit()` |
-| 3 | `contractAddress` | uint256 (uint160 cast) | The bridge contract address itself |
-| 4 | `anWorkchain` | uint256 (sign-extended int8 word) | AN destination workchain from the `Deposit` event |
-| 5 | `anAccountHigh` | uint128 | Upper 128 bits of the 256-bit AN account |
-| 6 | `anAccountLow` | uint128 | Lower 128 bits of the 256-bit AN account |
-| 7 | `blockHashHigh` | uint128 | Upper 128 bits of `blockhash(blockNumber)` |
-| 8 | `blockHashLow` | uint128 | Lower 128 bits of `blockhash(blockNumber)` |
-| 9 | `promise_commit` | uint256 | Keccak coprocessor commitment (Poseidon) |
+| # | Field | Type | Source | Bound by |
+|---|---|---|---|---|
+| 0 | `depositId` | uint256, `< 2^248` | `Deposit` topic 1 | Phase 1 == log topic |
+| 1 | `sender` | uint256 (uint160 cast) | `Deposit` topic 2 | Phase 1 == log topic |
+| 2 | `amount` | uint256, `< 2^128` | `Deposit` data word 0 | Phase 1 == log data |
+| 3 | `contractAddress` | uint256 (uint160 cast) | log emitter address | Phase 1 == log address |
+| 4 | `chainId` | uint256 | EIP-1559 typed-tx RLP field 0 | tx MPT @ same `tx_idx` |
+| 5 | `dappIdHigh` | uint128 | **config**, not the event | range-checked bytes only |
+| 6 | `dappIdLow` | uint128 | **config**, not the event | range-checked bytes only |
+| 7 | `anAccountHigh` | uint128 | `Deposit` data word 2, high half | Phase 1 == log data |
+| 8 | `anAccountLow` | uint128 | `Deposit` data word 2, low half | Phase 1 == log data |
+| 9 | `blockHashHigh` | uint128 | `keccak(header)` high half | `keccak_var_len` |
+| 10 | `blockHashLow` | uint128 | `keccak(header)` low half | `keccak_var_len` |
+| 11 | `promiseCommit` | uint256 | keccak coprocessor commitment | appended by `EthCircuitImpl` |
 
-**Payload format** (Halo2 SHPLONK proof bytes + 10 public-input Fr elements). The native verifier consumes the proof + inputs + VK directly; no auxiliary Groth16 layer. The AN side reconstructs the recipient as `anWorkchain:(anAccountHigh<<128 | anAccountLow)` and credits that proven account — an EVM address is not a valid AN recipient.
+`chainId` replaced a VK-baked constant on 2026-07-23 (Track 2): one VK now serves
+every allowlisted chain, and the AN side binds `(chainId → expected bridge Fr)`.
+`dappId` took the slot `anWorkchain` used to occupy on 2026-06-02; it is a
+config tag the AN-side `TokenBridge` compares against its own configured value,
+**not** anything read off Ethereum.
+
+**Payload format**: Halo2 SHPLONK proof bytes + 12 public-input Fr elements (LE).
+The native verifier consumes proof + inputs + VK directly; no Groth16 layer. The
+AN side reconstructs the recipient as `0:(anAccountHigh<<128 | anAccountLow)`.
 
 A valid proof certifies, given the witness, that:
 
-1. The block whose keccak256 hash equals `blockHashHigh ‖ blockHashLow` was the producer of the receipt referenced.
-2. A `Receipt` exists in that block's receipts trie at some transaction index (MPT inclusion).
-3. Inside the receipt's logs, there is a `Log` entry whose:
-   - `address == contractAddress` (the bridge);
-   - `topics[0] == keccak256("Deposit(uint256,address,uint256,uint256)")`;
+1. `blockHashHigh ‖ blockHashLow` is `keccak256` of a byte string that RLP-decodes
+   as a 16–21 field block header, and the keccak'd length equals the length the
+   RLP list prefix declares (BC-D03).
+2. A `Receipt` exists at transaction index *i* under that header's `receiptsRoot`,
+   verified against the root the MPT chip itself derived — not a separately
+   supplied witness (Alina review finding #1).
+3. An EIP-1559 transaction exists at the **same** index *i* under the same
+   header's `transactionsRoot`, and `chainId` is its RLP field 0. Sharing the
+   `tx_idx` cell is what makes the receipt and the transaction the same
+   transaction without an in-circuit `ecrecover`.
+4. Inside the receipt's logs, the log at `log_index` has:
+   - `address == contractAddress`;
+   - exactly 99 bytes of topics and 128 bytes of data (BC-D04), so the fixed
+     offsets below read event bytes rather than zero padding;
+   - `topics[0] == keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")`
+     = `0x8d5d0606…3d37ee`;
    - `topics[1] == bytes32(depositId)`, `topics[2] == bytes32(uint256(uint160(sender)))`;
-   - `data` decodes to `(amount, timestamp)`.
-4. All keccak256 calls inside the circuit are bound to `promise_commit` via the Poseidon coprocessor pattern (~500× constraint savings; see `docs/keccak_coprocessor_flowchart.mmd`).
+   - `data` decodes to `(amount, anWorkchain, anAccount, timestamp)`, of which
+     `amount` and `anAccount` are bound to public inputs and `anWorkchain` /
+     `timestamp` are deliberately not.
+5. All keccak256 calls are bound to `promiseCommit` via the Poseidon coprocessor
+   pattern (see `docs/keccak_coprocessor_flowchart.mmd`).
 
 **It does not certify**:
 
-- That `blockHashHigh ‖ blockHashLow` is the *canonical* Ethereum block hash. That's the verifier's job (V1 below).
-- That `depositId` has not already been credited. That's the AN-side nullifier's job (V5 below).
+- That `blockHashHigh ‖ blockHashLow` is the *canonical* Ethereum block hash —
+  the prover supplies the header and every trie node itself, so a
+  self-consistent but entirely fabricated chain satisfies items 1–4 above
+  (**BC-D01**). Canonicality is a fact about Ethereum consensus and is asserted
+    from outside the proof: since `acki-nacki` `7992ce26`, `finalizeDeposit`
+    requires the reassembled hash to sit in `_acceptedBlockHash[chainId]` —
+    mirroring what `AckiNackiBridge._knownAnchors` does for the opposite
+    direction. Two writers can populate that set: the owner
+    (`setAcceptedBlockHash`) and a threshold of attesters (`attestBlockHash`,
+    `1fb5b28c`). Which one is the real trust root depends on
+    `getAttesterConfig().ownerAnchorsEnabled`: while it is true the answer is the
+    owner key alone, no matter how many attesters are registered;
+    `disableOwnerAnchors()` is what makes it M-of-N. Either way it is a key, not
+    the proof, that certifies canonicality. See
+    `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1, and use
+    `scripts/deposit_anchor_params.py --verify` to derive an anchor and check it
+    against an independent node before admitting it.
+- That the *enclosing transaction* called the bridge directly. The `tx.to ==
+  contractAddress` constraint was removed (BC-D02) so that Safe / multisig,
+  ERC-4337, EIP-7702 and router-mediated deposits remain provable; the emitter
+  is pinned by item 4 regardless.
+- That `dappIdHigh`/`dappIdLow` mean anything on their own — they are
+  range-checked to be genuine 128-bit halves and nothing more.
+- That `depositId` has not already been credited. That's the AN-side nullifier
+  (V5 below).
+
+> **`verify_block_header_rlp` is a native check, not a constraint.**
+> `rlp_utils::verify_block_header_rlp` asserts `keccak(encoded_header) ==
+> block.hash` while *building* the witness, which is what stops us from silently
+> shipping a header with a consensus field dropped (PR #20 finding R2). It runs
+> in the prover process, so it constrains honest witness generation only — it is
+> not part of what the proof asserts, and a malicious prover simply skips it.
 
 ---
 
@@ -107,6 +164,8 @@ A complete acceptance flow has 5 stages (V1–V5). Stages V1–V3 can be exercis
 - `contractAddress` matches the deployed `AckiNackiBridge` for the target chain.
 
 If any RPC disagrees, abort. This guards against the cryptographic verifier accepting a proof tied to a phantom block hash.
+
+Since `acki-nacki` `7992ce26` this stage has an on-chain counterpart: the outcome of V1 is what the anchor writer records — `setAcceptedBlockHash` on the owner path, or `attestBlockHash` from each attester under the threshold path — and `finalizeDeposit` will not credit a deposit whose block hash is absent from that set. `scripts/deposit_anchor_params.py --verify` performs the hash half of the check above (canonical at its number, ≥ `--min-confirmations` deep) and prints the call arguments only if it passes; `--call attestBlockHash` selects the attester form. Under the threshold path this stage is run once per attester, against endpoints that do not share a provider — a quorum reading one RPC is one attester.
 
 ### V2 — MPT cross-check (off-chain)
 
@@ -182,7 +241,7 @@ When generating a proof to submit:
 
 | ID | Risk | Mitigation |
 | --- | --- | ---------- |
-| ETH-AN-1 | Producer feeds a proof tied to a non-canonical Ethereum block hash (re-org, alt-chain) | V1 RPC quorum; producer waits 12 finalisations. |
+| ETH-AN-1 | Producer feeds a proof tied to a non-canonical Ethereum block hash (re-org, alt-chain) | On-chain: `finalizeDeposit` requires the hash in `_acceptedBlockHash[chainId]` (BC-D01), and `_mintCapByChain` bounds the loss if it is admitted anyway. Off-chain: V1 RPC quorum before admitting the anchor, ≥ 64 confirmations. Residual: the anchor writer can admit a hash from a chain that does not exist — the owner key alone while `ownerAnchorsEnabled`, a threshold of attesters after `disableOwnerAnchors()`. |
 | ETH-AN-2 | Producer omits MPT proof step and forges receipt | V3 catches it — the in-circuit MPT inclusion is a hard binding. |
 | ETH-AN-3 | Replay of an already-credited deposit | V5 nullifier check. |
 | ETH-AN-4 | Wrong-bridge spoofing (`contractAddress` of an attacker contract) | V4 enforces `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR`. |

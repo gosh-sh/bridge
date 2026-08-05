@@ -25,8 +25,9 @@ use crate::error::RelayerError;
 
 /// Number of public inputs the deposit circuit commits to. Matches
 /// `deposit-prover`'s `num_instance() == vec![12]`:
-/// `[depositId, sender, amount, contractAddress, chainId, dappIdHigh, dappIdLow,
-/// anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
+/// `[depositId, sender, amount, contractAddress, chainId, dappIdHigh,
+/// dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
+/// promiseCommit]`.
 ///
 /// `chainId` is the EIP-1559 RLP field-0 value bound via the enclosing tx MPT
 /// proof (not VK-baked). `anAccount{High,Low}` bind the Acki Nacki destination
@@ -213,8 +214,8 @@ pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String,
         .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
     if value.is_zero() && !allow_zero {
         return Err(RelayerError::other(
-            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; \
-             set AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
+            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; set \
+             AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
         ));
     }
     Ok(format!("{value:#x}"))

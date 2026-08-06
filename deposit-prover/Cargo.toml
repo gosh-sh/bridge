@@ -85,6 +85,8 @@ ethers-core = { version = "=2.0.14", features = ["optimism"] }
 
 # RLP encoding/decoding
 alloy-rlp = { version = "0.3", features = ["derive"] }
+# ethers/axiom `get_block_rlp` uses this crate (must match header keccak)
+rlp = "0.5.2"
 ethereum-types = "0.14"
 
 # Merkle-Patricia Trie
@@ -95,6 +97,9 @@ hasher = "0.1"
 ff = "0.13"
 # halo2curves is provided transitively by the gosh halo2-axiom backend via the
 # `halo2_base::halo2_proofs::halo2curves` re-export (no direct PSE dep needed).
+
+# Deposit-source allowlist, shared verbatim with `deposit-relayer-daemon`.
+deposit-chain-ids = { path = "../crates/deposit-chain-ids" }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }

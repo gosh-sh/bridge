@@ -11,7 +11,7 @@
 //!      against `srs.verifier_params()`.
 //!
 //! A PASS here means: the deposit VK serialised into the v2 RLC blob, the
-//! Blake2b proof, and the 11 public inputs form a self-consistent triple that
+//! Blake2b proof, and the 12 public inputs form a self-consistent triple that
 //! the AN node opcode will accept — using only the bytes that cross the wire.
 //!
 //! Usage:
@@ -101,8 +101,8 @@ fn main() -> anyhow::Result<()> {
     let pubin = fs::read(&args.pubin)?;
     let instances = decode_instances(&pubin)?;
     anyhow::ensure!(
-        instances.len() == 11,
-        "expected 11 public inputs, got {}",
+        instances.len() == 12,
+        "expected 12 public inputs, got {}",
         instances.len()
     );
     println!(

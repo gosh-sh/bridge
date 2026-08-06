@@ -1,5 +1,12 @@
 # F10 Deposit Pipeline — Audit Remediation Plan
 
+> **⚠ Dated snapshot — superseded by Track-2 chain-binding (2026-07-23).**
+> Any PI-count claims below (11 PI) predate Track 2; the current circuit
+> exposes **12 PI** (adds `chainId` at slot 4, VkBlob `9dacd998…8360fae3` as of
+> 2026-07-30; the 12-PI blobs `de1dd3ab…` / `006cca5d…` / `3e2a2db2…` are
+> superseded).
+> Preserved as a historical audit-cycle artifact.
+
 **Source:** `HANDOFF-f10-prover-relayer-ru.txt` (2026-07-17, audit branch)  
 **Scope:** `deposit-prover` + `deposit-relayer-daemon` off-chain pipeline  
 **Threat model:** `finalizeDeposit` on AN is permissionless — relayer is not a trust root; failures affect **liveness**, not fund safety (nullifier prevents double-mint).

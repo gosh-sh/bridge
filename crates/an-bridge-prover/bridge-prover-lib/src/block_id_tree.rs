@@ -145,6 +145,33 @@ impl BlockIdMerkleTree {
     }
 }
 
+/// Re-derive `block_id` from an *open* L2/L3 pair and its three siblings —
+/// the verifier's half of [`BlockIdMerkleTree::siblings_for_l2_l3`], for
+/// callers that never see the other 14 leaves:
+///
+/// ```text
+/// h23  = SHA(l2   ‖ l3)
+/// h0_3 = SHA(s[0] ‖ h23)          // s[0] = h01
+/// h0_7 = SHA(h0_3 ‖ s[1])         // s[1] = h4_7
+/// root = SHA(h0_7 ‖ s[2])         // s[2] = h8_15
+/// ```
+///
+/// `l2` / `l3` are the BK-set Poseidon commitments in the canonical LE `Fr`
+/// repr the chain hashes into the leaves — *not* their numeric big-endian
+/// image. `bridge-verifier-daemon` and `AckiNackiBridge.applyBkSetUpdate`
+/// (which rebuilds the LE repr from the numeric commitment it is handed)
+/// both run exactly this fold.
+pub fn fold_l2_l3_open(
+    l2: &[u8; 32],
+    l3: &[u8; 32],
+    siblings: &[[u8; 32]; L2_L3_OPEN_SIBLINGS],
+) -> [u8; 32] {
+    let h23 = sha256_combine(l2, l3);
+    let h0_3 = sha256_combine(&siblings[0], &h23);
+    let h0_7 = sha256_combine(&h0_3, &siblings[1]);
+    sha256_combine(&h0_7, &siblings[2])
+}
+
 /// Build a 331-byte layer hashes preimage from layer root hashes.
 ///
 /// Format: `[num_layers: u8] + 10 * [layer_number: u8, root_hash: [u8; 32]]`.
@@ -210,6 +237,35 @@ mod tests {
         acc = sha256_combine(&acc, &siblings[1]); // (h0_3, h4_7)
         acc = sha256_combine(&acc, &siblings[2]); // (h0_7, h8_15)
         assert_eq!(acc, tree.root);
+
+        // Same result through the helper the verifier daemon uses.
+        assert_eq!(
+            fold_l2_l3_open(&leaves[2], &leaves[3], &siblings),
+            tree.root,
+        );
+    }
+
+    /// Cross-language pin against `AckiNackiBridge.applyBkSetUpdate`.
+    ///
+    /// The contract is handed the two commitments as *numeric* field elements
+    /// and rebuilds their LE repr internally (`_frToLeBytes`) before folding.
+    /// This is the same vector its
+    /// `test_applyBkSetUpdate_matchesOffChainVector` submits on-chain, so if
+    /// either side changes fold depth, sibling order, or the endianness of the
+    /// L2/L3 preimage, exactly one of the two tests goes red.
+    #[test]
+    fn l2_l3_opening_matches_on_chain_vector() {
+        // 0xA11CE and 0xB0B as `Fr::to_repr()` would serialise them.
+        let mut l2 = [0u8; 32];
+        l2[..8].copy_from_slice(&0xA11CEu64.to_le_bytes());
+        let mut l3 = [0u8; 32];
+        l3[..8].copy_from_slice(&0xB0Bu64.to_le_bytes());
+        let siblings = [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]];
+
+        assert_eq!(
+            hex::encode(fold_l2_l3_open(&l2, &l3, &siblings)),
+            "28ee9f98c4d654e9e4b33712fa1652ecd9fecd2a591fac1370b1b51e2b65fba4",
+        );
     }
 
     /// Cross-side pin: the exact 32-byte root that

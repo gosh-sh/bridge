@@ -10,13 +10,14 @@
 //!    ([`source::EthLogSource`]).
 //! 2. **Prove** that the deposit event was emitted — the `deposit-prover` Halo2
 //!    circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof plus the
-//!    eleven public inputs `[depositId, sender, amount, contractAddress,
-//!    dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh,
-//!    blockHashLow, promiseCommit]` — the Acki Nacki destination account is
-//!    bound in-circuit so the AN side credits a proven account, and `dappId` (a
-//!    config tag, replaced `anWorkchain` on 2026-06-02) is checked by the
-//!    AN-side bridge. Because `deposit-prover` is its own cargo workspace, the
-//!    proof is generated out-of-process ([`prover::SubprocessProofGenerator`]).
+//!    twelve public inputs `[depositId, sender, amount, contractAddress,
+//!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
+//!    blockHashHigh, blockHashLow, promiseCommit]` — the Acki Nacki destination
+//!    account is bound in-circuit so the AN side credits a proven account,
+//!    proven `chainId` is allowlisted by USDCBridge, and `dappId` (a config
+//!    tag, replaced `anWorkchain` on 2026-06-02) is checked by the AN-side
+//!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
+//!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
 //!    `proof`) to the AN-side `TokenBridge.finalizeDeposit(...)`, which
 //!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and consumes
@@ -66,6 +67,7 @@ pub mod relayer;
 pub mod source;
 pub mod state;
 pub mod submitter;
+pub mod supported_chains;
 pub mod types;
 
 pub use an_config::AnConfig;
@@ -86,6 +88,10 @@ pub use state::{DeploymentIdentity, RelayerState, StateLock};
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
+};
+pub use supported_chains::{
+    is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
+    CHAIN_ID_SEPOLIA, SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
 pub use types::{
     parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,

@@ -542,7 +542,10 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
             WITHDRAWAL_PUBLIC_INPUTS
         )));
     }
-    Ok(bytes.chunks_exact(32).map(hex::encode).collect())
+    // Length validated as an exact multiple of 32 above, so `as_chunks` leaves
+    // an empty remainder (and satisfies `clippy::chunks_exact_to_as_chunks`).
+    let (chunks, _rest) = bytes.as_chunks::<32>();
+    Ok(chunks.iter().map(hex::encode).collect())
 }
 
 /// Assert that the aggregator calldata re-exposes exactly the ten Circuit-4

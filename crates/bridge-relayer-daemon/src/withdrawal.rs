@@ -197,6 +197,7 @@ pub fn fr_hex_to_u256(hex_str: &str) -> Result<U256, RelayerError> {
     Ok(U256::from_le_bytes(le))
 }
 
+/// Partner schema v6 `block_id_hex` carries the raw 32-byte BE chain hash
 /// (= `Solidity uint256(bytes32(blockId))`), decoded here as big-endian and
 /// left unreduced.
 ///

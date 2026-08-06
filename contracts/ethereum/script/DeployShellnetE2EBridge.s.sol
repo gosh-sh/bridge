@@ -15,7 +15,7 @@ import "./ShplonkDeployLib.sol";
 ///         SHPLONK for C4 when wired.
 /// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
 ///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
-///      (or `SHPLONK_BIN_*` overrides). Bridge starts paused unless `START_PAUSED=false`.
+///      (or `SHPLONK_BIN_*` overrides).
 ///
 ///      withdrawByProof (Circuit 4) wiring is on by default and MUST stay on for any
 ///      chain other than local anvil (chainid 31337). The C4 `.bin` is committed and the
@@ -32,7 +32,6 @@ contract DeployShellnetE2EBridge is Script {
         ILayerHashesMovementVerifier layerHashes;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevMaxLevelLayerHash;
-        uint64 genesisLastSeenBlockSeqNo;
     }
 
     struct WithdrawWiring {
@@ -50,12 +49,7 @@ contract DeployShellnetE2EBridge is Script {
             fallback_: IFallbackVerifier(address(0)),
             layerHashes: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
-            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
-            // Must equal the AN-side `last_seen_block_seqno` baked into the very
-            // first verifyBlock proof (i.e. the daemon's BRIDGE_BOOTSTRAP_SEQNO).
-            // Defaults to 0 for legacy deploys where the first proof also
-            // carries `last_seen = 0`.
-            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
+            genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH")
         });
         // NB-Q8: default ON; `false` only tolerated on local anvil (chainid 31337).
         bool wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", true);
@@ -79,8 +73,6 @@ contract DeployShellnetE2EBridge is Script {
             require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
         }
 
-        bool startPaused = vm.envOr("START_PAUSED", true);
-
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
@@ -102,11 +94,6 @@ contract DeployShellnetE2EBridge is Script {
 
         AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
 
-        if (startPaused) {
-            bridge.pause();
-            console.log("Bridge deployed PAUSED - unpause after forgery + E2E sign-off");
-        }
-
         vm.stopBroadcast();
 
         console.log("AckiNackiBridge (shellnet E2E):", address(bridge));
@@ -117,7 +104,6 @@ contract DeployShellnetE2EBridge is Script {
         console.log("altDstChainId:", wd.altDstChainId);
         console.log("altDstHostChainId:", wd.altDstHostChainId);
         console.log("altTokenId:", wd.altTokenId);
-        console.log("startPaused:", startPaused);
     }
 
     function _deployProductionVerifyBlockTriple()
@@ -144,7 +130,7 @@ contract DeployShellnetE2EBridge is Script {
                 layerHashesVerifier: vb.layerHashes,
                 genesisBkSetCommitment: vb.genesisBkSetCommitment,
                 genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash,
-                genesisLastSeenBlockSeqNo: vb.genesisLastSeenBlockSeqNo
+                genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
             }),
             AckiNackiBridge.BridgeWithdrawConfig({
                 bridgeWithdrawalVerifier: wd.verifier,

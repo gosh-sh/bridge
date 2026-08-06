@@ -19,10 +19,15 @@
 //!
 //! - `status` — print the state file path.
 
-use std::{path::PathBuf, str::FromStr, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
-use alloy::{primitives::Address, providers::ProviderBuilder, providers::Provider};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
@@ -70,6 +75,10 @@ enum Cmd {
         /// How many deposit ids to probe.
         #[arg(long, default_value_t = 16)]
         count: u64,
+        /// Optional expected `eth_chainId` (must be a supported deposit chain).
+        /// When set, the CLI aborts if the RPC chain does not match.
+        #[arg(long)]
+        expect_chain_id: Option<u64>,
     },
     /// Listen for one depositId, prove it, write the operands to `--out-dir`.
     ProveOne {
@@ -113,6 +122,9 @@ enum Cmd {
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
         #[arg(long)]
         out_dir: PathBuf,
+        /// Optional expected `eth_chainId` (must be a supported deposit chain).
+        #[arg(long)]
+        expect_chain_id: Option<u64>,
     },
     /// Long-running listen→prove→submit loop.
     Daemon {
@@ -180,6 +192,10 @@ enum Cmd {
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]
         allow_insecure_graphql: bool,
+        /// Optional expected `eth_chainId`. The RPC's chain is checked against
+        /// the deposit allowlist either way.
+        #[arg(long)]
+        expect_chain_id: Option<u64>,
     },
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
@@ -233,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
             confirmations,
             start,
             count,
+            expect_chain_id,
         } => watch(
             rpc_url,
             bridge_address,
@@ -240,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
             confirmations,
             start,
             count,
+            expect_chain_id,
         )
         .await
         .map_err(log_err("watch")),
@@ -258,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
             max_log_num,
             dapp_id,
             out_dir,
+            expect_chain_id,
         } => {
             let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ true)
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -279,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
                 log_index,
                 prover_cfg,
                 out_dir,
+                expect_chain_id,
             )
             .await
             .map_err(log_err("prove-one"))
@@ -324,10 +344,10 @@ async fn main() -> anyhow::Result<()> {
             force_state,
             skip_after_attempts,
             allow_insecure_graphql,
+            expect_chain_id,
         } => {
-            let dapp_id =
-                parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
+                .map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
@@ -373,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
                 force_state,
                 skip_after_attempts,
                 allow_insecure_graphql,
+                expect_chain_id,
             )
             .await
             .map_err(log_err("daemon"))
@@ -468,6 +489,26 @@ fn build_prover_cfg(
     cfg
 }
 
+async fn ensure_supported_rpc_chain(
+    provider: &impl alloy::providers::Provider,
+    expect_chain_id: Option<u64>,
+) -> anyhow::Result<u64> {
+    use deposit_relayer_daemon::{is_supported_deposit_chain, supported_deposit_chains_display};
+    let id = provider.get_chain_id().await?;
+    if !is_supported_deposit_chain(id) {
+        anyhow::bail!(
+            "RPC eth_chainId {id} is not a supported deposit chain; supported: {}",
+            supported_deposit_chains_display()
+        );
+    }
+    if let Some(expected) = expect_chain_id {
+        if id != expected {
+            anyhow::bail!("RPC eth_chainId {id} != --expect-chain-id {expected}");
+        }
+    }
+    Ok(id)
+}
+
 async fn watch(
     rpc_url: String,
     bridge_address: Address,
@@ -475,12 +516,14 @@ async fn watch(
     confirmations: u64,
     start: u64,
     count: u64,
+    expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
     let source = EthLogSource::new(provider, bridge_address, from_block, confirmations);
 
     let counter = source.deposit_counter().await?;
-    info!(%bridge_address, deposit_counter = %counter, "bridge state");
+    info!(%bridge_address, chain_id, deposit_counter = %counter, "bridge state");
 
     for id in start..start.saturating_add(count) {
         match source.fetch(id).await? {
@@ -509,6 +552,7 @@ async fn prove_one(
     log_index: Option<u64>,
     prover_cfg: SubprocessProverConfig,
     out_dir: PathBuf,
+    expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
     if tx_hash.is_none() && from_block == 0 {
         warn!(
@@ -518,6 +562,7 @@ async fn prove_one(
     }
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let _chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
 
     let event = if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
         let tx_hash = alloy::primitives::B256::from_str(&tx_hash)
@@ -605,22 +650,26 @@ async fn run_daemon(
     force_state: bool,
     skip_after_attempts: u32,
     allow_insecure_graphql: bool,
+    expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
     let _state_lock = StateLock::acquire(&state_path)
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
     let scan_cursor = Arc::new(Mutex::new(
-        existing_state
-            .scanned_through_block
-            .unwrap_or(from_block),
+        existing_state.scanned_through_block.unwrap_or(from_block),
     ));
 
+    // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs
+    // the AN-side bridge has no allowlist entry for, so fail before the first
+    // deposit rather than after a long prove.
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let chain_id = provider
-        .get_chain_id()
-        .await
-        .map_err(|e| anyhow::anyhow!("get_chain_id failed: {e}"))?;
+    let chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
+    info!(
+        chain_id,
+        chain = deposit_relayer_daemon::supported_deposit_chain_name(chain_id).unwrap_or("?"),
+        "deposit source chain",
+    );
     let deployment = DeploymentIdentity::new(chain_id, bridge_address, prover_cfg.dapp_id.clone());
 
     let source = Arc::new(
@@ -702,6 +751,7 @@ async fn run_daemon(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_daemon_loop<S, P, A>(
     state_path: PathBuf,
     start_deposit_id: u64,

@@ -2349,6 +2349,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deposit-chain-ids"
+version = "0.1.0"
+
+[[package]]
 name = "deposit-relayer-daemon"
 version = "0.1.0"
 dependencies = [
@@ -2357,6 +2361,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "deposit-chain-ids",
  "fs2",
  "hex",
  "serde",

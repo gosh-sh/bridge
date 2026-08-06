@@ -16,7 +16,8 @@ use ethers::{
 };
 
 use crate::{
-    mpt::generate_receipt_proof,
+    mpt::{generate_receipt_proof, generate_transaction_proof},
+    require_supported_deposit_chain,
     types::{DepositEventData, DepositProofInput},
 };
 
@@ -32,6 +33,13 @@ impl EthereumFetcher {
         Ok(Self {
             provider,
         })
+    }
+
+    /// `eth_chainId` — must be in [`crate::SUPPORTED_DEPOSIT_CHAIN_IDS`].
+    pub async fn chain_id(&self) -> Result<u64> {
+        let id = self.provider.get_chainid().await?.as_u64();
+        require_supported_deposit_chain(id)?;
+        Ok(id)
     }
 
     /// Fetch a transaction receipt by hash
@@ -147,6 +155,10 @@ impl EthereumFetcher {
             an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
+            // `chain_id` is not part of the log — the caller
+            // (`fetch_deposit_proof`) stamps the RPC `eth_chainId` on the
+            // returned `DepositEventData` after this parse.
+            chain_id: 0,
         })
     }
 
@@ -165,6 +177,14 @@ impl EthereumFetcher {
     ) -> Result<DepositProofInput> {
         println!("Fetching deposit proof for tx: {:?}", tx_hash);
 
+        // Reject unsupported networks early (clear error for operators).
+        let chain_id = self.chain_id().await?;
+        println!(
+            "  - RPC chain_id={} ({})",
+            chain_id,
+            crate::supported_deposit_chain_name(chain_id).unwrap_or("?")
+        );
+
         // 1. Fetch the receipt
         println!("  - Fetching receipt...");
         let receipt = self.get_receipt(tx_hash).await?;
@@ -172,22 +192,39 @@ impl EthereumFetcher {
 
         // 2. Parse the Deposit event
         println!("  - Parsing Deposit event...");
-        let event_data = self.parse_deposit_event(&receipt, contract_address, log_index)?;
+        let mut event_data = self.parse_deposit_event(&receipt, contract_address, log_index)?;
+        // Stamp RPC `eth_chainId` — required for PI #4 (chain-binding).
+        event_data.chain_id = chain_id;
         println!("    ✓ Event parsed (depositId: {})", event_data.deposit_id);
 
         // 3. Generate MPT proof using the existing implementation
         println!("  - Generating MPT proof...");
         println!("    (This will fetch all receipts in the block and build the trie)");
         let provider_arc = Arc::new(self.provider.clone());
-        let receipt_proof = generate_receipt_proof(provider_arc, tx_hash).await?;
+        let receipt_proof = generate_receipt_proof(provider_arc.clone(), tx_hash).await?;
         println!(
             "    ✓ MPT proof generated ({} proof nodes)",
             receipt_proof.proof_nodes.len()
         );
 
+        // 4. Transaction-trie MPT proof (chain_id binding)
+        println!("  - Generating transaction MPT proof...");
+        let tx_proof = generate_transaction_proof(
+            provider_arc,
+            event_data.block_number,
+            event_data.transaction_index,
+        )
+        .await?;
+        println!(
+            "    ✓ Tx MPT proof generated ({} proof nodes, {} wire bytes)",
+            tx_proof.proof_nodes.len(),
+            tx_proof.tx_bytes.len()
+        );
+
         Ok(DepositProofInput {
             event_data,
             receipt_proof,
+            tx_proof,
             // dappId is a config tag, not part of the event. Defaults to zero
             // here; callers (CLI / prover config) overwrite `input.dapp_id`
             // with the operator-configured Acki Nacki dApp identifier.

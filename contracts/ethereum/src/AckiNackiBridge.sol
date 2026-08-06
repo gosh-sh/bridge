@@ -78,7 +78,6 @@ contract AckiNackiBridge {
     uint256 internal constant BN254_R =
         0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
 
-
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
     ///         binary split: Primary (>= 2/3 quorum) or Fallback (>1/2 split).
@@ -138,13 +137,6 @@ contract AckiNackiBridge {
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
     uint256 private _reentrancyStatus;
-
-    /// @notice Global pause flag. When `true`, all user-facing entrypoints
-    ///         (`deposit`, `verifyBlock`, `withdrawByProof`) revert with
-    ///         `BridgePaused`. Owner-only AAVE management remains
-    ///         available so funds can still be evacuated in an incident.
-    /// @dev Toggled via `pause()` / `unpause()` (owner-only).
-    bool public paused;
 
     // ---------------------------------------------------------------------
     // Storage: AN→ETH state (Phase 4 verifyBlock)
@@ -284,12 +276,7 @@ contract AckiNackiBridge {
         bytes32 anAccount,
         uint256 timestamp
     );
-    /// @notice Bridge paused — emitted when the owner sets `paused = true`.
-    /// @param by Owner address that triggered the pause (`msg.sender`).
-    event Paused(address indexed by);
-    /// @notice Bridge unpaused — emitted when the owner sets `paused = false`.
-    /// @param by Owner address that lifted the pause (`msg.sender`).
-    event Unpaused(address indexed by);
+
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
     event YieldHarvested(address indexed recipient, uint256 amount);
@@ -368,12 +355,6 @@ contract AckiNackiBridge {
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
     error NoYield();
-    /// @notice User-facing entrypoints are paused. Owner-only AAVE
-    ///         management (`emergencyWithdrawAll`, `withdrawFromAave`,
-    ///         `harvestYield`) remains available regardless of the pause
-    ///         state so funds can still be evacuated in an incident.
-    error BridgePaused();
-    error AlreadyInThatPauseState();
 
     // verifyBlock errors
     error VerifyBlockDisabled();
@@ -440,15 +421,6 @@ contract AckiNackiBridge {
         _reentrancyStatus = _ENTERED;
         _;
         _reentrancyStatus = _NOT_ENTERED;
-    }
-
-    /// @dev User-facing entrypoints revert when the bridge is paused.
-    ///      Owner-only AAVE management is deliberately *not* gated by
-    ///      this modifier so the owner can still pull liquidity in an
-    ///      incident.
-    modifier whenNotPaused() {
-        if (paused) revert BridgePaused();
-        _;
     }
 
     // ---------------------------------------------------------------------
@@ -606,7 +578,6 @@ contract AckiNackiBridge {
     function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
         external
         nonReentrant
-        whenNotPaused
     {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
@@ -686,7 +657,7 @@ contract AckiNackiBridge {
         uint8 numLayers,
         uint256[MAX_LAYER_HASHES] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         // Feature gate: all three verifier slots must be wired.
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -720,9 +691,15 @@ contract AckiNackiBridge {
         // A flat `layerHashes[numLayers - 1]` anchor diverges from the prover
         // whenever `numLayers` *decreases* across consecutive key blocks, which
         // would halt `verifyBlock` forever (AB-Q4). See `_expectedPrevAnchor`.
-        uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
-        if (prevMaxLevelLayerHash != expectedAnchor) {
-            revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+        //
+        // Scoped so `expectedAnchor` is freed before the tail `emit`, keeping
+        // this function's live-stack-slot count under 16 so it also compiles
+        // under `forge coverage` (which runs without the optimizer / `--via-ir`).
+        {
+            uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
+            if (prevMaxLevelLayerHash != expectedAnchor) {
+                revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+            }
         }
 
         // ---- Crypto: verify both proofs. The shared (blockId, bkSetCommitment,
@@ -730,35 +707,42 @@ contract AckiNackiBridge {
         //      mismatch between the two proofs surfaces here as one of the two
         //      verifications failing (their public inputs are computed from
         //      these values byte-for-byte).
-        bool attOk;
-        if (finType == FinalizationType.Primary) {
-            attOk = primaryVerifier.verifyPrimaryAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
-        } else {
-            attOk = fallbackVerifier.verifyFallbackAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
+        //
+        //      Each verification is in its own scope so the `bool` result is
+        //      freed before the tail `emit` (same stack-slot reason as above).
+        {
+            bool attOk;
+            if (finType == FinalizationType.Primary) {
+                attOk = primaryVerifier.verifyPrimaryAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            } else {
+                attOk = fallbackVerifier.verifyFallbackAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            }
+            if (!attOk) revert AttestationProofRejected();
         }
-        if (!attOk) revert AttestationProofRejected();
 
-        bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
-            layerHashesProof,
-            blockId,
-            bkSetCommitment,
-            uint256(numLayers),
-            layerHashes,
-            prevMaxLevelLayerHash
-        );
-        if (!lhOk) revert LayerHashesProofRejected();
+        {
+            bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
+                layerHashesProof,
+                blockId,
+                bkSetCommitment,
+                uint256(numLayers),
+                layerHashes,
+                prevMaxLevelLayerHash
+            );
+            if (!lhOk) revert LayerHashesProofRejected();
+        }
 
         // ---- Effects (CEI): commit the new state. ----
         // Storage v2.0 (2026-08-04): the flat `storedNumLayers` + `storedLayerHashes[10]`
@@ -782,6 +766,24 @@ contract AckiNackiBridge {
     /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
     ///      the full pubkey table stays off-chain (prover working set).
     ///
+    ///      `blockId` is the root of the canonical **16-leaf, depth-4**
+    ///      block-id tree (`poseidon_profile_new`; leaves L2/L3 carry the old
+    ///      and new BK-set Poseidon commitments). Opening that pair therefore
+    ///      needs **three** siblings, and the fold is:
+    ///
+    ///      ```
+    ///      h23  = SHA256(L2 ‖ L3)              // both in LE `Fr` repr
+    ///      h0_3 = SHA256(siblingH01  ‖ h23)
+    ///      h0_7 = SHA256(h0_3        ‖ siblingH4_7)
+    ///      root = SHA256(h0_7        ‖ siblingH8_15)
+    ///      blockId == root mod BN254_R         // canonical `Fr` image
+    ///      ```
+    ///
+    ///      Mirrors `bridge-prover-lib/src/block_id_tree.rs`
+    ///      (`siblings_for_l2_l3`) and the off-chain pre-flight in
+    ///      `bridge-verifier-daemon`. The pre-16-leaf variant took two
+    ///      siblings and folded one level less.
+    ///
     /// @param finType Primary or Fallback attestation path for the update block.
     /// @param attestationProof SHPLONK attestation proof bytes.
     /// @param blockId Block identifier shared with the attestation public inputs,
@@ -804,7 +806,7 @@ contract AckiNackiBridge {
         bytes32 siblingH01,
         bytes32 siblingH4_7,
         bytes32 siblingH8_15
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
         }
@@ -873,6 +875,26 @@ contract AckiNackiBridge {
         storedLastBkSetUpdateSeqNo = blockSeqNo;
 
         emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
+    }
+
+    /// @dev Little-endian 32-byte image of a BN254 `Fr` — i.e. what
+    ///      `Fr::to_repr()` produces on the Rust side.
+    ///
+    ///      The Acki Nacki block-id tree hashes BK-set Poseidon commitments in
+    ///      that canonical LE repr, while every other on-chain use of a
+    ///      commitment (`storedBkSetCommitment`, the attestation verifier's
+    ///      public input) is the numeric field element. `applyBkSetUpdate` is
+    ///      the single place where the two conventions meet, so the reversal
+    ///      lives here and nowhere else. Deploy-time counterpart: the runbook
+    ///      byte-reverses the prover's LE `bk_set_poseidon_hash_hex` to get
+    ///      `GENESIS_BK_SET_COMMITMENT`.
+    function _frToLeBytes(uint256 value) internal pure returns (bytes32) {
+        uint256 reversed;
+        for (uint256 i = 0; i < 32; i++) {
+            reversed = (reversed << 8) | (value & 0xff);
+            value >>= 8;
+        }
+        return bytes32(reversed);
     }
 
     /// @dev Append each non-zero layer hash from a successful `verifyBlock`
@@ -1108,7 +1130,7 @@ contract AckiNackiBridge {
     function withdrawByProof(
         bytes calldata proof,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-    ) external nonReentrant whenNotPaused returns (bool success) {
+    ) external nonReentrant returns (bool success) {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
@@ -1301,27 +1323,6 @@ contract AckiNackiBridge {
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
     }
 
-    // ---------------------------------------------------------------------
-    // Pause controls (owner-only)
-    // ---------------------------------------------------------------------
-
-    /// @notice Halt all user-facing entrypoints (`deposit`, `verifyBlock`,
-    ///         `withdrawByProof`). Reverts if the bridge is already paused.
-    /// @dev Owner-only AAVE management is *not* gated — the owner must
-    ///      still be able to evacuate funds via `emergencyWithdrawAll` /
-    ///      `withdrawFromAave` / `harvestYield` while paused.
-    function pause() external onlyOwner {
-        if (paused) revert AlreadyInThatPauseState();
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    /// @notice Re-enable user-facing entrypoints. Reverts if not paused.
-    function unpause() external onlyOwner {
-        if (!paused) revert AlreadyInThatPauseState();
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
 
     /// @notice Enable or disable further supplies to AAVE.
     function setAaveEnabled(bool enabled) external onlyOwner {
@@ -1352,32 +1353,6 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
-
-    /// @dev Convert a numeric `uint256` (a BN254 Fr scalar value) into its
-    ///      canonical 32-byte little-endian `Fr::to_repr()` byte layout.
-    ///
-    ///      Solidity's `bytes32(v)` / `abi.encodePacked(uint256)` yields the
-    ///      big-endian byte order (byte 0 = MSB). The AN side, however, feeds
-    ///      Poseidon commitments into the block-id SHA-256 tree as
-    ///      `Fr::to_repr()` bytes, which are little-endian (byte 0 = LSB —
-    ///      see `bridge-prover-lib/src/block_id_tree.rs:30-31`).
-    ///
-    ///      Reversing byte-by-byte lets the on-chain fold in `applyBkSetUpdate`
-    ///      match the off-chain root the AN prover commits to. Without this,
-    ///      every real `bkupd_*.json` would revert `BkUpdateMerkleMismatch`
-    ///      even though the underlying scalar values agree.
-    function _frToLeBytes(uint256 v) internal pure returns (bytes32 out) {
-        bytes32 be = bytes32(v);
-        // `byte(i, be)` = the i-th byte of `be` counted from the MSB (byte 0
-        // is MSB). Shifting it left by `8 * i` places it at bit position
-        // `8 * i`, i.e. byte (31 - i) of the resulting bytes32 — the
-        // reversal we want.
-        assembly {
-            for { let i := 0 } lt(i, 32) { i := add(i, 1) } {
-                out := or(out, shl(mul(8, i), byte(i, be)))
-            }
-        }
-    }
 
     /// @dev USDC that may be supplied to AAVE without dipping below the liquid reserve.
     function _amountSupplyable() internal view returns (uint256) {

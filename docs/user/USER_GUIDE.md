@@ -177,7 +177,7 @@ relayer-driven (the ETH-side steps are automatic — no manual submission):
 | `InvalidAmount` | `amount` was `0`. Enter a positive number. |
 | `InvalidAnAccount` | `anAccount` was zero or malformed. Use a non-zero 64-hex bytes32. |
 | `DepositTooLarge` | Max is 100 USDC (`100000000`) per deposit. |
-| Deposit reverts, no token error | Bridge may be **paused** — check `paused` on the Read tab. |
+| Deposit reverts, no token error | Check amount limits, allowance, and `anAccount != 0`. |
 | USDC not on Acki Nacki yet | Proving takes minutes. If still missing, send your **tx hash** + **depositId** (from the `Deposit` event log) to the operator. |
 
 **Safety:** Sepolia only. Confirm the bridge address before approving. Never
@@ -193,19 +193,28 @@ share your MetaMask secret recovery phrase. Test USDC is not real money.
 | Withdraw relayer (AN→ETH: verifyBlock + payout) | `crates/bridge-relayer-daemon/` — `relayer submit-verify-block` / `daemon-prover` / `daemon-withdraw` |
 | Latest AN→ETH daemon E2E | `docs/an_eth_daemon_withdraw_e2e_2026-07-03.md` |
 | Shellnet / VK redeploy checklist | `docs/shellnet_usdcbridge_deposit_vk_redeploy.md` |
-| 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
+| 12 deposit public inputs (Track-2 chain-binding, 2026-07-23) | `crates/deposit-relayer-daemon/src/types.rs`, `deposit-prover/src/types.rs` (`NUM_PUBLIC_INPUTS = 12`) |
 | Deploy scripts | `contracts/ethereum/script/` |
 | Env template (hosted relayer) | `scripts/ursus/deposit-relayer.env.example` |
 | Hermez KZG pins (repos/branches/blobs) | `docs/hermez_kzg_repos_and_branches.md` |
 
 > **Deposit prover must key on the Hermez ceremony.** Shellnet's `USDCBridge`
-> embeds the Hermez deposit `VkBlob` (`304c1c4e…`, 3982 B) and the AN node opcode
-> embeds Hermez `s_g2` (`928fafb3…`). A proof keyed on the old chain SRS
-> (`VkBlob 20cf9018…`) is rejected on-chain with `ERR_INVALID_ZKPROOF`
-> (TVM `exit_code 220`). Build the prover from the Hermez branch
-> (`pruvendo/hermez-kzg-fixtures`) with `deposit-prover/data/kzg_params_18.srs`
+> currently embeds the Hermez deposit `VkBlob` (`304c1c4e…`, 3982 B, **11 PI** —
+> pre-Track-2) and the AN node opcode embeds Hermez `s_g2` (`928fafb3…`). A proof
+> keyed on the old chain SRS (`VkBlob 20cf9018…`) is rejected on-chain with
+> `ERR_INVALID_ZKPROOF` (TVM `exit_code 220`). Build the prover from the Hermez
+> branch (`pruvendo/hermez-kzg-fixtures`) with `deposit-prover/data/kzg_params_18.srs`
 > (Hermez), delete any stale PK so keygen re-writes the `…pk.bp.json` sidecar, and
-> confirm `vk_blob.bin` hashes to `304c1c4e…` before submitting.
+> confirm `vk_blob.bin` matches the shellnet-deployed hash before submitting.
+>
+> **Track-2 follow-up (2026-07-23):** the current `deposit-prover` circuit exposes
+> **12 PI** (adds `chainId` at slot 4) and produces VkBlob `9dacd998…8360fae3`
+> (5006 B, rotated 2026-08-03 by the deposit-circuit audit fixes; the earlier 12-PI blobs
+> `de1dd3ab…7dd8d1` / `006cca5d…191dec05` / `3e2a2db2…bf0d049c` are superseded —
+> same PI layout, different constraint system).
+> This blob is **not yet redeployed to shellnet** — the on-chain
+> `USDCBridge.VK_BLOB` is still the 11-PI `304c1c4e…`. Track the redeploy in
+> `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
 
 **Verify the bridge on Etherscan** (run from `contracts/ethereum/`, which pins
 solc 0.8.19 / optimizer / `via_ir`):

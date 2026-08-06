@@ -10,7 +10,7 @@ use hasher::HasherKeccak;
 
 use crate::{
     rlp_utils::{encode_receipt, encode_tx_index},
-    types::ReceiptProof,
+    types::{ReceiptProof, TransactionProof},
 };
 
 /// Generate a Merkle-Patricia Trie proof for a transaction receipt
@@ -102,14 +102,112 @@ pub async fn generate_receipt_proof(
     // RLP encode the receipt
     let receipt_rlp = encode_receipt(&receipt)?;
 
-    // RLP encode the block header
-    let block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
+    // RLP encode the block header, asserting it reproduces the canonical hash —
+    // a silently truncated header would still hash to something and become the
+    // circuit's `blockHash` public input.
+    let block_header_rlp = crate::rlp_utils::verify_block_header_rlp(&block)?;
+    println!("✅ Block header RLP reproduces the canonical block hash");
 
     Ok(ReceiptProof {
         receipt_rlp,
         proof_nodes: proof,
         receipt_root: receipts_root,
         block_header_rlp,
+    })
+}
+
+/// Generate a Merkle-Patricia Trie proof for the enclosing transaction.
+///
+/// Reconstructs the block's transactions trie (same pattern as receipts —
+/// there is no `eth_getProof` for the tx trie) and returns the leaf + path for
+/// `rlp(tx_index)`. The leaf value is the typed-tx wire encoding (EIP-1559
+/// starts with `0x02`), which the circuit RLP-decodes to bind `chain_id`.
+pub async fn generate_transaction_proof(
+    provider: Arc<Provider<Http>>,
+    block_number: u64,
+    tx_index: u64,
+) -> Result<TransactionProof> {
+    use axiom_eth::providers::transaction::{get_transaction_rlp, get_tx_key_from_index};
+    use cita_trie::{MemoryDB, PatriciaTrie, Trie};
+    use hasher::HasherKeccak;
+
+    println!(
+        "🔍 Fetching block {} with full transactions (for tx MPT proof)...",
+        block_number
+    );
+    let block = provider
+        .get_block_with_txs(block_number)
+        .await
+        .context("Failed to fetch block with txs")?
+        .ok_or_else(|| anyhow!("Block {} not found", block_number))?;
+
+    let tx_count = block.transactions.len();
+    if (tx_index as usize) >= tx_count {
+        return Err(anyhow!(
+            "tx_index {} out of range (block has {} txs)",
+            tx_index,
+            tx_count
+        ));
+    }
+
+    let transactions_root: [u8; 32] = block.transactions_root.into();
+
+    // Build the transactions trie and verify against the header root.
+    let memdb = Arc::new(MemoryDB::new(true));
+    let hasher = Arc::new(HasherKeccak::new());
+    let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::clone(&hasher));
+    let mut target_tx_bytes = None;
+    for (idx, tx) in block.transactions.iter().enumerate() {
+        let key = get_tx_key_from_index(idx);
+        // ethers::types::Transaction is the same shape axiom-eth expects; convert
+        // via serde round-trip is unnecessary — cast through ethers_core by
+        // RLP-encoding with axiom's helper after a cheap clone into core types.
+        let core_tx: ethers_core::types::Transaction =
+            serde_json::from_value(serde_json::to_value(tx).context("tx serialize")?)
+                .context("tx deserialize as ethers_core")?;
+        let tx_rlp = get_transaction_rlp(&core_tx)
+            .context(format!("Failed to RLP-encode tx {}", idx))?
+            .to_vec();
+        if idx == tx_index as usize {
+            target_tx_bytes = Some(tx_rlp.clone());
+        }
+        trie.insert(key, tx_rlp)
+            .context(format!("Failed to insert tx {} into trie", idx))?;
+    }
+    let computed_root = trie.root()?;
+    if computed_root.as_slice() != transactions_root {
+        return Err(anyhow!(
+            "Transactions trie root mismatch! Computed: {:?}, Expected: {:?}",
+            computed_root,
+            transactions_root
+        ));
+    }
+
+    let tx_bytes = target_tx_bytes.ok_or_else(|| anyhow!("target tx bytes missing"))?;
+    // Reject non-EIP-1559 early so MockProver / prove fail with a clear error
+    // rather than an opaque RLP constraint failure.
+    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE) {
+        return Err(anyhow!(
+            "deposit enclosing tx must be EIP-1559 (type 0x02); got first byte {:#x}. \
+             The circuit binds chain_id from the typed-tx RLP, which only type 0x02 \
+             exposes, so this deposit cannot be proven as-is — the depositor must \
+             re-send with an EIP-1559 transaction.",
+            tx_bytes.first().copied().unwrap_or(0)
+        ));
+    }
+
+    let key = get_tx_key_from_index(tx_index as usize);
+    let proof = trie.get_proof(&key)?;
+    println!(
+        "✅ Generated tx MPT proof ({} nodes, {} wire bytes)",
+        proof.len(),
+        tx_bytes.len()
+    );
+
+    Ok(TransactionProof {
+        tx_bytes,
+        proof_nodes: proof,
+        transactions_root,
     })
 }
 

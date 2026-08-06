@@ -180,12 +180,20 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     // Get public instances
     let instances = circuit.instances();
 
-    // Run MockProver
+    // Run MockProver. `verify()` rather than `assert_satisfied()`: the latter
+    // panics, which makes an unsatisfied circuit indistinguishable from a crash
+    // and defeats the point of returning a `Result` — negative tests need to
+    // observe the rejection, not unwind through it.
     MockProver::run(k, &circuit, instances)
-        .map_err(|e| format!("MockProver failed: {:?}", e))?
-        .assert_satisfied();
-
-    Ok(())
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })
 }
 
 /// Load KZG parameters from disk
@@ -559,6 +567,7 @@ pub fn generate_proof(
         input.event_data.an_account,
         input.event_data.contract_address,
         block_hash,
+        input.event_data.chain_id,
     ))
 }
 
@@ -595,8 +604,9 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         return Err("Proof has no public instances".to_string());
     }
 
-    // Layout: [depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow,
-    // anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]
+    // Layout: [depositId, sender, amount, contractAddress, chainId,
+    //          dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
+    //          blockHashHigh, blockHashLow, promiseCommit]
     if snark.instances[0].len() != NUM_PUBLIC_INPUTS {
         return Err(format!(
             "Expected {NUM_PUBLIC_INPUTS} public inputs, got {}",
@@ -620,6 +630,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     let sender_field = bytes_to_field(&proof.sender);
     let amount_field = bytes_to_field(&proof.amount);
     let contract_field = bytes_to_field(&proof.contract_address);
+    let chain_id_field = Fr::from(proof.chain_id);
     let dapp_id_high = bytes_to_field(&proof.dapp_id[0..16]);
     let dapp_id_low = bytes_to_field(&proof.dapp_id[16..32]);
     let an_account_high = bytes_to_field(&proof.an_account[0..16]);
@@ -632,6 +643,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         ("sender", sender_field),
         ("amount", amount_field),
         ("contract_address", contract_field),
+        ("chainId", chain_id_field),
         ("dappIdHigh", dapp_id_high),
         ("dappIdLow", dapp_id_low),
         ("anAccountHigh", an_account_high),
@@ -652,9 +664,10 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     println!("  amount: 0x{}", hex::encode(proof.amount));
     println!("  contract: 0x{}", hex::encode(proof.contract_address));
     println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
+    println!("  chain_id: {}", proof.chain_id);
     println!(
         "  promise_commit: 0x{}",
-        hex::encode(snark.instances[0][10].to_bytes())
+        hex::encode(snark.instances[0][11].to_bytes())
     );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
@@ -774,7 +787,7 @@ pub fn generate_solidity_verifier(
 fn create_keygen_placeholder_input() -> DepositProofInput {
     use alloy_rlp::Encodable;
 
-    use crate::types::{DepositEventData, ReceiptProof};
+    use crate::types::{DepositEventData, ReceiptProof, TransactionProof};
 
     let event_data = DepositEventData {
         block_number: 0,
@@ -787,6 +800,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],
+        chain_id: 0,
     };
 
     // Create a minimal valid receipt RLP with one log
@@ -852,9 +866,51 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         block_header_rlp: vec![0u8; 100], // minimal block header
     };
 
+    // Minimal EIP-1559 typed-tx leaf: 0x02 || RLP([chainId=1, nonce, tips, fees,
+    // gas, to, value, data, accessList, yParity, r, s]) — sizes only need to be
+    // structurally valid for keygen shape (not MockProver-satisfying).
+    let mut tx_payload = Vec::new();
+    1u64.encode(&mut tx_payload); // chain_id
+    0u64.encode(&mut tx_payload); // nonce
+    0u64.encode(&mut tx_payload); // maxPriorityFeePerGas
+    0u64.encode(&mut tx_payload); // maxFeePerGas
+    21000u64.encode(&mut tx_payload); // gas
+    vec![0u8; 20].encode(&mut tx_payload); // to
+    0u64.encode(&mut tx_payload); // value
+    Vec::<u8>::new().encode(&mut tx_payload); // data
+    {
+        // empty accessList
+        let mut al = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: 0,
+        }
+        .encode(&mut al);
+        tx_payload.extend_from_slice(&al);
+    }
+    0u64.encode(&mut tx_payload); // yParity
+    vec![0u8; 32].encode(&mut tx_payload); // r
+    vec![0u8; 32].encode(&mut tx_payload); // s
+    let mut tx_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: tx_payload.len(),
+    }
+    .encode(&mut tx_list);
+    tx_list.extend_from_slice(&tx_payload);
+    let mut tx_bytes = vec![0x02u8];
+    tx_bytes.extend_from_slice(&tx_list);
+
+    let tx_proof = TransactionProof {
+        tx_bytes: tx_bytes.clone(),
+        proof_nodes: vec![tx_bytes],
+        transactions_root: [0u8; 32],
+    };
+
     DepositProofInput {
         event_data,
         receipt_proof,
+        tx_proof,
         dapp_id: [0u8; 32],
     }
 }

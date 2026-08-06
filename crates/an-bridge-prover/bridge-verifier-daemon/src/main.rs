@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 
+use bridge_prover_lib::block_id_tree;
 use bridge_prover_lib::bootstrap::{self, BootstrapSeed};
 use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_event_prover_lib as event_verifier;
@@ -674,15 +675,6 @@ fn write_bk_update_failure(seq_no: u32, error: &str) {
     }
 }
 
-/// SHA-256(left ‖ right) for Merkle internal nodes.
-fn sha256_concat(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(left);
-    hasher.update(right);
-    hasher.finalize().into()
-}
-
 /// Verify and (on success) apply one bk-update bundle. Mirrors the future
 /// Solidity entry point shape — three checks, all-or-nothing apply, state
 /// touches only the commitment + the bk-update cursor.
@@ -791,12 +783,8 @@ fn process_bk_update_bundle(
         }
     };
 
-    // (2) Open SHA-256 Merkle over the 16-leaf depth-4 block-id tree.
-    // Fold order (leaf-side to root):
-    //   h23_calc = SHA(L2 ‖ L3)
-    //   h0_3     = SHA(h01_sibling ‖ h23_calc)
-    //   h0_7     = SHA(h0_3 ‖ h4_7_sibling)
-    //   root     = SHA(h0_7 ‖ h8_15_sibling)
+    // (2) Open SHA-256 Merkle over the 16-leaf depth-4 block-id tree, folded
+    // by the same helper `AckiNackiBridge.applyBkSetUpdate` mirrors on-chain.
     // Compared against the raw 32-byte chain block hash carried in
     // `block_id_hex` (schema v6+ semantics = `uint256(bytes32(blockId))`).
     // The Fr public instance the Circuit 1a/1b proof binds is derived from
@@ -804,10 +792,7 @@ fn process_bk_update_bundle(
     // separate `block_id_hash ↔ block_id_fr` consistency check is no longer
     // needed — the two used to diverge only because the pre-v6 wire format
     // carried both a lossy Fr repr and a raw hash as independent fields.
-    let h23_calc = sha256_concat(&l2, &l3);
-    let h0_3_calc = sha256_concat(&h01, &h23_calc);
-    let h0_7_calc = sha256_concat(&h0_3_calc, &h4_7);
-    let root_calc = sha256_concat(&h0_7_calc, &h8_15);
+    let root_calc = block_id_tree::fold_l2_l3_open(&l2, &l3, &[h01, h4_7, h8_15]);
     let merkle_verified = root_calc == block_id_bytes;
     if !merkle_verified {
         warn!(

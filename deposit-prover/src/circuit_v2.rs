@@ -7,16 +7,22 @@ use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
-    rlp::types::RlpArrayWitness,
+    rlp::{evaluate_byte_array, types::RlpArrayWitness},
+    transaction::{
+        EthTransactionChip, EthTransactionChipParams, EthTransactionInputAssigned,
+        EthTransactionWitness,
+    },
     utils::{build_utils::aggregation::CircuitMetadata, eth_circuit::EthCircuitInstructions},
 };
 use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
-    gates::GateInstructions, halo2_proofs::halo2curves::bn256::Fr, utils::ScalarField,
+    gates::{GateInstructions, RangeInstructions},
+    halo2_proofs::halo2curves::bn256::Fr,
+    utils::ScalarField,
     AssignedValue, Context,
 };
 
-use crate::types::{DepositProofInput, ReceiptProof};
+use crate::types::{DepositProofInput, ReceiptProof, TransactionProof};
 
 /// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
 /// verifier size)
@@ -24,6 +30,43 @@ pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from
 pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: ultra-aggressive)
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
+
+/// Public-input layout, in slot order. This is the wire contract the AN-side
+/// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift
+/// silently — `deposit_circuit_declares_twelve_public_inputs` and
+/// `num_instance_matches_the_declared_layout` pin it.
+///
+/// `promiseCommit` is appended by `EthCircuitImpl`, not by
+/// `virtual_assign_phase0`, which is why the circuit sets 11 values but
+/// declares 12.
+pub const DEPOSIT_PUBLIC_INPUT_LAYOUT: [&str; 12] = [
+    "depositId",
+    "sender",
+    "amount",
+    "contractAddress",
+    "chainId",
+    "dappIdHigh",
+    "dappIdLow",
+    "anAccountHigh",
+    "anAccountLow",
+    "blockHashHigh",
+    "blockHashLow",
+    "promiseCommit",
+];
+
+/// Number of BN254 `Fr` public inputs the deposit proof carries.
+pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
+
+/// Slot of the proven L1 `chainId` (Track-2 chain binding).
+pub const PI_CHAIN_ID: usize = 4;
+/// Max depth of the transactions-trie MPT proof (mirrors receipt path).
+pub const TX_PF_MAX_DEPTH: usize = 10;
+/// Max calldata bytes for the enclosing EIP-1559 tx (deposit ABI is small).
+pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 256;
+/// Max RLP-encoded access-list length (deposit txs typically have none).
+pub const MAX_TX_ACCESS_LIST_LEN: usize = 64;
+/// EIP-1559 type byte / circuit `transaction_type` value.
+pub const EIP1559_TX_TYPE: u64 = 2;
 
 /// Fixed maximum block-header RLP length, in bytes.
 ///
@@ -35,11 +78,85 @@ pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 /// vector of this length so `keccak_var_len` and `decompose_rlp_array_*` emit an
 /// identical number of cells / copy-constraints for every block. The true header
 /// length is still bound cryptographically via the `keccak_var_len` length
-/// witness. Post-Shanghai mainnet headers (17 fields, through `withdrawalsRoot`)
-/// are ~540-640 bytes; 640 covers them with margin and matches the 17-entry
-/// `block_header_max_field_lens` table below. The receipt + MPT proof are already
-/// fixed-size (axiom-eth pads them to `value_max_byte_len` / `max_depth`).
-pub const MAX_BLOCK_HEADER_BYTES: usize = 640;
+/// witness.
+///
+/// Sized for the Prague/Isthmus 21-field header table: axiom-eth's
+/// Cancun/Ecotone `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the
+/// EIP-7685 `requestsHash`, and with `gasLimit` widened to 8 bytes so Arbitrum
+/// One's 2^50 limit fits. Covers every shape the supported chains emit today:
+/// Arbitrum (16 fields, no `withdrawalsRoot`), post-Shanghai (17), OP Stack
+/// Ecotone (20: + `blobGasUsed` / `excessBlobGas` / `parentBeaconBlockRoot`),
+/// and Prague / OP Isthmus (21: + `requestsHash` — Base, Mantle, World Chain,
+/// OP Mainnet and Sepolia are all here as of 2026-07).
+///
+/// The value is the RLP-encoded worst case implied by
+/// [`BLOCK_HEADER_MAX_FIELD_LENS`]: each field costs `max_len` plus its
+/// string prefix, and the list itself costs a 3-byte prefix.
+///
+/// A field slot that is too narrow is a **liveness** cliff, not a soundness
+/// hole: the RLP decode simply fails, so no deposit in such a block can ever be
+/// proven, and — since `withdraw()` was retired in Phase 4.3 — its funds are
+/// stuck. That asymmetry is why the integer slots are sized to the protocol
+/// maximum (8 bytes) rather than to observed values: widening them costs 12
+/// witness bytes and no extra keccak round (705 and 717 both need 6), whereas
+/// discovering later that one was too narrow costs a VK rotation plus a
+/// shellnet redeploy (BC-D06).
+///
+/// The receipt + MPT proof are already fixed-size (axiom-eth pads them to
+/// `value_max_byte_len` / `max_depth`).
+pub const MAX_BLOCK_HEADER_BYTES: usize = 717;
+
+/// Per-field max byte lengths for `decompose_rlp_array_*`. Slots 0–19 follow
+/// axiom-eth `MAINNET_HEADER_FIELDS_MAX_BYTES` (Cancun/Ecotone) except
+/// `gasLimit`; slot 20 is the Prague / OP Isthmus `requestsHash`.
+pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 21] = [
+    32,  // 0: parentHash
+    32,  // 1: ommersHash
+    20,  // 2: beneficiary (coinbase)
+    32,  // 3: stateRoot
+    32,  // 4: transactionsRoot
+    32,  // 5: receiptsRoot
+    256, // 6: logsBloom
+    7,   // 7: difficulty
+    8,   // 8: number (BC-D06: was 4 → 2^32 blocks; Arbitrum One is at 4.9e8)
+    8,   // 9: gasLimit (Arbitrum One runs at 2^50 — 7 bytes)
+    8,   // 10: gasUsed (BC-D06: was 4, while slot 9 allows 2^64)
+    8,   // 11: timestamp (BC-D06: was 4 → overflows in 2106)
+    32,  // 12: extraData (mainnet / OP Stack max)
+    32,  // 13: mixHash / prevRandao
+    8,   // 14: nonce
+    32,  // 15: baseFeePerGas (post-London)
+    32,  // 16: withdrawalsRoot (post-Shanghai)
+    8,   // 17: blobGasUsed (post-Cancun / Ecotone)
+    8,   // 18: excessBlobGas (post-Cancun / Ecotone)
+    32,  // 19: parentBeaconBlockRoot (post-Cancun / Ecotone)
+    32,  // 20: requestsHash (post-Prague / OP Isthmus, EIP-7685)
+];
+
+/// Worst-case RLP length implied by [`BLOCK_HEADER_MAX_FIELD_LENS`], so a
+/// future slot change can't silently outgrow [`MAX_BLOCK_HEADER_BYTES`].
+const fn max_block_header_rlp_len() -> usize {
+    let mut payload = 0;
+    let mut i = 0;
+    while i < BLOCK_HEADER_MAX_FIELD_LENS.len() {
+        let len = BLOCK_HEADER_MAX_FIELD_LENS[i];
+        // Single-byte strings < 0x80 encode bare, but no header field is
+        // capped at 1 byte, so every field carries a prefix.
+        let prefix = if len <= 55 {
+            1
+        } else if len <= 255 {
+            2
+        } else {
+            3
+        };
+        payload += len + prefix;
+        i += 1;
+    }
+    // Payload > 255 → 0xf9 + two length bytes.
+    payload + 3
+}
+
+const _: () = assert!(max_block_header_rlp_len() == MAX_BLOCK_HEADER_BYTES);
 
 /// Expected event signature:
 /// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
@@ -85,7 +202,12 @@ impl DepositEventCircuitV2 {
     ///
     /// * `inputs` - The deposit proof input containing event data and receipt
     ///   proof
-    /// * `config` - Circuit configuration (from prover module)
+    /// * `config` - Circuit configuration (from prover module). It carries no
+    ///   chain selector: the proven `chainId` is public input [`PI_CHAIN_ID`],
+    ///   and the AN-side allowlist binds `(chainId → expected bridge Fr)`. The
+    ///   CLI `--chain-id` flag only picks which RPC to fetch witnesses from and
+    ///   is cross-checked against the witness by
+    ///   [`DepositProofInput::require_chain_id`].
     pub fn new(inputs: DepositProofInput, config: &crate::prover::CircuitConfig) -> Self {
         let params = EthReceiptChipParams {
             max_data_byte_len: config.max_data_byte_len,
@@ -119,6 +241,7 @@ impl DepositEventCircuitV2 {
 #[derive(Clone)]
 pub struct Phase0Output {
     pub receipt_witness: EthReceiptWitness<Fr>,
+    pub tx_witness: EthTransactionWitness<Fr>,
     pub log_index: AssignedValue<Fr>,
     pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
@@ -224,47 +347,132 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let block_hash_bytes = block_hash_query.output_bytes.as_ref().to_vec();
         println!("   ✓ Computed block hash (32 bytes)");
 
-        // Parse block header RLP to extract receiptsRoot (field index 5)
+        // Parse block header RLP to extract receiptsRoot (field index 5).
+        // 21-slot Prague/Isthmus table (see `BLOCK_HEADER_MAX_FIELD_LENS`).
         let rlp_chip = chip.rlp();
-        let block_header_max_field_lens = vec![
-            32,  // 0: parentHash
-            32,  // 1: ommersHash
-            32,  // 2: beneficiary
-            32,  // 3: stateRoot
-            32,  // 4: transactionsRoot
-            32,  // 5: receiptsRoot ← WE NEED THIS
-            256, // 6: logsBloom
-            32,  // 7: difficulty
-            32,  // 8: number
-            32,  // 9: gasLimit
-            32,  // 10: gasUsed
-            32,  // 11: timestamp
-            32,  // 12: extraData
-            32,  // 13: mixHash
-            8,   // 14: nonce
-            32,  // 15: baseFeePerGas (post-London)
-            32,  // 16: withdrawalsRoot (post-Shanghai, optional)
-        ];
+        let block_header_max_field_lens = BLOCK_HEADER_MAX_FIELD_LENS.to_vec();
 
         let block_header_array = rlp_chip.decompose_rlp_array_phase0(
             ctx,
             block_header_rlp_bytes,
             &block_header_max_field_lens,
-            true, // variable length (15-17 fields)
+            true, // variable length (16–21 fields)
         );
+
+        // BC-D03: the length fed to `keccak_var_len` and the length the RLP
+        // decoder derived from the list prefix must be the same number.
+        // Without this the two views of the header are independent: the prover
+        // can append arbitrary trailing bytes inside the zero-padded witness,
+        // move `block_header_len` past them to shift `blockHash`, and still
+        // have `decompose_rlp_array` read the same `receiptsRoot` from the
+        // prefix-delimited list. That would let one event carry unboundedly
+        // many valid `blockHash` public inputs — none of them a real block, but
+        // it voids the "the proof commits to the producing block" claim.
+        ctx.constrain_equal(&block_header_len, &block_header_array.rlp_len);
+        println!("   ✓ Constrained keccak length == RLP list length (BC-D03)");
 
         // Extract receiptsRoot (field 5)
         let receipts_root_bytes = block_header_array.field_witness[5].field_cells.to_vec();
         println!("   ✓ Extracted receiptsRoot from block header (32 bytes)");
 
-        // Get MPT root from receipt proof
-        let mpt_root_bytes: Vec<AssignedValue<Fr>> = self
-            .inputs
-            .receipt_proof
-            .receipt_root
+        // Extract transactionsRoot (field 4) — chain-binding MPT target
+        let transactions_root_bytes = block_header_array.field_witness[4].field_cells.to_vec();
+        println!("   ✓ Extracted transactionsRoot from block header (32 bytes)");
+
+        // ====================================================================
+        // Track 2: bind enclosing EIP-1559 tx (chain_id + to + same tx_index)
+        // ====================================================================
+        // `from` is NOT in the typed-tx RLP (ECDSA-only); binding the Deposit
+        // `sender` topic to the same `tx_index` as this MPT proof closes that
+        // loop without an in-circuit ecrecover.
+        println!("🔧 Phase 0: Transaction MPT + chain_id binding...");
+        assert!(
+            !self.inputs.tx_proof.tx_bytes.is_empty(),
+            "tx_proof.tx_bytes is empty — regenerate DepositProofInput with \
+             generate_transaction_proof / fetch_deposit_proof (Track 2 chain binding)"
+        );
+        let tx_chip_params = EthTransactionChipParams {
+            max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
+            max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
+            enable_types: [false, false, true], // EIP-1559 only
+            network: self.params.network,
+        };
+        let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
+        let tx_mpt_input = self.inputs.tx_proof.to_mpt_input(
+            self.inputs.event_data.transaction_index,
+            MAX_TX_CALLDATA_BYTE_LEN,
+            MAX_TX_ACCESS_LIST_LEN,
+        );
+        let tx_mpt_proof = tx_mpt_input.assign(ctx);
+        // Reuse the same `tx_idx` AssignedValue as the receipt path.
+        let tx_input = EthTransactionInputAssigned {
+            transaction_index: tx_idx,
+            proof: tx_mpt_proof,
+        };
+        let tx_witness = tx_chip.parse_transaction_proof_phase0(ctx, tx_input);
+
+        // MPT root == block header transactionsRoot
+        for (pf_byte, hdr_byte) in tx_witness
+            .mpt_witness()
+            .root_hash_bytes
             .iter()
-            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
-            .collect();
+            .zip(transactions_root_bytes.iter())
+        {
+            ctx.constrain_equal(pf_byte, hdr_byte);
+        }
+        println!("   ✓ Constrained tx MPT root == transactionsRoot");
+
+        // transaction_type == 2 (EIP-1559)
+        let eip1559 = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
+        ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
+        println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
+
+        // Extract EIP-1559 chain_id (RLP field 0) and expose as a public input.
+        // Not constrained to a VK-baked constant — AN allowlists (chainId →
+        // expected bridge Fr); the relayer sanity-checks against eth_chainId.
+        let chain_id_idx = ctx.load_constant(Fr::from(0u64));
+        let chain_id_field =
+            tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
+        let chain_id_val = evaluate_byte_array(
+            ctx,
+            tx_chip.gate(),
+            &chain_id_field.field_bytes,
+            chain_id_field.len,
+        );
+        println!("   ✓ Extracted chain_id (public input, not VK-constrained)");
+
+        // BC-D02: `tx.to == contractAddress` used to be constrained here as
+        // defence-in-depth on the emitter. It is REMOVED, deliberately.
+        //
+        // It bought nothing. The emitter is already pinned independently — the
+        // log's RLP-decoded `address` is constrained equal to the
+        // `contractAddress` public instance in Phase 1 — and `chain_id`'s
+        // binding does not involve `to` at all: this tx is the *same* tx as the
+        // receipt because both MPT proofs are opened at the same `tx_idx`
+        // AssignedValue against roots taken from the same header.
+        //
+        // What it did cost was every deposit that does not call the bridge
+        // directly: a Safe or any multisig (`to` = wallet), ERC-4337 (`to` =
+        // EntryPoint), EIP-7702, and any router. `deposit()` accepts those
+        // calls, so their funds entered the bridge and then could not be
+        // proven — and the legacy `withdraw()` refund path was retired in
+        // Phase 4.3, leaving no way out short of `emergencyWithdrawAll`.
+
+        // MPT root the receipt inclusion was ACTUALLY verified against, taken from
+        // `receipt_witness` (set by `parse_receipt_proof_phase0` above) rather than
+        // reloaded as a fresh, prover-controlled witness from
+        // `receipt_proof.receipt_root`. This is what binds the proven receipt to
+        // *this* block's header: in Phase 1 it is constrained byte-for-byte equal to
+        // the header's receiptsRoot (field 5). Mirrors the tx path
+        // (`tx_witness.mpt_witness().root_hash_bytes` == transactionsRoot).
+        //
+        // Review finding #1 (CRITICAL): previously `mpt_root_bytes` was an
+        // independent witness only tied to the header receiptsRoot, never to the
+        // root the MPT chip verified against — so a prover could prove a real
+        // receipt under root R_A while binding the header (and thus the blockHash
+        // public input) of an unrelated block B, decoupling the event from its block.
+        let mpt_root_bytes: Vec<AssignedValue<Fr>> =
+            receipt_witness.mpt_witness().root_hash_bytes.to_vec();
 
         // ============================================================================
         // FIX BC-CIRCUIT-004: Compute public instances in Phase 0
@@ -321,7 +529,11 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
-        // 5. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
+        // 5. chainId - extracted EIP-1559 RLP field 0 (already computed above).
+        //    Exposed as a public input so USDCBridge can allowlist
+        //    (chainId → expected bridge Fr). Not constrained to a constant.
+
+        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
         //    from the bridge config (NOT from the Ethereum event). It replaced
         //    `anWorkchain` on 2026-06-02. A full UInt256 dappId can exceed the
         //    BN254 scalar modulus, so it is split into high/low 16-byte halves
@@ -329,16 +541,30 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         //    promoted to public instances; they are NOT constrained against
         //    event data — the AN-side `TokenBridge` checks them against its
         //    configured dappId, which is what binds the proof to a dApp.
+        //
+        //    BC-D05: unlike every other 32-byte input here, `dappId` has no
+        //    Phase-1 counterpart to be constrained against, so these witnesses
+        //    are otherwise entirely free. `bytes_to_field` does not range-check,
+        //    so without the loop below each "byte" could be any field element
+        //    and `dappIdHigh`/`dappIdLow` would not be 128-bit halves at all —
+        //    while the AN side reassembles them as `(fr[5] << 128) | fr[6]`.
+        //    An attacker gains nothing (dappId is freely chosen and checked
+        //    against the configured value), but the public input must mean what
+        //    the layout says it means.
         let dapp_id_bytes: Vec<AssignedValue<Fr>> = self
             .inputs
             .dapp_id
             .iter()
             .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
             .collect();
+        let range = chip.range();
+        for byte in dapp_id_bytes.iter() {
+            range.range_check(ctx, *byte, 8);
+        }
         let dapp_id_high = bytes_to_field(ctx, gate, &dapp_id_bytes[0..16]);
         let dapp_id_low = bytes_to_field(ctx, gate, &dapp_id_bytes[16..32]);
 
-        // 6. anAccount - Acki Nacki destination account (256-bit), split into high/low
+        // 7. anAccount - Acki Nacki destination account (256-bit), split into high/low
         //    16-byte halves (mirrors the block-hash split) so each fits a BN254 field
         //    element. Matches log data word 2.
         let an_account_bytes: Vec<AssignedValue<Fr>> = self
@@ -351,24 +577,26 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let an_account_high = bytes_to_field(ctx, gate, &an_account_bytes[0..16]);
         let an_account_low = bytes_to_field(ctx, gate, &an_account_bytes[16..32]);
 
-        // 7. blockHashHigh - from block hash (first 16 bytes)
+        // 8. blockHashHigh - from block hash (first 16 bytes)
         let block_hash_high = bytes_to_field(ctx, gate, &block_hash_bytes[0..16]);
 
-        // 8. blockHashLow - from block hash (last 16 bytes)
+        // 9. blockHashLow - from block hash (last 16 bytes)
         let block_hash_low = bytes_to_field(ctx, gate, &block_hash_bytes[16..32]);
 
         // Set public instances BEFORE promise_commit is added.
-        // Layout (10 user values + promise_commit appended by EthCircuitImpl):
-        //   [depositId, sender, amount, contractAddress,
+        // Layout (11 user values + promise_commit appended by EthCircuitImpl):
+        //   [depositId, sender, amount, contractAddress, chainId,
         //    dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
         //    blockHashHigh, blockHashLow, (promiseCommit)]
-        // All except dappId{High,Low} are verified in Phase 1 against the
-        // RLP-parsed event data; dappId is a config-supplied tag (see above).
+        // All except dappId{High,Low} and chainId are verified in Phase 1
+        // against the RLP-parsed event data; chainId is bound via tx MPT +
+        // EIP-1559 decode; dappId is a config-supplied tag (see above).
         let public_instances = vec![
             deposit_id_field,
             sender_field,
             amount_field,
             contract_address_field,
+            chain_id_val,
             dapp_id_high,
             dapp_id_low,
             an_account_high,
@@ -379,12 +607,13 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         builder.base.assigned_instances[0] = public_instances;
 
-        println!("   ✓ Set 10 public instances in Phase 0");
-        println!("   (promise_commit will be appended automatically)");
+        println!("   ✓ Set 11 explicit public instances in Phase 0 (chainId at PI[4])");
+        println!("   (promise_commit is appended automatically → 12 total, matches num_instance())");
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
         Phase0Output {
             receipt_witness,
+            tx_witness,
             log_index,
             block_hash_bytes,
             receipts_root_bytes,
@@ -419,7 +648,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
             (ctx_gate, ctx_rlc),
             phase0_output.block_header_witness,
-            true, // variable length (15-17 fields)
+            true, // variable length (15–20 fields)
         );
         println!("   ✓ Verified block header RLC");
 
@@ -427,6 +656,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let _receipt_trace = chip
             .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
         println!("   ✓ Verified receipt RLC");
+
+        // 2b. Transaction RLC (chain-binding witness from Phase 0)
+        let tx_chip_params = EthTransactionChipParams {
+            max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
+            max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
+            enable_types: [false, false, true],
+            network: self.params.network,
+        };
+        let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
+        let _tx_trace =
+            tx_chip.parse_transaction_proof_phase1((ctx_gate, ctx_rlc), phase0_output.tx_witness);
+        println!("   ✓ Verified transaction RLC");
 
         // 3. Extract the specific log at log_index
         let log_witness = chip.extract_receipt_log(
@@ -459,6 +700,25 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             false, // fixed length (always 3 fields)
         );
         println!("   ✓ Parsed log RLP structure");
+
+        // BC-D04: pin the payload lengths of the two variable-length log fields.
+        //
+        // Everything below reads `topics_rlp` and `data_bytes` at FIXED offsets
+        // into `field_cells`, which is zero-padded up to `log_max_field_lens`.
+        // Without these two constraints a log with fewer topics — or a shorter
+        // data payload — decodes fine, and `depositId` / `sender` / `anAccount`
+        // get read out of the padding instead of out of the event. The event
+        // signature check at topic 0 does not help: it only says *something* at
+        // offset 1..33 equals the signature.
+        //
+        //   topics: 3 × (0xa0 prefix + 32) = 99   [event_sig, depositId, sender]
+        //   data:   4 × 32 = 128                  [amount, anWorkchain,
+        //                                          anAccount, timestamp]
+        let expected_topics_len = ctx_gate.load_constant(Fr::from(99u64));
+        ctx_gate.constrain_equal(&log_array.field_witness[1].field_len, &expected_topics_len);
+        let expected_data_len = ctx_gate.load_constant(Fr::from(128u64));
+        ctx_gate.constrain_equal(&log_array.field_witness[2].field_len, &expected_data_len);
+        println!("   ✓ Constrained topics len == 99, data len == 128 (BC-D04)");
 
         // 5. Extract address (field 0)
         let address_bytes = &log_array.field_witness[0].field_cells;
@@ -587,6 +847,14 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Convert depositId (32 bytes from topics[1])
         let deposit_id_field = bytes_to_field(ctx_gate, gate, &deposit_id_bytes);
+        // review finding #2: `bytes_to_field` folds 32 BE bytes into one Fr, which is
+        // injective only for values below the BN254 scalar modulus. depositId is the
+        // AN-side anti-replay anchor; pin its top byte to zero (value < 2^248 « p) so
+        // two distinct on-chain ids can never collide mod p.
+        if deposit_id_bytes.len() == 32 {
+            let zero = ctx_gate.load_constant(Fr::zero());
+            ctx_gate.constrain_equal(&deposit_id_bytes[0], &zero);
+        }
         println!("   ✓ Converted depositId to field element");
 
         // Convert sender (32 bytes from topics[2], but only last 20 bytes are the
@@ -599,6 +867,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Convert amount (data word 0: bytes 0..32)
         let amount_bytes = &data_bytes[0..32.min(data_bytes.len())];
         let amount_field = bytes_to_field(ctx_gate, gate, amount_bytes);
+        // review finding #2: the AN contract reads `amount` as uint128. Require the
+        // high 16 bytes to be zero (amount < 2^128 « p): this makes the 32-byte→Fr
+        // fold injective AND rejects any deposit whose amount would silently truncate
+        // to uint128 on the contract side.
+        {
+            let zero = ctx_gate.load_constant(Fr::zero());
+            for b in amount_bytes.iter().take(16) {
+                ctx_gate.constrain_equal(b, &zero);
+            }
+        }
         println!("   ✓ Converted amount to field element");
 
         // Data word 1 (bytes 32..64) is the event's `anWorkchain` field. As of
@@ -618,16 +896,25 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // (Block hash and receiptsRoot were already computed in Phase 0)
         println!("🔧 Verifying block header...");
 
-        // Convert receiptsRoot from Phase 0 to field element
-        let receipts_root_field =
-            bytes_to_field(ctx_gate, gate, &phase0_output.receipts_root_bytes);
-
-        // Convert MPT root from Phase 0 to field element
-        let mpt_root_field = bytes_to_field(ctx_gate, gate, &phase0_output.mpt_root_bytes);
-
-        // CRITICAL: Constrain that receiptsRoot from block header equals MPT root
-        ctx_gate.constrain_equal(&receipts_root_field, &mpt_root_field);
-        println!("   ✓ Verified receiptsRoot matches MPT root");
+        // CRITICAL: bind the block-header receiptsRoot to the root the MPT chip
+        // actually verified the receipt inclusion against (`mpt_root_bytes`, set in
+        // Phase 0 from `receipt_witness.mpt_witness().root_hash_bytes`).
+        //
+        // Compare byte-for-byte rather than folding each 32-byte root into a single
+        // Fr with `bytes_to_field`: a keccak root can exceed the BN254 scalar
+        // modulus, so the fold is non-injective and two distinct roots could collide
+        // mod p (review finding #2). Byte-wise equality is exact and mirrors the
+        // transactionsRoot binding on the tx path.
+        assert_eq!(phase0_output.receipts_root_bytes.len(), 32);
+        assert_eq!(phase0_output.mpt_root_bytes.len(), 32);
+        for (hdr_byte, mpt_byte) in phase0_output
+            .receipts_root_bytes
+            .iter()
+            .zip(phase0_output.mpt_root_bytes.iter())
+        {
+            ctx_gate.constrain_equal(hdr_byte, mpt_byte);
+        }
+        println!("   ✓ Verified receiptsRoot == MPT-verified receipt root (byte-wise)");
 
         // 15. Use block hash from Phase 0
         println!("🔧 Using block hash from Phase 0...");
@@ -734,6 +1021,36 @@ impl ToMPTInput for ReceiptProof {
     }
 }
 
+impl TransactionProof {
+    /// Convert to axiom-eth `MPTInput` for the transactions trie.
+    fn to_mpt_input(
+        &self,
+        tx_index: u64,
+        max_data_byte_len: usize,
+        max_access_list_len: usize,
+    ) -> axiom_eth::mpt::MPTInput {
+        use axiom_eth::{mpt::MPTInput, transaction::calc_max_val_len};
+        use ethers_core::types::H256;
+
+        let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
+        let path_len = path_bytes.len();
+        let value_max_byte_len =
+            calc_max_val_len(max_data_byte_len, max_access_list_len, [false, false, true]);
+
+        MPTInput {
+            path: axiom_eth::mpt::PathBytes(path_bytes),
+            value: self.tx_bytes.clone(),
+            root_hash: H256::from_slice(&self.transactions_root),
+            proof: self.proof_nodes.clone(),
+            slot_is_empty: false,
+            value_max_byte_len,
+            max_depth: TX_PF_MAX_DEPTH,
+            max_key_byte_len: 3,
+            key_byte_len: Some(path_len),
+        }
+    }
+}
+
 /// Implement CircuitMetadata for proof generation compatibility
 impl CircuitMetadata for DepositEventCircuitV2 {
     /// This circuit does not use aggregation, so no accumulator
@@ -741,12 +1058,15 @@ impl CircuitMetadata for DepositEventCircuitV2 {
 
     /// Number of public instance columns.
     ///
-    /// We expose 11 public inputs (10 user values + promise_commit, which is
+    /// We expose 12 public inputs (11 user values + promise_commit, which is
     /// appended automatically by EthCircuitImpl at the end of Phase 0):
-    /// [depositId, sender, amount, contractAddress,
+    /// [depositId, sender, amount, contractAddress, chainId,
     ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
     ///  blockHashHigh, blockHashLow, promiseCommit]
     ///
+    /// `chainId` is the EIP-1559 RLP field-0 value extracted from the enclosing
+    /// tx (MPT-bound under `transactionsRoot`). It is **not** VK-baked — the
+    /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier) replaced
     /// the single `anWorkchain` slot on 2026-06-02. dappId is a config-supplied
     /// tag — it is not bound to event data in-circuit; the AN-side
@@ -754,16 +1074,16 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// `anAccountHigh`/`anAccountLow` remain the event-bound AN recipient account.
     /// The `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
     /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the public-inputs
-    /// cell from the same 11-scalar layout.
+    /// cell from the same 12-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
-        vec![11] // 10 user values + 1 promise_commit
+        vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 11 user values + 1 promise_commit
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DepositEventData;
+    use crate::{supported_chains::CHAIN_ID_SEPOLIA, types::DepositEventData};
 
     #[test]
     fn test_circuit_creation() {
@@ -783,6 +1103,7 @@ mod tests {
             an_account: [3u8; 32],
             timestamp: 1234567890,
             contract_address: [2u8; 20],
+            chain_id: 11155111,
         };
 
         let receipt_proof = ReceiptProof {
@@ -792,9 +1113,16 @@ mod tests {
             block_header_rlp: vec![],
         };
 
+        let tx_proof = TransactionProof {
+            tx_bytes: vec![0x02],
+            proof_nodes: vec![],
+            transactions_root: [0u8; 32],
+        };
+
         let input = DepositProofInput {
             event_data,
             receipt_proof,
+            tx_proof,
             dapp_id: [7u8; 32],
         };
 
@@ -816,58 +1144,75 @@ mod tests {
         assert_eq!(sig, expected);
     }
 
-    /// BC-CIRCUIT-004 Test: Verify that public instances are properly included
-    /// in the proof
+    /// The public-input layout is the wire contract the AN-side
+    /// `USDCBridge._parsePublicInputs` reads by fixed offset, and it has moved
+    /// three times in one quarter (7 → 10 → 11 → 12). This pins the width the
+    /// circuit declares.
     ///
-    /// This test verifies the fix for BC-CIRCUIT-004 where public instances
-    /// were not being constrained. The fix ensures that:
-    /// 1. All 6 user values are set as public instances in Phase 0
-    /// 2. promise_commit is automatically appended (7th instance)
-    /// 3. Phase 1 constrains the public instances to equal RLP-verified data
-    ///
-    /// Expected behavior:
-    /// - instances[0] should contain 7 values: [depositId, sender, amount,
-    ///   contractAddress, blockHashHigh, blockHashLow, promise_commit]
+    /// Deliberately witness-free: the previous version of this test loaded
+    /// `../e2e_attack_test_data/valid_proof.json`, which is `.gitignore`d, and
+    /// was additionally `#[ignore]`d — so it never ran for anyone, and its
+    /// doc-comment still described the 7-input layout while its assert demanded
+    /// 12 (BC-D08).
     #[test]
-    #[ignore] // Requires real proof data
-    fn test_bc_circuit_004_instances_in_proof() {
-        use std::fs;
-
-        use snark_verifier_sdk::Snark;
-
-        use crate::types::DepositProofOutput;
-
-        // Load a real proof from e2e test data
-        let proof_path = "../e2e_attack_test_data/valid_proof.json";
-        if !std::path::Path::new(proof_path).exists() {
-            println!("Skipping test: proof file not found");
-            return;
-        }
-
-        let json_str = fs::read_to_string(proof_path).expect("Failed to read proof file");
-        let proof_output: DepositProofOutput =
-            serde_json::from_str(&json_str).expect("Failed to parse proof JSON");
-
-        // Deserialize SNARK
-        let snark: Snark =
-            bincode::deserialize(&proof_output.proof).expect("Failed to deserialize SNARK");
-
-        println!("SNARK instances:");
-        println!("  Number of instance columns: {}", snark.instances.len());
-        assert_eq!(snark.instances.len(), 1, "Should have 1 instance column");
-
-        println!("  Column 0: {} instances", snark.instances[0].len());
-
-        // 11-input layout: [depositId, sender, amount, contractAddress,
-        // dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh,
-        // blockHashLow, promise_commit]
+    fn deposit_circuit_declares_twelve_public_inputs() {
         assert_eq!(
-            snark.instances[0].len(),
-            11,
-            "Should have 11 instances: [depositId, sender, amount, contractAddress, dappIdHigh, \
-             dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promise_commit]"
+            DEPOSIT_PUBLIC_INPUT_LAYOUT.len(),
+            DEPOSIT_NUM_PUBLIC_INPUTS,
+            "layout table and declared width disagree"
         );
+        assert_eq!(
+            DEPOSIT_PUBLIC_INPUT_LAYOUT[PI_CHAIN_ID], "chainId",
+            "chainId must stay at slot {PI_CHAIN_ID}"
+        );
+        assert_eq!(
+            *DEPOSIT_PUBLIC_INPUT_LAYOUT.last().unwrap(),
+            "promiseCommit",
+            "promise_commit is appended by EthCircuitImpl and must stay last"
+        );
+    }
 
-        println!("✅ Proof contains all 11 instances!");
+    /// `num_instance()` is what `keygen_vk` bakes into the VK, so it — not the
+    /// layout table — is what a verifier will enforce. Keep them equal.
+    #[test]
+    fn num_instance_matches_the_declared_layout() {
+        let circuit = DepositEventCircuitV2::new_with_defaults(minimal_input(), Chain::Sepolia);
+        assert_eq!(
+            circuit.num_instance(),
+            vec![DEPOSIT_NUM_PUBLIC_INPUTS],
+            "num_instance() drifted from DEPOSIT_PUBLIC_INPUT_LAYOUT"
+        );
+    }
+
+    /// Shape-only `DepositProofInput` — enough to construct the circuit struct
+    /// and read its declared instance count. Not provable.
+    fn minimal_input() -> DepositProofInput {
+        DepositProofInput {
+            event_data: DepositEventData {
+                block_number: 1,
+                transaction_index: 0,
+                log_index: 0,
+                deposit_id: 0,
+                sender: [0u8; 20],
+                amount: [0u8; 32],
+                an_workchain: 0,
+                an_account: [0u8; 32],
+                timestamp: 0,
+                contract_address: [0u8; 20],
+                chain_id: CHAIN_ID_SEPOLIA,
+            },
+            receipt_proof: ReceiptProof {
+                receipt_rlp: vec![],
+                proof_nodes: vec![],
+                receipt_root: [0u8; 32],
+                block_header_rlp: vec![],
+            },
+            tx_proof: TransactionProof {
+                tx_bytes: vec![0x02],
+                proof_nodes: vec![],
+                transactions_root: [0u8; 32],
+            },
+            dapp_id: [0u8; 32],
+        }
     }
 }

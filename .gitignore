@@ -223,6 +223,13 @@ docs/partner_handoff_*.md
 
 .temp/*
 
+# Serena MCP tool project metadata (local tooling state, regenerated).
+.serena/
+
+# Local one-off circuit/review analysis notes (not repo content; the fixes they
+# drove are landed in deposit-prover). Keep on disk, out of git.
+chain_id_deposit_circuit_v2_analysis.md
+
 # Runtime state + debug artefacts emitted by the relayer / prover binaries.
 # Never commit — the .stale_* variants are ad-hoc backups from crash-recovery
 # sessions; the submissions/ and diag/ dirs are env-gated dumps for offline

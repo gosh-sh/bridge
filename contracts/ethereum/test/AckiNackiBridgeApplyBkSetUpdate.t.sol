@@ -36,7 +36,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     bytes32 internal constant SIB_H4_7 = bytes32(uint256(0x5678));
     bytes32 internal constant SIB_H8_15 = bytes32(uint256(0x9ABC));
 
-    event BkSetUpdated(uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo);
+    event BkSetUpdated(
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
+    );
 
     function setUp() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();

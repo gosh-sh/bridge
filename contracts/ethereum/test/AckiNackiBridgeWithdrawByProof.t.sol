@@ -538,8 +538,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
         // Sanity: the seed block did populate the L2 window with this value.
         assertTrue(
-            bridge.isKnownLayerAnchor(2, l2Anchor),
-            "seed block should have written L2 window"
+            bridge.isKnownLayerAnchor(2, l2Anchor), "seed block should have written L2 window"
         );
         assertFalse(
             bridge.isKnownLayerAnchor(1, l2Anchor),

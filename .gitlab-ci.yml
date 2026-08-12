@@ -14,6 +14,12 @@ variables:
   # Disable TLS verification for self-signed certificates
   GIT_SSL_NO_VERIFY: "true"
   CI_SERVER_TLS_CA_FILE: ""
+  # Resolve cargo git deps via the system git CLI so the github.com
+  # url.insteadOf rewrite (with $GH_READ_TOKEN) in .rust_base is honoured.
+  # Needed by the crates/an-bridge-prover + crates/bridge-evm-aggregator
+  # jobs, which pull the private gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits
+  # dependency (the other three gosh-sh halo2 repos are public).
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 # Cache configuration
 .rust_cache: &rust_cache
@@ -46,6 +52,12 @@ default:
   before_script:
     # Configure git to use CI_JOB_TOKEN for GitLab authentication
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
+    # Authenticate to github.com for the ONE private cargo git dependency
+    # (gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits). $GH_READ_TOKEN is a
+    # masked+protected CI/CD variable; it is only present on protected refs
+    # (main/tags), so the private-dep jobs are gated on it via `rules` and skip
+    # cleanly on MR/branch pipelines where it is absent.
+    - if [ -n "$GH_READ_TOKEN" ]; then git config --global url."https://${GH_READ_TOKEN}@github.com/".insteadOf "https://github.com/"; fi
     # Ensure we're using nightly toolchain
     - rustup default nightly
     - rustc --version
@@ -139,6 +151,10 @@ build:rust:release:
 build:rust:relayer:
   extends: .rust_base
   stage: build
+  # Pulls the private gosh-sh circuits repo — only runs where $GH_READ_TOKEN
+  # (masked+protected) is injected, i.e. protected refs like main/tags.
+  rules:
+    - if: '$GH_READ_TOKEN'
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
@@ -154,6 +170,10 @@ build:rust:relayer:
 build:rust:aggregator:
   extends: .rust_base
   stage: build
+  # Pulls the private gosh-sh circuits repo (transitively) — gated like
+  # build:rust:relayer so it runs only where $GH_READ_TOKEN is available.
+  rules:
+    - if: '$GH_READ_TOKEN'
   cache:
     key: rust-aggregator-$CI_COMMIT_REF_SLUG
     paths:
@@ -200,6 +220,8 @@ test:rust:
 test:rust:relayer:
   extends: .rust_base
   stage: test
+  rules:
+    - if: '$GH_READ_TOKEN'
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
@@ -215,6 +237,8 @@ test:rust:relayer:
 test:rust:aggregator:
   extends: .rust_base
   stage: test
+  rules:
+    - if: '$GH_READ_TOKEN'
   cache:
     key: rust-aggregator-$CI_COMMIT_REF_SLUG
     paths:
@@ -305,6 +329,11 @@ lint:rust:clippy:
 lint:rust:relayer:fmt:
   extends: .rust_base
   stage: test
+  # `cargo fmt -p …` runs `cargo metadata`, which resolves (and thus fetches)
+  # the private circuits dep — gate it on $GH_READ_TOKEN like the other
+  # an-bridge-prover jobs.
+  rules:
+    - if: '$GH_READ_TOKEN'
   script:
     # bridge-relayer-daemon is a symlink member of the crates/an-bridge-prover
     # workspace (it inherits halo2-base etc. from that root). A standalone
@@ -317,6 +346,8 @@ lint:rust:relayer:fmt:
 lint:rust:relayer:clippy:
   extends: .rust_base
   stage: test
+  rules:
+    - if: '$GH_READ_TOKEN'
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:

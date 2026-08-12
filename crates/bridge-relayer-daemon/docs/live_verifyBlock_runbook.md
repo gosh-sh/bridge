@@ -133,15 +133,17 @@ cp .env.example .env                              # then edit:
 #   PRIVATE_KEY=<your burner from §1>
 #   ETHERSCAN_API_KEY=<optional, for source verification>
 
-# Compute genesis anchors from live shellnet — pin these into env before deploy.
-cd ../../crates/bridge-prover-lib
+# Compute genesis anchors against live shellnet chain head.
+# --at-head picks the newest W*P = 1024-block key-block boundary ≤ head:
+#   GENESIS_LAST_SEEN_BLOCK_SEQNO      = that boundary (the seed key block)
+#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH  = layer-1 root observed at that block
+#                                        (same value the bridge will stamp on-chain)
+#   GENESIS_BK_SET_COMMITMENT          = Poseidon commitment of bk_set.shellnet.json
+#                                        (stable while shellnet BK rotation is off)
+cd ../../crates/an-bridge-prover/bridge-prover-lib
 cargo run --release --bin compute_bridge_anchors -- \
   --at-head \
   --gql-endpoint https://shellnet.ackinacki.org/graphql
-# Output:
-#   GENESIS_BK_SET_COMMITMENT=0x...
-#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
-#   GENESIS_LAST_SEEN_BLOCK_SEQNO=<latest bundle boundary>
 
 cd ../../contracts/ethereum
 set -a && source .env && set +a

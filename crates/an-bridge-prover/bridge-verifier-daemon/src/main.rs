@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 
+use bridge_prover_lib::block_id_tree;
 use bridge_prover_lib::bootstrap::{self, BootstrapSeed};
 use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_event_prover_lib as event_verifier;
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
-use bridge_prover_lib::poseidon;
+use bridge_poseidon as poseidon;
 use bridge_prover_lib::verifier;
 use bridge_prover_lib::Fr;
 
@@ -31,11 +32,16 @@ const STATE_FILE: &str = "./state/verifier_state.json";
 /// Default GraphQL endpoint when `BRIDGE_GQL_ENDPOINT` is not set. Same env
 /// var the prover daemon honours, so a single export in the shell selects the
 /// network for both daemons. Used only by [`load_bk_set_commitment`] — the
-/// verifier has no other GQL traffic; bk_set.json is the fallback if GQL is
-/// unreachable.
+/// verifier has no other GQL traffic; the per-network BK-set genesis file is
+/// the fallback if GQL is unreachable or (as on shellnet) returns an empty
+/// `bkSetUpdates` log.
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
-const BK_SET_CONFIG: &str = "./bk_set.json";
+/// Genesis BK-set anchor. Same semantics as the prover daemon's constant of
+/// the same name — see `bridge-prover-daemon/src/main.rs`. Selected per-network
+/// via `BRIDGE_BK_SET_CONFIG` (default: `./bk_set.local.json`).
+const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
+const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 // History window size — must match the prover daemon and the node. Sourced
 // from the vendored poseidon_dense constant so it can never drift.
@@ -74,9 +80,12 @@ async fn main() -> anyhow::Result<()> {
 
     let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
         .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
+    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
+        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
-    info!("GQL endpoint: {} (BK-set fetch only; falls back to {})", gql_endpoint, BK_SET_CONFIG);
+    info!("GQL endpoint: {} (unused since 2026-07-22 refactor)", gql_endpoint);
+    info!("BK-set config: {}", bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
     // Graceful-shutdown flag flipped by the Ctrl-C handler. Checked at the top
@@ -93,32 +102,32 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 1. Load BK set commitment (for Circuit 1a verification reference).
-    let bk_set_commitment = load_bk_set_commitment(&gql_endpoint).await?;
+    let bk_set_commitment = load_bk_set_commitment(&gql_endpoint, &bk_set_config).await?;
     info!("BK set commitment: {:?}", bk_set_commitment);
 
     // 2. Load key manager (SRS + VKs only, no PKs needed).
     info!("loading SRS and VKs...");
     let key_manager = KeyManager::new(Path::new(PARAMS_DIR));
-    if key_manager.primary_vk.is_none() {
+    if key_manager.primary.vk_opt().is_none() {
         anyhow::bail!(
             "primary VK not found in {}. Run the prover first to generate keys.",
             PARAMS_DIR
         );
     }
-    if key_manager.fallback_vk.is_none() {
+    if key_manager.fallback.vk_opt().is_none() {
         anyhow::bail!(
             "fallback VK not found in {}. Run the prover first to generate keys \
              (the fallback VK is materialised alongside the primary VK on cold start).",
             PARAMS_DIR
         );
     }
-    if key_manager.layer_vk.is_none() {
+    if key_manager.layer.vk_opt().is_none() {
         anyhow::bail!(
             "layer VK not found in {}. Run the prover first to generate keys.",
             PARAMS_DIR
         );
     }
-    if key_manager.event_vk.is_none() {
+    if key_manager.event.vk_opt().is_none() {
         anyhow::bail!(
             "event VK not found in {}. Run the event prover (Circuit 4) first to generate keys.",
             PARAMS_DIR
@@ -152,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
                     seed.block_height,
                     seed.layer_hashes.len(),
                 );
-                seed.apply(&mut state);
+                seed.apply(&mut state)?;
                 state.save(STATE_FILE)?;
                 info!(
                     "initialized from seed: seqno={}, height={}",
@@ -223,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
                         seed.block_height,
                         seed.layer_hashes.len(),
                     );
-                    seed.apply(&mut state);
+                    seed.apply(&mut state)?;
                     state.save(STATE_FILE)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
                     bootstrapped = true;
@@ -284,7 +293,10 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // ---- Verify Circuit 1a ----
-            let block_id_fr = match ipc::fr_from_hex(&request.block_id_hex) {
+            // Schema v6: `block_id_hex` is the raw 32-byte BE chain hash.
+            // Reduce to Fr via the same inner-product fold Circuit 1 uses
+            // (matches the on-chain Yul `mod(calldataload, f_q)`).
+            let block_id_fr = match ipc::hash_hex_to_fr(&request.block_id_hex) {
                 Ok(fr) => fr,
                 Err(e) => {
                     let msg = format!("invalid block_id_hex: {}", e);
@@ -392,18 +404,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Build Circuit 2 public instances (14 values).
+            // Build Circuit 2 public instances (14 values). Since the
+            // 2026-07-22 Circuit 1 byte-order fix, Circuit 2 binds the same
+            // `block_id_fr = uint256(bytes32(root))` as Circuit 1, so we
+            // reuse the `block_id_fr` already parsed above for both proofs.
             let mut layer_instances = Vec::with_capacity(14);
-            // Circuit 2 computes its own block_id from the Merkle path.
-            let layer_block_id_hex = request.layer_block_id_hex.as_str();
-            let layer_block_id_fr = match ipc::fr_from_hex(layer_block_id_hex) {
-                Ok(fr) => fr,
-                Err(_) => {
-                    // Fallback for old proof files without layer_block_id_hex.
-                    ipc::fr_from_hex(&request.block_id_hex).unwrap_or(Fr::zero())
-                }
-            };
-            layer_instances.push(layer_block_id_fr);     // [0] block_id
+            layer_instances.push(block_id_fr);           // [0] block_id
             layer_instances.push(bk_set_hash_fr);        // [1] bk_set_poseidon_hash
             layer_instances.push(Fr::from(request.num_layers as u64)); // [2] num_layers
             for hex_str in &request.layer_hash_frs_hex {
@@ -482,19 +488,25 @@ async fn main() -> anyhow::Result<()> {
                             }
                         })
                         .collect();
-                    let bk_hash_bytes: [u8; 32] = bk_set_hash_fr.to_repr();
                     // `block_height` is the thread-anchored height from the
                     // node's envelope (carried in `ProofRequest` v2). In
                     // multi-thread Acki Nacki this resets across thread
                     // crossings, so it is NOT the same as `block_seq_no` —
                     // mirroring it explicitly is what keeps `heights[W]`
                     // aligned with the contract's per-layer rolling window.
+                    //
+                    // `bk_set_hash_fr` was already checked to equal
+                    // `state.stored_bk_set_commitment` during Circuit 1a
+                    // verification above; `append_bundle` no longer writes
+                    // the commitment (single-writer discipline mirroring
+                    // Solidity `verifyBlock`). Monotonicity is enforced
+                    // inside `append_bundle` too — `?` here is defense in
+                    // depth atop the outer guard above.
                     state.append_bundle(
                         &new_layer_hashes,
                         request.block_height,
                         next_seq_u64,
-                        bk_hash_bytes,
-                    );
+                    )?;
                     state.save(STATE_FILE)?;
                 }
                 // block_id_fr is informational only in v2 state — no longer
@@ -555,20 +567,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load_bk_set_commitment(gql_endpoint: &str) -> anyhow::Result<Fr> {
-    let bk_set = match bridge_prover_lib::gql_client::create_client(gql_endpoint) {
-        Ok(gql) => match bridge_prover_lib::bk_set_fetcher::fetch_bk_set(&gql).await {
-            Ok(bk) => {
-                info!("BK set loaded from GraphQL: {} signers", bk.len());
-                bk
-            }
-            Err(e) => {
-                info!("GraphQL BK set failed ({}), trying config file", e);
-                bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(BK_SET_CONFIG)?
-            }
-        },
-        Err(_) => bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(BK_SET_CONFIG)?,
-    };
+/// Load the genesis BK set commitment from the JSON config file.
+///
+/// The `_gql_endpoint` parameter is retained for signature/CLI-plumbing
+/// stability. The old GraphQL-first path (`fetch_bk_set`) was disabled on
+/// 2026-07-22 as architecturally broken — it replayed the `bkSetUpdates`
+/// delta log from ∅ but AN does not emit genesis as a synthetic `Added`
+/// event. Use `bk_set_at_height` (planned) for distant-block cold starts.
+async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
+    info!("BK set loaded from config: {} signers", bk_set.len());
     Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }
 
@@ -608,7 +616,7 @@ fn write_failure(seq_no: u32, error: &str) {
 }
 
 // =====================================================================
-// BK-set-update bundle scanner + verifier (schema v4)
+// BK-set-update bundle scanner + verifier (schema v7 — 16-leaf block-id tree)
 // =====================================================================
 //
 // On local devnet the prover never produces `bkupd_*.json` (the BK set is
@@ -667,15 +675,6 @@ fn write_bk_update_failure(seq_no: u32, error: &str) {
     }
 }
 
-/// SHA-256(left ‖ right) for Merkle internal nodes.
-fn sha256_concat(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(left);
-    hasher.update(right);
-    hasher.finalize().into()
-}
-
 /// Verify and (on success) apply one bk-update bundle. Mirrors the future
 /// Solidity entry point shape — three checks, all-or-nothing apply, state
 /// touches only the commitment + the bk-update cursor.
@@ -708,31 +707,30 @@ fn process_bk_update_bundle(
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let h0 = match decode_hash32(&req.merkle_sibling_h0_hex, "merkle_sibling_h0") {
+    let h01 = match decode_hash32(&req.merkle_sibling_h01_hex, "merkle_sibling_h01") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let h23 = match decode_hash32(&req.merkle_sibling_h23_hex, "merkle_sibling_h23") {
+    let h4_7 = match decode_hash32(&req.merkle_sibling_h4_7_hex, "merkle_sibling_h4_7") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let block_id_fr = match ipc::fr_from_hex(&req.block_id_hex) {
-        Ok(fr) => fr,
-        Err(e) => return finalize_bk_update_failure(
-            seq_no,
-            &format!("invalid block_id_hex: {e}"),
-            last_seen_bk_update_seqno,
-        ),
-    };
-    // The chain's raw 32-byte block hash for the SHA-256 Merkle reconstruction.
-    // `block_id_hex` is the Fr-reduced form (254-bit), so it cannot be used
-    // here when the chain hash exceeds the Fr modulus (top 2 bits set on the
-    // LE-interpreted big-endian byte string). The bundle carries the raw hash
-    // separately in `block_id_hash_hex`.
-    let block_id_bytes = match decode_hash32(&req.block_id_hash_hex, "block_id_hash") {
+    let h8_15 = match decode_hash32(&req.merkle_sibling_h8_15_hex, "merkle_sibling_h8_15") {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
+    // Schema v6: `block_id_hex` carries the raw 32-byte BE chain hash — the
+    // same value the SHA-256 Merkle open compares against and the same value
+    // the on-chain `applyBkSetUpdate` receives as `uint256 blockId`. The Fr
+    // public instance is derived on demand via the inner-product fold
+    // (matches Circuit 1's `compute_block_id_fr` and Yul
+    // `mod(calldataload, f_q)`), so both the SHPLONK check and the SHA
+    // Merkle check are anchored to the same 256-bit source of truth.
+    let block_id_bytes = match decode_hash32(&req.block_id_hex, "block_id") {
+        Ok(b) => b,
+        Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
+    };
+    let block_id_fr = ipc::fold_hash_be_to_fr(&block_id_bytes);
 
     // (1) Attestation. L2 in the bundle MUST match the verifier's stored
     // commitment — this is what authorises the update.
@@ -785,50 +783,23 @@ fn process_bk_update_bundle(
         }
     };
 
-    // (2) Open SHA-256 Merkle: H1 = SHA(L2‖L3); H01 = SHA(H0‖H1); root = SHA(H01‖H23).
-    // Compared against the raw 32-byte chain block hash (`block_id_hash_hex`),
-    // not against `block_id_fr.to_repr()` — the chain hash is 256 bits and may
-    // exceed the BN254 Fr modulus, so the Fr public instance is a lossy
-    // 254-bit projection. Consistency between the two is enforced separately
-    // in check (2b) below.
-    let h1_calc = sha256_concat(&l2, &l3);
-    let h01_calc = sha256_concat(&h0, &h1_calc);
-    let root_calc = sha256_concat(&h01_calc, &h23);
+    // (2) Open SHA-256 Merkle over the 16-leaf depth-4 block-id tree, folded
+    // by the same helper `AckiNackiBridge.applyBkSetUpdate` mirrors on-chain.
+    // Compared against the raw 32-byte chain block hash carried in
+    // `block_id_hex` (schema v6+ semantics = `uint256(bytes32(blockId))`).
+    // The Fr public instance the Circuit 1a/1b proof binds is derived from
+    // exactly these same bytes via the inner-product fold above, so a
+    // separate `block_id_hash ↔ block_id_fr` consistency check is no longer
+    // needed — the two used to diverge only because the pre-v6 wire format
+    // carried both a lossy Fr repr and a raw hash as independent fields.
+    let root_calc = block_id_tree::fold_l2_l3_open(&l2, &l3, &[h01, h4_7, h8_15]);
     let merkle_verified = root_calc == block_id_bytes;
     if !merkle_verified {
         warn!(
-            "bk-update {}: Merkle root mismatch — computed {} vs block_id_hash {}",
+            "bk-update {}: Merkle root mismatch — computed {} vs block_id {}",
             seq_no,
             hex::encode(root_calc),
             hex::encode(block_id_bytes),
-        );
-    }
-
-    // (2b) block_id_hash ↔ block_id_fr consistency. Without this, a bundle
-    // could pair one block's raw hash (used by check 2) with another block's
-    // Fr instance (bound by the Circuit 1a/1b proof in check 1). Both must
-    // refer to the same chain block.
-    //
-    // The relation the prover establishes is `block_id_fr = Σ byte_i · 256^i
-    // mod Fr_modulus` where byte_i are the chain hash bytes in LE order
-    // (`compute_block_id_fr` in bridge-prover-lib::prover). We re-run that
-    // construction here and require equality.
-    let block_id_fr_from_hash = {
-        let mut acc = Fr::zero();
-        let mut power = Fr::one();
-        let base = Fr::from(256u64);
-        for &b in &block_id_bytes {
-            acc += Fr::from(b as u64) * power;
-            power *= base;
-        }
-        acc
-    };
-    let fr_consistency_ok = block_id_fr_from_hash == block_id_fr;
-    if !fr_consistency_ok {
-        warn!(
-            "bk-update {}: block_id_fr inconsistent with block_id_hash — \
-             Fr(hash mod p) != bundled Fr instance",
-            seq_no
         );
     }
 
@@ -841,8 +812,7 @@ fn process_bk_update_bundle(
         );
     }
 
-    let verify_ok =
-        attestation_verified && merkle_verified && fr_consistency_ok && monotonicity_ok;
+    let verify_ok = attestation_verified && merkle_verified && monotonicity_ok;
     if verify_ok {
         if let Err(e) = state.apply_bk_set_update(l2, l3, req.block_seq_no as u64) {
             // apply_bk_set_update re-checks the preconditions; if it
@@ -873,8 +843,8 @@ fn process_bk_update_bundle(
         }
     } else {
         warn!(
-            "bk-update {}: REJECTED (attestation={}, merkle={}, fr_consistency={}, monotone={})",
-            seq_no, attestation_verified, merkle_verified, fr_consistency_ok, monotonicity_ok
+            "bk-update {}: REJECTED (attestation={}, merkle={}, monotone={})",
+            seq_no, attestation_verified, merkle_verified, monotonicity_ok
         );
     }
 
@@ -888,8 +858,8 @@ fn process_bk_update_bundle(
             None
         } else {
             Some(format!(
-                "attestation={}, merkle={}, fr_consistency={}, monotone={}",
-                attestation_verified, merkle_verified, fr_consistency_ok, monotonicity_ok
+                "attestation={}, merkle={}, monotone={}",
+                attestation_verified, merkle_verified, monotonicity_ok
             ))
         },
     };

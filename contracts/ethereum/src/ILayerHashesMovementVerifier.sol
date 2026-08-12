@@ -14,8 +14,8 @@ pragma solidity ^0.8.19;
 ///      circuit's `expose_public` order in
 ///      `historical-layer-hashes-movement-checker-circuit/src/circuit.rs`):
 ///      ```
-///      [0]      blockId                   keccak/SHA-256 root of the 8-leaf
-///                                         envelope tree, bound to Circuit 1A/1B
+///      [0]      blockId                   SHA-256 root of the 16-leaf, depth-4
+///                                         block-id tree, bound to Circuit 1A/1B
 ///      [1]      bkSetCommitment           Poseidon commitment to the active BK set
 ///      [2]      numLayers                 1..=10 active layers
 ///      [3..=12] layerHashes[0..10]        per-layer Poseidon Merkle roots; the
@@ -26,13 +26,13 @@ pragma solidity ^0.8.19;
 ///      ```
 interface ILayerHashesMovementVerifier {
     /// @notice Verify a Circuit 2 (Layer Hashes Movement) proof.
-    /// @param proof 256-byte Groth16 proof (8 × uint256, gnark MarshalSolidity layout)
+    /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof)
     /// @param blockId 32-byte AN block identifier (must equal the value carried by Circuit 1A/1B)
     /// @param bkSetCommitment Poseidon commitment to the BK set
     /// @param numLayers number of active layers (1..=10)
     /// @param layerHashes 10 layer-hash field elements; index ≥ numLayers must be 0
     /// @param prevMaxLevelLayerHash Poseidon root anchoring the previous chain
-    /// @return isValid true on a passing proof; reverts in the underlying gnark
+    /// @return isValid true on a passing proof; reverts in the underlying SHPLONK
     ///         verifier are caught and surfaced as `false`.
     function verifyLayerHashesMovement(
         bytes calldata proof,

@@ -196,7 +196,7 @@ The `vk` argument is stored once at deployment in immutable storage. Same trust-
 > | Q-WIRE-1 | Blake2b SHPLONK transcript (sole supported flavour for v1; the bundle still carries a `transcript_kind` discriminator byte to keep the door open for Keccak in a future version) | bridge / closed |
 > | Q-WIRE-2 | Verifier-only `ParamsKZG<Bn256>` built at runtime from 3 globally-embedded G1/G2 points, parameterised by `k = vk.cs.degree`. NOT carried in `Halo2TvmBundle` and NOT loaded from disk — SHPLONK verification only needs `g[0]`, `g2`, `s_g2`. | tvm-sdk (reuses the same `KZG_*_BYTES` constants `ZKHALO2VERIFY` uses for DarkDex W=8) |
 > | Q-WIRE-3 | Strict 32-byte little-endian `Fr::to_repr()`; no u64 shortcut. `Fr::from_repr` rejects ≥ modulus inputs structurally | bridge / closed |
-> | Q-WIRE-4 | Self-describing `Halo2TvmBundle` (see `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`). Magic `b"HALO2TVM"` + version `0x01` + transcript_kind byte + length-prefixed `(config_json, vk_bytes, instances, proof)` | bridge / closed |
+> | Q-WIRE-4 | Self-describing `Halo2TvmBundle` (see `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`). Magic `b"HALO2TVM"` + version `0x01` + transcript_kind byte + length-prefixed `(config_json, vk_bytes, instances, proof)` | bridge / closed |
 > | Q-WIRE-5 | Pin `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` to a commit SHA in `tvm_vm/Cargo.toml`. Any SHA bump requires a CI gate that proves & verifies a checked-in `Halo2TvmBundle` fixture; deserialisation drift = red CI = blocked merge | tvm-sdk maintainer + bridge CI |
 > | Q-NAME-1 | `ZKHALO2VERIFYWITHVK`, dispatch byte `0xC7 0x4A` (adjacent to `ZKHALO2VERIFY = 0xC7 0x49`). If `node-3406` reshuffles bytes pre-merge, our follow-up PR rebases onto whatever byte ends up adjacent | bridge / will rebase at follow-up PR |
 >
@@ -214,10 +214,10 @@ The bridge's `deposit-prover/` currently produces proofs with the **Keccak256** 
 Our preference: switch the producer side to Blake2b. It's a single-line change in `deposit-prover/src/prover.rs` and avoids growing the opcode surface.
 
 **Decision 2026-05-22 — DECIDED Blake2b.** The fallback path in
-`crates/bridge-prover-orchestrator/src/prover.rs::generate_fallback_proof`
+`crates/bridge-snark-utils/src/prover.rs::generate_fallback_proof`
 already uses `Blake2bWrite` / `Blake2bRead`, and the
 `Halo2TvmBundle` round-trip test in
-`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`
+`crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs`
 exercises this end-to-end against a real Circuit 1B fixture (k=20, 10
 signers, ~21.2 KB bundle). Forcing Keccak on the AN side would require a
 duplicate transcript gadget stack on a node that has no EVM-style
@@ -247,7 +247,7 @@ fn build_shared_kzg_params(k: u32) -> ParamsKZG<Bn256> {
 This means **no on-disk SRS file is required**. The `KZG_*_BYTES`
 constants live in `zk_halo2_utils.rs` (promoted to `pub(crate)` on the
 real-impl branch) and are the same trusted-setup points DarkDex W=8
-uses. The producer side (`bridge-prover-orchestrator`) still uses a
+uses. The producer side (`bridge-snark-utils`) still uses a
 full `kzg_bn254_20.srs` blob for proving (proving needs g[0..2^k]); the
 saving is purely on the verifier (TVM) side.
 
@@ -287,7 +287,7 @@ We prefer **Option B** and are happy to send a PR to `gosh-zk-snark-halo2-utils`
 **Decision 2026-05-22 — DECIDED Option B (self-describing bundle).** The
 bridge has already implemented the format under the name
 `Halo2TvmBundle` in
-`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`. The wire
+`crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`. The wire
 layout is:
 
 ```
@@ -310,7 +310,7 @@ The opcode deserialises `config_json` → `BaseCircuitParams`, calls
 `VerifyingKey::<G1Affine>::read(&vk_bytes, SerdeFormat::RawBytes, &cp)`,
 then runs the standard `gosh-zk-snark-halo2-utils::Proof::verify_with_vk`
 path. The round-trip test
-(`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`)
+(`crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs`)
 proves and verifies a real Circuit 1B (k=20, 10 signers) fixture
 through this format; format version byte will bump on any breaking
 change.
@@ -325,7 +325,7 @@ change.
 gate.** `tvm_vm/Cargo.toml` pins
 `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` to a `rev = "<sha>"` (not
 a branch). The bridge's CI checks in a `Halo2TvmBundle` fixture
-(`crates/bridge-prover-orchestrator/tests/fixtures/halo2_tvm_bundle_v1_circuit1b_k20.bin`)
+(`crates/bridge-snark-utils/tests/fixtures/halo2_tvm_bundle_v1_circuit1b_k20.bin`)
 along with its expected `verify_with_vk` outcome. Any future SHA bump
 must run this fixture through the latest verifier; a deserialisation
 failure or a flipped verdict is a red CI and blocks the bump until the
@@ -364,11 +364,11 @@ gate is `serhii/node-3406-vergrth16-with-vk` landing the
 **Status (2026-05-18): bridge-side proposal landed, awaiting partner ack.** The
 bridge has committed to a concrete byte layout and verified it
 end-to-end against a real Circuit 1B (fallback attestation) proof. See
-`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs` (the
+`crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` (the
 `Halo2TvmBundle` wire format, 8-byte magic + version + transcript_kind
 byte + length-prefixed `(config_json, vk_bytes, instances, proof)`
 chunks) and the round-trip integration test
-`crates/bridge-prover-orchestrator/tests/halo2_tvm_bundle_round_trip.rs`.
+`crates/bridge-snark-utils/tests/halo2_tvm_bundle_round_trip.rs`.
 
 What's now known:
 

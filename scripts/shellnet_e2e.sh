@@ -27,7 +27,7 @@ fi
 echo "[3/4] Bridge-relayer verify-fixture (SHPLONK calldata auto-detected)"
 if [[ -n "$RPC_URL" && -n "$BRIDGE" ]]; then
   (cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
-    --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+    --fixtures-dir ../bridge-snark-utils/proofs/bound \
     --rpc-url "$RPC_URL" --bridge-address "$BRIDGE" --no-simulate) || \
     echo "  verify-fixture failed (deploy bridge first or check anchors)"
 else

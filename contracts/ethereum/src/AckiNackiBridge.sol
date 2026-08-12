@@ -55,8 +55,10 @@ contract AckiNackiBridge {
     /// @notice One USDC base unit (USD Coin uses 6 decimals on Ethereum).
     uint256 public constant USDC_UNIT = 10 ** 6;
 
-    /// @notice Maximum deposit amount (100 USDC; prevents whale deposits)
-    uint256 public constant MAX_DEPOSIT_AMOUNT = 100 * USDC_UNIT;
+    /// @notice Maximum per-tx deposit amount. Capped at `type(uint64).max` so the
+    ///         amount fits AN `USDCBridge` mint path (`fr[2]` as uint64). Not a
+    ///         global TVL limit (QC-A1-1 / QC-AN-J1).
+    uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -71,8 +73,10 @@ contract AckiNackiBridge {
     /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
 
-    /// @notice L1-only anchor layer for Circuit 4 until `anchorLayer` PI lands.
-    uint8 internal constant WITHDRAW_ANCHOR_LAYER = 1;
+    /// @notice BN254 scalar field order — the modulus every circuit public
+    ///         input lives in.
+    uint256 internal constant BN254_R =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
 
     /// @notice Finalization type for a block being verified by `verifyBlock`.
     ///         Mirrors `attestation_bls_checker_circuit`'s `AttestationTargetType`
@@ -134,13 +138,6 @@ contract AckiNackiBridge {
     uint256 private constant _ENTERED = 2;
     uint256 private _reentrancyStatus;
 
-    /// @notice Global pause flag. When `true`, all user-facing entrypoints
-    ///         (`deposit`, `verifyBlock`, `withdrawByProof`) revert with
-    ///         `BridgePaused`. Owner-only AAVE management remains
-    ///         available so funds can still be evacuated in an incident.
-    /// @dev Toggled via `pause()` / `unpause()` (owner-only).
-    bool public paused;
-
     // ---------------------------------------------------------------------
     // Storage: AN→ETH state (Phase 4 verifyBlock)
     // ---------------------------------------------------------------------
@@ -178,24 +175,25 @@ contract AckiNackiBridge {
     ///         verified on-chain. Strictly monotonic via `verifyBlock`.
     uint64 public storedLastSeenBlockSeqNo;
 
-    /// @notice Number of active layer slots committed by the most recent
-    ///         layer-hashes proof. Range 1..=`MAX_LAYER_HASHES` (`MAX_LAYERS`).
-    uint8 public storedNumLayers;
-
-    /// @notice Per-layer Poseidon Merkle roots committed by the most recent
-    ///         layer-hashes proof. Indices `>= storedNumLayers` are zero.
-    uint256[MAX_LAYER_HASHES] public storedLayerHashes;
-
-    /// @notice The most recent block's max-level layer hash, plus the genesis
-    ///         bootstrap seed before any block is verified (set at
-    ///         construction).
-    /// @dev NOT the anchor source for the next `verifyBlock` — the chain anchor
-    ///      is derived per layer from `_layerWindows` via `_expectedPrevAnchor`
-    ///      (see AB-Q4). This field is read only as the genesis seed while no
-    ///      layer is populated; afterwards it is informational (mirrored by the
-    ///      `expectedPrevAnchor(numLayers)` view for relayers). Kept for
-    ///      backward-compatible reads.
-    uint256 public storedPrevMaxLevelLayerHash;
+    /// @notice Immutable genesis seed for the layer-hash chain anchor. Set
+    ///         once at construction from `VerifyBlockConfig.genesisPrevMaxLevelLayerHash`
+    ///         and never mutated post-deploy.
+    /// @dev **Deprecated in storage v2.0**: this is now the immutable genesis
+    ///      seed only — no longer tracks per-block max-layer values. Use
+    ///      `getLatestPerLayer()` for per-block per-layer state, and
+    ///      `expectedPrevAnchor(numLayers)` for the chain anchor that the
+    ///      next `verifyBlock` will require.
+    ///
+    ///      Read only by `_expectedPrevAnchor` as the pre-first-block bootstrap
+    ///      seed (before any layer window is populated). Every subsequent call
+    ///      sources the anchor from the per-layer rolling windows in
+    ///      `_layerWindows` — see AB-Q4 / `_expectedPrevAnchor`.
+    ///
+    ///      Storage v2.0 (2026-08-04): removed the hot-path SSTORE and made
+    ///      this immutable; also removed the sibling `storedNumLayers` and
+    ///      `storedLayerHashes[10]` flat cache — indexers migrate to
+    ///      `getLatestPerLayer()` and `_highestActiveLayer()`.
+    uint256 public immutable storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
     // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
@@ -240,9 +238,15 @@ contract AckiNackiBridge {
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
-    ///         Each `withdrawByProof` checks `finalRoot` against the L1
-    ///         window (`WITHDRAW_ANCHOR_LAYER`) — matching the partner
-    ///         event-witness builder (`layer_idx = 0`).
+    ///         Each `withdrawByProof` checks `finalRoot` against *any* layer
+    ///         window via `_isKnownAnchor` (NB-Q1 2026-08-04 — was previously
+    ///         pinned to L1 via a `WITHDRAW_ANCHOR_LAYER` constant that would
+    ///         `revert UnknownAnchor` for every partner L≥2 witness). Every
+    ///         window entry was written by a verified `verifyBlock`, so the
+    ///         layer index adds specificity, not security. Option A (Circuit 4
+    ///         PI slot `anchorLayer` + range-checked scan of the specific
+    ///         window) remains the ultimate target once the Circuit 4
+    ///         re-keygen lands.
     ///
     /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
     struct HistoryWindow {
@@ -272,12 +276,7 @@ contract AckiNackiBridge {
         bytes32 anAccount,
         uint256 timestamp
     );
-    /// @notice Bridge paused — emitted when the owner sets `paused = true`.
-    /// @param by Owner address that triggered the pause (`msg.sender`).
-    event Paused(address indexed by);
-    /// @notice Bridge unpaused — emitted when the owner sets `paused = false`.
-    /// @param by Owner address that lifted the pause (`msg.sender`).
-    event Unpaused(address indexed by);
+
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
     event YieldHarvested(address indexed recipient, uint256 amount);
@@ -286,6 +285,9 @@ contract AckiNackiBridge {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
+    /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
+    ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
+    event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
 
     /// @notice Emitted on every successful `verifyBlock` call.
     /// @param blockId AN block identifier (Merkle root committed by both proofs).
@@ -306,9 +308,7 @@ contract AckiNackiBridge {
 
     /// @notice Emitted when a BK-set rotation is applied via `applyBkSetUpdate`.
     event BkSetUpdated(
-        uint256 indexed oldCommitment,
-        uint256 indexed newCommitment,
-        uint64 indexed blockSeqNo
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
     /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
@@ -355,12 +355,6 @@ contract AckiNackiBridge {
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
     error NoYield();
-    /// @notice User-facing entrypoints are paused. Owner-only AAVE
-    ///         management (`emergencyWithdrawAll`, `withdrawFromAave`,
-    ///         `harvestYield`) remains available regardless of the pause
-    ///         state so funds can still be evacuated in an incident.
-    error BridgePaused();
-    error AlreadyInThatPauseState();
 
     // verifyBlock errors
     error VerifyBlockDisabled();
@@ -371,6 +365,10 @@ contract AckiNackiBridge {
     error PrevAnchorMismatch(uint256 supplied, uint256 stored);
     error InvalidNumLayers(uint256 numLayers);
     error LayerHashTailNonZero(uint256 index);
+    /// @notice Active layer slot (`i < numLayers`) must be non-zero (QC-A2-3).
+    error LayerHashActiveZero(uint256 index);
+    /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
+    error NoExcessUsdc();
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -425,15 +423,6 @@ contract AckiNackiBridge {
         _reentrancyStatus = _NOT_ENTERED;
     }
 
-    /// @dev User-facing entrypoints revert when the bridge is paused.
-    ///      Owner-only AAVE management is deliberately *not* gated by
-    ///      this modifier so the owner can still pull liquidity in an
-    ///      incident.
-    modifier whenNotPaused() {
-        if (paused) revert BridgePaused();
-        _;
-    }
-
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
@@ -455,6 +444,15 @@ contract AckiNackiBridge {
         ///         (no prior layer-hash chain to anchor against — the very
         ///         first verified block uses the zero anchor).
         uint256 genesisPrevMaxLevelLayerHash;
+        /// @notice Initial `storedLastSeenBlockSeqNo`. Must equal the AN-side
+        ///         `last_seen_block_seqno` baked into the very first
+        ///         verifyBlock proof (i.e. the bootstrap seed seq_no emitted by
+        ///         `compute_bridge_anchors`). Pass `0` only if the first proof
+        ///         will also carry `last_seen = 0`; otherwise the first
+        ///         `verifyBlock` reverts with `AttestationProofRejected` because
+        ///         instance[15] (the proof's baked-in `last_seen`) will not
+        ///         match `storedLastSeenBlockSeqNo`.
+        uint64 genesisLastSeenBlockSeqNo;
     }
 
     /// @notice Argument bundle for the AN→ETH Circuit 4 (single-final-root)
@@ -536,6 +534,7 @@ contract AckiNackiBridge {
         layerHashesVerifier = _vb.layerHashesVerifier;
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
+        storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
 
         // Circuit 4 (single-final-root) wiring — independent of `_vb`.
         // Verifier address is the toggle; if non-zero, both Fr identifiers
@@ -579,7 +578,6 @@ contract AckiNackiBridge {
     function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
         external
         nonReentrant
-        whenNotPaused
     {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
@@ -622,11 +620,17 @@ contract AckiNackiBridge {
     ///
     /// State updates after success:
     ///   - `storedLastSeenBlockSeqNo = blockSeqNo`
-    ///   - `storedNumLayers = numLayers`
-    ///   - `storedLayerHashes[i] = layerHashes[i]` for all 0..MAX_LAYER_HASHES
-    ///   - `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]`
-    ///     (informational mirror; the *next* call's anchor is derived per-layer
-    ///     from the rolling windows via `_expectedPrevAnchor`)
+    ///   - Per-layer rolling windows: for each `L in 1..=numLayers` with
+    ///     `layerHashes[L-1] != 0`, `_layerWindows[L].append(layerHashes[L-1], blockSeqNo)`.
+    ///     These are the authoritative per-layer state; observe via
+    ///     `getLatestPerLayer()` / `isKnownLayerAnchor(L, hash)` and derive
+    ///     the next block's expected anchor via `expectedPrevAnchor(numLayers)`.
+    ///
+    /// **Storage v2.0 (2026-08-04)**: the flat `storedNumLayers` +
+    /// `storedLayerHashes[10]` cache and the `storedPrevMaxLevelLayerHash`
+    /// SSTORE are no longer written on the hot path (SSTORE savings ≈ 32k gas
+    /// per call). `storedPrevMaxLevelLayerHash` is now the immutable genesis
+    /// seed. See `docs/storage_v2_abi_note.md`.
     ///   - each non-zero `layerHashes[i]` appended to its layer's rolling window
     ///
     /// @param finType            Primary or Fallback finalization path.
@@ -653,7 +657,7 @@ contract AckiNackiBridge {
         uint8 numLayers,
         uint256[MAX_LAYER_HASHES] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         // Feature gate: all three verifier slots must be wired.
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -669,6 +673,11 @@ contract AckiNackiBridge {
         for (uint256 i = numLayers; i < MAX_LAYER_HASHES; i++) {
             if (layerHashes[i] != 0) revert LayerHashTailNonZero(i);
         }
+        // Active slots must be non-zero so `_appendLayerHashes` cannot skip a
+        // layer and desync per-layer windows / `_highestActiveLayer` (QC-A2-3).
+        for (uint256 i = 0; i < numLayers; i++) {
+            if (layerHashes[i] == 0) revert LayerHashActiveZero(i);
+        }
 
         // ---- Anchor checks against stored state. ----
         if (bkSetCommitment != storedBkSetCommitment) {
@@ -682,9 +691,15 @@ contract AckiNackiBridge {
         // A flat `layerHashes[numLayers - 1]` anchor diverges from the prover
         // whenever `numLayers` *decreases* across consecutive key blocks, which
         // would halt `verifyBlock` forever (AB-Q4). See `_expectedPrevAnchor`.
-        uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
-        if (prevMaxLevelLayerHash != expectedAnchor) {
-            revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+        //
+        // Scoped so `expectedAnchor` is freed before the tail `emit`, keeping
+        // this function's live-stack-slot count under 16 so it also compiles
+        // under `forge coverage` (which runs without the optimizer / `--via-ir`).
+        {
+            uint256 expectedAnchor = _expectedPrevAnchor(numLayers);
+            if (prevMaxLevelLayerHash != expectedAnchor) {
+                revert PrevAnchorMismatch(prevMaxLevelLayerHash, expectedAnchor);
+            }
         }
 
         // ---- Crypto: verify both proofs. The shared (blockId, bkSetCommitment,
@@ -692,49 +707,51 @@ contract AckiNackiBridge {
         //      mismatch between the two proofs surfaces here as one of the two
         //      verifications failing (their public inputs are computed from
         //      these values byte-for-byte).
-        bool attOk;
-        if (finType == FinalizationType.Primary) {
-            attOk = primaryVerifier.verifyPrimaryAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
-        } else {
-            attOk = fallbackVerifier.verifyFallbackAttestation(
-                attestationProof,
-                blockId,
-                bkSetCommitment,
-                uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
-            );
+        //
+        //      Each verification is in its own scope so the `bool` result is
+        //      freed before the tail `emit` (same stack-slot reason as above).
+        {
+            bool attOk;
+            if (finType == FinalizationType.Primary) {
+                attOk = primaryVerifier.verifyPrimaryAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            } else {
+                attOk = fallbackVerifier.verifyFallbackAttestation(
+                    attestationProof,
+                    blockId,
+                    bkSetCommitment,
+                    uint256(blockSeqNo),
+                    uint256(storedLastSeenBlockSeqNo)
+                );
+            }
+            if (!attOk) revert AttestationProofRejected();
         }
-        if (!attOk) revert AttestationProofRejected();
 
-        bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
-            layerHashesProof,
-            blockId,
-            bkSetCommitment,
-            uint256(numLayers),
-            layerHashes,
-            prevMaxLevelLayerHash
-        );
-        if (!lhOk) revert LayerHashesProofRejected();
+        {
+            bool lhOk = layerHashesVerifier.verifyLayerHashesMovement(
+                layerHashesProof,
+                blockId,
+                bkSetCommitment,
+                uint256(numLayers),
+                layerHashes,
+                prevMaxLevelLayerHash
+            );
+            if (!lhOk) revert LayerHashesProofRejected();
+        }
 
         // ---- Effects (CEI): commit the new state. ----
+        // Storage v2.0 (2026-08-04): the flat `storedNumLayers` + `storedLayerHashes[10]`
+        // cache and the `storedPrevMaxLevelLayerHash` SSTORE are gone from the
+        // hot path — the authoritative per-layer state lives in `_layerWindows`
+        // and is written exclusively by `_appendLayer` below. Off-chain readers
+        // migrate to `getLatestPerLayer()` / `_highestActiveLayer()` /
+        // `expectedPrevAnchor(numLayers)`. See `docs/storage_v2_abi_note.md`.
         storedLastSeenBlockSeqNo = blockSeqNo;
-        storedNumLayers = numLayers;
-        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
-            storedLayerHashes[i] = layerHashes[i];
-        }
-        // Record this block's max-level layer hash. This is now informational
-        // only (the per-layer windows below are the anchor source — see
-        // `_expectedPrevAnchor` / AB-Q4); kept for backward-compatible reads.
-        // Then push each layer into its window (via a helper to keep this
-        // function's stack frame small enough to compile cleanly under
-        // `forge coverage`, which runs without `--via-ir`).
-        storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1];
         _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
         emit BlockVerified(blockId, blockSeqNo, finType, numLayers);
@@ -742,19 +759,43 @@ contract AckiNackiBridge {
 
     /// @notice Apply an Acki Nacki BK-set rotation on Ethereum after verifying
     ///         a Circuit 1A/1B attestation and an open SHA-256 Merkle binding
-    ///         `blockId == SHA256(SHA256(H0 ‖ SHA256(L2 ‖ L3)) ‖ H23)`.
+    ///         `blockId == SHA256(SHA256(SHA256(SHA256(H01 ‖ SHA256(L2 ‖ L3)) ‖ H4_7) ‖ H8_15))`
+    ///         against the depth-4 / 16-leaf block-id tree (`(L2, L3)` sit at
+    ///         leaf positions 2 and 3).
     ///
     /// @dev Permissionless. Only the Poseidon **commitment** rotates on-chain;
     ///      the full pubkey table stays off-chain (prover working set).
     ///
+    ///      `blockId` is the root of the canonical **16-leaf, depth-4**
+    ///      block-id tree (`poseidon_profile_new`; leaves L2/L3 carry the old
+    ///      and new BK-set Poseidon commitments). Opening that pair therefore
+    ///      needs **three** siblings, and the fold is:
+    ///
+    ///      ```
+    ///      h23  = SHA256(L2 ‖ L3)              // both in LE `Fr` repr
+    ///      h0_3 = SHA256(siblingH01  ‖ h23)
+    ///      h0_7 = SHA256(h0_3        ‖ siblingH4_7)
+    ///      root = SHA256(h0_7        ‖ siblingH8_15)
+    ///      blockId == root mod BN254_R         // canonical `Fr` image
+    ///      ```
+    ///
+    ///      Mirrors `bridge-prover-lib/src/block_id_tree.rs`
+    ///      (`siblings_for_l2_l3`) and the off-chain pre-flight in
+    ///      `bridge-verifier-daemon`. The pre-16-leaf variant took two
+    ///      siblings and folded one level less.
+    ///
     /// @param finType Primary or Fallback attestation path for the update block.
     /// @param attestationProof SHPLONK attestation proof bytes.
-    /// @param blockId Block identifier shared with the attestation public inputs.
+    /// @param blockId Block identifier shared with the attestation public inputs,
+    ///        so it is the canonical `Fr` image of the tree root (`root mod
+    ///        BN254_R`) rather than the raw SHA-256 root — the same convention
+    ///        `verifyBlock` uses.
     /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
     /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
     /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
-    /// @param siblingH0 Merkle sibling at level 0 (from prover `bkupd_*.json`).
-    /// @param siblingH23 Merkle sibling combining levels 2–3.
+    /// @param siblingH01 Merkle sibling `SHA256(L0 ‖ L1)` — depth-1 pair hash.
+    /// @param siblingH4_7 Merkle sibling `SHA256(SHA256(L4 ‖ L5) ‖ SHA256(L6 ‖ L7))` — depth-2 quad hash.
+    /// @param siblingH8_15 Merkle sibling covering leaves 8..15 — depth-3 oct hash.
     function applyBkSetUpdate(
         FinalizationType finType,
         bytes calldata attestationProof,
@@ -762,12 +803,11 @@ contract AckiNackiBridge {
         uint64 blockSeqNo,
         uint256 oldCommitmentL2,
         uint256 newCommitmentL3,
-        bytes32 siblingH0,
-        bytes32 siblingH23
-    ) external nonReentrant whenNotPaused {
-        if (
-            address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
-        ) {
+        bytes32 siblingH01,
+        bytes32 siblingH4_7,
+        bytes32 siblingH8_15
+    ) external nonReentrant {
+        if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
         }
 
@@ -798,17 +838,63 @@ contract AckiNackiBridge {
         }
         if (!attOk) revert AttestationProofRejected();
 
-        bytes32 h1 = sha256(abi.encodePacked(oldCommitmentL2, newCommitmentL3));
-        bytes32 h01 = sha256(abi.encodePacked(siblingH0, h1));
-        bytes32 root = sha256(abi.encodePacked(h01, siblingH23));
-        if (uint256(root) != blockId) {
-            revert BkUpdateMerkleMismatch(uint256(root), blockId);
+        // Depth-4 / 16-leaf block-id tree with (oldL2, newL3) at leaf positions 2 and 3.
+        //   round 1: h23   = SHA(L2 ‖ L3)              — depth-1 pair hash
+        //   round 2: h0_3  = SHA(siblingH01 ‖ h23)     — depth-2 quad hash (leaves 0..3)
+        //   round 3: h0_7  = SHA(h0_3 ‖ siblingH4_7)   — depth-3 oct hash  (leaves 0..7)
+        //   round 4: root  = SHA(h0_7 ‖ siblingH8_15)  — depth-4 root      (leaves 0..15)
+        //
+        // L2 and L3 are numeric `uint256` Fr scalars on the wire; the AN side
+        // (bridge-prover-lib `block_id_tree.rs:30-31`) hashes them as canonical
+        // 32-byte little-endian `Fr::to_repr()`. Solidity's default
+        // `abi.encodePacked(uint256)` is big-endian, so we byte-reverse both
+        // operands with `_frToLeBytes` before the round-1 SHA. Siblings at
+        // rounds 2..4 are opaque SHA-256 outputs (already `bytes32`) and need
+        // no reversal.
+        bytes32 h23 = sha256(
+            abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3))
+        );
+        bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
+        bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
+        bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
+        // The fold produces a raw 256-bit SHA-256 output, but `blockId` was
+        // just handed to the attestation adapter, which compares it byte-for-byte
+        // against the circuit's public instance — necessarily a canonical `Fr`,
+        // i.e. `< BN254_R`. Only ~18.9% of 256-bit values are, so without this
+        // reduction the two consumers of `blockId` disagree for roughly four out
+        // of five rotations and no argument can satisfy both at once. Reducing
+        // here keeps `blockId` meaning one thing everywhere (the field element
+        // the circuit committed to, same as in `verifyBlock`) and leaves the
+        // raw root confined to this fold.
+        uint256 rootFr = uint256(root) % BN254_R;
+        if (rootFr != blockId) {
+            revert BkUpdateMerkleMismatch(rootFr, blockId);
         }
 
         storedBkSetCommitment = newCommitmentL3;
         storedLastBkSetUpdateSeqNo = blockSeqNo;
 
         emit BkSetUpdated(oldCommitmentL2, newCommitmentL3, blockSeqNo);
+    }
+
+    /// @dev Little-endian 32-byte image of a BN254 `Fr` — i.e. what
+    ///      `Fr::to_repr()` produces on the Rust side.
+    ///
+    ///      The Acki Nacki block-id tree hashes BK-set Poseidon commitments in
+    ///      that canonical LE repr, while every other on-chain use of a
+    ///      commitment (`storedBkSetCommitment`, the attestation verifier's
+    ///      public input) is the numeric field element. `applyBkSetUpdate` is
+    ///      the single place where the two conventions meet, so the reversal
+    ///      lives here and nowhere else. Deploy-time counterpart: the runbook
+    ///      byte-reverses the prover's LE `bk_set_poseidon_hash_hex` to get
+    ///      `GENESIS_BK_SET_COMMITMENT`.
+    function _frToLeBytes(uint256 value) internal pure returns (bytes32) {
+        uint256 reversed;
+        for (uint256 i = 0; i < 32; i++) {
+            reversed = (reversed << 8) | (value & 0xff);
+            value >>= 8;
+        }
+        return bytes32(reversed);
     }
 
     /// @dev Append each non-zero layer hash from a successful `verifyBlock`
@@ -892,8 +978,9 @@ contract AckiNackiBridge {
     ///      prover's `BridgeState::prev_max_level_layer_hash_for`
     ///      (`bridge-prover-lib/src/bridge_state.rs`):
     ///        * `t = _highestActiveLayer()` (active-layer count);
-    ///        * before any block (`t == 0`): the genesis seed
-    ///          (`storedPrevMaxLevelLayerHash`, set at construction);
+    ///        * before any block (`t == 0`): the immutable genesis seed
+    ///          (`storedPrevMaxLevelLayerHash`, set at construction — the
+    ///          only remaining reader of the field after storage v2.0);
     ///        * otherwise `pick = min(numLayers, t)` and the anchor is the
     ///          latest hash of layer `pick`.
     ///      This is the AB-Q4 fix: a flat `layerHashes[numLayers - 1]` anchor
@@ -903,7 +990,7 @@ contract AckiNackiBridge {
     function _expectedPrevAnchor(uint8 numLayers) internal view returns (uint256) {
         uint8 t = _highestActiveLayer();
         if (t == 0) {
-            return storedPrevMaxLevelLayerHash; // genesis bootstrap seed
+            return storedPrevMaxLevelLayerHash; // immutable genesis bootstrap seed
         }
         uint8 pick = numLayers >= t ? t : numLayers;
         return _layerLatest(pick);
@@ -918,7 +1005,32 @@ contract AckiNackiBridge {
         return _expectedPrevAnchor(numLayers);
     }
 
-    /// @dev Legacy flat membership — true if `anchor` appears in any layer window.
+    /// @dev Flat membership — true if `anchor` appears in any layer window.
+    ///      This is the anchor check consumed by `withdrawByProof` (NB-Q1
+    ///      2026-08-04): every window entry was written by a verified
+    ///      `verifyBlock`, so the layer index adds specificity, not security.
+    ///      Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan
+    ///      of the specific window) remains the ultimate target once the
+    ///      Circuit 4 re-keygen lands.
+    ///
+    ///      **Soundness widening.** Dropping the layer index means the bridge
+    ///      no longer asserts which layer a withdrawal is anchored in. A
+    ///      Circuit 4 proof whose `finalRoot` equals a layer-2 window entry
+    ///      is accepted even if the withdrawal event was intended to anchor
+    ///      to layer 1 (or vice-versa). Correctness therefore rests entirely
+    ///      on Circuit 4's own binding of `finalRoot` to the event — Option A
+    ///      is what would restore per-layer specificity on-chain.
+    ///
+    ///      **Cost.** `_isKnownLayerAnchor` is O(W) with
+    ///      `HISTORY_PROOF_WINDOW = 128`; this flat scan calls it for all
+    ///      `MAX_LAYER_HASHES = 10` layers, so a miss is up to
+    ///      `10 × 128 = 1280` cold SLOADs (~2.7M gas) — ~10× the single-
+    ///      window scan it replaced — and is paid by the caller whose
+    ///      `withdrawByProof` then reverts. An `mapping(uint256 => bool)`
+    ///      written on append would give O(1) membership; the eviction on
+    ///      window rollover must delete the map entry too, or the map
+    ///      quietly becomes the unbounded bag the window was introduced to
+    ///      avoid.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {
@@ -928,13 +1040,26 @@ contract AckiNackiBridge {
         return false;
     }
 
-    /// @notice View helper: returns the full `storedLayerHashes` array as a
-    ///         memory copy. Public mappings give per-index access; this is
-    ///         convenient for off-chain reads in one RPC call.
-    function getStoredLayerHashes() external view returns (uint256[MAX_LAYER_HASHES] memory) {
+    /// @notice Latest anchor written into each layer window. Entry `[L-1]`
+    ///         is the head of `_layerWindows[L]`, i.e. the most recent
+    ///         Poseidon Merkle root committed for layer `L` across all
+    ///         `verifyBlock` calls so far — *not* just the last block's
+    ///         array. Empty windows return zero.
+    ///
+    ///         Storage v2.0 (2026-08-04): replaces `getStoredLayerHashes()`
+    ///         (removed). The per-layer view over `_layerWindows` is the
+    ///         authoritative source; a shallow-successor-after-deep block no
+    ///         longer overwrites deeper layers with zero. See
+    ///         `docs/storage_v2_abi_note.md`.
+    function getLatestPerLayer() external view returns (uint256[MAX_LAYER_HASHES] memory) {
         uint256[MAX_LAYER_HASHES] memory out;
-        for (uint256 i = 0; i < MAX_LAYER_HASHES; i++) {
-            out[i] = storedLayerHashes[i];
+        for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
+            HistoryWindow storage w = _layerWindows[L];
+            if (w.dataLen > 0) {
+                uint16 head = (w.writeCursor + uint16(HISTORY_PROOF_WINDOW) - 1)
+                              % uint16(HISTORY_PROOF_WINDOW);
+                out[L - 1] = w.data[head];
+            }
         }
         return out;
     }
@@ -1005,7 +1130,7 @@ contract AckiNackiBridge {
     function withdrawByProof(
         bytes calldata proof,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-    ) external nonReentrant whenNotPaused returns (bool success) {
+    ) external nonReentrant returns (bool success) {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
@@ -1033,13 +1158,22 @@ contract AckiNackiBridge {
         if (pub.recipientLo > RECIPIENT_HALF_MASK) {
             revert RecipientHalfOutOfRange(pub.recipientLo);
         }
+        // WD-Q2: reject recipient=0 before crypto / CEI so a stranded event
+        // cannot burn gas on verify then strand forever on a real USDC reject.
+        if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
+            revert InvalidRecipient();
+        }
         bytes32 nullifierKey = bytes32(pub.nullifier);
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // L1-only witness builder (`layer_idx = 0`). Future: read `anchorLayer`
-        // from Circuit 4 public input slot [10] when partner extends the layout.
-        if (!_isKnownLayerAnchor(WITHDRAW_ANCHOR_LAYER, pub.finalRoot)) {
+        // NB-Q1 (2026-08-04): flat scan across every layer window. Option A
+        // (Circuit 4 PI slot `anchorLayer` + range-checked scan of the
+        // specific window) remains the ultimate target — this unblocks
+        // partner L≥2 witnesses today without waiting for the Circuit 4
+        // re-keygen. Every window entry was written by a verified
+        // `verifyBlock`, so the layer index adds specificity, not security.
+        if (!_isKnownAnchor(pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 
@@ -1167,27 +1301,28 @@ contract AckiNackiBridge {
         emit YieldHarvested(yieldRecipient, received);
     }
 
-    // ---------------------------------------------------------------------
-    // Pause controls (owner-only)
-    // ---------------------------------------------------------------------
-
-    /// @notice Halt all user-facing entrypoints (`deposit`, `verifyBlock`,
-    ///         `withdrawByProof`). Reverts if the bridge is already paused.
-    /// @dev Owner-only AAVE management is *not* gated — the owner must
-    ///      still be able to evacuate funds via `emergencyWithdrawAll` /
-    ///      `withdrawFromAave` / `harvestYield` while paused.
-    function pause() external onlyOwner {
-        if (paused) revert AlreadyInThatPauseState();
-        paused = true;
-        emit Paused(msg.sender);
+    /// @notice Liquid USDC held by the bridge above `treasuryBalance` (user
+    ///         principal). Typically post-`emergencyWithdrawAll` yield that is
+    ///         no longer tracked as AAVE `accruedYield()` (QC-A1-3).
+    function excessUsdc() public view returns (uint256) {
+        uint256 liquid = usdc.balanceOf(address(this));
+        return liquid > treasuryBalance ? liquid - treasuryBalance : 0;
     }
 
-    /// @notice Re-enable user-facing entrypoints. Reverts if not paused.
-    function unpause() external onlyOwner {
-        if (!paused) revert AlreadyInThatPauseState();
-        paused = false;
-        emit Unpaused(msg.sender);
+    /// @notice Owner skim of `excessUsdc` to `yieldRecipient`. Does not touch
+    ///         user principal (`treasuryBalance`).
+    /// @param amount Amount to skim (`type(uint256).max` = all excess).
+    function skimExcessUsdc(uint256 amount) external onlyOwner nonReentrant {
+        if (yieldRecipient == address(0)) revert InvalidRecipient();
+        uint256 excess = excessUsdc();
+        uint256 toSkim = amount == type(uint256).max ? excess : amount;
+        if (excess == 0 || toSkim == 0 || toSkim > excess) revert NoExcessUsdc();
+        if (!usdc.transfer(yieldRecipient, toSkim)) {
+            revert WithdrawTransferFailed(yieldRecipient, toSkim);
+        }
+        emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
     }
+
 
     /// @notice Enable or disable further supplies to AAVE.
     function setAaveEnabled(bool enabled) external onlyOwner {

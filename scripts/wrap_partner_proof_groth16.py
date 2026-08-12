@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert partner proof_<seqno>.json Halo2 hex → 256-byte Groth16 for Ethereum submit.
 
-Uses identity-stub gnark wrappers in bridge-prover-orchestrator (cached proving.key).
+Uses identity-stub gnark wrappers in bridge-snark-utils (cached proving.key).
 Patches primary_proof_hex / layer_proof_hex in-place; writes .bak first.
 """
 from __future__ import annotations
@@ -60,8 +60,8 @@ def main() -> None:
 
     proof_path = Path(sys.argv[1]).resolve()
     repo = Path(__file__).resolve().parents[1]
-    w1a = repo / "crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a"
-    w2 = repo / "crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2"
+    w1a = repo / "crates/bridge-snark-utils/gnark-wrappers/circuit-1a"
+    w2 = repo / "crates/bridge-snark-utils/gnark-wrappers/circuit-2"
 
     data = json.loads(proof_path.read_text())
     backup = proof_path.with_suffix(proof_path.suffix + ".bak")

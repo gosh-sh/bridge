@@ -18,16 +18,13 @@
 //!   <set-dir>/deposit_vk_blob.bin             (shared, v2 RLC VkBlob)
 //!   <set-dir>/deposit_eth_circuit_params.json (shared EthCircuitParams)
 //!   <set-dir>/proof_NN/proof.bin              (Blake2b SHPLONK proof)
-//!   <set-dir>/proof_NN/public_inputs.bin      (11 × 32-byte LE Fr)
+//!   <set-dir>/proof_NN/public_inputs.bin      (12 × 32-byte LE Fr)
 //!
 //! Each `proof_NN/input.json` must already exist (written by
 //! `fetch_deposit_data`). Run with:
 //!   cargo run --release --example export_deposit_proof_set -- \
 //!     --set-dir fixtures/deposit_10proofs --count 10 \
 //!     --degree 18 --max-data-byte-len 256 --max-log-num 20
-
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
 
 use std::{fs, path::Path};
 
@@ -69,7 +66,7 @@ use halo2_base::{
         },
     },
 };
-use halo2_tvm_bundle::{CircuitShape, VkBlob};
+use deposit_prover::halo2_tvm_bundle::{CircuitShape, VkBlob};
 use rand::rngs::OsRng;
 use snark_verifier_sdk::CircuitExt;
 
@@ -89,6 +86,18 @@ struct Args {
     max_data_byte_len: usize,
     #[arg(long, default_value = "20")]
     max_log_num: usize,
+
+    /// Source network (not baked into VK; proven chainId is a PI). Must be in
+    /// `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111) and must match the
+    /// chain the loaded witness actually proves.
+    #[arg(long, default_value = "11155111")]
+    chain_id: u64,
+}
+
+fn load_input_checked(set_dir: &str, i: usize, chain_id: u64) -> anyhow::Result<DepositProofInput> {
+    let input = load_input(set_dir, i)?;
+    input.require_chain_id(chain_id)?;
+    Ok(input)
 }
 
 fn load_input(set_dir: &str, i: usize) -> anyhow::Result<DepositProofInput> {
@@ -101,6 +110,7 @@ fn load_input(set_dir: &str, i: usize) -> anyhow::Result<DepositProofInput> {
 fn main() -> anyhow::Result<()> {
     println!("=== Export deposit proof set (single shared VkBlob) ===\n");
     let args = Args::parse();
+    deposit_prover::require_supported_deposit_chain(args.chain_id)?;
     let config = CircuitConfig {
         degree: args.degree,
         max_data_byte_len: args.max_data_byte_len,
@@ -112,7 +122,7 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Keygen ONCE from proof_00, pinning params + break points + pk ----
     println!("Keygen (once) from proof_00/input.json ...");
-    let ref_input = load_input(&args.set_dir, 0)?;
+    let ref_input = load_input_checked(&args.set_dir, 0, args.chain_id)?;
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let mut kcircuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Keygen,
@@ -153,7 +163,7 @@ fn main() -> anyhow::Result<()> {
             println!("proof_{i:02}: SKIP (no input.json)");
             continue;
         }
-        let input = load_input(&args.set_dir, i)?;
+        let input = load_input_checked(&args.set_dir, i, args.chain_id)?;
         let circuit = EthCircuitImpl::<Fr, _>::new_impl(
             CircuitBuilderStage::Prover,
             DepositEventCircuitV2::new(input, &config),
@@ -165,8 +175,8 @@ fn main() -> anyhow::Result<()> {
 
         let instances = circuit.instances();
         anyhow::ensure!(
-            instances.len() == 1 && instances[0].len() == 11,
-            "proof_{i:02}: expected 11 public inputs, got {:?}",
+            instances.len() == 1 && instances[0].len() == 12,
+            "proof_{i:02}: expected 12 public inputs, got {:?}",
             instances.iter().map(|c| c.len()).collect::<Vec<_>>()
         );
         let inst0 = instances[0].clone();

@@ -17,7 +17,7 @@ target/
 # made the original on-chain VK (147efe14…) unbuildable after transitive drift.
 # See docs/deposit_vk_reproducibility.md.
 poseidon-proof/Cargo.lock
-crates/bridge-prover-orchestrator/Cargo.lock
+crates/bridge-snark-utils/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock
 
 # Foundry / Solidity
@@ -31,6 +31,8 @@ contracts/ethereum/lib/
 .env.local
 .env.production
 .env.*.local
+.env.shellnet
+.env.sepolia
 .secrets
 
 # IDE
@@ -47,32 +49,32 @@ contracts/ethereum/lib/
 # Bridge prover orchestrator generated artifacts (Phase 1.A+):
 # - SRS, VKs, PKs, and per-circuit base-circuit configs are produced by
 #   `cargo test` runs. PKs are multi-GB. Do not commit.
-crates/bridge-prover-orchestrator/params/*.srs
-crates/bridge-prover-orchestrator/params/*_pk.bin
-crates/bridge-prover-orchestrator/params/*_vk.bin
-crates/bridge-prover-orchestrator/params/*_config_params.json
-crates/bridge-prover-orchestrator/target/
+crates/bridge-snark-utils/params/*.srs
+crates/bridge-snark-utils/params/*_pk.bin
+crates/bridge-snark-utils/params/*_vk.bin
+crates/bridge-snark-utils/params/*_config_params.json
+crates/bridge-snark-utils/target/
 
 # Phase 3: per-circuit proof artefacts (regenerated on demand by
 # `cargo run --bin export-fallback-proof`).
-crates/bridge-prover-orchestrator/proofs/
+crates/bridge-snark-utils/proofs/
 
 # Phase 3: per-circuit gnark-wrapper outputs. Only the .go / go.mod / go.sum
 # source code is checked in; the trusted-setup keys, R1CS, and built binaries
 # are regenerated locally by `gnark-wrappers/circuit-1b/circuit-1b setup`.
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1a
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-1b
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-2
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-3
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit-4
-crates/bridge-prover-orchestrator/gnark-wrappers/*/proving.key
-crates/bridge-prover-orchestrator/gnark-wrappers/*/verification.key
-crates/bridge-prover-orchestrator/gnark-wrappers/*/circuit.r1cs
-crates/bridge-prover-orchestrator/gnark-wrappers/*/Groth16Verifier.sol
+crates/bridge-snark-utils/gnark-wrappers/*/circuit-1a
+crates/bridge-snark-utils/gnark-wrappers/*/circuit-1b
+crates/bridge-snark-utils/gnark-wrappers/*/circuit-2
+crates/bridge-snark-utils/gnark-wrappers/*/circuit-3
+crates/bridge-snark-utils/gnark-wrappers/*/circuit-4
+crates/bridge-snark-utils/gnark-wrappers/*/proving.key
+crates/bridge-snark-utils/gnark-wrappers/*/verification.key
+crates/bridge-snark-utils/gnark-wrappers/*/circuit.r1cs
+crates/bridge-snark-utils/gnark-wrappers/*/Groth16Verifier.sol
 contracts/ethereum/test/fixtures/r15_spike/MultiplierSpikeVerifier.sol
-crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_proof.hex
-crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_public_inputs.hex
-crates/bridge-prover-orchestrator/gnark-wrappers/*/groth16_output.json
+crates/bridge-snark-utils/gnark-wrappers/*/groth16_proof.hex
+crates/bridge-snark-utils/gnark-wrappers/*/groth16_public_inputs.hex
+crates/bridge-snark-utils/gnark-wrappers/*/groth16_output.json
 logs/
 
 # Coverage
@@ -150,16 +152,16 @@ deposit-prover/params/
 # KZG parameters (downloaded from trusted setup, not stored in git)
 deposit-prover/data/*.srs
 
-# AN→ETH gnark wrapper build artifacts (per-circuit, under bridge-prover-orchestrator)
+# AN→ETH gnark wrapper build artifacts (per-circuit, under bridge-snark-utils)
 # The deposit-prover/gnark-wrapper/ tree was retired in Phase 4.3 (2026-05-17).
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/circuit.r1cs
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/proving.key
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/verification.key
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/groth16_proof.hex
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-*/groth16_output.json
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a/circuit-1a
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1b/circuit-1b
-crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2/circuit-2
+crates/bridge-snark-utils/gnark-wrappers/circuit-*/circuit.r1cs
+crates/bridge-snark-utils/gnark-wrappers/circuit-*/proving.key
+crates/bridge-snark-utils/gnark-wrappers/circuit-*/verification.key
+crates/bridge-snark-utils/gnark-wrappers/circuit-*/groth16_proof.hex
+crates/bridge-snark-utils/gnark-wrappers/circuit-*/groth16_output.json
+crates/bridge-snark-utils/gnark-wrappers/circuit-1a/circuit-1a
+crates/bridge-snark-utils/gnark-wrappers/circuit-1b/circuit-1b
+crates/bridge-snark-utils/gnark-wrappers/circuit-2/circuit-2
 
 # Prompt files
 *.prompt
@@ -215,3 +217,21 @@ deposit-prover/src/bin/an_rlc_verify.rs
 docs/user/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
 docs/user/USER_GUIDE.pdf
 docs/user/USER_GUIDE.md.bak.*
+
+# Partner handoff / outreach messages — local-only drafts, not for commit.
+docs/partner_handoff_*.md
+
+.temp/*
+
+# Runtime state + debug artefacts emitted by the relayer / prover binaries.
+# Never commit — the .stale_* variants are ad-hoc backups from crash-recovery
+# sessions; the submissions/ and diag/ dirs are env-gated dumps for offline
+# replay (BRIDGE_DUMP_SUBMISSIONS_DIR, BRIDGE_DIAG_INSTANCES_FILE); the top
+# `proofs/` dir is halo2 proof output. Mirrors the existing
+# `crates/bridge-snark-utils/proofs/` rule.
+/proofs/
+crates/an-bridge-prover/relayer-state.json
+crates/an-bridge-prover/relayer-state.json.stale_*
+crates/an-bridge-prover/state.stale_*/
+crates/an-bridge-prover/submissions/
+crates/an-bridge-prover/diag/

@@ -5,10 +5,10 @@
 //! publicInputs)` (acki-nacki branch `poseidon_dex`, deployed on shellnet
 //! 2026-06-22; verified by code-hash match against
 //! `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`). The contract parses
-//! every deposit field straight out of the `publicInputs` operand (11 × 32-byte
+//! every deposit field straight out of the `publicInputs` operand (12 × 32-byte
 //! little-endian `Fr`), verifies the triple via
 //! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
-//! 0x4A`; the `VK_BLOB` is the deploy-time 11-input deposit VkBlob embedded in
+//! 0x4A`; the `VK_BLOB` is the deploy-time 12-input deposit VkBlob embedded in
 //! the contract, **not** a per-call argument), reconstructs the recipient
 //! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
 //! consumes a proof-bound deposit nullifier (deployed as a per-deposit
@@ -64,6 +64,10 @@ pub enum SubmitOutcome {
     /// AN rejected the submission (proof verification failed, malformed
     /// call). The relayer logs and records an attempt.
     Rejected { reason: String },
+    /// The tx was broadcast but confirmation timed out while still pending.
+    /// Distinct from [`Rejected`] — the relayer retries without treating it
+    /// as a verifier failure.
+    Pending { reason: String },
 }
 
 #[async_trait]
@@ -93,12 +97,12 @@ pub trait AnSubmitter: Send + Sync {
 /// publicInputs)` call is encoded by [`build_finalize_deposit_params`] + the
 /// tvm_client ABI encoder. This function produces a deterministic,
 /// self-describing big-endian layout used only by debug tooling and the
-/// round-trip unit test (it asserts the eleven decoded scalars survive a
+/// round-trip unit test (it asserts the twelve decoded scalars survive a
 /// re-encode):
 ///
 /// ```text
 ///   NUM_PUBLIC_INPUTS × 32-byte big-endian scalars (the proof's public inputs):
-///     depositId, sender, amount, contractAddress,
+///     depositId, sender, amount, contractAddress, chainId,
 ///     dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 ///     blockHashHigh, blockHashLow, promiseCommit
 ///   u32 BE proof length
@@ -112,6 +116,7 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
         pi.sender,
         pi.amount,
         pi.contract_address,
+        pi.chain_id,
         pi.dapp_id_high,
         pi.dapp_id_low,
         pi.an_account_high,
@@ -132,7 +137,8 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
 const FINALIZE_HEADER_LEN: usize = NUM_PUBLIC_INPUTS * 32 + 4;
 
 /// Decoded `finalizeDeposit` body: the public-input scalars and the raw proof
-/// bytes. dappId is `scalars[4..6]`; the AN account is `scalars[6..8]`.
+/// bytes. `chainId` is `scalars[4]`; dappId is `scalars[5..7]`; the AN account
+/// is `scalars[7..9]`.
 pub type DecodedFinalize = ([U256; NUM_PUBLIC_INPUTS], Vec<u8>);
 
 /// Decode a body produced by [`encode_finalize_deposit`] back into the
@@ -339,7 +345,10 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             params,
         };
 
-        let sent = self.client.call_contract(call).await?;
+        let sent = match self.client.call_contract(call).await {
+            Ok(hash) => hash,
+            Err(e) => return Ok(classify_call_error(&e.to_string())),
+        };
         let receipt = self
             .client
             .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
@@ -351,16 +360,114 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
                     tx_hash: Some(sent),
                 })
             },
-            TransactionStatus::Reverted | TransactionStatus::Failed => {
-                Ok(SubmitOutcome::Rejected {
-                    reason: format!("finalizeDeposit tx status = {:?}", receipt.status),
-                })
-            },
-            TransactionStatus::Pending => Ok(SubmitOutcome::Rejected {
+            TransactionStatus::Reverted | TransactionStatus::Failed => Ok(classify_reverted(
+                receipt.exit_code,
+                &format!("{:?}", receipt.status),
+            )),
+            TransactionStatus::Pending => Ok(SubmitOutcome::Pending {
                 reason: "finalizeDeposit tx still pending after timeout".to_string(),
             }),
         }
     }
+}
+
+/// StdContractError: DepositVoucher already deployed → deposit already
+/// finalized.
+const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
+/// USDCBridge `ERR_INVALID_ZKPROOF`.
+const EXIT_INVALID_ZKPROOF: i32 = 220;
+/// USDCBridge `ERR_UNKNOWN_SOURCE`.
+const EXIT_UNKNOWN_SOURCE: i32 = 222;
+/// USDCBridge `ERR_WRONG_DAPP`.
+const EXIT_WRONG_DAPP: i32 = 223;
+/// USDCBridge `ERR_UNKNOWN_BLOCK`.
+const EXIT_UNKNOWN_BLOCK: i32 = 224;
+/// USDCBridge `ERR_MINT_CAP_EXCEEDED`.
+const EXIT_MINT_CAP_EXCEEDED: i32 = 229;
+
+/// Names the USDCBridge revert and, where the cause is bridge configuration
+/// rather than a bad deposit, says which call fixes it. The fail-closed
+/// settings must be re-set by hand after every deploy or code upgrade (they are
+/// not threaded through `onCodeUpgrade`), so without this the first deposit
+/// after a redeploy reads as a broken bridge.
+fn describe_exit_code(code: i32) -> Option<&'static str> {
+    match code {
+        EXIT_INVALID_ZKPROOF => Some(
+            "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
+             this prover's VkBlob",
+        ),
+        EXIT_UNKNOWN_SOURCE => Some(
+            "ERR_UNKNOWN_SOURCE — source chain/bridge not allowlisted; owner must call \
+             setExpectedBridge(chainId, bridgeFr)",
+        ),
+        EXIT_WRONG_DAPP => Some(
+            "ERR_WRONG_DAPP — proof-bound dappId is not this deployment's; owner must call \
+             setExpectedAnDappId(dappId)",
+        ),
+        EXIT_UNKNOWN_BLOCK => Some(
+            "ERR_UNKNOWN_BLOCK — the deposit's block is not in the canonical-chain anchor set; \
+             confirm canonicality with `scripts/deposit_anchor_params.py --verify`, then the \
+             anchor writer must admit it — setAcceptedBlockHash(chainId, blockHash, true) on the \
+             owner path, or attestBlockHash(chainId, blockHash) from a threshold of attesters",
+        ),
+        EXIT_MINT_CAP_EXCEEDED => Some(
+            "ERR_MINT_CAP_EXCEEDED — this chain's cumulative mint cap is reached; the deposit \
+             stays retryable, so read getMintCap(chainId) and decide whether to raise it via \
+             setMintCap or leave the bound in place",
+        ),
+        _ => None,
+    }
+}
+
+fn rejected(code: i32, context: &str, detail: &str) -> SubmitOutcome {
+    let reason = match describe_exit_code(code) {
+        Some(hint) => format!("{hint} (exit_code={code}): {detail}"),
+        None => format!("{context} (exit_code={code}): {detail}"),
+    };
+    SubmitOutcome::Rejected {
+        reason,
+    }
+}
+
+fn classify_reverted(exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
+    match exit_code {
+        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
+        Some(code) => rejected(code, "finalizeDeposit reverted", detail),
+        None => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit tx status = {detail}"),
+        },
+    }
+}
+
+fn classify_call_error(msg: &str) -> SubmitOutcome {
+    // Prefer acki_nacki_interface parser when the tvm-sdk feature is on; fall
+    // back to a local regex-free scan so this module still builds without it.
+    let code = parse_exit_code_loose(msg);
+    match code {
+        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
+        Some(code) => rejected(code, "finalizeDeposit failed", msg),
+        None => SubmitOutcome::Rejected {
+            reason: format!("finalizeDeposit call failed: {msg}"),
+        },
+    }
+}
+
+fn parse_exit_code_loose(msg: &str) -> Option<i32> {
+    if let Some(c) = acki_nacki_interface::parse_exit_code_from_message(msg) {
+        return Some(c);
+    }
+    for marker in ["exit_code=Some(", "exit_code=", "local_exit_code="] {
+        if let Some(rest) = msg.split(marker).nth(1) {
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
 }
 
 #[async_trait]
@@ -400,6 +507,7 @@ mod tests {
             block_number: 1,
             block_hash: B256::repeat_byte(0xcd),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 
@@ -422,11 +530,12 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-                                                   // dappId is the config tag (scalars 4/5); the AN account high/low halves
-                                                   // (scalars 6/7) reconstruct the proven recipient account.
-        let dapp_id = (scalars[4] << 128) | scalars[5];
+        assert_eq!(scalars[4], b.parsed.chain_id); // proven chainId
+                                                   // dappId is the config tag (scalars 5/6); the AN account high/low halves
+                                                   // (scalars 7/8) reconstruct the proven recipient account.
+        let dapp_id = (scalars[5] << 128) | scalars[6];
         assert_eq!(dapp_id, b.parsed.dapp_id());
-        let reconstructed = (scalars[6] << 128) | scalars[7];
+        let reconstructed = (scalars[7] << 128) | scalars[8];
         assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
         assert_eq!(proof, b.proof.to_vec());
     }
@@ -483,7 +592,7 @@ mod tests {
         );
         let pi_bytes = hex::decode(public_inputs).unwrap();
         assert_eq!(pi_bytes, b.public_inputs.to_vec());
-        // The operand must be the canonical 11 × 32-byte LE layout the opcode reads.
+        // The operand must be the canonical 12 × 32-byte LE layout the opcode reads.
         assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
         // And it must round-trip back to the same parsed inputs.
         assert_eq!(
@@ -514,6 +623,59 @@ mod tests {
                 tx_hash,
             } => assert!(tx_hash.is_some()),
             other => panic!("expected Finalized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_exit_51_as_already_finalized() {
+        assert!(matches!(
+            classify_call_error("contract call aborted (exit_code=Some(51))"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+        assert!(matches!(
+            classify_reverted(Some(51), "Reverted"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+    }
+
+    #[test]
+    fn classify_exit_220_as_rejected() {
+        match classify_call_error("contract call aborted (exit_code=220)") {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains("220") || reason.contains("ERR_INVALID_ZKPROOF"));
+            },
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    /// The fail-closed config reverts must name the call that fixes them — an
+    /// operator seeing a bare `exit_code=224` after a redeploy has no way to
+    /// tell an unconfigured bridge from a rejected deposit.
+    #[test]
+    fn config_reverts_name_the_setter_that_fixes_them() {
+        for (code, err_name, setter) in [
+            (222, "ERR_UNKNOWN_SOURCE", "setExpectedBridge"),
+            (223, "ERR_WRONG_DAPP", "setExpectedAnDappId"),
+            (224, "ERR_UNKNOWN_BLOCK", "setAcceptedBlockHash"),
+            (229, "ERR_MINT_CAP_EXCEEDED", "setMintCap"),
+        ] {
+            for outcome in [
+                classify_call_error(&format!("contract call aborted (exit_code={code})")),
+                classify_reverted(Some(code), "Reverted"),
+            ] {
+                match outcome {
+                    SubmitOutcome::Rejected {
+                        reason,
+                    } => {
+                        assert!(reason.contains(err_name), "{code}: {reason}");
+                        assert!(reason.contains(setter), "{code}: {reason}");
+                        assert!(reason.contains(&code.to_string()), "{code}: {reason}");
+                    },
+                    other => panic!("expected Rejected for {code}, got {other:?}"),
+                }
+            }
         }
     }
 }

@@ -12,10 +12,11 @@
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
-//! 3. The [`DepositPublicInputs`] — the eleven field elements the proof commits
-//!    to (including the Acki Nacki destination account and the config-supplied
-//!    `dappId` tag), decoded from the `public_inputs` operand so the submitter
-//!    can build the `finalizeDeposit(...)` call arguments.
+//! 3. The [`DepositPublicInputs`] — the twelve field elements the proof commits
+//!    to (including proven `chainId`, the Acki Nacki destination account, and
+//!    the config-supplied `dappId` tag), decoded from the `public_inputs`
+//!    operand so the submitter can build the `finalizeDeposit(...)` call
+//!    arguments.
 
 use alloy::primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -23,16 +24,19 @@ use serde::{Deserialize, Serialize};
 use crate::error::RelayerError;
 
 /// Number of public inputs the deposit circuit commits to. Matches
-/// `deposit-prover`'s `num_instance() == vec![11]`:
-/// `[depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow,
-/// anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`.
+/// `deposit-prover`'s `num_instance() == vec![12]`:
+/// `[depositId, sender, amount, contractAddress, chainId, dappIdHigh,
+/// dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
+/// promiseCommit]`.
 ///
-/// `anAccount{High,Low}` bind the Acki Nacki destination account into the proof
-/// (an EVM address is not a valid AN recipient). `dappId{High,Low}` (the
-/// UInt256 AN dApp identifier, replaced `anWorkchain` on 2026-06-02) is a
-/// config-supplied tag — it is not bound to event data in-circuit;
-/// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
-pub const NUM_PUBLIC_INPUTS: usize = 11;
+/// `chainId` is the EIP-1559 RLP field-0 value bound via the enclosing tx MPT
+/// proof (not VK-baked). `anAccount{High,Low}` bind the Acki Nacki destination
+/// account into the proof (an EVM address is not a valid AN recipient).
+/// `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced `anWorkchain`
+/// on 2026-06-02) is a config-supplied tag — it is not bound to event data
+/// in-circuit; `TokenBridge.finalizeDeposit` checks it against its configured
+/// dappId. USDCBridge must also allowlist `(chainId → expected bridge Fr)`.
+pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
 pub const PUBLIC_INPUT_BYTES: usize = NUM_PUBLIC_INPUTS * 32;
@@ -78,23 +82,29 @@ pub struct DepositEvent {
     /// The bridge contract that emitted the event (the proof's
     /// `contractAddress` public input binds to this).
     pub source_contract: Address,
+    /// EIP-155 `chain_id` of the RPC used to fetch this event (`eth_chainId`).
+    /// Operator sanity: the proven `chainId` public input must match this
+    /// (not a hardcoded mainnet=1 assumption).
+    pub source_chain_id: u64,
 }
 
-/// The eleven public inputs the deposit proof commits to, decoded from the
+/// The twelve public inputs the deposit proof commits to, decoded from the
 /// `public_inputs` opcode operand. Each is a full `U256` (the field element
 /// re-interpreted as an integer); the submitter forwards these as the
 /// `finalizeDeposit(...)` scalar arguments.
 ///
-/// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
-/// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
-/// `an_account_low` are the high/low halves of the 256-bit AN account, matching
-/// the circuit's split. The AN side reconstructs each as `(high << 128) | low`.
+/// `chain_id` is the proven EIP-1559 tx `chainId`. `dapp_id_high` /
+/// `dapp_id_low` are the high/low 16-byte halves of the 256-bit AN dApp
+/// identifier (config-supplied tag); `an_account_high` / `an_account_low` are
+/// the high/low halves of the 256-bit AN account, matching the circuit's
+/// split. The AN side reconstructs each as `(high << 128) | low`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DepositPublicInputs {
     pub deposit_id: U256,
     pub sender: U256,
     pub amount: U256,
     pub contract_address: U256,
+    pub chain_id: U256,
     pub dapp_id_high: U256,
     pub dapp_id_low: U256,
     pub an_account_high: U256,
@@ -127,13 +137,14 @@ impl DepositPublicInputs {
             sender: field(1),
             amount: field(2),
             contract_address: field(3),
-            dapp_id_high: field(4),
-            dapp_id_low: field(5),
-            an_account_high: field(6),
-            an_account_low: field(7),
-            block_hash_high: field(8),
-            block_hash_low: field(9),
-            promise_commit: field(10),
+            chain_id: field(4),
+            dapp_id_high: field(5),
+            dapp_id_low: field(6),
+            an_account_high: field(7),
+            an_account_low: field(8),
+            block_hash_high: field(9),
+            block_hash_low: field(10),
+            promise_commit: field(11),
         })
     }
 
@@ -147,6 +158,7 @@ impl DepositPublicInputs {
             self.sender,
             self.amount,
             self.contract_address,
+            self.chain_id,
             self.dapp_id_high,
             self.dapp_id_low,
             self.an_account_high,
@@ -172,6 +184,43 @@ impl DepositPublicInputs {
     }
 }
 
+/// Parse and validate an `AN_DAPP_ID` hex string (optional `0x` prefix).
+///
+/// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
+/// `0x`-prefixed hex form used in proofs and `state.json`.
+///
+/// When `allow_zero` is false, a zero dappId is rejected — live daemon paths
+/// must set an explicit non-zero tag (QC-OFF-09).
+pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String, RelayerError> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID is empty; set --dapp-id / AN_DAPP_ID to a hex UInt256",
+        ));
+    }
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' is not valid hex"
+        )));
+    }
+    if hex.len() > 64 {
+        return Err(RelayerError::other(format!(
+            "AN_DAPP_ID '{raw}' exceeds 32 bytes (got {} hex chars)",
+            hex.len()
+        )));
+    }
+    let value = U256::from_str_radix(hex, 16)
+        .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
+    if value.is_zero() && !allow_zero {
+        return Err(RelayerError::other(
+            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; set \
+             AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
+        ));
+    }
+    Ok(format!("{value:#x}"))
+}
+
 /// The three operands the AN-side `ZKHALO2VERIFYWITHVK` opcode consumes,
 /// plus the decoded public inputs for building the `finalizeDeposit` call.
 ///
@@ -179,7 +228,7 @@ impl DepositPublicInputs {
 ///
 /// ```text
 /// bottom: vk_cell            ← `vk_blob`        (VkBlob v2 RLC for deposit)
-/// middle: public_inputs_cell ← `public_inputs`  (11 × 32-byte LE Fr, no header)
+/// middle: public_inputs_cell ← `public_inputs`  (12 × 32-byte LE Fr, no header)
 /// top:    proof_cell         ← `proof`          (raw Blake2b SHPLONK bytes)
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -215,9 +264,12 @@ impl DepositProofBundle {
         })
     }
 
-    /// Sanity-check that the proof's `depositId` public input matches the
-    /// deposit we think we're finalizing. A mismatch means the prover was
-    /// fed the wrong witness — a terminal bug, not a retryable condition.
+    /// Sanity-check that the proof's public inputs match the deposit we think
+    /// we're finalizing, including that proven `chainId` equals the RPC
+    /// `eth_chainId` used to fetch the event (`event.source_chain_id`). A
+    /// mismatch means the prover was fed the wrong witness or the operator
+    /// pointed at the wrong network — a terminal bug, not a retryable
+    /// condition.
     pub fn check_binds_to(&self, event: &DepositEvent) -> Result<(), RelayerError> {
         let expected = U256::from(event.deposit_id);
         if self.parsed.deposit_id != expected {
@@ -237,6 +289,13 @@ impl DepositProofBundle {
                 self.parsed.sender, event.sender
             )));
         }
+        let expected_chain = U256::from(event.source_chain_id);
+        if self.parsed.chain_id != expected_chain {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof chainId {:#x} != RPC eth_chainId {} (operator sanity)",
+                self.parsed.chain_id, event.source_chain_id
+            )));
+        }
         // The AN destination account is bound in-circuit; it must match the
         // event we read from chain. The 16-byte account halves are below the
         // field modulus so they're exact. dappId is a config tag (not in the
@@ -249,6 +308,32 @@ impl DepositProofBundle {
                 "proof anAccount {:#x} != event anAccount {:#x}",
                 self.parsed.an_account(),
                 U256::from_be_slice(event.an_account.as_slice())
+            )));
+        }
+        if self.parsed.amount != event.amount {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof amount {:#x} != event amount {:#x}",
+                self.parsed.amount, event.amount
+            )));
+        }
+        let expected_contract = U256::from_be_bytes::<32>({
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(event.source_contract.as_slice());
+            buf
+        });
+        if self.parsed.contract_address != expected_contract {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof contractAddress {:#x} != event source_contract {}",
+                self.parsed.contract_address, event.source_contract
+            )));
+        }
+        let exp_bh_hi = U256::from_be_slice(&event.block_hash.as_slice()[0..16]);
+        let exp_bh_lo = U256::from_be_slice(&event.block_hash.as_slice()[16..32]);
+        if self.parsed.block_hash_high != exp_bh_hi || self.parsed.block_hash_low != exp_bh_lo {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof blockHash {:#x} != event blockHash {:#x}",
+                (self.parsed.block_hash_high << 128) | self.parsed.block_hash_low,
+                U256::from_be_slice(event.block_hash.as_slice())
             )));
         }
         Ok(())
@@ -266,6 +351,7 @@ mod tests {
             sender: U256::from(0x1234u64),
             amount: U256::from(1_000_000u64),
             contract_address: U256::from(0xabcdu64),
+            chain_id: U256::from(1u64),
             dapp_id_high: U256::from(0xaaaa_bbbbu64),
             dapp_id_low: U256::from(0xcccc_ddddu64),
             an_account_high: U256::from(0x1111_2222u64),
@@ -306,6 +392,7 @@ mod tests {
             }),
             amount: U256::from(5u64),
             contract_address: U256::ZERO,
+            chain_id: U256::from(11155111u64),
             dapp_id_high: U256::from_be_slice(&[0x77u8; 16]),
             dapp_id_low: U256::from_be_slice(&[0x88u8; 16]),
             an_account_high: U256::from_be_slice(&[0x55u8; 16]),
@@ -332,6 +419,7 @@ mod tests {
             block_number: 1,
             block_hash: B256::ZERO,
             source_contract: Address::ZERO,
+            source_chain_id: 11155111,
         };
         bundle.check_binds_to(&event).unwrap();
 
@@ -343,5 +431,48 @@ mod tests {
         let mut wrong_acct = event.clone();
         wrong_acct.an_account = B256::repeat_byte(0x66);
         assert!(bundle.check_binds_to(&wrong_acct).is_err());
+
+        let mut wrong_amount = event.clone();
+        wrong_amount.amount = U256::from(999u64);
+        assert!(bundle.check_binds_to(&wrong_amount).is_err());
+
+        let mut wrong_contract = event.clone();
+        wrong_contract.source_contract = Address::repeat_byte(0x99);
+        assert!(bundle.check_binds_to(&wrong_contract).is_err());
+
+        let mut wrong_block = event.clone();
+        wrong_block.block_hash = B256::repeat_byte(0x88);
+        assert!(bundle.check_binds_to(&wrong_block).is_err());
+
+        // Proven chainId must match the RPC eth_chainId used to fetch.
+        let mut wrong_chain = event.clone();
+        wrong_chain.source_chain_id = 1;
+        assert!(bundle.check_binds_to(&wrong_chain).is_err());
+    }
+
+    #[test]
+    fn dapp_id_validation_accepts_hex() {
+        assert_eq!(
+            parse_and_validate_dapp_id("0x1a1a1a1a1a", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+        assert_eq!(
+            parse_and_validate_dapp_id("1A1A1A1A1A", true).unwrap(),
+            "0x1a1a1a1a1a"
+        );
+    }
+
+    #[test]
+    fn dapp_id_validation_rejects_garbage_and_overwidth() {
+        assert!(parse_and_validate_dapp_id("", true).is_err());
+        assert!(parse_and_validate_dapp_id("zz", true).is_err());
+        assert!(parse_and_validate_dapp_id(&"ab".repeat(33), true).is_err());
+    }
+
+    #[test]
+    fn dapp_id_zero_rejected_unless_allowed() {
+        assert!(parse_and_validate_dapp_id("0", false).is_err());
+        assert!(parse_and_validate_dapp_id("0x0", false).is_err());
+        assert_eq!(parse_and_validate_dapp_id("0", true).unwrap(), "0x0");
     }
 }

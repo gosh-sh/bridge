@@ -17,7 +17,7 @@
 **The infrastructure is already there:**
 - `bridge-prover-lib/src/prover.rs:213` exposes the generic helper `create_proof_with_transcript<E, T, C>` — explicitly designed to swap Blake2b for Poseidon without re-implementing keygen.
 - `bridge-prover-lib/src/prover.rs:205-212` documents the intent: *"a Poseidon transcript for snark-verifier consumption"*.
-- `crates/bridge-prover-orchestrator/src/prover.rs:90` already has a `TranscriptKind::Poseidon` scaffolding.
+- `crates/bridge-snark-utils/src/prover.rs:90` already has a `TranscriptKind::Poseidon` scaffolding.
 
 So the obstacle is "call this helper with `PoseidonWrite` instead of `Blake2bWrite`" — half a day of code, plus byte-level snark serialization to disk so the workspace-isolated aggregator can read it back.
 
@@ -121,9 +121,9 @@ pub struct PrimaryPoseidonOutput {
 
 Reuse the existing `create_proof_with_transcript` helper — no new keygen logic.
 
-### `bridge-prover-orchestrator` — new export binary
+### `bridge-snark-utils` — new export binary
 
-`crates/bridge-prover-orchestrator/src/bin/export_primary_poseidon_snark.rs`:
+`crates/bridge-snark-utils/src/bin/export_primary_poseidon_snark.rs`:
 - Writes `snark.bin`, `instances.json`, `vk.bin` into a stable directory the bridge-evm-aggregator binary reads from.
 
 ---
@@ -154,7 +154,7 @@ Pattern already exists for `vm.readFileBinary` of Yul bytecode — copy from `te
 | # | Where | Work | Effort | Depends on |
 |---|---|---|---|---|
 | 1 | `bridge-prover-lib` | Add `generate_primary_proof_poseidon` calling existing `create_proof_with_transcript` | 0.5 day | — |
-| 2 | `bridge-prover-orchestrator` | Add `export_primary_poseidon_snark` binary writing `snark.bin` / `instances.json` / `vk.bin` | 1 day | (1) |
+| 2 | `bridge-snark-utils` | Add `export_primary_poseidon_snark` binary writing `snark.bin` / `instances.json` / `vk.bin` | 1 day | (1) |
 | 3 | `bridge-evm-aggregator` | Add `src/primary_snark_loader.rs` | 1 day | (2) for artifacts to test against |
 | 4 | `bridge-evm-aggregator` | Add `src/bin/build_primary_aggregator_verifier.rs` | 0.5 day | (3) |
 | 5 | `bridge-evm-aggregator` | Add `tests/primary_real_inner.rs` round-trip | 1 day | (4) |

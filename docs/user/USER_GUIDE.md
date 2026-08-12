@@ -1,292 +1,235 @@
 # Acki Nacki Bridge — User Guide
 
-**Move test USDC from Ethereum (Sepolia) to Acki Nacki.**
+**Move test USDC between Ethereum (Sepolia) and Acki Nacki.**
 
-*Revision: June 2026 · Sepolia testnet*
-
----
-
-> This guide is for **testers and reviewers** who want to make a deposit with
-> **MetaMask only** — no custom website, no command line. You interact with the
-> bridge **on [Sepolia Etherscan](https://sepolia.etherscan.io)** and sign
-> transactions in MetaMask.
-
-Developers: see [Section 8](#for-developers).
+*Revision: July 2026 · Sepolia testnet · test tokens only, no real value*
 
 ---
 
-## 1. What this bridge does
+This bridge moves test **USDC** in both directions:
 
-The bridge connects two blockchains:
+- **Deposit — Ethereum → Acki Nacki.** You send USDC on Sepolia; a relayer proves
+  it and credits your Acki Nacki account. **You do this yourself in MetaMask.**
+- **Withdraw — Acki Nacki → Ethereum.** You start a withdrawal on Acki Nacki; a
+  relayer proves it and pays USDC to your Ethereum address. **Operator-assisted
+  today** (a relayer submits the proofs for you).
 
-- **Ethereum Sepolia** — where you send test **USDC**.
-- **Acki Nacki** — where matching funds can appear after an automated relayer
-  proves your deposit.
-
-Flow in plain terms:
-
-1. You **approve** then **deposit** USDC into the bridge contract on Sepolia.
-2. A **relayer** watches for your `Deposit` event, builds a zero-knowledge proof,
-   and submits it to Acki Nacki (`finalizeDeposit`).
-
-Only **Ethereum → Acki Nacki** is supported in this test setup. The reverse
-direction is still in development.
+Both directions have been run end-to-end on the live testnet — see
+[Section 5](#5-proof-it-works-latest-live-run).
 
 ---
 
-## 2. Before you start
+## 1. What you need
 
-You need:
-
-1. **MetaMask** on **Sepolia** ([metamask.io](https://metamask.io)). Enable test
-   networks in MetaMask settings if Sepolia is hidden.
-2. **Test ETH** on Sepolia (for gas) — any public “Sepolia faucet”.
-3. **Test USDC** on Sepolia — mint from the [Aave Sepolia faucet](https://app.aave.com/faucet/)
-   (connect MetaMask, select Sepolia, mint USDC).
-4. An **Acki Nacki recipient account** (where funds should land on the AN side).
-   This is **not** your MetaMask address. Use the account id your operator or
-   wallet gives you (64 hex characters, optionally with a `0x` prefix).
-
-> Test tokens have **no real value**. Do not use mainnet Ethereum or real USDC.
+1. **MetaMask** set to **Sepolia** (chain id `11155111`). Enable test networks in
+   MetaMask settings if Sepolia is hidden.
+2. **Sepolia ETH** for gas — any public "Sepolia faucet".
+3. **Test USDC** on Sepolia — mint from the
+   [Aave Sepolia faucet](https://app.aave.com/faucet/) (connect MetaMask, pick
+   Sepolia, mint USDC).
+4. **An Acki Nacki account id** (to receive deposits, or to send from when
+   withdrawing). This is **not** your MetaMask address — your operator gives it
+   to you (64 hex characters).
 
 ---
 
-## 3. Reference addresses (Sepolia)
-
-Confirm these with your operator before depositing — test deployments can change.
+## 2. Addresses (Sepolia)
 
 | Item | Address |
 | --- | --- |
 | **Bridge** (`AckiNackiBridge`) | `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` |
 | **USDC** (6 decimals) | `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` |
 | **Aave faucet** (mint test USDC) | `0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D` |
-| **Block explorer** | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| **Explorer** | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
 
-**Limits:** minimum deposit > 0; maximum **100 USDC** per deposit.
+**USDC uses 6 decimals** (not 18). Amounts you type on Etherscan:
 
-**USDC amounts on Etherscan** use **6 decimal places** (not 18 like ETH):
-
-| You want to deposit | Enter as `amount` (uint256) |
+| Amount | Enter as |
 | --- | --- |
 | 1 USDC | `1000000` |
 | 10 USDC | `10000000` |
-| 100 USDC | `100000000` |
+| 100 USDC (max/deposit) | `100000000` |
+
+Confirm addresses with your operator — test deployments can change.
 
 ---
 
-## 4. Deposit step by step (MetaMask + Etherscan)
+## 3. Deposit: Ethereum → Acki Nacki
 
-You will make **two** transactions: **approve**, then **deposit**.
+Two MetaMask transactions on Etherscan: **approve**, then **deposit**.
 
-### Step 1 — Connect MetaMask to Etherscan
+**Step 1 — Approve.** Open USDC →
+[Write Contract](https://sepolia.etherscan.io/address/0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8#writeContract)
+→ **Connect to Web3** → `approve`:
+- `spender` = bridge `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82`
+- `amount` = at least what you'll deposit (e.g. `1000000` for 1 USDC)
 
-1. Open [Sepolia Etherscan](https://sepolia.etherscan.io).
-2. Click **Connect Wallet** (top right) and choose MetaMask.
-3. Ensure MetaMask is on **Sepolia** (chain id `11155111`).
+**Step 2 — Deposit.** Open the bridge →
+[Write Contract](https://sepolia.etherscan.io/address/0x99c37fb75326ae6953ebbbdcd261ec331df4ce82#writeContract)
+→ `deposit`:
 
-### Step 2 — Approve USDC for the bridge
-
-1. Open the USDC contract:
-   [0x94a9…E4C8 on Sepolia](https://sepolia.etherscan.io/address/0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8#writeContract).
-2. Go to the **Contract** tab → **Write Contract** → **Connect to Web3**.
-3. Find **`approve`** and fill in:
-   - **`spender`**: `0x99c37fb75326ae6953ebbbdcd261ec331df4ce82` (bridge address)
-   - **`amount`**: at least the USDC base units you plan to deposit (see table
-     above), e.g. `10000000` for 10 USDC. On a testnet you may instead approve
-     the maximum `uint256` value once so repeat deposits do not need another
-     approve transaction.
-4. Click **Write**, confirm in MetaMask, wait until the transaction succeeds.
-
-This only **allows** the bridge to pull USDC; it does not deposit yet.
-
-### Step 3 — Call `deposit` on the bridge
-
-1. Open the bridge contract:
-   [0x99c37…e82 on Sepolia](https://sepolia.etherscan.io/address/0x99c37fb75326ae6953ebbbdcd261ec331df4ce82#writeContract).
-2. **Contract** → **Write Contract** → connect MetaMask if needed.
-3. Find **`deposit`** and fill in:
-
-   | Field | What to enter |
-   | --- | --- |
-   | **`amount`** | USDC base units (6 decimals), e.g. `10000000` for 10 USDC |
-   | **`anWorkchain`** | Usually `0` (ask your operator if unsure) |
-   | **`anAccount`** | Your Acki Nacki account as **bytes32**: exactly **64 hex
-   characters** (32 bytes), with optional `0x` prefix. If your account id is
-   shorter, pad with leading zeros on the left. Example:
-   `0x00000000000000000000000000000000000000000000000000000000000000ab` for
-   account byte `0xab`. **Must not be all zeros.** |
-
-   The **`amount`** here must be less than or equal to the USDC you approved in Step 2.
-
-4. Click **Write**, confirm in MetaMask, wait for confirmation.
-
-You are done on Ethereum. Save the **transaction hash** from Etherscan or
-MetaMask — the relayer and support staff use it to trace your deposit.
-
-### Step 4 — Confirm the event (optional)
-
-Open your deposit **transaction** on Etherscan (from MetaMask or the bridge
-**Transactions** tab) and check **Logs**. You should see a **`Deposit`** event
-with `depositId`, `sender`, `amount`, `anWorkchain`, `anAccount`, and
-`timestamp`. Note the **`depositId`** — the relayer uses it as the cursor when
-processing deposits.
-
----
-
-## 5. What happens after you deposit
-
-You do not need to run anything yourself:
-
-1. The **deposit relayer** scans Sepolia for `Deposit` events.
-2. It generates a **Halo2 proof** binding your deposit to the block, bridge
-   address, amount, and Acki Nacki recipient.
-3. It calls **`finalizeDeposit`** on Acki Nacki so test USDC can be credited on
-   your AN account (when the operator’s relayer and AN contract are configured).
-
-**Timing:** proof generation takes **minutes**, not seconds.
-
-**Testnet caveat (June 2026):** Sepolia deposits can be **proved** end-to-end,
-but **live crediting on shellnet** may still fail until the AN-side
-`USDCBridge` contract is redeployed with the correct deposit verifying key
-(11 public inputs). Your Ethereum deposit is still valid and visible on
-Etherscan; ask the operator whether `finalizeDeposit` on shellnet is enabled for
-your test window. Technical details:
-`docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
-
----
-
-## 6. Troubleshooting
-
-**“Insufficient funds” / out of gas**  
-You need **Sepolia ETH** for gas (separate from USDC).
-
-**`transferFrom` failed / deposit reverts**  
-You skipped **approve**, approved too little USDC, or have insufficient USDC
-balance. Repeat Step 2 with a large enough `amount`.
-
-**`InvalidAmount`**  
-`amount` was `0`. Enter a positive USDC base-unit amount (see the table in
-[Section 3](#reference-addresses-sepolia)).
-
-**`InvalidAnAccount`**  
-`anAccount` was zero or wrong format. Use a non-zero 256-bit Acki Nacki account
-id (64 hex chars as bytes32).
-
-**`DepositTooLarge`**  
-Maximum is 100 USDC per deposit (`100000000` base units).
-
-**Deposit reverts with no clear token error / bridge paused**  
-On the bridge **Read Contract** tab, check **`paused`**. If `true`, deposits are
-disabled until the operator unpauses the bridge.
-
-**Wrong network**  
-All steps must be on **Sepolia**, not Ethereum mainnet.
-
-**Funds not on Acki Nacki yet**  
-Wait several minutes. If still missing, send your **deposit transaction hash**
-and **depositId** (from the event) to the operator. The relayer or AN contract
-may be mid-upgrade.
-
-**Can I withdraw back to Ethereum?**  
-Not via this user path yet. AN → ETH is a separate bridge direction under
-development.
-
----
-
-## 7. Safety reminders
-
-- Use **Sepolia** only; confirm the bridge address before approving USDC.
-- Never share your MetaMask **secret recovery phrase**.
-- Test USDC is not real money.
-
----
-
-## 8. For developers
-
-| Task | Where to look |
+| Field | Value |
 | --- | --- |
-| Relayer (listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch`, `prove-one`, `daemon` |
+| `amount` | USDC base units, e.g. `1000000` for 1 USDC (≤ what you approved) |
+| `anWorkchain` | `0` (ask operator if unsure) |
+| `anAccount` | Your Acki Nacki account as **bytes32**: 64 hex chars, `0x`-prefixed. Must **not** be all zeros. Any valid account works, including full-width ids like `0x20c2db9c…834c9`. |
+
+Confirm in MetaMask and **save the transaction hash**.
+
+**Then wait.** The relayer scans your `Deposit` event, builds a zero-knowledge
+proof (**minutes, not seconds**), and calls `finalizeDeposit` on Acki Nacki. Your
+USDC appears on your AN account. You don't run anything.
+
+### What you'll see
+
+**On Etherscan** — a successful `deposit` emits exactly one `Deposit` event.
+Write down your **depositId** (you'll need it if you ever contact the operator).
+A real Sepolia deposit looks like this:
+
+| Field | Example |
+| --- | --- |
+| tx status | Success (1) |
+| gas used | ~58,600 |
+| `depositId` (indexed) | `9` |
+| `sender` (indexed) | `0x4A35…7592` |
+| `amount` | `1000000` (1 USDC) |
+| `anWorkchain` | `0` |
+| `anAccount` | `0x20c2db9c…834c9` |
+
+Event signature `Deposit(uint256,address,uint256,int8,bytes32,uint256)` =
+`0x8d5d0606…3d37ee`.
+
+**On Acki Nacki** (relayer-driven, a few minutes later) — the relayer proves the
+deposit and calls `finalizeDeposit`. On success the AN transaction has
+`exit_code 0`, a `DepositVoucher` is deployed, and `confirmDeposit` mints ECC
+currency **#3 (USDC)** to your account. You then see the balance on your AN
+account, e.g. `ecc{3:1000000}` = 1 USDC (last fully verified credit:
+depositId=9 → `0x20c2db9c…834c9`, AN tx `e217cc56…`, `exit_code 0`).
+
+> If your USDC hasn't arrived after several minutes, the AN side may be mid-
+> maintenance (e.g. a testnet reset temporarily invalidates the relayer's AN
+> account). Send your **tx hash + depositId** to the operator — the ETH-side
+> deposit is already final and will be credited once the relayer's AN account is
+> restored.
+
+---
+
+## 4. Withdraw: Acki Nacki → Ethereum
+
+1. Start a withdrawal on the **Acki Nacki** side, specifying the **Ethereum
+   address** that should receive the USDC (ask your operator for the exact step).
+2. The relayer proves the Acki Nacki block state on Ethereum (`verifyBlock`) and
+   then pays out (`withdrawByProof`) — **automatically, no MetaMask action from
+   you.**
+3. USDC arrives at your Ethereum address. Each withdrawal can be paid **once**
+   (replay-protected).
+
+This direction is **operator-assisted** on testnet today — the relayer submits
+the proofs. Tell your operator you want a withdrawal.
+
+### What you'll see
+
+The relayer submits two Sepolia transactions on your behalf (no MetaMask action
+from you):
+
+| Step | What it does | Example tx |
+| --- | --- | --- |
+| `verifyBlock` | Registers the Acki Nacki block anchor on the bridge | `0x0f54a486…` |
+| `withdrawByProof` | Pays your USDC to your Ethereum address (once) | `0xdf01a367…` |
+
+When `withdrawByProof` succeeds you'll see a USDC `Transfer` to your address on
+Etherscan and the funds in your wallet. A second attempt on the same withdrawal
+reverts — each withdrawal is replay-protected (nullifier).
+
+> Behind the scenes the Acki-Nacki-side proof (`proof_event_*.json`, Circuit 4)
+> is produced by the partner prover and self-verifies (`"verified": true`) before
+> the relayer touches Ethereum. Because `verifyBlock` enforces a **monotonic**
+> Acki Nacki block seq_no, the on-chain payout requires the bridge's stored
+> `storedLastSeenBlockSeqNo` to be at or below the proof's block — a fresh bridge
+> deployment is needed after an Acki Nacki testnet reset.
+
+---
+
+## 5. Proof it works (latest live run)
+
+Both directions, run end-to-end on **2026-07-03** (1 USDC each), fully
+relayer-driven (the ETH-side steps are automatic — no manual submission):
+
+| Direction | Evidence |
+| --- | --- |
+| **Deposit** (ETH→AN) | Sepolia `deposit` id=8 tx [`0x2b3781ef…`](https://sepolia.etherscan.io/tx/0x2b3781efccade0afdff0a7b531227c3ee0df6c3397d9ba2cf5ea8fec9e8f88b8) → relayer proved it → `finalizeDeposit` **accepted on Acki Nacki** (1 USDC credited to `0x20c2db9c…834c9`) |
+| **Withdraw** (AN→ETH) | relayer `verifyBlock` tx [`0x502b7648…`](https://sepolia.etherscan.io/tx/0x502b7648eaed23b365beb00e28b756690acc0d08825b33dd8e5364d2fd1c2ca8) (registers the AN block anchor) → relayer payout `withdrawByProof` tx [`0xb6e351c8…`](https://sepolia.etherscan.io/tx/0xb6e351c8086674ccf38f0b79946974f8aa3824d7a8d6b18b8e909c7e0cb18dcb) (1 USDC paid to the recipient's Ethereum address) |
+
+> The **deposit** run above is fully fresh, including the zero-knowledge proving.
+> The **withdraw** run exercises the relayer's Ethereum automation end-to-end
+> (fresh `verifyBlock` + `withdrawByProof`, real payout) on an Acki-Nacki-side
+> withdrawal proof produced earlier by the partner prover; originating a brand-new
+> withdrawal on Acki Nacki and re-proving it is a partner-prover step.
+
+---
+
+## 6. Troubleshooting (deposit)
+
+| Symptom | Fix |
+| --- | --- |
+| Out of gas / "insufficient funds" | You need **Sepolia ETH** (separate from USDC). |
+| `transferFrom` failed / revert | You skipped **approve** or approved too little. Redo Step 1. |
+| `InvalidAmount` | `amount` was `0`. Enter a positive number. |
+| `InvalidAnAccount` | `anAccount` was zero or malformed. Use a non-zero 64-hex bytes32. |
+| `DepositTooLarge` | Max is 100 USDC (`100000000`) per deposit. |
+| Deposit reverts, no token error | Check amount limits, allowance, and `anAccount != 0`. |
+| USDC not on Acki Nacki yet | Proving takes minutes. If still missing, send your **tx hash** + **depositId** (from the `Deposit` event log) to the operator. |
+
+**Safety:** Sepolia only. Confirm the bridge address before approving. Never
+share your MetaMask secret recovery phrase. Test USDC is not real money.
+
+---
+
+## 7. For developers
+
+| Task | Where |
+| --- | --- |
+| Deposit relayer (ETH→AN: listen → prove → submit) | `crates/deposit-relayer-daemon/` — `deposit-relayer watch` / `prove-one` / `finalize-one` / `daemon` |
+| Withdraw relayer (AN→ETH: verifyBlock + payout) | `crates/bridge-relayer-daemon/` — `relayer submit-verify-block` / `daemon-prover` / `daemon-withdraw` |
+| Latest AN→ETH daemon E2E | `docs/an_eth_daemon_withdraw_e2e_2026-07-03.md` |
 | Shellnet / VK redeploy checklist | `docs/shellnet_usdcbridge_deposit_vk_redeploy.md` |
-| 11 deposit public inputs | `crates/deposit-relayer-daemon/src/types.rs` |
-| Optional local UI (not required for testing) | `frontend/` — `trunk serve` → `http://localhost:8080` |
-| `cast` / Foundry scripts | `contracts/ethereum/script/DeployTestBridge.s.sol` |
-| Verify deployed contract on Etherscan | see below |
+| 12 deposit public inputs (Track-2 chain-binding, 2026-07-23) | `crates/deposit-relayer-daemon/src/types.rs`, `deposit-prover/src/types.rs` (`NUM_PUBLIC_INPUTS = 12`) |
+| Deploy scripts | `contracts/ethereum/script/` |
+| Env template (hosted relayer) | `scripts/ursus/deposit-relayer.env.example` |
+| Hermez KZG pins (repos/branches/blobs) | `docs/hermez_kzg_repos_and_branches.md` |
 
-Example env template for a hosted relayer:
-`scripts/ursus/deposit-relayer.env.example`.
+> **Deposit prover must key on the Hermez ceremony.** Shellnet's `USDCBridge`
+> currently embeds the Hermez deposit `VkBlob` (`304c1c4e…`, 3982 B, **11 PI** —
+> pre-Track-2) and the AN node opcode embeds Hermez `s_g2` (`928fafb3…`). A proof
+> keyed on the old chain SRS (`VkBlob 20cf9018…`) is rejected on-chain with
+> `ERR_INVALID_ZKPROOF` (TVM `exit_code 220`). Build the prover from the Hermez
+> branch (`pruvendo/hermez-kzg-fixtures`) with `deposit-prover/data/kzg_params_18.srs`
+> (Hermez), delete any stale PK so keygen re-writes the `…pk.bp.json` sidecar, and
+> confirm `vk_blob.bin` matches the shellnet-deployed hash before submitting.
+>
+> **Track-2 follow-up (2026-07-23):** the current `deposit-prover` circuit exposes
+> **12 PI** (adds `chainId` at slot 4) and produces VkBlob `9dacd998…8360fae3`
+> (5006 B, rotated 2026-08-03 by the deposit-circuit audit fixes; the earlier 12-PI blobs
+> `de1dd3ab…7dd8d1` / `006cca5d…191dec05` / `3e2a2db2…bf0d049c` are superseded —
+> same PI layout, different constraint system).
+> This blob is **not yet redeployed to shellnet** — the on-chain
+> `USDCBridge.VK_BLOB` is still the 11-PI `304c1c4e…`. Track the redeploy in
+> `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
 
-### Verify & Publish the bridge contract on Etherscan
-
-Source-verification publishes the Solidity that produced the deployed bytecode,
-so the contract is readable on Etherscan and its Read/Write tabs work. Two
-contract kinds verify differently:
-
-- `AckiNackiBridge` + mocks — normal Solidity verification (below).
-- The SHPLONK aggregator verifiers (`PrimaryAggregatorVerifier`,
-  `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`,
-  `BridgeWithdrawalAggregatorVerifier`) are **raw Yul bytecode** deployed from
-  `contracts/ethereum/verifiers/*.bin` via `ShplonkDeployLib`, so there is no
-  Solidity source to submit — publish their provenance
-  (`contracts/ethereum/verifiers/README.md`: `.bin` hash + snark-verifier rev +
-  regen command) instead of a source match.
-
-**Prerequisites**
-
-- An Etherscan **V2** API key (one key works across chains):
-  `export ETHERSCAN_API_KEY=…` (create at <https://etherscan.io/myapikey>).
-- The deployed address + chain id (Sepolia = `11155111`, mainnet = `1`).
-- Run `forge` **from `contracts/ethereum/`** so it reads `foundry.toml` and
-  submits the exact settings the deployment used:
-  **solc 0.8.19, optimizer on, `optimizer_runs = 1`, `via_ir = true`**. A
-  settings mismatch is the #1 cause of "bytecode does NOT match".
-
-**Option A — verify at deploy time (simplest):** add `--verify` to the deploy run.
+**Verify the bridge on Etherscan** (run from `contracts/ethereum/`, which pins
+solc 0.8.19 / optimizer / `via_ir`):
 
 ```bash
-cd contracts/ethereum
-forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
-  --rpc-url "$SEPOLIA_RPC_URL" --private-key "$DEPLOYER_PK" \
-  --broadcast --verify --etherscan-api-key "$ETHERSCAN_API_KEY" -vvvv
-```
-
-**Option B — verify an already-deployed contract.** `AckiNackiBridge` has a
-struct-heavy constructor, so let Foundry recover the args from on-chain creation
-code. The address below is this guide's deposit bridge
-(`0x99c37f…ce82`); substitute whichever deployment you are verifying:
-
-```bash
-cd contracts/ethereum
 forge verify-contract --chain 11155111 --watch --guess-constructor-args \
   --etherscan-api-key "$ETHERSCAN_API_KEY" \
   0x99c37fb75326ae6953ebbbdcd261ec331df4ce82 \
   src/AckiNackiBridge.sol:AckiNackiBridge
 ```
 
-Other ways to get the constructor args: read them from
-`broadcast/<script>/<chainId>/run-latest.json`, or ABI-encode by hand
-(structs are tuples):
-
-```bash
-cast abi-encode \
-  "constructor(address,address,address,address,(address,address,address,uint256,uint256),(address,uint256,uint256,uint256,uint256,uint256))" \
-  "$ORACLE" "$USDC" "$AAVE_POOL" "$AUSDC" \
-  "($PRIMARY,$FALLBACK,$LAYERHASHES,$GENESIS_BK_SET_COMMITMENT,$GENESIS_PREV_MAX_LEVEL_LAYER_HASH)" \
-  "($WITHDRAW_VERIFIER,$DAPP_FR,$ACC_FR,$ALT_DST_CHAIN_ID,$ALT_DST_HOST_CHAIN_ID,$ALT_TOKEN_ID)"
-```
-
-**Etherscan V2 gotchas:**
-
-- If Foundry doesn't recognise the chain (`ETHERSCAN_API_KEY must be set…`), add
-  `--verifier etherscan --verifier-url "https://api.etherscan.io/v2/api?chainid=<id>"`.
-- If via-IR metadata trips verification, run `forge verify-contract
-  --show-standard-json-input …` and submit the JSON manually in the Etherscan UI.
-
-After a green ✓ badge, record the verified address + explorer URL in the
-deployment notes, and link the `verifiers/README.md` provenance entry for the
-raw-bytecode verifiers.
+The Yul aggregator verifiers are raw bytecode (`contracts/ethereum/verifiers/*.bin`);
+publish their provenance from `contracts/ethereum/verifiers/README.md` instead of
+a source match.
 
 ---
 
-*Confirm network and contract addresses with the operator before each test
-campaign. This document describes the Sepolia MetaMask + Etherscan deposit path
-only.*
+*Confirm network and addresses with the operator before each test campaign.*

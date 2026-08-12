@@ -46,6 +46,7 @@ tvm_types = { workspace = true }
 
 # Daemon-side enrichment (only the `build` binary uses these)
 bridge-prover-lib = { workspace = true }
+bridge-gql-fetcher = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
 tokio = { workspace = true }
 

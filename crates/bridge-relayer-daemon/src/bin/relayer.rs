@@ -1,24 +1,14 @@
-//! Phase 5.1 — Relayer CLI binary.
+//! Relayer CLI binary.
 //!
-//! Four subcommands:
+//! Core subcommands:
 //!
 //! - `smoke-fixture` — submits one canned block from a Phase 4.1 bound-proof
 //!   fixture directory through the real
-//!   [`bridge_relayer_daemon::EthBridgeClient`]. Optionally wraps the relayer
-//!   in a [`bridge_relayer_daemon::SentryGuardedRelayer`] when `--an-node-url`
-//!   is provided, so a live AN-side BK rotation pauses the run end-to-end.
-//!
-//! - `sentry-watch` — a standalone BK-set sentry: polls `/v2/bk_set_update` on
-//!   the supplied AN node and prints structured `Bootstrapped` / `Quiet` /
-//!   `RotationDetected` events. No Ethereum side is touched — handy for
-//!   operators wanting to confirm that the committee they think is active
-//!   really is, before running the bridge relayer in earnest.
+//!   [`bridge_relayer_daemon::EthBridgeClient`].
 //!
 //! - `daemon` — long-running operator entry point. Drives `Relayer::tick`
-//!   forever with exponential backoff, until SIGINT/SIGTERM. Optionally wraps
-//!   in `SentryGuardedRelayer` when `--an-node-url` is supplied so the loop
-//!   pauses on a live BK rotation. Logs a structured metrics snapshot on every
-//!   shutdown.
+//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a
+//!   structured metrics snapshot on every shutdown.
 //!
 //! - `verify-fixture` — **read-only** pre-flight check. Loads a fixture, reads
 //!   the on-chain bridge anchors over RPC, and reports field-by-field whether
@@ -27,26 +17,34 @@
 //!   private key, no submission. Exits non-zero on any mismatch so it slots
 //!   into a pre-deploy shell pipeline.
 //!
-//! In Phase 5.2 the `daemon` subcommand will swap `FixturesBlockSource`
-//! for a real `LiveBlockSource` and the sentry's `resume()` gets wired
-//! into the rotation pipeline. For now,
-//! `cargo run -p bridge-relayer-daemon --bin relayer -- --help` is the
-//! best entry point.
+//! BK-set rotations are handled at the source seam by
+//! `bridge_prover_lib::live_driver::LiveProverDriver` (used by the
+//! `daemon-live` subcommand). The old REST-based `BkSetSentry` /
+//! `SentryGuardedRelayer` / `sentry-watch` surface was retired 2026-07-30:
+//! port 8600 REST is internal-only on public shellnet since AN v0.16.3.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy::{
-    network::EthereumWallet,
+    network::{EthereumWallet, Network},
     primitives::Address,
     providers::{Provider, ProviderBuilder},
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    BackoffConfig, BkSetSentry, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource,
-    BlockSource, BridgeClient, DryRunOutcome, EthBridgeClient, FixturesBlockSource, GuardedOutcome,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics,
-    SentryGuardedRelayer, SentryStatus, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
+    discover_event_proofs, result_path_for, BackoffConfig, BkSetUpdateSubmitOutcome,
+    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
+    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
+    LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
+    RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
+    TickOutcome,
+    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -91,27 +89,6 @@ enum Cmd {
         /// canned fixture).
         #[arg(long, default_value_t = 1)]
         max_ticks: usize,
-        /// Optional AN node base URL (e.g. `http://94.156.178.19:8600`).
-        /// When supplied, the relayer is wrapped in a
-        /// `SentryGuardedRelayer` that pauses verifyBlock submissions
-        /// on a live BK rotation. Without it the relayer runs blind
-        /// (Phase 5.1 behaviour, suitable only for canned fixtures).
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
-    },
-    /// Standalone BK-set sentry: poll `/v2/bk_set_update` on an AN
-    /// node and print structured events. No Ethereum side.
-    SentryWatch {
-        /// AN node base URL (e.g. `http://94.156.178.19:8600`).
-        #[arg(long, default_value = "http://94.156.178.19:8600")]
-        node_url: String,
-        /// Number of ticks before exiting. `0` means run forever
-        /// (Ctrl-C to stop).
-        #[arg(long, default_value_t = 5)]
-        ticks: u64,
-        /// Seconds between ticks.
-        #[arg(long, default_value_t = 30)]
-        interval_secs: u64,
     },
     /// Long-running daemon mode. Drives `Relayer::tick` forever with
     /// exponential backoff until SIGINT/SIGTERM. The fixture source is
@@ -138,11 +115,6 @@ enum Cmd {
         /// Hex-encoded private key of the relayer EOA.
         #[arg(long, env = "RELAYER_PRIVATE_KEY")]
         private_key: String,
-        /// Optional AN node base URL. When provided, the daemon runs
-        /// inside a `SentryGuardedRelayer` and pauses on a live BK
-        /// rotation (waiting for the future Phase 5.2 reconcile path).
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
         /// Initial backoff sleep on the first non-success outcome.
         #[arg(long, default_value_t = 2)]
         backoff_initial_secs: u64,
@@ -204,8 +176,6 @@ enum Cmd {
         bridge_address: Address,
         #[arg(long, env = "RELAYER_PRIVATE_KEY")]
         private_key: String,
-        #[arg(long, env = "AN_NODE_URL")]
-        an_node_url: Option<String>,
         #[arg(long, default_value_t = 2)]
         backoff_initial_secs: u64,
         #[arg(long, default_value_t = 60)]
@@ -274,6 +244,180 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         seq_no: u32,
     },
+    /// M7 ETH-side path: generate one Circuit 4 withdrawal proof as **SHPLONK
+    /// aggregator calldata** the deployed `BridgeWithdrawalAggregatorVerifier`
+    /// accepts. Re-proves the `PrivateWitness` in-process with a Poseidon
+    /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
+    /// the historical `export-c4-poseidon-snark --fixture` subprocess),
+    /// aggregates the inner snark (`aggregate-proof`, which self-checks the
+    /// regenerated Yul == committed `.bin`), cross-checks the calldata binds
+    /// the ten public inputs, and writes a `proof_event` JSON that
+    /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
+    ProveWithdrawShplonk {
+        /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
+        #[arg(long)]
+        witness: PathBuf,
+        /// `crates/bridge-evm-aggregator` root (holds
+        /// `target/release/aggregate-proof`).
+        #[arg(long, env = "AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (the aggregator's
+        /// byte-identity self-check target).
+        #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
+        verifiers_dir: PathBuf,
+        /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
+        #[arg(long, default_value = "../../params")]
+        params_dir: PathBuf,
+        /// Scratch dir for the intermediate `circuit4.snark` /
+        /// `.instances.bin`.
+        #[arg(long, default_value = "./shplonk-snark")]
+        snark_dir: PathBuf,
+        /// Where to write the resulting `proof_event` JSON.
+        #[arg(long, default_value = "./proof_event.json")]
+        out: PathBuf,
+        /// Seqno stamped into the proof_event.
+        #[arg(long, default_value_t = 0)]
+        seq_no: u64,
+        /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
+        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live --pk-cache-dir`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
+    },
+    /// Long-running daemon reading partner `proof_event_*.json` bundles from
+    /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
+    /// The withdraw-side twin of `daemon-prover`: it gates on the sibling
+    /// `proof_event_*.result.json` ACK, skips nullifiers already consumed
+    /// on-chain (idempotent restart), and retries transient reverts with
+    /// exponential backoff until SIGINT/SIGTERM.
+    DaemonWithdraw {
+        /// Directory containing `proof_event_*.json` + `*.result.json`
+        /// (partner verifier daemon `proofs/` folder).
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Seconds to sleep between directory scans when idle.
+        #[arg(long, default_value_t = 15)]
+        poll_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Skip the partner `proof_event_*.result.json` verification gate.
+        #[arg(long)]
+        skip_verified_gate: bool,
+        /// Simulate (`eth_call`) each pending withdrawal but never send a
+        /// transaction. Useful to confirm the pipeline before spending gas.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Unified AN→ETH daemon: **one process, one relayer EOA** that runs
+    /// BOTH withdrawal-path legs by interleaving them in a single loop —
+    /// no two-service split, no concurrent transactions on the same key.
+    ///
+    /// Each iteration does, in order:
+    ///   1. one `daemon-prover` tick — advance the on-chain AN anchor from the
+    ///      next available partner `proof_<seqno>.json` (`verifyBlock`);
+    ///   2. one `daemon-withdraw` scan — pay out every ready
+    ///      `proof_event_*.json` (`withdrawByProof`), gated on the sibling
+    ///      `*.result.json` ACK and skipping nullifiers already used on-chain.
+    ///
+    /// Both legs read the SAME `--proofs-dir`. Because the two legs run
+    /// sequentially in one task sharing one provider, there is only ever a
+    /// single in-flight transaction, so nonces never race. Shared
+    /// exponential backoff (interruptible by SIGINT/SIGTERM); the prover
+    /// cursor persists to `--state`.
+    DaemonBridge {
+        /// Directory containing BOTH `proof_<seqno>.json` (+ `result_*.json`)
+        /// and `proof_event_*.json` (+ `*.result.json`).
+        #[arg(long, env = "PROVER_PROOFS_DIR")]
+        proofs_dir: PathBuf,
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Seconds to sleep between iterations when idle (no work / all done).
+        #[arg(long, default_value_t = 15)]
+        poll_secs: u64,
+        #[arg(long, default_value_t = 5)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 300)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Skip the partner `result_*.json` / `proof_event_*.result.json`
+        /// verification gate on BOTH legs.
+        #[arg(long)]
+        skip_verified_gate: bool,
+        /// Simulate (`eth_call`) the withdraw leg but never send a
+        /// `withdrawByProof` transaction. The prover leg still submits
+        /// `verifyBlock` (there is no dry-run for the anchor advance).
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
+    /// `applyBkSetUpdate` (Alina live-integration plan).
+    ///
+    /// Requires SRS/PKs under `--params-dir`, shellnet (or local) GQL, and a
+    /// BK-set JSON fallback. Prover state lives under `--prover-state-dir`.
+    DaemonLive {
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: String,
+        /// Acki Nacki GraphQL endpoint (same as partner `BRIDGE_GQL_ENDPOINT`).
+        #[arg(long, env = "BRIDGE_GQL_ENDPOINT")]
+        gql_endpoint: String,
+        /// Directory with SRS + circuit PKs (`KeyManager`).
+        #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
+        params_dir: PathBuf,
+        /// Directory for `prover_state.json` / `prover_bk_set.json` /
+        /// `bootstrap_seed.json`.
+        #[arg(long, env = "BRIDGE_STATE_DIR", default_value = "./state")]
+        prover_state_dir: PathBuf,
+        /// Fallback BK-set JSON if GQL fetch fails at startup.
+        #[arg(
+            long,
+            env = "BRIDGE_BK_SET_CONFIG",
+            default_value = "../an-bridge-prover/bk_set.shellnet.json"
+        )]
+        bk_set_config: PathBuf,
+        /// Optional explicit bootstrap seqno (`SeedPolicy::Explicit`).
+        #[arg(long, env = "BRIDGE_BOOTSTRAP_SEQNO")]
+        bootstrap_seqno: Option<u64>,
+        #[arg(long, default_value_t = 2)]
+        backoff_initial_secs: u64,
+        #[arg(long, default_value_t = 60)]
+        backoff_max_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        backoff_multiplier: u32,
+        /// Path to the `crates/bridge-evm-aggregator` root (used by the
+        /// `aggregate-proof` subprocess). C1/C2 R15 SHPLONK aggregation is
+        /// mandatory — the on-chain `AckiNackiBridge` verifier only accepts
+        /// aggregated calldata, so `daemon-live` refuses to start without it.
+        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (aggregator self-check).
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
+        verifiers_dir: PathBuf,
+        /// Persistent outer-PK cache directory for the `aggregate-proof`
+        /// subprocess (`--pk-cache-dir`). Without this, every bundle re-runs
+        /// the full K=21 outer keygen (~3–5 min); with it, only the first
+        /// bundle pays keygen and subsequent bundles hit the disk cache
+        /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
+    },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
@@ -325,7 +469,6 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
-            an_node_url,
         } => smoke_fixture(
             args.state,
             fixtures_dir,
@@ -334,23 +477,12 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
-            an_node_url,
         )
         .await
         .map_err(|e| {
             error!(?e, "smoke run failed");
             e
         }),
-        Cmd::SentryWatch {
-            node_url,
-            ticks,
-            interval_secs,
-        } => sentry_watch(node_url, ticks, interval_secs)
-            .await
-            .map_err(|e| {
-                error!(?e, "sentry watch failed");
-                e
-            }),
         Cmd::VerifyFixture {
             fixtures_dir,
             verifiers_dir,
@@ -375,7 +507,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             private_key,
-            an_node_url,
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
@@ -392,7 +523,6 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url,
                 bridge_address,
                 private_key,
-                an_node_url,
                 backoff,
             )
             .await
@@ -406,7 +536,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             private_key,
-            an_node_url,
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
@@ -423,7 +552,6 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url,
                 bridge_address,
                 private_key,
-                an_node_url,
                 backoff,
                 skip_verified_gate,
             )
@@ -489,6 +617,148 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "prove-withdraw failed");
                 e
             }),
+        Cmd::ProveWithdrawShplonk {
+            witness,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            out,
+            seq_no,
+            pk_cache_dir,
+        } => {
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            prove_withdraw_shplonk(
+                witness,
+                aggregator_dir,
+                verifiers_dir,
+                params_dir,
+                snark_dir,
+                out,
+                seq_no,
+                pk_cache_dir,
+            )
+        }
+        .await
+        .map_err(|e| {
+            error!(?e, "prove-withdraw-shplonk failed");
+            e
+        }),
+        Cmd::DaemonWithdraw {
+            proofs_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            poll_secs,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            skip_verified_gate,
+            dry_run,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_withdraw_daemon(
+                proofs_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                Duration::from_secs(poll_secs),
+                backoff,
+                skip_verified_gate,
+                dry_run,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-withdraw failed");
+                e
+            })
+        },
+        Cmd::DaemonBridge {
+            proofs_dir,
+            rpc_url,
+            bridge_address,
+            private_key,
+            poll_secs,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            skip_verified_gate,
+            dry_run,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            run_bridge_daemon(
+                args.state,
+                proofs_dir,
+                rpc_url,
+                bridge_address,
+                private_key,
+                Duration::from_secs(poll_secs),
+                backoff,
+                skip_verified_gate,
+                dry_run,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-bridge failed");
+                e
+            })
+        },
+        Cmd::DaemonLive {
+            rpc_url,
+            bridge_address,
+            private_key,
+            gql_endpoint,
+            params_dir,
+            prover_state_dir,
+            bk_set_config,
+            bootstrap_seqno,
+            backoff_initial_secs,
+            backoff_max_secs,
+            backoff_multiplier,
+            aggregator_dir,
+            verifiers_dir,
+            pk_cache_dir,
+        } => {
+            let backoff = BackoffConfig {
+                initial: Duration::from_secs(backoff_initial_secs),
+                max: Duration::from_secs(backoff_max_secs),
+                multiplier: backoff_multiplier,
+            };
+            // Default the outer-PK cache alongside the SRS so a single
+            // params_dir carries every artefact the aggregator needs.
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            let aggregation = C12AggregationCfg {
+                aggregator_dir,
+                verifiers_dir,
+                pk_cache_dir,
+            };
+            run_daemon_live(
+                args.state,
+                rpc_url,
+                bridge_address,
+                private_key,
+                gql_endpoint,
+                params_dir,
+                prover_state_dir,
+                bk_set_config,
+                bootstrap_seqno,
+                backoff,
+                aggregation,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-live failed");
+                e
+            })
+        },
         Cmd::SubmitWithdraw {
             proof_event,
             rpc_url,
@@ -526,7 +796,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // CLI surface; each arg maps to a flag
 async fn smoke_fixture(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
@@ -535,7 +804,6 @@ async fn smoke_fixture(
     bridge_address: Address,
     private_key: String,
     max_ticks: usize,
-    an_node_url: Option<String>,
 ) -> anyhow::Result<()> {
     // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
     // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
@@ -557,154 +825,14 @@ async fn smoke_fixture(
     )?);
 
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
 
-    match an_node_url {
-        None => {
-            info!("running without sentry (BK rotations will NOT pause this relayer)");
-            let history = relayer
-                .run_loop(max_ticks, |outcome| {
-                    matches!(outcome, TickOutcome::Verified { .. })
-                })
-                .await?;
-            info!(?history, "smoke run complete");
-        },
-        Some(url) => {
-            info!(node_url = %url, "running with BkSetSentry guard");
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            for tick_idx in 1..=max_ticks {
-                let outcome = guarded.tick().await?;
-                match &outcome {
-                    GuardedOutcome::SentryBootstrapped {
-                        observed_seq_no,
-                        bk_count,
-                        inner,
-                    } => {
-                        info!(
-                            tick = tick_idx,
-                            observed_seq_no,
-                            bk_count,
-                            ?inner,
-                            "bootstrap + inner",
-                        );
-                        if matches!(inner, TickOutcome::Verified { .. }) {
-                            return Ok(());
-                        }
-                    },
-                    GuardedOutcome::SentryQuiet {
-                        observed_seq_no,
-                        future_changed,
-                        inner,
-                    } => {
-                        info!(
-                            tick = tick_idx,
-                            observed_seq_no,
-                            future_changed,
-                            ?inner,
-                            "quiet + inner",
-                        );
-                        if matches!(inner, TickOutcome::Verified { .. }) {
-                            return Ok(());
-                        }
-                    },
-                    GuardedOutcome::RotationDetected {
-                        old_seq_no,
-                        new_seq_no,
-                        added,
-                        removed,
-                        pubkey_mutations,
-                    } => {
-                        warn!(
-                            tick = tick_idx,
-                            old_seq_no,
-                            new_seq_no,
-                            added,
-                            removed,
-                            pubkey_mutations,
-                            "BK rotation detected — relayer paused; Phase 5.2 will trigger \
-                             Circuit 3 and call resume() here. Exiting the smoke run.",
-                        );
-                        return Ok(());
-                    },
-                    GuardedOutcome::PausedAwaitingRotationReconcile => {
-                        // Unreachable in the smoke binary (we exit on
-                        // the first RotationDetected above) — kept
-                        // for exhaustiveness.
-                        warn!(tick = tick_idx, "guard still paused; exiting");
-                        return Ok(());
-                    },
-                }
-            }
-            info!(
-                "smoke run complete (no verified block within {} ticks)",
-                max_ticks
-            );
-        },
-    }
-    Ok(())
-}
-
-async fn sentry_watch(node_url: String, ticks: u64, interval_secs: u64) -> anyhow::Result<()> {
-    let mut sentry = BkSetSentry::from_node_url(&node_url)?;
-    info!(%node_url, ticks, interval_secs, "starting BkSetSentry");
-
-    let interval = Duration::from_secs(interval_secs);
-    let cap = if ticks == 0 { u64::MAX } else { ticks };
-    for i in 1..=cap {
-        match sentry.tick().await {
-            Ok(SentryStatus::Bootstrapped {
-                observed_seq_no,
-                bk_count,
-            }) => {
-                info!(
-                    tick = i,
-                    observed_seq_no, bk_count, "BOOTSTRAP — first observation"
-                );
-            },
-            Ok(SentryStatus::Quiet {
-                observed_seq_no,
-                future_changed,
-            }) => {
-                info!(
-                    tick = i,
-                    observed_seq_no, future_changed, "QUIET — membership unchanged"
-                );
-            },
-            Ok(SentryStatus::RotationDetected {
-                old_seq_no,
-                new_seq_no,
-                delta,
-            }) => {
-                warn!(
-                    tick = i,
-                    old_seq_no,
-                    new_seq_no,
-                    added = delta.added.len(),
-                    removed = delta.removed.len(),
-                    pubkey_mutations = delta.pubkey_mutations.len(),
-                    "ROTATION — committee changed",
-                );
-            },
-            Err(e) => {
-                warn!(tick = i, error = ?e, "sentry tick failed; continuing");
-            },
-        }
-        let metrics = sentry.metrics();
-        info!(
-            tick = i,
-            total = metrics.total_ticks,
-            ok = metrics.successful_ticks,
-            rotations = metrics.rotations_observed,
-            last_seq_no = metrics.last_observed_seq_no,
-            "metrics snapshot",
-        );
-        if i < cap {
-            tokio::time::sleep(interval).await;
-        }
-    }
-    let metrics = sentry.metrics();
-    info!(?metrics, "sentry watch complete");
+    let history = relayer
+        .run_loop(max_ticks, |outcome| {
+            matches!(outcome, TickOutcome::Verified { .. })
+        })
+        .await?;
+    info!(?history, "smoke run complete");
     Ok(())
 }
 
@@ -716,7 +844,6 @@ async fn run_daemon(
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
-    an_node_url: Option<String>,
     backoff: BackoffConfig,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -733,7 +860,7 @@ async fn run_daemon(
         verifiers_dir.as_deref(),
     )?);
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
     // Cross-platform graceful shutdown: SIGINT on every OS, plus SIGTERM
@@ -762,26 +889,10 @@ async fn run_daemon(
         }
     };
 
-    info!(?backoff, ?an_node_url, "daemon starting");
-    let summary = match an_node_url {
-        None => {
-            warn!(
-                "running without sentry — a live BK rotation will NOT pause this daemon; \
-                 verifyBlock calls will start reverting until the operator restarts."
-            );
-            relayer
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-        Some(url) => {
-            info!(node_url = %url, "wrapping in SentryGuardedRelayer");
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            guarded
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-    };
+    info!(?backoff, "daemon starting");
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
 
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon stopped");
     Ok(())
@@ -894,16 +1005,22 @@ async fn verify_fixture(
         );
     }
 
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): the on-chain
+    // `storedPrevMaxLevelLayerHash()` field is now the immutable genesis
+    // seed. The runtime anchor lives in `_layerWindows[L]` and is exposed
+    // via `expectedPrevAnchor(numLayers)`.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         ok = false;
         diagnostics.push(format!(
-            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain = {:#x}",
-            block.prev_max_level_layer_hash, on_chain.prev_max_level_layer_hash
+            "PrevAnchor MISMATCH: fixture = {:#x}, on-chain expectedPrevAnchor({}) = {:#x}",
+            block.prev_max_level_layer_hash, block.num_layers, chain_anchor
         ));
     } else {
         info!(
             prev_anchor = ?block.prev_max_level_layer_hash,
-            "PrevAnchor matches on-chain",
+            num_layers = block.num_layers,
+            "PrevAnchor matches on-chain expectedPrevAnchor",
         );
     }
 
@@ -954,14 +1071,12 @@ async fn verify_fixture(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_prover_daemon(
     state_path: PathBuf,
     proofs_dir: PathBuf,
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
-    an_node_url: Option<String>,
     backoff: BackoffConfig,
     skip_verified_gate: bool,
 ) -> anyhow::Result<()> {
@@ -977,7 +1092,7 @@ async fn run_prover_daemon(
     let source =
         Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
     let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, bridge)?;
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
     let shutdown = async {
@@ -986,20 +1101,9 @@ async fn run_prover_daemon(
     };
 
     info!(?backoff, proofs_dir = %proofs_dir.display(), "daemon-prover starting");
-    let summary = match an_node_url {
-        None => {
-            relayer
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-        Some(url) => {
-            let sentry = BkSetSentry::from_node_url(url)?;
-            let mut guarded = SentryGuardedRelayer::new(relayer, sentry);
-            guarded
-                .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-                .await?
-        },
-    };
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon-prover stopped");
     Ok(())
 }
@@ -1095,11 +1199,14 @@ async fn verify_prover_proof(
             on_chain.last_seen_block_seq_no
         );
     }
-    if block.prev_max_level_layer_hash != on_chain.prev_max_level_layer_hash {
+    // Storage v2.0 (2026-08-04): compare against per-layer anchor pick.
+    let chain_anchor = bridge.expected_prev_anchor(block.num_layers).await?;
+    if block.prev_max_level_layer_hash != chain_anchor {
         anyhow::bail!(
-            "prev anchor mismatch: proof={} chain={}",
+            "prev anchor mismatch: proof={} chain_expectedPrevAnchor({})={}",
             block.prev_max_level_layer_hash,
-            on_chain.prev_max_level_layer_hash
+            block.num_layers,
+            chain_anchor
         );
     }
 
@@ -1152,6 +1259,455 @@ async fn prove_withdraw(
         out.display()
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prove_withdraw_shplonk(
+    witness: PathBuf,
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    params_dir: PathBuf,
+    snark_dir: PathBuf,
+    out: PathBuf,
+    seq_no: u64,
+    pk_cache_dir: PathBuf,
+) -> anyhow::Result<()> {
+    // NB-Q9 PR-B: in-process Circuit 4 Poseidon re-prove (no more subprocess
+    // shell-out to `export-c4-poseidon-snark`).
+    let snark_prover = InProcessCircuit4SnarkProver::new(&params_dir);
+    let aggregator = SubprocessAggregator::new(
+        SubprocessAggregatorConfig::new(&aggregator_dir, &verifiers_dir, &params_dir)
+            .with_pk_cache_dir(&pk_cache_dir),
+    );
+    let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
+
+    info!(
+        witness = %witness.display(),
+        "M7: re-proving Circuit 4 (Poseidon, in-process) → aggregating → calldata (this may take minutes)"
+    );
+    let proof = pipeline.prove(&witness, &snark_dir, seq_no).await?;
+
+    // Persist in the `proof_event` schema that `submit-withdraw` reads. The
+    // `proof_hex` here is the SHPLONK aggregator calldata (not raw Halo2).
+    let json = serde_json::json!({
+        "schema_version": proof.schema_version,
+        "seq_no": proof.seq_no,
+        "proof_hex": proof.proof_hex,
+        "public_instances_hex": proof.public_instances_hex,
+        "self_verified": proof.self_verified,
+    });
+    std::fs::write(&out, serde_json::to_vec_pretty(&json)?)?;
+    let calldata_len = proof.proof_bytes().map(|b| b.len()).unwrap_or(0);
+    info!(
+        out = %out.display(),
+        calldata_bytes = calldata_len,
+        public_inputs = proof.public_instances_hex.len(),
+        "SHPLONK withdrawal calldata written; submit with `relayer submit-withdraw --proof-event {}`",
+        out.display()
+    );
+    Ok(())
+}
+
+/// Cross-scan bookkeeping for the withdraw leg. `done` holds proofs fully
+/// handled this process lifetime (paid, already-used, or permanently
+/// rejected) so re-scanning the directory is cheap; on-chain
+/// `isNullifierUsed` is the durable idempotency source across restarts.
+#[derive(Default)]
+struct WithdrawScanState {
+    done: HashSet<PathBuf>,
+    paid: u64,
+    skipped: u64,
+}
+
+/// SIGINT (+ SIGTERM on Unix) shutdown future shared by the long-running
+/// daemons. Resolves on the first signal; systemd sends SIGTERM by default.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+                    _ = sigterm.recv() => info!("SIGTERM received"),
+                }
+            },
+            Err(e) => {
+                warn!(?e, "failed to install SIGTERM handler; SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("SIGINT received");
+    }
+}
+
+/// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
+/// bundles, submitting `withdrawByProof` for each. Gates each proof on its
+/// `*.result.json` ACK (unless `skip_verified_gate`), skips nullifiers
+/// already consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
+///
+/// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
+/// submit revert), signalling the caller to back off before the next scan.
+/// Permanent per-proof problems (parse errors, bad public inputs, proofs
+/// that fail the SHPLONK aggregator shape gate, or an ACK that isn't
+/// accepted) park the proof in `st.done` and
+/// the scan drains the rest of the directory. Lower-level infra failures
+/// (RPC down during dry-run/submit) propagate as `Err`.
+async fn withdraw_scan_once<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    proofs_dir: &Path,
+    skip_verified_gate: bool,
+    dry_run: bool,
+    st: &mut WithdrawScanState,
+) -> anyhow::Result<bool>
+where
+    P: Provider<N> + Clone,
+    N: Network,
+{
+    let mut had_transient_failure = false;
+    let proofs = match discover_event_proofs(proofs_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(?e, "discovery failed; will retry");
+            Vec::new()
+        },
+    };
+
+    for proof_path in proofs {
+        if st.done.contains(&proof_path) {
+            continue;
+        }
+
+        // Gate on the verifier ACK unless explicitly skipped.
+        if !skip_verified_gate {
+            let result_path = result_path_for(&proof_path);
+            match std::fs::read(&result_path) {
+                Ok(bytes) => match WithdrawalResultGate::from_json_bytes(&bytes) {
+                    Ok(gate) if gate.is_accepted() => {},
+                    Ok(_) => {
+                        warn!(proof = %proof_path.display(), "verifier ACK present but not accepted (verified/anchor_matched/proof_valid); parking");
+                        st.done.insert(proof_path);
+                        continue;
+                    },
+                    Err(e) => {
+                        warn!(?e, proof = %proof_path.display(), "unpardeable result ACK; skipping this scan");
+                        continue;
+                    },
+                },
+                Err(_) => {
+                    // ACK not written yet — verifier hasn't finished.
+                    info!(proof = %proof_path.display(), "no result ACK yet; will re-check");
+                    continue;
+                },
+            }
+        }
+
+        let bundle = match std::fs::read(&proof_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", proof_path.display()))
+            .and_then(|b| Ok(PartnerWithdrawalProof::from_json_bytes(&b)?))
+        {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "parse failed; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        let pub_inputs = match bundle.public_inputs() {
+            Ok(pi) => pi,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "bad public inputs; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        // Idempotency: skip anything already withdrawn on-chain.
+        match bridge.is_nullifier_used(pub_inputs.nullifier).await {
+            Ok(true) => {
+                info!(proof = %proof_path.display(), nullifier = %pub_inputs.nullifier, "nullifier already used on-chain; skipping");
+                st.skipped += 1;
+                st.done.insert(proof_path);
+                continue;
+            },
+            Ok(false) => {},
+            Err(e) => {
+                warn!(?e, "isNullifierUsed read failed; backing off");
+                had_transient_failure = true;
+                break;
+            },
+        }
+
+        let proof_bytes = match bundle.proof_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(?e, proof = %proof_path.display(), "proof fails SHPLONK aggregator shape gate; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
+        if dry_run {
+            match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
+                DryRunOutcome::WouldSucceed => {
+                    info!(proof = %proof_path.display(), "dry-run: withdrawByProof would succeed");
+                    st.done.insert(proof_path);
+                },
+                DryRunOutcome::WouldRevert {
+                    reason,
+                } => {
+                    warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
+                    had_transient_failure = true;
+                    break;
+                },
+            }
+            continue;
+        }
+
+        match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+            WithdrawSubmitOutcome::Paid {
+                tx_hash,
+            } => {
+                info!(proof = %proof_path.display(), ?tx_hash, "withdrawByProof PAID");
+                st.paid += 1;
+                st.done.insert(proof_path);
+            },
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+            } => {
+                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
+                had_transient_failure = true;
+                break;
+            },
+        }
+    }
+
+    Ok(had_transient_failure)
+}
+
+/// Withdraw-side twin of `run_prover_daemon`. Polls `proofs_dir` for
+/// `proof_event_*.json` bundles, gates each on its `*.result.json` ACK,
+/// skips nullifiers already consumed on-chain (so restarts are idempotent
+/// and re-scanning the same directory is cheap), and submits
+/// `withdrawByProof`. Transient reverts (e.g. anchor not yet registered by
+/// the verifyBlock lane) back off exponentially and are retried; permanent
+/// per-proof failures are logged and the proof is parked so the loop keeps
+/// draining the rest of the directory.
+#[allow(clippy::too_many_arguments)]
+async fn run_withdraw_daemon(
+    proofs_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    poll_interval: Duration,
+    backoff: BackoffConfig,
+    skip_verified_gate: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    info!(
+        proofs_dir = %proofs_dir.display(),
+        ?poll_interval,
+        dry_run,
+        skip_verified_gate,
+        "daemon-withdraw starting"
+    );
+
+    let mut st = WithdrawScanState::default();
+    let mut current_backoff = backoff.initial;
+
+    loop {
+        let had_transient_failure =
+            withdraw_scan_once(&bridge, &proofs_dir, skip_verified_gate, dry_run, &mut st).await?;
+
+        info!(
+            paid = st.paid,
+            skipped = st.skipped,
+            "daemon-withdraw scan complete"
+        );
+
+        // Sleep: backoff after a transient failure, otherwise the idle poll
+        // interval. Either sleep is interruptible by shutdown.
+        let sleep_for = if had_transient_failure {
+            let d = current_backoff;
+            current_backoff = std::cmp::min(current_backoff * backoff.multiplier, backoff.max);
+            d
+        } else {
+            current_backoff = backoff.initial;
+            poll_interval
+        };
+
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!(paid = st.paid, skipped = st.skipped, "daemon-withdraw stopped");
+                return Ok(());
+            },
+            _ = tokio::time::sleep(sleep_for) => {},
+        }
+    }
+}
+
+/// Unified AN→ETH daemon (the `daemon-bridge` subcommand). Interleaves the
+/// two withdrawal-path legs in a single loop on a single relayer EOA:
+///
+///   1. one prover tick — `Relayer::tick()` advances the on-chain anchor from
+///      the next available `proof_<seqno>.json` (`verifyBlock`);
+///   2. one withdraw scan — `withdraw_scan_once` pays out every ready
+///      `proof_event_*.json` (`withdrawByProof`).
+///
+/// Running them sequentially in one task, sharing one provider, means there
+/// is never more than one in-flight transaction, so the shared EOA's nonces
+/// can't race (the failure mode a two-service split invites). A transient
+/// failure in *either* leg trips the shared exponential backoff; a clean
+/// idle iteration resets it to the poll interval. Shutdown (SIGINT/SIGTERM)
+/// is honoured at the sleep boundary, so a `Verified` tick always flushes
+/// `state.json` before exit.
+#[allow(clippy::too_many_arguments)]
+async fn run_bridge_daemon(
+    state_path: PathBuf,
+    proofs_dir: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    poll_interval: Duration,
+    backoff: BackoffConfig,
+    skip_verified_gate: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+
+    // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
+    let source =
+        Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
+    let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
+    let cfg = RelayerConfig::new(state_path);
+    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
+
+    // Withdraw leg: shares the SAME provider (one nonce source; the two
+    // legs run sequentially so there's only ever one in-flight tx).
+    let wd_bridge = EthBridgeClient::new(bridge_address, provider);
+    let mut wd_state = WithdrawScanState::default();
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    info!(
+        proofs_dir = %proofs_dir.display(),
+        ?poll_interval,
+        dry_run,
+        skip_verified_gate,
+        "daemon-bridge starting (unified verifyBlock + withdrawByProof)"
+    );
+
+    let mut current_backoff = backoff.initial;
+
+    loop {
+        let mut had_transient = false;
+
+        // ── Leg 1: advance the on-chain anchor (verifyBlock). ──────────
+        match relayer.tick().await {
+            Ok(TickOutcome::Verified {
+                seq_no, ..
+            }) => info!(
+                seq_no,
+                "daemon-bridge: verifyBlock verified (anchor advanced)"
+            ),
+            Ok(TickOutcome::BkUpdateApplied {
+                seq_no, ..
+            }) => info!(
+                seq_no,
+                "daemon-bridge: applyBkSetUpdate applied"
+            ),
+            Ok(TickOutcome::NotYetAvailable {
+                ..
+            }) => {},
+            Ok(TickOutcome::BridgeReverted {
+                target_seq_no,
+                reason,
+            }) => {
+                warn!(target_seq_no, %reason, "daemon-bridge: verifyBlock reverted; backing off");
+                had_transient = true;
+            },
+            Ok(TickOutcome::BkUpdateReverted {
+                seq_no,
+                reason,
+            }) => {
+                warn!(seq_no, %reason, "daemon-bridge: applyBkSetUpdate reverted; backing off");
+                had_transient = true;
+            },
+            Err(e) => {
+                warn!(?e, "daemon-bridge: verifyBlock tick failed; backing off");
+                had_transient = true;
+            },
+        }
+
+        // ── Leg 2: pay out ready withdrawal proofs (withdrawByProof). ──
+        match withdraw_scan_once(
+            &wd_bridge,
+            &proofs_dir,
+            skip_verified_gate,
+            dry_run,
+            &mut wd_state,
+        )
+        .await
+        {
+            Ok(transient) => had_transient |= transient,
+            Err(e) => {
+                warn!(?e, "daemon-bridge: withdraw scan hard error; backing off");
+                had_transient = true;
+            },
+        }
+        info!(
+            paid = wd_state.paid,
+            skipped = wd_state.skipped,
+            "daemon-bridge: withdraw scan complete"
+        );
+
+        // ── Shared backoff / poll sleep, interruptible by shutdown. ────
+        let sleep_for = if had_transient {
+            let d = current_backoff;
+            current_backoff = std::cmp::min(current_backoff * backoff.multiplier, backoff.max);
+            d
+        } else {
+            current_backoff = backoff.initial;
+            poll_interval
+        };
+
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                info!(
+                    paid = wd_state.paid,
+                    skipped = wd_state.skipped,
+                    "daemon-bridge stopped"
+                );
+                return Ok(());
+            },
+            _ = tokio::time::sleep(sleep_for) => {},
+        }
+    }
 }
 
 async fn submit_withdraw(
@@ -1230,11 +1786,288 @@ async fn submit_bk_update(
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
             tx_hash,
+            ..
         } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
         BkSetUpdateSubmitOutcome::Reverted {
             reason,
         } => anyhow::bail!("applyBkSetUpdate reverted: {reason}"),
     }
+    Ok(())
+}
+
+/// Live GraphQL + `LiveProverDriver` → ETH `verifyBlock` / `applyBkSetUpdate`.
+#[allow(clippy::too_many_arguments)]
+/// Wiring for the ETH-side Poseidon re-prove + R15 SHPLONK aggregation
+/// pipeline. When present, `run_daemon_live` wraps `LiveBlockSource` in an
+/// [`AggregatedBlockSource`] so `AnBlockData.attestation_proof` /
+/// `AnBlockData.layer_hashes_proof` (and BK-update `attestation_proof`) carry
+/// the aggregator calldata the Solidity `AckiNackiBridge` accepts.
+struct C12AggregationCfg {
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    /// Persistent outer-PK cache directory for `aggregate-proof`. When
+    /// present, memoises the K=21 outer keygen across bundles.
+    pk_cache_dir: PathBuf,
+}
+
+// Daemon wiring handler: the args mirror distinct CLI flags, so grouping them
+// into a struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
+async fn run_daemon_live(
+    state_path: PathBuf,
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    gql_endpoint: String,
+    params_dir: PathBuf,
+    prover_state_dir: PathBuf,
+    bk_set_config: PathBuf,
+    bootstrap_seqno: Option<u64>,
+    backoff: BackoffConfig,
+    aggregation: C12AggregationCfg,
+) -> anyhow::Result<()> {
+    use bridge_gql_fetcher::gql_client::create_client;
+    use bridge_prover_lib::{
+        bk_set_bootstrap,
+        bridge_state::BridgeState,
+        keys::KeyManager,
+        live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
+        prover_bk_set::ProverBkSet,
+        transcript::TranscriptKind,
+    };
+    use tokio::sync::Mutex;
+
+    std::fs::create_dir_all(&prover_state_dir)?;
+    let state_paths = StatePaths::under(&prover_state_dir);
+    let prover_state_path = state_paths.prover_state_json.clone();
+    let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
+
+    let gql = create_client(&gql_endpoint)
+        .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+
+    // Load BK set via the shared bootstrap helper (aligned with
+    // `bridge-prover-daemon/src/main.rs`). Mode is selected by
+    // `BRIDGE_BK_SET_BOOTSTRAP=file|fold_at_height`; `fold_at_height`
+    // uses `bk_set_at_height` to reconstruct the committee at
+    // `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to `bootstrap_seqno`)
+    // by folding `bkSetUpdates` onto the JSON genesis anchor.
+    let bk_set_config_str = bk_set_config
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?
+        .to_string();
+    let bk_set = bk_set_bootstrap::load_bk_set(&gql, &bk_set_config_str, bootstrap_seqno)
+        .await
+        .map_err(|e| anyhow::anyhow!("load BK set: {e}"))?;
+
+    info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
+    let mut key_manager = KeyManager::new(&params_dir);
+    key_manager
+        .ensure_primary_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_primary_keys: {e}"))?;
+    key_manager
+        .ensure_fallback_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_fallback_keys: {e}"))?;
+    key_manager
+        .ensure_layer_keys()
+        .map_err(|e| anyhow::anyhow!("ensure_layer_keys: {e}"))?;
+
+    let state_path_str = prover_state_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("prover_state path not UTF-8"))?;
+    let state = BridgeState::load(state_path_str, HISTORY_WINDOW_SIZE as usize)
+        .map_err(|e| anyhow::anyhow!("load BridgeState: {e}"))?;
+
+    let bk_path_str = prover_bk_set_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("prover_bk_set path not UTF-8"))?;
+    let prover_bk_set = match ProverBkSet::load(bk_path_str)
+        .map_err(|e| anyhow::anyhow!("load ProverBkSet: {e}"))?
+    {
+        Some(loaded) => {
+            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
+                anyhow::bail!(
+                    "prover_bk_set commitment {} disagrees with prover_state {} — \
+                     delete BOTH under {} or restore a paired backup",
+                    hex::encode(loaded.commitment),
+                    hex::encode(state.stored_bk_set_commitment),
+                    prover_state_dir.display(),
+                );
+            }
+            loaded
+        }
+        None => {
+            let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
+            pbs.save(bk_path_str)
+                .map_err(|e| anyhow::anyhow!("save ProverBkSet: {e}"))?;
+            info!(
+                signers = pbs.pubkeys_hex.len(),
+                "bootstrapped prover_bk_set.json"
+            );
+            pbs
+        }
+    };
+
+    // Shared startup guard (parity with bridge-prover-daemon): reject the
+    // "stale ./state on top of a re-initialised chain" configuration
+    // before we hand off to LiveProverDriver.
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
+        &bk_set_config_str,
+        &prover_bk_set,
+    )?;
+
+    // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
+    // owns `prover_bk_set` as the sole BK-pubkey source and derives its
+    // in-driver pubkey table on demand via `prover_bk_set.pubkeys()`.
+    // The relayer no longer passes a separate `bk_set` argument.
+
+    let seed_policy = match (bootstrap_seqno, state.initialized) {
+        (_, true) => SeedPolicy::Resume,
+        (Some(n), false) => SeedPolicy::Explicit(n),
+        (None, false) => SeedPolicy::Auto,
+    };
+    info!(?seed_policy, "LiveProverDriver seed policy");
+
+    let driver = LiveProverDriver::new(
+        gql,
+        key_manager,
+        state,
+        prover_bk_set,
+        LiveProverConfig {
+            seed_policy,
+            // Emit Poseidon-transcript proofs directly. Consumed in-process
+            // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
+            // the old `export-1a1b2-poseidon-snark` subprocess that
+            // independently re-fetched + re-proved every bundle.
+            transcript: TranscriptKind::Poseidon,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("LiveProverDriver::new: {e}"))?;
+    let driver = Arc::new(Mutex::new(driver));
+
+    let live_source = Arc::new(LiveBlockSource::new(Arc::clone(&driver), state_paths));
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+
+    // Startup drift audit (§5.4.5).
+    let on_chain = bridge.read_state().await?;
+    let driver_state = live_source.driver_snapshot().await;
+    info!(
+        on_chain_last_seen = on_chain.last_seen_block_seq_no,
+        driver_last_seen = driver_state.stored_last_seen_block_seq_no,
+        on_chain_bk_upd = on_chain.last_bk_set_update_seq_no,
+        driver_bk_upd = driver_state.stored_last_bk_set_update_seq_no,
+        "daemon-live startup anchors"
+    );
+    if driver_state.initialized
+        && driver_state.stored_last_seen_block_seq_no != on_chain.last_seen_block_seq_no
+        && on_chain.last_seen_block_seq_no != 0
+        && driver_state.stored_last_seen_block_seq_no != 0
+    {
+        anyhow::bail!(
+            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap \
+             (do NOT auto-heal)",
+            driver_state.stored_last_seen_block_seq_no,
+            on_chain.last_seen_block_seq_no,
+            prover_state_dir.display(),
+        );
+    }
+
+    let cfg = RelayerConfig::new(&state_path);
+
+    // Wrap the live source so the two proof-byte fields in AnBlockData carry
+    // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.
+    // The wrapper delegates ack / driver_snapshot back to LiveBlockSource so
+    // state persistence and ack-after-submit semantics are unchanged.
+    // Aggregation is unconditional: the on-chain `AckiNackiBridge` verifier
+    // only accepts aggregated calldata (raw halo2 bytes revert with
+    // `AttestationProofRejected()`).
+    use bridge_relayer_daemon::{
+        AggregatedBlockSource, Circuit12ShplonkPipeline, PoseidonSnarkWrapper,
+        SubprocessAggregator, SubprocessAggregatorConfig,
+    };
+    let aggregator_cfg = SubprocessAggregatorConfig::new(
+        &aggregation.aggregator_dir,
+        &aggregation.verifiers_dir,
+        &params_dir,
+    )
+    .with_pk_cache_dir(&aggregation.pk_cache_dir);
+    let pipeline = Circuit12ShplonkPipeline::new(
+        PoseidonSnarkWrapper::new(&params_dir),
+        SubprocessAggregator::new(aggregator_cfg),
+    );
+    let aggregated = Arc::new(AggregatedBlockSource::new(
+        Arc::clone(&live_source),
+        pipeline,
+    ));
+    info!(
+        aggregator_dir = %aggregation.aggregator_dir.display(),
+        verifiers_dir = %aggregation.verifiers_dir.display(),
+        pk_cache_dir = %aggregation.pk_cache_dir.display(),
+        "daemon-live: C1/C2 R15 SHPLONK aggregation",
+    );
+    spawn_and_run(
+        cfg,
+        Arc::clone(&aggregated),
+        aggregated,
+        bridge,
+        backoff,
+        &gql_endpoint,
+        &params_dir,
+        &prover_state_dir,
+    )
+    .await
+}
+
+/// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
+/// Generic over the source types so both aggregation-on and aggregation-off
+/// paths in [`run_daemon_live`] share the same startup + run wiring.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_and_run<S, U, B>(
+    cfg: RelayerConfig,
+    source: Arc<S>,
+    bk_update_source: Arc<U>,
+    bridge: Arc<B>,
+    backoff: BackoffConfig,
+    gql_endpoint: &str,
+    params_dir: &Path,
+    prover_state_dir: &Path,
+) -> anyhow::Result<()>
+where
+    S: bridge_relayer_daemon::source::BlockSource + 'static,
+    U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
+    B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
+{
+    let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
+
+    if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
+        let actual = relayer.bridge().read_state().await?;
+        check_startup_drift(&remembered, &actual).map_err(|d| {
+            anyhow::anyhow!(
+                "startup on-chain drift vs last_observed_on_chain: {d} — operator must reconcile"
+            )
+        })?;
+    }
+
+    let metrics = RelayerMetrics::new();
+    let shutdown = shutdown_signal();
+    info!(
+        gql = %gql_endpoint,
+        params = %params_dir.display(),
+        prover_state = %prover_state_dir.display(),
+        "daemon-live starting"
+    );
+    let summary = relayer
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .await?;
+    info!(?summary, snapshot = ?metrics.snapshot(), "daemon-live stopped");
     Ok(())
 }
 

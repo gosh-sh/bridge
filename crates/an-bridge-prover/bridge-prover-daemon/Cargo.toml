@@ -21,6 +21,8 @@ self-verify = []
 
 [dependencies]
 bridge-prover-lib = { workspace = true }
+bridge-gql-fetcher = { workspace = true }
+bridge-poseidon = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
 bincode = { workspace = true }
 tvm_block = { workspace = true }

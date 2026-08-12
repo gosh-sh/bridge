@@ -41,6 +41,7 @@ use tracing::info;
 use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink, MAX_CHAIN_LEN};
 
 use bridge_prover_lib::keys::KeyManager;
+use bridge_prover_lib::transcript::{PoseidonWrite, TranscriptKind};
 
 use bridge_event_prove_circuit::boc_helper::BocFlattenData;
 use bridge_event_prove_circuit::bridge_event_prove_circuit::{
@@ -322,10 +323,28 @@ pub fn generate_event_proof(
     key_manager: &KeyManager,
     witness: &PrivateWitness,
 ) -> Result<EventProofOutput> {
+    generate_event_proof_with_transcript(key_manager, witness, TranscriptKind::Blake2b)
+}
+
+/// Generate a Circuit 4 proof from a fully-populated [`PrivateWitness`] with
+/// the chosen Fiat–Shamir transcript. See
+/// [`bridge_prover_lib::prover::generate_primary_proof_with_transcript`] for
+/// transcript semantics — `Poseidon` here is what the R15 ETH-side
+/// aggregator consumes.
+pub fn generate_event_proof_with_transcript(
+    key_manager: &KeyManager,
+    witness: &PrivateWitness,
+    transcript: TranscriptKind,
+) -> Result<EventProofOutput> {
     let inputs = build_proof_inputs(witness, key_manager.event_config().clone())
         .context("build_proof_inputs failed (translating witness JSON → circuit)")?;
     let EventProofInputs { circuit, public_instances } = inputs;
-    generate_event_proof_from_circuit(key_manager, circuit, public_instances)
+    generate_event_proof_from_circuit_with_transcript(
+        key_manager,
+        circuit,
+        public_instances,
+        transcript,
+    )
 }
 
 /// Lower-level entry point: prove an already-built [`BridgeEventProveCircuit`]
@@ -338,30 +357,76 @@ pub fn generate_event_proof_from_circuit(
     circuit: BridgeEventProveCircuit,
     public_instances: Vec<Fr>,
 ) -> Result<EventProofOutput> {
+    generate_event_proof_from_circuit_with_transcript(
+        key_manager,
+        circuit,
+        public_instances,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Lower-level entry point with the chosen Fiat–Shamir transcript. Same
+/// contract as [`generate_event_proof_from_circuit`] otherwise. Selecting
+/// [`TranscriptKind::Poseidon`] here produces proof bytes byte-for-byte
+/// compatible with `snark-verifier-sdk`'s
+/// `PoseidonTranscript<NativeLoader, _>` — what the R15 ETH-side aggregator
+/// pipeline requires. `Blake2b` is the AN-facing default (accepted by the
+/// `ZKHALO2VERIFYWITHVK` opcode).
+pub fn generate_event_proof_from_circuit_with_transcript(
+    key_manager: &KeyManager,
+    circuit: BridgeEventProveCircuit,
+    public_instances: Vec<Fr>,
+    transcript: TranscriptKind,
+) -> Result<EventProofOutput> {
     let instance_refs: &[&[Fr]] = &[&public_instances];
     info!(
-        "generating Circuit 4 proof: {} public instances",
-        public_instances.len()
+        "generating Circuit 4 proof: {} public instances, transcript={:?}",
+        public_instances.len(),
+        transcript,
     );
 
-    let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        Challenge255<G1Affine>,
-        _,
-        Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
-        _,
-    >(
-        &key_manager.srs,
-        key_manager.event_pk(),
-        &[circuit],
-        &[instance_refs],
-        OsRng,
-        &mut transcript,
-    )
-    .context("Circuit 4 proof generation failed")?;
-    let proof_bytes = transcript.finalize();
+    let proof_bytes = match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                key_manager.event.srs(),
+                key_manager.event_pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("Circuit 4 proof generation failed (Blake2b transcript)")?;
+            t.finalize()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                key_manager.event.srs(),
+                key_manager.event_pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("Circuit 4 proof generation failed (Poseidon transcript)")?;
+            t.finalize()
+        },
+    };
     info!("Circuit 4 proof generated: {} bytes", proof_bytes.len());
 
     Ok(EventProofOutput {

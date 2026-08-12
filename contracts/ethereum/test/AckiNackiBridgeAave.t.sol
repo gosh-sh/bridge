@@ -59,7 +59,7 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(bridge.owner(), owner, "owner");
         assertEq(bridge.yieldRecipient(), owner, "yield recipient defaults to owner");
         assertEq(bridge.liquidReserveBps(), 1_000, "default 10% reserve");
-        assertEq(bridge.MAX_DEPOSIT_AMOUNT(), 100 * UsdcTestLib.UNIT, "100 USDC cap");
+        assertEq(bridge.MAX_DEPOSIT_AMOUNT(), type(uint64).max, "u64 mint-path cap");
     }
 
     function test_constructor_partialAaveWiringReverts() public {

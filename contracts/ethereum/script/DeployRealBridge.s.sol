@@ -14,7 +14,7 @@ import "./ShplonkDeployLib.sol";
 /**
  * @title DeployRealBridge
  * @notice Deployment script for the production bridge contract.
- * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 2; gnark Groth16 for 1B fallback.
+ * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 1B + 2 (1B hybrid was retired on e2a962b).
  *
  * Oracle mode:
  *   - USE_AXIOM_ORACLE=true → AxiomBlockHeaderOracle (production)
@@ -28,18 +28,17 @@ import "./ShplonkDeployLib.sol";
  *     SHPLONK_BIN_LAYER_HASHES). All three circuits use the R15 SHPLONK aggregator path.
  *
  * withdrawByProof wiring:
- *   - WIRE_WITHDRAW_BY_PROOF=true → BridgeWithdrawalAggregatorVerifier + identity env vars.
- *     Requires WITHDRAW_ACC_FR (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids.
- *
- * Pause:
- *   - START_PAUSED defaults true when any verifier is wired; owner must unpause after sign-off.
+ *   - MANDATORY on the production script (NB-Q8): the C4 aggregator `.bin` is
+ *     committed and the Yul adapter is production-ready, so silently shipping
+ *     with `address(0)` here bricks user withdrawals. Requires WITHDRAW_ACC_FR
+ *     (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids. If a deploy
+ *     legitimately wants verifyBlock-only (e.g. bring-up), use
+ *     DeployShellnetE2EBridge on a local anvil instead.
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
         bool useAave;
         bool wireVerifyBlock;
-        bool wireWithdraw;
-        bool startPaused;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
         uint256 withdrawDappFr;
@@ -63,8 +62,6 @@ contract DeployRealBridge is Script {
         address bridgeAddr;
         bool useAave;
         bool wireVerifyBlock;
-        bool wireWithdraw;
-        bool startPaused;
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
         address layerHashesVerifierAddr;
@@ -104,8 +101,6 @@ contract DeployRealBridge is Script {
                 bridgeAddr: r.bridgeAddr,
                 useAave: w.useAave,
                 wireVerifyBlock: w.wireVerifyBlock,
-                wireWithdraw: w.wireWithdraw,
-                startPaused: w.startPaused,
                 primaryVerifierAddr: r.primaryVerifierAddr,
                 fallbackVerifierAddr: r.fallbackVerifierAddr,
                 layerHashesVerifierAddr: r.layerHashesVerifierAddr,
@@ -120,22 +115,21 @@ contract DeployRealBridge is Script {
     function _readWireInputs() internal view returns (WireInputs memory w) {
         w.useAave = vm.envOr("USE_AAVE", false);
         w.wireVerifyBlock = vm.envOr("WIRE_VERIFY_BLOCK", false);
-        w.wireWithdraw = vm.envOr("WIRE_WITHDRAW_BY_PROOF", false);
-        w.startPaused = vm.envOr("START_PAUSED", w.wireVerifyBlock || w.wireWithdraw);
 
         if (w.wireVerifyBlock) {
             w.genesisBkSetCommitment = vm.envUint("GENESIS_BK_SET_COMMITMENT");
             w.genesisPrevAnchor = vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH");
             require(w.genesisBkSetCommitment != 0, "GENESIS_BK_SET_COMMITMENT required");
         }
-        if (w.wireWithdraw) {
-            w.withdrawAccFr = vm.envUint("WITHDRAW_ACC_FR");
-            require(w.withdrawAccFr != 0, "WITHDRAW_ACC_FR required");
-            w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
-            w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
-            w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
-            w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
-        }
+        // NB-Q8: withdrawByProof wiring is mandatory on RealBridge. The C4 `.bin`
+        // is committed and the Yul adapter is production-ready — a deploy that
+        // silently ships with `address(0)` bricks user withdrawals.
+        w.withdrawAccFr = vm.envUint("WITHDRAW_ACC_FR");
+        require(w.withdrawAccFr != 0, "WITHDRAW_ACC_FR required (NB-Q8: withdraw wiring mandatory)");
+        w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
+        w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
+        w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
+        w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)
@@ -148,7 +142,6 @@ contract DeployRealBridge is Script {
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
         );
         AckiNackiBridge.BridgeWithdrawConfig memory bw = _buildWithdrawConfig(
-            w.wireWithdraw,
             w.withdrawDappFr,
             w.withdrawAccFr,
             w.altDstChainId,
@@ -161,18 +154,12 @@ contract DeployRealBridge is Script {
             r.fallbackVerifierAddr = address(vb.fallbackVerifier);
             r.layerHashesVerifierAddr = address(vb.layerHashesVerifier);
         }
-        if (w.wireWithdraw) {
-            r.withdrawalVerifierAddr = address(bw.bridgeWithdrawalVerifier);
-        }
+        r.withdrawalVerifierAddr = address(bw.bridgeWithdrawalVerifier);
 
         console.log("Deploying AckiNackiBridge (Shplonk verifiers only)...");
         AckiNackiBridge bridge = new AckiNackiBridge(oracleAddr, usdcAddr, aavePool, aUSDC, vb, bw);
         r.bridgeAddr = address(bridge);
 
-        if (w.startPaused && (w.wireVerifyBlock || w.wireWithdraw)) {
-            bridge.pause();
-            console.log("Bridge PAUSED at deploy - unpause after R15 sign-off");
-        }
         console.log("AckiNackiBridge deployed at:", r.bridgeAddr);
     }
 
@@ -187,23 +174,17 @@ contract DeployRealBridge is Script {
         console.log("Oracle type:", oracleType);
         console.log("Oracle:", oracleAddr);
         console.log("AckiNackiBridge:", r.bridgeAddr);
-        console.log("startPaused:", w.startPaused);
         if (w.wireVerifyBlock) {
             console.log("PrimaryAggregatorVerifier:", r.primaryVerifierAddr);
-            console.log("FallbackVerifier (Groth16):", r.fallbackVerifierAddr);
+            console.log("FallbackAggregatorVerifier:", r.fallbackVerifierAddr);
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
-        if (w.wireWithdraw) {
-            console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalVerifierAddr);
-        }
+        console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalVerifierAddr);
         if (!useAxiomOracle) {
             console.log("\n  ** WARNING: MockBlockHeaderOracle - NOT for production **");
         }
         if (!w.wireVerifyBlock) {
             console.log("\n  ** verifyBlock DISABLED - WIRE_VERIFY_BLOCK + Shplonk .bin **");
-        }
-        if (!w.wireWithdraw) {
-            console.log("\n  ** withdrawByProof DISABLED - WIRE_WITHDRAW_BY_PROOF + C4 .bin **");
         }
     }
 
@@ -264,7 +245,8 @@ contract DeployRealBridge is Script {
                 fallbackVerifier: IFallbackVerifier(address(0)),
                 layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
                 genesisBkSetCommitment: 0,
-                genesisPrevMaxLevelLayerHash: 0
+                genesisPrevMaxLevelLayerHash: 0,
+                genesisLastSeenBlockSeqNo: 0
             });
         }
 
@@ -277,7 +259,8 @@ contract DeployRealBridge is Script {
             fallbackVerifier: v.fallback_,
             layerHashesVerifier: v.layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
-            genesisPrevMaxLevelLayerHash: genesisPrevAnchor
+            genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
         console.log("  PrimaryAggregatorVerifier:", address(v.primary));
         console.log("  FallbackAggregatorVerifier:", address(v.fallback_));
@@ -285,24 +268,12 @@ contract DeployRealBridge is Script {
     }
 
     function _buildWithdrawConfig(
-        bool wire,
         uint256 dappFr,
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
         uint256 altTokenId
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
-        if (!wire) {
-            return AckiNackiBridge.BridgeWithdrawConfig({
-                bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
-                dappFr: 0,
-                accFr: 0,
-                altDstChainId: 0,
-                altDstHostChainId: 0,
-                altTokenId: 0
-            });
-        }
-
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
         IBridgeWithdrawalVerifier w =
             ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
@@ -341,16 +312,14 @@ contract DeployRealBridge is Script {
                 )
             );
         }
-        if (a.wireWithdraw) {
-            verifierJson = string(
-                abi.encodePacked(
-                    verifierJson,
-                    '  "withdrawal_verifier": "',
-                    vm.toString(a.withdrawalVerifierAddr),
-                    '",\n'
-                )
-            );
-        }
+        verifierJson = string(
+            abi.encodePacked(
+                verifierJson,
+                '  "withdrawal_verifier": "',
+                vm.toString(a.withdrawalVerifierAddr),
+                '",\n'
+            )
+        );
 
         string memory deploymentJson = string(
             abi.encodePacked(
@@ -367,12 +336,7 @@ contract DeployRealBridge is Script {
                 '  "verify_block_wired": ',
                 a.wireVerifyBlock ? "true" : "false",
                 ",\n",
-                '  "withdraw_wired": ',
-                a.wireWithdraw ? "true" : "false",
-                ",\n",
-                '  "start_paused": ',
-                a.startPaused ? "true" : "false",
-                ",\n",
+                '  "withdraw_wired": true,\n',
                 verifierJson,
                 '  "aave_enabled": ',
                 a.useAave ? "true" : "false",

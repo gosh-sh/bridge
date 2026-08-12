@@ -1,0 +1,38 @@
+# Hermez deposit VkBlob drop for USDCBridge (Alina / Serhii).
+#
+# Regenerate with: `scripts/build_partner_pack.sh hermez_usdcbridge_vk_for_alina`
+# (after refreshing dist/hermez_usdcbridge_vk/ if the VkBlob changed).
+#
+# Output: hermez_usdcbridge_vk_for_alina_<today>.{zip,tar.gz} (+ .sha256).
+
+dist/hermez_usdcbridge_vk/deposit_vk_blob.bin => 01_deposit_vk_blob.bin
+dist/hermez_usdcbridge_vk/deposit_vk_blob.bin.sha256 => 01_deposit_vk_blob.bin.sha256
+dist/hermez_usdcbridge_vk/VK_BLOB.sol.snippet => 02_VK_BLOB.sol.snippet
+dist/hermez_usdcbridge_vk/usdcbridge_hermez_vk.patch => 03_usdcbridge_hermez_vk.patch
+dist/hermez_usdcbridge_vk/APPLY.md => 04_APPLY.md
+
+---
+## Why
+
+`ZKHALO2VERIFYWITHVK` on the Hermez resurrection branch embeds Hermez
+`s_g2` (`928fafb3…`). Shellnet `USDCBridge.VK_BLOB` must be the Hermez
+deposit fixture or `finalizeDeposit` rejects every real deposit proof.
+
+## Reading / apply order
+
+1. `04_APPLY.md` — one-page apply + redeploy notes.
+2. `03_usdcbridge_hermez_vk.patch` — preferred; applies onto current
+   `USDCBridge.sol` (rotates chain-ceremony VkBlob → Hermez).
+3. Or paste `02_VK_BLOB.sol.snippet` by hand; verify against
+   `01_deposit_vk_blob.bin` / its `.sha256`.
+
+## Verify after apply
+
+```bash
+# embedded constant must hash to:
+# 304c1c4ed1e4cf09a00fb1d83a0ae2ba42db2afead035ae089a4faa85346251a
+sha256sum 01_deposit_vk_blob.bin
+```
+
+Related: tvm-sdk PR https://github.com/tvmlabs/tvm-sdk/pull/276
+(`pruvendo/hermez-deposit-fixtures` → `feature/hermez-kzg-resurrection`).

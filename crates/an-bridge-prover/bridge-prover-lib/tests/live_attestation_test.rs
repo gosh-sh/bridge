@@ -23,7 +23,7 @@ fn test_live_attestation_bls_verification() {
     }
 
     // Load BK set.
-    let bk_set = bridge_prover_lib::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
         .expect("failed to load BK set");
     println!("BK set: {} signers", bk_set.len());
 
@@ -32,15 +32,15 @@ fn test_live_attestation_bls_verification() {
     let att_bytes = hex::decode(att_hex.trim()).unwrap();
     println!("Attestation: {} bytes", att_bytes.len());
 
-    // Parse with bridge-parsers.
-    let sig_bytes = bridge_parsers::attestation_data_parser::parse_signature_bytes(&att_bytes);
-    let num_signers = bridge_parsers::attestation_data_parser::parse_num_signers(&att_bytes);
-    let entries = bridge_parsers::attestation_data_parser::parse_signer_entries(&att_bytes);
+    // Parse with the attestation-bls-checker-circuit parser module.
+    let sig_bytes = attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(&att_bytes);
+    let num_signers = attestation_bls_checker_circuit::attestation_data_parser::parse_num_signers(&att_bytes);
+    let entries = attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(&att_bytes);
     println!("sig_len={}, num_signers={}, entries={:?}", sig_bytes.len(), num_signers, entries);
 
     // Verify BLS signature off-circuit.
     let signature = gosh_bls_verification::helpers::deserialize_g2_signature(sig_bytes);
-    let att_data = bridge_parsers::attestation_data_parser::parse_attestation_data_bytes(&att_bytes);
+    let att_data = attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att_bytes);
     let msg = &att_data[..120];
     let msg_hash = gosh_bls_verification::helpers::compute_msg_hash(msg);
     let pubkeys_with_counts = gosh_bls_verification::helpers::resolve_pubkeys(&entries, &bk_set);
@@ -50,7 +50,7 @@ fn test_live_attestation_bls_verification() {
     assert!(bls_ok, "BLS signature verification failed on live attestation!");
 
     // Compute Poseidon commitment.
-    let (commitment, _) = bridge_prover_lib::poseidon::compute_bk_set_poseidon(&bk_set);
+    let (commitment, _) = bridge_poseidon::compute_bk_set_poseidon(&bk_set);
     println!("BK set Poseidon commitment: {:?}", commitment);
 
     println!("All checks passed!");

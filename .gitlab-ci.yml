@@ -132,10 +132,10 @@ build:rust:release:
     - main
     - tags
 
-# bridge-relayer-daemon is excluded from the workspace (has its own Cargo.lock
-# + alloy/clap deps) so the `--workspace` jobs above don't touch it. Without a
-# dedicated job, regressions in the relayer (build errors, broken tests,
-# clippy/fmt drift) ship to main silently. This job closes that gap.
+# bridge-relayer-daemon depends on bridge-prover-lib (halo2) and must build as
+# a member of crates/an-bridge-prover (symlink member). Standalone
+# `cd crates/bridge-relayer-daemon && cargo …` cannot resolve workspace=true
+# circuit deps. Without this job, relayer regressions ship to main silently.
 build:rust:relayer:
   extends: .rust_base
   stage: build
@@ -143,11 +143,11 @@ build:rust:relayer:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/bridge-relayer-daemon/target/
+      - crates/an-bridge-prover/target/
     policy: pull-push
   script:
-    - cd crates/bridge-relayer-daemon
-    - cargo build --locked --all-targets
+    - cd crates/an-bridge-prover
+    - cargo build --locked -p bridge-relayer-daemon --all-targets
 
 # bridge-evm-aggregator is excluded from the workspace (axiom halo2-lib vs gosh
 # fork in the orchestrator). Dedicated build/test keeps R15 regressions visible.
@@ -204,13 +204,13 @@ test:rust:relayer:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/bridge-relayer-daemon/target/
+      - crates/an-bridge-prover/target/
     policy: pull
   needs:
     - build:rust:relayer
   script:
-    - cd crates/bridge-relayer-daemon
-    - cargo test --locked
+    - cd crates/an-bridge-prover
+    - cargo test --locked -p bridge-relayer-daemon
 
 test:rust:aggregator:
   extends: .rust_base
@@ -255,8 +255,13 @@ test:solidity:
 test:solidity:coverage:
   extends: .foundry_base
   stage: test
+  # `only: merge_requests` makes this run in a *merge request pipeline*, where
+  # `build:solidity` (default `only: branches/tags`) is absent. Mark the need
+  # optional so pipeline creation succeeds there; the job rebuilds from scratch
+  # anyway (npm install + forge install + forge coverage), so it is self-contained.
   needs:
-    - build:solidity
+    - job: build:solidity
+      optional: true
   script:
     - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum
@@ -312,13 +317,13 @@ lint:rust:relayer:clippy:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/bridge-relayer-daemon/target/
+      - crates/an-bridge-prover/target/
     policy: pull
   needs:
     - build:rust:relayer
   script:
-    - cd crates/bridge-relayer-daemon
-    - cargo clippy --locked --all-targets -- -D warnings
+    - cd crates/an-bridge-prover
+    - cargo clippy --locked -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
   allow_failure: false
 
 lint:solidity:fmt:

@@ -24,7 +24,7 @@ For each circuit, produce **Poseidon-transcript** inner proofs + aggregator bund
 
 ```bash
 # Example: bound block (1A + 2) with Poseidon flavour — orchestrator
-cd crates/bridge-prover-orchestrator
+cd crates/bridge-snark-utils
 # export with TranscriptKind::Poseidon (see export_* binaries / bound export)
 
 cd ../bridge-evm-aggregator

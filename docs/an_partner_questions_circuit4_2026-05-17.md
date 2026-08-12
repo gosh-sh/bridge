@@ -209,13 +209,13 @@ SHPLONK → R1CS) — это Phase 8 R&D у нас, мы за неё ещё не
 Когда будет первый «настоящий» Halo2-proof из `bridge-event-prove-circuit`
 (пусть на тестовых данных), пришли нам `halo2_proof.json` в том же формате,
 что для Circuit 2 (см.
-`crates/bridge-prover-orchestrator/src/proof_export.rs:17-22`, структура
+`crates/bridge-snark-utils/src/proof_export.rs:17-22`, структура
 `Halo2ProofData` с полями `public_inputs`, `proof_bytes`, `protocol`).
 Тогда у нас встанет полноценный E2E:
 
 ```
 halo2_proof.json
-  → crates/bridge-prover-orchestrator/gnark-wrappers/circuit-4/
+  → crates/bridge-snark-utils/gnark-wrappers/circuit-4/
        (go run . setup …; go run . prove …)
   → BridgeEventGroth16VerifierGenerated.sol
   → AckiNackiBridge.verifyEvent(proof, tokenId)  ✅

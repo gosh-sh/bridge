@@ -15,13 +15,26 @@ const PROOFS_DIR: &str = "proofs";
 /// Current `ProofRequest` schema version. Bumped to 2 when `block_height` was
 /// added; bumped to 3 when `attestation_circuit` was added so the verifier
 /// knows which VK (Primary 1a vs Fallback 1b) to use; bumped to 4 alongside
-/// the introduction of the bk-set-update bundle (`BkUpdateRequest`). The
-/// layer-bundle wire shape is unchanged between v3 and v4 — the bump just
-/// keeps the two file kinds version-synced so the verifier can reject one
-/// commit/the-other mismatches loudly instead of silently re-interpreting
-/// fields. The verifier rejects mismatched versions instead of silently
-/// re-interpreting fields.
-pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 4;
+/// the introduction of the bk-set-update bundle (`BkUpdateRequest`); bumped
+/// to 5 when `layer_block_id_hex` was removed — after the 2026-07-22 Circuit 1
+/// byte-order fix (`uint256(bytes32(root))`), Circuits 1 and 2 emit the same
+/// `block_id_fr`, so the second copy on the wire was pure redundancy; bumped
+/// to 6 when `block_id_hex` semantics were unified with the upstream circuits
+/// crate — `block_id_hex` now carries the raw 32-byte BE chain hash (=
+/// `Solidity uint256(bytes32(blockId))`) in both `ProofRequest` and
+/// `BkUpdateRequest`, and the redundant `BkUpdateRequest.block_id_hash_hex`
+/// was dropped; bumped to 7 when the block-id Merkle tree grew from 8 leaves
+/// (depth 3) to the canonical 16 leaves (depth 4). The v7 `BkUpdateRequest`
+/// wire shape carries **three** BK-set update siblings (`h01`, `h4_7`,
+/// `h8_15`) instead of the two v6 fields (`h0`, `h23`), and the layer-bundle
+/// `NUM_MERKLE_SIBLINGS` grew from 3 to 4 accordingly. The Fr value the halo2
+/// verifier consumes is derived on demand by inner-product-folding the
+/// reversed bytes (see [`hash_hex_to_fr`]). Note: the R15 SHPLONK aggregator
+/// adapter on-chain does *not* auto-reduce — it byte-compares the argument
+/// against the proof's instance before the pairing, so callers must send the
+/// canonical `Fr` image (see `bridge-relayer-daemon::withdrawal::hash_hex_to_block_id_fr`).
+/// The verifier rejects mismatched versions instead of silently re-interpreting fields.
+pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 7;
 
 fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
 
@@ -63,9 +76,20 @@ pub struct ProofRequest {
     pub block_height: u64,
     /// Sequence number of the previously proved key block.
     pub last_seen_block_seqno: u32,
-    /// Block ID from the attestation circuit as hex Fr. Same value whether
-    /// 1a or 1b emitted the proof — Circuit 1b's same-block_id constraint
-    /// guarantees the two attestations in the fallback pair agree.
+    /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
+    /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
+    /// `uint256(bytes32(blockId))`). Both Circuit 1a/1b and Circuit 2 bind
+    /// `block_id_fr = fold(reverse(this))` — reduction mod `Fr` happens on the
+    /// caller side (Rust: [`hash_hex_to_fr`]; on-chain: the relayer sends the
+    /// already-reduced value, and `AckiNackiBridge` applies the same `% BN254_R`
+    /// before the SHA-256 fold compare, since the R15 SHPLONK adapter does NOT
+    /// auto-reduce — it byte-compares the argument against a canonical `Fr`
+    /// instance read out of the proof before the pairing runs). Storing the
+    /// full 256-bit hash preserves the top 2 bits that a `Fr::to_repr()` wire
+    /// format would lose whenever the chain hash `>= p` (~81% of blocks).
+    /// Same value whether 1a or 1b emitted the proof — Circuit 1b's
+    /// same-block_id constraint guarantees the two attestations in the
+    /// fallback pair agree.
     pub block_id_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
@@ -82,8 +106,6 @@ pub struct ProofRequest {
     // ---- Circuit 2 (Layer Hashes Movement) ----
     /// Hex-encoded Circuit 2 proof bytes.
     pub layer_proof_hex: String,
-    /// Block ID from Circuit 2 (Merkle tree root) as hex Fr.
-    pub layer_block_id_hex: String,
     /// BK set Poseidon commitment (from node) as hex Fr.
     pub bk_set_poseidon_hash_hex: String,
     /// Number of active layers (1..=10).
@@ -195,8 +217,37 @@ pub fn fr_to_hex(fr: &Fr) -> String {
     hex::encode(fr.to_repr().as_ref())
 }
 
+/// Parse a 32-byte BE chain-hash hex and reduce to `Fr` via inner-product
+/// fold — mirrors `compute_block_id_fr` in
+/// `attestation_bls_checker_circuit::attestation_data_parser` and the
+/// in-circuit fold, giving `Fr = uint256(bytes32(hash)) mod p`. Use this at
+/// verifier entry to derive the public instance from schema v6
+/// `block_id_hex` (raw hash BE) — never `fr_from_hex`, which would reject
+/// hashes `>= p` (roughly 3/4 of random SHA-256 outputs).
+pub fn hash_hex_to_fr(hex_str: &str) -> anyhow::Result<Fr> {
+    let bytes = hex::decode(hex_str).context("invalid hex")?;
+    if bytes.len() != 32 {
+        anyhow::bail!("expected 32 bytes for hash, got {}", bytes.len());
+    }
+    Ok(fold_hash_be_to_fr(&bytes))
+}
+
+/// Inner-product fold of a 32-byte BE hash into `Fr`. Same construction as
+/// the in-circuit `inner_product(reverse(bytes), powers_of_256)` and
+/// `attestation_bls_checker_circuit::attestation_data_parser::compute_block_id_fr`.
+pub fn fold_hash_be_to_fr(bytes_be: &[u8]) -> Fr {
+    let mut acc = Fr::zero();
+    let mut power = Fr::one();
+    let base = Fr::from(256u64);
+    for &b in bytes_be.iter().rev() {
+        acc += Fr::from(b as u64) * power;
+        power *= base;
+    }
+    acc
+}
+
 // ---------------------------------------------------------------------------
-// BK-set update IPC bundle (schema v4)
+// BK-set update IPC bundle (schema v7 — 16-leaf block-id tree)
 // ---------------------------------------------------------------------------
 
 /// File-name prefix for bk-set-update bundles. The prover writes
@@ -211,7 +262,7 @@ const BKUPD_PREFIX: &str = "bkupd";
 /// receive: the Circuit 1a/1b attestation proof (binding `block_id` under
 /// the OLD commitment) plus the open SHA-256 Merkle siblings revealing
 /// `L2 = old_bk_set_poseidon_hash` and `L3 = new_bk_set_poseidon_hash` as
-/// leaves of the 8-leaf block-id tree.
+/// leaves of the 16-leaf depth-4 block-id tree.
 ///
 /// **No pubkey list.** The verifier daemon mirrors the contract state,
 /// which only stores the commitment. The full pubkey table is the prover's
@@ -232,17 +283,19 @@ pub struct BkUpdateRequest {
     /// `stored_last_bk_set_update_seq_no` at the time this bundle is
     /// produced). The verifier checks `block_seq_no > this`.
     pub last_seen_bk_update_seqno: u32,
-    /// Block ID emitted by the attestation circuit, as hex Fr (32-byte LE
-    /// `Fr::to_repr()`). Bound by the Circuit 1a/1b proof as its first public
-    /// instance. NOT used for the SHA-256 Merkle check (Fr reduction can lose
-    /// the top 2 bits when the chain hash exceeds the Fr modulus).
+    /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
+    /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
+    /// `uint256(bytes32(blockId))`). This is the single value
+    /// `applyBkSetUpdate` receives on-chain: the R15 SHPLONK adapter does NOT
+    /// auto-reduce (it byte-compares against a canonical `Fr` instance before
+    /// the pairing), so the relayer must send the already-reduced value; the
+    /// contract applies the same `% BN254_R` to the SHA-256 fold root before
+    /// comparing so both consumers agree. Rust verify derives the Fr public
+    /// instance on demand via [`hash_hex_to_fr`]; the pre-v6 dual-field
+    /// encoding (`block_id_hex` = Fr LE repr + `block_id_hash_hex` = raw hash
+    /// BE) is gone — the Fr form was redundant since it's a pure function of
+    /// the raw hash.
     pub block_id_hex: String,
-    /// Chain's raw 32-byte block hash (= GraphQL `Block.id` = SHA-256 root of
-    /// the 8-leaf `block_merkle_tree_leaves`). Used by the verifier to check
-    /// `root(L2, L3, H0, H23) == this`. This is the value the future
-    /// `applyBkSetUpdate` Solidity entry point will receive on-chain.
-    #[serde(default)]
-    pub block_id_hash_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
     /// Which attestation circuit produced `primary_proof_hex`.
@@ -261,10 +314,15 @@ pub struct BkUpdateRequest {
     /// L3 = new BK-set Poseidon commitment, as hex (32 bytes LE).
     /// At verify time: becomes the new `stored_bk_set_commitment`.
     pub new_bk_set_poseidon_hash_hex: String,
-    /// Merkle sibling H0 = SHA256(L0 ‖ L1), as hex (32 bytes).
-    pub merkle_sibling_h0_hex: String,
-    /// Merkle sibling H23 = SHA256(H2 ‖ H3), as hex (32 bytes).
-    pub merkle_sibling_h23_hex: String,
+    /// Merkle sibling h01 = SHA256(L0 ‖ L1), as hex (32 bytes). First fold
+    /// step: `sha_pair(h01, sha_pair(L2, L3)) → h0_3`.
+    pub merkle_sibling_h01_hex: String,
+    /// Merkle sibling h4_7 = SHA256(h45 ‖ h67), as hex (32 bytes). Second
+    /// fold step: `sha_pair(h0_3, h4_7) → h0_7`.
+    pub merkle_sibling_h4_7_hex: String,
+    /// Merkle sibling h8_15 = SHA256(h8_11 ‖ h12_15), as hex (32 bytes).
+    /// Third fold step: `sha_pair(h0_7, h8_15) → root`.
+    pub merkle_sibling_h8_15_hex: String,
 
     // ---- Timings (optional, for the prover's heartbeat log) ----
     #[serde(default)]
@@ -279,7 +337,9 @@ pub struct BkUpdateResult {
     pub block_seq_no: u32,
     /// Circuit 1a/1b attestation verification passed.
     pub attestation_verified: bool,
-    /// `root = SHA(SHA(H0‖SHA(L2‖L3))‖H23) == block_id` check passed.
+    /// Depth-4 fold check passed. Fold order:
+    /// `h23 = sha(L2‖L3); h0_3 = sha(h01‖h23);
+    ///  h0_7 = sha(h0_3‖h4_7); root = sha(h0_7‖h8_15) == block_id`.
     pub merkle_verified: bool,
     /// `block_seq_no > stored_last_bk_set_update_seq_no` check passed.
     pub monotonicity_ok: bool,
@@ -370,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn bkupd_request_roundtrip_preserves_v4() {
+    fn bkupd_request_roundtrip_preserves_v7() {
         let req = BkUpdateRequest {
             schema_version: PROOF_REQUEST_SCHEMA_VERSION,
             block_seq_no: 1024,
@@ -381,16 +441,35 @@ mod tests {
             primary_proof_hex: "00".to_string(),
             old_bk_set_poseidon_hash_hex: "cc".repeat(32),
             new_bk_set_poseidon_hash_hex: "dd".repeat(32),
-            merkle_sibling_h0_hex: "ee".repeat(32),
-            merkle_sibling_h23_hex: "ff".repeat(32),
+            merkle_sibling_h01_hex: "ee".repeat(32),
+            merkle_sibling_h4_7_hex: "ff".repeat(32),
+            merkle_sibling_h8_15_hex: "aa".repeat(32),
             primary_proof_gen_ms: 12345,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: BkUpdateRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, 4);
+        assert_eq!(back.schema_version, PROOF_REQUEST_SCHEMA_VERSION);
         assert_eq!(back.block_seq_no, 1024);
         assert_eq!(back.attestation_circuit, AttestationCircuit::Primary);
         assert_eq!(back.old_bk_set_poseidon_hash_hex, "cc".repeat(32));
         assert_eq!(back.new_bk_set_poseidon_hash_hex, "dd".repeat(32));
+        assert_eq!(back.merkle_sibling_h01_hex, "ee".repeat(32));
+        assert_eq!(back.merkle_sibling_h4_7_hex, "ff".repeat(32));
+        assert_eq!(back.merkle_sibling_h8_15_hex, "aa".repeat(32));
+    }
+
+    #[test]
+    fn hash_hex_to_fr_matches_fold() {
+        // Both `hash_hex_to_fr` and the equivalent inline fold must produce
+        // the same Fr for a 32-byte BE hash — this is the same construction
+        // `attestation_bls_checker_circuit::attestation_data_parser::
+        // compute_block_id_fr` uses and the same reduction the contract
+        // applies (`% BN254_R`) before handing the value to the R15 SHPLONK
+        // adapter, which byte-compares canonical `Fr` instances rather than
+        // auto-reducing.
+        let raw_be = [0xffu8; 32];
+        let via_helper = hash_hex_to_fr(&hex::encode(raw_be)).unwrap();
+        let via_inline = fold_hash_be_to_fr(&raw_be);
+        assert_eq!(via_helper, via_inline);
     }
 }

@@ -6,10 +6,10 @@
 //! workspace's dependency tree). Rather than force-merge two halo2 backends,
 //! this crate keeps proof generation behind a trait with two backends:
 //!
-//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the eleven
-//!   public inputs (including the AN destination account and the config dappId
-//!   tag) straight from the event so the relayer + submitter can be driven
-//!   end-to-end in unit tests in microseconds.
+//! - [`MockProofGenerator`] — deterministic, no halo2. Derives the twelve
+//!   public inputs (including proven `chainId`, the AN destination account, and
+//!   the config dappId tag) straight from the event so the relayer + submitter
+//!   can be driven end-to-end in unit tests in microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
@@ -35,10 +35,11 @@ pub trait ProofGenerator: Send + Sync {
 // MockProofGenerator — deterministic, no halo2
 // ─────────────────────────────────────────────────────────────────────
 
-/// Deterministic proof generator for tests. Derives the eleven public inputs
-/// (the AN destination account from the event the same way the real circuit
-/// binds it, plus the config dappId tag) so the submitter's `finalizeDeposit`
-/// args are realistic, and emits canned `vk_blob` / `proof` bytes.
+/// Deterministic proof generator for tests. Derives the twelve public inputs
+/// (proven `chainId` from `event.source_chain_id`, the AN destination account
+/// from the event the same way the real circuit binds it, plus the config
+/// dappId tag) so the submitter's `finalizeDeposit` args are realistic, and
+/// emits canned `vk_blob` / `proof` bytes.
 #[derive(Clone, Debug, Default)]
 pub struct MockProofGenerator {
     /// When set, `generate` fails for this `deposit_id` — lets tests
@@ -88,6 +89,8 @@ impl MockProofGenerator {
             sender: addr_to_field(event.sender.as_slice()),
             amount: event.amount,
             contract_address: addr_to_field(event.source_contract.as_slice()),
+            // Proven chainId mirrors RPC eth_chainId stamped on the event.
+            chain_id: U256::from(event.source_chain_id),
             // dappId is the config tag, split into 16-byte halves (not from the
             // event). The AN account is bound from the event, split likewise.
             dapp_id_high: half(&dapp_be[0..16]),
@@ -166,7 +169,7 @@ impl SubprocessProverConfig {
 /// 1. `fetch_deposit_data` — RPC → `DepositProofInput` JSON (receipt RLP, MPT
 ///    proof, block header, parsed event fields);
 /// 2. `export_vk_blob` — v2 RLC `VkBlob` for the deposit circuit;
-/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 11×32-byte LE
+/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 12×32-byte LE
 ///    public-input operand.
 ///
 /// The three resulting files are read back and assembled into a
@@ -271,6 +274,11 @@ impl ProofGenerator for SubprocessProofGenerator {
         let tx_hash = format!("{:#x}", event.tx_hash);
         let contract = format!("{:#x}", event.source_contract);
         let log_index = event.log_index.to_string();
+        // Pass the chain we believe this deposit is on, so the prover can fail
+        // fast if the witness it fetched proves a different one. Without it the
+        // prover falls back to whatever the witness says and the mismatch would
+        // only surface as an AN-side allowlist rejection.
+        let chain_id = event.source_chain_id.to_string();
 
         // 1. Fetch witness.
         self.run_example(&[
@@ -295,6 +303,8 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_example(&[
             "export_vk_blob".into(),
             "--".into(),
+            "--chain-id".into(),
+            chain_id.clone(),
             "--input".into(),
             input_json.display().to_string(),
             "--output".into(),
@@ -312,6 +322,8 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_example(&[
             "export_blake2b_proof".into(),
             "--".into(),
+            "--chain-id".into(),
+            chain_id.clone(),
             "--input".into(),
             input_json.display().to_string(),
             "--proof-out".into(),
@@ -361,6 +373,7 @@ mod tests {
             block_number: 500,
             block_hash: B256::repeat_byte(0xcd),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 

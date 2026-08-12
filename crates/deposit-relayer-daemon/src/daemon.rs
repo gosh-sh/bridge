@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     error::RelayerError,
@@ -54,6 +54,21 @@ impl Default for BackoffConfig {
 }
 
 impl BackoffConfig {
+    /// Reject configs that would busy-loop the daemon.
+    pub fn validate(&self) -> Result<(), RelayerError> {
+        if self.initial.is_zero() {
+            return Err(RelayerError::other(
+                "backoff initial delay must be > 0 (got 0s)",
+            ));
+        }
+        if self.multiplier == 0 {
+            return Err(RelayerError::other(
+                "backoff multiplier must be >= 1 (0 causes a hot loop)",
+            ));
+        }
+        Ok(())
+    }
+
     fn bump(&self, current: Duration) -> Duration {
         let next = current.saturating_mul(self.multiplier);
         if next > self.max {
@@ -140,6 +155,8 @@ pub enum LastOutcome {
     NotYetAvailable { deposit_id: u64 },
     ProofFailed { deposit_id: u64 },
     AnRejected { deposit_id: u64 },
+    AnPending { deposit_id: u64 },
+    Skipped { deposit_id: u64 },
     TickError,
 }
 
@@ -240,6 +257,33 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         deposit_id,
                     })
                 },
+                Ok(TickOutcome::AnPending {
+                    deposit_id,
+                    reason,
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.not_yet_available += 1;
+                    debug!(deposit_id, reason = %reason, "daemon: finalizeDeposit still pending");
+                    (false, LastOutcome::AnPending {
+                        deposit_id,
+                    })
+                },
+                Ok(TickOutcome::Skipped {
+                    deposit_id,
+                    reason,
+                }) => {
+                    summary.already_finalized += 1;
+                    warn!(
+                        deposit_id,
+                        reason = %reason,
+                        "daemon: deposit parked; run finalize-one manually",
+                    );
+                    (true, LastOutcome::Skipped {
+                        deposit_id,
+                    })
+                },
                 Err(e) => {
                     if let Some(m) = &metrics {
                         m.tick_errors_total.fetch_add(1, Ordering::Relaxed);
@@ -309,6 +353,7 @@ mod tests {
             block_number: 100 + id,
             block_hash: B256::repeat_byte(0xcd),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 
@@ -322,6 +367,10 @@ mod tests {
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()
     }
@@ -332,6 +381,26 @@ mod tests {
             max: Duration::from_millis(80),
             multiplier: 2,
         }
+    }
+
+    #[test]
+    fn backoff_rejects_zero_multiplier() {
+        let b = BackoffConfig {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(10),
+            multiplier: 0,
+        };
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn backoff_rejects_zero_initial() {
+        let b = BackoffConfig {
+            initial: Duration::ZERO,
+            max: Duration::from_secs(10),
+            multiplier: 2,
+        };
+        assert!(b.validate().is_err());
     }
 
     #[test]

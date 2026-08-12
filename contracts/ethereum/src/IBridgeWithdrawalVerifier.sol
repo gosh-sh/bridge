@@ -20,12 +20,11 @@ pragma solidity ^0.8.19;
 ///      - `layerHashes[100]` removed — replaced by a single `finalRoot`
 ///        public input and an off-circuit anchor lookup on-chain.
 ///
-///      The `WithdrawalPublicInputs` struct mirrors slots [0..9] of the gnark
-///      circuit's 10-element public-input vector byte-for-byte. See
-///      `IBridgeWithdrawalGroth16Verifier` for the full layout.
+///      The `WithdrawalPublicInputs` struct mirrors slots [0..9] of the Halo2
+///      circuit's 10-element public-input vector byte-for-byte.
 interface IBridgeWithdrawalVerifier {
     /// @notice Public-input slots [0..9] of the Circuit 4 (single-final-root) proof.
-    /// @dev Field order matches the gnark circuit's public-input layout
+    /// @dev Field order matches the Halo2 circuit's public-input layout
     ///      byte-for-byte. The on-chain adapter forwards this struct
     ///      verbatim to `verifyProof`.
     struct WithdrawalPublicInputs {
@@ -57,9 +56,9 @@ interface IBridgeWithdrawalVerifier {
     }
 
     /// @notice Verify a Circuit 4 (single-final-root) proof.
-    /// @param proof 256-byte gnark Groth16 proof (8 × uint256, marshal-solidity layout).
+    /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof).
     /// @param pub Public-input slots [0..9] — the 10 field elements.
-    /// @return isValid true on a passing proof; reverts inside the underlying gnark
+    /// @return isValid true on a passing proof; reverts inside the underlying SHPLONK
     ///         verifier are caught and surfaced as `false`.
     function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)
         external

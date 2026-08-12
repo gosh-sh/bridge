@@ -9,7 +9,11 @@
 //!   timestamp)` event, honouring a confirmation depth so only finalised
 //!   deposits are surfaced.
 
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use alloy::{
     network::{Ethereum, Network},
@@ -181,6 +185,12 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     from_block: u64,
     /// Confirmation depth: `safe_head = head - confirmations`.
     confirmations: u64,
+    /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
+    chain_id: Mutex<Option<u64>>,
+    /// Highest `safe_head` scanned on the previous fetch. When set, the next
+    /// scan starts at `scanned_through + 1` instead of re-walking from
+    /// `from_block`.
+    scan_cursor: Option<Arc<Mutex<u64>>>,
     _network: std::marker::PhantomData<N>,
 }
 
@@ -195,12 +205,49 @@ where
             address,
             from_block,
             confirmations,
+            chain_id: Mutex::new(None),
+            scan_cursor: None,
             _network: std::marker::PhantomData,
+        }
+    }
+
+    /// Attach a shared scan cursor (typically backed by `RelayerState`).
+    pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<u64>>) -> Self {
+        self.scan_cursor = Some(cursor);
+        self
+    }
+
+    fn effective_scan_from(&self) -> u64 {
+        match &self.scan_cursor {
+            Some(cursor) => {
+                let last = *cursor.lock().expect("poisoned scan cursor");
+                if last >= self.from_block {
+                    last.saturating_add(1)
+                } else {
+                    self.from_block
+                }
+            },
+            None => self.from_block,
         }
     }
 
     pub fn address(&self) -> Address {
         self.address
+    }
+
+    /// Resolve and cache `eth_chainId` for operator sanity checks against the
+    /// proven `chainId` public input.
+    async fn resolve_chain_id(&self) -> Result<u64, RelayerError> {
+        if let Some(id) = *self.chain_id.lock().expect("poisoned lock") {
+            return Ok(id);
+        }
+        let id = self
+            .provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RelayerError::eth(format!("eth_chainId failed: {e}")))?;
+        *self.chain_id.lock().expect("poisoned lock") = Some(id);
+        Ok(id)
     }
 
     /// Read the bridge's `depositCounter()` — the number of deposits made so
@@ -296,6 +343,10 @@ where
         block_number,
         block_hash: receipt.block_hash.unwrap_or_default(),
         source_contract: bridge_address,
+        source_chain_id: provider
+            .get_chain_id()
+            .await
+            .map_err(|e| RelayerError::eth(format!("get_chain_id failed: {e}")))?,
     }))
 }
 
@@ -321,7 +372,7 @@ where
         // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
         let mut logs = Vec::new();
-        let mut chunk_start = self.from_block;
+        let mut chunk_start = self.effective_scan_from();
         while chunk_start <= safe_head {
             let chunk_end = chunk_start
                 .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
@@ -335,6 +386,10 @@ where
             let chunk = get_logs_with_retry(&self.provider, &filter).await?;
             logs.extend(chunk);
             chunk_start = chunk_end.saturating_add(1);
+        }
+
+        if let Some(cursor) = &self.scan_cursor {
+            *cursor.lock().expect("poisoned scan cursor") = safe_head;
         }
 
         for log in logs {
@@ -374,6 +429,7 @@ where
                 block_number: decoded.block_number.unwrap_or_default(),
                 block_hash: decoded.block_hash.unwrap_or_default(),
                 source_contract: self.address,
+                source_chain_id: self.resolve_chain_id().await?,
             }));
         }
         Ok(None)
@@ -423,6 +479,7 @@ mod tests {
             block_number: 100 + deposit_id,
             block_hash: B256::repeat_byte(0xbb),
             source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 1,
         }
     }
 

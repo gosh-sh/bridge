@@ -22,7 +22,7 @@
 - Verifies it against an embedded `VK_BLOB` constant using the 3-operand opcode
   (`VkBlob` magic `"VKBLOB\x00\x00"`, strict 32-byte LE Fr, raw SHPLONK proof).
 - The wire framing matches our producer side
-  (`crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs::Halo2TvmOperands`)
+  (`crates/bridge-snark-utils/src/halo2_tvm_bundle.rs::Halo2TvmOperands`)
   exactly.
 
 The embedded `VK_BLOB` is, by its own inline comment, our **Circuit 1B fallback**
@@ -216,7 +216,7 @@ reads. Today `deposit-prover` uses `halo2-pse`. To make its VK byte-compatible:
    (`../vk-compat-check/rlc-reader/`, RESULT: PASS).
 2. **[VkBlob v2 — DONE (producer wire) 2026-05-28]** Implemented the shape
    discriminator + config carriage in
-   `crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs`:
+   `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`:
    - New `CircuitShape { Base = 0, Rlc = 1 }` + `VkConfig { Base(BaseCircuitParams),
      Rlc(Vec<u8>) }` (RLC config carried as **opaque `EthCircuitParams` JSON** so
      the crate needs no `axiom-eth` dep until o3a/o4 land).

@@ -30,7 +30,7 @@ This doc is the **end-to-end view**. Every section follows the pattern: *what th
 
 - ETH → AN: `AckiNackiBridge.deposit()` (ETH side), the Halo2 deposit-prover proof (off-chain), and the future `VERHALO2SHPLONK`-based AN-side `TokenBridge.finalizeDeposit(...)` + nullifier. The legacy refund-style `withdraw(...)` was retired in Phase 4.3.
 - AN → ETH: `AckiNackiBridge.verifyBlock()` and the tuple of two cross-circuit-bound ZK proofs (Circuit 1A or 1B + Circuit 2).
-- BK-set commitment lifecycle: deferred to Phase 1.C (Circuit 3 / `bkSetUpdateProof`); the legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2**. Until Phase 1.C ships, `storedBkSetCommitment` only changes via redeployment.
+- BK-set commitment lifecycle: rotation runs today through the interim `applyBkSetUpdate` (attestation + SHA-256 opening of the `(L2, L3)` leaf pair, §6); Circuit 3 (`bkSetUpdateProof`) is still owed for a statement about the rotation's contents. The legacy 7-day timelocked owner fallback (`LayerHashBridge.proposeBkSetCommitment`) was **retired in Phase 4.2** and no owner path replaced it.
 - Block-hash oracle (`AxiomBlockHeaderOracle` + the EVM `blockhash()` opcode) — currently unused by the public surface; preserved for a future burn-proof / ETH-side withdrawal flow.
 - Cross-cutting properties: ZK verifier integrity, reentrancy, access control, fork resistance.
 - AAVE V3 integration: covered in detail in `docs/aave_integration.md`; this doc only summarises how it interacts with the rest.
@@ -112,7 +112,9 @@ AN-side (planned, lands with the future `VERHALO2SHPLONK` opcode + `TokenBridge.
 | **DEP-N-1** | A successful `finalizeDeposit(halo2Proof, publicInputs, vk)` requires the Halo2 SHPLONK proof to verify natively under the immutable VK, binding `(depositId, sender, amount, bridgeAddr, anWorkchain, anAccount, blockHash, promiseCommit)` to a real `Deposit` event in the receipt trie of an Ethereum block. |
 | **DEP-N-2** | `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` — wrong-bridge proofs revert. |
 | **DEP-N-3** | The per-`depositId` nullifier in `TokenBridge` is set before any token mint; replay reverts. |
-| **DEP-N-4** | Producer pipeline waits ≥ 12 finality confirmations before generating the proof, and the ground-truth block hash is cross-checked against ≥ 2 Ethereum RPC providers. |
+| **DEP-N-4** | `finalizeDeposit` credits a deposit only if the proof-bound source block hash sits in the on-chain anchor set `_acceptedBlockHash[chainId]`. Admission is off-proof: the block must be canonical at its number on an independent node and ≥ 64 confirmations deep. |
+| **DEP-N-5** | One source deposit mints at most once, and deposits on different chains never share a voucher: the replay identity is `(srcChainId, depositId, contractAddr, dappId)`, and all three places that compute it agree. |
+| **DEP-N-6** | Per chain, cumulative minted amount stays within `_mintCapByChain[chainId]` when that cap is non-zero (bound on damage; overshoot possible by the amount of concurrently in-flight deposits). |
 | **DEP-N-5** | The AN recipient is a **proven** public input (`anWorkchain`, `anAccountHigh`, `anAccountLow`): `finalizeDeposit` credits `anWorkchain:(anAccountHigh<<128 \| anAccountLow)` reconstructed from the proof, never an EVM address or a relayer-supplied hint. The circuit `constrain_equal`s these to the RLP-parsed `Deposit` event data words. |
 
 ### 4.2 Why each property holds
@@ -129,7 +131,11 @@ AN-side (post-`VERHALO2SHPLONK`):
 - **DEP-N-1**: the Halo2 SHPLONK verifier inside the TVM opcode accepts only proofs whose transcript matches `vk` and whose public inputs match the supplied vector. The circuit's internal constraints chain receipt RLP, MPT inclusion, log selector + topics + data, block-hash binding, and the keccak coprocessor commitment.
 - **DEP-N-2**: explicit `require(publicInputs[3] == ETH_BRIDGE_ADDRESS_FR, "wrong bridge contract");` in `TokenBridge.finalizeDeposit`.
 - **DEP-N-3**: `nullifier[depositId] = true` is set before `_mintTo(...)`; second call reverts.
-- **DEP-N-4**: producer responsibility, not contract. Documented in `docs/verifying_eth_proof_on_an.md` §3.
+- **DEP-N-4**: half contract, half trust assumption. The contract half is `require(_acceptedBlockHash[f.chainId][_parseBlockHash(publicInputs)], ERR_UNKNOWN_BLOCK)` in `USDCBridge.finalizeDeposit` (`acki-nacki` `7992ce26`), mirroring `AckiNackiBridge._knownAnchors` in the AN→ETH direction. No circuit can supply the other half — "this header is canonical" is a statement about Ethereum consensus, not about the witness (BC-D01) — so the anchor set is populated from outside the proof, by a key. Two writers exist: the owner (`setAcceptedBlockHash`) and a threshold of attesters (`attestBlockHash`, `1fb5b28c`). **Which one is the actual trust root is a deployment fact, not a code fact**: while `getAttesterConfig().ownerAnchorsEnabled` is true it is the owner key alone regardless of how many attesters are registered, and `disableOwnerAnchors()` (one-way) is what makes it M-of-N. Either way the writer can mint by admitting a hash from a chain that never existed; an ETH light client is the long-run target for L1, and L2s stay on attesters until someone verifies their settlement to L1. `scripts/deposit_anchor_params.py --verify` enforces the independence + confirmation-depth obligations before printing the call arguments. Full analysis: `docs/reviews/deposit_circuit_audit_2026-08-03.md` §1.
+
+- **DEP-N-5** (new 2026-08-04, `acki-nacki` `21a781e7`): the anti-replay identity behind the deterministic `DepositVoucher` address is `(srcChainId, depositId, contractAddr, dappId)`. `srcChainId` is load-bearing rather than decorative: without it, two allowlisted chains sharing a bridge address (CREATE2, or the same deployer nonce) collide on their per-chain `depositId` counters, and the second chain's deposit is silently swallowed as a replay — funds in, nothing minted, no refund path. Checked mechanically across all three copies of the signature by `scripts/check_voucher_abi_consistency.py`, because a divergence between bridge and voucher aborts the voucher constructor on cell underflow (`exit_code 9`) rather than failing to compile.
+
+- **DEP-N-6** (new 2026-08-04, `acki-nacki` `993af815`): `_mintedByChain[chainId] <= _mintCapByChain[chainId]` for every chain with a non-zero cap — a bound on damage, not a soundness invariant. Enforced in `finalizeDeposit` (so an over-cap deposit reverts while staying retryable) and tallied in `confirmDeposit` (so replays consume no headroom), which means N in-flight deposits can overshoot by their combined amount. Read it as "a forgery cannot drain more than this per chain", not as an exact ceiling.
 - **DEP-N-5**: the deposit circuit (`deposit-prover/src/circuit_v2.rs`) exposes `anWorkchain`/`anAccountHigh`/`anAccountLow` as public inputs #4–#6 and constrains them equal to the RLP-parsed `Deposit` data words 1–2 (the same Phase-0/Phase-1 binding used for `amount`). `TokenBridge.finalizeDeposit` therefore credits a destination that is part of the proof, not trusted from the relayer (landed 2026-06-02; `num_instance` 7→10).
 
 ### 4.3 How to verify
@@ -205,19 +211,19 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000
 |---|---|
 | **LH-1** | Every successful `verifyBlock(...)` is preceded by **two** Groth16 proofs: one attestation proof (Circuit 1A or 1B, depending on `finType`) and one layer-hashes-movement proof (Circuit 2). |
 | **LH-2** | `bkSetCommitment` (the argument flowing into both verifier calls) equals the bridge's stored `storedBkSetCommitment` — proofs cannot be back-dated to a stale committee. |
-| **LH-3** | `prevMaxLevelLayerHash` (the argument flowing into Circuit 2) equals the bridge's stored `storedPrevMaxLevelLayerHash` — the **chain anchor**. For the very first call after deployment this equals `genesisPrevMaxLevelLayerHash` (typically 0). |
+| **LH-3** | `prevMaxLevelLayerHash` (the argument flowing into Circuit 2) equals the bridge's `expectedPrevAnchor(numLayers)` — the **chain anchor** derived from the per-layer rolling windows via `pick = min(numLayers, highestActiveLayer)`. For the very first call after deployment this falls back to the immutable `storedPrevMaxLevelLayerHash` genesis seed (typically 0). Storage v2.0 (2026-08-04): the flat mutable `storedPrevMaxLevelLayerHash` was removed; `expectedPrevAnchor` sources from `_layerWindows[pick]` instead. |
 | **LH-4** | `numLayers ∈ [1, MAX_LAYER_HASHES]` (i.e., 1..10) — out-of-range counts revert with `InvalidNumLayers`. |
 | **LH-5** | `layerHashes[i] == 0` for every `i ≥ numLayers`. The bridge will revert with `LayerHashTailNonZero(i)` — the unused tail must not carry silent garbage. |
 | **LH-6** | `blockSeqNo > storedLastSeenBlockSeqNo` — strict monotonicity. Replay attempts revert with `BlockSeqNoNotMonotonic`. |
 | **LH-7** | Each verifier adapter (`PrimaryVerifier`, `FallbackVerifier`, `LayerHashesMovementVerifier`) returns `false` if `proof.length != 256`, and never reverts on invalid proofs — it normalises gnark reverts to `false` via try/catch so `verifyBlock` produces a clean `AttestationProofRejected` / `LayerHashesProofRejected` revert. |
-| **LH-8** | After a successful call, `storedPrevMaxLevelLayerHash = layerHashes[numLayers - 1]` (the new top-of-chain becomes the anchor for the next call), `storedNumLayers = numLayers`, `storedLayerHashes = layerHashes`, `storedLastSeenBlockSeqNo = blockSeqNo`. There is no admin path that bypasses this. |
+| **LH-8** | Storage v2.0 (2026-08-04): after a successful call, `_layerWindows[L]` gets `layerHashes[L-1]` appended for every non-zero `L ∈ [1, numLayers]` (rolling window semantics); `storedLastSeenBlockSeqNo = blockSeqNo`. There is no admin path that bypasses this. The flat `storedNumLayers` / `storedLayerHashes` / mutable `storedPrevMaxLevelLayerHash` writes are gone — indexers observe per-layer heads via `getLatestPerLayer()` and query the next-block anchor via `expectedPrevAnchor(numLayers)`. |
 | **LH-9** | If any of the three verifier slots is `address(0)` at construction, `verifyBlock` reverts with `VerifyBlockDisabled`. The deposit/AAVE surface remains fully functional in that mode. |
 
 ### 5.2 Why each property holds
 
 - **LH-1**: `verifyBlock` directly calls both verifier adapters; the verifier addresses are `immutable` and set in the constructor's `VerifyBlockConfig`. There is no setter that can replace them post-deployment.
 - **LH-2**: `bkSetCommitment != storedBkSetCommitment ⇒ revert BkSetCommitmentMismatch`. The user-supplied `bkSetCommitment` is the same value passed to **both** verifier calls — the partner's circuits commit to it as a public input (offset 96 of the envelope tree), so a wrong value would also fail the gnark pairing.
-- **LH-3**: explicit `prevMaxLevelLayerHash != storedPrevMaxLevelLayerHash ⇒ revert PrevAnchorMismatch`. The first-call genesis case is just `storedPrevMaxLevelLayerHash = genesisPrevMaxLevelLayerHash` seeded in the constructor.
+- **LH-3**: explicit `prevMaxLevelLayerHash != _expectedPrevAnchor(numLayers) ⇒ revert PrevAnchorMismatch`. Storage v2.0 (2026-08-04): `_expectedPrevAnchor` picks the head of `_layerWindows[min(numLayers, highestActiveLayer)]`; if `highestActiveLayer == 0` (very first call after deployment) it falls back to the immutable `storedPrevMaxLevelLayerHash` genesis seed.
 - **LH-4**: explicit `if (numLayers == 0 || numLayers > MAX_LAYER_HASHES) revert InvalidNumLayers(numLayers)`.
 - **LH-5**: explicit `for (i = numLayers; i < MAX_LAYER_HASHES; i++) if (layerHashes[i] != 0) revert LayerHashTailNonZero(i)` — guards against silent garbage in unused slots.
 - **LH-6**: explicit `blockSeqNo <= storedLastSeenBlockSeqNo ⇒ revert BlockSeqNoNotMonotonic`.
@@ -235,7 +241,7 @@ cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000
 2. Shape & range checks: `numLayers` in `[1, MAX_LAYER_HASHES]` (LH-4); `layerHashes` tail (LH-5).
 3. Anchor checks against stored state: `bkSetCommitment` (LH-2), `blockSeqNo` (LH-6), `prevMaxLevelLayerHash` (LH-3).
 4. Crypto: route to `primaryVerifier` or `fallbackVerifier` based on `finType`, then call `layerHashesVerifier`. Both must return `true` (LH-1, LH-7).
-5. Effects (CEI): commit `storedLastSeenBlockSeqNo`, `storedNumLayers`, `storedLayerHashes`, `storedPrevMaxLevelLayerHash` (LH-8).
+5. Effects (CEI): commit `storedLastSeenBlockSeqNo` and call `_appendLayerHashes(numLayers, layerHashes, blockSeqNo)` to push each non-zero `layerHashes[L-1]` into `_layerWindows[L]` (LH-8). Storage v2.0 (2026-08-04): the flat `storedNumLayers` / `storedLayerHashes` / mutable `storedPrevMaxLevelLayerHash` writes were removed.
 6. Emit `BlockVerified(blockId, blockSeqNo, finType, numLayers)`.
 
 ```bash
@@ -271,10 +277,10 @@ forge test --match-test "testHappyPathPrimary" -vv
 Drives `verifyBlock` end-to-end with a real bound proof set generated by:
 
 ```bash
-cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+cargo run -p bridge-snark-utils --bin export-bound-block-proofs --release
 ```
 
-The export binary writes `bound_scenario.json` plus `proof_*.bin` into `crates/bridge-prover-orchestrator/exports/`; the Foundry test loads them as hardcoded fixtures (regenerated on demand). Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue) is deferred to **Phase 5.3**.
+The export binary writes `bound_scenario.json` plus `proof_*.bin` into `crates/bridge-snark-utils/exports/`; the Foundry test loads them as hardcoded fixtures (regenerated on demand). Multi-block real-proof coverage (the legacy `LayerHashE2ETest` analogue) is deferred to **Phase 5.3**.
 
 #### L5 — post-deployment
 
@@ -284,21 +290,29 @@ cast call $BRIDGE "fallbackVerifier()(address)"
 cast call $BRIDGE "layerHashesVerifier()(address)"
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"
 cast call $BRIDGE "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE "storedNumLayers()(uint8)"
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
+# Storage v2.0 (2026-08-04): `storedNumLayers` was removed; use
+# `getLatestPerLayer()` (see below) — the highest non-zero entry
+# is the current `highestActiveLayer`.
+# The `storedPrevMaxLevelLayerHash()` getter still exists but is the
+# immutable genesis seed; for the next-block anchor use
+# `expectedPrevAnchor(numLayers)`.
+cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"   # immutable genesis seed
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 cast call $BRIDGE "MAX_LAYER_HASHES()(uint256)"   # 10
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"   # replaces getStoredLayerHashes()
 ```
 
 #### L6 — monitoring invariants
 
 ```
-storedPrevMaxLevelLayerHash(t) == storedLayerHashes[storedNumLayers - 1](t)            # always
-prevMaxLevelLayerHash_in_event_t == storedPrevMaxLevelLayerHash(t-1)                   # event continuity
-storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                            # strict monotonicity
+# Storage v2.0 (2026-08-04): invariants restated over the per-layer window model.
+getLatestPerLayer()[L-1] == last-non-zero layerHashes[L-1] observed in verifyBlock so far  # rolling head
+expectedPrevAnchor(numLayers)(t) == layerHashes[pick-1] from most recent verifyBlock       # per-layer anchor
+prevMaxLevelLayerHash_in_event_t == expectedPrevAnchor(numLayers_t)(t-1)                    # event continuity
+storedLastSeenBlockSeqNo(t) > storedLastSeenBlockSeqNo(t-1)                                  # strict monotonicity
 ```
 
-A relayer/monitor that sees a `BlockVerified` event with a `prevMaxLevelLayerHash` parameter that doesn't match the prior `storedPrevMaxLevelLayerHash` should alert — it would indicate a state-machine break.
+A relayer/monitor that sees a `BlockVerified` event with a `prevMaxLevelLayerHash` parameter that doesn't match the prior `expectedPrevAnchor(numLayers)` should alert — it would indicate a state-machine break.
 
 ---
 
@@ -310,9 +324,9 @@ The legacy `LayerHashBridge.rotateBkSet` (ZK-proven via a 2-input Halo2 stub) **
 
 The v2 plan is **Phase 1.C**: extend `verifyBlock` (or add a sibling `verifyBkSetUpdate`) with an optional `bkSetUpdateProof` argument that, on a successful Circuit 3 pairing, advances `storedBkSetCommitment` from old → new in the same transaction. Until Phase 1.C ships:
 
-- `storedBkSetCommitment` is **immutable post-deployment** in practice — there is no setter.
-- BK-set rotation requires a **redeployment** of `AckiNackiBridge` with a new `genesisBkSetCommitment` until Circuit 3 is wired (and the relayer can produce the proof).
-- This is intentional: it removes the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` introduced.
+- An **interim** `applyBkSetUpdate` has since shipped: it takes a Circuit 1A/1B attestation plus a three-sibling SHA-256 opening of the `(L2, L3)` leaf pair in the 16-leaf, depth-4 block-id tree, and advances `storedBkSetCommitment` when the fold reproduces `blockId`. It is permissionless and needs no Circuit 3 — the rotation is authorised by the attested block itself, not by a dedicated proof. So `storedBkSetCommitment` is no longer immutable post-deployment, and BK-set rotation no longer requires a redeployment.
+- What Circuit 3 still buys is a statement about the rotation's *contents* (that the new committee legitimately succeeds the old one). `applyBkSetUpdate` only shows that the attested block commits to this pair of commitments at those tree positions.
+- No owner path was reintroduced: the "trusted owner can flip the committee" assumption that the legacy `LayerHashBridge.proposeBkSetCommitment` carried stays retired.
 
 ### 6.2 What must hold (target invariants for Phase 1.C)
 
@@ -326,9 +340,21 @@ The following list is **forward-looking** and will be re-verified once Circuit 3
 | **BK-4** | After success, `storedBkSetCommitment = newCommitment` and a `BkSetCommitmentRotated(oldCommitment, newCommitment)` event is emitted. |
 | **BK-5** | The transition is single-step: there is no "pending"/"executed" two-phase flow (the v1 timelock was a workaround for the absence of Circuit 3). |
 
+The one invariant below is **not** forward-looking — it constrains `applyBkSetUpdate` as shipped, and it is the kind that fails silently in the direction of "nothing works" rather than "anything passes":
+
+| Property | Statement (holds today) |
+|---|---|
+| **BK-6** | `blockId` means the same thing to both of its consumers inside `applyBkSetUpdate`: the canonical `Fr` image of the block-id tree root. The attestation adapter compares it byte-for-byte against an instance read out of the proof, which is always `< r`; the fold produces a raw SHA-256 root, of which only `r / 2^256 = 18.9%` are. The contract therefore reduces the root (`% BN254_R`) before comparing, and the relayer sends the reduced value on both this path and `verifyBlock`. |
+
+- **BK-6**: worth stating because the failure is not a security hole but a dead entry point — without the reduction the two consumers are unsatisfiable at once for ~81% of rotations, and the mismatch surfaces as `AttestationProofRejected` or `BkUpdateMerkleMismatch` depending on which convention the caller picked. It stayed invisible for a while because the mock verifiers accepted any argument; they now mirror the adapter and reject non-canonical inputs, so the suite fails if either side drifts back. Contract side: `AckiNackiBridge.applyBkSetUpdate`. Relayer side: `types::block_id_to_field` / `withdrawal::hash_hex_to_block_id_fr`. Note the older claim in this tree that "the on-chain verifier auto-reduces via `mod(calldataload, f_q)`" was true of the direct Yul verifier and stopped being true with the R15 aggregator adapters, which compare before they pair.
+
 ### 6.3 How to verify (today)
 
-There are no BK-set rotation tests at HEAD — the surface doesn't exist yet. The closest thing is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+`AckiNackiBridgeApplyBkSetUpdateTest` (11 tests) covers the shipped interim surface: the depth-4 fold against a vector computed independently in Python, rejection of the legacy depth-3 root, the `Fr` reduction in both directions (BK-6), replay, non-monotonic sequence numbers, stale old commitment, and a two-rotation chain. For the Circuit 3 target invariants above, the closest thing at HEAD is the negative path in `AckiNackiBridgeVerifyBlockTest::testRevertOnBkSetCommitmentMismatch`, which confirms that `verifyBlock` rejects any proof signed by a different committee.
+
+```bash
+cd contracts/ethereum && forge test --match-contract ApplyBkSetUpdate -vv
+```
 
 ```bash
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"   # static between deployments
@@ -437,7 +463,7 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 |---|---|
 | **ZK-1** | Production wires all three circuits to the R15 SHPLONK aggregator Yul (`PrimaryAggregatorVerifier.bin`, `FallbackAggregatorVerifier.bin`, `LayerHashesAggregatorVerifier.bin`), each `snark-verifier-sdk` output not subsequently edited. The retained 1A/2 gnark Groth16 test verifiers (`PrimaryGroth16VerifierGenerated`, `LayerHashesGroth16VerifierGenerated`) are likewise auto-generated; the 1B `FallbackGroth16VerifierGenerated` was deleted when Circuit 1B moved to SHPLONK. |
 | **ZK-2** | Each adapter normalises a failing verifier call to `false`: the SHPLONK adapters (`PrimaryAggregatorVerifier`, `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier`) check the Yul `staticcall` result; the retained 1A/2 gnark adapters (`PrimaryVerifier`, `LayerHashesMovementVerifier`) wrap `verifyProof` in `try/catch`. |
-| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's 7 public inputs are consumed natively on the AN side, not on Ethereum.) |
+| **ZK-3** | The adapter never builds a public-input vector larger than the circuit allows; layout matches the gnark VK. (Circuit 1A/1B: 4 inputs; Circuit 2: 14 inputs. The deposit-prover Halo2 SHPLONK path's **12 public inputs** — Track-2 chain-binding, 2026-07-23 — are consumed natively on the AN side, not on Ethereum.) |
 | **ZK-4** | Adapter constructors reject `address(0)` for the underlying Groth16 verifier. |
 | **ZK-5** | Each adapter rejects proofs of the wrong byte length (256 B for the v2 attestation/layer-hashes path). |
 
@@ -447,7 +473,7 @@ cast call $ORACLE "getBlockHash(uint256)" $((BLOCK_NOW - 1))   # should return n
 
 ```bash
 diff -u contracts/ethereum/src/LayerHashesGroth16VerifierGenerated.sol \
-  <(cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
+  <(cd crates/bridge-snark-utils/gnark-wrappers/circuit-2 && ./circuit-2 setup ../../proofs/.../halo2_proof.json | tee /dev/stderr)
 ```
 
 This is a one-shot manual check whenever the corresponding circuit (or its `circuit.go` `Define`) changes. The same applies to `PrimaryGroth16VerifierGenerated.sol` (circuit-1a). (Circuit 1B no longer has a gnark Groth16 verifier — it uses the SHPLONK aggregator `.bin`; regenerate via `scripts/n14_r15_proving_run.sh`.)
@@ -552,7 +578,7 @@ forge test                # 135 tests across 15 suites, all green
 # ─── L3 — single-block real-proof bound test ──────────────────
 forge test --match-test "testHappyPathPrimary|testHappyPathFallback" -vv
 # Drives verifyBlock with a real bound proof set generated by:
-#   cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+#   cargo run -p bridge-snark-utils --bin export-bound-block-proofs --release
 # Multi-block real-proof E2E is deferred to Phase 5.3 (relayer + Anvil).
 
 # ─── L0 — sanity grep for invariants ──────────────────────────
@@ -574,8 +600,10 @@ cast call $BRIDGE  "fallbackVerifier()(address)"
 cast call $BRIDGE  "layerHashesVerifier()(address)"
 cast call $BRIDGE  "storedBkSetCommitment()(uint256)"
 cast call $BRIDGE  "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE  "storedNumLayers()(uint8)"
-cast call $BRIDGE  "storedPrevMaxLevelLayerHash()(uint256)"
+# Storage v2.0 (2026-08-04): `storedNumLayers()` removed; use
+# `getLatestPerLayer()` and scan for the highest non-zero entry.
+cast call $BRIDGE  "storedPrevMaxLevelLayerHash()(uint256)"     # immutable genesis seed
+cast call $BRIDGE  "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 cast call $BRIDGE  "MAX_LAYER_HASHES()(uint256)"                 # 10
 cast call $ORACLE  "axiomV2Core()(address)"
 
@@ -587,11 +615,14 @@ echo "aWETHbal  = $(cast call $aWETH 'balanceOf(address)(uint256)' $BRIDGE)"
 # Invariant: balance + aWETHbal >= treasury
 
 # 2. AN→ETH chain integrity (poll every block)
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+# Storage v2.0 (2026-08-04): observe the per-layer window heads and the
+# per-numLayers anchor pick — the flat `getStoredLayerHashes()` cache is gone.
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
 # Invariant: prevMaxLevelLayerHash in each new BlockVerified event must equal
-# the stored value at the time of the prior call. Strict monotonicity on
-# storedLastSeenBlockSeqNo is the second invariant — alert on any drop.
+# expectedPrevAnchor(numLayers) at the time of the prior call. Strict
+# monotonicity on storedLastSeenBlockSeqNo is the second invariant — alert
+# on any drop.
 
 # 3. No genesis drift
 cast call $BRIDGE "storedBkSetCommitment()(uint256)"
@@ -610,10 +641,10 @@ To be explicit about the trust boundary:
 | Soundness of the Halo2 circuits (1A, 1B, 2, and 3 once it lands) | `docs/layer_hashes_circuit_audit.md`, partner audits, `docs/four_circuit_architecture.md` §3 |
 | BLS12-381 G2 subgroup gap (audit FORK-2 / BLS-1) | open audit finding; carries over to v2's Circuit 1A/1B (same `gosh-bls-verification` chip); will be addressed in next circuit revision |
 | Trusted setup of the KZG SRS for Halo2 | community-generated `kzg_bn254_19.srs` shared across all four circuits; verify checksum on download |
-| Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-prover-orchestrator/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
+| Trusted setup of the gnark Groth16 wrappers (one per AN→ETH circuit) | wrapping circuits live under `crates/bridge-snark-utils/gnark-wrappers/{circuit-1a,circuit-1b,circuit-2}/`. As of 2026-05-17 all three `Define`s are no-op identity stubs (R15) — tracked under `docs/an_partner_integration_plan.md` Phase 8 R&D. Mainnet `v2.0.0` is gated on closing this. The deposit-side gnark wrapper was retired in Phase 4.3 — there is no longer an ETH-side ZK adapter for the deposit direction. |
 | Acki Nacki BFT economic security | not a bridge concern; the bridge inherits whatever finality AN provides via the Primary ≥ 2/3 / Fallback > 1/2 thresholds |
 | Off-chain relayer liveness / censorship | a malicious relayer can stall but cannot forge state; multiple competing relayers are sufficient |
-| Phase 1.C BK-set rotation circuit + on-chain wiring | not yet shipped; until then `storedBkSetCommitment` is effectively immutable post-deployment |
+| Phase 1.C BK-set rotation **circuit** (Circuit 3) | not yet shipped; the interim `applyBkSetUpdate` rotates the commitment against an attested block's Merkle tree, but proves nothing about the succession itself |
 
 When any of these change, this doc must be revisited and the affected sections updated.
 

@@ -22,7 +22,8 @@ library VerifyBlockConfigLib {
             fallbackVerifier: IFallbackVerifier(address(0)),
             layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: 0,
-            genesisPrevMaxLevelLayerHash: 0
+            genesisPrevMaxLevelLayerHash: 0,
+            genesisLastSeenBlockSeqNo: 0
         });
     }
 
@@ -40,7 +41,8 @@ library VerifyBlockConfigLib {
             fallbackVerifier: fallback_,
             layerHashesVerifier: layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
-            genesisPrevMaxLevelLayerHash: genesisPrevAnchor
+            genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
+            genesisLastSeenBlockSeqNo: 0
         });
     }
 

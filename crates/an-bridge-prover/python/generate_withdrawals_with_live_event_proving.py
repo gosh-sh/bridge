@@ -147,13 +147,25 @@ def deploy_multisig():
             )
             time.sleep(3)
     else:
-        fund_value = max(total_ecc, 100_000_000_000_000)
-        tracer.log(f"  funding via giver ecc[{ECC_ID_FOR_BURN}]={fund_value}")
+        # Canonical bridge pattern from acki-nacki/tests/exchange/
+        # bridge_e2e_self_contained.py::deploy_multisig (and mirrored in
+        # tests/dex/generate_vouchers_with_live_event_proving.py): a single
+        # `sendCurrencyWithFlag` call with flag=17 carrying a large native
+        # `value` and the ECC[2] bootstrap. The follow-up top-up is applied
+        # only AFTER deploy, and only if deploy consumed the ECC balance
+        # (handled below). The earlier two-shot 17→1 loop (borrowed from
+        # test_airegistry/test_registration.py) left the Uninit account in
+        # a state where deployx's stateInit was rejected with
+        # COMPUTE_SKIPPED: The account doesn't have a state.
+        fund_ecc    = max(total_ecc, 100_000_000_000_000)
+        fund_native = 200_000_000_000_000
+        tracer.log(f"  funding via giver single-shot (flag=17), "
+                   f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
         common.call_contract(
             GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
             "sendCurrencyWithFlag",
-            {"dest": msig_address_legacy, "value": "200000000000000",
-             "ecc": {str(ECC_ID_FOR_BURN): str(fund_value)},
+            {"dest": msig_address_legacy, "value": str(fund_native),
+             "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
              "flag": "17", "bounce": False},
         )
     time.sleep(8)
@@ -244,13 +256,14 @@ def mint_usdc(msig_address_legacy: str, amount: int):
 # ── Local-devnet bk_set materialization ───────────────────────────────────────
 
 def materialize_bk_set_from_node_config():
-    """Regenerate `<PROVER_DIR>/bk_set.json` from the running local cluster's
+    """Regenerate `<PROVER_DIR>/bk_set.local.json` from the running local cluster's
     BLS key files. Daemon-side `bridge_prover_lib::bk_set_fetcher` tries the
     GraphQL `bkSetUpdates` stream first; on a fresh devnet (zero validator
     churn since genesis) that stream returns empty and the daemon falls back
-    to `./bk_set.json` (relative to its cwd, which is `PROVER_DIR`).
+    to `./bk_set.local.json` (the default value of `BRIDGE_BK_SET_CONFIG` in
+    the daemon), relative to its cwd, which is `PROVER_DIR`.
 
-    For ad-hoc local runs we cannot rely on a committed `bk_set.json` snapshot
+    For ad-hoc local runs we cannot rely on a committed `bk_set.local.json` snapshot
     — node images may regenerate BLS keys when rebuilt from scratch. Source
     the set from the same `config/block_keeperN_bls.keys.json` files the node
     containers boot with, enumerated by the running `*-nodeN-*` containers so
@@ -304,10 +317,10 @@ def materialize_bk_set_from_node_config():
             raise ValueError(f"unexpected format in {path}: {e}") from e
         bk_set[str(idx)] = pub
 
-    out_path = os.path.join(PROVER_DIR, "bk_set.json")
+    out_path = os.path.join(PROVER_DIR, "bk_set.local.json")
     with open(out_path, "w") as f:
         json.dump(bk_set, f, indent=2)
-    tracer.log(f"  bk_set.json: {len(bk_set)} signers (indices {indices}) "
+    tracer.log(f"  bk_set.local.json: {len(bk_set)} signers (indices {indices}) "
                f"sourced from {config_dir}")
     tracer.log(f"  wrote {out_path}")
 
@@ -415,7 +428,7 @@ def main():
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
     if not IS_SHELLNET:
-        tracer.log_phase("Materializing bk_set.json from local cluster config")
+        tracer.log_phase("Materializing bk_set.local.json from local cluster config")
         materialize_bk_set_from_node_config()
         if USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
             tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")

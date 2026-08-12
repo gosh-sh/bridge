@@ -84,7 +84,7 @@ See `docs/four_circuit_architecture.md` §4 for the full CC-# table.
     │  3. Build attestation witness + layer-hashes witness
     │  4. (Phase 5.2) Recompute transition_hashes locally
     ▼
-[bridge-prover-orchestrator]
+[bridge-snark-utils]
     │  Per circuit (parallelisable):
     │  Circuit 1A or 1B:                Circuit 2:
     │  Halo2 SHPLONK prove (~3-6 min)   Halo2 SHPLONK prove (~3-6 min)
@@ -165,10 +165,10 @@ proof.verify_with_vk(&params, &vk, &instances)?;
 // returns Ok(()) on success, Err(...) on any verification failure.
 ```
 
-In our orchestrator, this is wrapped under `crates/bridge-prover-orchestrator/src/{primary_prover,fallback_prover,layer_hashes_prover}.rs::verify_proof`. Run via:
+In our orchestrator, this is wrapped under `crates/bridge-snark-utils/src/{primary_prover,fallback_prover,layer_hashes_prover}.rs::verify_proof`. Run via:
 
 ```bash
-cd crates/bridge-prover-orchestrator
+cd crates/bridge-snark-utils
 cargo test --release verify_round_trip
 # Verifies each circuit's keygen → prove → verify path with the bound test data.
 ```
@@ -186,7 +186,7 @@ cargo test --release verify_round_trip
 **Per-circuit walkthrough**:
 
 ```bash
-cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a
+cd crates/bridge-snark-utils/gnark-wrappers/circuit-1a
 go run cmd/verify-json halo2_proof_circuit-1a.json
 # Decodes the JSON, reconstructs the instances vector,
 # compares byte-for-byte against the Halo2 .bin.
@@ -207,7 +207,7 @@ The JSON format is per-circuit (different number of instance entries; different 
 **Per-circuit walkthrough**:
 
 ```bash
-cd crates/bridge-prover-orchestrator/gnark-wrappers/circuit-1a
+cd crates/bridge-snark-utils/gnark-wrappers/circuit-1a
 ./gnark-wrapper verify groth16_proof_circuit-1a.hex \
                        groth16_public_inputs_circuit-1a.hex
 # returns 0 on success, non-zero on any verification failure.
@@ -235,11 +235,11 @@ This is the final integration check — it exercises both gnark Groth16 verifier
 
 ### 8.1 Foundry (in-repo, fastest)
 
-The single-block bound real-proof test is `AckiNackiBridgeVerifyBlockTest::testHappyPathPrimary` (and `…::testHappyPathFallback`). It loads exported bound proofs from `crates/bridge-prover-orchestrator/exports/`:
+The single-block bound real-proof test is `AckiNackiBridgeVerifyBlockTest::testHappyPathPrimary` (and `…::testHappyPathFallback`). It loads exported bound proofs from `crates/bridge-snark-utils/exports/`:
 
 ```bash
 # 1. Generate fresh bound proofs (Halo2 + gnark wrap, ~10-15 min total)
-cargo run -p bridge-prover-orchestrator --bin export-bound-block-proofs --release
+cargo run -p bridge-snark-utils --bin export-bound-block-proofs --release
 
 # 2. Replay them through verifyBlock
 cd contracts/ethereum
@@ -260,10 +260,13 @@ forge script script/DeployRealBridge.s.sol --broadcast --rpc-url http://localhos
 cargo run -p bridge-relayer-daemon -- one-shot --block-seq-no $SEQ \
     --rpc-url http://localhost:8545 --bridge $BRIDGE
 
-# 3. Inspect on-chain state
+# 3. Inspect on-chain state (Storage v2.0, 2026-08-04)
 cast call $BRIDGE "storedLastSeenBlockSeqNo()(uint64)"
-cast call $BRIDGE "storedPrevMaxLevelLayerHash()(uint256)"
-cast call $BRIDGE "getStoredLayerHashes()(uint256[10])"
+# `storedPrevMaxLevelLayerHash()` is now the immutable genesis seed; for the
+# next-block anchor use `expectedPrevAnchor(numLayers)`.
+cast call $BRIDGE "expectedPrevAnchor(uint8)(uint256)" $NUM_LAYERS
+# Per-layer rolling window heads (replaces the flat `getStoredLayerHashes`).
+cast call $BRIDGE "getLatestPerLayer()(uint256[10])"
 ```
 
 ### 8.3 Production (mainnet)
@@ -281,7 +284,7 @@ Same as Anvil, but against the deployed `AckiNackiBridge` and a production-grade
 | V1 step 4 (binding mismatch) | Relayer mixed proofs from two blocks | Inspect the bound-test-data harness or live relayer; ensure both proofs originate from the same `BridgeTestData` |
 | V1 step 6 (layer hashes mismatch) | Bincode layout drift in AN node | Audit finding L-1; pin AN node version |
 | V2 (Halo2 verify fails) | Wrong VK or wrong SRS | Check that `kzg_bn254_19.srs` matches the one used at keygen time |
-| V3 (gnark JSON mismatch) | Wrapper version skew | Rebuild the wrapper binary; check `crates/bridge-prover-orchestrator/gnark-wrappers/<circuit>/go.mod` |
+| V3 (gnark JSON mismatch) | Wrapper version skew | Rebuild the wrapper binary; check `crates/bridge-snark-utils/gnark-wrappers/<circuit>/go.mod` |
 | V4 (gnark verify fails) | Wrong gnark VK or wrong proof bytes | Confirm both files are from the same `setup` invocation |
 | V5 `AttestationProofRejected` | Attestation proof bytes don't match the claimed `(blockId, bkSetCommitment, blockSeqNo, lastSeen)` | Recompute claimed PI; ensure `lastSeen` matches the on-chain `storedLastSeenBlockSeqNo` |
 | V5 `LayerHashesProofRejected` | Layer-hashes proof bytes don't match the claimed `(blockId, bkSetCommitment, numLayers, layerHashes, prevMaxLevelLayerHash)` | Recompute claimed PI; verify layer-hashes preimage parsing |
@@ -298,7 +301,7 @@ Same as Anvil, but against the deployed `AckiNackiBridge` and a production-grade
 
 ```bash
 # 0. One-time: pull SRS (kzg_bn254_19.srs) and verify checksum.
-cd crates/bridge-prover-orchestrator/params
+cd crates/bridge-snark-utils/params
 sha256sum kzg_bn254_19.srs    # compare against published checksum
 
 # 1. Generate a bound block scenario + proofs (Halo2 + gnark, all 3 circuits).

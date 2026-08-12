@@ -1,20 +1,18 @@
-pub mod gql_client;
-pub mod attestation_fetcher;
-pub mod bk_set_fetcher;
-pub mod poseidon;
 pub mod poseidon_dense;
-pub mod types;
 pub mod keys;
+pub mod transcript;
 pub mod prover;
 pub mod verifier;
 pub mod ipc;
 pub mod bridge_state;
 pub mod prover_bk_set;
 pub mod bootstrap;
+pub mod bk_set_bootstrap;
 pub mod block_id_tree;
 pub mod chain_proof_builder;
 pub mod real_chain_builder;
 pub mod layer_prover;
+pub mod live_driver;
 
 // Re-export commonly used types.
 pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr;

@@ -24,12 +24,6 @@
 //!     --output /tmp/deposit_e2e/deposit_vk_blob.bin \
 //!     --degree 18 --max-data-byte-len 256 --max-log-num 20
 
-// Reuse the REAL producer-side wire format (the same module the orchestrator
-// and the `vkblob-v2` isolation crate compile) so the bytes can never drift
-// from what the opcode expects.
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
-
 use std::fs;
 
 use axiom_eth::{
@@ -56,7 +50,7 @@ use halo2_base::{
         SerdeFormat,
     },
 };
-use halo2_tvm_bundle::{CircuitShape, VkBlob};
+use deposit_prover::halo2_tvm_bundle::{self, CircuitShape, VkBlob};
 
 /// Pinned keccak promise-loader capacity — makes the deposit VK
 /// witness-independent (one embedded VK verifies every deposit). MUST match the
@@ -107,6 +101,12 @@ struct Args {
     /// Max log number (must match the proving run).
     #[arg(long, default_value = "20")]
     max_log_num: usize,
+
+    /// Source network (not baked into VK; proven chainId is a PI). Must be in
+    /// `SUPPORTED_DEPOSIT_CHAIN_IDS` (e.g. Sepolia=11155111) and must match the
+    /// chain the loaded witness actually proves.
+    #[arg(long)]
+    chain_id: Option<u64>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -116,6 +116,8 @@ fn main() -> anyhow::Result<()> {
     println!("Loading input from {}...", args.input);
     let json = fs::read_to_string(&args.input)?;
     let input: DepositProofInput = serde_json::from_str(&json)?;
+    let chain_id = input.resolve_chain_id(args.chain_id)?;
+    println!("Proving a deposit on chain {chain_id}");
 
     let config = CircuitConfig {
         degree: args.degree,

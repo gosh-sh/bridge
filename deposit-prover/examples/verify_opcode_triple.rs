@@ -11,7 +11,7 @@
 //!      against `srs.verifier_params()`.
 //!
 //! A PASS here means: the deposit VK serialised into the v2 RLC blob, the
-//! Blake2b proof, and the 11 public inputs form a self-consistent triple that
+//! Blake2b proof, and the 12 public inputs form a self-consistent triple that
 //! the AN node opcode will accept — using only the bytes that cross the wire.
 //!
 //! Usage:
@@ -20,9 +20,6 @@
 //!     --proof     /tmp/deposit_e2e/deposit_proof_blake2b.bin \
 //!     --pubin     /tmp/deposit_e2e/deposit_public_inputs.bin \
 //!     --degree 18
-
-#[path = "../../crates/bridge-prover-orchestrator/src/halo2_tvm_bundle.rs"]
-mod halo2_tvm_bundle;
 
 use std::fs;
 
@@ -48,7 +45,7 @@ use halo2_base::halo2_proofs::{
     transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
     SerdeFormat,
 };
-use halo2_tvm_bundle::{decode_instances, CircuitShape, VkBlob, VkConfig};
+use deposit_prover::halo2_tvm_bundle::{decode_instances, CircuitShape, VkBlob, VkConfig};
 
 #[derive(Clone)]
 struct Noop;
@@ -104,8 +101,8 @@ fn main() -> anyhow::Result<()> {
     let pubin = fs::read(&args.pubin)?;
     let instances = decode_instances(&pubin)?;
     anyhow::ensure!(
-        instances.len() == 11,
-        "expected 11 public inputs, got {}",
+        instances.len() == 12,
+        "expected 12 public inputs, got {}",
         instances.len()
     );
     println!(

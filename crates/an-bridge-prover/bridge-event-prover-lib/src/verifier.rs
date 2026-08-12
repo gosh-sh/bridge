@@ -7,8 +7,9 @@
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
 use bridge_prover_lib::keys::KeyManager;
+use bridge_prover_lib::transcript::TranscriptKind;
 
-/// Verify a Circuit 4 proof against its public instances.
+/// Verify a Circuit 4 proof against its public instances (Blake2b transcript).
 ///
 /// Instances layout (length `TOTAL_PUBLIC_INPUTS = 10`):
 ///   `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
@@ -22,9 +23,28 @@ pub fn verify_event_proof(
     instances: &[Fr],
 ) -> bool {
     bridge_prover_lib::verifier::verify_kzg_proof(
-        key_manager,
+        key_manager.event.srs(),
         key_manager.event_vk(),
         proof_bytes,
         instances,
+    )
+}
+
+/// Verify a Circuit 4 proof with the chosen Fiat–Shamir transcript. Must
+/// match what
+/// [`crate::prover::generate_event_proof_with_transcript`] used or
+/// verification returns `false`.
+pub fn verify_event_proof_with_transcript(
+    key_manager: &KeyManager,
+    proof_bytes: &[u8],
+    instances: &[Fr],
+    transcript: TranscriptKind,
+) -> bool {
+    bridge_prover_lib::verifier::verify_kzg_proof_with_transcript(
+        key_manager.event.srs(),
+        key_manager.event_vk(),
+        proof_bytes,
+        instances,
+        transcript,
     )
 }

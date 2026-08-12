@@ -56,7 +56,7 @@
 
 use std::{
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use axiom_eth::{
@@ -79,7 +79,7 @@ use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark
 
 use crate::{
     circuit_v2::DepositEventCircuitV2,
-    types::{DepositProofInput, DepositProofOutput},
+    types::{DepositProofInput, DepositProofOutput, NUM_PUBLIC_INPUTS},
 };
 
 /// Pinned keccak promise-loader capacity.
@@ -180,12 +180,20 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     // Get public instances
     let instances = circuit.instances();
 
-    // Run MockProver
+    // Run MockProver. `verify()` rather than `assert_satisfied()`: the latter
+    // panics, which makes an unsatisfied circuit indistinguishable from a crash
+    // and defeats the point of returning a `Result` — negative tests need to
+    // observe the rejection, not unwind through it.
     MockProver::run(k, &circuit, instances)
-        .map_err(|e| format!("MockProver failed: {:?}", e))?
-        .assert_satisfied();
-
-    Ok(())
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })
 }
 
 /// Load KZG parameters from disk
@@ -238,39 +246,9 @@ fn load_kzg_params(path: &str) -> Result<ParamsKZG<Bn256>, String> {
 /// - The file is corrupted or invalid
 /// - The file format is incorrect
 pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, String> {
-    // PREFER the chain-ceremony SRS (`params/kzg_bn254_{k}.srs`) over the
-    // Hermez/Polygon SRS (`data/kzg_params_{k}.srs`).
-    //
-    // The AN-side `ZKHALO2VERIFYWITHVK` opcode rebuilds its verifier params from
-    // points embedded from the chain's `kzg_bn254_19.srs` ceremony. A SHPLONK
-    // proof (and the VK it is bound to) ONLY verifies under the opcode if the
-    // prover used the *same* ceremony. The Hermez SRS produces a different,
-    // opcode-REJECTED VK — e.g. deposit VkBlob `b1e5ce0b…` (Hermez) vs the
-    // deployed/opcode-aligned `147efe14…` (chain). See `examples/downsize_srs.rs`
-    // and `docs/deposit_vk_reproducibility.md`. Falls back to the Hermez SRS for
-    // degrees that have no downsized chain SRS on disk (e.g. k=20).
-    let chain_path = format!("params/kzg_bn254_{}.srs", k);
-    if Path::new(&chain_path).exists() {
-        println!("Loading chain-ceremony KZG parameters from {}", chain_path);
-        match load_kzg_params(&chain_path) {
-            Ok(params) => {
-                println!(
-                    "✅ Loaded chain-ceremony KZG parameters (opcode-aligned) from {}",
-                    chain_path
-                );
-                return Ok(params);
-            },
-            Err(e) => {
-                return Err(format!(
-                    "Chain-ceremony SRS {} exists but failed to load: {}. \
-                     Delete it to fall back to the Hermez SRS, or regenerate it \
-                     with `cargo run --release --example downsize_srs`.",
-                    chain_path, e
-                ));
-            },
-        }
-    }
-
+    // Hermez / Polygon Powers of Tau only (`data/kzg_params_{k}.srs`).
+    // Matches `tvm-sdk` `feature/hermez-kzg-resurrection` embedded
+    // `KZG_S_G2_BYTES` (`928fafb3…`). No chain-ceremony fallback.
     let params_path = format!("data/kzg_params_{}.srs", k);
 
     // Try to load existing parameters
@@ -306,15 +284,9 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
         }
     }
 
-    // Parameters not found - try to use degree 18 parameters (downward compatible).
-    // Prefer the chain-ceremony k=18 SRS so downsized params stay opcode-aligned;
-    // fall back to the Hermez k=18 SRS only if the chain SRS is absent.
+    // Parameters not found - try Hermez degree 18 (downward compatible).
     if k < 18 {
-        let fallback_path = if Path::new("params/kzg_bn254_18.srs").exists() {
-            "params/kzg_bn254_18.srs"
-        } else {
-            "data/kzg_params_18.srs"
-        };
+        let fallback_path = "data/kzg_params_18.srs";
         if Path::new(fallback_path).exists() {
             println!(
                 "⚠️  KZG parameters for degree {} not found, using degree 18 (downward compatible)",
@@ -456,29 +428,64 @@ pub fn get_or_create_proving_key(
     let pk_path = pk_path_with_fingerprint(pk_path, &shape);
     let pk_path = pk_path.as_path();
 
-    // Generate or load proving key. `gen_pk(.., Some(path))` loads the PK if the
-    // (fingerprinted) file exists, otherwise generates it AND persists it there.
-    // Because the path is shape-fingerprinted, a stale PK from a different
-    // circuit shape lives under a different filename and is never loaded.
-    if pk_path.exists() {
-        println!("Found existing proving key at {:?}, loading...", pk_path);
+    // Break points are computed by halo2 DURING keygen synthesis and stored on
+    // the (RefCell) builder. `gen_pk(.., Some(path))` only *deserialises* an
+    // existing PK — it does NOT synthesise — so on the load path
+    // `circuit.break_points()` comes back EMPTY and the prover later panics with
+    // "break points not set". They are therefore persisted to a sidecar next to
+    // the PK during keygen and reloaded on a cache hit, so proving reuses the PK
+    // with NO keygen (the operator fast path). `RlcThreadBreakPoints` is serde.
+    let bp_path = PathBuf::from(format!("{}.bp.json", pk_path.display()));
+
+    // A PK generated before this sidecar existed would be loaded WITHOUT its
+    // break points (unrecoverable without a synthesis). Remove such a legacy PK
+    // so both the PK and its sidecar are regenerated together, once.
+    if pk_path.exists() && !bp_path.exists() {
+        println!(
+            "Proving key {:?} present but break-points sidecar missing; \
+             regenerating both (one-time)...",
+            pk_path
+        );
+        let _ = fs::remove_file(pk_path);
+    }
+
+    let load_from_cache = pk_path.exists() && bp_path.exists();
+    if load_from_cache {
+        println!(
+            "Found existing proving key + break points, loading (no keygen): {:?}",
+            pk_path
+        );
     } else {
         println!("Generating proving key (this may take a few minutes)...");
     }
+
     let pk = gen_pk(params, &circuit, Some(pk_path));
     println!("Proving key ready");
 
-    // Get the calculated circuit params from the keygen circuit
-    // These are needed to create the prover circuit with the same structure
+    // Get the calculated circuit params from the keygen circuit. Available after
+    // `calculate_params()` above on both the load and generate paths.
     use halo2_base::halo2_proofs::plonk::Circuit;
     let calculated_params = circuit.params().rlc;
 
-    // Get break points from the keygen circuit
-    // These are needed when creating the prover circuit
-    // NOTE: We always get break points from the keygen circuit we just created,
-    // even if the proving key was loaded from disk. This is because break points
-    // are deterministic and depend only on the circuit structure.
-    let break_points = circuit.break_points();
+    let break_points = if load_from_cache {
+        // Load path: the circuit was NOT synthesised (gen_pk only deserialised
+        // the PK), so read the break points from the sidecar instead of the
+        // (empty) builder.
+        let bytes = fs::read(&bp_path)
+            .map_err(|e| format!("reading break-points sidecar {:?}: {e}", bp_path))?;
+        serde_json::from_slice::<RlcThreadBreakPoints>(&bytes)
+            .map_err(|e| format!("deserialising break-points sidecar {:?}: {e}", bp_path))?
+    } else {
+        // Generate path: gen_pk synthesised the circuit, so the builder now holds
+        // the break points. Persist them next to the PK for future cache hits.
+        let bp = circuit.break_points();
+        let bytes = serde_json::to_vec(&bp)
+            .map_err(|e| format!("serialising break points: {e}"))?;
+        fs::write(&bp_path, &bytes)
+            .map_err(|e| format!("writing break-points sidecar {:?}: {e}", bp_path))?;
+        println!("Wrote break-points sidecar -> {:?}", bp_path);
+        bp
+    };
 
     Ok((pk, calculated_params, break_points))
 }
@@ -560,6 +567,7 @@ pub fn generate_proof(
         input.event_data.an_account,
         input.event_data.contract_address,
         block_hash,
+        input.event_data.chain_id,
     ))
 }
 
@@ -596,12 +604,12 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         return Err("Proof has no public instances".to_string());
     }
 
-    // FIX BC-CIRCUIT-004: Check that we have exactly 7 public inputs
-    // (depositId, sender, amount, contract_address, block_hash_high,
-    // block_hash_low, promise_commit)
-    if snark.instances[0].len() != 7 {
+    // Layout: [depositId, sender, amount, contractAddress, chainId,
+    //          dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
+    //          blockHashHigh, blockHashLow, promiseCommit]
+    if snark.instances[0].len() != NUM_PUBLIC_INPUTS {
         return Err(format!(
-            "Expected 7 public inputs (6 user values + promise_commit), got {}",
+            "Expected {NUM_PUBLIC_INPUTS} public inputs, got {}",
             snark.instances[0].len()
         ));
     }
@@ -619,51 +627,47 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
 
     // Verify public inputs match the claimed values
     let deposit_id_field = Fr::from(proof.deposit_id);
-
-    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of sender address
     let sender_field = bytes_to_field(&proof.sender);
-
-    // FIX BC-TYPES-001: Convert ALL 32 bytes of amount
     let amount_field = bytes_to_field(&proof.amount);
-
-    // FIX BC-PROVER-003 Issue B: Convert ALL 20 bytes of contract address
     let contract_field = bytes_to_field(&proof.contract_address);
-
-    // FIX BC-PROVER-003 Issue C: Convert block_hash to high/low field elements
-    // Block hash is split into two 128-bit (16-byte) field elements
+    let chain_id_field = Fr::from(proof.chain_id);
+    let dapp_id_high = bytes_to_field(&proof.dapp_id[0..16]);
+    let dapp_id_low = bytes_to_field(&proof.dapp_id[16..32]);
+    let an_account_high = bytes_to_field(&proof.an_account[0..16]);
+    let an_account_low = bytes_to_field(&proof.an_account[16..32]);
     let block_hash_high = bytes_to_field(&proof.block_hash[0..16]);
     let block_hash_low = bytes_to_field(&proof.block_hash[16..32]);
 
-    if snark.instances[0][0] != deposit_id_field {
-        return Err("Public input mismatch: depositId".to_string());
-    }
-    if snark.instances[0][1] != sender_field {
-        return Err("Public input mismatch: sender".to_string());
-    }
-    if snark.instances[0][2] != amount_field {
-        return Err("Public input mismatch: amount".to_string());
-    }
-    if snark.instances[0][3] != contract_field {
-        return Err("Public input mismatch: contract_address".to_string());
-    }
-    // FIX BC-PROVER-003 Issue C: Verify block_hash_high and block_hash_low
-    if snark.instances[0][4] != block_hash_high {
-        return Err("Public input mismatch: block_hash_high".to_string());
-    }
-    if snark.instances[0][5] != block_hash_low {
-        return Err("Public input mismatch: block_hash_low".to_string());
+    let expected = [
+        ("depositId", deposit_id_field),
+        ("sender", sender_field),
+        ("amount", amount_field),
+        ("contract_address", contract_field),
+        ("chainId", chain_id_field),
+        ("dappIdHigh", dapp_id_high),
+        ("dappIdLow", dapp_id_low),
+        ("anAccountHigh", an_account_high),
+        ("anAccountLow", an_account_low),
+        ("blockHashHigh", block_hash_high),
+        ("blockHashLow", block_hash_low),
+    ];
+    for (idx, (name, expected_fr)) in expected.iter().enumerate() {
+        if snark.instances[0][idx] != *expected_fr {
+            return Err(format!("Public input mismatch: {name}"));
+        }
     }
 
     println!("✓ Proof structure valid");
-    println!("✓ Public inputs verified (7 instances: 6 user values + promise_commit)");
+    println!("✓ Public inputs verified ({NUM_PUBLIC_INPUTS} instances incl. promise_commit)");
     println!("  depositId: {}", proof.deposit_id);
     println!("  sender: 0x{}", hex::encode(proof.sender));
     println!("  amount: 0x{}", hex::encode(proof.amount));
     println!("  contract: 0x{}", hex::encode(proof.contract_address));
     println!("  block_hash: 0x{}", hex::encode(proof.block_hash));
+    println!("  chain_id: {}", proof.chain_id);
     println!(
         "  promise_commit: 0x{}",
-        hex::encode(snark.instances[0][6].to_bytes())
+        hex::encode(snark.instances[0][11].to_bytes())
     );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
@@ -718,11 +722,8 @@ pub fn generate_solidity_verifier(
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
 
-    // 4. Define number of public instances
-    // FIX BC-CIRCUIT-004: Updated to 7 to include promise_commit
-    // We have 7 public outputs: [depositId, sender, amount,
-    // contract_address, block_hash_high, block_hash_low, promise_commit]
-    let num_instance = vec![7];
+    // 4. Public instance count must match the live circuit / AN opcode (11).
+    let num_instance = vec![NUM_PUBLIC_INPUTS];
 
     // 5. Generate Solidity verifier using SHPLONK
     println!("Generating Solidity code...");
@@ -786,7 +787,7 @@ pub fn generate_solidity_verifier(
 fn create_keygen_placeholder_input() -> DepositProofInput {
     use alloy_rlp::Encodable;
 
-    use crate::types::{DepositEventData, ReceiptProof};
+    use crate::types::{DepositEventData, ReceiptProof, TransactionProof};
 
     let event_data = DepositEventData {
         block_number: 0,
@@ -799,6 +800,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],
+        chain_id: 0,
     };
 
     // Create a minimal valid receipt RLP with one log
@@ -864,9 +866,51 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         block_header_rlp: vec![0u8; 100], // minimal block header
     };
 
+    // Minimal EIP-1559 typed-tx leaf: 0x02 || RLP([chainId=1, nonce, tips, fees,
+    // gas, to, value, data, accessList, yParity, r, s]) — sizes only need to be
+    // structurally valid for keygen shape (not MockProver-satisfying).
+    let mut tx_payload = Vec::new();
+    1u64.encode(&mut tx_payload); // chain_id
+    0u64.encode(&mut tx_payload); // nonce
+    0u64.encode(&mut tx_payload); // maxPriorityFeePerGas
+    0u64.encode(&mut tx_payload); // maxFeePerGas
+    21000u64.encode(&mut tx_payload); // gas
+    vec![0u8; 20].encode(&mut tx_payload); // to
+    0u64.encode(&mut tx_payload); // value
+    Vec::<u8>::new().encode(&mut tx_payload); // data
+    {
+        // empty accessList
+        let mut al = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: 0,
+        }
+        .encode(&mut al);
+        tx_payload.extend_from_slice(&al);
+    }
+    0u64.encode(&mut tx_payload); // yParity
+    vec![0u8; 32].encode(&mut tx_payload); // r
+    vec![0u8; 32].encode(&mut tx_payload); // s
+    let mut tx_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: tx_payload.len(),
+    }
+    .encode(&mut tx_list);
+    tx_list.extend_from_slice(&tx_payload);
+    let mut tx_bytes = vec![0x02u8];
+    tx_bytes.extend_from_slice(&tx_list);
+
+    let tx_proof = TransactionProof {
+        tx_bytes: tx_bytes.clone(),
+        proof_nodes: vec![tx_bytes],
+        transactions_root: [0u8; 32],
+    };
+
     DepositProofInput {
         event_data,
         receipt_proof,
+        tx_proof,
         dapp_id: [0u8; 32],
     }
 }

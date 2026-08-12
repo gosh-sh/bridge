@@ -22,12 +22,12 @@
 //!
 //! ### Proof format note
 //!
-//! The summary carries the **raw Halo2 SHPLONK proof** (`proof_hex`). That is
-//! the artefact the R15 SHPLONK `BridgeWithdrawalAggregatorVerifier` consumes.
-//! The legacy `submit-withdraw` path still asserts a 256-byte gnark proof (see
-//! [`crate::withdrawal::GROTH16_PROOF_SIZE`]); reconciling the on-chain
-//! verifier shape is tracked separately (R15 M3–M7). `prove-withdraw` therefore
-//! only *produces* the proof_event — submission is a deliberate second step.
+//! The summary carries the **raw Halo2 SHPLONK aggregator calldata**
+//! (`proof_hex` = `instances ‖ proof`, ≥
+//! [`crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES`] bytes). That is the
+//! artefact the R15 SHPLONK `BridgeWithdrawalAggregatorVerifier` consumes on
+//! chain. `prove-withdraw` only *produces* the proof_event — submission is a
+//! deliberate second step.
 
 use std::{
     path::{Path, PathBuf},
@@ -55,8 +55,9 @@ pub trait WithdrawalProver: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic withdrawal prover for tests. Returns a canned, self-verified
-/// [`PartnerWithdrawalProof`] (256-byte proof + ten 32-byte LE public inputs)
-/// so the submit path is exercised end-to-end without running halo2.
+/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + ten 32-byte LE
+/// public inputs) so the submit path is exercised end-to-end without running
+/// halo2.
 #[derive(Clone, Debug)]
 pub struct MockWithdrawalProver {
     canned: PartnerWithdrawalProof,
@@ -65,7 +66,8 @@ pub struct MockWithdrawalProver {
 }
 
 impl MockWithdrawalProver {
-    /// A valid canned proof: ten ascending public inputs and a 256-byte proof.
+    /// A valid canned proof: ten ascending public inputs and a SHPLONK-shaped
+    /// proof blob long enough to pass [`PartnerWithdrawalProof::proof_bytes`].
     pub fn valid() -> Self {
         let public_instances_hex = (0u8..10)
             .map(|i| {
@@ -78,7 +80,10 @@ impl MockWithdrawalProver {
             canned: PartnerWithdrawalProof {
                 schema_version: 1,
                 seq_no: 0,
-                proof_hex: hex::encode([0xAAu8; crate::withdrawal::GROTH16_PROOF_SIZE]),
+                proof_hex: hex::encode(vec![
+                    0xAAu8;
+                    crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200
+                ]),
                 public_instances_hex,
                 self_verified: true,
             },
@@ -274,7 +279,7 @@ mod tests {
             .unwrap();
         assert!(proof.self_verified);
         assert_eq!(proof.public_instances_hex.len(), 10);
-        // Canned proof is submit-shaped (256-byte gnark size).
+        // Canned proof is submit-shaped (SHPLONK aggregator calldata).
         assert!(proof.proof_bytes().is_ok());
         let pi = proof.public_inputs().unwrap();
         assert_eq!(pi.final_root, alloy::primitives::U256::from(9u64));

@@ -130,7 +130,9 @@ contract DeployShellnetE2EBridge is Script {
                 layerHashesVerifier: vb.layerHashes,
                 genesisBkSetCommitment: vb.genesisBkSetCommitment,
                 genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash,
-                genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
+                genesisLastSeenBlockSeqNo: uint64(
+                    vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0))
+                )
             }),
             AckiNackiBridge.BridgeWithdrawConfig({
                 bridgeWithdrawalVerifier: wd.verifier,

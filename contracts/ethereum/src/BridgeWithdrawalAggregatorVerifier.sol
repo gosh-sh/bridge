@@ -8,10 +8,13 @@ import "./ShplonkAggregatorVerifierBase.sol";
 /// @notice R15 adapter: verifies Circuit 4 via SHPLONK aggregator Yul verifier.
 /// @dev `proof` calldata = `instances (12 acc + 10 inner) ‖ snark_proof`.
 ///      Re-exposed inner PIs at indices 12..21 must match `pub`.
-contract BridgeWithdrawalAggregatorVerifier is IBridgeWithdrawalVerifier, ShplonkAggregatorVerifierBase {
+contract BridgeWithdrawalAggregatorVerifier is
+    IBridgeWithdrawalVerifier,
+    ShplonkAggregatorVerifierBase
+{
     uint256 private constant NUM_INNER = 10;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) {}
+    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
 
     /// @inheritdoc IBridgeWithdrawalVerifier
     function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)

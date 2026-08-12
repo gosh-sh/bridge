@@ -53,14 +53,18 @@ contract DeployGenesisCursorBridge is Script {
         AckiNackiBridge.VerifyBlockConfig memory vb = AckiNackiBridge.VerifyBlockConfig({
             primaryVerifier: IPrimaryVerifier(vm.envAddress("PRIMARY_VERIFIER")),
             fallbackVerifier: IFallbackVerifier(vm.envAddress("FALLBACK_VERIFIER")),
-            layerHashesVerifier: ILayerHashesMovementVerifier(vm.envAddress("LAYER_HASHES_VERIFIER")),
+            layerHashesVerifier: ILayerHashesMovementVerifier(
+                vm.envAddress("LAYER_HASHES_VERIFIER")
+            ),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
             genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
             genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
         });
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(vm.envAddress("WITHDRAWAL_VERIFIER")),
+            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(
+                vm.envAddress("WITHDRAWAL_VERIFIER")
+            ),
             dappFr: vm.envUint("WITHDRAW_DAPP_FR"),
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
@@ -72,8 +76,9 @@ contract DeployGenesisCursorBridge is Script {
 
         vm.startBroadcast(pk);
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
-        GenesisCursorBridge bridge =
-            new GenesisCursorBridge(address(oracle), USDC_SEPOLIA, address(0), address(0), vb, bw, genesisLastSeen);
+        GenesisCursorBridge bridge = new GenesisCursorBridge(
+            address(oracle), USDC_SEPOLIA, address(0), address(0), vb, bw, genesisLastSeen
+        );
         vm.stopBroadcast();
 
         console.log("GenesisCursorBridge:", address(bridge));

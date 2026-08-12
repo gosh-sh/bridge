@@ -195,10 +195,11 @@ deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
 
-# R15 / M2 bridge-evm-aggregator spike (standalone workspace, lock + target +
-# regenerated KZG SRS + generated Yul/.bin artefacts; only the source tree
-# under src/ + tests/ is committed).
-crates/bridge-evm-aggregator/Cargo.lock
+# R15 / M2 bridge-evm-aggregator spike (standalone workspace: target +
+# regenerated KZG SRS + generated Yul/.bin artefacts are local-only).
+# Cargo.lock IS committed — the build:rust:aggregator / test:rust:aggregator
+# CI jobs run `--locked`, which requires a checked-in lockfile (same as the
+# tracked crates/an-bridge-prover/Cargo.lock).
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/

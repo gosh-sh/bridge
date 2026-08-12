@@ -163,6 +163,22 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     }
 
     let chain_empty = chain.last_seen_block_seq_no == 0;
+    // Post-deploy transitional state: the constructor writes
+    // `storedLastSeenBlockSeqNo = genesisLastSeenBlockSeqNo` (from
+    // `compute_bridge_anchors`' emitted GENESIS_SEED_SEQNO) but does
+    // NOT populate `_layerWindows` — those are only appended by
+    // `verifyBlock` at runtime. So a just-deployed contract has a
+    // non-zero cursor with every window empty. We must NOT route
+    // this to Resurrect (that would copy empty windows into local
+    // state and skip GQL bootstrap, causing PrevAnchorMismatch on
+    // the first submit because the prover would compute
+    // prev_max_level=0 while the contract expects the immutable
+    // `storedPrevMaxLevelLayerHash`). Instead, route to Cold with
+    // an Explicit policy pinned to the chain's cursor — this
+    // forces the driver to fetch the seed key block via GQL, which
+    // will populate layer windows and produce the same anchor the
+    // contract's genesis constant carries.
+    let chain_has_no_windows = chain.layer_windows.iter().all(|w| w.data_len == 0);
 
     if !local.initialized {
         // Local state has never applied a bundle. Either the daemon
@@ -174,6 +190,16 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
                     Some(n) => SeedPolicy::Explicit(n),
                     None => SeedPolicy::Auto,
                 },
+            }
+        } else if chain_has_no_windows {
+            // Post-deploy, pre-first-verifyBlock. Bootstrap using the
+            // chain's cursor as the seed seqno regardless of what the
+            // operator passed via `--bootstrap-seqno` — otherwise the
+            // proof's baked-in `last_seen` would diverge from
+            // `storedLastSeenBlockSeqNo` and attestation verification
+            // would fail.
+            StartupDecision::Cold {
+                policy: SeedPolicy::Explicit(chain.last_seen_block_seq_no),
             }
         } else {
             // Chain-resurrect: rebuild BridgeState from the on-chain
@@ -374,6 +400,36 @@ mod tests {
         }) {
             StartupDecision::WarmResume => {}
             d => panic!("expected WarmResume, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn cold_when_local_absent_chain_post_deploy() {
+        // Just-deployed contract: constructor set last_seen to the
+        // seed seqno emitted by compute_bridge_anchors, but no
+        // verifyBlock has run yet so every layer window is empty.
+        // Must route to Cold with Explicit(chain.last_seen), NOT
+        // Resurrect (which would copy the empty windows and skip
+        // the GQL bootstrap).
+        let seed_seqno: u64 = 5_495_808;
+        let mut chain = empty_chain();
+        chain.last_seen_block_seq_no = seed_seqno;
+        chain.bk_set_commitment = U256::from_be_bytes::<32>([7u8; 32]);
+        chain.last_bk_set_update_seq_no = 0;
+        // layer_windows already all empty (data_len == 0) via empty_chain().
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            // Operator's flag should be ignored on this path — chain
+            // cursor is authoritative for the seed seqno.
+            bootstrap_seqno: Some(999_999),
+            window_size: W,
+        }) {
+            StartupDecision::Cold { policy } => {
+                assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
+            }
+            d => panic!("expected Cold(Explicit({seed_seqno})), got {d:?}"),
         }
     }
 

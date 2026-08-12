@@ -18,32 +18,36 @@
 //!
 //! Callers who want the legacy native-only `K = 20` fallback (pre-SHPLONK)
 //! can construct via [`FallbackKeyManager::new_with_k`].
+//!
+//! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
+//! on-demand PK load/unload, accessor plumbing) is delegated to the shared
+//! [`super::common::KeyManagerState`]. Only the circuit-specific
+//! reference-witness construction lives here.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
 use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+    plonk::{ProvingKey, VerifyingKey},
     poly::kzg::commitment::ParamsKZG,
 };
 use tracing::info;
 
-use super::common;
+use super::common::KeyManagerState;
 use super::primary::{LIMB_BITS, LOOKUP_BITS, MAX_SIGNERS, NUM_LIMBS, NUM_UNUSABLE_ROWS};
 
 pub(super) const PREFIX: &str = "fallback";
 
+/// Operator-facing size hint for `load_pk`. Purely cosmetic — the actual
+/// elapsed time is always logged after the load.
+const PK_SIZE_HINT: &str = "~3.7 GB";
+
 pub struct FallbackKeyManager {
-    params_dir: PathBuf,
-    srs: ParamsKZG<Bn256>,
-    k: u32,
-    vk: Option<VerifyingKey<G1Affine>>,
-    pk: Option<ProvingKey<G1Affine>>,
-    config: Option<BaseCircuitParams>,
+    state: KeyManagerState,
 }
 
 impl FallbackKeyManager {
@@ -58,35 +62,16 @@ impl FallbackKeyManager {
     /// Full constructor. Loads SRS (halo2-base disk cache) and any cached
     /// VK/config. PK is left on disk — call [`Self::load_pk`] before proving.
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
-        std::fs::create_dir_all(params_dir).ok();
-        let srs = common::load_srs(params_dir, k);
-        let mut mgr = Self {
-            params_dir: params_dir.to_path_buf(),
-            srs,
-            k,
-            vk: None,
-            pk: None,
-            config: None,
-        };
-        if let Ok(config) = common::load_config(&mgr.params_dir, PREFIX) {
-            info!("found fallback config: {:?}", config);
-            if let Some(vk) = common::try_load_vk(&mgr.params_dir, PREFIX, &config) {
-                info!("loaded fallback VK from cache");
-                mgr.vk = Some(vk);
-            }
-            if common::pk_path(&mgr.params_dir, PREFIX).exists() {
-                info!("fallback PK found on disk (will load on demand)");
-            }
-            mgr.config = Some(config);
+        Self {
+            state: KeyManagerState::new(params_dir, PREFIX, k, k, Some(PK_SIZE_HINT)),
         }
-        mgr
     }
 
     /// Ensure keys exist on disk. Runs keygen (a few minutes) if not cached.
     /// The keygen witness is synthetic; only the constraint shape affects
     /// the VK/PK, so any admissible input drives keygen identically.
     pub fn ensure_keys(&mut self, bk_set: &HashMap<u16, Vec<u8>>) -> anyhow::Result<()> {
-        if self.vk.is_some() && common::pk_path(&self.params_dir, PREFIX).exists() {
+        if self.state.keys_cached() {
             info!("fallback keys already available (VK in memory, PK on disk)");
             return Ok(());
         }
@@ -107,7 +92,7 @@ impl FallbackKeyManager {
             attestation_fallback_bytes,
             test_data.bk_set,
             last_seen,
-            self.k as usize,
+            self.state.k() as usize,
             NUM_UNUSABLE_ROWS,
             LOOKUP_BITS,
             LIMB_BITS,
@@ -115,78 +100,39 @@ impl FallbackKeyManager {
             MAX_SIGNERS,
         );
         let base_params = circuit.params.base_circuit_params.clone();
-        info!("fallback base_circuit_params: {:?}", base_params);
 
-        let t = std::time::Instant::now();
-        let vk = keygen_vk(&self.srs, &circuit).context("fallback keygen_vk failed")?;
-        info!("fallback keygen_vk: {:?}", t.elapsed());
-
-        let t = std::time::Instant::now();
-        let pk = keygen_pk(&self.srs, vk.clone(), &circuit)
-            .context("fallback keygen_pk failed")?;
-        info!("fallback keygen_pk: {:?}", t.elapsed());
-
-        common::save_vk(&self.params_dir, PREFIX, &vk)?;
-        common::save_pk(&self.params_dir, PREFIX, &pk)?;
-        common::save_config(&self.params_dir, PREFIX, &base_params)?;
-
-        self.vk = Some(vk);
-        // pk dropped here — reload on demand via load_pk().
-        self.config = Some(base_params);
-
+        self.state.run_keygen(&circuit, base_params)?;
         info!("fallback keys generated and cached (PK on disk, not in memory)");
         Ok(())
     }
 
-    /// Load PK from disk into memory. Call before proving.
+    // ---- forwarding accessors / lifecycle ----
+
     pub fn load_pk(&mut self) -> anyhow::Result<()> {
-        if self.pk.is_some() {
-            return Ok(());
-        }
-        let config = self.config.as_ref().ok_or_else(|| {
-            anyhow::format_err!("fallback config not loaded — run ensure_keys first")
-        })?;
-        info!("loading fallback PK from disk (~3.7 GB)...");
-        let t = std::time::Instant::now();
-        let pk = common::try_load_pk(&self.params_dir, PREFIX, config).ok_or_else(|| {
-            anyhow::format_err!(
-                "failed to load fallback PK from {}",
-                common::pk_path(&self.params_dir, PREFIX).display()
-            )
-        })?;
-        info!("fallback PK loaded in {:?}", t.elapsed());
-        self.pk = Some(pk);
-        Ok(())
+        self.state.load_pk()
     }
-
     pub fn unload_pk(&mut self) {
-        if self.pk.is_some() {
-            self.pk = None;
-            info!("fallback PK unloaded from memory");
-        }
+        self.state.unload_pk()
     }
-
-    // ---- accessors ----
-
     pub fn params_dir(&self) -> &Path {
-        &self.params_dir
+        self.state.params_dir()
     }
     pub fn srs(&self) -> &ParamsKZG<Bn256> {
-        &self.srs
+        self.state.srs()
     }
     pub fn k(&self) -> u32 {
-        self.k
+        self.state.k()
     }
     pub fn vk_opt(&self) -> Option<&VerifyingKey<G1Affine>> {
-        self.vk.as_ref()
+        self.state.vk_opt()
     }
     pub fn vk(&self) -> &VerifyingKey<G1Affine> {
-        self.vk.as_ref().expect("fallback VK not loaded")
+        self.state.vk()
     }
     pub fn pk(&self) -> &ProvingKey<G1Affine> {
-        self.pk.as_ref().expect("fallback PK not loaded")
+        self.state.pk()
     }
     pub fn config(&self) -> &BaseCircuitParams {
-        self.config.as_ref().expect("fallback config not loaded")
+        self.state.config()
     }
 }

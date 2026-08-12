@@ -3,16 +3,22 @@
 //! Independent from Circuit 1's shape — smaller K, tighter lookup width,
 //! and its own reference-witness path built from
 //! `bridge_test_data_gen::layer_hashes::generate_layer_hash_chain_with_depth`.
+//!
+//! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
+//! on-demand PK load/unload, accessor plumbing) is delegated to the shared
+//! [`super::common::KeyManagerState`]. Only the circuit-specific
+//! reference-witness construction and the extra
+//! [`LayerHashesKeyManager::num_unusable_rows`] / [`LayerHashesKeyManager::lookup_bits`]
+//! accessors live here.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::Context;
 use bridge_test_data_gen::layer_hashes::LayerHashChainData;
 use gosh_dense_balanced_tree::DenseChainLink;
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+    plonk::{ProvingKey, VerifyingKey},
     poly::kzg::commitment::ParamsKZG,
 };
 use historical_layer_hashes_movement_checker_circuit::{
@@ -20,20 +26,19 @@ use historical_layer_hashes_movement_checker_circuit::{
 };
 use tracing::info;
 
-use super::common;
+use super::common::KeyManagerState;
 
 pub(super) const PREFIX: &str = "layer";
 
 pub(super) const NUM_UNUSABLE_ROWS: usize = 109;
 pub(super) const LOOKUP_BITS: usize = 16;
 
+/// Operator-facing size hint for `load_pk`. Purely cosmetic — the actual
+/// elapsed time is always logged after the load.
+const PK_SIZE_HINT: &str = "~2.8 GB";
+
 pub struct LayerHashesKeyManager {
-    params_dir: PathBuf,
-    srs: ParamsKZG<Bn256>,
-    k: u32,
-    vk: Option<VerifyingKey<G1Affine>>,
-    pk: Option<ProvingKey<G1Affine>>,
-    config: Option<BaseCircuitParams>,
+    state: KeyManagerState,
 }
 
 impl LayerHashesKeyManager {
@@ -56,30 +61,11 @@ impl LayerHashesKeyManager {
     }
 
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
-        std::fs::create_dir_all(params_dir).ok();
         // SRS must match the degree baked into cached PKs (see KEYGEN_SRS_K).
         let srs_k = Self::KEYGEN_SRS_K.max(k);
-        let srs = common::load_srs(params_dir, srs_k);
-        let mut mgr = Self {
-            params_dir: params_dir.to_path_buf(),
-            srs,
-            k,
-            vk: None,
-            pk: None,
-            config: None,
-        };
-        if let Ok(config) = common::load_config(&mgr.params_dir, PREFIX) {
-            info!("found layer config: {:?}", config);
-            if let Some(vk) = common::try_load_vk(&mgr.params_dir, PREFIX, &config) {
-                info!("loaded layer VK from cache");
-                mgr.vk = Some(vk);
-            }
-            if common::pk_path(&mgr.params_dir, PREFIX).exists() {
-                info!("layer PK found on disk (will load on demand)");
-            }
-            mgr.config = Some(config);
+        Self {
+            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k, Some(PK_SIZE_HINT)),
         }
-        mgr
     }
 
     /// Ensure Circuit 2 keys exist. Runs keygen with a synthetic chain
@@ -90,7 +76,7 @@ impl LayerHashesKeyManager {
     /// [`crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE`] so it stays in
     /// sync with the on-chain tree cadence.
     pub fn ensure_keys(&mut self) -> anyhow::Result<()> {
-        if self.vk.is_some() && common::pk_path(&self.params_dir, PREFIX).exists() {
+        if self.state.keys_cached() {
             info!("layer keys already available (VK in memory, PK on disk)");
             return Ok(());
         }
@@ -126,83 +112,45 @@ impl LayerHashesKeyManager {
             (chain_data.num_prev_chain_steps + 1) as u8,
             chain_links,
             bk_set_hash,
-            self.k as usize,
+            self.state.k() as usize,
             NUM_UNUSABLE_ROWS,
             LOOKUP_BITS,
         );
         let base_params = circuit.base_circuit_params().clone();
-        info!("layer base_circuit_params: {:?}", base_params);
 
-        let t = std::time::Instant::now();
-        let vk = keygen_vk(&self.srs, &circuit).context("layer keygen_vk failed")?;
-        info!("layer keygen_vk: {:?}", t.elapsed());
-
-        let t = std::time::Instant::now();
-        let pk =
-            keygen_pk(&self.srs, vk.clone(), &circuit).context("layer keygen_pk failed")?;
-        info!("layer keygen_pk: {:?}", t.elapsed());
-
-        common::save_vk(&self.params_dir, PREFIX, &vk)?;
-        common::save_pk(&self.params_dir, PREFIX, &pk)?;
-        common::save_config(&self.params_dir, PREFIX, &base_params)?;
-
-        self.vk = Some(vk);
-        // pk dropped here — freed ~2.8 GB; reload on demand.
-        self.config = Some(base_params);
-
+        self.state.run_keygen(&circuit, base_params)?;
         info!("layer keys generated and cached (PK on disk, not in memory)");
         Ok(())
     }
 
+    // ---- forwarding accessors / lifecycle ----
+
     pub fn load_pk(&mut self) -> anyhow::Result<()> {
-        if self.pk.is_some() {
-            return Ok(());
-        }
-        let config = self.config.as_ref().ok_or_else(|| {
-            anyhow::format_err!("layer config not loaded — run ensure_keys first")
-        })?;
-        info!("loading layer PK from disk (~2.8 GB)...");
-        let t = std::time::Instant::now();
-        let pk = common::try_load_pk(&self.params_dir, PREFIX, config).ok_or_else(|| {
-            anyhow::format_err!(
-                "failed to load layer PK from {}",
-                common::pk_path(&self.params_dir, PREFIX).display()
-            )
-        })?;
-        info!("layer PK loaded in {:?}", t.elapsed());
-        self.pk = Some(pk);
-        Ok(())
+        self.state.load_pk()
     }
-
     pub fn unload_pk(&mut self) {
-        if self.pk.is_some() {
-            self.pk = None;
-            info!("layer PK unloaded from memory");
-        }
+        self.state.unload_pk()
     }
-
-    // ---- accessors ----
-
     pub fn params_dir(&self) -> &Path {
-        &self.params_dir
+        self.state.params_dir()
     }
     pub fn srs(&self) -> &ParamsKZG<Bn256> {
-        &self.srs
+        self.state.srs()
     }
     pub fn k(&self) -> u32 {
-        self.k
+        self.state.k()
     }
     pub fn vk_opt(&self) -> Option<&VerifyingKey<G1Affine>> {
-        self.vk.as_ref()
+        self.state.vk_opt()
     }
     pub fn vk(&self) -> &VerifyingKey<G1Affine> {
-        self.vk.as_ref().expect("layer VK not loaded")
+        self.state.vk()
     }
     pub fn pk(&self) -> &ProvingKey<G1Affine> {
-        self.pk.as_ref().expect("layer PK not loaded")
+        self.state.pk()
     }
     pub fn config(&self) -> &BaseCircuitParams {
-        self.config.as_ref().expect("layer config not loaded")
+        self.state.config()
     }
 
     pub fn num_unusable_rows(&self) -> usize {

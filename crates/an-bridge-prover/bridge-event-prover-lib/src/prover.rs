@@ -40,7 +40,7 @@ use rand::rngs::OsRng;
 use tracing::info;
 use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink, MAX_CHAIN_LEN};
 
-use bridge_prover_lib::keys::KeyManager;
+use bridge_prover_lib::keys::EventKeyManager;
 use bridge_prover_lib::transcript::{PoseidonWrite, TranscriptKind};
 
 use bridge_event_prove_circuit::boc_helper::BocFlattenData;
@@ -316,14 +316,14 @@ pub struct EventProofOutput {
 /// Generate a Circuit 4 proof from a fully-populated [`PrivateWitness`].
 ///
 /// Caller is responsible for ensuring the event PK is loaded into memory
-/// before calling — i.e. `key_manager.load_event_pk()?` first, then
-/// `key_manager.unload_event_pk()` after. The same on-demand pattern
+/// before calling — i.e. `event_km.load_pk()?` first, then
+/// `event_km.unload_pk()` after. The same on-demand pattern
 /// `bridge-prover-daemon` uses for the primary and layer PKs.
 pub fn generate_event_proof(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     witness: &PrivateWitness,
 ) -> Result<EventProofOutput> {
-    generate_event_proof_with_transcript(key_manager, witness, TranscriptKind::Blake2b)
+    generate_event_proof_with_transcript(event_km, witness, TranscriptKind::Blake2b)
 }
 
 /// Generate a Circuit 4 proof from a fully-populated [`PrivateWitness`] with
@@ -332,15 +332,15 @@ pub fn generate_event_proof(
 /// transcript semantics — `Poseidon` here is what the R15 ETH-side
 /// aggregator consumes.
 pub fn generate_event_proof_with_transcript(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     witness: &PrivateWitness,
     transcript: TranscriptKind,
 ) -> Result<EventProofOutput> {
-    let inputs = build_proof_inputs(witness, key_manager.event_config().clone())
+    let inputs = build_proof_inputs(witness, event_km.config().clone())
         .context("build_proof_inputs failed (translating witness JSON → circuit)")?;
     let EventProofInputs { circuit, public_instances } = inputs;
     generate_event_proof_from_circuit_with_transcript(
-        key_manager,
+        event_km,
         circuit,
         public_instances,
         transcript,
@@ -353,12 +353,12 @@ pub fn generate_event_proof_with_transcript(
 /// `bridge-event-prove-circuit::test_helpers::build_synthetic_event_keygen_inputs`
 /// rather than from a daemon-side [`PrivateWitness`].
 pub fn generate_event_proof_from_circuit(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     circuit: BridgeEventProveCircuit,
     public_instances: Vec<Fr>,
 ) -> Result<EventProofOutput> {
     generate_event_proof_from_circuit_with_transcript(
-        key_manager,
+        event_km,
         circuit,
         public_instances,
         TranscriptKind::Blake2b,
@@ -373,7 +373,7 @@ pub fn generate_event_proof_from_circuit(
 /// pipeline requires. `Blake2b` is the AN-facing default (accepted by the
 /// `ZKHALO2VERIFYWITHVK` opcode).
 pub fn generate_event_proof_from_circuit_with_transcript(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     circuit: BridgeEventProveCircuit,
     public_instances: Vec<Fr>,
     transcript: TranscriptKind,
@@ -396,8 +396,8 @@ pub fn generate_event_proof_from_circuit_with_transcript(
                 Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
                 _,
             >(
-                key_manager.event.srs(),
-                key_manager.event_pk(),
+                event_km.srs(),
+                event_km.pk(),
                 &[circuit],
                 &[instance_refs],
                 OsRng,
@@ -416,8 +416,8 @@ pub fn generate_event_proof_from_circuit_with_transcript(
                 PoseidonWrite<Vec<u8>>,
                 _,
             >(
-                key_manager.event.srs(),
-                key_manager.event_pk(),
+                event_km.srs(),
+                event_km.pk(),
                 &[circuit],
                 &[instance_refs],
                 OsRng,

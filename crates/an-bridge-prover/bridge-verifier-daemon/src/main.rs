@@ -1135,7 +1135,7 @@ fn process_event_proof(
 
     // ---- Cryptographic verification ----
     let t_verify = Instant::now();
-    let proof_valid = event_verifier::verify_event_proof(key_manager, &proof_bytes, &instances);
+    let proof_valid = event_verifier::verify_event_proof(&key_manager.event, &proof_bytes, &instances);
     let verify_elapsed = t_verify.elapsed();
     info!(
         "event {}: Circuit 4 {} ({:?}) | total {:?}",

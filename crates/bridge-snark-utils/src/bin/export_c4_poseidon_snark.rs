@@ -146,14 +146,14 @@ fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to read fixture {}", fixture.display()))?;
         let witness: PrivateWitness = serde_json::from_str(&raw)
             .with_context(|| format!("failed to parse PrivateWitness JSON from {}", fixture.display()))?;
-        generate_event_proof_with_transcript(&km, &witness, TranscriptKind::Poseidon)
+        generate_event_proof_with_transcript(&km.event, &witness, TranscriptKind::Poseidon)
             .context("Circuit 4 Poseidon proof generation failed (real witness)")?
     } else {
         let seed = args.seed.unwrap_or(C4_SEED);
         println!("proving SYNTHETIC witness (seed={seed:#x})");
         let (circuit, instances) = build_synthetic_event_keygen_inputs(seed);
         generate_event_proof_from_circuit_with_transcript(
-            &km,
+            &km.event,
             circuit,
             instances,
             TranscriptKind::Poseidon,
@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     // (stale/mismatched event keys are the usual culprit; delete
     // params/event_{vk,pk}.bin + event_config_params.json and re-run).
     let ok = verify_event_proof_with_transcript(
-        &km,
+        &km.event,
         &out.proof_bytes,
         &out.public_instances,
         TranscriptKind::Poseidon,

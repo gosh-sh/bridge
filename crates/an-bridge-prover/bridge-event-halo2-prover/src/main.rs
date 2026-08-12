@@ -33,7 +33,7 @@ use tracing::{error, info};
 
 use bridge_event_prove_circuit::test_helpers::build_synthetic_event_keygen_inputs;
 use bridge_event_prover_lib::{EventProofOutput, EventProver, PrivateWitness};
-use bridge_prover_lib::keys::KeyManager;
+use bridge_prover_lib::keys::EventKeyManager;
 
 const PARAMS_DIR: &str = "./params";
 
@@ -152,8 +152,8 @@ fn run() -> Result<()> {
     info!("=== bridge-event-prove ({mode}) ===");
     info!("params_dir: {PARAMS_DIR}");
 
-    let mut km = KeyManager::new(Path::new(PARAMS_DIR));
-    let mut event_prover = EventProver::new(&mut km);
+    let mut ekm = EventKeyManager::new(Path::new(PARAMS_DIR));
+    let mut event_prover = EventProver::new(&mut ekm);
     event_prover.ensure_keys().context("ensure_event_keys failed")?;
     event_prover.load_pk().context("load_event_pk failed")?;
 

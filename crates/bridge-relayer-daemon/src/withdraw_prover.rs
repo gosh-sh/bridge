@@ -82,7 +82,8 @@ impl MockWithdrawalProver {
                 seq_no: 0,
                 proof_hex: hex::encode(vec![
                     0xAAu8;
-                    crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200
+                    crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES
+                        + 3200
                 ]),
                 public_instances_hex,
                 self_verified: true,

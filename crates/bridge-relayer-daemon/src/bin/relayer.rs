@@ -7,8 +7,8 @@
 //!   [`bridge_relayer_daemon::EthBridgeClient`].
 //!
 //! - `daemon` — long-running operator entry point. Drives `Relayer::tick`
-//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a
-//!   structured metrics snapshot on every shutdown.
+//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a structured
+//!   metrics snapshot on every shutdown.
 //!
 //! - `verify-fixture` — **read-only** pre-flight check. Loads a fixture, reads
 //!   the on-chain bridge anchors over RPC, and reports field-by-field whether
@@ -37,14 +37,14 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use bridge_relayer_daemon::{
-    discover_event_proofs, result_path_for, BackoffConfig, BkSetUpdateSubmitOutcome,
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
-    LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
-    RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
-    TickOutcome,
-    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
+    check_startup_drift, discover_event_proofs, result_path_for, BackoffConfig,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, StatePaths,
+    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawSubmitOutcome, WithdrawalProver,
+    WithdrawalResultGate,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -279,7 +279,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         seq_no: u64,
         /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
-        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live --pk-cache-dir`.
+        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live
+        /// --pk-cache-dir`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
     },
@@ -407,7 +408,8 @@ enum Cmd {
         /// aggregated calldata, so `daemon-live` refuses to start without it.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator self-check).
+        /// Directory of committed verifier `.bin` files (aggregator
+        /// self-check).
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
@@ -1636,10 +1638,7 @@ async fn run_bridge_daemon(
             ),
             Ok(TickOutcome::BkUpdateApplied {
                 seq_no, ..
-            }) => info!(
-                seq_no,
-                "daemon-bridge: applyBkSetUpdate applied"
-            ),
+            }) => info!(seq_no, "daemon-bridge: applyBkSetUpdate applied"),
             Ok(TickOutcome::NotYetAvailable {
                 ..
             }) => {},
@@ -1785,8 +1784,7 @@ async fn submit_bk_update(
 
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
-            tx_hash,
-            ..
+            tx_hash, ..
         } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
         BkSetUpdateSubmitOutcome::Reverted {
             reason,
@@ -1842,8 +1840,8 @@ async fn run_daemon_live(
     let prover_state_path = state_paths.prover_state_json.clone();
     let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
 
-    let gql = create_client(&gql_endpoint)
-        .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+    let gql =
+        create_client(&gql_endpoint).map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
 
     // Load BK set via the shared bootstrap helper (aligned with
     // `bridge-prover-daemon/src/main.rs`). Mode is selected by
@@ -1886,15 +1884,15 @@ async fn run_daemon_live(
         Some(loaded) => {
             if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
                 anyhow::bail!(
-                    "prover_bk_set commitment {} disagrees with prover_state {} — \
-                     delete BOTH under {} or restore a paired backup",
+                    "prover_bk_set commitment {} disagrees with prover_state {} — delete BOTH \
+                     under {} or restore a paired backup",
                     hex::encode(loaded.commitment),
                     hex::encode(state.stored_bk_set_commitment),
                     prover_state_dir.display(),
                 );
             }
             loaded
-        }
+        },
         None => {
             let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
             pbs.save(bk_path_str)
@@ -1904,16 +1902,13 @@ async fn run_daemon_live(
                 "bootstrapped prover_bk_set.json"
             );
             pbs
-        }
+        },
     };
 
     // Shared startup guard (parity with bridge-prover-daemon): reject the
     // "stale ./state on top of a re-initialised chain" configuration
     // before we hand off to LiveProverDriver.
-    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
-        &bk_set_config_str,
-        &prover_bk_set,
-    )?;
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(&bk_set_config_str, &prover_bk_set)?;
 
     // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
     // owns `prover_bk_set` as the sole BK-pubkey source and derives its
@@ -1927,21 +1922,15 @@ async fn run_daemon_live(
     };
     info!(?seed_policy, "LiveProverDriver seed policy");
 
-    let driver = LiveProverDriver::new(
-        gql,
-        key_manager,
-        state,
-        prover_bk_set,
-        LiveProverConfig {
-            seed_policy,
-            // Emit Poseidon-transcript proofs directly. Consumed in-process
-            // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
-            // the old `export-1a1b2-poseidon-snark` subprocess that
-            // independently re-fetched + re-proved every bundle.
-            transcript: TranscriptKind::Poseidon,
-            ..Default::default()
-        },
-    )
+    let driver = LiveProverDriver::new(gql, key_manager, state, prover_bk_set, LiveProverConfig {
+        seed_policy,
+        // Emit Poseidon-transcript proofs directly. Consumed in-process
+        // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
+        // the old `export-1a1b2-poseidon-snark` subprocess that
+        // independently re-fetched + re-proved every bundle.
+        transcript: TranscriptKind::Poseidon,
+        ..Default::default()
+    })
     .map_err(|e| anyhow::anyhow!("LiveProverDriver::new: {e}"))?;
     let driver = Arc::new(Mutex::new(driver));
 
@@ -1972,8 +1961,8 @@ async fn run_daemon_live(
         && driver_state.stored_last_seen_block_seq_no != 0
     {
         anyhow::bail!(
-            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap \
-             (do NOT auto-heal)",
+            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap (do NOT \
+             auto-heal)",
             driver_state.stored_last_seen_block_seq_no,
             on_chain.last_seen_block_seq_no,
             prover_state_dir.display(),
@@ -2026,9 +2015,10 @@ async fn run_daemon_live(
     .await
 }
 
-/// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
-/// Generic over the source types so both aggregation-on and aggregation-off
-/// paths in [`run_daemon_live`] share the same startup + run wiring.
+/// Build a Relayer, run the startup drift audit, then drive
+/// `run_until_shutdown`. Generic over the source types so both aggregation-on
+/// and aggregation-off paths in [`run_daemon_live`] share the same startup +
+/// run wiring.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_and_run<S, U, B>(
     cfg: RelayerConfig,

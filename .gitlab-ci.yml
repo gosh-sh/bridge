@@ -255,8 +255,13 @@ test:solidity:
 test:solidity:coverage:
   extends: .foundry_base
   stage: test
+  # `only: merge_requests` makes this run in a *merge request pipeline*, where
+  # `build:solidity` (default `only: branches/tags`) is absent. Mark the need
+  # optional so pipeline creation succeeds there; the job rebuilds from scratch
+  # anyway (npm install + forge install + forge coverage), so it is self-contained.
   needs:
-    - build:solidity
+    - job: build:solidity
+      optional: true
   script:
     - export PATH="$FOUNDRY_DIR/bin:$PATH"
     - cd contracts/ethereum

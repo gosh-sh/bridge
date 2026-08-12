@@ -19,7 +19,8 @@ Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 ## Table of Contents
 
 - [Quick resume checklist (returning to a running system)](#quick-resume-checklist-returning-to-a-running-system)
-- [Reference addresses (current deploy)](#reference-addresses-current-deploy)
+- [Deploy your own bridge bundle (external users)](#deploy-your-own-bridge-bundle-external-users)
+- [Live reference deploy (Alina's shellnet)](#live-reference-deploy-alinas-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
 - [Case 2 — Steady-state operation](#case-2--steady-state-operation)
@@ -39,8 +40,8 @@ Run this **before touching anything** — it takes 30 seconds and tells you
 exactly which case (below) applies.
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/an-bridge-prover
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
+cd <your-checkout>/bridge/crates/an-bridge-prover
+export BRIDGE=$(grep '^BRIDGE_ADDRESS=' .env.shellnet | cut -d= -f2)   # your deploy
 export RPC=https://ethereum-sepolia-rpc.publicnode.com
 
 # 1. Is the daemon alive?
@@ -74,28 +75,147 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 
 ---
 
-## Reference addresses (current deploy)
+## Deploy your own bridge bundle (external users)
 
-Source of truth: [`../../../bridge-deployer.txt`](../../../bridge-deployer.txt) —
-read the latest `Deploy #N` section for current addresses. Values below are
-Deploy #4 (2026-08-03, active).
+Running this E2E requires an on-chain `AckiNackiBridge` **that you own and
+fund**. `verifyBlock` (`AckiNackiBridge.sol:650`) is a
+state-mutating `external nonReentrant` function; every relayer submit is a
+signed Sepolia transaction. The daemon reads its signer from the
+`RELAYER_PRIVATE_KEY` env var (`bridge-relayer-daemon/src/bin/relayer.rs:86`);
+there is no default, no fallback, no shared key. You cannot borrow the
+reference-deploy addresses below — those are Alina's; only she holds the
+key that can advance them.
+
+### 1. Create a fresh burner wallet
+
+```bash
+cast wallet new
+#  Address:     0x...
+#  Private key: 0x...
+```
+
+Keep the private key in a local file **outside** the repo. Never reuse a
+wallet that holds real funds — the deploy scripts and daemon both accept
+the key over env.
+
+### 2. Fund it with Sepolia ETH
+
+Two faucets that reliably deliver **without** an anti-Sybil mainnet-deposit
+gate (verified 2026-08):
+
+- **pk910 PoW** — https://sepolia-faucet.pk910.de/  (mine in-browser, ~5–15 min for the target amount)
+- **Google Cloud Web3 faucet** — https://cloud.google.com/application/web3/faucet/ethereum/sepolia  (0.05 ETH/day, no PoW)
+
+Faucets that require depositing ≥0.001 ETH on mainnet first (Alchemy /
+Infura / QuickNode) are usable once you're funded; they hand out 0.05–0.5
+ETH/day and are the practical top-up path after bootstrap.
+
+**Budget.** The one-shot deploy of the 6-contract bundle
+(`DeployShellnetE2EBridge.s.sol`: `AckiNackiBridge` + 4 SHPLONK verifiers +
+`MockBlockHeaderOracle`) cost **0.051 ETH** on 2026-08-04 (30M gas @
+2.4 gwei). Add ~0.001 ETH for the post-deploy `unpause()` tx and a
+running budget of ~0.001–0.003 ETH per `verifyBlock` submit (one per
+512-block stride). **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a
+multi-day E2E run.
+
+### 3. Deploy the contract bundle
+
+The canonical deploy script is
+[`contracts/ethereum/script/DeployShellnetE2EBridge.s.sol`](../../../contracts/ethereum/script/DeployShellnetE2EBridge.s.sol).
+Full deployer-side runbook lives at
+[`docs/shellnet_e2e_acceptance_runbook.md`](../../../docs/shellnet_e2e_acceptance_runbook.md);
+the minimum env needed is:
+
+```bash
+cd contracts/ethereum
+cp .env.example .env                              # then edit:
+#   SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+#   PRIVATE_KEY=<your burner from §1>
+#   ETHERSCAN_API_KEY=<optional, for source verification>
+
+# Compute genesis anchors from live shellnet — pin these into env before deploy.
+cd ../../crates/bridge-prover-lib
+cargo run --release --bin compute_bridge_anchors -- \
+  --at-head \
+  --gql-endpoint https://shellnet.ackinacki.org/graphql
+# Output:
+#   GENESIS_BK_SET_COMMITMENT=0x...
+#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+#   GENESIS_LAST_SEEN_BLOCK_SEQNO=<latest bundle boundary>
+
+cd ../../contracts/ethereum
+set -a && source .env && set +a
+export GENESIS_BK_SET_COMMITMENT=0x...
+export GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+export GENESIS_LAST_SEEN_BLOCK_SEQNO=<from compute_bridge_anchors>
+export WIRE_WITHDRAW_BY_PROOF=true            # required by constructor since 7a645e5
+export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a  # placeholder OK for verifyBlock-only
+
+forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+  --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
+
+# Contract is deployed PAUSED. Unpause with:
+cast send $BRIDGE 'unpause()' --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
+```
+
+The broadcast record ends up in
+`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json` —
+extract the 6 contract addresses from there.
+
+### 4. Wire the daemon to your deploy
+
+Populate `crates/an-bridge-prover/.env.shellnet` (create if missing):
+
+```bash
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+BRIDGE_ADDRESS=<AckiNackiBridge from step 3>
+RELAYER_PRIVATE_KEY=<your burner from step 1>
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BOOTSTRAP_SEQNO=<GENESIS_LAST_SEEN_BLOCK_SEQNO from step 3>
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+BRIDGE_PARAMS_DIR=./params
+BRIDGE_STATE_DIR=./state
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+```
+
+Now jump to [Binary + env prerequisites](#binary--env-prerequisites) and
+[Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy).
+
+---
+
+## Live reference deploy (Alina's shellnet)
+
+The addresses below are Alina's **working** verifyBlock-only shellnet
+deploy on Sepolia. External users cannot advance them (Alina holds the
+signer) but they are useful as read-only reference — every `cast call`
+example in this runbook targets these values, and you can compare your
+own deploy's `expectedPrevAnchor(1)` / `storedBkSetCommitment()` shapes
+against them for sanity.
 
 | Item | Value |
 |---|---|
 | Network | Sepolia (chain 11155111) |
 | RPC | `https://ethereum-sepolia-rpc.publicnode.com` |
-| `AckiNackiBridge` | `0x36272c871d9389E77d0b95F931BA0B0f74d43818` |
-| `PrimaryAggregatorVerifier` | `0x653ceeAaC0b77f6A9c5E6cAB648a434c707fa6eD` |
-| `FallbackAggregatorVerifier` | `0x4DA9474C7b9a6c45cC96DDdc9fB8679846076B1e` |
-| `LayerHashesAggregatorVerifier` | `0xA6f0bc033485751a3a8C301441b672E1d07CeD79` |
-| `MockBlockHeaderOracle` | `0x05eE6Ee62696efA7B6B8dA1Ce520f16CC3bC2f2f` |
-| Bootstrap seed seq_no | `4887552` |
-| Deployer / relayer wallet | `0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f` |
+| `AckiNackiBridge` | `0x827169ac5DdF31f6cCE8C5026a8501dEc3a5253a` |
+| `PrimaryAggregatorVerifier` | `0x0AE4061E336dF9cF988807FF3616Ec9BBA734d1C` |
+| `FallbackAggregatorVerifier` | `0x3774Fa01589C49e6DdE596d2a8F86a3dfEE49cEf` |
+| `LayerHashesAggregatorVerifier` | `0xa3208EFd0926948D8f1C3092D81B4Ff979d874f3` |
+| `BridgeWithdrawalAggregatorVerifier` | `0x65782C62FAC71FAB4672488DAd027BBf84f30B04` |
+| `MockBlockHeaderOracle` | `0x50217f995139cE12D6C747fFb1145034Ec80cE78` |
+| Bootstrap seed seq_no | `5495808` |
 | Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
-| Genesis `prev_max_level_layer_hash` | `0x268e7b0af653733a850d2fd7ee2cff346145bf5e9c4559f90e024829a7869158` |
+| Genesis `prev_max_level_layer_hash` | `0x10dcf878d2958d3eca4c23544bae2be13069595907e2b1bee5bb1756e8c11f76` |
 
-Any redeploy invalidates all seven — regenerate `.env.shellnet` from the
-new `bridge-deployer.txt` section (see [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain)).
+*Local note (Alina/Claude only):* the burner deployer key, per-deploy
+change history, and full genesis-anchor paper trail live in
+`~/HALO2_TVM_EXPERIMENTS/bridge-deployer.txt` — a personal, off-tree file.
+Not shipped and not linked from this doc.
+
+Any redeploy invalidates all seven contract addresses + the seed seq_no —
+regenerate `.env.shellnet` (see [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users)
+step 4, or [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) for
+in-place re-seed against an existing contract).
 
 ---
 
@@ -136,8 +256,14 @@ done
 ```
 
 All ten variables must be present. `BRIDGE_BOOTSTRAP_SEQNO` must equal the
-contract's `storedLastSeenBlockSeqNo` at construction (visible in
-`bridge-deployer.txt` and via `cast call ... storedLastSeenBlockSeqNo()`).
+contract's `storedLastSeenBlockSeqNo` at construction — i.e. the
+`GENESIS_LAST_SEEN_BLOCK_SEQNO` you passed at deploy time (see
+[Deploy your own bridge bundle §3](#3-deploy-the-contract-bundle)). Verify
+on-chain with:
+
+```bash
+cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC
+```
 
 ---
 
@@ -148,17 +274,19 @@ contract's `storedLastSeenBlockSeqNo` at construction (visible in
 **Pre-flight (contract sanity):**
 
 ```bash
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
+set -a && source .env.shellnet && set +a
+export BRIDGE=$BRIDGE_ADDRESS
+export RPC=$RPC_URL
 
 cast call $BRIDGE 'paused()(bool)'                          --rpc-url $RPC   # false
-cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'      --rpc-url $RPC   # 4887552
+cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'      --rpc-url $RPC   # == $BRIDGE_BOOTSTRAP_SEQNO
 cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' 1    --rpc-url $RPC   # matches env GENESIS_PREV_MAX_LEVEL_LAYER_HASH
 cast call $BRIDGE 'storedBkSetCommitment()(uint256)'        --rpc-url $RPC   # matches env GENESIS_BK_SET_COMMITMENT
 ```
 
-If any of the four don't match the values in `bridge-deployer.txt`, **stop**
-— the deploy is broken. Do not launch the daemon.
+If any of the four don't match your deploy's genesis values (from the
+`compute_bridge_anchors` output you pinned at deploy time), **stop** —
+the deploy is broken. Do not launch the daemon.
 
 **Cold-start launch:**
 
@@ -182,7 +310,7 @@ INFO bridge_prover_lib::keys::fallback:    loaded fallback VK from cache
 INFO bridge_prover_lib::keys::layer:       loaded layer VK from cache
 INFO bridge_prover_lib::keys::event:       loaded event VK from cache
 INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shellnet.json matches prover_bk_set.commitment
-INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(4887552)      ← THIS is the cold-start signature
+INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)   ← cold-start signature (e.g. 5495808 on the live reference deploy)
 ```
 
 `seed_policy=Explicit(N)` means the daemon is seeding from
@@ -219,7 +347,7 @@ tail -f crates/an-bridge-prover/logs/live_*.log
 watch -n 30 'ls -lt crates/an-bridge-prover/submissions/ | head -6'
 
 # On-chain progress
-watch -n 60 'cast call 0x36272c871d9389E77d0b95F931BA0B0f74d43818 storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url https://ethereum-sepolia-rpc.publicnode.com'
+watch -n 60 "cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC"
 ```
 
 **Progress signature (per successful cycle):**
@@ -287,8 +415,9 @@ transport failures should retry with backoff, not abort.
 ### 4a. Verify no txs actually landed (nonce check)
 
 ```bash
-cast nonce 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC
-cast nonce 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC --block pending
+RELAYER_ADDR=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+cast nonce $RELAYER_ADDR --rpc-url $RPC
+cast nonce $RELAYER_ADDR --rpc-url $RPC --block pending
 ```
 
 If `latest == pending`, no txs in mempool. If `pending > latest`, wait 1-2 min
@@ -435,11 +564,10 @@ nohup ./target/release/relayer daemon-live > logs/live_rebootstrap_${TS}.log 2>&
 **Why re-bootstrap is dangerous.** If `BRIDGE_BOOTSTRAP_SEQNO` doesn't match
 `storedLastSeenBlockSeqNo` on-chain, the first submit reverts with
 `BlockSeqNoNotMonotonic` (if you're behind) or `PrevAnchorMismatch` (if
-you're ahead of chain but chain expects a different prev-anchor). The
-[Deploy #4 log in `bridge-deployer.txt`](../../../bridge-deployer.txt) has a
-detailed post-mortem of the `storedLastSeenBlockSeqNo=0` chicken-and-egg
-that motivated adding `genesisLastSeenBlockSeqNo` to the contract
-constructor.
+you're ahead of chain but chain expects a different prev-anchor). See the
+[Change log](#change-log--known-incidents) `2026-08-03 — chicken-and-egg
+fix` entry for the constructor-arg (`genesisLastSeenBlockSeqNo`) that
+makes this diagnosable rather than a hard hang on the first submit.
 
 ---
 
@@ -448,15 +576,20 @@ constructor.
 **On-chain state snapshot:**
 
 ```bash
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
+set -a && source .env.shellnet && set +a
+export BRIDGE=$BRIDGE_ADDRESS
+export RPC=$RPC_URL
 echo "paused:            $(cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC)"
 echo "last_seen:         $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
-echo "num_layers:        $(cast call $BRIDGE 'storedNumLayers()(uint8)' --rpc-url $RPC --json | jq -r '.[0]')"
+# num_layers derived from getLatestPerLayer() — highest index with a nonzero hash.
+# (Since storage-v2 / commit f8c5ba0, storedNumLayers()/storedLayerHashes(uint256)/getStoredLayerHashes() are gone.)
+echo "latest_per_layer:  $(cast call $BRIDGE 'getLatestPerLayer()(uint256[10])' --rpc-url $RPC)"
 echo "bk_last_update:    $(cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
 echo "bk_commitment:     $(cast call $BRIDGE 'storedBkSetCommitment()(uint256)' --rpc-url $RPC)"
 echo "expectedPrev(1):   $(cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' 1 --rpc-url $RPC)"
-echo "storedPrev(legacy):$(cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(uint256)' --rpc-url $RPC)"
+echo "storedPrev(genesis): $(cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(uint256)' --rpc-url $RPC)"
+# Since storage-v2 (f8c5ba0), storedPrevMaxLevelLayerHash is `immutable` — it
+# holds the genesis seed forever, not the last-block max-level.
 ```
 
 **Daemon liveness:**
@@ -483,9 +616,12 @@ ls -lt crates/an-bridge-prover/submissions/verifyBlock_seq*.json | head -5
 **Wallet balance:**
 
 ```bash
-cast balance 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC --ether
+RELAYER_ADDR=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+cast balance $RELAYER_ADDR --rpc-url $RPC --ether
 # Each verifyBlock costs ~0.001-0.003 ETH depending on Sepolia gas price.
-# Refill from faucets listed in bridge-deployer.txt if <0.5 ETH.
+# Refill from the faucets listed under
+# [Deploy your own bridge bundle §2](#2-fund-it-with-sepolia-eth)
+# if <0.5 ETH.
 ```
 
 ---
@@ -536,6 +672,39 @@ crates/an-bridge-prover/
 Newest first. Each entry captures **what happened, why, what changed, and
 the reference commits/paths** so we don't have to reconstruct history next
 time we come back to the runbook.
+
+### 2026-08-04 — Deploy #5 (storage v2.0 + NB-Q1/Q8 remediation)
+
+- **Why re-deploy.** Four contract changes landed between 2026-08-03 and
+  2026-08-04 and were folded into a fresh deploy rather than run
+  mixed-source/bytecode against Deploy #4.
+- **Contract changes:**
+  - `f8c5ba0` — storage v2.0. `storedNumLayers` + `storedLayerHashes[10]`
+    removed; hot-path SSTOREs on both eliminated (~31.9 k gas / verifyBlock).
+    `storedPrevMaxLevelLayerHash` promoted to `immutable` (holds the
+    genesis seed forever); new `getLatestPerLayer()` view is the correct
+    per-layer state observation.
+  - `7da8878` — `applyBkSetUpdate` folds BK-set commitments LE (NB-Q1
+    blocker from Sergey's 07-27 answer).
+  - `09c1686` — `withdrawByProof` flat `_isKnownAnchor` across all 10
+    windows (NB-Q1 Option D; no feature flag).
+  - `7a645e5` — `DeployShellnetE2EBridge` now requires the C4 verifier +
+    `WITHDRAW_ACC_FR` on any chain != anvil (NB-Q8). The
+    `BridgeWithdrawalAggregatorVerifier` .bin ships in the bundle even
+    though this runbook does not exercise `withdrawByProof`.
+- **ABI removals versus prior deploys.** Any tooling calling
+  `storedNumLayers()`, `storedLayerHashes(uint256)` or
+  `getStoredLayerHashes()` will revert against Deploy #5. Health-check
+  block in this runbook updated to use `getLatestPerLayer()` instead.
+- **Fresh genesis anchors** were regenerated via
+  `compute_bridge_anchors --at-head` against shellnet GraphQL. Bootstrap
+  seed advanced from `4887552` (Deploy #4) to `5495808` (Deploy #5,
+  bundle boundary 1024). Genesis `bk_set_commitment` unchanged (shellnet
+  BK rotation is off).
+- **Reference addresses** for Alina's live shellnet deploy are in
+  [Live reference deploy](#live-reference-deploy-alinas-shellnet).
+- **How to re-deploy your own bundle:** see
+  [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users).
 
 ### 2026-08-04 — RPC-transport hard-abort false-positive
 
@@ -602,8 +771,9 @@ time we come back to the runbook.
 - Deploy #4 added `genesisLastSeenBlockSeqNo` as a constructor arg
   (`AckiNackiBridge.sol` constructor). The client's
   `BRIDGE_BOOTSTRAP_SEQNO` must equal this value.
-- Current active deploy: [see reference table above](#reference-addresses-current-deploy).
-  Post-mortem lives in `bridge-deployer.txt` (Deploy #4 section).
+- Current active deploy: see
+  [Live reference deploy](#live-reference-deploy-alinas-shellnet) (Deploy #5
+  superseded #4 on 2026-08-04 — see entry above).
 
 ---
 

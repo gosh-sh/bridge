@@ -3,15 +3,19 @@
 //! Requires the `tvm-sdk` feature. See
 //! <https://github.com/tvmlabs/tvm-sdk/blob/main/docs/MIGRATION-3.0.md>.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tvm_client::{
     abi::{Abi, CallSet, ParamsOfEncodeMessage, Signer},
     account::{get_account, ParamsOfGetAccount},
     crypto::KeyPair,
-    net::{query_collection, NetworkConfig, ParamsOfQueryCollection},
+    net::{query, NetworkConfig, ParamsOfQuery},
     processing::{process_message, ParamsOfProcessMessage},
     ClientConfig, ClientContext,
 };
@@ -50,6 +54,15 @@ pub struct TvmAckiNacki {
     context: Arc<ClientContext>,
     bridge_abi: Abi,
     keys: KeyPair,
+    /// Receipts captured at `process_message` time, keyed by tx hash.
+    ///
+    /// `process_message` already produces and confirms the transaction and
+    /// returns it in full, so this is the authoritative outcome. Caching it
+    /// lets `wait_for_confirmation` answer without a second GraphQL round-trip —
+    /// which matters because the legacy `query_collection` collection endpoint
+    /// is disabled on current AN networks and the blockchain-API fallback can
+    /// lag the transaction by longer than the confirm timeout.
+    receipts: Arc<Mutex<HashMap<TxHash, TransactionReceipt>>>,
 }
 
 impl TvmAckiNacki {
@@ -74,6 +87,7 @@ impl TvmAckiNacki {
             context: Arc::new(context),
             bridge_abi: config.bridge_abi,
             keys: config.keys,
+            receipts: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -152,7 +166,32 @@ impl IAckiNacki for TvmAckiNacki {
             .get("id")
             .and_then(|v| v.as_str())
             .or_else(|| result.transaction.get("hash").and_then(|v| v.as_str()));
-        parse_tx_hash(tx_id)
+        let hash = parse_tx_hash(tx_id)?;
+
+        // Cache the authoritative receipt from `process_message` so
+        // `wait_for_confirmation` resolves without a second (deprecated / laggy)
+        // GraphQL query.
+        let gas_used = result
+            .transaction
+            .get("compute")
+            .and_then(|c| c.get("gas_used"))
+            .and_then(|g| g.as_u64())
+            .unwrap_or(0);
+        let block_number = result.transaction.get("now").and_then(|n| n.as_u64());
+        if let Ok(mut cache) = self.receipts.lock() {
+            cache.insert(
+                hash,
+                TransactionReceipt::with_compute(
+                    hash,
+                    status,
+                    block_number,
+                    gas_used,
+                    exit_code,
+                    aborted,
+                ),
+            );
+        }
+        Ok(hash)
     }
 
     async fn get_transaction_status(&self, tx_hash: &TxHash) -> Result<TransactionStatus> {
@@ -160,18 +199,41 @@ impl IAckiNacki for TvmAckiNacki {
     }
 
     async fn get_transaction_receipt(&self, tx_hash: &TxHash) -> Result<TransactionReceipt> {
+        // Prefer the receipt captured at `process_message` time — it is the
+        // authoritative outcome and needs no network round-trip.
+        if let Ok(cache) = self.receipts.lock() {
+            if let Some(receipt) = cache.get(tx_hash) {
+                return Ok(receipt.clone());
+            }
+        }
         let id = hex::encode(tx_hash);
-        let params = ParamsOfQueryCollection {
-            collection: "transactions".to_string(),
-            filter: Some(json!({ "id": { "eq": id } })),
-            result: "id aborted now compute { exit_code success gas_used }".to_string(),
-            order: None,
-            limit: Some(1),
-        };
-        let res = query_collection(self.context.clone(), params)
-            .await
-            .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
-        let Some(tx) = res.result.first() else {
+        // Query via the modern `blockchain { transaction(hash:) }` API. The
+        // legacy `query_collection("transactions", …)` collection endpoint is
+        // disabled on current AN networks (shellnet returns "Deprecated API is
+        // disabled") — even though `process_message`, which already produced and
+        // confirmed this tx, succeeds. Re-querying the deprecated collection
+        // here made a fully-successful `finalizeDeposit` report as a network
+        // error. The blockchain API is what `tvm-cli` 3.0 uses.
+        let gql = format!(
+            "{{ blockchain {{ transaction(hash:\"{id}\") {{ aborted now compute {{ exit_code success }} }} }} }}"
+        );
+        let res = query(
+            self.context.clone(),
+            ParamsOfQuery {
+                query: gql,
+                variables: None,
+            },
+        )
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        let tx = res
+            .result
+            .get("blockchain")
+            .and_then(|b| b.get("transaction"))
+            .filter(|t| !t.is_null());
+        let Some(tx) = tx else {
+            // Not yet indexed by the blockchain API — treat as pending so the
+            // caller's `wait_for_confirmation` loop keeps polling.
             return Ok(TransactionReceipt::with_compute(
                 *tx_hash,
                 TransactionStatus::Pending,
@@ -182,17 +244,12 @@ impl IAckiNacki for TvmAckiNacki {
             ));
         };
         let (status, exit_code, aborted) = classify_tx_json(tx);
-        let gas_used = tx
-            .get("compute")
-            .and_then(|c| c.get("gas_used"))
-            .and_then(|g| g.as_u64())
-            .unwrap_or(0);
         let block_number = tx.get("now").and_then(|n| n.as_u64());
         Ok(TransactionReceipt::with_compute(
             *tx_hash,
             status,
             block_number,
-            gas_used,
+            0, // gas_used not exposed by the blockchain transaction query
             exit_code,
             aborted,
         ))
@@ -329,6 +386,8 @@ fn parse_tx_hash(id: Option<&str>) -> Result<TxHash> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]

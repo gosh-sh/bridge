@@ -575,10 +575,7 @@ contract AckiNackiBridge {
     ///                    Must be non-zero. Carried as ZK public inputs and
     ///                    credited on the AN side — an EVM address cannot be an
     ///                    AN recipient, so the destination is supplied explicitly.
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-        external
-        nonReentrant
-    {
+    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
@@ -1057,7 +1054,7 @@ contract AckiNackiBridge {
             HistoryWindow storage w = _layerWindows[L];
             if (w.dataLen > 0) {
                 uint16 head = (w.writeCursor + uint16(HISTORY_PROOF_WINDOW) - 1)
-                              % uint16(HISTORY_PROOF_WINDOW);
+                    % uint16(HISTORY_PROOF_WINDOW);
                 out[L - 1] = w.data[head];
             }
         }
@@ -1322,7 +1319,6 @@ contract AckiNackiBridge {
         }
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
     }
-
 
     /// @notice Enable or disable further supplies to AAVE.
     function setAaveEnabled(bool enabled) external onlyOwner {

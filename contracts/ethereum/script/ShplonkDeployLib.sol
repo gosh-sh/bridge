@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Vm} from "forge-std/Vm.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 import "../src/ShplonkHalo2Verifier.sol";
 import "../src/IPrimaryVerifier.sol";
@@ -108,6 +108,8 @@ library ShplonkDeployLib {
         internal
         returns (VerifyBlockVerifiers memory out)
     {
-        return deployVerifyBlockProduction(primaryBinPath(), fallbackBinPath(), layerHashesBinPath());
+        return deployVerifyBlockProduction(
+            primaryBinPath(), fallbackBinPath(), layerHashesBinPath()
+        );
     }
 }

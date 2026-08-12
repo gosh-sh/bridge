@@ -8,8 +8,7 @@ recovery from the failure modes we have actually hit in production.
 **Scope of this runbook.** Bundle-only path: Circuit 1A/1B (attestation) +
 Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 `verifyBlock`. **No** BK-set updates (Circuit 3 / `applyBkSetUpdate`) and
-**no** event proofs (Circuit 4 / `withdrawByProof`). For the full E2E
-including Circuit 4 see [`../TECHNICAL_README.md`](../TECHNICAL_README.md).
+**no** event proofs (Circuit 4 / `withdrawByProof`). 
 
 > **Notation:** `seq_no` is Acki Nacki block sequence number.
 > "Key block" = every `SEQ_NO % (W*P) == 0` block; only key blocks trigger a
@@ -72,10 +71,6 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 | not running | yes | >0 | [Case 4](#case-4--restart-after-rpc-induced-hard-abort) (RPC hard-abort) — reset counter first |
 | not running | **no** | any | [Case 5](#case-5--restart-after-on-chain-revert) or [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) — do not restart blindly |
 | running/not | state/ missing | — | [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) (re-bootstrap) |
-
-**Authoritative branch (as of 2026-08-04):** `refactoring_and_review_bridge_relayer_demon`
-in `bridge-relayer-daemon/`. The BN254 Fr client fix (`types.rs:83`) is
-committed on this branch — see [Change log](#change-log--known-incidents).
 
 ---
 
@@ -517,7 +512,7 @@ crates/an-bridge-prover/
 └── target/release/relayer           ← the binary
 ```
 
-**Persistence triggers (see [`../../bridge-relayer-daemon/src/live_source.rs:115,132,210,259`](../../bridge-relayer-daemon/src/live_source.rs)):**
+**Persistence triggers (see [`../src/live_source.rs:115,132,210,259`](../src/live_source.rs)):**
 
 - `state/prover_state.json` + `state/prover_bk_set.json` are written together
   by `persist_driver` on every successful `ack_last_bundle` /

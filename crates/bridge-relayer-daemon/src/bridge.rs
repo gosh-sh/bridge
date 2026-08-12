@@ -81,6 +81,47 @@ pub struct BridgeOnChainState {
     pub last_bk_set_update_seq_no: u64,
 }
 
+/// Width of the on-chain per-layer rolling window
+/// (`HISTORY_PROOF_WINDOW` in `AckiNackiBridge.sol`).
+/// Kept as a const here so the resurrect path fails loudly at compile
+/// time if the contract-side constant is ever changed.
+pub const HISTORY_PROOF_WINDOW: usize = 128;
+
+// `MAX_LAYER_HASHES` (layer count = 10) is defined in `crate::types` and
+// used here via the `use` at the top of the file — kept there as the
+// single source of truth.
+
+/// Native mirror of one on-chain `HistoryWindow` (added 2026-08 alongside
+/// `getLayerWindow(uint8)`). Consumed by the daemon's chain-resurrect
+/// path to rebuild `BridgeState` when starting fresh against an
+/// already-advanced contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractLayerWindow {
+    /// Full slot buffer, chronological-by-cursor. Unused slots are zero.
+    pub data: Vec<[u8; 32]>,
+    /// Parallel heights buffer.
+    pub heights: Vec<u64>,
+    /// Number of valid entries currently in the window (saturates at W).
+    pub data_len: u16,
+    /// Next slot to overwrite (always `mod W`).
+    pub write_cursor: u16,
+    /// Height of the last appended entry (zero when empty).
+    pub last_height: u64,
+}
+
+/// Full contract state readable by an off-chain resurrect: the four scalar
+/// mirrors plus all 10 layer windows. Sufficient to reconstruct
+/// `BridgeState` byte-for-byte via `BridgeState::from_contract`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractFullState {
+    pub last_seen_block_seq_no: u64,
+    pub bk_set_commitment: U256,
+    pub last_bk_set_update_seq_no: u64,
+    pub prev_max_level_layer_hash: U256,
+    /// Index `L-1` corresponds to layer `L` (1..=10).
+    pub layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES],
+}
+
 /// Outcome of `submit_block`. The relayer interprets this to decide
 /// whether to advance state, retry, or skip.
 #[derive(Clone, Debug)]
@@ -407,6 +448,25 @@ mod sol_bindings {
             /// array. Empty windows return zero.
             function getLatestPerLayer() external view returns (uint256[10] memory);
 
+            /// Full contents of `_layerWindows[L]` — data + heights +
+            /// dataLen + writeCursor + lastHeight. Off-chain-only reader
+            /// used by the relayer daemon to reconstruct its BridgeState
+            /// mirror during Case 6 chain-resurrect (see runbook).
+            /// Added 2026-08.
+            ///
+            /// `HISTORY_PROOF_WINDOW` is fixed at 128 in `AckiNackiBridge.sol`;
+            /// the array widths below are compile-time constants of the
+            /// binding.
+            struct HistoryWindow {
+                uint256[128] data;
+                uint64[128] heights;
+                uint16 dataLen;
+                uint16 writeCursor;
+                uint64 lastHeight;
+            }
+
+            function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
+
             struct WithdrawalPublicInputs {
                 uint256 tokenId;
                 uint256 amount;
@@ -675,6 +735,83 @@ where
             bk_set_commitment: bk,
             prev_max_level_layer_hash: anchor,
             last_bk_set_update_seq_no: last_bk,
+        })
+    }
+
+    /// Read every field the daemon needs to reconstruct `BridgeState`
+    /// from an already-advanced contract (Case 6 chain-resurrect).
+    ///
+    /// Issues 4 scalar view calls + 10 `getLayerWindow` calls. Each
+    /// window returns ~5 KB, so the total off-chain cost is ~50 KB of
+    /// RPC response — well under any provider's per-call cap, but the
+    /// full read is worth pinning to a single block via a follow-up
+    /// `read_full_state_at(BlockId)` if two consecutive `verifyBlock`
+    /// receipts could interleave (not the case at daemon startup, hence
+    /// the "latest block" call here).
+    ///
+    /// Consistency: no lock across calls, so a `verifyBlock` landing
+    /// mid-read could cause the layer windows to be one block ahead of
+    /// the scalar seq_no. That's fine for resurrect because we exit
+    /// this call and let the normal startup drift routing re-observe on
+    /// the next cycle — a one-block skew triggers an immediate re-read,
+    /// not a mis-seed.
+    pub async fn read_full_state(&self) -> Result<ContractFullState, RelayerError> {
+        let last = self
+            .contract
+            .storedLastSeenBlockSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let bk = self
+            .contract
+            .storedBkSetCommitment()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let last_bk = self
+            .contract
+            .storedLastBkSetUpdateSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let anchor = self
+            .contract
+            .storedPrevMaxLevelLayerHash()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+
+        // Read all 10 layer windows.
+        // `HistoryWindow` on the sol! side has fixed-size arrays that
+        // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
+        let mut windows: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
+        for layer in 1..=MAX_LAYER_HASHES as u8 {
+            let w = self
+                .contract
+                .getLayerWindow(layer)
+                .call()
+                .await
+                .map_err(map_contract_err)?;
+            let data: Vec<[u8; 32]> = w.data.iter().map(|u| u.to_be_bytes()).collect();
+            let heights: Vec<u64> = w.heights.to_vec();
+            windows.push(ContractLayerWindow {
+                data,
+                heights,
+                data_len: w.dataLen,
+                write_cursor: w.writeCursor,
+                last_height: w.lastHeight,
+            });
+        }
+        let layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES] = windows
+            .try_into()
+            .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
+
+        Ok(ContractFullState {
+            last_seen_block_seq_no: last,
+            bk_set_commitment: bk,
+            last_bk_set_update_seq_no: last_bk,
+            prev_max_level_layer_hash: anchor,
+            layer_windows,
         })
     }
 }

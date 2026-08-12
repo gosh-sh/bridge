@@ -27,10 +27,10 @@ Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 - [Case 3 — Clean restart (no state loss)](#case-3--clean-restart-no-state-loss)
 - [Case 4 — Restart after RPC-induced hard-abort](#case-4--restart-after-rpc-induced-hard-abort)
 - [Case 5 — Restart after on-chain revert](#case-5--restart-after-on-chain-revert)
-- [Case 6 — State loss / re-bootstrap from mid-chain](#case-6--state-loss--re-bootstrap-from-mid-chain)
+- [Case 6 — Chain-resurrect (shared contract + fresh daemon)](#case-6--chain-resurrect-shared-contract--fresh-daemon)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
-- [Change log / known incidents](#change-log--known-incidents)
+- [Change log / known incidents](./live_verifyBlock_changelog.md) *(separate file)*
 
 ---
 
@@ -70,8 +70,9 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 | running | yes | >0 | Watch — mid-cycle retry; only intervene if hard-aborts |
 | not running | yes | 0 | [Case 3](#case-3--clean-restart-no-state-loss) (clean restart) |
 | not running | yes | >0 | [Case 4](#case-4--restart-after-rpc-induced-hard-abort) (RPC hard-abort) — reset counter first |
-| not running | **no** | any | [Case 5](#case-5--restart-after-on-chain-revert) or [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) — do not restart blindly |
-| running/not | state/ missing | — | [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) (re-bootstrap) |
+| not running | local < chain | any | [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon) — restart; daemon auto-resurrects from chain |
+| not running | local > chain | any | [Case 5](#case-5--restart-after-on-chain-revert) — investigate first; daemon will `Stop` on restart |
+| running/not | state/ missing | — | [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon) — restart; daemon auto-resurrects |
 
 ---
 
@@ -216,7 +217,7 @@ Not shipped and not linked from this doc.
 
 Any redeploy invalidates all seven contract addresses + the seed seq_no —
 regenerate `.env.shellnet` (see [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users)
-step 4, or [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) for
+step 4, or [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon) for
 in-place re-seed against an existing contract).
 
 ---
@@ -315,9 +316,38 @@ INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shell
 INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)   ← cold-start signature (e.g. 5495808 on the live reference deploy)
 ```
 
-`seed_policy=Explicit(N)` means the daemon is seeding from
-`BRIDGE_BOOTSTRAP_SEQNO`. `seed_policy=Resume` would mean it found existing
-`state/prover_state.json` and is resuming — wrong for cold start.
+**How the daemon picks its startup path.** Since 2026-08-12, the daemon
+reads the *full* on-chain state (four scalars + all 10 `_layerWindows`
+via `getLayerWindow(uint8)`) at startup and routes through one of four
+arms via `startup_decide::decide()` (`bridge-relayer-daemon/src/startup_decide.rs`).
+Inputs: local `state/prover_state.json` + on-chain `ContractFullState` +
+`BRIDGE_BOOTSTRAP_SEQNO`. `seed_policy` (`Resume` / `Explicit(N)` / `Auto`)
+is derived — not directly chosen — as a consequence of the arm picked.
+
+| local state file                       | on-chain contract                                | arm            | `seed_policy` |
+|---|---|---|---|
+| absent / `initialized=false`           | genesis (`last_seen == 0`)                       | **Cold**       | `Explicit(N)` if `$BRIDGE_BOOTSTRAP_SEQNO` set else `Auto` |
+| absent / `initialized=false`           | advanced (`last_seen > 0`)                       | **Resurrect**  | `Resume` (state rebuilt from chain first) |
+| present, cursor / commitment / windows byte-match chain | same                                    | **WarmResume** | `Resume` |
+| present, `local_last_seen < chain_last_seen` (co-tester advanced it) | advanced                    | **Resurrect**  | `Resume` (state overwritten from chain) |
+| present, `local_last_seen > chain_last_seen`                        | genesis or older            | **Stop**       | (daemon bails) |
+| present, cursors match but bk-commit / windows diverge              | same cursor                 | **Stop**       | (daemon bails) |
+| window-size mismatch (contract W ≠ daemon `HISTORY_WINDOW_SIZE`)    | (any)                       | **Stop**       | (daemon bails) |
+
+`state.initialized` lives in `state/prover_state.json` and is flipped to
+`true` by `persist_driver` (`live_source.rs:141-157`) after the first
+successful on-chain ACK, **or** by `Resurrect` when it rebuilds the mirror
+from `getLayerWindow` and saves it before driver construction.
+`Explicit(N)` also requires `N > 0 && N % (W*P) == 0` — bad values abort
+in `LiveProverDriver::new`.
+
+For cold start (this Case), the log MUST show
+`startup: Cold — contract at genesis, bootstrapping` followed by
+`LiveProverDriver seed policy seed_policy=Explicit(<BOOTSTRAP_SEQNO>)`.
+If instead you see `startup: Resurrect …` or `startup: WarmResume …`,
+the contract already has history — that's expected in the shared-test
+multi-tester scenario (see [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon))
+and no operator intervention is needed.
 
 **First cycle takes ~15 min:** GQL fetch of seed block → real-chain-builder
 Merkle root → Circuit 2 proof (~2 min) → aggregation (~7 min at `layer PK`
@@ -390,7 +420,7 @@ nohup ./target/release/relayer daemon-live > logs/live_restart_${TS}.log 2>&1 &
 
 **Verify Resume:** log must contain `LiveProverDriver seed policy
 seed_policy=Resume`, NOT `Explicit(...)`. If you see `Explicit(...)` after a
-restart, `state/prover_state.json` is missing — go to [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain).
+restart, `state/prover_state.json` is missing — go to [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon).
 
 ---
 
@@ -489,7 +519,7 @@ not a transport blip:
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [Change log — 2026-08-03 BN254 Fr fix](#change-log--known-incidents). |
+| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [changelog — 2026-08-03 BN254 Fr fix](./live_verifyBlock_changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). |
 | `0x...PrevAnchorMismatch` | `PrevAnchorMismatch(supplied, stored)` | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. Either the daemon crashed mid-tx (extremely rare) or the chain advanced without us. |
 | `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(...)` | On-chain BK-set was rotated by an `applyBkSetUpdate` we don't know about, OR `bk_set.shellnet.json` drifted from live shellnet BLS keys. |
 | `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | We're trying to submit a `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
@@ -520,56 +550,94 @@ Fix the root cause first, then follow [Case 4c → 4d](#4c-reset-the-attempts-co
 
 ---
 
-## Case 6 — State loss / re-bootstrap from mid-chain
+## Case 6 — Chain-resurrect (shared contract + fresh daemon)
 
-**When to use.** `state/prover_state.json` deleted / corrupted, OR contract
-redeployed at a different `storedLastSeenBlockSeqNo`.
+**When it fires.** Any startup where the on-chain contract has history
+(`storedLastSeenBlockSeqNo > 0`) but the local `state/prover_state.json`
+is either absent, `initialized=false`, or has `stored_last_seen_block_seq_no`
+strictly less than chain. This is the **default** operating case for
+multi-tester development against a shared bridge, and for fresh checkouts
+on a new machine that need to catch up with an already-advanced deploy.
 
-**This is destructive.** Only proceed if you've confirmed the contract is at
-a known seed and no in-flight state is worth preserving.
+**No manual bootstrap needed** — the daemon does it automatically. Since
+2026-08-12, on startup the daemon:
+
+1. Reads the full on-chain state via `getLayerWindow(1..=10)` +
+   `storedLastSeenBlockSeqNo` + `storedBkSetCommitment` +
+   `storedLastBkSetUpdateSeqNo`.
+2. Compares against local state via `startup_decide::decide()`.
+3. On the `Resurrect` arm: rebuilds `BridgeState` byte-for-byte from
+   the contract snapshot via `BridgeState::from_contract`, atomically
+   persists it to `state/prover_state.json`, then drives
+   `LiveProverDriver` with `SeedPolicy::Resume`. `BRIDGE_BOOTSTRAP_SEQNO`
+   is **ignored** — the seed comes from chain.
+4. Continues to Case 2 (steady state) on the next key block after chain
+   head.
+
+**What the operator does.**
 
 ```bash
 cd crates/an-bridge-prover
-
-# 1. Read the contract's CURRENT last_seen from chain
-CURRENT=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
-echo "chain last_seen = $CURRENT"
-
-# 2. Update BRIDGE_BOOTSTRAP_SEQNO in .env.shellnet to match
-#    (must equal what compute_bridge_anchors would produce for that seed)
-grep '^BRIDGE_BOOTSTRAP_SEQNO=' .env.shellnet
-# Manually edit if needed — MUST equal $CURRENT
-
-# 3. Archive any existing state
-TS=$(date +%Y%m%d_%H%M%S)
-[ -d state ] && mv state state.stale_${TS}
-[ -f relayer-state.json ] && mv relayer-state.json relayer-state.json.stale_${TS}
-mkdir -p state
-
-# 4. Regenerate genesis anchors from the seed block (sanity)
-cd ../bridge-prover-lib
-cargo run --release --bin compute_bridge_anchors -- \
-  --seed-seqno $CURRENT \
-  --gql-endpoint https://shellnet.ackinacki.org/graphql
-# Compare its output to `expectedPrevAnchor(1)` and `storedBkSetCommitment()`
-# on-chain. All three must match. If not: env / contract are out of sync —
-# fix the contract deploy before proceeding.
-cd ../an-bridge-prover
-
-# 5. Cold-start launch (identical to Case 1)
-set -a && source .env.shellnet && set +a
-nohup ./target/release/relayer daemon-live > logs/live_rebootstrap_${TS}.log 2>&1 &
+set -a && source .env.shellnet && set +a       # RPC, BRIDGE, private key
+nohup ./target/release/relayer daemon-live > logs/live_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
-**Expect `seed_policy=Explicit($CURRENT)`** in the log. Not `Resume`.
+That's it. No env edits, no `mv state state.stale_*`, no
+`compute_bridge_anchors` re-run. `BRIDGE_BOOTSTRAP_SEQNO` may be left
+stale — it is only consulted on the `Cold` arm (contract at genesis).
 
-**Why re-bootstrap is dangerous.** If `BRIDGE_BOOTSTRAP_SEQNO` doesn't match
-`storedLastSeenBlockSeqNo` on-chain, the first submit reverts with
-`BlockSeqNoNotMonotonic` (if you're behind) or `PrevAnchorMismatch` (if
-you're ahead of chain but chain expects a different prev-anchor). See the
-[Change log](#change-log--known-incidents) `2026-08-03 — chicken-and-egg
-fix` entry for the constructor-arg (`genesisLastSeenBlockSeqNo`) that
-makes this diagnosable rather than a hard hang on the first submit.
+**Expected log signature:**
+
+```
+INFO relayer: startup: read on-chain state for routing chain_last_seen=... local_last_seen=0 local_initialized=false
+INFO relayer: startup: Resurrect — rebuilding BridgeState from on-chain snapshot chain_last_seen=...
+INFO relayer: LiveProverDriver seed policy seed_policy=Resume
+```
+
+**When the daemon refuses to auto-resurrect (`Stop` arm).** `decide()`
+bails with an explicit reason for any of these:
+
+- `local_last_seen > chain_last_seen` — local state is *ahead* of
+  chain. Means either a reorg, a redeployment the operator hasn't
+  acknowledged, or a state file copied from another environment. Never
+  silently rewound.
+- `local_last_seen == chain_last_seen` but `stored_bk_set_commitment`
+  or `stored_last_bk_set_update_seq_no` diverges — same cursor,
+  different state (different verifier wrote local, or state drifted).
+- `local_last_seen == chain_last_seen` but per-layer windows diverge
+  byte-for-byte — cursor match with inconsistent history mirror.
+- `window_size` mismatch — contract deployed with a different
+  `HISTORY_PROOF_WINDOW` than daemon's `HISTORY_WINDOW_SIZE`.
+
+Each `Stop` message carries the diagnostic. Operator inspects, then
+either points at the intended contract, archives the local state
+(`mv state state.stale_$(date +%Y%m%d_%H%M%S)` — resurrect will then
+rebuild from chain), or rolls back to a matching contract.
+
+**Destructive re-bootstrap (rarely needed).** Only when the contract
+itself has been redeployed at a *different address* and the operator
+wants to bootstrap into it from a specific seed:
+
+```bash
+# 1. Confirm you're pointing at the intended contract:
+CURRENT=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
+echo "chain last_seen = $CURRENT"      # if > 0, resurrect will handle it
+
+# 2. Only if the contract is at genesis (last_seen == 0) AND you need a
+#    non-default seed: set BRIDGE_BOOTSTRAP_SEQNO in .env.shellnet, then
+#    launch. This exercises the Cold arm, not the Resurrect arm.
+grep '^BRIDGE_BOOTSTRAP_SEQNO=' .env.shellnet     # must match your intended seed
+# Optional sanity: regenerate genesis anchors
+cd ../bridge-prover-lib && \
+  cargo run --release --bin compute_bridge_anchors -- \
+    --seed-seqno $BRIDGE_BOOTSTRAP_SEQNO \
+    --gql-endpoint https://shellnet.ackinacki.org/graphql && \
+  cd ../an-bridge-prover
+```
+
+See the changelog's
+[2026-08-03 chicken-and-egg fix](./live_verifyBlock_changelog.md#2026-08-03--deploy-4-storedlastseenblockseqno0-chicken-and-egg-fix)
+for why the constructor now takes `genesisLastSeenBlockSeqNo`.
 
 ---
 
@@ -664,123 +732,15 @@ crates/an-bridge-prover/
 - `logs/` — safe to prune, but keep the most recent for post-mortem.
 - `state/`, `relayer-state.json` — **NEVER** delete a running daemon's
   active state. To reset, archive to `state.stale_<ts>/` +
-  `relayer-state.json.stale_<ts>` first (see [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain)).
+  `relayer-state.json.stale_<ts>` first (see [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon)).
 - `params/` — never delete; keygen takes ~7 min per circuit.
 
 ---
 
 ## Change log / known incidents
 
-Newest first. Each entry captures **what happened, why, what changed, and
-the reference commits/paths** so we don't have to reconstruct history next
-time we come back to the runbook.
-
-### 2026-08-04 — Deploy #5 (storage v2.0 + NB-Q1/Q8 remediation)
-
-- **Why re-deploy.** Four contract changes landed between 2026-08-03 and
-  2026-08-04 and were folded into a fresh deploy rather than run
-  mixed-source/bytecode against Deploy #4.
-- **Contract changes:**
-  - `f8c5ba0` — storage v2.0. `storedNumLayers` + `storedLayerHashes[10]`
-    removed; hot-path SSTOREs on both eliminated (~31.9 k gas / verifyBlock).
-    `storedPrevMaxLevelLayerHash` promoted to `immutable` (holds the
-    genesis seed forever); new `getLatestPerLayer()` view is the correct
-    per-layer state observation.
-  - `7da8878` — `applyBkSetUpdate` folds BK-set commitments LE (NB-Q1
-    blocker from Sergey's 07-27 answer).
-  - `09c1686` — `withdrawByProof` flat `_isKnownAnchor` across all 10
-    windows (NB-Q1 Option D; no feature flag).
-  - `7a645e5` — `DeployShellnetE2EBridge` now requires the C4 verifier +
-    `WITHDRAW_ACC_FR` on any chain != anvil (NB-Q8). The
-    `BridgeWithdrawalAggregatorVerifier` .bin ships in the bundle even
-    though this runbook does not exercise `withdrawByProof`.
-- **ABI removals versus prior deploys.** Any tooling calling
-  `storedNumLayers()`, `storedLayerHashes(uint256)` or
-  `getStoredLayerHashes()` will revert against Deploy #5. Health-check
-  block in this runbook updated to use `getLatestPerLayer()` instead.
-- **Fresh genesis anchors** were regenerated via
-  `compute_bridge_anchors --at-head` against shellnet GraphQL. Bootstrap
-  seed advanced from `4887552` (Deploy #4) to `5495808` (Deploy #5,
-  bundle boundary 1024). Genesis `bk_set_commitment` unchanged (shellnet
-  BK rotation is off).
-- **Reference addresses** for Alina's live shellnet deploy are in
-  [Live reference deploy](#live-reference-deploy-alinas-shellnet).
-- **How to re-deploy your own bundle:** see
-  [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users).
-
-### 2026-08-04 — RPC-transport hard-abort false-positive
-
-- **Symptom.** Daemon exited at 11:10:38 local after 3 consecutive tx-send
-  failures on seq `4891136`. First failure was `error sending request` (a
-  transport error); the next two were `tx confirmation timeout`.
-- **Nonce check confirmed zero txs actually landed** — the daemon was
-  killed by its own retry-counter, not the chain.
-- **Root cause.** The `9b07b24` hard-abort logic in
-  `bridge-relayer-daemon/src/relayer.rs` treats transport failures
-  (network / receipt polling) identically to on-chain reverts. `N=3`
-  transport hiccups on a public RPC (publicnode.com) trip the abort.
-- **Recovery (this incident).**
-  1. Ran the drift check (§Case 4b) → zero drift.
-  2. Reset counter atomically:
-     `jq '.last_attempt_seqno = .last_processed_seqno | .attempts_since_progress = 0'`.
-  3. Relaunched via [Case 3](#case-3--clean-restart-no-state-loss).
-     `seed_policy=Resume` confirmed in log.
-  4. First cycle regenerated the proof for `4891136` in ~13 min → confirmed
-     on Sepolia → `state/prover_state.json` bumped mtime to 11:47.
-- **Follow-up (not yet landed).** Refactor the hard-abort classifier so
-  transport-error variants only trigger exponential backoff, and only
-  on-chain revert variants count towards the N=3 abort budget. Documented
-  as an open item; the runbook workaround (§Case 4c) is the current
-  mitigation.
-
-### 2026-08-03 — BN254 Fr canonicalization client fix
-
-- **Symptom.** `verifyBlock` on shellnet block `4888576` reverted with
-  `AttestationProofRejected()` (selector `0x87bf1c06`). Root-caused to the
-  SHPLONK adapter's Fr equality prelude reading a raw 32-byte BE
-  `blockId` that was `≥ r` (BN254 scalar modulus).
-- **Fix (client-side).** In
-  `bridge-relayer-daemon/src/types.rs:81-83`, reduce the raw chain hash
-  mod `BN254_FR_MODULUS` before packing it into `U256`:
-  ```rust
-  block_id: U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS,
-  ```
-  Constant lives in `withdrawal::BN254_FR_MODULUS`.
-- **Note.** `BkSetUpdateData::block_id` (line 106) deliberately keeps the
-  un-reduced form — `applyBkSetUpdate` compares against a raw SHA-256
-  Merkle root (`AckiNackiBridge.sol:834`), not an Fr scalar.
-- **Verified txs (post-fix).**
-  - `0x12110bb7…` — first bundle after fix (seq `4890624`).
-  - `0x5194250e…` — subsequent bundle (seq `4891136`, ACK'd at 11:47 on
-    2026-08-04 after the RPC-abort re-run above).
-- **Commits (branch `refactoring_and_review_bridge_relayer_demon`):**
-  `487a869` (types.rs Fr reduction), `0fc2851`, `ca106f5` (surrounding
-  cleanup + BN254_FR_MODULUS constant).
-- **Contract-side follow-up.** Adding the same `% BN254_FR` step inside
-  the three SHPLONK adapter contracts would make the client fix
-  unnecessary; would require redeploy of `PrimaryAggregatorVerifier`,
-  `FallbackAggregatorVerifier`, `LayerHashesAggregatorVerifier` — all
-  immutable references in `AckiNackiBridge` so the bridge itself would
-  need redeploy too. Not planned; client workaround is stable.
-
-### 2026-08-03 — Deploy #4 (`storedLastSeenBlockSeqNo=0` chicken-and-egg fix)
-
-- Deploys #1–3 constructed the contract with
-  `storedLastSeenBlockSeqNo=0`, which required a bootstrap `verifyBlock`
-  call with `block_seq_no > 0` to advance it — but the first legit
-  `expectedPrevAnchor` check couldn't be satisfied until state was
-  seeded. Chicken-and-egg.
-- Deploy #4 added `genesisLastSeenBlockSeqNo` as a constructor arg
-  (`AckiNackiBridge.sol` constructor). The client's
-  `BRIDGE_BOOTSTRAP_SEQNO` must equal this value.
-- Current active deploy: see
-  [Live reference deploy](#live-reference-deploy-alinas-shellnet) (Deploy #5
-  superseded #4 on 2026-08-04 — see entry above).
-
----
-
-**Editing this runbook.** When adding a new incident: keep entries dated,
-one-paragraph, and always cite the commit / file:line so the next
-maintainer can jump straight to the change without spelunking through
-`git log`. Old entries can be pruned once the underlying fix has been
-proven for >30 days across restarts.
+Moved to [`live_verifyBlock_changelog.md`](./live_verifyBlock_changelog.md)
+to keep this runbook focused on operational procedures. The changelog
+covers dated post-mortems (BN254 Fr canonicalization, RPC hard-abort
+false-positive, Deploy #4/#5 constructor + storage changes) with the
+commit/file:line cites needed to jump straight to each fix.

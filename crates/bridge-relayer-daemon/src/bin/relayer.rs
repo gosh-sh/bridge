@@ -1920,10 +1920,73 @@ async fn run_daemon_live(
     // in-driver pubkey table on demand via `prover_bk_set.pubkeys()`.
     // The relayer no longer passes a separate `bk_set` argument.
 
-    let seed_policy = match (bootstrap_seqno, state.initialized) {
-        (_, true) => SeedPolicy::Resume,
-        (Some(n), false) => SeedPolicy::Explicit(n),
-        (None, false) => SeedPolicy::Auto,
+    // ── Startup routing ────────────────────────────────────────────
+    // Read the *full* on-chain state (four scalars + all 10 layer
+    // windows) once, then hand it to `startup_decide::decide()` which
+    // returns one of {Cold, WarmResume, Resurrect, Stop}. This replaces
+    // both the old 3-arm seed_policy match AND the late "startup
+    // drift" bail below — a shared test bridge that a co-tester has
+    // advanced now cleanly resurrects instead of aborting.
+    let bridge_probe = {
+        let signer: PrivateKeySigner = private_key.parse()?;
+        let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let chain_id = probe.get_chain_id().await?;
+        let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+        let provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(rpc_url.parse()?);
+        EthBridgeClient::new(bridge_address, provider)
+    };
+    let chain_full = bridge_probe
+        .read_full_state()
+        .await
+        .map_err(|e| anyhow::anyhow!("read_full_state (startup): {e}"))?;
+    info!(
+        chain_last_seen = chain_full.last_seen_block_seq_no,
+        chain_bk_upd = chain_full.last_bk_set_update_seq_no,
+        local_last_seen = state.stored_last_seen_block_seq_no,
+        local_bk_upd = state.stored_last_bk_set_update_seq_no,
+        local_initialized = state.initialized,
+        "startup: read on-chain state for routing",
+    );
+    let decision = bridge_relayer_daemon::startup_decide(
+        bridge_relayer_daemon::DecideInputs {
+            local: &state,
+            chain: &chain_full,
+            bootstrap_seqno,
+            window_size: HISTORY_WINDOW_SIZE as usize,
+        },
+    );
+    let (state, seed_policy) = match decision {
+        bridge_relayer_daemon::StartupDecision::Cold { policy } => {
+            info!(?policy, "startup: Cold — contract at genesis, bootstrapping");
+            (state, policy)
+        }
+        bridge_relayer_daemon::StartupDecision::WarmResume => {
+            info!(
+                last_seen = state.stored_last_seen_block_seq_no,
+                "startup: WarmResume — local state matches chain byte-for-byte",
+            );
+            (state, SeedPolicy::Resume)
+        }
+        bridge_relayer_daemon::StartupDecision::Resurrect { fresh_state } => {
+            let rebuilt = *fresh_state;
+            info!(
+                chain_last_seen = chain_full.last_seen_block_seq_no,
+                "startup: Resurrect — rebuilding BridgeState from on-chain snapshot",
+            );
+            // Persist the resurrected state atomically before we build
+            // the driver, so a subsequent crash-and-restart sees a
+            // matching local mirror (which would then take the
+            // WarmResume path).
+            rebuilt
+                .save(state_path_str)
+                .map_err(|e| anyhow::anyhow!("save resurrected BridgeState: {e}"))?;
+            (rebuilt, SeedPolicy::Resume)
+        }
+        bridge_relayer_daemon::StartupDecision::Stop { reason } => {
+            anyhow::bail!("startup routing STOP: {reason}");
+        }
     };
     info!(?seed_policy, "LiveProverDriver seed policy");
 
@@ -1947,38 +2010,14 @@ async fn run_daemon_live(
 
     let live_source = Arc::new(LiveBlockSource::new(Arc::clone(&driver), state_paths));
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-
-    // Startup drift audit (§5.4.5).
-    let on_chain = bridge.read_state().await?;
-    let driver_state = live_source.driver_snapshot().await;
-    info!(
-        on_chain_last_seen = on_chain.last_seen_block_seq_no,
-        driver_last_seen = driver_state.stored_last_seen_block_seq_no,
-        on_chain_bk_upd = on_chain.last_bk_set_update_seq_no,
-        driver_bk_upd = driver_state.stored_last_bk_set_update_seq_no,
-        "daemon-live startup anchors"
-    );
-    if driver_state.initialized
-        && driver_state.stored_last_seen_block_seq_no != on_chain.last_seen_block_seq_no
-        && on_chain.last_seen_block_seq_no != 0
-        && driver_state.stored_last_seen_block_seq_no != 0
-    {
-        anyhow::bail!(
-            "startup drift: driver last_seen={} vs on-chain {} — nuke {} and rebootstrap \
-             (do NOT auto-heal)",
-            driver_state.stored_last_seen_block_seq_no,
-            on_chain.last_seen_block_seq_no,
-            prover_state_dir.display(),
-        );
-    }
+    // Re-use the same `bridge_probe` client we built for `read_full_state`
+    // above — one signer/provider triple for the whole daemon lifetime.
+    // The pre-decide drift-audit that used to live here is now subsumed
+    // by `startup_decide::decide()`: `Stop` bails with a precise reason,
+    // `Resurrect` rebuilds the local mirror before the driver is even
+    // constructed, and `WarmResume` is only reached when local and chain
+    // match byte-for-byte.
+    let bridge = Arc::new(bridge_probe);
 
     let cfg = RelayerConfig::new(&state_path);
 

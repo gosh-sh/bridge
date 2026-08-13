@@ -20,7 +20,6 @@ Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 
 - [Quick resume checklist (returning to a running system)](#quick-resume-checklist-returning-to-a-running-system)
 - [Deploy your own bridge bundle (external users)](#deploy-your-own-bridge-bundle-external-users)
-- [Live reference deploy (Alina's shellnet)](#live-reference-deploy-alinas-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
 - [Case 2 — Steady-state operation](#case-2--steady-state-operation)
@@ -76,6 +75,85 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 
 ---
 
+## Shared test deploy (open — for quick onboarding)
+
+This is a **deliberately public** Sepolia burner + bridge bundle, deployed
+so a third-party developer can `git clone` and run
+`./target/release/relayer daemon-live` end-to-end without deploying
+anything or funding a wallet.
+
+**When to use it.** One-shot smoke test — confirm the daemon builds,
+picks a startup arm, generates a proof, and submits a real `verifyBlock`
+tx that lands on Sepolia.
+
+**When NOT to use it.**
+
+- Continuous / multi-day operation.
+- Any workflow where two developers run against it concurrently. The
+  burner is a single key; concurrent submits from different machines
+  collide on nonce and one side reverts.
+- Anything you care about not being drained. This key is in-repo —
+  Sepolia key-scraper bots harvest it within minutes. Treat any balance
+  as ephemeral.
+
+For serious work, use [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users)
+to spin up a private burner + private contract bundle.
+
+### Credentials
+
+| Item | Value |
+|---|---|
+| Network | Sepolia (chain 11155111) |
+| RPC | `https://ethereum-sepolia-rpc.publicnode.com` |
+| Burner address | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
+| Burner private key | `0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87` |
+| `AckiNackiBridge` | `0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c` |
+| `PrimaryAggregatorVerifier` | `0xE03337cfC0498a4C40B538A332D18a26df833502` |
+| `FallbackAggregatorVerifier` | `0xBe652c88e3d4639Aa11390a878F0da4B4a91fBb8` |
+| `LayerHashesAggregatorVerifier` | `0x149f61E049B7a325d720cbF56D102E7376d38643` |
+| `BridgeWithdrawalAggregatorVerifier` | `0x4127E8c7F3C6308eD836CBc819aA556868AfD139` |
+| `MockBlockHeaderOracle` | `0xB7ad2342F8Fe665435Fe934757AA4f208ccf2417` |
+| Bootstrap seed seq_no | `7726080` |
+| Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
+| Genesis `prev_max_level_layer_hash` | `0x265511da2029a440b78947e07b9f57fb59e234e0845e9e3b1acc8f41e5aca507` |
+
+### Wiring the daemon (no deploy needed)
+
+```bash
+cd crates/an-bridge-prover
+cat > .env.shellnet <<'EOF'
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+BRIDGE_ADDRESS=0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c
+RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BOOTSTRAP_SEQNO=7726080
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+BRIDGE_PARAMS_DIR=./params
+BRIDGE_STATE_DIR=./state
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+EOF
+```
+
+Then jump straight to [Binary + env prerequisites](#binary--env-prerequisites)
+and [Case 6 — Chain-resurrect](#case-6--chain-resurrect-shared-contract--fresh-daemon)
+(the contract already has history; a fresh daemon will auto-resurrect
+from chain — no local bootstrap needed).
+
+**Balance check before launch:**
+
+```bash
+cast balance 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307 \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com --ether
+```
+
+If `< 0.005 ETH`, one of the faucets under
+[Deploy your own bridge bundle §2](#2-fund-it-with-sepolia-eth) will
+top it back up (pk910 PoW is public-goods and does not require you to
+own the address).
+
+---
+
 ## Deploy your own bridge bundle (external users)
 
 Running this E2E requires an on-chain `AckiNackiBridge` **that you own and
@@ -83,9 +161,10 @@ fund**. `verifyBlock` (`AckiNackiBridge.sol:650`) is a
 state-mutating `external nonReentrant` function; every relayer submit is a
 signed Sepolia transaction. The daemon reads its signer from the
 `RELAYER_PRIVATE_KEY` env var (`bridge-relayer-daemon/src/bin/relayer.rs:86`);
-there is no default, no fallback, no shared key. You cannot borrow the
-reference-deploy addresses below — those are Alina's; only she holds the
-key that can advance them.
+there is no default. The [shared test deploy](#shared-test-deploy-open--for-quick-onboarding)
+above ships a burner + contract for one-shot onboarding, but it is
+single-key and gets drained by faucet bots — for continuous work, spin
+up your own burner + contract bundle here.
 
 ### 1. Create a fresh burner wallet
 
@@ -113,9 +192,9 @@ ETH/day and are the practical top-up path after bootstrap.
 
 **Budget.** The one-shot deploy of the 6-contract bundle
 (`DeployShellnetE2EBridge.s.sol`: `AckiNackiBridge` + 4 SHPLONK verifiers +
-`MockBlockHeaderOracle`) cost **0.051 ETH** on 2026-08-04 (30M gas @
-2.4 gwei). Add ~0.001 ETH for the post-deploy `unpause()` tx and a
-running budget of ~0.001–0.003 ETH per `verifyBlock` submit (one per
+`MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
+2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
+submit (one per
 512-block stride). **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a
 multi-day E2E run.
 
@@ -156,10 +235,11 @@ export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
 
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
   --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
-
-# Contract is deployed PAUSED. Unpause with:
-cast send $BRIDGE 'unpause()' --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY
 ```
+
+The current `AckiNackiBridge.sol` has no Pausable inheritance — user
+entrypoints are live the moment the deploy tx confirms. No post-deploy
+unpause step needed.
 
 The broadcast record ends up in
 `contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json` —
@@ -187,38 +267,10 @@ Now jump to [Binary + env prerequisites](#binary--env-prerequisites) and
 
 ---
 
-## Live reference deploy (Alina's shellnet)
-
-The addresses below are Alina's **working** verifyBlock-only shellnet
-deploy on Sepolia. External users cannot advance them (Alina holds the
-signer) but they are useful as read-only reference — every `cast call`
-example in this runbook targets these values, and you can compare your
-own deploy's `expectedPrevAnchor(1)` / `storedBkSetCommitment()` shapes
-against them for sanity.
-
-| Item | Value |
-|---|---|
-| Network | Sepolia (chain 11155111) |
-| RPC | `https://ethereum-sepolia-rpc.publicnode.com` |
-| `AckiNackiBridge` | `0x827169ac5DdF31f6cCE8C5026a8501dEc3a5253a` |
-| `PrimaryAggregatorVerifier` | `0x0AE4061E336dF9cF988807FF3616Ec9BBA734d1C` |
-| `FallbackAggregatorVerifier` | `0x3774Fa01589C49e6DdE596d2a8F86a3dfEE49cEf` |
-| `LayerHashesAggregatorVerifier` | `0xa3208EFd0926948D8f1C3092D81B4Ff979d874f3` |
-| `BridgeWithdrawalAggregatorVerifier` | `0x65782C62FAC71FAB4672488DAd027BBf84f30B04` |
-| `MockBlockHeaderOracle` | `0x50217f995139cE12D6C747fFb1145034Ec80cE78` |
-| Bootstrap seed seq_no | `5495808` |
-| Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
-| Genesis `prev_max_level_layer_hash` | `0x10dcf878d2958d3eca4c23544bae2be13069595907e2b1bee5bb1756e8c11f76` |
-
-*Local note (Alina/Claude only):* the burner deployer key, per-deploy
-change history, and full genesis-anchor paper trail live in
-`~/HALO2_TVM_EXPERIMENTS/bridge-deployer.txt` — a personal, off-tree file.
-Not shipped and not linked from this doc.
-
-Any redeploy invalidates all seven contract addresses + the seed seq_no —
-regenerate `.env.shellnet` (see [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users)
-step 4, or [Case 6](#case-6--chain-resurrect-shared-contract--fresh-daemon) for
-in-place re-seed against an existing contract).
+*Maintainer-only note:* Alina keeps her personal burner + per-deploy
+change history + genesis-anchor paper trail in
+`~/HALO2_TVM_EXPERIMENTS/bridge-deployer.txt` — off-tree, not shipped,
+not linked from this doc.
 
 ---
 
@@ -281,7 +333,6 @@ set -a && source .env.shellnet && set +a
 export BRIDGE=$BRIDGE_ADDRESS
 export RPC=$RPC_URL
 
-cast call $BRIDGE 'paused()(bool)'                          --rpc-url $RPC   # false
 cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'      --rpc-url $RPC   # == $BRIDGE_BOOTSTRAP_SEQNO
 cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' 1    --rpc-url $RPC   # matches env GENESIS_PREV_MAX_LEVEL_LAYER_HASH
 cast call $BRIDGE 'storedBkSetCommitment()(uint256)'        --rpc-url $RPC   # matches env GENESIS_BK_SET_COMMITMENT
@@ -313,7 +364,7 @@ INFO bridge_prover_lib::keys::fallback:    loaded fallback VK from cache
 INFO bridge_prover_lib::keys::layer:       loaded layer VK from cache
 INFO bridge_prover_lib::keys::event:       loaded event VK from cache
 INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shellnet.json matches prover_bk_set.commitment
-INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)   ← cold-start signature (e.g. 5495808 on the live reference deploy)
+INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)   ← cold-start signature
 ```
 
 **How the daemon picks its startup path.** Since 2026-08-12, the daemon
@@ -671,7 +722,6 @@ for why the constructor now takes `genesisLastSeenBlockSeqNo`.
 set -a && source .env.shellnet && set +a
 export BRIDGE=$BRIDGE_ADDRESS
 export RPC=$RPC_URL
-echo "paused:            $(cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC)"
 echo "last_seen:         $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
 # num_layers derived from getLatestPerLayer() — highest index with a nonzero hash.
 # (Since storage-v2 / commit f8c5ba0, storedNumLayers()/storedLayerHashes(uint256)/getStoredLayerHashes() are gone.)

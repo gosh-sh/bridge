@@ -152,6 +152,87 @@ If `< 0.005 ETH`, one of the faucets under
 top it back up (pk910 PoW is public-goods and does not require you to
 own the address).
 
+### Recommended server-side path (headless Linux)
+
+**Best strategy: shared *contract*, your own *key*.** `verifyBlock` is
+permissionless (`external nonReentrant`, no role gate) — anyone with a
+funded Sepolia burner and a valid proof can submit against
+`0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c`. Using your own key avoids
+the two problems of the shared burner: nonce collisions when several
+devs run concurrently, and getting drained by faucet-scraper bots.
+Reserve the in-repo burner for a one-shot "does my clone build and
+land a tx" smoke test.
+
+```bash
+# 1. Clone + build (~15 min)
+git clone https://github.com/gosh-sh/bridge.git && cd bridge
+git checkout deposit_proof_fixes
+cd crates/an-bridge-prover
+cargo build --release -p bridge-relayer-daemon --bin relayer
+(cd ../bridge-evm-aggregator && cargo build --release)
+
+# 2. Provision params/ (~30 min one-time). See TECHNICAL_README.md
+#    "KZG SRS provisioning"; or rsync ~17 GB from a teammate.
+
+# 3. Wire env — shared contract, YOUR key (fund via API-key faucet:
+#    Alchemy / Infura / QuickNode all work headlessly).
+cat > .env.shellnet <<'EOF'
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+BRIDGE_ADDRESS=0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c
+RELAYER_PRIVATE_KEY=<your funded Sepolia burner>
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BOOTSTRAP_SEQNO=7726080
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+BRIDGE_PARAMS_DIR=./params
+BRIDGE_STATE_DIR=./state
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+EOF
+
+# 4. Launch under tmux/screen for server persistence
+mkdir -p state logs
+tmux new -d -s bridge \
+  "set -a && source .env.shellnet && set +a && \
+   ./target/release/relayer daemon-live 2>&1 | tee logs/live_$(date +%s).log"
+
+# 5. Confirm the startup arm within 30 s
+tmux capture-pane -t bridge -p | grep -E 'startup:|seed_policy='
+```
+
+**Expected first-launch signature** — until the first verifyBlock
+lands, contract has `last_seen=7726080` but empty layer windows;
+`decide()` routes this "post-deploy transitional" state to Cold, not
+Resurrect:
+
+```
+startup: Cold — contract at genesis, bootstrapping ...
+LiveProverDriver seed policy seed_policy=Explicit(7726080)
+```
+
+After someone lands the first submit, later fresh launches will see
+`startup: Resurrect …` + `seed_policy=Resume` instead — both healthy
+(Case 1 and Case 6).
+
+**~15 min later**, the burner should have paid for its first Sepolia
+tx and the contract cursor should advance from `7726080` → `7727104`:
+
+```bash
+cast call 0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c \
+  'storedLastSeenBlockSeqNo()(uint64)' \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com --json | jq -r '.[0]'
+```
+
+**Two gotchas on a shared contract:**
+
+- `publicnode.com` drops long receipt polls under load — if logs show
+  `WARN … transport failure` on the receipt wait, swap to an
+  Alchemy / Infura / dRPC endpoint (`RPC_URL=` in `.env.shellnet`).
+- Multiple daemons racing the same cursor: only one wins per key-block
+  stride; losers hit `BlockSeqNoNotMonotonic` (Case 5). Fine for
+  testing the revert-recovery path, but coordinate on team chat if
+  you need every submit to land. For fully-isolated work, jump to
+  [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users).
+
 ---
 
 ## Deploy your own bridge bundle (external users)

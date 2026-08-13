@@ -1,9 +1,10 @@
 HANDOFF для разработчиков Acki Nacki Bridge (ETH ↔ AN)
-Дата: 2026-07-21 (ответы зафиксированы из Pruvendo QA Stage II, раздел Bridge)
-Источник: аудит ветки audit, регистры questions-an.md и questions-cross-chain.md
-Тесты AN: make audit-an-test → 74 passed. PoC и детали: audit/reports/questions-an.md, audit/findings/BC-AN-*/
+Дата: 2026-08-13 (Phase G1 sync на ветке audit-new, код = origin/main)
+Источник: audit/reports/closeout-an.md, questions-an.md, questions-cross-chain.md
+Тесты: make audit-an-test → 74 passed; overlay ETH → 56 passed
+Следующий фокус: BC-AN-02 (G2), QC-OFF-06 live (G3) — см. audit/reports/phase-g-status.md
 
-Ответы разработчиков записаны в регистрах. Дальнейная рассылка не планируется — открытые пункты остаются in progress.
+Ответы Stage II (2026-07-21) ниже. Пункты «resolved in main» — в closeout-an.md.
 
 
 BC-AN-01 — ЗАКРЫТО

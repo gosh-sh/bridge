@@ -46,20 +46,22 @@ Canonical list: `docs/operations/bridge_verification.md` (DEP-#, LH-#, CC-#, …
 
 Every spec test header should cite the invariant(s) it covers.
 
-## Phase status (ETH)
+## Phase status
 
-| Phase | Artifact | Status |
+**Active branch:** `audit-new` (canonical code = `origin/main`). See `reports/phase-g-status.md`.
+
+| Track | Artifact | Status |
 |-------|----------|--------|
-| A | `reports/manual-audit/A1..A4.md` | done |
-| B | `reports/test-matrix.md` | done |
-| C | `spec/ethereum/*.t.sol` | **done** (29 unit) |
-| D | handlers + invariants | **done** (11 fuzz/inv) |
-| E | E2E gaps | **done** (7 E2E) |
-| Closeout | `reports/closeout-eth.md` | **draft** — QC open, author ack pending |
-| AN closeout | `reports/closeout-an.md` | **draft** — 2 BC + QC open |
-| CI | `test:solidity:audit` in `.gitlab-ci.yml` | ✅ |
-| Local gate | `make pre-push-audit` | ✅ |
-| **F — AN** | `spec/an/` + `reports/an-audit-plan.md` | **F0–F10** 74 pytest ✅; relayer + prover overlay ✅ |
+| ETH overlay | `spec/ethereum/` | **56/56** on `audit-new` |
+| AN pytest | `spec/an/` | **74** `make audit-an-test` |
+| F10 relayer | `crates/deposit-relayer-daemon/tests/f10_*` | **68** cargo tests |
+| Closeout ETH | `reports/closeout-eth.md` | G1 synced — 9 QC open |
+| Closeout AN | `reports/closeout-an.md` | G1 synced — BC-AN-02 + QC open |
+| **G2** | BC-AN-02 disposition | **next** |
+| **G3** | QC-OFF-06 live path | partial in main |
+| **G5** | E-AN-01 shellnet E2E | deferred |
+
+Legacy phase table (ETH A–E, AN F0–F10): completed before merge; counts updated above.
 
 Run ETH: `make pre-push-audit`  
 Run AN: `make audit-an-test` (after `./scripts/sync_an_contracts.sh`)  

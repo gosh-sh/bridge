@@ -1,9 +1,11 @@
 HANDOFF F10 — deposit-prover и deposit-relayer-daemon
-Дата: 2026-07-17
-Источник: аудит off-chain pipeline (фаза F10), ветка audit
-Детали и PoC: audit/reports/questions-cross-chain.md (§ QC-OFF, QC-PROV)
+Дата: 2026-08-13 (Phase G1 — audit-new, main #15/#18/#20)
+Источник: closeout-an.md § F10, questions-cross-chain.md
+Gate: cargo test в deposit-relayer-daemon → 68 passed
+Статус: QC-OFF-07, -11, -12, QC-PROV-03 закрыты в main; QC-OFF-06 partial — G3
+
+Детали PoC: audit/reports/questions-cross-chain.md (§ QC-OFF, QC-PROV)
 Threat model: audit/reports/manual-audit/F10-offchain-deposit-pipeline.md
-Синтез: audit/reports/manual-audit/F10-subagent-synthesis.md
 
 Базовая модель: finalizeDeposit на AN permissionless — релеер не trust root.
 При сбое релеера кражи нет, страдает liveness (задержка кредита на AN).
@@ -17,18 +19,11 @@ RELAYER — deposit-relayer-daemon
 ═══════════════════════════════════════════════════════════════════════════════
 
 
-QC-OFF-06 (P0 — liveness при конкурирующих релеерах)
+QC-OFF-06 (P0 — liveness при конкурирующих релеерах) — ЧАСТИЧНО ЗАКРЫТО в main (#15)
 
-В unit-тестах mock-отправитель при повторном finalizeDeposit на уже обработанный
-depositId возвращает AlreadyFinalized, и демон спокойно двигает курсор дальше.
-В боевом пути AnInterfaceSubmitter так не работает: повторная отправка на AN
-даёт Reverted, демон помечает депозит как Rejected и снова крутится на том же id.
-Если другой релеер уже успел зафинализировать этот depositId, наш демон может
-навсегда застрять на нём и заблокировать все последующие (head-of-line).
-PoC на mock: crates/deposit-relayer-daemon/tests/f10_competing_submit.rs;
-live-путь в тестах пока не воспроизведён полностью.
-Вопрос: маппить revert «already finalized» в AlreadyFinalized? Нужен read API
-nullifier на цепи до mainnet?
+main: AlreadyFinalized для exit 0x1000; mock-тест f10_competing_submit.rs зелёный.
+ОТКРЫТО: live AnInterfaceSubmitter — Revert → Rejected (f10_interface_reverted.rs).
+Следующий шаг (G3): e2e два relayer'а или nullifier read API.
 
 
 QC-OFF-01 (строгая очередь по depositId)

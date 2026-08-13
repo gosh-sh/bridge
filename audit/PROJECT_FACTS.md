@@ -54,7 +54,7 @@ Retired: ETH-side deposit Groth16, `withdraw()`, `verifyEvent`, 103-PI withdraw.
 ## Trust assumptions (ETH custody)
 
 - **USDC (Sepolia / mainnet):** bridge assumes standard ERC-20 semantics — exact `transferFrom` credit, no fee-on-transfer. Mainnet USDC is an upgradeable proxy; Circle blacklist/pause on the bridge address would freeze flows (operational risk, not a Solidity bug). **Author confirm:** acceptable for target deployment?
-- **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = 100 USDC` limits a single call, not aggregate TVL. **Author confirm:** intentional for milestone?
+- **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = type(uint64).max` on main (#20); overlay documents aggregate TVL uncapped (`DepositWhaleCap.t.sol`). **Author confirm:** deployment cap policy?
 
 ## Audit classification (ETH pass 2026-07)
 

@@ -10,6 +10,6 @@ Questions are split by **author / deployment boundary**. Do not merge into a sin
 
 **Policy:** QC = reproduced behaviour + auditor view; **author confirms** bug vs feature. BC = bug candidate with PoC (where noted).
 
-**Closeouts:** ETH → `closeout-eth.md`. AN → **`closeout-an.md`** (draft, author ack pending).
+**Closeouts:** ETH → `closeout-eth.md`. AN → `closeout-an.md`. **Phase G:** `phase-g-status.md` (`audit-new`).
 
 **Registers:** `an-audit-direction.md` (AN test gate), `findings-summary.md` (ETH workstreams).

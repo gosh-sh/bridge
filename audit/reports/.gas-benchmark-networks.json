@@ -1,0 +1,122 @@
+{
+  "measurement_utc": "2026-07-21T16:46:07Z",
+  "price_source": {
+    "provider": "CoinGecko",
+    "url": "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,polygon-ecosystem-token&vs_currencies=usd",
+    "fetched_at_utc": "2026-07-21T16:46:08Z",
+    "ethereum_usd": 1924.16,
+    "polygon_pol_usd": 0.080322
+  },
+  "gas_price_method": "eth_gasPrice via cast (JSON-RPC)",
+  "networks": [
+    {
+      "network": "ethereum",
+      "native_token": "ETH",
+      "coingecko_id": "ethereum",
+      "native_token_usd": 1924.16,
+      "rpc_candidates": [
+        "https://ethereum.publicnode.com",
+        "https://rpc.ankr.com/eth",
+        "https://1rpc.io/eth",
+        "https://eth.llamarpc.com"
+      ],
+      "gas_price_wei": 165671060,
+      "gas_price_gwei": 0.16567106,
+      "block_number": 25582383,
+      "rpc_used": "https://ethereum.publicnode.com",
+      "source": "live_rpc",
+      "fallback_gwei": 20.0,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    },
+    {
+      "network": "sepolia",
+      "native_token": "ETH",
+      "coingecko_id": "ethereum",
+      "native_token_usd": 1924.16,
+      "rpc_candidates": [
+        "https://ethereum-sepolia.publicnode.com",
+        "https://rpc.sepolia.org",
+        "https://1rpc.io/sepolia"
+      ],
+      "gas_price_wei": 1057373494,
+      "gas_price_gwei": 1.057373494,
+      "block_number": 11320950,
+      "rpc_used": "https://ethereum-sepolia.publicnode.com",
+      "source": "live_rpc",
+      "fallback_gwei": 5.0,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    },
+    {
+      "network": "arbitrum",
+      "native_token": "ETH",
+      "coingecko_id": "ethereum",
+      "native_token_usd": 1924.16,
+      "rpc_candidates": [
+        "https://arb1.arbitrum.io/rpc",
+        "https://arbitrum-one.publicnode.com",
+        "https://1rpc.io/arb"
+      ],
+      "gas_price_wei": 20052000,
+      "gas_price_gwei": 0.020052,
+      "block_number": 486245084,
+      "rpc_used": "https://arb1.arbitrum.io/rpc",
+      "source": "live_rpc",
+      "fallback_gwei": 0.05,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    },
+    {
+      "network": "base",
+      "native_token": "ETH",
+      "coingecko_id": "ethereum",
+      "native_token_usd": 1924.16,
+      "rpc_candidates": [
+        "https://mainnet.base.org",
+        "https://base.publicnode.com",
+        "https://1rpc.io/base"
+      ],
+      "gas_price_wei": 6000000,
+      "gas_price_gwei": 0.006,
+      "block_number": 48931511,
+      "rpc_used": "https://mainnet.base.org",
+      "source": "live_rpc",
+      "fallback_gwei": 0.01,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    },
+    {
+      "network": "optimism",
+      "native_token": "ETH",
+      "coingecko_id": "ethereum",
+      "native_token_usd": 1924.16,
+      "rpc_candidates": [
+        "https://mainnet.optimism.io",
+        "https://optimism.publicnode.com",
+        "https://1rpc.io/op"
+      ],
+      "gas_price_wei": 1000388,
+      "gas_price_gwei": 0.001000388,
+      "block_number": 154526796,
+      "rpc_used": "https://mainnet.optimism.io",
+      "source": "live_rpc",
+      "fallback_gwei": 0.01,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    },
+    {
+      "network": "polygon",
+      "native_token": "POL",
+      "coingecko_id": "polygon-ecosystem-token",
+      "native_token_usd": 0.080322,
+      "rpc_candidates": [
+        "https://polygon-bor-rpc.publicnode.com",
+        "https://polygon-rpc.com",
+        "https://1rpc.io/matic"
+      ],
+      "gas_price_wei": 277971645999,
+      "gas_price_gwei": 277.971645999,
+      "block_number": 90631582,
+      "rpc_used": "https://polygon-bor-rpc.publicnode.com",
+      "source": "live_rpc",
+      "fallback_gwei": 30.0,
+      "fetched_at_utc": "2026-07-21T16:46:08Z"
+    }
+  ]
+}

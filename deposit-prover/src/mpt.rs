@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use cita_trie::{MemoryDB, PatriciaTrie, Trie};
 use ethers::{
     providers::{Http, Middleware, Provider},
-    types::{TransactionReceipt, H256},
+    types::{Address, Block, Bloom, H256, H64, Transaction, TransactionReceipt, U256, U64},
 };
 use hasher::HasherKeccak;
 
@@ -12,6 +12,59 @@ use crate::{
     rlp_utils::{encode_receipt, encode_tx_index},
     types::{ReceiptProof, TransactionProof},
 };
+
+/// Keccak256 hash of RLP([]) — canonical `ommersHash` for a block with no uncles.
+const EMPTY_UNCLES_HASH: [u8; 32] = [
+    0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a, 0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4,
+    0x1a, 0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13, 0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4,
+    0x93, 0x47,
+];
+
+/// Build a consistent [`ReceiptProof`] for a single-receipt trie (synthetic / keygen).
+pub fn receipt_proof_from_receipt(receipt: &TransactionReceipt) -> Result<ReceiptProof> {
+    let tx_index = receipt.transaction_index.as_u64();
+    let mut trie = build_receipt_trie(&[receipt.clone()])?;
+    let root = trie.root()?;
+    let receipt_root: [u8; 32] = root
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("receipt trie root must be 32 bytes"))?;
+
+    let key = encode_tx_index(tx_index);
+    let proof_nodes = trie.get_proof(&key)?;
+    let receipt_rlp = encode_receipt(receipt)?;
+    let block = minimal_block_header(H256::from(receipt_root));
+    let block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
+
+    Ok(ReceiptProof {
+        receipt_rlp,
+        proof_nodes,
+        receipt_root,
+        block_header_rlp,
+    })
+}
+
+fn minimal_block_header(receipts_root: H256) -> Block<Transaction> {
+    Block {
+        parent_hash: H256::zero(),
+        uncles_hash: H256::from(EMPTY_UNCLES_HASH),
+        author: Some(Address::zero()),
+        state_root: H256::zero(),
+        transactions_root: H256::zero(),
+        receipts_root,
+        logs_bloom: Some(Bloom::default()),
+        difficulty: U256::zero(),
+        number: Some(U64::from(1)),
+        gas_limit: U256::from(30_000_000),
+        gas_used: U256::zero(),
+        timestamp: U256::from(1_700_000_000),
+        extra_data: Default::default(),
+        mix_hash: Some(H256::zero()),
+        nonce: Some(H64::zero()),
+        transactions: vec![],
+        ..Default::default()
+    }
+}
 
 /// Generate a Merkle-Patricia Trie proof for a transaction receipt
 ///

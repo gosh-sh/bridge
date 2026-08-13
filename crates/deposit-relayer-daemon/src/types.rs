@@ -475,4 +475,64 @@ mod tests {
         assert!(parse_and_validate_dapp_id("0x0", false).is_err());
         assert_eq!(parse_and_validate_dapp_id("0", true).unwrap(), "0x0");
     }
+
+    /// QC-OFF-07 closed on main (#15): local bind checks amount, contract, block hash.
+    #[test]
+    fn binding_check_rejects_amount_and_contract_mismatch() {
+        let pi = DepositPublicInputs {
+            deposit_id: U256::from(3u64),
+            sender: U256::from_be_bytes::<32>({
+                let mut b = [0u8; 32];
+                b[12..].copy_from_slice(Address::repeat_byte(0x11).as_slice());
+                b
+            }),
+            amount: U256::from(999u64),
+            contract_address: U256::from(0xdeadbeefu64),
+            chain_id: U256::from(11155111u64),
+            dapp_id_high: U256::ZERO,
+            dapp_id_low: U256::ZERO,
+            an_account_high: U256::from_be_slice(&[0x55u8; 16]),
+            an_account_low: U256::from_be_slice(&[0x55u8; 16]),
+            block_hash_high: U256::from(1u64),
+            block_hash_low: U256::from(2u64),
+            promise_commit: U256::ZERO,
+        };
+        let bundle = DepositProofBundle {
+            vk_blob: Bytes::from(vec![1u8; 4]),
+            public_inputs: Bytes::from(pi.to_operand()),
+            proof: Bytes::from(vec![2u8; 8]),
+            parsed: pi,
+        };
+        let event = DepositEvent {
+            deposit_id: 3,
+            sender: Address::repeat_byte(0x11),
+            amount: U256::from(5u64),
+            an_workchain: 0,
+            an_account: B256::repeat_byte(0x55),
+            timestamp: U256::ZERO,
+            tx_hash: B256::ZERO,
+            log_index: 0,
+            block_number: 1,
+            block_hash: B256::ZERO,
+            source_contract: Address::repeat_byte(0x22),
+            source_chain_id: 11155111,
+        };
+        assert!(bundle.check_binds_to(&event).is_err(), "amount mismatch");
+        let mut ok_pi = bundle.parsed.clone();
+        ok_pi.amount = event.amount;
+        ok_pi.contract_address = U256::from_be_bytes::<32>({
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(event.source_contract.as_slice());
+            buf
+        });
+        ok_pi.block_hash_high = U256::ZERO;
+        ok_pi.block_hash_low = U256::ZERO;
+        let ok_bundle = DepositProofBundle {
+            vk_blob: bundle.vk_blob.clone(),
+            public_inputs: Bytes::from(ok_pi.to_operand()),
+            proof: bundle.proof.clone(),
+            parsed: ok_pi,
+        };
+        assert!(ok_bundle.check_binds_to(&event).is_ok());
+    }
 }

@@ -80,9 +80,9 @@ pub use prover::{
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{
-    fetch_deposit_from_receipt, is_retryable_eth_rpc_error, receipt_log_index_from_block_log,
-    resolve_from_block, AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource,
-    BRIDGE_DEPLOY_BLOCK_ENV,
+    fetch_deposit_from_receipt, is_deposit_block_finalized, is_retryable_eth_rpc_error,
+    receipt_log_index_from_block_log, resolve_from_block, AckiNackiBridge, DepositSource,
+    EthLogSource, InMemoryDepositSource, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 pub use state::{DeploymentIdentity, RelayerState, StateLock};
 pub use submitter::{

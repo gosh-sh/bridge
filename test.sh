@@ -155,6 +155,10 @@ fi
 
 # Run Solidity tests
 if [ "$RUST_ONLY" = false ]; then
+    print_step "Bootstrapping Foundry dependencies..."
+    chmod +x scripts/bootstrap-foundry-deps.sh
+    ./scripts/bootstrap-foundry-deps.sh
+
     print_step "Running Solidity tests..."
     
     cd contracts/ethereum

@@ -1,0 +1,587 @@
+pragma gosh-solidity >=0.76.1;
+pragma AbiHeader expire;
+pragma AbiHeader pubkey;
+
+import "./modifiers/modifiers.sol";
+import "./DepositVoucher.sol";
+import "../token/interface/ISubscriber.sol";
+
+interface IShellAccumulator {
+    function buyShellFor(address buyer) external;
+}
+
+/// @title USDCBridge
+/// @notice The name covers three distinct flows that share storage / owner key
+///         but are otherwise independent:
+///
+///         1. TIP-3 USDC → ECC[3] stripe-mint gateway
+///            `onTransferReceived` (ISubscriber callback) — fires when the
+///            bridge's TIP-3 USDC TokenWallet receives a transfer. Mints
+///            equivalent ECC[3] USDC and forwards to the original depositor.
+///            One-way: TIP-3 → ECC. Counter: `_totalMinted`.
+///
+///         2. Owner-mint admin path
+///            `mintAndSend` / `mintAndSendAccumulator` — owner-key (pubkey)
+///            mints ECC[3] USDC and dispatches to recipient / Accumulator
+///            buyShellFor. Nonce-protected (`_mintNonce`,
+///            `_mintAccumulatorNonce`) against off-chain replay of signed
+///            mint requests.
+///
+///         3. Cross-chain bridge — USDC-only (tokenId == USDC_ECC_ID)
+///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
+///            `finalizeDeposit` / `confirmDeposit` (verify proof, deploy
+///            deterministic `DepositVoucher` for anti-replay, mint ECC).
+///            destination/source chain are opaque to this contract.
+///            Counters: per-tokenId `_totalMintedBridgeByToken` /
+///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
+///
+///         Deployed at fixed address in zerostate.
+contract USDCBridge is USDCBridgeModifiers, ISubscriber {
+    string constant version = "1.1.0";
+
+    event UsdcMigrated(address from, uint128 value);
+    event UsdcMinted(address recipient, uint128 value);
+    event WithdrawalInitiated(
+        uint256 dstChainId,
+        bytes recipient,
+        uint128 amount,
+        uint32 tokenId,
+        address sender
+    );
+    event DepositFinalized(
+        uint256 depositId,
+        uint256 contractAddr,
+        uint256 dappId,
+        uint128 amount,
+        uint256 anAccount
+    );
+
+    /// @notice Deposit fields read out of the proven public-inputs blob.
+    struct DepositPI {
+        uint256 depositId;     // fr[0] — anti-replay anchor (per source contract/dapp)
+        uint128 amount;        // fr[2]
+        uint256 contractAddr;  // fr[3] — L1 bridge contract that emitted the event
+        uint256 dappId;        // fr[4]<<128 | fr[5] — AN dapp id
+        uint256 anAccount;     // fr[6]<<128 | fr[7] — AN recipient (256-bit, proof-bound)
+    }
+
+    uint256 _ownerPubkey;
+
+    // TokenWallet address for TIP-3 USDC bridge (one-way: TIP-3 -> ECC[3])
+    address _usdcWallet;
+
+    // Total ECC[3] USDC minted by the stripe (TIP-3) bridge
+    uint128 _totalMinted;
+
+    // Nonces for double-spend protection
+    uint64 _mintNonce;
+    uint64 _mintAccumulatorNonce;
+
+    // Cross-chain bridge accounting per tokenId (any external chain; independent
+    // of stripe `_totalMinted`). No invariant enforced between minted/burned —
+    // intra-AN ECC distribution can outpace deposits, so on-AN withdrawal can
+    // exceed historical deposits for the same token. The split is for
+    // observability / per-token analytics, not for on-chain checks.
+    mapping(uint32 => uint128) _totalMintedBridgeByToken;
+    mapping(uint32 => uint128) _totalBurnedBridgeByToken;
+
+    // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
+    TvmCell _depositVoucherCode;
+
+    // ZK verifying key (VkBlob) for the FINAL ETH-deposit circuit
+    // (receipt-proof of an L1 deposit event, 11 public inputs). Audit overlay
+    // (max_key_byte_len=3, axiom-eth @1d61be0, Hermez SRS k=18):
+    //   deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin
+    // 3982 bytes; sha256=724687a4db00b11afd24500715e6b0ab0ee73a27dbbfcef0cb865d03ede79b9c
+    bytes constant VK_BLOB =
+        hex"564b424c4f4200000200010000000000ec0000007b22726c63223a7b2262617365223a7b226b223a31382c226e756d5f6164"
+        hex"766963655f7065725f7068617365223a5b31332c31305d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f"
+        hex"6164766963655f7065725f7068617365223a5b312c312c305d2c226c6f6f6b75705f62697473223a382c226e756d5f696e73"
+        hex"74616e63655f636f6c756d6e73223a317d2c226e756d5f726c635f636f6c756d6e73223a317d2c226b656363616b223a7b22"
+        hex"636f6d705f6c6f616465725f706172616d73223a7b226d61785f686569676874223a302c2273686172645f63617073223a5b"
+        hex"36345d7d7d7d8a0e00000212000000001c00000058c338696a199ecb26464c9bdedd6f46e6fa0c9974d91b9fcaa627c329df"
+        hex"f21a4e7b0e1f40caf730f9cb23b5583598194673b2bc3c7f181c20266ff8b4d3cf263c5fe8e4306d821943491717d0628ffd"
+        hex"ba76fcecc7821125a36b7248605e5f23761a6622b0bab9300986d70b8e5f49efe221acd3f85713f09de804432b80930b5fd2"
+        hex"1dccbc7228aff95afe27989687390e02314dbb76851aca0f0eed3554fc18b3be9a3a4da11db71bf86500e86212ab3b3c524d"
+        hex"02c197c14dd773879e342c05db935101e59d4c505fb8904c071dfa423f0bb5fe7be040f3b164bd414f161d01a414d27ff209"
+        hex"38c7329fb35a79bdeb029c823e35c2c23dcd45fb800a8a550926ef2a097b473418d4da72ee708a6b7aa4dc14912f8f8049fd"
+        hex"838e12fdc22db81f3ae5d1abb6834b98f06b160f2402e5368e5a0e5eae6437eb1096346ad5e3ef297e9d67129484b9797c0c"
+        hex"12c21a0f171fa8035f7831455362885767e579397306f0300e82850ab65baf1a2c6413e6b4b26a3825f17c67c1128e55dc01"
+        hex"eaa1321775436210f7b4c48fb0d03b39b3ddbe7a2a902bec503ecb50008f63ebae412918b7b6ebafd72e8145607fc294acc3"
+        hex"08adc81c0d985bdfadd2e0f4297ea2f05b111787ab3f4537bc311d35a40b6a156bdc03c7c17f6110352baeac0ca4d6837225"
+        hex"0f5c7c76d89c1d5550a57d13f17e67b98a1c1a71ca9de880486a8b10647d332eb9ff59c66b6a56ed01c2dd35b6d93ba36b04"
+        hex"bc2bf1a6fd5614d1b2f8c6476e0031f7fbdf4532a47e07ad3808551616565afbce736e174807a458e7c5f0ad5c21cacdf703"
+        hex"04b8136bf95b60a13d7d33633adae6395c4c3acdaf8e05828414862c7518f494da8f47fd68f854413fc6917c8818a8c78128"
+        hex"6a0a82d25bcdd58f9e0b0a4b31b8ee5ff6eda8b5c4fb3502b167b186dd22e00ee9284d8a7d661d7e1202a74fa70b29d3e084"
+        hex"d0121a66df1b6a87c9162b77a20b79cc785803e3ef2e1c2edf78611a1017746a8bb4ed98b9dde95e471130760b46db39f142"
+        hex"7c7f14118e2bea2730dee6c55a7a502883359d80b9f937d1d6dc61ee7126e18707567b6b841255f461f426bbf28ca86293f8"
+        hex"3687830e54385d9b5743d8a4e392288174f6dd0df25695a24d2fd554368ef8c41f2b45fdd037ac01b8e8ccf7f0f6d3c3857c"
+        hex"f7081f7c7e7ad8449e295b7a6656e4fcafa40ded1d39d92b818a99bce25cf1d08c212347730df4d54c6f85a6edbe67d06014"
+        hex"654168d00f7a23a709f01abdc0a98d18c76ee5bce93da6baa42eda8b4992f83e3b9fc900c671a6dec1f8039f5515bc162673"
+        hex"00f1b4711430de437f8b91a8cfe9f1f4e8e3b5fefd5135e50a88e872cd2681c677121c3981041154c711afaefcebd2e065cb"
+        hex"f627e595274eb594b001d014b3a432f192f08b0bfa3713754830bd36e875b4c6173b3f7408077f973f786d2005866eaedcfd"
+        hex"e789b1e798a96aaaf55a4d62278ec8bbb65611be6a87fde5aa12d1a9854221a14a0585c23cf28d8658b185bfb74fea043965"
+        hex"c9b7bfb919a56a0794e491ba93e43211e392910b3ddc450be0674db64f37b16f739e390d1bbab0180a6cab91fd77bb16a3ff"
+        hex"cfcef7001d8f295c4ebd73708524db7a46889d51b2001bcf5bff9887f0592419d4b9ac2cd0faef322a90baff1f2f76154c39"
+        hex"b41de82aac47ba03e73a3ab987e68c8d7ba2c663ec3166d2fcaa09d68c2dfe7c6b0bd32b301238886bd2ecaa09053ef3d9b8"
+        hex"fc53a49cc47b0a5c36d33bb079b0eba0d009b17c7e85db3015721f4a57c8722599dc176c4cb670d9c52027799ac89465762f"
+        hex"3eaf467abb7f4dbf14d13795c01cc4e3ac479d3c4ee7bfb3f9fc272636e6c20b605a9a9f05fd2ba27aad65c05dc40ce668f9"
+        hex"4b24a8ef05a900c50f1bff96251eed77380dd1390f0d0e9530c5b206a482251aa2429e4a73e04c6cfc2a8b491003875645b9"
+        hex"f0876ae51563afa03af9682436016d37b68c2faf9715455a484f032b8570ed29ee9113cf671db62041d768568bc4fc6b53d7"
+        hex"667d36bbe65e0d13921e1f36f05e3a548919bf85600c75b03e0656779d58361d59c834f8444cd6ff611c727efdb3134fa1ba"
+        hex"f22c9aaa92b91cf7ef569c261749d2607198888d50bf612066eec72a02304f193ae103b033d0af59daf50f2febaea3a774d3"
+        hex"c6c666152a0748574bd676f097bcba8cdf81d7c07d84a836c5c785c3704fb2f8750b2c702f2307a268a6798ab772c2189fbf"
+        hex"e02fb84df048ad6485bc63236438a49e4780611656ab894ca47a5d8704f7ae7f5580606e576d29b857998cca7888737c5990"
+        hex"cb2f9bf221fa9c755abcad0f96b1985e2a22083a07bf50b2cb5c972b7907918e3122d5e2f0199bb6b7a1bee5ba28d2d24cd9"
+        hex"87f7cce829a750b481568df38d213a1bb3fc371ce8dc1ea7d3053977dd4aaf3a6020ae3c069323bae486f963f7eaf8087bd3"
+        hex"d221a948343487f749aa989554b9e631cf68cc7680325922d8fa7172ec1bdcd25c58fa015369bed84c1fdd3477ae2e850867"
+        hex"13bfc9494e54a22509a0b212ef8954dd012ee06a3ebe30150ddebef92a42d9a824e819dd547473a489553b150aa00c5007ed"
+        hex"405e018f54ae470dcd92fa1d3d97f6821bf86ed301319e749102ecb13fa86a28cc3d9fc8c686963ea0cd30d8b86f911953fb"
+        hex"10b9af1e2ad635213810460d865d1164ad4a381ff79452570c6bd885542b1e647c1467365b480f1744b6c872444c7b2b9852"
+        hex"8d24adabe4009787070c06880c09a03b1c3a74765426f246da5443b102673151f01f4565f34cc74fd05f40712896219e8098"
+        hex"66c5270be7c04fefefb6a1021eaf2c9dea98a3c6f6e21aad2cef57ec03fd09fa99097e0215d75df2a6f29bec75c95213508d"
+        hex"5979d331052c7fca5c52bc7e83bca1403e16b19fce292a294787762574331e2080f30d100b71e9d3e96863571fd882061906"
+        hex"acdb7936c28658055b38cfa99cbeb4487cb62de67bb76633f3f3fa828aa90f2c3ba6a6aef8f3a8fb76ad47c1b96d2bbdbe4d"
+        hex"5e6619cc315ce2025ba0beaf3f12f9dd99de097127f1d4ec2302b533db3240e5851a4a61b43879a86eaa75b98b15b968a003"
+        hex"8a3d59789c7e79f8aac2bddba6109145915d424523cd358553c28f17a077ba1f8fcbb76e5f0db57831b718cfb451626bd90e"
+        hex"7ae58a5f55aff1b81908e3fee306b158ad7b7471f772f92baaae5b363eb6a9affd0cdc257c87b67d0c0c7f9087e0259a5e95"
+        hex"9397f717a26975ee3145c9251a4729ae320e082d6167872a306494b807e1f7848a41fbcd0acb08ea8d04fa9bcfcc6dd9e1e8"
+        hex"9e112ea6591e0bfa9778082b2f9492eb9d97b10f5aa2bb8c4afd030744f611a879d7e053b0257b1c07b3c223906ca62ce15a"
+        hex"1a1df17172cb48f71d8060a272b734e4e3198c20440f7790a0efa43d1fd592a82bbdd7770903c53c223ee3b07400f64acab1"
+        hex"2d1c72d43d0c4316391acd0d95cfbae31d1f90a9807db9fd8562645df81eeb431f12c845d0d43eb86da26ab80b545ddb4be0"
+        hex"2acc0e0edce11cb819c4296ecfb58c2b384cfb78800730032a6bad373c1e7f4bfc6d18902f40d3e235231ab889c3272be859"
+        hex"51278437dc3c1ae1dd362f34510a7feece60d533f7f46fc21bbcf107a3157eb896452c35a121746391c2e8bdca280243b909"
+        hex"d319e9ba56077e5408ee2f02e03efea630f5c434014a00cc35dc088bb0a15becc84202c8a0329c1f3eed7a2e9f5bc9dcc08d"
+        hex"dc61286896602e47a654f6056543bc8cb594789aef95b561870edd4ebb7001256db0abdec933a0c43bb47e8072ba448d57b8"
+        hex"e53fc64535a3972defe039c896c664c0af8f73857a0669ee013d6d56d177f10e06b0c8ad61864b2b5b3696a5b3e246f6ceba"
+        hex"608855eb0b26799565576a29208b56c7c27726723a09eb89e23ee0514aefd65d28931ad53313e869bcbf9f502fa6a5c722ea"
+        hex"43f8fe279904b495cf0562068aa564a4521c31d05ac8ae16e2d6c1ae6a7c0672b60002075214800490db0a8f92e5819c94d4"
+        hex"5acad547ac1c1a2e279d100ae947dbf76f2dce5feddb50d76b98b79061370135fbdffde1fd87530a60fbcb98b24d81e8ff17"
+        hex"0a99b5c4ab8149912e4feac3c993551707ed2dc88426a0143e00960877754a0639180de871ef03ecd05e2b1f10eb382e433d"
+        hex"7b5dc3a3e2e7b8b811f5382af20046da3bc2d2de007ac087118b4368a183c55d132fe1913153eec842cb7adeb310221fe504"
+        hex"278c690efeafd02a6471df7c23818e5571b5306adb1dbe245a1ea009f375b7e8344c7e66e5271b03d2902b15c19dcbf45aca"
+        hex"2c20a42d93a733f06d265c2004a2d5f9acaadce4a1e6ba7b837c526455dba336420ea21ea382b332fa10d922b27709acc3a8"
+        hex"18a50a6dcf7654fa518338fe8a904667c8a7e6141fb99f01483eb2e25265a70cef454b8f5e1c14e333e2ec1bf7ebd9397014"
+        hex"a78fad3cb805635da4fd6eda1d47e8122aa41636b5720c92cbda71b747699b7b3dccfc72fa06de6f4b9ece392d0bec6f1348"
+        hex"cf7300c9018eef2c89cf8e0728d1505030e95224584ed95748dcc29c75d3391c8a894f3c017e77f1084440343c6aa65bd087"
+        hex"9c043066c425727627dc7a21e39b16dd616dae1566ef25343b7663012ca39c2a5524c291fd3fe41bb579d482b4c1de058087"
+        hex"b8cadc733b734815f5ad6e7ee6e1552f36e69d30cdd050030173f8e70b786296dcaac7c7c547077ea7e5d58bc99cb5203da9"
+        hex"f4cfd204ca4daf3f9365e91b94d94f11bd2e5ce73b4579cdf78bfee19b17bcb032717022813810193e765ab372f558d4c21d"
+        hex"d5c0572ba5c3f0f347129b0698660bf3886a03a87b76ede67eb0a223666b4e6e389cbf005faf38ae1af0d22eac47bd3b1125"
+        hex"777b23d1dcd502446e1e9a02b6935501051ceda9a21f6783032bb08360abfa1143892fd6544225914450b4a1c17f48f3c232"
+        hex"c91a77f94dd3b11a7b3024c7f6cf6bbd7ec974d96895c4ce03cb7a916f0383cacc2bbc648d30ee12f7df844d6716ba78860f"
+        hex"6785dc304e2057d5ea5525cdd88dda13af97b4819a0349d9e6c2d896c8077124463635f63470c64b362e6f3a1cf1dabca203"
+        hex"db61fe2d0bc5c9a41d7e59d3bf6ed498f97c208e9b367ff1760c0219fc5142ac9af3241aefc56f17770ce0789c2e6a04d046"
+        hex"c3112744a9864a4ee3ff9859bcfdd07edc24fc1e22fde32d2693af2c94ddf55b36dac541e279be745cb664238fd28f8fed15"
+        hex"091638a0fb0da1eacb6862d297e9e185974834b7e55514429ca7b6e9e0a76100";
+
+    /// @notice Contract constructor.
+    /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
+    ///       in the only deploy path that matters (zerostate premine stub +
+    ///       `updateCode` upgrade) the voucher code arrives via the
+    ///       `onCodeUpgrade` payload. There is no standalone setter (B2 fix),
+    ///       so the only way to populate / rotate `_depositVoucherCode` is a
+    ///       full `updateCode` upgrade of USDCBridge.
+    /// @param pubkey — owner public key for admin operations
+    /// @param usdcWallet — address of the Exchange's TIP-3 USDC TokenWallet (subscriber target)
+    constructor(
+        uint256 pubkey,
+        address usdcWallet
+    ) accept {
+        _ownerPubkey = pubkey;
+        _usdcWallet = usdcWallet;
+    }
+
+    /// @notice Ensures contract balance stays above MIN_BALANCE by minting vmshell if needed.
+    function ensureBalance() private pure {
+        if (address(this).balance >= MIN_BALANCE) { return; }
+        gosh.mintshellq(MIN_BALANCE);
+    }
+
+    // ========================================================
+    // TIP-3 USDC -> ECC[3] bridge (ISubscriber callback)
+    // ========================================================
+
+    /// @notice ISubscriber callback invoked by the bridge's TIP-3 USDC TokenWallet
+    ///         when it receives a TIP-3 transfer. Mints equivalent ECC[3] USDC and sends
+    ///         it to the original depositor. Only callable by _usdcWallet.
+    /// @param from — address of the original depositor (wallet owner who sent TIP-3 USDC)
+    /// @param value — amount of TIP-3 USDC received (in micro-USDC, 6 decimals)
+    function onTransferReceived(
+        address from,
+        address /*to*/,
+        uint128 value,
+        uint128 /*balance*/
+    ) external override {
+        require(msg.sender == _usdcWallet, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+
+        // TIP-3 USDC deposited -> mint ECC[3] and send to depositor
+        require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
+        gosh.mintecc(uint64(value), USDC_ECC_ID);
+        _totalMinted += value;
+
+        mapping(uint32 => varuint32) ecc;
+        ecc[USDC_ECC_ID] = varuint32(value);
+        from.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+
+        address addrExtern = address.makeAddrExtern(UsdcMigratedEmit, bitCntAddress);
+        emit UsdcMigrated{dest: addrExtern}(from, value);
+    }
+
+    // ========================================================
+    // Mint ECC[3] USDC and send to recipient (owner only)
+    // ========================================================
+
+    /// @notice Mints ECC[3] USDC and sends it to the specified recipient address.
+    ///         Only callable by the owner (by public key).
+    /// @param recipient — address to receive the minted ECC[3] USDC
+    /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
+    function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
+        require(value > 0, ERR_ZERO_AMOUNT);
+        require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
+        _mintNonce = nonce;
+
+        gosh.mintecc(uint64(value), USDC_ECC_ID);
+        _totalMinted += value;
+
+        mapping(uint32 => varuint32) ecc;
+        ecc[USDC_ECC_ID] = varuint32(value);
+        recipient.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+
+        address addrExtern = address.makeAddrExtern(UsdcMintedEmit, bitCntAddress);
+        emit UsdcMinted{dest: addrExtern}(recipient, value);
+    }
+
+    // ========================================================
+    // Mint USDC and send to Accumulator for a buyer
+    // ========================================================
+
+    /// @notice Mints ECC[3] USDC and sends it to the Accumulator's buyShellFor,
+    ///         which will process the purchase and send ECC[2] Shell to the buyer.
+    /// @param buyer — address to receive Shell from the Accumulator
+    /// @param value — amount of ECC[3] USDC to mint (in micro-USDC)
+    function mintAndSendAccumulator(address buyer, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        require(nonce == _mintAccumulatorNonce + 1, ERR_INVALID_NONCE);
+        require(value > 0, ERR_ZERO_AMOUNT);
+        require(value % USDC_DECIMALS_FACTOR == 0, ERR_NOT_WHOLE_USDC);
+        require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
+        _mintAccumulatorNonce = nonce;
+
+        gosh.mintecc(uint64(value), USDC_ECC_ID);
+        _totalMinted += value;
+
+        mapping(uint32 => varuint32) ecc;
+        ecc[USDC_ECC_ID] = varuint32(value);
+        IShellAccumulator(ACCUMULATOR_ADDRESS).buyShellFor{value: 1 vmshell, bounce: false, flag: 1, currencies: ecc}(buyer);
+
+        address addrExtern = address.makeAddrExtern(UsdcMintedEmit, bitCntAddress);
+        emit UsdcMinted{dest: addrExtern}(buyer, value);
+    }
+
+    // ========================================================
+    // Cross-chain bridge — outbound (AN -> any chain): burn ECC, emit proof-source event
+    // ========================================================
+
+    /// @notice Burns the ECC currency attached to this message and emits an event
+    ///         carrying the data needed to mint the equivalent on the destination
+    ///         chain. Exactly one ECC currency must be attached; its id and amount
+    ///         are taken from `msg.currencies`. The destination chain is opaque
+    ///         to this contract — `dstChainId` is just passed through to the event.
+    /// @param dstChainId — opaque destination chain identifier (passed through to event)
+    /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
+    function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
+        tvm.accept();
+        ensureBalance();
+        require(recipient.length <= 64, ERR_RECIPIENT_TOO_LONG);
+
+        mapping(uint32 => varuint32) currencies = msg.currencies;
+        uint32[] keys = currencies.keys();
+        require(keys.length >= 1, ERR_NO_ECC);
+        require(keys.length == 1, ERR_MULTIPLE_ECC);
+
+        uint32 tokenId = keys[0];
+        require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
+        uint128 amount = uint128(currencies[tokenId]);
+        require(amount > 0, ERR_ZERO_AMOUNT);
+        require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
+
+        gosh.burnecc(uint64(amount), tokenId);
+        _totalBurnedBridgeByToken[tokenId] += amount;
+
+        address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
+        emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
+    }
+
+    // ========================================================
+    // Cross-chain bridge — inbound (any chain -> AN): verify proof, deploy DepositVoucher, mint ECC
+    // ========================================================
+
+    /// @notice Finalizes an L1 deposit proven by the final ETH-deposit halo2
+    ///         circuit (receipt-proof of the L1 deposit event). The relayer
+    ///         passes the proof and its public-inputs blob verbatim; we verify
+    ///         against `VK_BLOB` and read every deposit field straight out of the
+    ///         PROVEN instances — amount, recipient and source identity are all
+    ///         proof-bound, nothing is caller-set. A deterministic
+    ///         `DepositVoucher` (keyed on the proof-bound deposit identity) gives
+    ///         replay protection; it calls back `confirmDeposit` to mint + pay.
+    /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
+    ///                         `proof_cell` operand of TVM opcode
+    ///                         ZKHALO2VERIFYWITHVK (0xC7 0x4A).
+    /// @param publicInputs  — the circuit instance column: 11 × 32-byte LE Fr
+    ///                         (deposit_id, sender, amount, contract, dapp_hi,
+    ///                         dapp_lo, an_account_hi, an_account_lo, + 3 receipt/
+    ///                         block hashes). Verified verbatim; business fields
+    ///                         read at fixed offsets — see `_parsePublicInputs`.
+    function finalizeDeposit(bytes proof, bytes publicInputs) public {
+        // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
+        DepositPI f = _parsePublicInputs(publicInputs);
+        require(f.amount > 0, ERR_ZERO_AMOUNT);
+
+        // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
+        // multi-second WASM extern that vastly exceeds the external-message
+        // pre-accept gas limit. Permissionless submission — the proof itself is
+        // the authorization; a garbage proof only wastes the bridge's own gas.
+        tvm.accept();
+        require(
+            gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof),
+            ERR_INVALID_ZKPROOF
+        );
+        ensureBalance();
+
+        // Anti-replay anchor = proof-bound (deposit_id, source contract); the
+        // dapp component is pinned to 0 (see _parsePublicInputs).
+        // amount/recipient are NOT in the key — they are fixed by the proof, so a
+        // replay can never re-route or re-mint: same key ⇒ same voucher ⇒ no-op.
+        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId));
+
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: DepositVoucher,
+            varInit: { _depositHash: depositHash },
+            code: _depositVoucherCode
+        });
+
+        new DepositVoucher{
+            stateInit: stateInit,
+            value: 2 vmshell,
+            flag: 1
+        }(f.depositId, f.contractAddr, f.dappId, f.amount, f.anAccount);
+    }
+
+    /// @notice Internal callback from a freshly deployed `DepositVoucher`. Mints
+    ///         USDC ECC and sends it to the proof-bound AN recipient. The caller
+    ///         must be the deterministic voucher address derived from the
+    ///         deposit identity — replay attempts hit the existing voucher
+    ///         account whose constructor was already consumed.
+    function confirmDeposit(
+        uint256 depositId,
+        uint256 contractAddr,
+        uint256 dappId,
+        uint128 amount,
+        uint256 anAccount
+    ) public {
+        uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId));
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: DepositVoucher,
+            varInit: { _depositHash: depositHash },
+            code: _depositVoucherCode
+        });
+        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+
+        tvm.accept();
+        ensureBalance();
+
+        gosh.mintecc(uint64(amount), USDC_ECC_ID);
+        _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
+
+        mapping(uint32 => varuint32) ecc;
+        ecc[USDC_ECC_ID] = varuint32(amount);
+        address.makeAddrStd(0, anAccount).transfer({
+            value: 1 vmshell,
+            bounce: false,
+            flag: 1,
+            currencies: ecc
+        });
+
+        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
+        emit DepositFinalized{dest: addrExtern}(
+            depositId, contractAddr, dappId, amount, anAccount
+        );
+    }
+
+    // DepositVoucher code rotation is intentionally not exposed as a
+    // standalone setter. The only way to change `_depositVoucherCode` is via
+    // a full `updateCode` upgrade of USDCBridge (the new code+layout pass
+    // through `onCodeUpgrade`). This removes the "owner can swap voucher
+    // logic in one tx and free-mint" backdoor flagged in PR2112 review (B2).
+
+    // ========================================================
+    // Admin
+    // ========================================================
+
+    /// @notice Replaces the owner public key. Only callable by the current owner.
+    /// @param pubkey — new owner public key (uint256)
+    function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _ownerPubkey = pubkey;
+    }
+
+    /// @notice Sends a plain transfer to the given address from the bridge.
+    ///         Used to trigger Transaction contracts deployed by the bridge's USDC wallet
+    ///         (e.g. SET_SUBSCRIBER_TYPE). Only callable by the owner.
+    /// @param txAddr — address of the Transaction contract to trigger
+    function triggerTransaction(address txAddr) public view onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        txAddr.transfer({value: 1 vmshell, bounce: true, flag: 1});
+    }
+
+    // ========================================================
+    // On-chain code upgrade (owner only)
+    // ========================================================
+
+    /// @notice Upgrades the contract code on-chain. Only callable by the owner.
+    /// @param newcode — new contract code TvmCell
+    /// @param userCell — reserved passthrough for future upgrade payloads.
+    ///        Currently unused (the new code receives a cell built purely
+    ///        from snapshot of current storage). Future upgrades can read
+    ///        this slot once `onCodeUpgrade` is extended; today it lets the
+    ///        ABI stay stable.
+    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        TvmCell migrationCell = abi.encode(
+            _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
+            _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
+            userCell
+        );
+        tvm.commit();
+        tvm.setcode(newcode);
+        tvm.setCurrentCode(newcode);
+        onCodeUpgrade(migrationCell);
+    }
+
+    /// @notice Initializes state after code upgrade. Resets all storage and re-initializes
+    ///         from the provided cell. Called by UpdateZeroContract (zerostate) and updateCode().
+    /// @param cell — ABI-encoded tuple:
+    ///                 (uint256 pubkey,
+    ///                  address usdcWallet,
+    ///                  uint128 totalMinted,
+    ///                  uint64  mintNonce,
+    ///                  uint64  mintAccumulatorNonce,
+    ///                  mapping(uint32 => uint128) totalMintedBridgeByToken,
+    ///                  mapping(uint32 => uint128) totalBurnedBridgeByToken,
+    ///                  TvmCell depositVoucherCode,
+    ///                  TvmCell userCell)
+    ///         `depositVoucherCode` is the voucher code carried by the
+    ///         zerostate path. `userCell` is `updateCode`'s passthrough: on a
+    ///         code-bumping on-chain upgrade it carries the INTENDED NEW voucher
+    ///         code (so a code bump can swap the voucher logic atomically — the
+    ///         only way to rotate `_depositVoucherCode` post-deploy, per B2); it
+    ///         is empty on the zerostate path. When non-empty it takes
+    ///         precedence over `depositVoucherCode`.
+    function onCodeUpgrade(TvmCell cell) private {
+        tvm.accept();
+        tvm.resetStorage();
+        (uint256 pubkey,
+         address usdcWallet,
+         uint128 totalMinted,
+         uint64  mintNonce,
+         uint64  mintAccumulatorNonce,
+         mapping(uint32 => uint128) totalMintedBridgeByToken,
+         mapping(uint32 => uint128) totalBurnedBridgeByToken,
+         TvmCell depositVoucherCode,
+         TvmCell userCell)
+            = abi.decode(cell, (uint256, address, uint128, uint64, uint64,
+                                mapping(uint32 => uint128), mapping(uint32 => uint128),
+                                TvmCell, TvmCell));
+        _ownerPubkey = pubkey;
+        _usdcWallet = usdcWallet;
+        _totalMinted = totalMinted;
+        _mintNonce = mintNonce;
+        _mintAccumulatorNonce = mintAccumulatorNonce;
+        _totalMintedBridgeByToken = totalMintedBridgeByToken;
+        _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
+        _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
+    }
+
+    // ========================================================
+    // Getters
+    // ========================================================
+
+    /// @notice Returns the TIP-3 USDC TokenWallet address used for the bridge.
+    function getUsdcWallet() external view returns (address) {
+        return _usdcWallet;
+    }
+
+    /// @notice Returns the owner public key.
+    function getOwnerPubkey() external view returns (uint256) {
+        return _ownerPubkey;
+    }
+
+    /// @notice Returns total ECC[3] USDC minted by this contract.
+    function getTotalMinted() external view returns (uint128) {
+        return _totalMinted;
+    }
+
+    /// @notice Returns total ECC minted/burned via the cross-chain bridge path
+    ///         for a specific tokenId.
+    function getTotalBridged(uint32 tokenId) external view returns (uint128 minted, uint128 burned) {
+        return (_totalMintedBridgeByToken[tokenId], _totalBurnedBridgeByToken[tokenId]);
+    }
+
+    /// @notice Returns the hash of the currently installed DepositVoucher code.
+    function getDepositVoucherCodeHash() external view returns (uint256) {
+        return tvm.hash(_depositVoucherCode);
+    }
+
+    /// @notice Returns current nonces for double-spend protection.
+    function getNonces() external view returns (uint64 mintNonce, uint64 mintAccumulatorNonce) {
+        return (_mintNonce, _mintAccumulatorNonce);
+    }
+
+    /// @notice Returns contract version and name.
+    function getVersion() external pure returns (string, string) {
+        return (version, "USDCBridge");
+    }
+
+    // ========================================================
+    // Halo2 public-inputs assembly (consumer side of opcode 0xC7 0x4A)
+    // ========================================================
+
+    /// @dev Read the deposit fields out of the PROVEN public-inputs blob (the
+    ///      contract verified the proof over this exact blob, so every value
+    ///      here is proof-bound). Layout = 11 × 32-byte LE Fr; offsets per the
+    ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
+    ///      3=contract, 4..5=dapp_id(hi..lo), 6..7=an_account(hi..lo),
+    ///      8..10=receipt/block hashes (ignored on the AN side). Only the first
+    ///      8 Fr are needed.
+    function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
+        TvmSlice s = publicInputs.toSlice();
+        uint256[] fr;
+        for (uint k = 0; k < 8; k++) {
+            uint256 v = 0;
+            for (uint i = 0; i < 32; i++) {
+                if (s.bits() < 8) { s = s.loadRef().toSlice(); }
+                v |= (uint256(uint8(s.loadUint(8))) << (8 * i));   // little-endian
+            }
+            fr.push(v);
+        }
+        require(fr[2] <= uint256(type(uint64).max), ERR_OVERFLOW);
+        // The circuit splits the 256-bit AN account into two 16-byte halves
+        // (fr[6]=high, fr[7]=low) — reassemble it. The workchain concept is
+        // retired on AN, so the recipient always lives in workchain 0 (see
+        // confirmDeposit's makeAddrStd).
+        f.depositId    = fr[0];
+        f.amount       = uint128(fr[2]);
+        f.contractAddr = fr[3];
+        // Deposits into AN always land in dapp 0, so the dapp halves carried by
+        // the circuit (fr[4]=high, fr[5]=low) are not used. Pinning the field to
+        // 0 keeps the deposit identity — and therefore the DepositVoucher
+        // address — independent of what the L1 side reports.
+        f.dappId       = 0;
+        f.anAccount    = (fr[6] << 128) | fr[7];
+    }
+}

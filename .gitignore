@@ -97,6 +97,22 @@ tmp/
 temp/
 *.tmp
 
+# AN audit vendor checkouts (shallow clones — not submodules)
+audit/vendors/*
+!audit/vendors/README.md
+
+# AN audit toolchain (local symlinks to sibling repos — not portable in git)
+.tools/
+.venv-an-audit/
+audit/spec/an-contracts/tools
+audit/spec/an-contracts/compiler/
+audit/spec/an/fixtures/
+audit/spec/an/fixtures/bc_an_01/*
+!audit/spec/an/fixtures/bc_an_01/README.md
+audit/spec/an-contracts/**/build/
+**/.pytest_cache/
+**/__pycache__/
+
 # OS specific
 Thumbs.db
 .DS_Store

@@ -20,7 +20,8 @@ path = "src/lib.rs"
 # axiom-eth fork (branch `gosh-stable-rlcmanager-assignment`) whose RlcManager
 # names `VirtualRegionManager::Assignment` explicitly for the stable gosh
 # halo2-base, and the bumped gosh halo2-lib fork (v0.4.1 / zkevm-hashes 0.2.1).
-axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment", default-features = false, features = [
+# Pinned @ 1d61be0 — dev-confirmed canonical rev (QC-PROV-02, 2026-07-17).
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", rev = "1d61be00a63ec73b3f709d74eb9e6b09b754b911", default-features = false, features = [
   "providers",
   "display",
   "aggregation",

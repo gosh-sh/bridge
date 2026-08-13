@@ -1,7 +1,7 @@
 # `bridge-evm-aggregator` — R15 / M2 feasibility spike
 
 This is the **M2** milestone of the R15 roadmap
-(`docs/r15_snark_verifier_roadmap.md`). It stands up the
+(`docs/zk/evm-side/r15_snark_verifier_roadmap.md`). It stands up the
 snark-verifier-sdk → Yul EVM verifier pipeline in our build environment
 and confirms it produces an EIP-170-fitting Solidity verifier.
 
@@ -26,7 +26,7 @@ produce a SHPLONK proof of any shape so the aggregator pipeline can be
 exercised end-to-end.
 
 When the partner's Circuit 4 lands (M4 in
-`docs/r15_snark_verifier_roadmap.md`), the trivial multiply gate is replaced
+`docs/zk/evm-side/r15_snark_verifier_roadmap.md`), the trivial multiply gate is replaced
 with the real Circuit 4 prover, the aggregator's K may bump (M5 sizing),
 and the Yul output becomes the production
 `BridgeWithdrawalAggregatorVerifier.sol` (M6) that the bridge contract

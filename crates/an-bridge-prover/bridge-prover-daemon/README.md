@@ -8,7 +8,7 @@ Circuit 2 (Layer Historical Hashes, K=17). Pairs with
 The daemon classifies each key block as **Primary** (one ≥2N/3
 attestation → Circuit 1A) or **Fallback** (paired ≥N/2+1 PRIMARY +
 FALLBACK attestations over the same `block_id` → Circuit 1B). See
-[`docs/fallback_path.md`](../docs/fallback_path.md) for the classifier
+[`docs/operations/an_bridge_prover_fallback_path.md`](../docs/operations/an_bridge_prover_fallback_path.md) for the classifier
 contract and operational notes.
 
 This README is a standalone runbook for exercising the prover/verifier

@@ -143,6 +143,10 @@ fi
 print_info "Rust build completed"
 
 # Build Solidity contracts
+print_step "Bootstrapping Foundry dependencies..."
+chmod +x scripts/bootstrap-foundry-deps.sh
+./scripts/bootstrap-foundry-deps.sh
+
 print_step "Building Solidity contracts..."
 cd contracts/ethereum
 forge build

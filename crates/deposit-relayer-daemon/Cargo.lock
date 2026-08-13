@@ -2364,6 +2364,7 @@ dependencies = [
  "deposit-chain-ids",
  "fs2",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

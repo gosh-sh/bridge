@@ -1,0 +1,59 @@
+No files changed, compilation skipped
+
+Ran 9 tests for GasBenchmark.t.sol:GasBenchmark
+[PASS] test_gas_deposit() (gas: 3376435)
+Logs:
+  GAS|user|erc20_approve|10usdc|22527
+  GAS|user|deposit|first_10usdc|74686
+  GAS|user|deposit|warm_10usdc|6986
+  GAS|user|deposit|max_100usdc|6986
+
+[PASS] test_gas_owner_emergencyWithdrawAll() (gas: 4182036)
+Logs:
+  GAS|owner|emergencyWithdrawAll|default|12899
+
+[PASS] test_gas_owner_ops() (gas: 4360993)
+Logs:
+  GAS|owner|pause|default|22264
+  GAS|owner|unpause|default|1811
+  GAS|owner|supplyToAave|max|119915
+  GAS|owner|withdrawFromAave|5usdc|10768
+  GAS|owner|setYieldRecipient|default|1952
+  GAS|owner|setLiquidReserveBps|5pct|2246
+  GAS|owner|setAaveEnabled|false|2408
+  GAS|owner|setAaveEnabled|true|2436
+  GAS|owner|harvestYield|1usdc|36589
+
+[PASS] test_gas_verifyBlock_mock() (gas: 4051503)
+Logs:
+  GAS|relayer|verifyBlock|mock_primary_first|342133
+  GAS|relayer|verifyBlock|mock_primary_warm|92627
+
+[PASS] test_gas_verifyBlock_production() (gas: 20039660)
+Logs:
+  GAS|relayer|verifyBlock|production_primary|1283234
+  GAS|verifier|primary_attestation|isolated|419985
+  GAS|verifier|layer_hashes|isolated|346036
+  GAS|verifier|fallback_attestation|isolated|419985
+
+[PASS] test_gas_views() (gas: 17492372)
+Logs:
+  GAS|view|expectedPrevAnchor|cold|24851
+  GAS|view|isNullifierUsed|cold|3759
+
+[PASS] test_gas_withdrawByProof_aave_pull_mock() (gas: 5042403)
+Logs:
+  GAS|relayer|withdrawByProof|mock_with_aave_pull|63217
+
+[PASS] test_gas_withdrawByProof_mock() (gas: 4180823)
+Logs:
+  GAS|relayer|withdrawByProof|mock_liquid_only|53560
+  GAS|relayer|withdrawByProof|mock_warm|31660
+
+[PASS] test_gas_withdrawal_verifier_production() (gas: 5165728)
+Logs:
+  GAS|verifier|withdrawal_c4|isolated|393055
+
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 45.67ms (77.27ms CPU time)
+
+Ran 1 test suite in 47.97ms (45.67ms CPU time): 9 tests passed, 0 failed, 0 skipped (9 total tests)

@@ -1,0 +1,6 @@
+{
+  "contracts": [
+    {"name": "USDCBridge", "source": "exchange"},
+    {"name": "DepositVoucher", "source": "exchange"}
+  ]
+}

@@ -1,0 +1,115 @@
+HANDOFF для разработчиков Acki Nacki Bridge (ETH ↔ AN)
+Дата: 2026-07-21 (ответы зафиксированы из Pruvendo QA Stage II, раздел Bridge)
+Источник: аудит ветки audit, регистры questions-an.md и questions-cross-chain.md
+Тесты AN: make audit-an-test → 74 passed. PoC и детали: audit/reports/questions-an.md, audit/findings/BC-AN-*/
+
+Ответы разработчиков записаны в регистрах. Дальнейная рассылка не планируется — открытые пункты остаются in progress.
+
+
+BC-AN-01 — ЗАКРЫТО
+
+Был: double-mint при разном dappId в PI. Фикс: f.dappId = 0 на contracts/dex_bridge.
+Ответ Stage II: «fixed. Принудительно dapp_id делаю 0».
+Регрессия: integration/test_bc_an_01_dapp_id_double_mint.py.
+
+
+BC-AN-02 — ОТКРЫТО (in progress)
+
+Нет allowlist L1 contractAddr на AN. PoC: test_bc_an_02_no_l1_bridge_allowlist_pre_zk.
+Ответ Stage II: нет.
+
+
+QC-AN-01 — ЧАСТИЧНЫЙ ACK (in progress)
+
+Лимит uint64 на AN vs 100 USDC на ETH.
+Ответ Stage II: «лучше в эфире увеличить до u64. Надо подумать про минимальный размер».
+
+
+QC-AN-02 — ОТКРЫТО (in progress)
+
+Централизация owner mint. Ответ Stage II: нет.
+
+
+QC-AN-03 — ЗАКРЫТО (ack)
+
+Ротация кода ваучера.
+Ответ Stage II: «обновлять код ваучера нельзя — старые пруфы позволят наминтить. Тестов нет».
+
+
+QC-AN-04 — ОТКРЫТО (in progress)
+
+Пауза на AN vs ETH. Ответ Stage II: нет.
+
+
+QC-AN-05 — ЧАСТИЧНЫЙ ACK (in progress)
+
+Два счётчика supply.
+Ответ Stage II: «нет, оставляем отдельно. Ещё посмотрю на превышение».
+
+
+QC-AN-06 — ЧАСТИЧНЫЙ ACK (in progress)
+
+VK blob в контракте.
+Ответ Stage II: «тестируем тестовыми пруфами».
+
+
+QC-AN-07 — ЗАКРЫТО (ack)
+
+Voucher brick при деплое.
+Ответ Stage II: «да. Ваучер будет установлен сразу при деплое».
+
+
+QC-AN-08 — ЗАКРЫТО (тест)
+
+Усечённые PI. Отдельного вопроса в Stage II нет.
+
+
+QC-AN-09 — ОТКРЫТО (in progress)
+
+Griefing accept до ZK. Ответ Stage II: нет.
+
+
+QC-AN-10 — ЧАСТИЧНЫЙ ACK (in progress)
+
+Нулевой anAccount.
+Ответ Stage II: «добавлю require» на AN; «убрать проверку в эфире» — сжечь на L1 разрешено.
+
+
+QC-AN-J1 — ОТКРЫТО (in progress)
+
+Единый лимит депозита ETH↔AN. Ответ Stage II: нет (см. QC-AN-01).
+
+
+QC-AN-J2 — ОТКРЫТО (in progress)
+
+Пауза ETH vs finalize на AN. Ответ Stage II: нет.
+
+
+QC-AN-J3 — ОТКРЫТО (in progress)
+
+Паритет нулевого получателя. Ответ Stage II: нет (см. QC-AN-10 — асимметрия).
+
+
+QC-AN-J4 — ЗАКРЫТО (ack)
+
+Workchain в событии Deposit.
+Ответ Stage II: «Не используется».
+
+
+QC-AN-J5 — ОТКРЫТО (in progress)
+
+Двухдоменная custody. Ответ Stage II: нет.
+
+
+Off-chain / relayer — QC-OFF-01..06
+
+В Stage II Bridge § не включены. См. audit/reports/HANDOFF-f10-prover-relayer-ru.txt — in progress.
+
+
+Сводка
+
+Закрыто: BC-AN-01, QC-AN-03, QC-AN-07, QC-AN-08, QC-AN-J4
+Частичный ack: QC-AN-01, QC-AN-05, QC-AN-06, QC-AN-10
+Открыто / ждём: BC-AN-02, QC-AN-02, QC-AN-04, QC-AN-09, QC-AN-J1..J3, QC-AN-J5, QC-OFF-*
+
+Контакты артефактов: audit/reports/questions-an.md, audit/reports/questions-cross-chain.md, audit/reports/closeout-an.md.

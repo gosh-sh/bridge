@@ -1,0 +1,105 @@
+# Hermez KZG — required repos, branches, and links
+
+Correct pins for Hermez Powers-of-Tau migration of deposit + Circuit 1B
+fixtures and USDCBridge `VK_BLOB` (`ZKHALO2VERIFYWITHVK` embeds Hermez
+`s_g2 = 928fafb3…`, **not** chain `c6028acf…`).
+
+**Audit sync status (2026-07-17):** `max_key_byte_len = 3` (dev-confirmed). Audit overlay
+VkBlob sha256 **`724687a4…`** — `deposit-prover/fixtures/` +
+`audit/spec/an-contracts/USDCBridge.sol` + `audit/spec/an/fixtures/deposit_10proofs/`.
+**Not** byte-identical to tvm-sdk tip (`304c1c4e…`) until new contracts ship; compare
+after deploy.
+
+---
+
+## 1. Core (use these tips)
+
+| Role | Repo | Branch / ref | Link |
+|------|------|--------------|------|
+| **Opcode fixtures (deposit + Circuit 1B) — living tip** | `tvmlabs/tvm-sdk` | `pruvendo/hermez-deposit-fixtures` @ `915e6998` | https://github.com/tvmlabs/tvm-sdk/tree/pruvendo/hermez-deposit-fixtures |
+| Bridge Hermez-only prover + regenerated fixtures | `gosh-sh/bridge` | `pruvendo/hermez-kzg-fixtures` @ `903efff` | https://github.com/gosh-sh/bridge/tree/pruvendo/hermez-kzg-fixtures |
+| Shellnet E2E parent (base of bridge Hermez PR) | `gosh-sh/bridge` | `pruvendo/shellnet-e2e-landing` | https://github.com/gosh-sh/bridge/tree/pruvendo/shellnet-e2e-landing |
+| USDCBridge `VK_BLOB` = Hermez deposit VkBlob | `gosh-sh/acki-nacki` | `pruvendo/hermez-deposit-vk-blob` @ `0d2f7a063` | https://github.com/gosh-sh/acki-nacki/tree/pruvendo/hermez-deposit-vk-blob |
+
+Bridge GitLab mirror: https://vcs.modus-ponens.com/ton/acki-nacki-bridge (`origin`)
+
+### Important tip note (`tvm-sdk`)
+
+| Ref | What it has |
+|-----|-------------|
+| `pruvendo/hermez-deposit-fixtures` @ **`915e6998`** | Hermez **deposit_10proofs** (`304c1c4e…`) **and** Hermez Circuit 1B `fallback_*` K=21 (`9ba63795…`) |
+| Merge of PR #276 @ `1de7fa9e` | Hermez **deposit** only (1B commit landed on the branch **after** that merge) |
+| `feature/hermez-kzg-resurrection`, `fix_rc` | **Deleted** after PRs merged — do not clone by those names |
+| `main`, `3.0.4.an-rc`, `full_dex_and_bridge_test_with_final_halo2_circuit` | Still older deposit VkBlob `20cf9018…` / old K=20 fallback — **not** Hermez-correct |
+
+Until Hermez lands on a durable release branch, pin **`pruvendo/hermez-deposit-fixtures`**.
+
+---
+
+## 2. Pull requests
+
+| PR | State | URL |
+|----|-------|-----|
+| tvm-sdk #275 — Hermez SRS + DarkDex W=128 VK | MERGED | https://github.com/tvmlabs/tvm-sdk/pull/275 |
+| tvm-sdk #276 — Hermez `deposit_10proofs` + un-ignore deposit tests | MERGED | https://github.com/tvmlabs/tvm-sdk/pull/276 |
+| bridge #10 — Hermez-only fixtures + no chain / `gen_srs` fallback | OPEN → `pruvendo/shellnet-e2e-landing` | https://github.com/gosh-sh/bridge/pull/10 |
+| bridge #5 — Shellnet E2E landing | OPEN → `main` | https://github.com/gosh-sh/bridge/pull/5 |
+
+Alina migration doc:
+https://github.com/tvmlabs/tvm-sdk/blob/pruvendo/hermez-deposit-fixtures/tvm_vm/doc/HERMEZ_KZG_MIGRATION_FOR_SERGEY.md
+
+---
+
+## 3. Fixture / artefact paths
+
+| Artefact | Path | Expected digests / size |
+|----------|------|-------------------------|
+| Deposit VkBlob + 10 proofs | `tvm_vm/halo2_test_data/deposit_10proofs/` | tvm-sdk tip: **`304c1c4e…`** (3982 B) |
+| Same (audit overlay) | `bridge` → `deposit-prover/fixtures/deposit_10proofs/` | audit: **`724687a4…`** (`max_key_byte_len=3`) |
+| Circuit 1B operands | `tvm_vm/halo2_test_data/fallback_{vk_blob,public_inputs,proof,vk,config_params}.*` | vk_blob **`9ba63795…`** (3364 B), proof 7616 B, **k=21** |
+| USDCBridge constant | `acki-nacki` → `contracts/exchange/USDCBridge.sol` | `VK_BLOB` byte-identical to deposit VkBlob |
+| Partner pack manifest | `scripts/partner_packs/hermez_usdcbridge_vk_for_alina.manifest` | `scripts/build_partner_pack.sh` |
+
+---
+
+## 4. Local SRS bootstrap (deposit-prover)
+
+Pre-converted S3 blob may 403 from some networks. Use Google Cloud `.ptau`:
+
+```bash
+./scripts/bootstrap_hermez_srs_k18.sh
+# → deposit-prover/data/kzg_params_18.srs
+```
+
+Then BC-AN-01 dual proofs:
+
+```bash
+./scripts/audit/generate_bc_an_01_dual_proofs.sh
+```
+
+---
+
+## 5. Do **not** use for Hermez deposit / 1B WithVK
+
+| Wrong | Why |
+|-------|-----|
+| Chain SRS (`s_g2 = c6028acf…`) only | Opcode on Hermez branch rejects |
+| Deposit VkBlob `20cf9018…` | Pre-Hermez |
+| Circuit 1B fixtures 6308 B / K=20 | Pre-Hermez |
+| GitHub SSH **`:22`** from filtered networks | Use `ssh://git@ssh.github.com:443/` |
+
+---
+
+## 6. Quick clone map
+
+```text
+github.com/tvmlabs/tvm-sdk.git
+  └─ pruvendo/hermez-deposit-fixtures @ 915e6998
+
+github.com/gosh-sh/bridge.git
+  └─ pruvendo/hermez-kzg-fixtures @ 903efff
+  └─ pruvendo/shellnet-e2e-landing
+
+github.com/gosh-sh/acki-nacki.git
+  └─ pruvendo/hermez-deposit-vk-blob @ 0d2f7a063
+```

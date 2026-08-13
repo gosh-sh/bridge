@@ -341,6 +341,28 @@ from `getLayerWindow` and saves it before driver construction.
 `Explicit(N)` also requires `N > 0 && N % (W*P) == 0` — bad values abort
 in `LiveProverDriver::new`.
 
+**"Byte-match" is not literal on layer windows.** `startup_decide::decide()`
+normalizes endianness before comparing:
+
+- `bk_set_commitment` — chain returns `uint256` (BE); local is
+  `Fr::to_repr()` (LE). `to_lib_full_state` converts chain to LE.
+- `_layerWindows[i].data[j]` — each slot is a BE `uint256`; local is LE.
+  `to_lib_layer_window` reverses per slot.
+- Cold-start genesis prepend — `BootstrapSeed::apply()` pushes the seed's
+  per-layer `history_proofs` into `layer_windows[i].data[0]` for every
+  layer in the seed's max_level (see `bootstrap.rs:17-18`); chain only
+  materializes layer 1's anchor as `storedPrevMaxLevelLayerHash` and
+  leaves `_layerWindows[k>=2]` empty until a verifyBlock promotes them.
+  `windows_match` therefore walks each ring oldest→newest and accepts a
+  `local.len == chain.len + 1` offset: layer 1's genesis slot is
+  byte-verified against `storedPrevMaxLevelLayerHash` (BE→LE); layers
+  2..10 accept the +1 offset without per-slot verification, and the
+  runtime ack-time top-hash check (`history_consistency.rs:38-47`) is
+  the authoritative gate. `last_height` is not compared standalone —
+  the chronological tuple compare covers heights for populated slots
+  (chain's empty-layer `last_height=0` would otherwise false-reject a
+  local layer holding only a genesis prepend).
+
 For cold start (this Case), the log MUST show
 `startup: Cold — contract at genesis, bootstrapping` followed by
 `LiveProverDriver seed policy seed_policy=Explicit(<BOOTSTRAP_SEQNO>)`.

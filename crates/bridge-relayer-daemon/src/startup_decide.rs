@@ -75,11 +75,26 @@ pub struct DecideInputs<'a> {
 
 /// Convert the daemon-side (alloy-typed) `ContractLayerWindow` into the
 /// alloy-neutral `bridge_prover_lib` shape consumed by
-/// `BridgeState::from_contract`. Alloy `U256` → 32-byte big-endian, and
-/// the width fields are copied through.
+/// `BridgeState::from_contract`.
+///
+/// Endianness: chain-side layer window slots are stored as
+/// `[u8;32]` big-endian (produced in `bridge.rs::read_full_state` via
+/// `U256::to_be_bytes`), but `BridgeState.layer_windows` stores LE
+/// (`Fr::to_repr()` output). We reverse each slot per the convention
+/// documented in `history_consistency.rs:59` and memory
+/// `bridge_genesis_anchor_endianness.md`.
 fn to_lib_layer_window(w: &ContractLayerWindow) -> LibContractLayerWindow {
+    let data: Vec<[u8; 32]> = w
+        .data
+        .iter()
+        .map(|slot| {
+            let mut le = *slot;
+            le.reverse();
+            le
+        })
+        .collect();
     LibContractLayerWindow {
-        data: w.data.clone(),
+        data,
         heights: w.heights.clone(),
         data_len: w.data_len,
         write_cursor: w.write_cursor,
@@ -94,26 +109,120 @@ fn to_lib_full_state(cfs: &ContractFullState) -> LibContractFullState {
         std::array::from_fn(|i| to_lib_layer_window(&cfs.layer_windows[i]));
     LibContractFullState {
         last_seen_block_seq_no: cfs.last_seen_block_seq_no,
-        bk_set_commitment: cfs.bk_set_commitment.to_be_bytes::<32>(),
+        // See `history_consistency.rs:59` — BridgeState stores
+        // bk_set_commitment as LE (`Fr::to_repr()`); chain `uint256` is
+        // BE-hex of the same scalar. Match that convention here so
+        // `decide()` can compare byte-for-byte against
+        // `local.stored_bk_set_commitment`.
+        bk_set_commitment: cfs.bk_set_commitment.to_le_bytes::<32>(),
         last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
         layer_windows,
     }
 }
 
-/// Byte-for-byte comparison of local vs chain layer windows.
-/// Returns `true` iff every slot in every layer matches.
+/// Chronological equivalence check for local vs chain layer windows.
+///
+/// **Endianness.** Local `BridgeState` slots are LE (`Fr::to_repr()`); chain
+/// slots arrive from `bridge.rs::read_full_state` as BE. Chain slots are
+/// byte-reversed before comparing.
+///
+/// **Layer-1 genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
+/// documented at `bootstrap.rs:17-18` as a Phase 1 fix ensuring verifier
+/// daemon does not lag prover) calls `append_bundle` with the seed's
+/// `history_proofs`, which pushes the genesis `prev_max_level_layer_hash`
+/// into `layer_windows[0].data[0]` (layer 1 slot 0). The contract holds
+/// the same value in `storedPrevMaxLevelLayerHash` as an immutable field
+/// and does **not** copy it into `_layerWindows[1]`. So chronologically:
+///
+/// - **Pre-wrap** (local data_len ≤ W): local layer-1 window is
+///   `[genesis_anchor, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
+///   Local has exactly one extra leading entry that must equal
+///   `chain.prev_max_level_layer_hash` (byte-reversed).
+/// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
+///   overwrites local's genesis slot): local and chain chronological
+///   sequences are identical.
+///
+/// Layers 2..MAX_LAYERS have no genesis prepend (shellnet's max_level=1
+/// seed block only stamps layer 1); their chronologies must match exactly
+/// modulo the per-slot byte reversal.
 fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
+    let w = local.window_size;
     for i in 0..MAX_LAYERS {
         let lw = &local.layer_windows[i];
         let cw = &chain.layer_windows[i];
-        if lw.data != cw.data
-            || lw.heights != cw.heights
-            || lw.data_len as u16 != cw.data_len
-            || lw.write_cursor as u16 != cw.write_cursor
-            || lw.last_height != cw.last_height
-        {
+
+        if lw.data.len() != cw.data.len() || lw.data.len() != w {
             return false;
         }
+        // Do NOT compare `last_height` directly — on a layer whose only
+        // populated entry is a genesis prepend (chain layer empty,
+        // local layer has one entry at seed height), local.last_height
+        // is the seed height and chain.last_height is 0. The
+        // chronological tuple comparison below still covers height
+        // equality on every populated slot.
+
+        // Walk each ring oldest → newest, byte-reversing chain slots.
+        let local_chrono: Vec<([u8; 32], u64)> = {
+            let len = lw.data_len;
+            let start = if len < w { 0 } else { lw.write_cursor };
+            (0..len)
+                .map(|k| {
+                    let p = (start + k) % w;
+                    (lw.data[p], lw.heights[p])
+                })
+                .collect()
+        };
+        let chain_chrono: Vec<([u8; 32], u64)> = {
+            let len = cw.data_len as usize;
+            let start = if len < w { 0 } else { cw.write_cursor as usize };
+            (0..len)
+                .map(|k| {
+                    let p = (start + k) % w;
+                    let mut le = cw.data[p];
+                    le.reverse();
+                    (le, cw.heights[p])
+                })
+                .collect()
+        };
+
+        // Common case: chronologies match directly (post-wrap on any
+        // layer, or layers whose seed history_proofs did not touch them).
+        if local_chrono == chain_chrono {
+            continue;
+        }
+
+        // Genesis prepend case: local has one extra leading slot from
+        // `BootstrapSeed::apply` calling `append_bundle` with the seed's
+        // per-layer `history_proofs`. Chain does not copy those seed
+        // entries into `_layerWindows`.
+        //
+        // For layer 1 (i == 0), the seed's layer-1 hash is exposed on
+        // chain as `storedPrevMaxLevelLayerHash` (empirically verified
+        // for shellnet Deploy #6: env `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`
+        // equals the seed's layer-1 anchor, not its deepest-layer anchor
+        // — despite the "max_level" in the name), so we byte-verify it.
+        // For layers 2..MAX_LAYERS, chain has no per-layer genesis anchor
+        // surface; we accept the presence of a genesis prepend but do
+        // not byte-verify that first slot against chain. Runtime
+        // ack-time consistency (via `EthBridgeClient::submit_block`'s
+        // `expectedPrevAnchor(numLayers)` cross-check, per
+        // `history_consistency.rs:38-47`) is the authoritative gate for
+        // deeper layers — startup routing only ensures we do not
+        // silently resurrect on a mismatched cursor.
+        if local_chrono.len() == chain_chrono.len() + 1 {
+            if i == 0 {
+                let anchor_le = chain.prev_max_level_layer_hash.to_le_bytes::<32>();
+                if local_chrono[0].0 != anchor_le {
+                    return false;
+                }
+            }
+            if local_chrono[1..] != chain_chrono[..] {
+                return false;
+            }
+            continue;
+        }
+
+        return false;
     }
     true
 }
@@ -262,7 +371,10 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // inconsistent (e.g. same last_seen but different bk commitment)
     // and we must not silently proceed.
     let local_commit = local.stored_bk_set_commitment;
-    let chain_commit = chain.bk_set_commitment.to_be_bytes::<32>();
+    // LE matches `BridgeState.stored_bk_set_commitment` (Fr::to_repr).
+    // See `history_consistency.rs:59` for the canonical convention and
+    // memory `bridge_genesis_anchor_endianness.md` for the rationale.
+    let chain_commit = chain.bk_set_commitment.to_le_bytes::<32>();
     if local_commit != chain_commit {
         return StartupDecision::Stop {
             reason: format!(

@@ -24,7 +24,12 @@ import "./ShplonkDeployLib.sol";
 ///      env var is kept only so CI runs against a fresh anvil can opt out; setting it to
 ///      `false` off anvil reverts.
 contract DeployShellnetE2EBridge is Script {
-    address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
+    // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
+    // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
+    // owner-only mint, so third-party devs couldn't fund the burner via any
+    // public faucet. Wiring against Circle canonical means the same USDC that
+    // Circle's faucet dispenses is the one the bridge's deposit() consumes.
+    address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
 
     struct VerifyBlockWiring {
         IPrimaryVerifier primary;

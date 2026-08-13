@@ -107,12 +107,13 @@ to spin up a private burner + private contract bundle.
 | RPC | `https://ethereum-sepolia-rpc.publicnode.com` |
 | Burner address | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
 | Burner private key | `0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87` |
-| `AckiNackiBridge` | `0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c` |
-| `PrimaryAggregatorVerifier` | `0xE03337cfC0498a4C40B538A332D18a26df833502` |
-| `FallbackAggregatorVerifier` | `0xBe652c88e3d4639Aa11390a878F0da4B4a91fBb8` |
-| `LayerHashesAggregatorVerifier` | `0x149f61E049B7a325d720cbF56D102E7376d38643` |
-| `BridgeWithdrawalAggregatorVerifier` | `0x4127E8c7F3C6308eD836CBc819aA556868AfD139` |
-| `MockBlockHeaderOracle` | `0xB7ad2342F8Fe665435Fe934757AA4f208ccf2417` |
+| `AckiNackiBridge` | `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` |
+| `PrimaryAggregatorVerifier` | `0x7a5CCd5A4401F58D39D153401b89d6A36f7A633A` |
+| `FallbackAggregatorVerifier` | `0x388378371ab38a1499fa18b6ABD8b93c0f881515` |
+| `LayerHashesAggregatorVerifier` | `0x466C71E46433045fB8313895264a0EDE91895E25` |
+| `BridgeWithdrawalAggregatorVerifier` | `0xa4B7df0Aa0136F10bEc750957b010CE1AA2d1e35` |
+| `MockBlockHeaderOracle` | `0x8A3B744BA61D5C05F98DEe8aeA48126909304966` |
+| USDC (Circle canonical) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
 | Bootstrap seed seq_no | `7726080` |
 | Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
 | Genesis `prev_max_level_layer_hash` | `0x265511da2029a440b78947e07b9f57fb59e234e0845e9e3b1acc8f41e5aca507` |
@@ -123,7 +124,7 @@ to spin up a private burner + private contract bundle.
 cd crates/an-bridge-prover
 cat > .env.shellnet <<'EOF'
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
-BRIDGE_ADDRESS=0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c
+BRIDGE_ADDRESS=0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb
 RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 BRIDGE_BOOTSTRAP_SEQNO=7726080
@@ -157,7 +158,7 @@ own the address).
 **Best strategy: shared *contract*, your own *key*.** `verifyBlock` is
 permissionless (`external nonReentrant`, no role gate) — anyone with a
 funded Sepolia burner and a valid proof can submit against
-`0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c`. Using your own key avoids
+`0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb`. Using your own key avoids
 the two problems of the shared burner: nonce collisions when several
 devs run concurrently, and getting drained by faucet-scraper bots.
 Reserve the in-repo burner for a one-shot "does my clone build and
@@ -178,7 +179,7 @@ cargo build --release -p bridge-relayer-daemon --bin relayer
 #    Alchemy / Infura / QuickNode all work headlessly).
 cat > .env.shellnet <<'EOF'
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
-BRIDGE_ADDRESS=0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c
+BRIDGE_ADDRESS=0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb
 RELAYER_PRIVATE_KEY=<your funded Sepolia burner>
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 BRIDGE_BOOTSTRAP_SEQNO=7726080
@@ -217,7 +218,7 @@ After someone lands the first submit, later fresh launches will see
 tx and the contract cursor should advance from `7726080` → `7727104`:
 
 ```bash
-cast call 0xb883Abb563F4Aab0fEd634f5654E1fE332ec3c1c \
+cast call 0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb \
   'storedLastSeenBlockSeqNo()(uint64)' \
   --rpc-url https://ethereum-sepolia-rpc.publicnode.com --json | jq -r '.[0]'
 ```

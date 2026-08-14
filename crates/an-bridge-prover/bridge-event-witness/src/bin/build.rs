@@ -23,11 +23,15 @@
 //!     so 4-deep proofs). Same layout `bridge-prover-lib::real_chain_builder
 //!     ::build_layer1_tree` uses.
 //!   * `anchor` — references the L1 layer hash the verifier has mirrored
-//!     for the key block containing this event. Carries the chosen layer
-//!     hash (the value the circuit publishes as `PUB_FINAL_ROOT`) and the
-//!     `dense_chain` (here 0 active steps, just inactive padding to
-//!     `MAX_CHAIN_LEN` — the L1 root *is* the chosen layer hash, so no
-//!     hops up to a higher layer are needed).
+//!     for the thinned key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Carries
+//!     the chosen layer hash (the value the circuit publishes as
+//!     `PUB_FINAL_ROOT` = `R_1@K`) and the `dense_chain`. When the
+//!     event's own W-aligned key block `H_e = ⌈event_seq/W⌉·W` differs
+//!     from `K`, the chain walks `hops = (K − H_e)/W` forward-hops at
+//!     layer 1 (each hop opens slot 1 = `prev_same_layer_root` of the
+//!     next L1 tree). `hops ∈ {0, …, P−1}`, comfortably within
+//!     `MAX_CHAIN_LEN`. Remaining slots are inactive padding anchored at
+//!     the chosen layer hash.
 //!
 //! ### L1-only anchor; L1→L5 escalation deferred
 //!
@@ -70,6 +74,7 @@ use bridge_prover_lib::bridge_state::BridgeState;
 use bridge_prover_lib::chain_proof_builder::{
     build_tree_and_proof, pad_leaves_to_power_of_2,
 };
+use bridge_prover_lib::real_chain_builder;
 use bridge_gql_fetcher::gql_client::{self, GqlClient};
 
 use bridge_event_witness::schema::{
@@ -185,7 +190,10 @@ struct OutputSummary<'a> {
     schema_version: u32,
     event_message_hash_hex: &'a str,
     block_seq_no: u64,
+    /// Event's own W-aligned key block `H_e` (covers the block_tree_proof).
     key_block_seq_no: u64,
+    /// Thinned key block `K` (verifier-stored L1 anchor).
+    thinned_key_block_seq_no: u64,
     layer_idx: u32,
     layer_hash_hex: &'a str,
     events_tree_depth: usize,
@@ -302,45 +310,44 @@ async fn run() -> Result<()> {
         events_tree_proof.siblings_hex.len(),
     );
 
-    // ---- Identify key block for this event -----------------------------
+    // ---- Identify key blocks for this event ----------------------------
     // Production L1 tree at key block H covers blocks [H - W, ..., H - 1].
     // The unique multiple of W in [event_seq+1, event_seq+W] is the key
-    // block whose history_proof[1] is the L1 hash we anchor against.
+    // block whose history_proof[1] is the L1 hash containing this event's
+    // block leaf — we call this `H_e` (`key_block_seq`).
     //
-    // With prover thinning (P > 1), the verifier only persists L1 roots
-    // for `(W*P)`-aligned key blocks. Events that fall outside the last
-    // W-window of a thinned bundle cannot anchor against a stored root in
-    // this first cut — they would require a multi-step chain inside
-    // Circuit 4 (see BRIDGE_PROVER_THINNING_SPEC.md §6).
+    // Under prover thinning (P > 1), the verifier only persists L1 roots
+    // for `(W*P)`-aligned key blocks. Let `K = thinned_key_block_seq` be
+    // the smallest `(W*P)`-aligned key block ≥ `H_e`. When `H_e != K`,
+    // Circuit 4 chains forward from `R_1@H_e` to `R_1@K` via a sequence
+    // of `hops = (K - H_e) / W` forward Merkle openings at position 1
+    // (`prev_same_layer_root`) of each intermediate L1 tree — the
+    // "horizontal" path from BRIDGE_PROVER_THINNING_SPEC.md §2.3 (Forward
+    // move) / §6.1. `hops ∈ {0, …, P-1}` fits well within MAX_CHAIN_LEN.
     let w = HISTORY_WINDOW_SIZE;
     let p = THINNING_FACTOR_P;
     let key_block_seq = ((event_seq / w) * w) + w;
     let thinned_key_block_seq = ((event_seq / (w * p)) * (w * p)) + (w * p);
-    if key_block_seq != thinned_key_block_seq {
+    let hops = (thinned_key_block_seq - key_block_seq) / w;
+    if (hops as usize) > MAX_CHAIN_LEN {
         bail!(
-            "event at seq_no {event_seq} falls in W-window ending at key block \
-             {key_block_seq}, but with thinning_factor P={p} the verifier only \
-             stores L1 roots at (W*P)={}-aligned key blocks (next one: {}). \
-             Re-time the event so it lands in the last W={} blocks of a thinned \
-             bundle (i.e. event_seq ∈ [{}..{})). \
-             Multi-step in-circuit chaining is tracked in \
-             BRIDGE_PROVER_THINNING_SPEC.md §6.",
-            w * p,
-            thinned_key_block_seq,
-            w,
-            thinned_key_block_seq - w,
-            thinned_key_block_seq,
+            "internal: hops={} exceeds MAX_CHAIN_LEN={} (W={}, P={}, event_seq={}, \
+             H_e={}, K={}). This should not happen when P ≤ MAX_CHAIN_LEN.",
+            hops, MAX_CHAIN_LEN, w, p, event_seq, key_block_seq, thinned_key_block_seq,
         );
     }
     let window_start = key_block_seq - w;
     let block_offset_in_window = event_seq - window_start;
     info!(
-        "key_block_seq={} (thinned, W*P={}-aligned), window=[{}..{}), block_offset_in_window={}",
+        "H_e={} (event's W-aligned KB, window=[{}..{}), offset={}); \
+         K={} (thinned, W*P={}-aligned); hops={}",
         key_block_seq,
-        w * p,
         window_start,
         key_block_seq,
         block_offset_in_window,
+        thinned_key_block_seq,
+        w * p,
+        hops,
     );
 
     // ---- Build block_tree_proof -----------------------------------------
@@ -358,16 +365,51 @@ async fn run() -> Result<()> {
         hex::encode(l1_root_self_computed),
     );
 
+    // ---- Build horizontal forward chain H_e → K (L1 only) --------------
+    // Each hop i ∈ 1..=hops walks one W-step at layer 1: it proves that
+    // the previous L1 root (starting from R_1@H_e) sits at slot 1
+    // (`prev_same_layer_root`) of the L1 tree at `H_e + i·W`. After
+    // `hops` such openings the accumulated root equals R_1@K, which the
+    // verifier holds in `layer_windows[0]`.
+    //
+    // Uses `real_chain_builder::build_layer1_tree` — the same primitive
+    // Circuit 2's `build_chain_same_layer` uses — so the tree shape is
+    // byte-for-byte identical to the node's construction.
+    let mut chain_leaf_value = l1_root_self_computed; // R_1@H_e
+    let mut active_links: Vec<DenseChainLink> = Vec::with_capacity(hops as usize);
+    for i in 1..=hops {
+        let seq_i = key_block_seq + i * w;
+        let tree = real_chain_builder::build_layer1_tree(&gql, seq_i, chain_leaf_value, w)
+            .await
+            .with_context(|| format!("building L1 tree at seq={seq_i} for forward-hop {i}/{hops}"))?;
+        let (root_i, siblings) = build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
+        info!(
+            "  hop {}/{}: L1 tree at seq={}, chain_leaf_pos={}, resulting root={}",
+            i, hops, seq_i, tree.chain_leaf_position, hex::encode(root_i),
+        );
+        active_links.push(DenseChainLink {
+            active: true,
+            siblings,
+            position: tree.chain_leaf_position,
+            leaf_native: chain_leaf_value,
+        });
+        chain_leaf_value = root_i;
+    }
+    let final_chain_root = chain_leaf_value; // == R_1@K when hops>0, else R_1@H_e
+
     // ---- Build anchor (L1 only) ----------------------------------------
-    // Resolve key block's observed_height (the value the verifier stored
-    // in heights[] when it applied the bundle), then locate the slot in
-    // state.layer_windows[0].
-    let key_block_height = fetch_block_observed_height(&gql, key_block_seq)
+    // The verifier stores L1 roots keyed by the thinned KB's observed
+    // height, not the event's covering KB. So look up `layer_windows[0]`
+    // at K's height.
+    let anchor_key_block_seq = thinned_key_block_seq;
+    let key_block_height = fetch_block_observed_height(&gql, anchor_key_block_seq)
         .await
-        .with_context(|| format!("fetching observed_height for key block {key_block_seq}"))?;
+        .with_context(|| {
+            format!("fetching observed_height for thinned key block {anchor_key_block_seq}")
+        })?;
     info!(
-        "key block {} observed_height = {}",
-        key_block_seq, key_block_height
+        "thinned key block {} observed_height = {}",
+        anchor_key_block_seq, key_block_height
     );
 
     let l1_slot = bridge_state.slot_for_event_height(1, key_block_height).ok_or_else(|| {
@@ -375,7 +417,7 @@ async fn run() -> Result<()> {
         // out of layer 1's rolling window, escalate to L2/L3/... rather
         // than failing.
         anyhow::anyhow!(
-            "key block height {} not found in L1 window {:?} \
+            "thinned key block height {} not found in L1 window {:?} \
              — block has rolled out of the L1 rolling window. \
              L1→L5 escalation not yet implemented (see TODO in src/main.rs).",
             key_block_height,
@@ -385,7 +427,7 @@ async fn run() -> Result<()> {
                 .collect::<Vec<_>>(),
         )
     })?;
-    info!("L1 slot for this key block: {}", l1_slot);
+    info!("L1 slot for this thinned key block: {}", l1_slot);
 
     // The circuit publishes a single `final_root` public input. The verifier
     // checks this value off-circuit against its mirror of `layer_windows`,
@@ -402,29 +444,34 @@ async fn run() -> Result<()> {
             )
         })?;
 
-    if chosen_layer_hash != l1_root_self_computed {
-        // Not necessarily fatal: the self-computed L1 root depends on
-        // higher_layer_root / prev_same_layer_root values, both of which
-        // we approximate (see TODO in build_block_tree_proof). A mismatch
-        // here means the proof, while structurally valid, will not satisfy
-        // the circuit. Surface it loudly.
+    if chosen_layer_hash != final_chain_root {
+        // Not necessarily fatal: the self-computed roots depend on
+        // higher_layer_root / prev_same_layer_root values fetched from
+        // GQL. A mismatch here means the proof, while structurally
+        // valid, will not satisfy the circuit. Surface it loudly.
         warn!(
-            "L1 root mismatch — verifier mirror = {}, locally rebuilt = {}. \
-             The proof will not satisfy the circuit until block_tree_proof \
-             reconstruction matches the node's L1 tree shape byte-for-byte.",
+            "final chain root mismatch — verifier mirror (R_1@K) = {}, locally \
+             rebuilt (R_1@H_e chained through {} forward hop(s)) = {}. \
+             The proof will not satisfy the circuit until every L1 tree along \
+             the chain matches the node's construction byte-for-byte.",
             hex::encode(chosen_layer_hash),
-            hex::encode(l1_root_self_computed),
+            hops,
+            hex::encode(final_chain_root),
         );
     }
 
-    // L1 anchoring: dense_chain has 0 active steps (the L1 root *is* the
-    // chosen layer hash, no hops needed). Pad all MAX_CHAIN_LEN slots with
-    // inactive links anchored at root_1. Depth must match the L1 tree's
-    // proof depth so `verify_chain_of_dense_proofs` accepts the padding.
+    // Assemble MAX_CHAIN_LEN links: `hops` active forward-hop openings
+    // followed by inactive padding anchored at the final chain root.
+    // Depth must match the L1 tree's proof depth so
+    // `verify_chain_of_dense_proofs` accepts the padding.
     let inactive_depth = block_tree_proof.siblings_hex.len();
-    let dense_chain_native: Vec<DenseChainLink> = (0..MAX_CHAIN_LEN)
-        .map(|_| DenseChainLink::inactive(chosen_layer_hash, inactive_depth))
-        .collect();
+    let mut dense_chain_native: Vec<DenseChainLink> =
+        Vec::with_capacity(MAX_CHAIN_LEN);
+    dense_chain_native.extend(active_links);
+    for _ in (hops as usize)..MAX_CHAIN_LEN {
+        dense_chain_native.push(DenseChainLink::inactive(chosen_layer_hash, inactive_depth));
+    }
+    debug_assert_eq!(dense_chain_native.len(), MAX_CHAIN_LEN);
     let dense_chain_ser: Vec<DenseChainLinkSer> = dense_chain_native
         .iter()
         .map(|link| DenseChainLinkSer {
@@ -440,7 +487,7 @@ async fn run() -> Result<()> {
         height: key_block_height,
         layer_hash_hex: hex::encode(chosen_layer_hash),
         dense_chain: dense_chain_ser,
-        num_active_chain_steps: 0,
+        num_active_chain_steps: hops as u32,
     };
 
     let events_tree_depth = events_tree_proof.siblings_hex.len();
@@ -466,11 +513,12 @@ async fn run() -> Result<()> {
         event_message_hash_hex: &witness.event_message_hash_hex,
         block_seq_no: witness.block_seq_no,
         key_block_seq_no: key_block_seq,
+        thinned_key_block_seq_no: thinned_key_block_seq,
         layer_idx: args.layer_idx,
         layer_hash_hex: &witness.anchor.as_ref().unwrap().layer_hash_hex,
         events_tree_depth,
         block_tree_depth,
-        num_active_chain_steps: 0,
+        num_active_chain_steps: hops as u32,
         out: args.out.to_string_lossy().into_owned(),
     };
     println!("{}", serde_json::to_string(&summary)?);

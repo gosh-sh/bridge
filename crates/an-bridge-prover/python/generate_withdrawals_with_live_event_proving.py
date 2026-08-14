@@ -77,7 +77,6 @@ if IS_SHELLNET:
                   "timeout": 30}
     EVENT_INDEXER_TIMEOUT_S    = 240
     VERIFIER_STATE_TIMEOUT_S   = 2400
-    FIRE_WINDOW_WAIT_TIMEOUT_S = 900
 else:
     DEFAULT_NETWORK = "http://127.0.0.1:80"
     DEFAULT_GRAPHQL = "http://localhost/graphql"
@@ -86,7 +85,6 @@ else:
     GQL_KWARGS = {}
     EVENT_INDEXER_TIMEOUT_S    = 120
     VERIFIER_STATE_TIMEOUT_S   = 1800
-    FIRE_WINDOW_WAIT_TIMEOUT_S = 600
 
 # An explicit override pins the key path (no auto-materialize). Otherwise we
 # fall back to the MODE-picked bundled file and — in local mode — refresh it
@@ -445,8 +443,10 @@ def main():
 
     msig_address, msig_abi = deploy_multisig()
 
-    be.wait_for_fire_window(tracer, gql, FIRE_WINDOW_WAIT_TIMEOUT_S)
-
+    # No fire-window gating: the witness builder now emits a horizontal
+    # forward chain of L1 openings from `H_e = ⌈event_seq/W⌉·W` to
+    # `K = ⌈event_seq/(W·P)⌉·(W·P)` (hops ∈ {0, …, P-1}). Fire the event
+    # whenever — we only need the verifier to eventually reach `K`.
     tracer.log_phase("Dispatching initiateWithdrawal")
     tracer.log(f"  dstChainId={DST_CHAIN_ID}, recipient=0x{RECIPIENT_HEX}, "
                f"amount={WITHDRAWAL_AMOUNT}, tokenId={USDC_TOKEN_ID}")
@@ -463,16 +463,13 @@ def main():
 
     event_seq = meta["block_seq_no"]
     key_block_seq, thinned_kb_seq, target_seq = be.compute_target_seq(event_seq)
+    hops = (thinned_kb_seq - key_block_seq) // W
     tracer.log_phase("Boundary math")
     tracer.log(f"  event_seq        = {event_seq}")
-    tracer.log(f"  key_block_seq    = {key_block_seq}  (W-aligned L1 tree the event lives in)")
-    tracer.log(f"  thinned_kb_seq   = {thinned_kb_seq}  (verifier-stored L1 root anchor)")
+    tracer.log(f"  key_block_seq    = {key_block_seq}  (H_e: W-aligned L1 tree the event lives in)")
+    tracer.log(f"  thinned_kb_seq   = {thinned_kb_seq}  (K: verifier-stored L1 root anchor)")
     tracer.log(f"  target_seq       = {target_seq}    (verifier must reach this seq_no)")
-    if key_block_seq != thinned_kb_seq:
-        raise RuntimeError(
-            f"event landed in wrong W-window: key_block_seq={key_block_seq} != "
-            f"thinned_kb_seq={thinned_kb_seq}. Re-run the test."
-        )
+    tracer.log(f"  hops             = {hops}          (active forward-hop chain links)")
 
     be.wait_for_verifier_state(tracer, gql, PROVER_DIR, target_seq, VERIFIER_STATE_TIMEOUT_S)
 

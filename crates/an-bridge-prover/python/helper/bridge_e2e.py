@@ -25,8 +25,7 @@ Layout:
   • Pipeline helpers   ── encode_initiate_withdrawal_body,
                           capture_event_metadata, wait_for_verifier_state,
                           run_rust_bin, wait_for_daemon_result,
-                          wait_for_fire_window, call_initiate_withdrawal,
-                          run_event_proving_steps
+                          call_initiate_withdrawal, run_event_proving_steps
 """
 
 import json
@@ -400,39 +399,6 @@ def wait_for_daemon_result(tracer: Tracer, prover_dir: str, seq_no: int,
         time.sleep(0.5)
     raise TimeoutError(
         f"daemon result file did not appear within {timeout_s}s: {path}"
-    )
-
-
-def wait_for_fire_window(tracer: Tracer, gql: GqlClient, timeout_s: int):
-    """With thinning factor P, the verifier only stores L1 roots at
-    (W*P)-aligned key blocks. The witness builder requires the event to land
-    in the LAST W-window before the next thinned key block (i.e.
-    `event_seq ∈ [K-W, K-1]` for some `K ≡ 0 mod (W*P)`).
-
-    Block until `latest_seq` is inside that firing window. The transaction's
-    ExtOut typically lands within 1-3 blocks of dispatch, so we aim for
-    `latest_seq` exactly at the start of the last W-window."""
-    tracer.log_phase("Waiting for fire window")
-    wp = W * P
-    fire_deadline = time.time() + timeout_s
-    last_logged = -1
-    while time.time() < fire_deadline:
-        latest = gql.fetch_latest_block_seq_no()
-        if latest < 0:
-            time.sleep(2)
-            continue
-        next_thinned = ((latest // wp) + 1) * wp     # next thinned KB strictly after latest
-        fire_start = next_thinned - W                # start of its last W-window
-        if latest != last_logged:
-            tracer.log(f"  latest_seq={latest}, next_thinned_kb={next_thinned}, "
-                       f"fire_start={fire_start}")
-            last_logged = latest
-        if latest >= fire_start:
-            tracer.log(f"  ENTERED fire window: latest={latest} ∈ [{fire_start}..{next_thinned})")
-            return
-        time.sleep(2)
-    raise TimeoutError(
-        f"chain never entered fire window within {timeout_s}s"
     )
 
 

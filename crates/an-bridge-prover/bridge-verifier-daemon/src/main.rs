@@ -190,7 +190,6 @@ async fn main() -> anyhow::Result<()> {
     // `*.result.json` files get rewritten. That is intentional: the daemon
     // is the source of truth, and re-verification is cheap.
     let mut last_seen_event_seqno: i64 = -1;
-    let mut bootstrapped = state.initialized;
     let mut stats = Stats::default();
     let t_total = Instant::now();
     let mut last_stats_log = Instant::now();
@@ -219,10 +218,15 @@ async fn main() -> anyhow::Result<()> {
             last_stats_log = Instant::now();
         }
 
-        // If not bootstrapped, retry loading the seed file. The prover writes
-        // `state/bootstrap_seed.json` on its own cold start; if the verifier
-        // was started first, this is the loop point at which it picks it up.
-        if !bootstrapped {
+        // If state is still uninitialized, retry loading the seed file. The
+        // prover writes `state/bootstrap_seed.json` on its own cold start; if
+        // the verifier was started first, this is the loop point at which it
+        // picks it up. Guarded on `state.initialized` rather than a local
+        // sticky flag because `append_bundle` also flips `initialized = true`
+        // when the first proof arrives before the seed — in that case the
+        // state is already past the seed's cursor and re-applying it would
+        // regress (and `initialize_bk_set_commitment` panics as a safeguard).
+        if !state.initialized {
             match BootstrapSeed::load(bootstrap::DEFAULT_SEED_PATH)? {
                 Some(seed) => {
                     info!(
@@ -235,7 +239,6 @@ async fn main() -> anyhow::Result<()> {
                     seed.apply(&mut state)?;
                     state.save(STATE_FILE)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
-                    bootstrapped = true;
                 }
                 None => {
                     // Seed file not yet written. Stay idle and try again on the

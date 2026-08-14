@@ -482,7 +482,7 @@ async fn build_chain_for_new_layer(
 ///   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root) for the
 ///                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
 ///   [W+2..pow2]: zero padding (to next power of 2)
-async fn build_layer1_tree(
+pub async fn build_layer1_tree(
     gql: &GqlClient,
     key_block_seqno: u64,
     chain_leaf_value: [u8; 32],

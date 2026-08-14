@@ -100,6 +100,13 @@ pub struct WithdrawalInitiated {
     /// (up to 64 bytes) is documented as future work in the circuit's
     /// `EVENT_LAYOUT_COMPARISON.md` §5.6.
     pub recipient_hex: String,
+    /// 34 BE bytes of the sender cell payload (`std_addr$10` + anycast flag +
+    /// workchain(8) + acc_id(256)), i.e. `entries[3].cell_repr_data[2..]`.
+    /// Diagnostic only — the sender is cryptographically committed via
+    /// `sha256(sender cell)` inside the body cell and the ExtOut wrapper's
+    /// message hash, both of which are consumed by the circuit.
+    #[serde(default)]
+    pub sender_hex: String,
 }
 
 /// Generic Merkle proof data — used for both the events tree and the

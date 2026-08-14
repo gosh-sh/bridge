@@ -134,9 +134,6 @@ pub fn decode_event(entries: &[FlatCell; 4]) -> Result<WithdrawalInitiated> {
         .map_err(|_| anyhow!("body slice for tokenId is not 4 bytes"))?;
     let token_id = u32::from_be_bytes(token_id_bytes);
     let recipient_hex = hex::encode(&recipient_data[2..2 + RECIPIENT_LEN_FIXED]);
-    // Sender cell payload after the 2-byte d1+d2 header — same convention as
-    // recipient_hex. `validate_layout` has already asserted the cell is
-    // exactly SENDER_CELL_LEN bytes.
     let sender_hex = hex::encode(&entries[3].cell_repr_data[2..SENDER_CELL_LEN]);
 
     Ok(WithdrawalInitiated {

@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     //     `GlobalHistoryData` via constructor arguments at deployment:
     //     the prover-as-deployer produces `state/bootstrap_seed.json`, and
     //     the verifier-as-contract consumes it exactly once. Without this,
-    //     the L1 window's first key block (block 8 on `W=8`) was present
+    //     the L1 window's first key block (block `W` — 128 on `W=128`) was present
     //     in the prover state but absent from the verifier — a one-entry
     //     drift from genesis onward.
     if !state.initialized {

@@ -1,7 +1,7 @@
-//! `bridge-event-witness-builder` — Track D1 of the Circuit 4 integration plan.
+//! `bridge-event-witness-builder` 
 //!
 //! Reads a *partial* `PrivateWitness` JSON (the one produced by
-//! `bridge-event-private-witness-export` — see Track B), pulls the
+//! `bridge-event-private-witness-export`), pulls the
 //! daemon-side data it needs from GraphQL + the bridge state file, and
 //! writes an *enriched* `PrivateWitness` JSON that `bridge-event-prove
 //! --fixture` (Track D3) can consume to generate a real Circuit 4 proof.
@@ -17,11 +17,11 @@
 //!   * `block_tree_proof` — Poseidon Merkle proof from this block's
 //!     `block_leaf` (= `Poseidon96(block_id || envelope_hash || ext_out_root)`)
 //!     up to `root_1` (the L1 history-window root the verifier mirrors).
-//!     Built with the production L1 tree shape: 8 leaves
+//!     Built with the production L1 tree shape: `2 + W` leaves
 //!     `[higher_layer_root, prev_same_layer_root, block_leaf_0, ...,
-//!     block_leaf_{W-1}]` padded to the next power of 2 (16 leaves at W=8,
-//!     so 4-deep proofs). Same layout `bridge-prover-lib::real_chain_builder
-//!     ::build_layer1_tree` uses.
+//!     block_leaf_{W-1}]` padded to the next power of 2 (at W=128:
+//!     130 leaves → 256 padded → 8-deep proofs). Same layout
+//!     `bridge-prover-lib::real_chain_builder::build_layer1_tree` uses.
 //!   * `anchor` — references the L1 layer hash the verifier has mirrored
 //!     for the thinned key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Carries
 //!     the chosen layer hash (the value the circuit publishes as
@@ -83,17 +83,12 @@ use bridge_event_witness::schema::{
 
 use gosh_dense_balanced_tree::{DenseChainLink, MAX_CHAIN_LEN};
 
-// Pull the same canonical constants the rest of the daemon stack uses, so
-// the witness builder cannot drift from the verifier.
 const HISTORY_WINDOW_SIZE: u64 =
     bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64;
 
-/// Prover-side thinning factor `P`. Re-exported from `bridge_prover_lib`
-/// so the witness builder uses the same value as the prover daemon.
 const THINNING_FACTOR_P: u64 = bridge_prover_lib::THINNING_FACTOR_P;
 
 /// Default path of the bridge-state JSON file the witness builder reads.
-///
 /// We default to `prover_state.json` because the standalone CI orchestrator
 /// (`bridge_e2e_self_contained.py`) runs without a verifier daemon and only
 /// has the prover's state on disk. The paired-mode orchestrator

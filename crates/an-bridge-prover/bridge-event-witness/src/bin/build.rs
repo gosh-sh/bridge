@@ -43,7 +43,9 @@
 //!   `W·P − 1` blocks (at W=128, P=4 → ≤ 511 blocks).
 //! * `--anchor-layer 2` (L2) — one vertical L1→L2 rung to
 //!   `T_2 = ⌈event_seq/W²⌉·W²`. Wait time budget: up to `W² − 1` blocks
-//!   (at W=128 → ≤ 16383 blocks).
+//!   (at W=128 → ≤ 16383 blocks). Because this is ≈ 2 hours of verifier
+//!   catch-up on shellnet cadence, the CLI refuses to run at L2 unless
+//!   the caller also passes `--i-know-the-wait`.
 //!
 //! In both cases, if the chosen key block has rolled out of the relevant
 //! rolling window (i.e. no slot in `state.layer_windows[target_layer-1]`
@@ -119,6 +121,11 @@ struct CliArgs {
     /// 1-indexed target anchor layer: 1 = L1, 2 = L2. Only these two are
     /// supported in this cut; higher layers are future work.
     anchor_layer: u8,
+    /// Opt-in bypass for the wait-time guard on anchor layers whose
+    /// worst-case verifier catch-up is impractical. Required for
+    /// `--anchor-layer 2` (up to `W² − 1` blocks ≈ hours on shellnet).
+    /// Ignored for `--anchor-layer 1` (wait ≤ W·P − 1 blocks).
+    i_know_the_wait: bool,
     out: PathBuf,
 }
 
@@ -134,6 +141,7 @@ impl CliArgs {
         // value.
         let mut anchor_layer_1indexed: Option<u8> = None;
         let mut layer_idx_0indexed: Option<u32> = None;
+        let mut i_know_the_wait = false;
         let mut out: Option<PathBuf> = None;
 
         while let Some(a) = args.next() {
@@ -159,6 +167,9 @@ impl CliArgs {
                     let v = args.next().context("--layer-idx needs a u32")?;
                     layer_idx_0indexed =
                         Some(v.parse::<u32>().context("--layer-idx must be a u32")?);
+                }
+                "--i-know-the-wait" => {
+                    i_know_the_wait = true;
                 }
                 "--out" => {
                     let v = args.next().context("--out needs a path")?;
@@ -211,6 +222,7 @@ impl CliArgs {
             bridge_state: bridge_state.unwrap_or_else(|| PathBuf::from(DEFAULT_STATE)),
             gql_endpoint: gql_endpoint.unwrap_or_else(|| DEFAULT_GQL_ENDPOINT.to_string()),
             anchor_layer,
+            i_know_the_wait,
             out,
         })
     }
@@ -221,7 +233,7 @@ fn print_help() {
         "Usage: bridge-event-witness-builder \
          --partial-witness <path> --out <path> \
          [--state <path>] [--gql-endpoint <url>] \
-         [--anchor-layer <1|2>] [--layer-idx <u32>]"
+         [--anchor-layer <1|2>] [--layer-idx <u32>] [--i-know-the-wait]"
     );
     eprintln!();
     eprintln!("  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export.");
@@ -232,6 +244,9 @@ fn print_help() {
     eprintln!("                            Wait budget: L1 ≤ W·P−1 blocks, L2 ≤ W²−1 blocks.");
     eprintln!("  --layer-idx <u32>         0-indexed alias for --anchor-layer (0 = L1, 1 = L2).");
     eprintln!("                            Kept for backwards compat with existing Python drivers.");
+    eprintln!("  --i-know-the-wait         Bypass the wait-time guard on impractical anchor layers.");
+    eprintln!("                            Required for --anchor-layer 2 (up to W²−1 blocks of");
+    eprintln!("                            verifier catch-up, ≈ hours on shellnet cadence).");
     eprintln!();
     eprintln!("Prints a single-line JSON summary on the last non-empty line of stdout.");
 }
@@ -297,6 +312,20 @@ async fn run() -> Result<()> {
         args.anchor_layer - 1,
     );
     info!("out:             {}", args.out.display());
+
+    // ---- Wait-time guard (Phase 3) --------------------------------------
+    //
+    // Anchor layers > 1 have a worst-case verifier catch-up budget that's
+    // impractical to sit through in an interactive/E2E-test context.
+    // At W=128, P=4 and shellnet's observed ~0.5s/seq_no verifier cadence:
+    //   L1: worst case  W·P − 1 =   511 blocks ≈  4 min → no guard.
+    //   L2: worst case  W²  − 1 = 16383 blocks ≈ 2 hours → guarded.
+    //
+    // The guard is advisory-only (all the actual waiting happens in the
+    // caller / Python orchestrator waiting for verifier_state.json). It
+    // exists so callers picking `--anchor-layer 2` know what they're
+    // signing up for and confirm intent with `--i-know-the-wait`.
+    guard_wait_time(args.anchor_layer, args.i_know_the_wait, HISTORY_WINDOW_SIZE)?;
 
     // ---- Load partial witness -------------------------------------------
     let raw = std::fs::read_to_string(&args.partial_witness)
@@ -565,6 +594,63 @@ async fn run() -> Result<()> {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Empirical verifier catch-up rate on shellnet, used only for the
+/// human-readable wait estimate in [`guard_wait_time`]. Actual observed
+/// throughput on 2026-08-15: verifier moved 1536 seq_nos in 9 min ≈
+/// 0.35 s/seq_no; we round up to 0.5 to stay on the conservative side.
+const VERIFIER_SECS_PER_SEQNO: f64 = 0.5;
+
+/// Wait-time guard threshold: if worst-case verifier catch-up at the
+/// chosen anchor layer exceeds this, require `--i-know-the-wait`.
+/// 15 min is deliberately generous — L1 (≤ ~4 min) never trips it, L2
+/// (≥ ~2 h) always does.
+const WAIT_TIME_WARN_THRESHOLD_SECS: f64 = 15.0 * 60.0;
+
+/// Return the worst-case verifier catch-up window (in seq_no units) for
+/// the chosen anchor layer. See the L1/L2 wait-budget lines in the
+/// module docblock.
+fn worst_case_wait_blocks(anchor_layer: u8, w: u64, p: u64) -> u64 {
+    match anchor_layer {
+        1 => w * p - 1,
+        2 => w * w - 1,
+        // Higher layers are rejected earlier by CliArgs::parse, but
+        // return a conservative bound here so this function stays total.
+        n => w.saturating_pow(n as u32).saturating_sub(1),
+    }
+}
+
+/// Warn about the wait time for the chosen anchor layer; error out if
+/// the worst case exceeds [`WAIT_TIME_WARN_THRESHOLD_SECS`] and the
+/// caller has not passed `--i-know-the-wait`.
+fn guard_wait_time(anchor_layer: u8, i_know_the_wait: bool, w: u64) -> Result<()> {
+    let p = THINNING_FACTOR_P;
+    let max_blocks = worst_case_wait_blocks(anchor_layer, w, p);
+    let max_secs = (max_blocks as f64) * VERIFIER_SECS_PER_SEQNO;
+
+    if max_secs <= WAIT_TIME_WARN_THRESHOLD_SECS {
+        // L1 lands here — no warning worth the noise.
+        return Ok(());
+    }
+
+    let max_minutes = max_secs / 60.0;
+    if !i_know_the_wait {
+        bail!(
+            "--anchor-layer {} has an impractical wait budget: worst case {} blocks \
+             (≈ {:.0} min at ~{:.1}s per seq_no verifier catch-up). Re-run with \
+             --i-know-the-wait if this is intentional; typical E2E callers should \
+             stick with --anchor-layer 1 (L1, ≤ W·P−1 blocks ≈ 4 min).",
+            anchor_layer, max_blocks, max_minutes, VERIFIER_SECS_PER_SEQNO,
+        );
+    }
+    // Opt-in acknowledged; log the estimate but proceed.
+    warn!(
+        "anchor_layer=L{}: worst-case verifier catch-up ≈ {} blocks (~{:.0} min); \
+         proceeding because --i-know-the-wait was passed",
+        anchor_layer, max_blocks, max_minutes,
+    );
+    Ok(())
+}
 
 fn parse_hex32(label: &str, s: &str) -> Result<[u8; 32]> {
     let s = s.strip_prefix("0x").unwrap_or(s);

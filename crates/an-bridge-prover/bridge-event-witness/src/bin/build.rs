@@ -33,30 +33,34 @@
 //!     `MAX_CHAIN_LEN`. Remaining slots are inactive padding anchored at
 //!     the chosen layer hash.
 //!
-//! ### L1 and explicit L2 anchoring; L(N≥3) auto-escalation deferred
+//! ### L1 and L2 anchoring with L1→L2 auto-escalation
 //!
-//! This cut supports two explicit anchor layers, selected via
-//! `--anchor-layer <1|2>` (default 1):
+//! `--anchor-layer <arg>` (default `1`):
 //!
-//! * `--anchor-layer 1` (L1) — horizontal L1 walk from `H_e` to the thinned
-//!   key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Wait time budget: up to
-//!   `W·P − 1` blocks (at W=128, P=4 → ≤ 511 blocks).
-//! * `--anchor-layer 2` (L2) — one vertical L1→L2 rung to
-//!   `T_2 = ⌈event_seq/W²⌉·W²`. Wait time budget: up to `W² − 1` blocks
+//! * `1` (L1, **strict**) — horizontal L1 walk from `H_e` to the thinned
+//!   key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Wait budget: up to `W·P − 1`
+//!   blocks (at W=128, P=4 → ≤ 511 blocks).
+//! * `2` (L2, **strict**) — one vertical L1→L2 rung to
+//!   `T_2 = ⌈event_seq/W²⌉·W²`. Wait budget: up to `W² − 1` blocks
 //!   (at W=128 → ≤ 16383 blocks). Because this is ≈ 2 hours of verifier
-//!   catch-up on shellnet cadence, the CLI refuses to run at L2 unless
-//!   the caller also passes `--i-know-the-wait`.
+//!   catch-up on shellnet cadence, the CLI refuses to run explicit L2
+//!   unless the caller also passes `--i-know-the-wait`.
+//! * `auto` — probe the verifier state and pick the cheapest layer whose
+//!   window still covers the event: try L1 (check K's height in
+//!   `layer_windows[0]`); if rolled out, escalate to L2 (check T_2's
+//!   height in `layer_windows[1]`); if both are out, fail. Auto counts
+//!   as implicit `--i-know-the-wait`.
 //!
-//! In both cases, if the chosen key block has rolled out of the relevant
-//! rolling window (i.e. no slot in `state.layer_windows[target_layer-1]`
-//! matches the key block's observed_height), the command fails with a clear
-//! error rather than silently producing an un-anchored witness.
+//! In strict mode, if the chosen key block has rolled out of the
+//! relevant rolling window (i.e. no slot in `state.layer_windows[target_layer-1]`
+//! matches the key block's observed_height), the command fails with a
+//! clear error rather than silently producing an un-anchored witness.
 //!
-//! TODO(L1→L5 auto-escalation): implement transparent escalation for old
-//! events whose L1 slot has rolled out: walk up through L2/L3/... using
-//! additional vertical rungs from `real_chain_builder::build_layer_n_leaves`.
-//! Follow-up to this pass — first land explicit L1/L2 support, then add the
-//! escalation policy (bootstrap-from-middle scanning).
+//! TODO(L3+ auto-escalation): extend `auto` beyond L2 by adding
+//! additional vertical rungs in `real_chain_builder` and probing
+//! `layer_windows[2..]` here. Blocked on there being a helper that
+//! composes multi-rung walks (see the `build_layer_n_leaves` /
+//! `build_layer_n_tree` internals kept private for now).
 //!
 //! ### Mode and exit codes
 //!
@@ -112,19 +116,32 @@ const THINNING_FACTOR_P: u64 = bridge_prover_lib::THINNING_FACTOR_P;
 const DEFAULT_STATE: &str = "./state/prover_state.json";
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 
+/// Anchor-layer selection mode.
+///
+/// * `Explicit(n)` — strict: use L(n), error out if the anchor's height
+///   has rolled out of `layer_windows[n-1]`.
+/// * `Auto` — try L1 first; if L1's K has rolled out of the L1 window,
+///   escalate to L2. Bails if both are out (L3+ auto-escalation is
+///   future work).
+#[derive(Debug, Clone, Copy)]
+enum AnchorLayerMode {
+    Explicit(u8),
+    Auto,
+}
+
 /// Top-level CLI args.
 #[derive(Debug)]
 struct CliArgs {
     partial_witness: PathBuf,
     bridge_state: PathBuf,
     gql_endpoint: String,
-    /// 1-indexed target anchor layer: 1 = L1, 2 = L2. Only these two are
-    /// supported in this cut; higher layers are future work.
-    anchor_layer: u8,
+    /// User's requested anchor-layer mode. See [`AnchorLayerMode`].
+    anchor_mode: AnchorLayerMode,
     /// Opt-in bypass for the wait-time guard on anchor layers whose
     /// worst-case verifier catch-up is impractical. Required for
     /// `--anchor-layer 2` (up to `W² − 1` blocks ≈ hours on shellnet).
-    /// Ignored for `--anchor-layer 1` (wait ≤ W·P − 1 blocks).
+    /// Ignored for `--anchor-layer 1` and `--anchor-layer auto`
+    /// (auto-escalation to L2 counts as implicit acknowledgement).
     i_know_the_wait: bool,
     out: PathBuf,
 }
@@ -138,8 +155,9 @@ impl CliArgs {
         // The 1-indexed anchor layer is the user-facing flag. `--layer-idx`
         // (0-indexed) is accepted for backwards compat with existing Python
         // drivers; if both flags are given they must resolve to the same
-        // value.
-        let mut anchor_layer_1indexed: Option<u8> = None;
+        // value. `--anchor-layer auto` selects [`AnchorLayerMode::Auto`]
+        // and cannot be combined with `--layer-idx`.
+        let mut anchor_mode_arg: Option<AnchorLayerMode> = None;
         let mut layer_idx_0indexed: Option<u32> = None;
         let mut i_know_the_wait = false;
         let mut out: Option<PathBuf> = None;
@@ -159,9 +177,16 @@ impl CliArgs {
                     gql_endpoint = Some(v);
                 }
                 "--anchor-layer" => {
-                    let v = args.next().context("--anchor-layer needs 1 or 2")?;
-                    let n: u8 = v.parse::<u8>().context("--anchor-layer must be 1 or 2")?;
-                    anchor_layer_1indexed = Some(n);
+                    let v = args.next().context("--anchor-layer needs 1, 2, or auto")?;
+                    let mode = if v.eq_ignore_ascii_case("auto") {
+                        AnchorLayerMode::Auto
+                    } else {
+                        let n: u8 = v.parse::<u8>().with_context(|| {
+                            format!("--anchor-layer must be 1, 2, or 'auto' (got {v:?})")
+                        })?;
+                        AnchorLayerMode::Explicit(n)
+                    };
+                    anchor_mode_arg = Some(mode);
                 }
                 "--layer-idx" => {
                     let v = args.next().context("--layer-idx needs a u32")?;
@@ -187,9 +212,16 @@ impl CliArgs {
             partial_witness.ok_or_else(|| anyhow::anyhow!("--partial-witness is required"))?;
         let out = out.ok_or_else(|| anyhow::anyhow!("--out is required"))?;
 
-        // Resolve anchor_layer from either flag. Default 1 (L1).
-        let anchor_layer: u8 = match (anchor_layer_1indexed, layer_idx_0indexed) {
-            (Some(a), Some(b)) => {
+        // Resolve anchor_mode from the two flags. Default is explicit L1
+        // (kept for backwards compat with the existing Python drivers
+        // that pass `--layer-idx 0`). Auto-escalation is strictly opt-in
+        // via `--anchor-layer auto`.
+        let anchor_mode: AnchorLayerMode = match (anchor_mode_arg, layer_idx_0indexed) {
+            (Some(AnchorLayerMode::Auto), Some(_)) => bail!(
+                "--anchor-layer auto cannot be combined with --layer-idx. \
+                 Auto mode picks the layer at runtime; --layer-idx forces a specific one."
+            ),
+            (Some(AnchorLayerMode::Explicit(a)), Some(b)) => {
                 let from_idx = (b as u8)
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?;
@@ -200,28 +232,33 @@ impl CliArgs {
                         a, b, a, from_idx,
                     );
                 }
-                a
+                AnchorLayerMode::Explicit(a)
             }
-            (Some(a), None) => a,
-            (None, Some(b)) => (b as u8)
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?,
-            (None, None) => 1,
+            (Some(mode), None) => mode,
+            (None, Some(b)) => {
+                let n = (b as u8)
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?;
+                AnchorLayerMode::Explicit(n)
+            }
+            (None, None) => AnchorLayerMode::Explicit(1),
         };
-        if anchor_layer < 1 || anchor_layer > 2 {
-            bail!(
-                "--anchor-layer must be 1 (L1) or 2 (L2). Got {}. \
-                 Higher layers are future work — see TODO(L1→L5 auto-escalation) \
-                 in bin/build.rs.",
-                anchor_layer,
-            );
+        if let AnchorLayerMode::Explicit(n) = anchor_mode {
+            if n < 1 || n > 2 {
+                bail!(
+                    "--anchor-layer must be 1 (L1), 2 (L2), or 'auto'. Got {}. \
+                     Higher layers are future work — auto-escalation currently \
+                     only walks L1 → L2.",
+                    n,
+                );
+            }
         }
 
         Ok(Self {
             partial_witness,
             bridge_state: bridge_state.unwrap_or_else(|| PathBuf::from(DEFAULT_STATE)),
             gql_endpoint: gql_endpoint.unwrap_or_else(|| DEFAULT_GQL_ENDPOINT.to_string()),
-            anchor_layer,
+            anchor_mode,
             i_know_the_wait,
             out,
         })
@@ -233,20 +270,25 @@ fn print_help() {
         "Usage: bridge-event-witness-builder \
          --partial-witness <path> --out <path> \
          [--state <path>] [--gql-endpoint <url>] \
-         [--anchor-layer <1|2>] [--layer-idx <u32>] [--i-know-the-wait]"
+         [--anchor-layer <1|2|auto>] [--layer-idx <u32>] [--i-know-the-wait]"
     );
     eprintln!();
     eprintln!("  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export.");
     eprintln!("  --out <path>              Output path for the enriched PrivateWitness JSON.");
     eprintln!("  --state <path>            BridgeState JSON path. Default: {}", DEFAULT_STATE);
     eprintln!("  --gql-endpoint <url>      Default: {}", DEFAULT_GQL_ENDPOINT);
-    eprintln!("  --anchor-layer <1|2>      1 = L1 anchor (default), 2 = L2 anchor.");
+    eprintln!("  --anchor-layer <arg>      1 = L1 anchor (default, strict),");
+    eprintln!("                            2 = L2 anchor (strict),");
+    eprintln!("                            auto = try L1, escalate to L2 if L1's anchor has");
+    eprintln!("                                   rolled out of the verifier's L1 window.");
     eprintln!("                            Wait budget: L1 ≤ W·P−1 blocks, L2 ≤ W²−1 blocks.");
-    eprintln!("  --layer-idx <u32>         0-indexed alias for --anchor-layer (0 = L1, 1 = L2).");
+    eprintln!("  --layer-idx <u32>         0-indexed alias for explicit --anchor-layer");
+    eprintln!("                            (0 = L1, 1 = L2). Not accepted with 'auto'.");
     eprintln!("                            Kept for backwards compat with existing Python drivers.");
     eprintln!("  --i-know-the-wait         Bypass the wait-time guard on impractical anchor layers.");
-    eprintln!("                            Required for --anchor-layer 2 (up to W²−1 blocks of");
-    eprintln!("                            verifier catch-up, ≈ hours on shellnet cadence).");
+    eprintln!("                            Required for explicit --anchor-layer 2 (up to W²−1");
+    eprintln!("                            blocks of verifier catch-up, ≈ hours on shellnet).");
+    eprintln!("                            Not required with 'auto' — escalation is opt-in.");
     eprintln!();
     eprintln!("Prints a single-line JSON summary on the last non-empty line of stdout.");
 }
@@ -306,26 +348,12 @@ async fn run() -> Result<()> {
     info!("partial_witness: {}", args.partial_witness.display());
     info!("bridge_state:    {}", args.bridge_state.display());
     info!("gql_endpoint:    {}", args.gql_endpoint);
-    info!(
-        "anchor_layer:    L{} (layer_idx={}); supported: L1, L2",
-        args.anchor_layer,
-        args.anchor_layer - 1,
-    );
+    info!("anchor_mode:     {:?}; supported: L1, L2", args.anchor_mode);
     info!("out:             {}", args.out.display());
 
-    // ---- Wait-time guard (Phase 3) --------------------------------------
-    //
-    // Anchor layers > 1 have a worst-case verifier catch-up budget that's
-    // impractical to sit through in an interactive/E2E-test context.
-    // At W=128, P=4 and shellnet's observed ~0.5s/seq_no verifier cadence:
-    //   L1: worst case  W·P − 1 =   511 blocks ≈  4 min → no guard.
-    //   L2: worst case  W²  − 1 = 16383 blocks ≈ 2 hours → guarded.
-    //
-    // The guard is advisory-only (all the actual waiting happens in the
-    // caller / Python orchestrator waiting for verifier_state.json). It
-    // exists so callers picking `--anchor-layer 2` know what they're
-    // signing up for and confirm intent with `--i-know-the-wait`.
-    guard_wait_time(args.anchor_layer, args.i_know_the_wait, HISTORY_WINDOW_SIZE)?;
+    // Wait-time guard for the *requested* mode is applied after we know
+    // the resolved layer (auto probe below can pick L1 or L2). Auto mode
+    // counts as implicit opt-in — see `guard_wait_time`.
 
     // ---- Load partial witness -------------------------------------------
     let raw = std::fs::read_to_string(&args.partial_witness)
@@ -375,6 +403,35 @@ async fn run() -> Result<()> {
     let gql = gql_client::create_client(&args.gql_endpoint)
         .with_context(|| format!("failed to construct GQL client for {}", args.gql_endpoint))?;
 
+    // ---- Resolve anchor layer (Phase 4: L1→L2 auto-escalation) ----------
+    //
+    // In `Explicit(n)` mode we defer to the strict slot lookup later —
+    // that path emits a detailed error when the anchor has rolled out.
+    // In `Auto` mode we probe now so that (a) we can pick the cheapest
+    // layer whose window still covers this event, and (b) failure is
+    // surfaced up front, before we spend time building tree proofs.
+    let (anchor_layer, escalated_from_auto) = resolve_anchor_layer(
+        &gql,
+        &bridge_state,
+        event_seq,
+        args.anchor_mode,
+    )
+    .await
+    .context("resolving anchor layer")?;
+    info!(
+        "resolved anchor: L{} (mode={:?}, auto_escalated={})",
+        anchor_layer, args.anchor_mode, escalated_from_auto,
+    );
+
+    // Wait-time guard against the resolved layer. Auto mode counts as
+    // implicit acknowledgement — the caller opted in to escalation.
+    let implicit_optin = matches!(args.anchor_mode, AnchorLayerMode::Auto);
+    guard_wait_time(
+        anchor_layer,
+        args.i_know_the_wait || implicit_optin,
+        HISTORY_WINDOW_SIZE,
+    )?;
+
     // ---- Build events_tree_proof ---------------------------------------
     let events_tree_proof = build_events_tree_proof(&gql, event_seq, &dapp, &acc, &event_repr_hash)
         .await
@@ -422,13 +479,13 @@ async fn run() -> Result<()> {
     );
 
     // ---- Build the event-anchor chain (L1 horizontal or L1→L2 vertical) -
-    // The composed helper picks the topology from `args.anchor_layer` and
+    // The composed helper picks the topology from `anchor_layer` and
     // returns the active links + the reconstructed final root.
     let chain_result = real_chain_builder::build_event_anchor_chain(
         &gql,
         event_seq,
         l1_root_self_computed,
-        args.anchor_layer,
+        anchor_layer,
         w,
         p,
     )
@@ -436,7 +493,7 @@ async fn run() -> Result<()> {
     .with_context(|| {
         format!(
             "building event-anchor chain (target_layer=L{}) failed",
-            args.anchor_layer
+            anchor_layer
         )
     })?;
     let num_active = chain_result.active_links.len();
@@ -444,13 +501,13 @@ async fn run() -> Result<()> {
         bail!(
             "internal: {} active chain links exceed MAX_CHAIN_LEN={} \
              (anchor_layer=L{}, event_seq={}, W={}, P={}, anchor_kb={})",
-            num_active, MAX_CHAIN_LEN, args.anchor_layer, event_seq, w, p,
+            num_active, MAX_CHAIN_LEN, anchor_layer, event_seq, w, p,
             chain_result.anchor_kb_seqno,
         );
     }
     info!(
         "chain built: anchor_layer=L{}, anchor_kb={}, active_links={}, final_root={}",
-        args.anchor_layer,
+        anchor_layer,
         chain_result.anchor_kb_seqno,
         num_active,
         hex::encode(chain_result.final_chain_root),
@@ -466,7 +523,7 @@ async fn run() -> Result<()> {
             format!(
                 "fetching observed_height for anchor key block {anchor_key_block_seq} \
                  (target_layer=L{})",
-                args.anchor_layer,
+                anchor_layer,
             )
         })?;
     info!(
@@ -474,31 +531,36 @@ async fn run() -> Result<()> {
         anchor_key_block_seq, key_block_height,
     );
 
-    let target_layer_idx0 = (args.anchor_layer - 1) as usize;
+    let target_layer_idx0 = (anchor_layer - 1) as usize;
     let slot = bridge_state
-        .slot_for_event_height(args.anchor_layer, key_block_height)
+        .slot_for_event_height(anchor_layer, key_block_height)
         .ok_or_else(|| {
-            // TODO(L1→L5 auto-escalation): if the anchor KB's height has
-            // rolled out of L(anchor_layer)'s rolling window, transparently
-            // walk up to the next layer rather than failing here.
+            // In Explicit mode we surface the rollout here so the caller
+            // sees exactly which layer failed. Auto mode probes earlier
+            // in `resolve_anchor_layer` and would have escalated already
+            // — hitting this branch from auto means both L1 and L2 rolled
+            // out and the probe raced with rollover, which is very rare.
+            //
+            // L(N≥3) auto-escalation is deferred (needs additional
+            // vertical-rung support in `real_chain_builder`).
             anyhow::anyhow!(
                 "anchor key block height {} not found in L{} window {:?} \
                  — block has rolled out of the L{} rolling window. \
-                 Auto-escalation to higher layers is not yet implemented; \
-                 rerun with a higher `--anchor-layer` if the state has \
-                 progressed to that layer.",
+                 Re-run with `--anchor-layer auto` (probes L1 then L2) or \
+                 explicitly pick a higher layer if the state has progressed \
+                 to it.",
                 key_block_height,
-                args.anchor_layer,
+                anchor_layer,
                 bridge_state.layer_windows[target_layer_idx0]
                     .iter_chronological()
                     .map(|(_, h)| h)
                     .collect::<Vec<_>>(),
-                args.anchor_layer,
+                anchor_layer,
             )
         })?;
     info!(
         "L{} slot for this anchor key block: {}",
-        args.anchor_layer, slot,
+        anchor_layer, slot,
     );
 
     let chosen_layer_hash = bridge_state.layer_windows[target_layer_idx0]
@@ -508,7 +570,7 @@ async fn run() -> Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "internal: L{} slot {} found but not present when iterating chronologically",
-                args.anchor_layer, slot,
+                anchor_layer, slot,
             )
         })?;
 
@@ -521,7 +583,7 @@ async fn run() -> Result<()> {
             "final chain root mismatch — verifier mirror (L{} root @ anchor KB) = {}, \
              locally rebuilt = {}. The proof will not satisfy the circuit until \
              every tree along the chain matches the node's construction byte-for-byte.",
-            args.anchor_layer,
+            anchor_layer,
             hex::encode(chosen_layer_hash),
             hex::encode(chain_result.final_chain_root),
         );
@@ -549,7 +611,7 @@ async fn run() -> Result<()> {
         .collect();
 
     let anchor = AnchorRef {
-        layer_idx: (args.anchor_layer - 1) as u32,
+        layer_idx: (anchor_layer - 1) as u32,
         height: key_block_height,
         layer_hash_hex: hex::encode(chosen_layer_hash),
         dense_chain: dense_chain_ser,
@@ -580,7 +642,7 @@ async fn run() -> Result<()> {
         block_seq_no: witness.block_seq_no,
         key_block_seq_no: key_block_seq,
         thinned_key_block_seq_no: anchor_key_block_seq,
-        layer_idx: (args.anchor_layer - 1) as u32,
+        layer_idx: (anchor_layer - 1) as u32,
         layer_hash_hex: &witness.anchor.as_ref().unwrap().layer_hash_hex,
         events_tree_depth,
         block_tree_depth,
@@ -594,6 +656,82 @@ async fn run() -> Result<()> {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Resolve the requested [`AnchorLayerMode`] into a concrete 1-indexed
+/// layer number (1 = L1, 2 = L2).
+///
+/// * `Explicit(n)` — returns `n` unchanged. Rollout detection is left to
+///   the downstream `slot_for_event_height` lookup so the error carries
+///   the exact window contents.
+/// * `Auto` — probes the verifier state:
+///   1. Compute `K` via [`real_chain_builder::l1_anchor_boundaries`] and
+///      fetch its observed_height. If `K`'s height is in `layer_windows[0]`,
+///      pick L1 (cheapest).
+///   2. Otherwise compute `T_2` via [`real_chain_builder::l2_anchor_boundaries`],
+///      fetch its observed_height, and check `layer_windows[1]`. If present,
+///      pick L2. Log the escalation at INFO.
+///   3. Otherwise fail with an explanatory error. L3+ escalation is future
+///      work (no matching helper in `real_chain_builder` yet).
+///
+/// Returns `(anchor_layer, escalated_from_auto)`.
+async fn resolve_anchor_layer(
+    gql: &GqlClient,
+    bridge_state: &BridgeState,
+    event_seq: u64,
+    mode: AnchorLayerMode,
+) -> Result<(u8, bool)> {
+    if let AnchorLayerMode::Explicit(n) = mode {
+        return Ok((n, false));
+    }
+
+    let w = HISTORY_WINDOW_SIZE;
+    let p = THINNING_FACTOR_P;
+
+    // --- Probe L1 -----------------------------------------------------
+    let (_h_e, k, _hops) = real_chain_builder::l1_anchor_boundaries(event_seq, w, p);
+    let k_height = fetch_block_observed_height(gql, k)
+        .await
+        .with_context(|| format!("auto-probe: fetching observed_height for L1 anchor K={k}"))?;
+    if bridge_state.slot_for_event_height(1, k_height).is_some() {
+        info!("auto: L1 slot present for K={} (height={}); using L1", k, k_height);
+        return Ok((1, false));
+    }
+    info!(
+        "auto: L1 slot for K={} (height={}) has rolled out of L1 window — probing L2",
+        k, k_height,
+    );
+
+    // --- Escalate to L2 -----------------------------------------------
+    if bridge_state.num_active_layers() < 2 {
+        bail!(
+            "auto: L1 anchor K={} (height={}) rolled out of the L1 rolling window \
+             and the verifier state has no active L2 layer to escalate to \
+             (active_layers={}). Event is older than the total L1 window coverage; \
+             L(N≥2) escalation requires the verifier to have observed at least one \
+             L2 boundary.",
+            k, k_height, bridge_state.num_active_layers(),
+        );
+    }
+    let (_h_e2, t2, _pos) = real_chain_builder::l2_anchor_boundaries(event_seq, w);
+    let t2_height = fetch_block_observed_height(gql, t2)
+        .await
+        .with_context(|| format!("auto-probe: fetching observed_height for L2 anchor T_2={t2}"))?;
+    if bridge_state.slot_for_event_height(2, t2_height).is_some() {
+        info!(
+            "auto: escalating L1 → L2 for event_seq={} (K={} rolled out; T_2={} in L2 window at height={})",
+            event_seq, k, t2, t2_height,
+        );
+        return Ok((2, true));
+    }
+
+    bail!(
+        "auto: both L1 (K={}, height={}) and L2 (T_2={}, height={}) anchors rolled \
+         out of their rolling windows. Event is older than L2 coverage; L(N≥3) \
+         auto-escalation is not yet implemented (needs additional per-layer \
+         support in real_chain_builder).",
+        k, k_height, t2, t2_height,
+    );
+}
 
 /// Empirical verifier catch-up rate on shellnet, used only for the
 /// human-readable wait estimate in [`guard_wait_time`]. Actual observed

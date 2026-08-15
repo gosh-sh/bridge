@@ -726,10 +726,11 @@ pub async fn build_event_anchor_chain(
 ///
 /// Invariants: `H_e ≤ K`, `(K − H_e) % W == 0`, `hops < P`.
 ///
-/// Extracted so unit tests can pin the arithmetic without a live GQL
-/// client. The live builder ([`build_event_anchor_chain_l1`]) consumes
-/// exactly this triple.
-fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
+/// Pub so callers (e.g. `bridge-event-witness-builder`'s auto-escalation
+/// probe) can predict `K` without running the full chain builder. The
+/// live builder ([`build_event_anchor_chain_l1`]) consumes exactly this
+/// triple.
+pub fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
     let h_e = (event_seq / w) * w + w;
     let k = (event_seq / (w * p)) * (w * p) + (w * p);
     let hops = (k - h_e) / w;
@@ -747,8 +748,8 @@ fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
 ///   `[higher_layer_root, prev_same_layer_root]` (see the module-level
 ///   layout doc). `k < W` always holds because `H_e ∈ (T_2 − W², T_2]`.
 ///
-/// Extracted for the same reason as [`l1_anchor_boundaries`].
-fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
+/// Pub for the same reason as [`l1_anchor_boundaries`].
+pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
     let h_e = (event_seq / w) * w + w;
     let w2 = w * w;
     let t2 = (event_seq / w2) * w2 + w2;

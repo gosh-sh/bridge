@@ -717,6 +717,46 @@ pub async fn build_event_anchor_chain(
     }
 }
 
+/// Pure boundary math for L1 event anchoring.
+///
+/// Given an event's block seq_no, returns the triple `(H_e, K, hops)`:
+/// * `H_e = ⌈event_seq/W⌉·W` — the W-aligned L1 tree containing the event.
+/// * `K = ⌈event_seq/(W·P)⌉·(W·P)` — the thinned L1 anchor the verifier stores.
+/// * `hops = (K − H_e) / W` — forward-hop rung count between them.
+///
+/// Invariants: `H_e ≤ K`, `(K − H_e) % W == 0`, `hops < P`.
+///
+/// Extracted so unit tests can pin the arithmetic without a live GQL
+/// client. The live builder ([`build_event_anchor_chain_l1`]) consumes
+/// exactly this triple.
+fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
+    let h_e = (event_seq / w) * w + w;
+    let k = (event_seq / (w * p)) * (w * p) + (w * p);
+    let hops = (k - h_e) / w;
+    (h_e, k, hops)
+}
+
+/// Pure boundary math for L2 event anchoring.
+///
+/// Returns `(H_e, T_2, position)`:
+/// * `H_e = ⌈event_seq/W⌉·W` — the event's W-aligned L1 tree.
+/// * `T_2 = ⌈event_seq/W²⌉·W²` — the L2 tree the event lives in.
+/// * `position` — data-leaf index of `H_e` inside the L2 tree:
+///   `position = 2 + (W − 1 − k)` where `k = (T_2 − H_e)/W`. The `+2`
+///   offset accounts for the first two L2 leaves being
+///   `[higher_layer_root, prev_same_layer_root]` (see the module-level
+///   layout doc). `k < W` always holds because `H_e ∈ (T_2 − W², T_2]`.
+///
+/// Extracted for the same reason as [`l1_anchor_boundaries`].
+fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
+    let h_e = (event_seq / w) * w + w;
+    let w2 = w * w;
+    let t2 = (event_seq / w2) * w2 + w2;
+    let k = (t2 - h_e) / w;
+    let position = 2 + (w - 1 - k) as usize;
+    (h_e, t2, position)
+}
+
 /// Horizontal L1 walk from `H_e` to `K` (both W-aligned; K is W·P-aligned).
 /// Emits `hops = (K − H_e)/W` active rungs.
 async fn build_event_anchor_chain_l1(
@@ -726,9 +766,7 @@ async fn build_event_anchor_chain_l1(
     w: u64,
     p: u64,
 ) -> anyhow::Result<EventAnchorChainResult> {
-    let h_e = (event_seq / w) * w + w;
-    let k = (event_seq / (w * p)) * (w * p) + (w * p);
-    let hops = (k - h_e) / w;
+    let (h_e, k, hops) = l1_anchor_boundaries(event_seq, w, p);
 
     let mut chain_leaf_value = event_l1_root;
     let mut active_links: Vec<DenseChainLink> = Vec::with_capacity(hops as usize);
@@ -777,9 +815,11 @@ async fn build_event_anchor_chain_l2(
     event_l1_root: [u8; 32],
     w: u64,
 ) -> anyhow::Result<EventAnchorChainResult> {
-    let h_e = (event_seq / w) * w + w;
+    let (h_e, t2, position) = l2_anchor_boundaries(event_seq, w);
     let w2 = w * w;
-    let t2 = (event_seq / w2) * w2 + w2;
+    // Runtime sanity — `l2_anchor_boundaries` is pure and unit-tested, so
+    // these hold by construction. Kept as defence-in-depth in case
+    // upstream ever passes a degenerate `w` (e.g. 0 or non-power-of-two).
     ensure!(
         h_e <= t2 && (t2 - h_e) % w == 0,
         "internal: H_e={} not W-aligned inside L2 tree at T_2={} (W={})",
@@ -791,8 +831,6 @@ async fn build_event_anchor_chain_l2(
         "internal: L2 window offset k={} exceeds W-1 (W={}) — event outside T_2's L2 window",
         k, w,
     );
-    // data_leaves[i] = L1 root at T_2 - (W-1-i)*W, so position of H_e is 2 + (W-1-k).
-    let position = 2 + (w - 1 - k) as usize;
 
     // Fetch the L2 tree's prev_same_layer_root (L2 root at T_2 - W², or zero
     // when T_2 == W²).
@@ -876,4 +914,129 @@ async fn fetch_block_leaf_hash_from_boc(gql: &GqlClient, seqno: u64) -> anyhow::
         &block.envelope_hash,
         &block.tracked_ext_out_messages_root,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-arithmetic tests for the event-anchor boundary helpers. The
+    //! live GQL-consuming paths (`build_event_anchor_chain_l1`/`_l2`) are
+    //! covered by the manual E2E in `E2E_RUN_STATE_2026_08_15.md`; adding
+    //! a mock GqlClient is deferred (would need a trait refactor).
+    use super::{l1_anchor_boundaries, l2_anchor_boundaries};
+
+    // Production values on shellnet: W = 128, P = 4.
+    const W: u64 = 128;
+    const P: u64 = 4;
+
+    // ---- L1 -----------------------------------------------------------
+
+    #[test]
+    fn l1_event_at_zero_snaps_to_first_tree() {
+        // event_seq = 0 → H_e = W, K = W·P (both smallest positive boundaries).
+        let (h_e, k, hops) = l1_anchor_boundaries(0, W, P);
+        assert_eq!(h_e, W);
+        assert_eq!(k, W * P);
+        assert_eq!(hops, P - 1); // (W·P − W) / W = P − 1
+    }
+
+    #[test]
+    fn l1_event_exactly_on_h_e_still_climbs_next_tree() {
+        // event_seq == W is *inside* the L1 tree at 2W (⌈W/W⌉·W = W … wait,
+        // actually H_e = (W/W)*W + W = 2W). The event sits at the tail of
+        // tree 2W. Bumped-to-next-W behaviour is intentional — matches the
+        // circuit's convention that H_e is *strictly greater than* the
+        // event block's seq.
+        let (h_e, k, hops) = l1_anchor_boundaries(W, W, P);
+        assert_eq!(h_e, 2 * W);
+        assert_eq!(k, W * P);
+        assert_eq!(hops, P - 2);
+    }
+
+    #[test]
+    fn l1_event_exactly_on_k_lands_next_thinned_anchor() {
+        // event_seq == W·P → H_e = W·P + W, K = 2·W·P.
+        let (h_e, k, hops) = l1_anchor_boundaries(W * P, W, P);
+        assert_eq!(h_e, W * P + W);
+        assert_eq!(k, 2 * W * P);
+        assert_eq!(hops, P - 1);
+    }
+
+    #[test]
+    fn l1_shellnet_run_2026_08_15_boundaries() {
+        // Regression pin for the 2026-08-15 shellnet E2E: event at
+        // seq_no=8251308 → H_e = K = 8251392, hops = 0 (event happened
+        // to land on a W·P-aligned tree).
+        let (h_e, k, hops) = l1_anchor_boundaries(8_251_308, W, P);
+        assert_eq!(h_e, 8_251_392);
+        assert_eq!(k, 8_251_392);
+        assert_eq!(hops, 0);
+    }
+
+    #[test]
+    fn l1_hops_bounded_by_p_minus_one() {
+        // For any event_seq, hops = (K − H_e)/W ∈ [0, P − 1]. Sweep an
+        // arbitrary window to double-check the invariant holds.
+        for offset in 0..(W * P * 3) {
+            let (h_e, k, hops) = l1_anchor_boundaries(offset, W, P);
+            assert_eq!(k % (W * P), 0, "K must be W·P-aligned (event_seq={offset})");
+            assert_eq!(h_e % W, 0, "H_e must be W-aligned (event_seq={offset})");
+            assert!(h_e <= k, "H_e must not exceed K (event_seq={offset})");
+            assert!(hops < P, "hops < P must hold (event_seq={offset}, hops={hops})");
+            assert_eq!((k - h_e) / W, hops);
+        }
+    }
+
+    // ---- L2 -----------------------------------------------------------
+
+    #[test]
+    fn l2_event_at_zero_snaps_to_first_l2_tree() {
+        // event_seq = 0 → H_e = W, T_2 = W², k = (W² − W)/W = W − 1.
+        // position = 2 + (W − 1 − (W − 1)) = 2 (the first data-leaf slot,
+        // corresponding to the earliest L1 tree in this L2 window).
+        let (h_e, t2, position) = l2_anchor_boundaries(0, W);
+        assert_eq!(h_e, W);
+        assert_eq!(t2, W * W);
+        assert_eq!(position, 2);
+    }
+
+    #[test]
+    fn l2_event_at_last_l1_tree_in_window_lands_on_final_slot() {
+        // event_seq = W² − W − 1 → H_e = W² − W → T_2 = W², k = 1,
+        // position = 2 + (W − 1 − 1) = W. This is the *last* data-leaf
+        // slot before the L2 tree pads to next-pow2.
+        let event_seq = W * W - W - 1;
+        let (h_e, t2, position) = l2_anchor_boundaries(event_seq, W);
+        assert_eq!(h_e, W * W - W);
+        assert_eq!(t2, W * W);
+        assert_eq!(position, W as usize);
+    }
+
+    #[test]
+    fn l2_event_at_w_squared_climbs_to_next_l2_tree() {
+        // event_seq = W² → H_e = W² + W, T_2 = 2·W², k = W − 1,
+        // position = 2 + 0 = 2. Event is the "just-past-boundary" case:
+        // it's the first block in the new L2 window, and its L1 tree sits
+        // at the earliest data-leaf slot (position 2) of the L2 tree at 2·W².
+        let (h_e, t2, position) = l2_anchor_boundaries(W * W, W);
+        assert_eq!(h_e, W * W + W);
+        assert_eq!(t2, 2 * W * W);
+        assert_eq!(position, 2);
+    }
+
+    #[test]
+    fn l2_position_invariants_across_full_window() {
+        // Sweep across an entire L2 window and verify position ∈ [2, W+1].
+        let base = 5 * W * W; // arbitrary later window
+        for offset in 0..(W * W) {
+            let (h_e, t2, position) = l2_anchor_boundaries(base + offset, W);
+            assert_eq!(t2 % (W * W), 0, "T_2 must be W²-aligned");
+            assert_eq!(h_e % W, 0, "H_e must be W-aligned");
+            assert!(h_e <= t2, "H_e must not exceed T_2");
+            assert!(
+                position >= 2 && position <= (W + 1) as usize,
+                "position {} out of [2, W+1] (event_seq={})",
+                position, base + offset,
+            );
+        }
+    }
 }

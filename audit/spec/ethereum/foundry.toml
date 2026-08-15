@@ -29,3 +29,6 @@ invariant = { runs = 1000, depth = 50 }
 [profile.audit]
 fuzz = { runs = 256 }
 invariant = { runs = 128, depth = 50 }
+
+[profile.fork]
+evm_version = "shanghai"

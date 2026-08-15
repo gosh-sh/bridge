@@ -21,7 +21,7 @@ The single biggest open question (Q-WIRE-1 below) is *which Halo2 transcript fla
 
 See `docs/integration/an_partner_integration_plan.md` Decision Log 2026-05-17 for the full rationale. In short:
 
-- The Halo2 SHPLONK proof produced by `deposit-prover/` encodes everything the AN side needs (11 public inputs: `[depositId, sender, amount, contractAddress, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`). The AN recipient is bound in-circuit via `anAccountHigh`/`anAccountLow`.
+- The Halo2 SHPLONK proof produced by `deposit-prover/` encodes everything the AN side needs (**12 public inputs**: `[depositId, sender, amount, contractAddress, chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow, promiseCommit]`). `chainId` is slot 4 (Track-2); `promiseCommit` is slot 11. The AN recipient is bound in-circuit via `anAccountHigh`/`anAccountLow`.
 - On Ethereum we previously needed a gnark Groth16 wrapper because of EIP-170's 24 KB contract code limit. **The AN side has no such limit**, so we can verify Halo2 SHPLONK natively and skip the wrapper entirely.
 - Skipping the wrapper eliminates two attack surfaces (R15 no-op `Define` stub; any EIP-170-driven wrapper simplifications) — see `docs/architecture/audit_trail_v2.md` R-8.
 

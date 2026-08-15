@@ -3,14 +3,18 @@
 //! Uses [`crate::rlp_utils::encode_receipt`] (legacy, no EIP-2718 type prefix) so
 //! axiom-eth @ `1d61be0` decomposes exactly four receipt fields (QC-PROV-02).
 
+use alloy_rlp::Encodable;
 use ethers::types::{Address, Bloom, Bytes, H256, Log, TransactionReceipt, U256, U64};
 
 use crate::{
     ethereum_fetcher::get_deposit_event_signature,
-    mpt::receipt_proof_from_receipt,
+    mpt::{align_block_header_roots, receipt_proof_from_receipt, transaction_proof_from_wire_bytes},
     prover::CircuitConfig,
-    types::{DepositEventData, DepositProofInput},
+    types::{DepositEventData, DepositProofInput, TransactionProof},
 };
+
+/// Sepolia — matches committed `deposit_10proofs` fixtures.
+pub const SYNTHETIC_CHAIN_ID: u64 = 11_155_111;
 
 /// Circuit params aligned with `export_deposit_proof_set` / audit fixtures.
 pub fn audit_circuit_config() -> CircuitConfig {
@@ -22,8 +26,67 @@ pub fn audit_circuit_config() -> CircuitConfig {
     }
 }
 
+/// Production capacity limits baked into the embedded VK (`MAX_LOG_NUM=3`, 128B data).
+pub fn production_capacity_config() -> CircuitConfig {
+    use crate::circuit_v2::{MAX_DATA_BYTE_LEN, MAX_LOG_NUM};
+
+    CircuitConfig {
+        degree: 18,
+        max_data_byte_len: MAX_DATA_BYTE_LEN,
+        max_log_num: MAX_LOG_NUM,
+        topic_num_bounds: (0, 4),
+    }
+}
+
+fn minimal_tx_proof() -> TransactionProof {
+    let mut tx_payload = Vec::new();
+    SYNTHETIC_CHAIN_ID.encode(&mut tx_payload);
+    0u64.encode(&mut tx_payload);
+    0u64.encode(&mut tx_payload);
+    0u64.encode(&mut tx_payload);
+    21_000u64.encode(&mut tx_payload);
+    vec![0u8; 20].encode(&mut tx_payload);
+    0u64.encode(&mut tx_payload);
+    Vec::<u8>::new().encode(&mut tx_payload);
+    {
+        let mut al = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: 0,
+        }
+        .encode(&mut al);
+        tx_payload.extend_from_slice(&al);
+    }
+    0u64.encode(&mut tx_payload);
+    vec![0u8; 32].encode(&mut tx_payload);
+    vec![0u8; 32].encode(&mut tx_payload);
+    let mut tx_list = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: tx_payload.len(),
+    }
+    .encode(&mut tx_list);
+    tx_list.extend_from_slice(&tx_payload);
+    let mut tx_bytes = vec![0x02u8];
+    tx_bytes.extend_from_slice(&tx_list);
+
+    TransactionProof {
+        tx_bytes: tx_bytes.clone(),
+        proof_nodes: vec![tx_bytes],
+        transactions_root: [0u8; 32],
+    }
+}
+
 /// Minimal single-log deposit witness; `deposit_id` is reflected in event + log topics.
 pub fn synthetic_deposit_proof_input(deposit_id: u64) -> DepositProofInput {
+    synthetic_deposit_proof_input_with_workchain(deposit_id, 0)
+}
+
+/// Same as [`synthetic_deposit_proof_input`] but with arbitrary `anWorkchain` in log data.
+pub fn synthetic_deposit_proof_input_with_workchain(
+    deposit_id: u64,
+    an_workchain: i8,
+) -> DepositProofInput {
     let sender = [0x11u8; 20];
     let contract = [0x22u8; 20];
     let mut amount = [0u8; 32];
@@ -39,7 +102,7 @@ pub fn synthetic_deposit_proof_input(deposit_id: u64) -> DepositProofInput {
 
     let mut data = [0u8; 128];
     data[0..32].copy_from_slice(&amount);
-    data[63] = 0; // anWorkchain
+    data[63] = an_workchain as u8;
     data[64..96].copy_from_slice(&an_account);
     let mut ts_word = [0u8; 32];
     U256::from(timestamp).to_big_endian(&mut ts_word);
@@ -78,6 +141,12 @@ pub fn synthetic_deposit_proof_input(deposit_id: u64) -> DepositProofInput {
     let receipt_proof = receipt_proof_from_receipt(&receipt)
         .expect("synthetic receipt trie proof must build");
 
+    let tx_proof = transaction_proof_from_wire_bytes(minimal_tx_proof().tx_bytes, 0)
+        .expect("synthetic tx trie proof must build");
+    let mut receipt_proof = receipt_proof;
+    align_block_header_roots(&mut receipt_proof, tx_proof.transactions_root)
+        .expect("block header roots must align");
+
     let event_data = DepositEventData {
         block_number: 1,
         transaction_index: 0,
@@ -85,15 +154,17 @@ pub fn synthetic_deposit_proof_input(deposit_id: u64) -> DepositProofInput {
         deposit_id,
         sender,
         amount,
-        an_workchain: 0,
+        an_workchain,
         an_account,
         timestamp,
         contract_address: contract,
+        chain_id: SYNTHETIC_CHAIN_ID,
     };
 
     DepositProofInput {
         event_data,
         receipt_proof,
+        tx_proof,
         dapp_id: [0u8; 32],
     }
 }
@@ -101,7 +172,7 @@ pub fn synthetic_deposit_proof_input(deposit_id: u64) -> DepositProofInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{prover::test_circuit_mock, synthetic_fixture::audit_circuit_config};
+    use crate::prover::test_circuit_mock;
 
     #[test]
     fn synthetic_input_satisfies_mock_prover_audit_config() {

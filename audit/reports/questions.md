@@ -12,4 +12,8 @@ Questions are split by **author / deployment boundary**. Do not merge into a sin
 
 **Closeouts:** ETH → `closeout-eth.md`. AN → `closeout-an.md`. **Phase G:** `phase-g-status.md` (`audit-new`).
 
+**ETH deposit baseline (open only):** `baseline-deposit-eth.md` · locked tests → `baseline-deposit-eth-locked.md` · delta → `delta-deposit-eth.md`.
+
+**ETH deposit test directions (3-agent catalog):** `test-directions-deposit-eth-catalog.md` (68 TD, dedup) · index → `test-directions-deposit-eth.md`.
+
 **Registers:** `an-audit-direction.md` (AN test gate), `findings-summary.md` (ETH workstreams).

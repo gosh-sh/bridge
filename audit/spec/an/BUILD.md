@@ -13,7 +13,9 @@ One-time setup:
 
 ```bash
 ./scripts/setup_an_audit_tools.sh
-./scripts/sync_an_contracts.sh   # acki-nacki origin/dev
+./scripts/bootstrap-an-audit-py.sh
+./scripts/sync_an_contracts.sh   # default: acki-nacki @ contracts/bridge
+./scripts/sync_audit_deposit_fixtures.sh
 ```
 
 Build TVM binaries if missing:
@@ -37,8 +39,14 @@ Uses `sold --tvm-version gosh --base-path .` (see dex `audit/Makefile.inc`).
 # toolchain smoke (no contracts required)
 cd audit/spec/an && python3 -m pytest unit/test_toolchain_smoke.py -q
 
-# full spec (after sync + build)
+# full spec (after sync + build) — eccUSDCBridge + DepositVoucher
 make audit-an-test
+
+# full CI path (gates + integration pytest, ~7 min)
+AN_AUDIT_INTEGRATION=1 ./scripts/ci_an_audit.sh
+
+# integration only
+cd audit/spec/an && python3 -m pytest integration/ -q --tb=short
 
 # property tests only (Hypothesis; includes slow integration)
 cd audit/spec/an && python3 -m pytest -m property -q

@@ -11,7 +11,9 @@
 |-------|------------------|--------------|---------|
 | **Manual** | `audit/reports/manual-audit/A*.md` | `F1-usdcbridge-deposit.md` + F2 withdraw/admin | code walk + invariant map |
 | **Unit (U)** | `audit/spec/ethereum/` Foundry | `audit/spec/an/unit/` pytest | mocks for oracles/verifiers |
-| **Integration (I)** | bound Groth16 in `CrossCircuitNegative` | real `deposit_10proofs` + MessagePipeline | real ZK bytes, not circuit audit |
+| **Integration (I)** | bound Groth16 in `CrossCircuitNegative` | real `deposit_10proofs` + MessagePipeline (`eccUSDCBridge`) | real ZK bytes, not circuit audit |
+
+**AN integration gate (2026-08-14):** `AN_AUDIT_INTEGRATION=1 ./scripts/ci_an_audit.sh` → **74 passed**, 0 skipped, 0 failed (~7 min). Upstream `eccUSDCBridge@contracts/bridge`, BC-AN-01 dual-proof included. Delta: `delta-deposit-eth.md` § contracts/bridge migration.
 | **E2E (E)** | fork AAVE, shellnet relayer | `test_usdcbridge_finalize.py` | **deferred** |
 
 ---
@@ -24,7 +26,7 @@ make pre-push-audit          # main forge + audit/spec/ethereum (47 tests)
 
 # AN contracts (active)
 ./scripts/setup_an_audit_tools.sh
-./scripts/sync_an_contracts.sh    # acki-nacki @ dev → an-contracts + fixtures
+./scripts/sync_an_contracts.sh    # acki-nacki @ contracts/bridge → eccUSDCBridge + fixtures
 cd audit/spec/an-contracts && ./build.sh
 make audit-an-test           # full pytest (fixtures)
 make pre-push-an             # unit only, no fixtures
@@ -55,7 +57,7 @@ SETUP_AUDIT_VENDORS_PROVERS=1 ./scripts/setup_audit_vendors.sh   # when PoC need
 
 | P | Item | Deliverable |
 |---|------|-------------|
-| **P0** | BC-AN-01 dual `dappId` mint | `bootstrap_hermez_srs_k18.sh` + `generate_bc_an_01_dual_proofs.sh` | ✅ |
+| **P0** | BC-AN-01 dual `dappId` mint | `generate_bc_an_01_dual_proofs.sh` → **384 B** PI; `eccUSDCBridge` pytest green | ✅ |
 | **P1** | BC-AN-02 L1 bridge allowlist | integration pre-ZK test | ✅ |
 | **P1** | Joint ETH↔AN QC | cap / pause / workchain matrix in `questions-cross-chain.md` | ✅ |
 | **P2** | F2 manual withdraw/admin | `manual-audit/F2-usdcbridge-withdraw-admin.md` | ✅ |

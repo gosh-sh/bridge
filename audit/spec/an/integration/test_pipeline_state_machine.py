@@ -17,7 +17,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 from hypothesis import strategies as st
 from hypothesis.stateful import run_state_machine_as_test
 
-from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance
+from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance, BRIDGE_CONTRACT
 from pipeline_fuzz_helpers import (
     canonical_max_minted_from_history,
     deliver_random_indices,
@@ -49,14 +49,14 @@ class DepositPipelineMachine(RuleBasedStateMachine):
         self._tag = f"mpl_sm_{id(self) & 0xFFFF}"
         self.bridge_tvc = init_bridge_instance(tb, self._tag)
         self.pipe = MessagePipeline(tb)
-        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, "USDCBridge")
+        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, BRIDGE_CONTRACT)
         self.rng = random.Random(42)
         self.finalize_history: list[int] = []
         self._last_minted = 0
 
     def teardown(self):
         self.pipe.cleanup()
-        self.tb.cleanup_instance("USDCBridge", self._tag)
+        self.tb.cleanup_instance(BRIDGE_CONTRACT, self._tag)
 
     def _refresh_minted(self) -> int:
         return get_total_bridged_minted(self.tb, self.bridge_tvc)
@@ -132,14 +132,14 @@ class DepositPipelineDeepMachine(RuleBasedStateMachine):
         self._tag = f"mpl_deep_{id(self) & 0xFFFF}"
         self.bridge_tvc = init_bridge_instance(tb, self._tag)
         self.pipe = MessagePipeline(tb)
-        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, "USDCBridge")
+        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, BRIDGE_CONTRACT)
         self.rng = random.Random(99)
         self.finalize_history: list[int] = []
         self._last_minted = 0
 
     def teardown(self):
         self.pipe.cleanup()
-        self.tb.cleanup_instance("USDCBridge", self._tag)
+        self.tb.cleanup_instance(BRIDGE_CONTRACT, self._tag)
 
     def _check_step_invariants(self) -> None:
         cur = get_total_bridged_minted(self.tb, self.bridge_tvc)

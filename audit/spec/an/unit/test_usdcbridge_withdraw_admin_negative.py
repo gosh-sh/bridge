@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_NONCE,
     ERR_MULTIPLE_ECC,
     ERR_NO_ECC,
@@ -16,7 +17,6 @@ from bridge_helpers import (
     USDC_ECC_ID,
     init_bridge_instance,
 )
-
 pytestmark = pytest.mark.unit
 
 
@@ -25,14 +25,14 @@ def test_initiate_withdrawal_no_ecc(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_failure(r, ERR_NO_ECC)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_no_ecc")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_no_ecc")
 
 
 def test_initiate_withdrawal_unsupported_token(tb):
@@ -40,7 +40,7 @@ def test_initiate_withdrawal_unsupported_token(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender="0:1111111111111111111111111111111111111111111111111111111111111111",
@@ -49,7 +49,7 @@ def test_initiate_withdrawal_unsupported_token(tb):
         )
         tb.assert_failure(r, ERR_UNSUPPORTED_TOKEN)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_badtok")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_badtok")
 
 
 def test_initiate_withdrawal_zero_amount(tb):
@@ -57,7 +57,7 @@ def test_initiate_withdrawal_zero_amount(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender="0:1111111111111111111111111111111111111111111111111111111111111111",
@@ -66,7 +66,7 @@ def test_initiate_withdrawal_zero_amount(tb):
         )
         tb.assert_failure(r, ERR_ZERO_AMOUNT)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_zero")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_zero")
 
 
 def test_initiate_withdrawal_recipient_too_long(tb):
@@ -74,14 +74,14 @@ def test_initiate_withdrawal_recipient_too_long(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": "aa" * 65},
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_failure(r, ERR_RECIPIENT_TOO_LONG)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_long")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_long")
 
 
 def test_initiate_withdrawal_multiple_ecc(tb):
@@ -89,7 +89,7 @@ def test_initiate_withdrawal_multiple_ecc(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender="0:1111111111111111111111111111111111111111111111111111111111111111",
@@ -98,7 +98,7 @@ def test_initiate_withdrawal_multiple_ecc(tb):
         )
         tb.assert_failure(r, ERR_MULTIPLE_ECC)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_multi")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_multi")
 
 
 def test_mint_and_send_wrong_nonce(tb):
@@ -106,7 +106,7 @@ def test_mint_and_send_wrong_nonce(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {
                 "recipient": "0:2222222222222222222222222222222222222222222222222222222222222222",
@@ -118,4 +118,4 @@ def test_mint_and_send_wrong_nonce(tb):
         )
         tb.assert_failure(r, ERR_INVALID_NONCE)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_nonce")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_nonce")

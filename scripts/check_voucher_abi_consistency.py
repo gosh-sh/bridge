@@ -83,6 +83,27 @@ def render(params: Params) -> str:
     return "(" + ", ".join(f"{t} {n}" for t, n in params) + ")"
 
 
+def resolve_bridge_source(exchange_dir: pathlib.Path) -> pathlib.Path:
+    """USDCBridge.sol (legacy overlay) or eccUSDCBridge.sol (contracts/bridge)."""
+    for name in ("USDCBridge.sol", "eccUSDCBridge.sol"):
+        path = exchange_dir / name
+        if path.is_file():
+            return path
+    raise SystemExit(
+        f"{exchange_dir}: neither USDCBridge.sol nor eccUSDCBridge.sol found (pass --source)"
+    )
+
+
+def resolve_bridge_abi(compiled_dir: pathlib.Path) -> pathlib.Path:
+    for name in ("USDCBridge.abi.json", "eccUSDCBridge.abi.json"):
+        path = compiled_dir / name
+        if path.is_file():
+            return path
+    raise SystemExit(
+        f"{compiled_dir}: neither USDCBridge.abi.json nor eccUSDCBridge.abi.json found"
+    )
+
+
 def compare(problems: list[str], label: str, left: Params, right: Params) -> None:
     if left != right:
         problems.append(f"{label}:\n      {render(left)}\n  vs  {render(right)}")
@@ -104,11 +125,11 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    bridge_src = args.source / "USDCBridge.sol"
+    bridge_src = resolve_bridge_source(args.source)
+    bridge_name = bridge_src.stem
     voucher_src = args.source / "DepositVoucher.sol"
-    for path in (bridge_src, voucher_src):
-        if not path.is_file():
-            raise SystemExit(f"{path}: not found (pass --source)")
+    if not voucher_src.is_file():
+        raise SystemExit(f"{voucher_src}: not found (pass --source)")
 
     src_ctor = source_signature(voucher_src, "constructor")
     src_confirm = source_signature(bridge_src, "function confirmDeposit")
@@ -117,7 +138,7 @@ def main() -> int:
     problems: list[str] = []
     print(f"source {args.source}")
     print(f"  DepositVoucher.constructor  {render(src_ctor)}")
-    print(f"  USDCBridge.confirmDeposit   {render(src_confirm)}")
+    print(f"  {bridge_name}.confirmDeposit   {render(src_confirm)}")
     print(f"  new DepositVoucher(...)     {deploy_arity} args")
 
     compare(
@@ -133,17 +154,16 @@ def main() -> int:
         )
 
     if not args.source_only:
-        bridge_abi = args.compiled / "USDCBridge.abi.json"
+        bridge_abi = resolve_bridge_abi(args.compiled)
         voucher_abi = args.compiled / "DepositVoucher.abi.json"
-        for path in (bridge_abi, voucher_abi):
-            if not path.is_file():
-                raise SystemExit(f"{path}: not found (pass --compiled or --source-only)")
+        if not voucher_abi.is_file():
+            raise SystemExit(f"{voucher_abi}: not found (pass --compiled or --source-only)")
 
         abi_ctor = abi_signature(voucher_abi, "constructor")
         abi_confirm = abi_signature(bridge_abi, "confirmDeposit")
         print(f"compiled {args.compiled}")
         print(f"  DepositVoucher.constructor  {render(abi_ctor)}")
-        print(f"  USDCBridge.confirmDeposit   {render(abi_confirm)}")
+        print(f"  {bridge_abi.stem}.confirmDeposit   {render(abi_confirm)}")
 
         # The pairwise check is what would have caught 2026-07-02 on its own.
         compare(

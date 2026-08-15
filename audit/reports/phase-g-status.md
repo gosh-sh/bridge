@@ -5,6 +5,18 @@
 
 ---
 
+## G1.5 — ETH deposit baseline + edge tests (2026-08-13)
+
+| Артефакт | Содержание |
+|----------|------------|
+| `baseline-deposit-eth.md` | **только open** вопросы (не перечислять закрытые каждый раз) |
+| `baseline-deposit-eth-locked.md` | карта тест→инвариант для закрытых пунктов |
+| `delta-deposit-eth.md` | новые находки vs июльский аудит |
+| `DepositEdgeCases.t.sol`, `DepositWorkchain.t.sol` | +12 edge-case tests |
+| `f10a_binding.rs` | 12 PI (QC-PROV-01 partial close) |
+
+---
+
 ## G1 — Closeout sync (этот коммит)
 
 Обновлены: `closeout-eth.md`, `closeout-an.md`, `questions-cross-chain.md`, HANDOFF-файлы.
@@ -27,8 +39,10 @@ PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
 
 | Статус | Деталь |
 |--------|--------|
-| partial | main #15: `AlreadyFinalized` для exit `0x1000`; mock path зелёный (`f10_competing_submit.rs`) |
-| open | live `AnInterfaceSubmitter`: Revert → `Rejected` (`f10_interface_reverted.rs`) |
+| **partial QC** | `td_65_g3_revert_loop.rs` (8): exit 51 → `AlreadyFinalized`; generic `Reverted` → HOL; `is_finalized` stub; notes `td-65-g3-live-notes.md` |
+| mock | `f10_competing_submit.rs` — competing relayers, no double-mint |
+| mock | `f10_interface_reverted.rs` — generic Revert → `Rejected` |
+| open | shellnet E2E двух relayer'ов (E-AN-01); nullifier read API (QC-OFF-05) |
 
 Нужен: e2e с двумя relayer'ами на shellnet или nullifier read API.
 
@@ -44,7 +58,8 @@ PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
 
 ## G5 — E-AN-01 shellnet E2E
 
-**deferred** — после G2/G3 или по запросу ops.
+**deferred** — после G2/G3 или по запросу ops.  
+Mock recovery path: TD-53 (`td_53_e2e_runbook_recovery.rs`, `td-53-shellnet-e2e-runbook-notes.md`).
 
 ---
 
@@ -53,7 +68,7 @@ PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
 | Gate | Результат |
 |------|-----------|
 | `contracts/ethereum && forge test` | 126 passed |
-| `audit/spec/ethereum` profile audit | 56 passed |
+| `audit/spec/ethereum` profile audit | 69 passed |
 | `make pre-push-an` | 42 passed |
 | `make audit-an-test` | 74 passed |
 | `cargo test` deposit-relayer | 68 passed |
@@ -61,6 +76,17 @@ PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
 Команда:
 
     make pre-push-audit
+
+---
+
+## G6 — Phase 2 deposit ETH milestone (2026-08-14)
+
+| Артефакт | Содержание |
+|----------|------------|
+| `phase-2-deposit-eth-milestone.md` | TD-36–68 rollup, META CI gates, ops blockers, Phase 3 outline |
+| `check_deposit_audit_gates.sh` | TD-68 → TD-42 → TD-43 → TD-49 → TD-04 overlay matrix |
+
+**Verdict:** Phase 2 **closed (mock/CI)**; P0 ops carry-over TD-04 live deploy.
 
 ---
 
@@ -72,3 +98,4 @@ PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
 | `closeout-an.md` | AN BC/QC + F10 |
 | `HANDOFF-an-cross-chain-ru.txt` | RU summary для авторов |
 | `HANDOFF-f10-prover-relayer-ru.txt` | off-chain HANDOFF |
+| `phase-2-deposit-eth-milestone.md` | Phase 2 TD-36–68 rollup + Phase 3 outline |

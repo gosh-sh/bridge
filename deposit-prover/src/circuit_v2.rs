@@ -24,6 +24,86 @@ use halo2_base::{
 
 use crate::types::{DepositProofInput, ReceiptProof, TransactionProof};
 
+/// Audit PoC hook: corrupt MPT witness before `MPTInput::assign` or mutate
+/// fixture inputs before proving.
+///
+/// Production prove paths must leave this `None`. Used by TD-09 / padding PoCs
+/// to test MPT soundness (receipt root, node order, RLP length, siblings) and
+/// whether `max_key_byte_len` padding slots are constrained.
+#[derive(Clone, Debug, Default)]
+pub struct MptWitnessMutation {
+    /// Override `MPTInput.max_key_byte_len` (PoC: 4 vs axiom-eth reference 3).
+    pub max_key_byte_len: Option<usize>,
+    /// After honest `assign`, overwrite `key_bytes[idx]` (padding-slot garbage).
+    pub corrupt_key_byte_at: Option<(usize, u8)>,
+    /// XOR `receipt_root[idx]` with `mask` (wrong trie root witness).
+    pub flip_receipt_root_byte: Option<(usize, u8)>,
+    /// Swap two receipt trie proof nodes (wrong path order).
+    pub swap_receipt_proof_nodes: Option<(usize, usize)>,
+    /// Truncate `receipt_rlp` to `len` bytes (RLP length mismatch).
+    pub truncate_receipt_rlp: Option<usize>,
+    /// Replace proof node `dst` with a copy of node `src` (wrong sibling).
+    pub substitute_receipt_proof_node: Option<(usize, usize)>,
+    /// Set `proof_nodes[node][byte]` (compact-prefix / node-body corruption).
+    pub corrupt_receipt_proof_node_byte: Option<(usize, usize, u8)>,
+}
+
+/// Audit-only witness overrides (`None` in production). TD-50 BC-D05 PoCs.
+#[derive(Clone, Debug, Default)]
+pub struct DepositWitnessMutation {
+    /// At `dapp_id` byte index `idx`, load `Fr::from(val)` instead of the u8
+    /// witness (`val > 255` exercises BC-D05 range_check reject).
+    pub dapp_id_oversized_byte: Option<(usize, u64)>,
+}
+
+impl MptWitnessMutation {
+    pub fn apply_input(&self, mpt_input: &mut axiom_eth::mpt::MPTInput) {
+        if let Some(max) = self.max_key_byte_len {
+            mpt_input.max_key_byte_len = max;
+        }
+    }
+
+    pub fn apply_assigned<F: ScalarField>(
+        &self,
+        proof: &mut axiom_eth::mpt::MPTProof<F>,
+        ctx: &mut Context<F>,
+    ) {
+        if let Some((idx, byte)) = self.corrupt_key_byte_at {
+            proof.key_bytes[idx] = ctx.load_witness(F::from(byte as u64));
+        }
+    }
+
+    /// Input-level mutations applied before the circuit is constructed.
+    pub fn apply_to_deposit_input(&self, input: &mut DepositProofInput) {
+        if let Some((idx, mask)) = self.flip_receipt_root_byte {
+            if idx < input.receipt_proof.receipt_root.len() {
+                input.receipt_proof.receipt_root[idx] ^= mask;
+            }
+        }
+        if let Some((a, b)) = self.swap_receipt_proof_nodes {
+            let nodes = &mut input.receipt_proof.proof_nodes;
+            if a < nodes.len() && b < nodes.len() {
+                nodes.swap(a, b);
+            }
+        }
+        if let Some(len) = self.truncate_receipt_rlp {
+            input.receipt_proof.receipt_rlp.truncate(len);
+        }
+        if let Some((dst, src)) = self.substitute_receipt_proof_node {
+            let nodes = &mut input.receipt_proof.proof_nodes;
+            if dst < nodes.len() && src < nodes.len() {
+                nodes[dst] = nodes[src].clone();
+            }
+        }
+        if let Some((node, byte_idx, value)) = self.corrupt_receipt_proof_node_byte {
+            let nodes = &mut input.receipt_proof.proof_nodes;
+            if node < nodes.len() && byte_idx < nodes[node].len() {
+                nodes[node][byte_idx] = value;
+            }
+        }
+    }
+}
+
 /// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
 /// verifier size)
 pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from 256)
@@ -193,6 +273,10 @@ fn bytes_to_field<F: ScalarField>(
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
+    /// Audit-only MPT witness corruption (`None` in production).
+    pub mpt_mutation: Option<MptWitnessMutation>,
+    /// Audit-only non-MPT witness corruption (`None` in production).
+    pub witness_mutation: Option<DepositWitnessMutation>,
 }
 
 impl DepositEventCircuitV2 {
@@ -218,6 +302,8 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            mpt_mutation: None,
+            witness_mutation: None,
         }
     }
 
@@ -233,6 +319,8 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            mpt_mutation: None,
+            witness_mutation: None,
         }
     }
 }
@@ -286,12 +374,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
 
         // 2. Convert receipt proof to MPTInput and assign
-        let mpt_input = self.inputs.receipt_proof.to_mpt_input(
+        let mut mpt_input = self.inputs.receipt_proof.to_mpt_input(
             self.inputs.event_data.transaction_index,
             self.params.max_data_byte_len,
             self.params.max_log_num,
         );
-        let proof = mpt_input.assign(ctx);
+        if let Some(mutation) = &self.mpt_mutation {
+            mutation.apply_input(&mut mpt_input);
+        }
+        let mut proof = mpt_input.assign(ctx);
+        if let Some(mutation) = &self.mpt_mutation {
+            mutation.apply_assigned(&mut proof, ctx);
+        }
 
         // 3. Create receipt input
         let rc_input = EthReceiptInputAssigned {
@@ -555,7 +649,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             .inputs
             .dapp_id
             .iter()
-            .map(|&byte| ctx.load_witness(Fr::from(byte as u64)))
+            .enumerate()
+            .map(|(i, &byte)| {
+                if let Some((idx, val)) = self
+                    .witness_mutation
+                    .as_ref()
+                    .and_then(|m| m.dapp_id_oversized_byte)
+                {
+                    if i == idx {
+                        return ctx.load_witness(Fr::from(val));
+                    }
+                }
+                ctx.load_witness(Fr::from(byte as u64))
+            })
             .collect();
         let range = chip.range();
         for byte in dapp_id_bytes.iter() {

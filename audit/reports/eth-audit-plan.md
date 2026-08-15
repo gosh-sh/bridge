@@ -33,7 +33,7 @@
 
 | Модуль | Файлы | Критичность |
 |--------|-------|-------------|
-| **Core bridge** | `AckiNackiBridge.sol` | **Critical** — custody, verifyBlock, withdrawByProof, pause, AAVE |
+| **Core bridge** | `AckiNackiBridge.sol` | **Critical** — custody, verifyBlock, withdrawByProof, AAVE (no bridge `pause` — #20) |
 | **Verifier adapters** | `PrimaryVerifier`, `FallbackAggregatorVerifier`, `LayerHashesMovementVerifier`, `BridgeWithdrawalVerifier` | **High** — PI layout, proof length, try/catch |
 | **SHPLONK aggregators** | `*AggregatorVerifier.sol`, `ShplonkAggregatorVerifierBase.sol` | **High** — production path; mock bypass = fund loss |
 | **Oracle** | `AxiomBlockHeaderOracle.sol` | Medium — сейчас не на hot path |
@@ -41,6 +41,8 @@
 | **Deploy scripts** | `script/Deploy*.s.sol` | Medium — misconfiguration |
 
 **Out of scope:** soundness partner circuits, relayer daemons (byzantine relayer не может украсть — только stall).
+
+**Deposit off-chain verification (TD-43):** MockProver / `verify_proof` struct **не** заменяют SHPLONK opcode triple. CI smoke: `check_mock_vs_shplonk_smoke.sh`; opcode path: `verify_deposit_opcode_triple`. Не полагаться на mock-only green при аудите deposit-prover / relayer. См. `audit/PROJECT_FACTS.md` § verification layers, `audit/reports/td-43-mock-vs-shplonk-notes.md`.
 
 ---
 
@@ -76,7 +78,7 @@
 - `MAX_DEPOSIT_AMOUNT`, zero amount, `anAccount == 0`
 - Fee-on-transfer / weird ERC-20 (USDC на mainnet — pause/blacklist — QC для Sepolia mock)
 - Rounding при 6 decimals
-- Interaction с `pause` / `whenNotPaused`
+- Interaction с bridge pause — **нет** (#20); token pause/blacklist external (TD-58)
 
 **SWC-фокус:** SWC-107 (reentrancy), SWC-105 (unprotected ether/token), SWC-132 (unexpected balance).
 
@@ -109,7 +111,7 @@
 - `tokenId`, amount vs treasury / USDC balance
 - Treasury shortfall path — partial pay vs revert
 - Strict forwarding публичных inputs в verifier (MockBridgeWithdrawalVerifier strict mode)
-- Interaction: withdraw до первого verifyBlock, после pause
+- Interaction: withdraw до первого verifyBlock (no bridge pause gate)
 
 **SWC-фокус:** SWC-120 (authorization), SWC-114 (tx order), double-spend.
 
@@ -122,7 +124,7 @@
 - AC-2, AC-4, AC-5 — owner не трогает principal
 - `liquidReserveBps` cap, `supplyToAave` / `withdrawFromAave` / `emergencyWithdrawAll`
 - `harvestYield` — yield vs principal isolation (`accruedYield`)
-- Pause: блокирует deposit/verifyBlock/withdraw но не owner AAVE?
+- Pause: **removed (#20)** — document token pause + relayer ops only
 - Verifier adapters: ZK-1..5 — proof length, address(0), try/catch swallow
 - Production vs mock verifiers в deploy scripts
 - `AxiomBlockHeaderOracle` — fail-closed, immutables
@@ -187,7 +189,7 @@
 - DEP-1..4 каждый — positive + negative
 - Accounting: `treasuryBalance` после N deposits; после `supplyToAave` principal unchanged
 - Edge: `MAX_DEPOSIT_AMOUNT`, `MAX+1`, amount=0, `anAccount=0`
-- Pause: deposit reverts when paused
+- Pause asymmetry: `DepositPauseAsymmetry.t.sol` — no `BridgePaused` on deposit
 
 ### C2 — verifyBlock (mock verifiers)
 
@@ -264,7 +266,7 @@ CI/night: `FOUNDRY_PROFILE=ci` (5000 fuzz / 1000 invariant) — как в ammalg
 | **Solvency** | sum(deposits) - sum(withdrawals) ≤ USDC balance + aUSDC principal |
 | **Replay** | same nullifier / seqNo never succeeds twice |
 | **Access** | non-owner never calls owner functions |
-| **Pause** | user ops blocked iff paused |
+| **Pause** | **No bridge pause (#20)**; USDC token pause external |
 
 **Критерий готовности:** `FOUNDRY_PROFILE=audit forge test` green; counterexamples задокументированы или → BC.
 
@@ -321,7 +323,7 @@ FOUNDRY_PROFILE=fork FORK_URL=$RPC forge test --match-contract Fork
 | S5 | **Oracle / anchor** — stale anchor, fake finalRoot |
 | S6 | **Verifier bypass** — adapter returns true on garbage; wrong proof length |
 | S7 | **Denial of service** — unbounded loops, griefing (bridge stall OK, fund lock NOT) |
-| S8 | **Centralization** — owner pause, emergency withdraw, yield harvest |
+| S8 | **Centralization** — owner AAVE/yield paths (no bridge pause #20) |
 | S9 | **Cross-function** — deposit + supplyToAave + withdrawByProof ordering |
 | S10 | **Token assumptions** — USDC pause/blacklist (document trust model) |
 
@@ -376,7 +378,7 @@ ZK opcode (`ZKHALO2VERIFYWITHVK`) — **smoke only** (trust boundary); глуб�
 - `AckiNackiBridgeWithdrawByProof.t.sol` (27) — withdraw
 - `AckiNackiBridgeVerifyBlock.t.sol` (17) — real proofs verifyBlock
 - `AckiNackiBridgeAaveTest.t.sol` (21) — AAVE mock
-- `AckiNackiBridgePause.t.sol` (12)
+- `DepositPauseAsymmetry.t.sol` (TD-58); `AckiNackiBridgePause.t.sol` **removed** (#20)
 - `FuzzAckiNackiBridgeVerifyBlock.t.sol` (7) — pre-crypto fuzz
 - `AckiNackiBridgeRelayerLoop.t.sol` (6) — multi-block mock
 

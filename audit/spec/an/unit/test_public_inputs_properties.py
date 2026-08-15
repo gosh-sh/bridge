@@ -68,7 +68,7 @@ def test_dapp_limb_mutation_changes_pi(deposit_id: int, flip_byte: int):
     """BC-AN-01 helper — same depositId, flipped dapp limb → different PI."""
     base = build_public_inputs(deposit_id=deposit_id)
     mutated = bytearray(base)
-    idx = 4 * 32 + flip_byte
+    idx = 5 * 32 + flip_byte
     mutated[idx] ^= 0x01
     assert parse_pi_fields(bytes(mutated))["deposit_id"] == deposit_id
     assert bytes(mutated) != base

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Rsync AN bridge contracts from sibling acki-nacki into audit/spec/an-contracts/.
 #
-# Default: contracts/dex_bridge @ git@github.com:gosh-sh/acki-nacki.git
-# (DEX+bridge integration tip). Override: ACKI_NACKI_BRANCH=dev
+# Default: contracts/bridge @ git@github.com:gosh-sh/acki-nacki.git
+# (bridge deposit stack: eccUSDCBridge 12-PI + allowlist). Override: ACKI_NACKI_BRANCH=dev
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${ACKI_NACKI_ROOT:-$ROOT/../acki-nacki}"
 DEST="$ROOT/audit/spec/an-contracts"
 REMOTE="${ACKI_NACKI_REMOTE:-origin}"
-BRANCH="${ACKI_NACKI_BRANCH:-contracts/dex_bridge}"
+BRANCH="${ACKI_NACKI_BRANCH:-contracts/bridge}"
 PRESERVE_AUDIT_VK_BLOB="${PRESERVE_AUDIT_VK_BLOB:-1}"
 SKIP_DEPOSIT_FIXTURES="${SKIP_DEPOSIT_FIXTURES:-1}"
 
@@ -69,14 +69,22 @@ if [[ -f "$SRC/contracts/Makefile.inc" ]]; then
 fi
 
 MANIFEST="$DEST/contracts_manifest.json"
-cat > "$MANIFEST" <<'EOF'
-{
-  "contracts": [
-    {"name": "USDCBridge", "source": "exchange"},
-    {"name": "DepositVoucher", "source": "exchange"}
-  ]
+BRIDGE_NAME="USDCBridge"
+if [[ ! -f "$DEST/exchange/USDCBridge.sol" ]] && [[ -f "$DEST/exchange/eccUSDCBridge.sol" ]]; then
+  BRIDGE_NAME="eccUSDCBridge"
+fi
+python3 - "$MANIFEST" "$BRIDGE_NAME" <<'PY'
+import json, sys
+manifest, bridge = sys.argv[1], sys.argv[2]
+data = {
+    "contracts": [
+        {"name": bridge, "source": "exchange"},
+        {"name": "DepositVoucher", "source": "exchange"},
+    ]
 }
-EOF
+open(manifest, "w").write(json.dumps(data, indent=2) + "\n")
+print(f"manifest bridge contract: {bridge}")
+PY
 
 if [[ "${SKIP_DEPOSIT_FIXTURES}" != "1" ]] && [[ -d "$SRC/tests/exchange/fixtures/deposit_10proofs" ]]; then
   echo "Sync deposit_10proofs fixtures ..."

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from bridge_helpers import USDC_BRIDGE_ADDR, USDC_ECC_ID, fixtures_available, init_bridge_instance, load_fixture_proof
+from bridge_helpers import (
+    BRIDGE_CONTRACT,
+    USDC_BRIDGE_ADDR,
+    USDC_ECC_ID,
+    fixtures_available,
+    init_bridge_instance,
+    load_fixture_proof,
+    seed_trust_from_pi,
+)
 from test_base import MessagePipeline
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -13,7 +21,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 def get_minted(tb, bridge_tvc) -> int:
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "getTotalBridged",
         {"tokenId": str(USDC_ECC_ID)},
         address=USDC_BRIDGE_ADDR,
@@ -27,13 +35,14 @@ def test_finalize_deposit_without_voucher_code_no_mint(tb):
     """QC-AN-07 — ZK + deploy msg may run, but mint requires valid voucher code in pipeline."""
     bridge_tvc = init_bridge_instance(tb, "qc07_novc", with_voucher_code=False)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     proof, pi = load_fixture_proof(0)
+    seed_trust_from_pi(tb, bridge_tvc, pi)
     try:
         minted_before = get_minted(tb, bridge_tvc)
         r = tb.call(
             bridge_tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": proof.hex(), "publicInputs": pi.hex()},
             address=USDC_BRIDGE_ADDR,
@@ -46,4 +55,4 @@ def test_finalize_deposit_without_voucher_code_no_mint(tb):
         assert get_minted(tb, bridge_tvc) == minted_before
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "qc07_novc")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "qc07_novc")

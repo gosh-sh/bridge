@@ -16,7 +16,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 from hypothesis.stateful import run_state_machine_as_test
 
-from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance
+from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance, BRIDGE_CONTRACT
 from pipeline_fuzz_helpers import (
     canonical_max_minted_from_history,
     deliver_random_indices,
@@ -43,7 +43,7 @@ class BounceRetryPipelineMachine(RuleBasedStateMachine):
         self._tag = f"mpl_bnc_{id(self) & 0xFFFF}"
         self.bridge_tvc = init_bridge_instance(tb, self._tag)
         self.pipe = MessagePipeline(tb)
-        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, "USDCBridge")
+        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, BRIDGE_CONTRACT)
         self.rng = random.Random(808)
         self.finalize_history: list[int] = []
         self._last_jr: JsonResult | None = None
@@ -52,7 +52,7 @@ class BounceRetryPipelineMachine(RuleBasedStateMachine):
 
     def teardown(self):
         self.pipe.cleanup()
-        self.tb.cleanup_instance("USDCBridge", self._tag)
+        self.tb.cleanup_instance(BRIDGE_CONTRACT, self._tag)
 
     def _check(self) -> None:
         cur = get_total_bridged_minted(self.tb, self.bridge_tvc)
@@ -117,7 +117,7 @@ def test_bounce_probe_alone_does_not_mint(tb):
     tag = "bounce_only"
     bridge_tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     rng = random.Random(1)
     try:
         jr = finalize_enqueue(tb, bridge_tvc, pipe, 0)
@@ -133,7 +133,7 @@ def test_bounce_probe_alone_does_not_mint(tb):
         assert len(pipe.history) >= before
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
@@ -142,7 +142,7 @@ def test_deploy_retry_after_success_is_idempotent(tb):
     tag = "retry_idem"
     bridge_tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     try:
         jr = finalize_enqueue(tb, bridge_tvc, pipe, 0)
         drain_fifo(pipe)
@@ -153,4 +153,4 @@ def test_deploy_retry_after_success_is_idempotent(tb):
         assert get_total_bridged_minted(tb, bridge_tvc) == minted
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)

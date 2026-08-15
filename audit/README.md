@@ -52,11 +52,12 @@ Every spec test header should cite the invariant(s) it covers.
 
 | Track | Artifact | Status |
 |-------|----------|--------|
-| ETH overlay | `spec/ethereum/` | **56/56** on `audit-new` |
+| ETH overlay | `spec/ethereum/` | **69/69** on `audit-new` |
 | AN pytest | `spec/an/` | **74** `make audit-an-test` |
 | F10 relayer | `crates/deposit-relayer-daemon/tests/f10_*` | **68** cargo tests |
 | Closeout ETH | `reports/closeout-eth.md` | G1 synced — 9 QC open |
 | Closeout AN | `reports/closeout-an.md` | G1 synced — BC-AN-02 + QC open |
+| Deposit test catalog | `reports/test-directions-deposit-eth-catalog.md` | 68 TD, 3-agent dedup, PoC backlog |
 | **G2** | BC-AN-02 disposition | **next** |
 | **G3** | QC-OFF-06 live path | partial in main |
 | **G5** | E-AN-01 shellnet E2E | deferred |

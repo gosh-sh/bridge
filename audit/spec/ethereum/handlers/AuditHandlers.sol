@@ -6,6 +6,7 @@ import "forge-std/Test.sol";
 import "@src/AckiNackiBridge.sol";
 import "@src/IBridgeWithdrawalVerifier.sol";
 import "@bridge-test/mocks/MockERC20.sol";
+import "@bridge-test/mocks/FeeOnTransferERC20.sol";
 import "@bridge-test/mocks/MockAave.sol";
 
 /// @title DepositHandler
@@ -38,16 +39,19 @@ contract DepositHandler is Test {
 
 /// @title TreasuryHandler
 /// @notice Handler for TR-1 / TR-2 invariant campaigns (deposit, AAVE ops, withdraw).
-/// @dev Ghost vars: `ghostDeposited`, `ghostWithdrawn`.
+/// @dev Ghost vars: `ghostDeposited`, `ghostWithdrawn`. TD-14 interleaves donation/skim/accrue.
 contract TreasuryHandler is Test {
     AckiNackiBridge public immutable bridge;
     MockERC20 public immutable usdc;
+    MockAUSDC public immutable aUSDC;
+    MockAavePool public immutable pool;
     address public immutable owner;
 
     uint256 public ghostDeposited;
     uint256 public ghostWithdrawn;
     uint256 internal depositNonce;
     uint256 internal withdrawNonce;
+    uint256 internal donateNonce;
 
     uint256 public immutable seedAnchor;
     uint256 public immutable dappFr;
@@ -57,6 +61,8 @@ contract TreasuryHandler is Test {
     constructor(
         AckiNackiBridge _bridge,
         MockERC20 _usdc,
+        MockAUSDC _aUSDC,
+        MockAavePool _pool,
         address _owner,
         uint256 _seedAnchor,
         uint256 _dappFr,
@@ -66,6 +72,8 @@ contract TreasuryHandler is Test {
     ) {
         bridge = _bridge;
         usdc = _usdc;
+        aUSDC = _aUSDC;
+        pool = _pool;
         owner = _owner;
         seedAnchor = _seedAnchor;
         dappFr = _dappFr;
@@ -119,6 +127,43 @@ contract TreasuryHandler is Test {
         vm.stopPrank();
     }
 
+    /// @dev TD-14 — accrue AAVE yield on supplied principal (pre-harvest path).
+    function accrueAaveYield(uint256 amountSeed) external {
+        uint256 amount = bound(amountSeed, 1, 1_000_000);
+        aUSDC.accrueYield(address(bridge), amount);
+        usdc.mint(address(pool), amount);
+    }
+
+    /// @dev TD-14 — skim liquid excess above `treasuryBalance` (post-emergency yield).
+    function skimExcessUsdcMax() external {
+        vm.startPrank(owner);
+        if (bridge.excessUsdc() > 0) {
+            bridge.skimExcessUsdc(type(uint256).max);
+        }
+        vm.stopPrank();
+    }
+
+    function skimExcessPartial(uint256 amountSeed) external {
+        vm.startPrank(owner);
+        uint256 excess = bridge.excessUsdc();
+        if (excess > 0) {
+            bridge.skimExcessUsdc(bound(amountSeed, 1, excess));
+        }
+        vm.stopPrank();
+    }
+
+    /// @dev TD-14 / TR-3 cross — direct USDC transfer does not credit `treasuryBalance`.
+    function donateDirectUsdc(uint256 amountSeed) external {
+        uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
+        address donor = address(
+            uint160(uint256(keccak256(abi.encode("donate", donateNonce++, amountSeed))))
+        );
+        usdc.mint(donor, amount);
+        vm.startPrank(donor);
+        usdc.transfer(address(bridge), amount);
+        vm.stopPrank();
+    }
+
     /// @dev BOUNDS: amount ∈ [1, treasuryBalance]
     function withdrawByProof(uint256 amountSeed, uint256 nullifierSeed) external {
         uint256 tb = bridge.treasuryBalance();
@@ -157,6 +202,50 @@ contract TreasuryHandler is Test {
 
     function _dummyProof() internal pure returns (bytes memory) {
         return hex"00";
+    }
+}
+
+/// @title FoTTreasuryHandler
+/// @notice TD-23 — deposit handler for fee-on-transfer tokens in TR-1 invariant campaigns.
+/// @dev Ghost `ghostDeposited` tracks nominal `deposit(amount)`; custody is net-of-fee.
+contract FoTTreasuryHandler is Test {
+    AckiNackiBridge public immutable bridge;
+    FeeOnTransferERC20 public immutable fot;
+    uint256 public immutable minDepositAmount;
+
+    uint256 public ghostDeposited;
+    uint256 public ghostCustodyReceived;
+    uint256 public fotDepositOps;
+    uint256 internal depositNonce;
+
+    constructor(
+        AckiNackiBridge _bridge,
+        FeeOnTransferERC20 _fot,
+        uint256 _initialGhostDeposited,
+        uint256 _minDepositAmount
+    ) {
+        bridge = _bridge;
+        fot = _fot;
+        ghostDeposited = _initialGhostDeposited;
+        minDepositAmount = _minDepositAmount;
+    }
+
+    /// @dev BOUNDS: amount ∈ [minDepositAmount, MAX_DEPOSIT_AMOUNT] — fee must be non-zero.
+    function depositFoT(uint256 amountSeed) external {
+        if (minDepositAmount > bridge.MAX_DEPOSIT_AMOUNT()) return;
+        uint256 amount = bound(amountSeed, minDepositAmount, bridge.MAX_DEPOSIT_AMOUNT());
+        address user = address(
+            uint160(uint256(keccak256(abi.encode("fot-dep", depositNonce++, amountSeed))))
+        );
+        uint256 custodyBefore = fot.balanceOf(address(bridge));
+        fot.mint(user, amount);
+        vm.startPrank(user);
+        fot.approve(address(bridge), amount);
+        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        vm.stopPrank();
+        ghostDeposited += amount;
+        ghostCustodyReceived += fot.balanceOf(address(bridge)) - custodyBefore;
+        fotDepositOps++;
     }
 }
 
@@ -366,6 +455,14 @@ contract OwnerOpsHandler is Test {
         vm.startPrank(owner);
         if (bridge.aUsdcBalance() > 0 || bridge.suppliedPrincipal() > 0) {
             bridge.emergencyWithdrawAll();
+        }
+        vm.stopPrank();
+    }
+
+    function skimExcessMax() external {
+        vm.startPrank(owner);
+        if (bridge.excessUsdc() > 0) {
+            bridge.skimExcessUsdc(type(uint256).max);
         }
         vm.stopPrank();
     }

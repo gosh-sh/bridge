@@ -5,9 +5,13 @@
 //! the prover would refuse to build a witness for.
 
 pub use deposit_chain_ids::{
-    is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
-    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
-    CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
+    is_production_deposit_chain, is_supported_deposit_chain, is_testnet_only_deposit_chain,
+    parse_deployment_profile, production_and_testnet_only_disjoint,
+    production_deposit_chains_display, supported_deposit_chain_name,
+    supported_deposit_chains_display, validate_chain_for_deployment_profile,
+    DepositDeploymentProfile, CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST,
+    CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN,
+    PRODUCTION_DEPOSIT_CHAIN_IDS, SUPPORTED_DEPOSIT_CHAIN_IDS, TESTNET_ONLY_DEPOSIT_CHAIN_IDS,
 };
 
 #[cfg(test)]

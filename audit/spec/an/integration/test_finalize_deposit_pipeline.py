@@ -5,12 +5,14 @@ from __future__ import annotations
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     USDC_BRIDGE_ADDR,
     USDC_ECC_ID,
     fixtures_available,
     fr_le,
     init_bridge_instance,
     load_fixture_proof,
+    seed_trust_from_pi,
 )
 from test_base import JsonResult, MessagePipeline
 
@@ -37,7 +39,7 @@ def voucher_address(pipe: MessagePipeline, deploy_msg: dict) -> str:
 def get_minted(tb, bridge_tvc) -> int:
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "getTotalBridged",
         {"tokenId": str(USDC_ECC_ID)},
         address=USDC_BRIDGE_ADDR,
@@ -47,10 +49,11 @@ def get_minted(tb, bridge_tvc) -> int:
 
 
 def finalize_and_drain(tb, bridge_tvc, pipe: MessagePipeline, proof: bytes, pi: bytes):
+    seed_trust_from_pi(tb, bridge_tvc, pi)
     prev = len(pipe.history)
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "finalizeDeposit",
         {"proof": proof.hex(), "publicInputs": pi.hex()},
         address=USDC_BRIDGE_ADDR,
@@ -79,7 +82,7 @@ def test_dep_an_11_pipeline_voucher_confirm_minted(tb):
     """INV DEP-AN-11: voucher deploy → confirmDeposit → minted increases."""
     bridge_tvc = init_bridge_instance(tb, "dep11")
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     proof, pi = load_fixture_proof(0)
     expected = fr_le(pi, 2)
     try:
@@ -91,7 +94,7 @@ def test_dep_an_11_pipeline_voucher_confirm_minted(tb):
         assert get_minted(tb, bridge_tvc) == minted_before + expected
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "dep11")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "dep11")
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="run scripts/sync_an_contracts.sh")
@@ -99,7 +102,7 @@ def test_dep_an_12_replay_finalize_minted_unchanged(tb):
     """INV DEP-AN-12: replay same proof → minted unchanged."""
     bridge_tvc = init_bridge_instance(tb, "dep12")
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     proof, pi = load_fixture_proof(0)
     try:
         r1, _ = finalize_and_drain(tb, bridge_tvc, pipe, proof, pi)
@@ -116,4 +119,4 @@ def test_dep_an_12_replay_finalize_minted_unchanged(tb):
         assert all(s.gas_used < 10_000 for s in replay_bridge)
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "dep12")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "dep12")

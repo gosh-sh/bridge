@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, init_bridge_instance, load_fixture_proof
+from bridge_helpers import (
+    BRIDGE_CONTRACT,
+    USDC_BRIDGE_ADDR,
+    fixtures_available,
+    init_bridge_instance,
+    load_fixture_proof,
+    seed_trust_from_pi,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -16,9 +23,10 @@ def test_finalize_deposit_real_fixture(tb, proof_idx: int):
     tvc = init_bridge_instance(tb, f"fd_real{proof_idx:02d}")
     try:
         proof, pi = load_fixture_proof(proof_idx)
+        seed_trust_from_pi(tb, tvc, pi)
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": proof.hex(), "publicInputs": pi.hex()},
             address=USDC_BRIDGE_ADDR,
@@ -26,4 +34,4 @@ def test_finalize_deposit_real_fixture(tb, proof_idx: int):
         tb.assert_success(r, f"finalizeDeposit proof_{proof_idx:02d}")
         assert len(r.messages) >= 1, "expected DepositVoucher deploy internal message"
     finally:
-        tb.cleanup_instance("USDCBridge", f"fd_real{proof_idx:02d}")
+        tb.cleanup_instance(BRIDGE_CONTRACT, f"fd_real{proof_idx:02d}")

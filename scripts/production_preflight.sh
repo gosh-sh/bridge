@@ -3,8 +3,21 @@
 #
 # Usage:
 #   ./scripts/production_preflight.sh
+#   ./scripts/production_preflight.sh --help
 #   make production-preflight
 set -euo pipefail
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+Production preflight — EIP-170, verifier artefacts, Foundry gates, relayer tests.
+
+TD-16 negative (must fail):
+  CHAIN_ID=11155111 PROFILE=prod ./scripts/td_16_prod_no_sepolia.sh
+
+See also: scripts/td_16_prod_no_sepolia.sh --help
+EOF
+  exit 0
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
@@ -77,11 +90,17 @@ echo "--- [4/5] Foundry production gate tests ---"
   echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
 )
 
-echo "--- [5/5] Relayer unit tests ---"
+echo "--- [5/6] Relayer unit tests ---"
 (
   cd crates/bridge-relayer-daemon
   cargo test --quiet
 )
+
+echo "--- [6/6] TD-16 prod deposit chain policy (prod ∩ testnet = ∅) ---"
+chmod +x scripts/td_16_prod_no_sepolia.sh
+if ! ./scripts/td_16_prod_no_sepolia.sh; then
+  fail=1
+fi
 
 echo "=== Preflight summary ==="
 if (( fail )); then

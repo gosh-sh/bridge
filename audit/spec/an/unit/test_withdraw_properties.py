@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given, strategies as st
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_MULTIPLE_ECC,
     ERR_NO_ECC,
     ERR_RECIPIENT_TOO_LONG,
@@ -15,7 +16,6 @@ from bridge_helpers import (
     USDC_ECC_ID,
     init_bridge_instance,
 )
-
 pytestmark = [pytest.mark.unit, pytest.mark.property]
 
 pytest.importorskip("hypothesis")
@@ -31,7 +31,7 @@ def test_recipient_length_exit_code(tb, length: int):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": recipient},
             address=USDC_BRIDGE_ADDR,
@@ -41,7 +41,7 @@ def test_recipient_length_exit_code(tb, length: int):
         else:
             tb.assert_failure(r, ERR_NO_ECC)
     finally:
-        tb.cleanup_instance("USDCBridge", f"wd_len_{length}")
+        tb.cleanup_instance(BRIDGE_CONTRACT, f"wd_len_{length}")
 
 
 @pytest.mark.parametrize(
@@ -58,7 +58,7 @@ def test_ecc_attachment_table(tb, ecc: dict, expected: int | None):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender=SENDER,
@@ -70,7 +70,7 @@ def test_ecc_attachment_table(tb, ecc: dict, expected: int | None):
         else:
             tb.assert_failure(r, expected)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_ecc_tbl")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_ecc_tbl")
 
 
 def test_multiple_ecc_reverts(tb):
@@ -79,7 +79,7 @@ def test_multiple_ecc_reverts(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender=SENDER,
@@ -88,4 +88,4 @@ def test_multiple_ecc_reverts(tb):
         )
         tb.assert_failure(r, ERR_MULTIPLE_ECC)
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_multi")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_multi")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bridge_helpers import EVM_RECIPIENT_20B, USDC_BRIDGE_ADDR, USDC_ECC_ID, init_bridge_instance
+from bridge_helpers import EVM_RECIPIENT_20B, USDC_BRIDGE_ADDR, USDC_ECC_ID, init_bridge_instance, BRIDGE_CONTRACT
 
 pytestmark = pytest.mark.unit
 
@@ -16,7 +16,7 @@ def test_initiate_withdrawal_happy_burn_and_event(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "11155111", "recipient": EVM_RECIPIENT_20B},
             sender=sender,
@@ -26,4 +26,4 @@ def test_initiate_withdrawal_happy_burn_and_event(tb):
         tb.assert_success(r, "initiateWithdrawal")
         assert r.messages, "expected outbound messages (monitoring event)"
     finally:
-        tb.cleanup_instance("USDCBridge", "wd_happy")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_happy")

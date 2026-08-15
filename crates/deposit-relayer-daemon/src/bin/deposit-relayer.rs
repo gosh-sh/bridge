@@ -493,20 +493,20 @@ async fn ensure_supported_rpc_chain(
     provider: &impl alloy::providers::Provider,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<u64> {
-    use deposit_relayer_daemon::{is_supported_deposit_chain, supported_deposit_chains_display};
-    let id = provider.get_chain_id().await?;
-    if !is_supported_deposit_chain(id) {
-        anyhow::bail!(
-            "RPC eth_chainId {id} is not a supported deposit chain; supported: {}",
-            supported_deposit_chains_display()
-        );
-    }
-    if let Some(expected) = expect_chain_id {
-        if id != expected {
-            anyhow::bail!("RPC eth_chainId {id} != --expect-chain-id {expected}");
-        }
-    }
-    Ok(id)
+    deposit_relayer_daemon::resolve_supported_chain_id(provider, expect_chain_id)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+async fn ensure_prover_rpc_matches_source(
+    source_chain_id: u64,
+    prover_rpc_url: &str,
+    expect_chain_id: Option<u64>,
+) -> anyhow::Result<()> {
+    let prover_provider = ProviderBuilder::new().connect_http(prover_rpc_url.parse()?);
+    let prover_chain_id = ensure_supported_rpc_chain(&prover_provider, expect_chain_id).await?;
+    deposit_relayer_daemon::ensure_matching_source_prover_chain_ids(source_chain_id, prover_chain_id)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 async fn watch(
@@ -563,6 +563,9 @@ async fn prove_one(
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let _chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
+    if prover_cfg.rpc_url != rpc_url {
+        ensure_prover_rpc_matches_source(_chain_id, &prover_cfg.rpc_url, expect_chain_id).await?;
+    }
 
     let event = if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
         let tx_hash = alloy::primitives::B256::from_str(&tx_hash)
@@ -665,6 +668,9 @@ async fn run_daemon(
     // deposit rather than after a long prove.
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
+    if prover_cfg.rpc_url != rpc_url {
+        ensure_prover_rpc_matches_source(chain_id, &prover_cfg.rpc_url, expect_chain_id).await?;
+    }
     info!(
         chain_id,
         chain = deposit_relayer_daemon::supported_deposit_chain_name(chain_id).unwrap_or("?"),

@@ -401,9 +401,10 @@ where
             chunk_start = chunk_end.saturating_add(1);
         }
 
-        if let Some(cursor) = &self.scan_cursor {
-            *cursor.lock().expect("poisoned scan cursor") = safe_head;
-        }
+        // TD-06: never advance `scan_cursor` to `safe_head` on a targeted
+        // per-`depositId` fetch. Sequential deposits in the same block window
+        // live at blocks < `safe_head`; advancing the cursor here permanently
+        // skips them (see `td_06_scan_cursor.rs`).
 
         for log in logs {
             let decoded = match log.log_decode::<Deposit>() {
@@ -546,5 +547,40 @@ mod tests {
     fn confirmation_depth_saturates_when_confirmations_exceed_head() {
         assert!(!is_deposit_block_finalized(1, 5, 100));
         assert!(is_deposit_block_finalized(0, 5, 100));
+    }
+
+    /// TD-51 — documents `fetch_deposit_from_receipt` head gate (returns `Ok(None)`).
+    #[test]
+    fn test_td51_fetch_deposit_from_receipt_head_regression() {
+        let deposit_block = 100u64;
+        let confirmations = 12u64;
+        // head=110 → safe_head=98: deposit block 100 not buried yet.
+        assert!(!is_deposit_block_finalized(deposit_block, 110, confirmations));
+        // head=112 → safe_head=100: same deposit becomes finalizable.
+        assert!(is_deposit_block_finalized(deposit_block, 112, confirmations));
+    }
+
+    /// TD-51 — documents `EthLogSource::resolve_chain_id` cache (QC: stale if RPC lies post-startup).
+    #[test]
+    fn test_td51_resolve_chain_id_cached() {
+        let cache = Mutex::new(None::<u64>);
+        let mut rpc_calls = 0u32;
+        let mut read_chain_id = || {
+            rpc_calls += 1;
+            Ok::<u64, ()>(42)
+        };
+        let resolve = |cache: &Mutex<Option<u64>>,
+                       read: &mut dyn FnMut() -> Result<u64, ()>| {
+            if let Some(id) = *cache.lock().expect("poisoned") {
+                return Ok::<u64, ()>(id);
+            }
+            let id = read()?;
+            *cache.lock().expect("poisoned") = Some(id);
+            Ok(id)
+        };
+
+        assert_eq!(resolve(&cache, &mut read_chain_id).unwrap(), 42);
+        assert_eq!(resolve(&cache, &mut read_chain_id).unwrap(), 42);
+        assert_eq!(rpc_calls, 1, "second resolve must not re-read eth_chainId");
     }
 }

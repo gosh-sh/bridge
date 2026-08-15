@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_ZKPROOF,
     ERR_OVERFLOW,
     ERR_ZERO_AMOUNT,
@@ -12,7 +13,6 @@ from bridge_helpers import (
     build_public_inputs,
     init_bridge_instance,
 )
-
 pytestmark = pytest.mark.unit
 
 
@@ -23,14 +23,14 @@ def test_finalize_deposit_zero_amount(tb):
     pi = build_public_inputs(amount=0).hex()
     r = tb.call(
       tvc,
-      "USDCBridge",
+      BRIDGE_CONTRACT,
       "finalizeDeposit",
       {"proof": "00", "publicInputs": pi},
       address=USDC_BRIDGE_ADDR,
     )
     tb.assert_failure(r, ERR_ZERO_AMOUNT)
   finally:
-    tb.cleanup_instance("USDCBridge", "fd_zero")
+    tb.cleanup_instance(BRIDGE_CONTRACT, "fd_zero")
 
 
 def test_finalize_deposit_amount_overflow(tb):
@@ -40,14 +40,14 @@ def test_finalize_deposit_amount_overflow(tb):
     pi = build_public_inputs(amount=(1 << 64)).hex()
     r = tb.call(
       tvc,
-      "USDCBridge",
+      BRIDGE_CONTRACT,
       "finalizeDeposit",
       {"proof": "00", "publicInputs": pi},
       address=USDC_BRIDGE_ADDR,
     )
     tb.assert_failure(r, ERR_OVERFLOW)
   finally:
-    tb.cleanup_instance("USDCBridge", "fd_ovf")
+    tb.cleanup_instance(BRIDGE_CONTRACT, "fd_ovf")
 
 
 def test_finalize_deposit_invalid_zk_proof(tb):
@@ -57,14 +57,14 @@ def test_finalize_deposit_invalid_zk_proof(tb):
     pi = build_public_inputs(amount=1).hex()
     r = tb.call(
       tvc,
-      "USDCBridge",
+      BRIDGE_CONTRACT,
       "finalizeDeposit",
       {"proof": "00", "publicInputs": pi},
       address=USDC_BRIDGE_ADDR,
     )
     tb.assert_failure(r, ERR_INVALID_ZKPROOF)
   finally:
-    tb.cleanup_instance("USDCBridge", "fd_badzk")
+    tb.cleanup_instance(BRIDGE_CONTRACT, "fd_badzk")
 
 
 def test_confirm_deposit_wrong_sender(tb):
@@ -75,9 +75,10 @@ def test_confirm_deposit_wrong_sender(tb):
   try:
     r = tb.call(
       tvc,
-      "USDCBridge",
+      BRIDGE_CONTRACT,
       "confirmDeposit",
       {
+        "chainId": "11155111",
         "depositId": "1",
         "contractAddr": "0",
         "dappId": "0",
@@ -88,4 +89,4 @@ def test_confirm_deposit_wrong_sender(tb):
     )
     tb.assert_failure(r, ERR_INVALID_SENDER)
   finally:
-    tb.cleanup_instance("USDCBridge", "cd_sender")
+    tb.cleanup_instance(BRIDGE_CONTRACT, "cd_sender")

@@ -62,6 +62,21 @@ Bridge assumes standard ERC-20 semantics (no fee-on-transfer). Circle blacklist/
 
 ---
 
+## Deposit pipeline — mock vs SHPLONK (TD-43)
+
+Off-chain deposit proofs must pass the **Blake2b SHPLONK opcode triple**, not only MockProver / `verify_proof`.
+
+| When | Run |
+|------|-----|
+| CI / pre-push deposit audit | `scripts/check_deposit_audit_gates.sh` (includes TD-43 smoke after VkBlob pin) |
+| Local opcode reproduction | `deposit-prover/examples/verify_opcode_triple.rs` or `verify_deposit_opcode_triple` |
+| Witness / constraint only | `test_circuit_mock` — **insufficient** for AN finalize |
+| Struct PI match only | `verify_proof` — **insufficient** (bincode Snark ≠ Blake2b wire) |
+
+Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inputs.bin`). Without fixture, smoke needs `deposit-prover/data/kzg_params_18.srs` or `DEPOSIT_KZG_SRS`. See `audit/reports/td-43-mock-vs-shplonk-notes.md`.
+
+---
+
 ## Deploy checklist (mainnet)
 
 1. `./scripts/check_withdrawal_verifier_not_stub.sh`

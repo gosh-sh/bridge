@@ -211,6 +211,8 @@ audit-solidity-ci: ## Audit overlay @ profile ci (5000 fuzz / 1000 inv; ~8 min)
 
 audit-deposit-relayer-test: ## F10 deposit-relayer unit + integration + proptest
 	@echo "$(BLUE)Running deposit-relayer-daemon tests...$(NC)"
+	@chmod +x scripts/check_deposit_audit_gates.sh
+	@./scripts/check_deposit_audit_gates.sh
 	@cd crates/deposit-relayer-daemon && cargo test
 
 bootstrap-an-audit-py: ## Create .venv-an-audit with pytest + hypothesis

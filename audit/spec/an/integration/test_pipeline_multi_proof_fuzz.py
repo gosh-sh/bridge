@@ -12,13 +12,12 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 from hypothesis.stateful import run_state_machine_as_test
 
-from bridge_helpers import USDC_BRIDGE_ADDR, get_total_bridged_minted, init_bridge_instance, ten_proofs_available
+from bridge_helpers import USDC_BRIDGE_ADDR, get_total_bridged_minted, init_bridge_instance, ten_proofs_available, BRIDGE_CONTRACT
 from pipeline_fuzz_helpers import (
     canonical_bridged_minted,
     canonical_max_minted_from_history,
     deliver_random_indices,
     finalize_enqueue,
-    sum_all_proof_amounts,
 )
 from test_base import MessagePipeline
 
@@ -40,14 +39,14 @@ class DepositPipelineMultiProofMachine(RuleBasedStateMachine):
         self._tag = f"mpl_x10_{id(self) & 0xFFFF}"
         self.bridge_tvc = init_bridge_instance(tb, self._tag)
         self.pipe = MessagePipeline(tb)
-        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, "USDCBridge")
+        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, BRIDGE_CONTRACT)
         self.rng = random.Random(2026)
         self.finalize_history: list[int] = []
         self._last_minted = 0
 
     def teardown(self):
         self.pipe.cleanup()
-        self.tb.cleanup_instance("USDCBridge", self._tag)
+        self.tb.cleanup_instance(BRIDGE_CONTRACT, self._tag)
 
     def _check(self) -> None:
         cur = get_total_bridged_minted(self.tb, self.bridge_tvc)
@@ -113,9 +112,9 @@ def test_multi_proof_pipeline_state_machine(tb):
 
 @pytest.mark.skipif(not ten_proofs_available(), reason="need proof_00..proof_09")
 def test_all_ten_proofs_fifo_reaches_full_oracle(tb):
-    """Deterministic: proofs 0..9 sequential FIFO mint sum of all amounts."""
+    """Deterministic: proofs 0..9 sequential FIFO — mint capped by replay keys."""
     indices = list(range(10))
-    expected = sum_all_proof_amounts()
+    expected = canonical_max_minted_from_history(indices)
     canonical = canonical_bridged_minted(tb, indices, "mpl_x10_fifo")
     assert canonical == expected
     assert expected > 0

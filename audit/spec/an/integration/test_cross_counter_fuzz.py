@@ -18,6 +18,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 from hypothesis.stateful import run_state_machine_as_test
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     EVM_RECIPIENT_20B,
     USDC_BRIDGE_ADDR,
     USDC_ECC_ID,
@@ -56,7 +57,7 @@ class CrossCounterMachine(RuleBasedStateMachine):
         self._tag = f"cc_sm_{id(self) & 0xFFFF}"
         self.bridge_tvc = init_bridge_instance(tb, self._tag)
         self.pipe = MessagePipeline(tb)
-        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, "USDCBridge")
+        self.pipe.register(USDC_BRIDGE_ADDR, self.bridge_tvc, BRIDGE_CONTRACT)
         self.rng = random.Random(7)
         self.finalize_history: list[int] = []
         self.mint_nonce = 0
@@ -66,7 +67,7 @@ class CrossCounterMachine(RuleBasedStateMachine):
 
     def teardown(self):
         self.pipe.cleanup()
-        self.tb.cleanup_instance("USDCBridge", self._tag)
+        self.tb.cleanup_instance(BRIDGE_CONTRACT, self._tag)
 
     def _sync_counters(self) -> tuple[int, int, int]:
         bridged_m, bridged_b = get_bridged_counters(self.tb, self.bridge_tvc)
@@ -124,7 +125,7 @@ class CrossCounterMachine(RuleBasedStateMachine):
     def withdraw_burn(self, amount: int):
         r = self.tb.call_internal(
             self.bridge_tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender=WITHDRAW_SENDER,
@@ -161,7 +162,7 @@ def test_qc_an_05_owner_mint_allows_burned_above_bridged_minted(tb):
 
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender=WITHDRAW_SENDER,
@@ -174,4 +175,4 @@ def test_qc_an_05_owner_mint_allows_burned_above_bridged_minted(tb):
         assert bridged_b2 == WHOLE_USDC // 2
         assert bridged_b2 > bridged_m2, "QC-AN-05: bridged burned can exceed bridged minted"
     finally:
-        tb.cleanup_instance("USDCBridge", "qc_an_05")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "qc_an_05")

@@ -101,7 +101,10 @@ impl RelayerState {
                 Ok(())
             },
             Some(stored) if stored == expected => Ok(()),
-            Some(_) if force => {
+            Some(stored) if force => {
+                if stored != expected {
+                    self.reset_for_new_deployment();
+                }
                 self.deployment = Some(expected.clone());
                 Ok(())
             },
@@ -172,6 +175,17 @@ impl RelayerState {
         self.last_processed_deposit_id = Some(deposit_id);
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = 0;
+    }
+
+    /// Clear progress cursors when `--force-state` overrides a deployment
+    /// mismatch (TD-18). Prevents reusing `last_processed` across bridge
+    /// redeploys or `dappId` namespace changes.
+    pub fn reset_for_new_deployment(&mut self) {
+        self.last_processed_deposit_id = None;
+        self.last_attempt_deposit_id = None;
+        self.attempts_since_progress = 0;
+        self.scanned_through_block = None;
+        self.parked_deposit_ids.clear();
     }
 }
 
@@ -264,6 +278,47 @@ mod tests {
         };
         let err = s.ensure_deployment(&deployment(2), false).unwrap_err();
         assert!(err.to_string().contains("deployment mismatch"));
+    }
+
+    #[test]
+    fn force_deployment_mismatch_resets_progress() {
+        let mut s = RelayerState {
+            deployment: Some(deployment(1)),
+            last_processed_deposit_id: Some(5),
+            last_attempt_deposit_id: Some(5),
+            attempts_since_progress: 3,
+            scanned_through_block: Some(42),
+            parked_deposit_ids: vec![2],
+            ..RelayerState::default()
+        };
+        let new_dep = DeploymentIdentity::new(
+            2,
+            Address::repeat_byte(0x99),
+            "0xBBBBBBBBBBBB",
+        );
+        s.ensure_deployment(&new_dep, true).unwrap();
+        assert_eq!(s.deployment, Some(new_dep));
+        assert_eq!(s.last_processed_deposit_id, None);
+        assert_eq!(s.next_target(0), 0);
+        assert_eq!(s.scanned_through_block, None);
+        assert!(s.parked_deposit_ids.is_empty());
+    }
+
+    #[test]
+    fn partial_tmp_file_ignored_when_state_json_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+
+        let mut s = RelayerState::default();
+        s.ensure_deployment(&deployment(11155111), false).unwrap();
+        s.record_progress(3);
+        s.save(&path).unwrap();
+
+        std::fs::write(&tmp, b"{\"last_processed_deposit_id\": 99").unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.last_processed_deposit_id, Some(3));
     }
 
     #[test]

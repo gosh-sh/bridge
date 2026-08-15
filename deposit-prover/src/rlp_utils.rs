@@ -359,6 +359,157 @@ pub fn verify_block_header_rlp<T>(block: &Block<T>) -> Result<Vec<u8>> {
     Ok(rlp)
 }
 
+/// Live `eth_getBlockByNumber` header fixtures for the per-L2 shape matrix (TD-32).
+pub struct HeaderShapeSample {
+    pub name: &'static str,
+    pub raw_json: &'static str,
+    pub expected_fields: usize,
+}
+
+pub const HEADER_SHAPE_SAMPLES: &[HeaderShapeSample] = &[
+    HeaderShapeSample {
+        name: "arbitrum_one",
+        raw_json: include_str!("../fixtures/headers/arbitrum_one.json"),
+        expected_fields: 16,
+    },
+    HeaderShapeSample {
+        name: "mainnet_shanghai",
+        raw_json: include_str!("../fixtures/headers/mainnet_shanghai.json"),
+        expected_fields: 17,
+    },
+    HeaderShapeSample {
+        name: "op_ecotone",
+        raw_json: include_str!("../fixtures/headers/op_ecotone.json"),
+        expected_fields: 20,
+    },
+    HeaderShapeSample {
+        name: "sepolia_prague",
+        raw_json: include_str!("../fixtures/headers/sepolia_prague.json"),
+        expected_fields: 21,
+    },
+    HeaderShapeSample {
+        name: "op_isthmus",
+        raw_json: include_str!("../fixtures/headers/op_isthmus.json"),
+        expected_fields: 21,
+    },
+];
+
+/// TD-64 — one pinned real-block header per [`deposit_chain_ids::SUPPORTED_DEPOSIT_CHAIN_IDS`] entry.
+pub struct ChainHeaderCorpusEntry {
+    pub chain_id: u64,
+    pub chain_name: &'static str,
+    pub fixture_name: &'static str,
+    pub raw_json: &'static str,
+    pub expected_fields: usize,
+}
+
+pub const CHAIN_HEADER_CORPUS: &[ChainHeaderCorpusEntry] = &[
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_OP_MAINNET,
+        chain_name: "optimism",
+        fixture_name: "op_mainnet",
+        raw_json: include_str!("../fixtures/headers/op_mainnet.json"),
+        expected_fields: 21,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_WORLD_CHAIN,
+        chain_name: "world_chain",
+        fixture_name: "world_chain_mainnet",
+        raw_json: include_str!("../fixtures/headers/world_chain_mainnet.json"),
+        expected_fields: 21,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_MANTLE,
+        chain_name: "mantle",
+        fixture_name: "mantle_mainnet",
+        raw_json: include_str!("../fixtures/headers/mantle_mainnet.json"),
+        expected_fields: 21,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_BASE,
+        chain_name: "base",
+        fixture_name: "base_mainnet",
+        raw_json: include_str!("../fixtures/headers/base_mainnet.json"),
+        expected_fields: 21,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_ARBITRUM_ONE,
+        chain_name: "arbitrum_one",
+        fixture_name: "arbitrum_one",
+        raw_json: include_str!("../fixtures/headers/arbitrum_one.json"),
+        expected_fields: 16,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_BLAST,
+        chain_name: "blast",
+        fixture_name: "blast_mainnet",
+        raw_json: include_str!("../fixtures/headers/blast_mainnet.json"),
+        expected_fields: 20,
+    },
+    ChainHeaderCorpusEntry {
+        chain_id: deposit_chain_ids::CHAIN_ID_SEPOLIA,
+        chain_name: "sepolia",
+        fixture_name: "sepolia_prague",
+        raw_json: include_str!("../fixtures/headers/sepolia_prague.json"),
+        expected_fields: 21,
+    },
+];
+
+/// Count top-level RLP fields in an encoded header list.
+///
+/// Best-effort on truncated or malformed input: returns a partial count instead
+/// of panicking (TD-54 / BC-D09 fuzz boundary).
+pub fn rlp_header_field_count(header: &[u8]) -> usize {
+    if header.is_empty() {
+        return 0;
+    }
+    let prefix = header[0];
+    let mut i = if prefix >= 0xf8 {
+        let len_len = (prefix - 0xf7) as usize;
+        if 1 + len_len > header.len() {
+            return 0;
+        }
+        1 + len_len
+    } else if prefix >= 0xc0 {
+        1
+    } else {
+        return 0;
+    };
+    let mut fields = 0;
+    while i < header.len() {
+        let b = header[i];
+        let advance = match b {
+            0x00..=0x7f => 1,
+            0x80..=0xb7 => {
+                let payload = (b - 0x80) as usize;
+                if i + 1 + payload > header.len() {
+                    break;
+                }
+                1 + payload
+            },
+            0xb8..=0xbf => {
+                let n = (b - 0xb7) as usize;
+                if i + 1 + n > header.len() {
+                    break;
+                }
+                let mut len = 0usize;
+                for byte in &header[i + 1..i + 1 + n] {
+                    len = (len << 8) | *byte as usize;
+                }
+                let total = 1 + n + len;
+                if i + total > header.len() {
+                    break;
+                }
+                total
+            },
+            _ => break,
+        };
+        i += advance;
+        fields += 1;
+    }
+    fields
+}
+
 /// Encode transaction index for use as trie key
 ///
 /// In Ethereum's receipt trie, the key is RLP(transaction_index)
@@ -592,56 +743,8 @@ mod tests {
         assert!(pre_encoded.len() < encoded.len());
     }
 
-    /// Verbatim `eth_getBlockByNumber` responses (minus the tx/withdrawal
-    /// lists) for one block per header shape the supported chains emit.
-    const HEADER_SAMPLES: [(&str, &str, usize); 3] = [
-        // Prague / EIP-7685: 21 fields incl. `requestsHash`. Base, Mantle,
-        // World Chain and OP Mainnet have the same shape.
-        (
-            "sepolia_prague",
-            include_str!("../fixtures/headers/sepolia_prague.json"),
-            21,
-        ),
-        // OP Stack Isthmus: Prague shape with a 16-byte Holocene `extraData`.
-        (
-            "op_isthmus",
-            include_str!("../fixtures/headers/op_isthmus.json"),
-            21,
-        ),
-        // Arbitrum One: no `withdrawalsRoot`, no Cancun tail, and a 2^50
-        // `gasLimit` (7 bytes) — the widest numeric field of any supported chain.
-        (
-            "arbitrum_one",
-            include_str!("../fixtures/headers/arbitrum_one.json"),
-            16,
-        ),
-    ];
-
     fn rlp_field_count(header: &[u8]) -> usize {
-        let prefix = header[0];
-        let mut i = if prefix >= 0xf8 {
-            1 + (prefix - 0xf7) as usize
-        } else {
-            1
-        };
-        let mut fields = 0;
-        while i < header.len() {
-            let b = header[i];
-            i += match b {
-                0x00..=0x7f => 1,
-                0x80..=0xb7 => 1 + (b - 0x80) as usize,
-                _ => {
-                    let n = (b - 0xb7) as usize;
-                    let mut len = 0usize;
-                    for byte in &header[i + 1..i + 1 + n] {
-                        len = (len << 8) | *byte as usize;
-                    }
-                    1 + n + len
-                },
-            };
-            fields += 1;
-        }
-        fields
+        rlp_header_field_count(header)
     }
 
     /// The load-bearing test for header encoding: every supported header shape
@@ -652,19 +755,22 @@ mod tests {
     /// consumer can tie the proof to a canonical block.
     #[test]
     fn header_samples_reproduce_canonical_block_hash() {
-        for (name, raw, expected_fields) in HEADER_SAMPLES {
+        for sample in HEADER_SHAPE_SAMPLES {
             let block: Block<H256> =
-                serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
+                serde_json::from_str(sample.raw_json)
+                    .unwrap_or_else(|e| panic!("{}: deserialize: {e}", sample.name));
             let rlp = verify_block_header_rlp(&block)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+                .unwrap_or_else(|e| panic!("{}: {e}", sample.name));
             assert_eq!(
                 rlp_field_count(&rlp),
-                expected_fields,
-                "{name}: unexpected header field count"
+                sample.expected_fields,
+                "{}: unexpected header field count",
+                sample.name
             );
             assert!(
                 rlp.len() <= crate::circuit_v2::MAX_BLOCK_HEADER_BYTES,
-                "{name}: encoded header is {} bytes, over MAX_BLOCK_HEADER_BYTES ({})",
+                "{}: encoded header is {} bytes, over MAX_BLOCK_HEADER_BYTES ({})",
+                sample.name,
                 rlp.len(),
                 crate::circuit_v2::MAX_BLOCK_HEADER_BYTES
             );
@@ -675,7 +781,7 @@ mod tests {
     /// that hashes to a plausible-looking non-canonical value.
     #[test]
     fn header_without_requests_hash_is_rejected() {
-        let (_, raw, _) = HEADER_SAMPLES[0];
+        let raw = HEADER_SHAPE_SAMPLES[3].raw_json;
         let mut block: Block<H256> = serde_json::from_str(raw).unwrap();
         assert!(
             block.other.remove("requestsHash").is_some(),
@@ -751,7 +857,7 @@ mod tests {
     /// Arbitrum's `gasLimit` is 2^50; the circuit's per-field cap must cover it.
     #[test]
     fn arbitrum_gas_limit_fits_the_circuit_field_cap() {
-        let (_, raw, _) = HEADER_SAMPLES[2];
+        let raw = HEADER_SHAPE_SAMPLES[0].raw_json;
         let block: Block<H256> = serde_json::from_str(raw).unwrap();
         let gas_limit_bytes = (block.gas_limit.bits() + 7) / 8;
         assert!(gas_limit_bytes > 4, "sample no longer exercises the wide case");
@@ -791,8 +897,8 @@ mod tests {
     #[test]
     fn sample_headers_fit_every_integer_slot() {
         use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
-        for (name, raw, _) in HEADER_SAMPLES {
-            let block: Block<H256> = serde_json::from_str(raw).unwrap();
+        for sample in HEADER_SHAPE_SAMPLES {
+            let block: Block<H256> = serde_json::from_str(sample.raw_json).unwrap();
             for (slot, width, field) in [
                 (8, block.number.unwrap().as_u64().into(), "number"),
                 (9, block.gas_limit, "gasLimit"),
@@ -802,7 +908,11 @@ mod tests {
                 let need = ((width.bits() + 7) / 8).max(1);
                 assert!(
                     need <= BLOCK_HEADER_MAX_FIELD_LENS[slot],
-                    "{name}: {field} needs {need} bytes, slot {slot} caps at {}",
+                    "{}: {} needs {} bytes, slot {} caps at {}",
+                    sample.name,
+                    field,
+                    need,
+                    slot,
                     BLOCK_HEADER_MAX_FIELD_LENS[slot]
                 );
             }

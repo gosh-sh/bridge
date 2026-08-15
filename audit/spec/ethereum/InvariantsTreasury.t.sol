@@ -76,6 +76,8 @@ contract InvariantsTreasuryTest is StdInvariant, Test {
         handler = new TreasuryHandler(
             bridge,
             usdc,
+            aUSDC,
+            pool,
             address(this),
             seedAnchor,
             DAPP_FR,

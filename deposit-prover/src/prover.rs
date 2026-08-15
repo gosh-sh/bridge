@@ -78,7 +78,7 @@ use halo2_base::{
 use snark_verifier_sdk::{evm::gen_evm_verifier_shplonk, gen_pk, halo2::gen_snark_shplonk, Snark};
 
 use crate::{
-    circuit_v2::DepositEventCircuitV2,
+    circuit_v2::{DepositEventCircuitV2, DepositWitnessMutation, MptWitnessMutation},
     types::{DepositProofInput, DepositProofOutput, NUM_PUBLIC_INPUTS},
 };
 
@@ -163,27 +163,73 @@ pub fn get_default_params() -> RlcCircuitParams {
 ///
 /// `Ok(())` if the circuit is satisfied, `Err` otherwise
 pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Result<(), String> {
-    // Load circuit parameters
+    test_circuit_mock_with_mpt_mutation(input, config, None)
+}
+
+/// Run MockProver with optional MPT witness / fixture mutations (audit PoCs).
+pub fn test_circuit_mock_with_mpt_mutation(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+    mpt_mutation: Option<MptWitnessMutation>,
+) -> Result<(), String> {
+    let instances = test_circuit_mock_instances(input, config, mpt_mutation)?;
+    let _ = instances;
+    Ok(())
+}
+
+/// MockProver run returning public instances (for PI ↔ event binding checks).
+pub fn test_circuit_mock_instances(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+    mpt_mutation: Option<MptWitnessMutation>,
+) -> Result<Vec<Vec<Fr>>, String> {
+    let mut input = input;
+    if let Some(ref mutation) = mpt_mutation {
+        mutation.apply_to_deposit_input(&mut input);
+    }
+
     let params = get_default_params();
     let k = params.base.k as u32;
 
-    // Create the circuit
-    let circuit_input = DepositEventCircuitV2::new(input, config);
+    let mut circuit_input = DepositEventCircuitV2::new(input, config);
+    circuit_input.mpt_mutation = mpt_mutation;
     let mut circuit = create_circuit(CircuitBuilderStage::Mock, params, circuit_input);
 
-    // Fulfill Keccak promises (required for RLC)
     circuit.mock_fulfill_keccak_promises(None);
-
-    // Calculate circuit parameters
     circuit.calculate_params();
-
-    // Get public instances
     let instances = circuit.instances();
 
-    // Run MockProver. `verify()` rather than `assert_satisfied()`: the latter
-    // panics, which makes an unsatisfied circuit indistinguishable from a crash
-    // and defeats the point of returning a `Result` — negative tests need to
-    // observe the rejection, not unwind through it.
+    MockProver::run(k, &circuit, instances.clone())
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })?;
+
+    Ok(instances)
+}
+
+/// MockProver with audit-only witness corruption (TD-50 BC-D05 range_check).
+pub fn test_circuit_mock_with_witness_mutation(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+    witness_mutation: DepositWitnessMutation,
+) -> Result<(), String> {
+    let params = get_default_params();
+    let k = params.base.k as u32;
+
+    let mut circuit_input = DepositEventCircuitV2::new(input, config);
+    circuit_input.witness_mutation = Some(witness_mutation);
+    let mut circuit = create_circuit(CircuitBuilderStage::Mock, params, circuit_input);
+
+    circuit.mock_fulfill_keccak_promises(None);
+    circuit.calculate_params();
+    let instances = circuit.instances();
+
     MockProver::run(k, &circuit, instances)
         .map_err(|e| format!("MockProver failed to run: {e:?}"))?
         .verify()
@@ -193,7 +239,40 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
                 msg.push_str(&format!("\n  {f}"));
             }
             msg
-        })
+        })?;
+
+    Ok(())
+}
+
+/// MockProver with corrupted public instances (audit PoC: TD-21 promiseCommit binding).
+pub fn test_circuit_mock_with_pi_corruption(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+    corrupt: impl FnOnce(&mut Vec<Vec<Fr>>),
+) -> Result<(), String> {
+    let params = get_default_params();
+    let k = params.base.k as u32;
+
+    let circuit_input = DepositEventCircuitV2::new(input, config);
+    let mut circuit = create_circuit(CircuitBuilderStage::Mock, params, circuit_input);
+
+    circuit.mock_fulfill_keccak_promises(None);
+    circuit.calculate_params();
+    let mut instances = circuit.instances();
+    corrupt(&mut instances);
+
+    MockProver::run(k, &circuit, instances)
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })?;
+
+    Ok(())
 }
 
 /// Load KZG parameters from disk

@@ -25,6 +25,16 @@ use crate::{
     types::{DepositEvent, DepositProofBundle, DepositPublicInputs},
 };
 
+/// Best-effort kill for a timed-out subprocess (TD-52).
+fn kill_process_pid(pid: Option<u32>) {
+    if let Some(p) = pid {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(p.to_string())
+            .status();
+    }
+}
+
 /// Produces a [`DepositProofBundle`] for a confirmed [`DepositEvent`].
 #[async_trait]
 pub trait ProofGenerator: Send + Sync {
@@ -232,29 +242,38 @@ impl SubprocessProofGenerator {
             }
             c
         };
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
-        let output = tokio::time::timeout(self.config.timeout, cmd.output())
-            .await
-            .map_err(|_| {
-                RelayerError::ProofGeneration(format!(
+        let child = cmd.spawn().map_err(|e| {
+            RelayerError::ProofGeneration(format!("failed to spawn deposit-prover: {e}"))
+        })?;
+        let child_pid = child.id();
+
+        // TD-52: on timeout, kill by pid — dropping a cancelled `wait_with_output`
+        // future does not always terminate `cargo run --example` children.
+        match tokio::time::timeout(self.config.timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    return Err(RelayerError::ProofGeneration(format!(
+                        "deposit-prover example {:?} exited with {}: {}",
+                        args.first(),
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                Ok(())
+            },
+            Ok(Err(e)) => Err(RelayerError::ProofGeneration(format!(
+                "failed to wait on deposit-prover child: {e}"
+            ))),
+            Err(_) => {
+                kill_process_pid(child_pid);
+                Err(RelayerError::ProofGeneration(format!(
                     "deposit-prover example timed out after {:?}",
                     self.config.timeout
-                ))
-            })?
-            .map_err(|e| {
-                RelayerError::ProofGeneration(format!("failed to spawn deposit-prover: {e}"))
-            })?;
-
-        if !output.status.success() {
-            return Err(RelayerError::ProofGeneration(format!(
-                "deposit-prover example {:?} exited with {}: {}",
-                args.first(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )));
+                )))
+            },
         }
-        Ok(())
     }
 }
 

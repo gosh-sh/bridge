@@ -9,7 +9,7 @@
 ## Summary
 
 The `withdrawByProof` payout path is the AN→ETH fund exit. Contract-side enforcement is **solid**: correct
-Checks-Effects-Interactions ordering (nullifier + treasury mutated before any transfer), `nonReentrant`, `whenNotPaused`,
+Checks-Effects-Interactions ordering (nullifier + treasury mutated before any transfer), `nonReentrant` only (#20),
 immutable identity pinning, exact 160-bit recipient reconstruction with per-half range checks, per-contract nullifier
 replay protection, chain-id binding with a tightly scoped shellnet alias, and fail-closed behaviour before any
 `verifyBlock` has recorded an anchor.
@@ -33,7 +33,7 @@ aggregator adapter instead.
 - [x] Amount vs treasury / USDC transfer — `amount > treasuryBalance` reverts `WithdrawTreasuryShortfall`; no partial pay; AAVE top-up pull is bounded and reverts on shortfall. Sound.
 - [x] Treasury shortfall behaviour — reverts atomically; nullifier NOT consumed on revert (verified by `test_..._verifierRejects_revertsAndDoesNotMutateState` and shortfall test). Sound.
 - [x] Public input forwarding to verifier — all 10 PIs forwarded verbatim; aggregator adapter re-checks re-exposed instances [12..21]; verifier `false`/revert ⇒ `WithdrawalProofRejected`, no state mutation. Sound (but see A3-03 for the stub adapter).
-- [x] Pause / no-anchor-yet paths — `whenNotPaused` (tested in `AckiNackiBridgePause.t.sol`); before any `verifyBlock`, every `finalRoot` (incl. 0) fails the anchor check. Sound.
+- [x] Pause / no-anchor-yet paths — **no bridge pause** (#20 / TD-58); before any `verifyBlock`, every `finalRoot` fails anchor check. `DepositPauseAsymmetry.t.sol`
 - [x] tokenId assumptions — only `tokenId == 0` (or scoped `altTokenId`) accepted; `amount` treated as 6-decimal USDC unconditionally (A3-05 coupling note).
 - [x] CEI: nullifier set before transfer — yes; `_nullifiers[k]=true; treasuryBalance-=amount;` precede the AAVE pull and `usdc.transfer`. Sound.
 - [x] `withdrawByProof` permissionless — payout targets the proof-bound `recipient`, never `msg.sender`; front-running is MEV-neutral (griefer only burns gas). Positive.
@@ -71,6 +71,6 @@ See `audit/reports/manual-audit/invariants-extended.md` §A3 for the full WD-1..
 | WD-7 | A nullifier pays out at most once; replay reverts `NullifierAlreadyUsed`. |
 | WD-8 | CEI: `_nullifiers[k]=true` and `treasuryBalance -= amount` execute before any external call; `nonReentrant`. |
 | WD-9 | `amount ≤ treasuryBalance` (else revert); payouts are all-or-nothing (no partial pay). |
-| WD-10 | `whenNotPaused`: paused ⇒ revert `BridgePaused`. |
+| WD-10 | **OBSOLETE (#20):** no `BridgePaused` on `withdrawByProof`; token pause external (TD-24/58) |
 | WD-11 | All 10 public inputs are forwarded byte-for-byte to the verifier; a `false`/revert leaves all state untouched. |
 | WD-12 | Payout is sent to the proof-bound `recipient`, independent of `msg.sender` (permissionless submission). |

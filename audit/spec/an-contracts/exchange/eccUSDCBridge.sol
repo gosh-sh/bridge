@@ -10,7 +10,7 @@ interface IShellAccumulator {
     function buyShellFor(address buyer) external;
 }
 
-/// @title USDCBridge
+/// @title eccUSDCBridge
 /// @notice The name covers three distinct flows that share storage / owner key
 ///         but are otherwise independent:
 ///
@@ -31,13 +31,15 @@ interface IShellAccumulator {
 ///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
 ///            `finalizeDeposit` / `confirmDeposit` (verify proof, deploy
 ///            deterministic `DepositVoucher` for anti-replay, mint ECC).
-///            destination/source chain are opaque to this contract.
+///            The destination chain of a withdrawal is opaque; the SOURCE of a
+///            deposit is proof-bound (chainId + emitting contract) and gated by
+///            the owner-managed `_trustedL1Bridge` allowlist.
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
 ///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
 ///
 ///         Deployed at fixed address in zerostate.
-contract USDCBridge is USDCBridgeModifiers, ISubscriber {
-    string constant version = "1.1.0";
+contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
+    string constant version = "1.3.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -52,17 +54,19 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         uint256 depositId,
         uint256 contractAddr,
         uint256 dappId,
+        uint256 chainId,
         uint128 amount,
         uint256 anAccount
     );
 
     /// @notice Deposit fields read out of the proven public-inputs blob.
     struct DepositPI {
-        uint256 depositId;     // fr[0] — anti-replay anchor (per source contract/dapp)
+        uint256 depositId;     // fr[0] — anti-replay anchor (per source chain/contract/dapp)
         uint128 amount;        // fr[2]
         uint256 contractAddr;  // fr[3] — L1 bridge contract that emitted the event
-        uint256 dappId;        // fr[4]<<128 | fr[5] — AN dapp id
-        uint256 anAccount;     // fr[6]<<128 | fr[7] — AN recipient (256-bit, proof-bound)
+        uint256 chainId;       // fr[4] — source L1 chain id (EIP-1559 tx proof-bound)
+        uint256 dappId;        // pinned to 0 — see _parsePublicInputs
+        uint256 anAccount;     // fr[7]<<128 | fr[8] — AN recipient (256-bit, proof-bound)
     }
 
     uint256 _ownerPubkey;
@@ -88,92 +92,106 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
     // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
     TvmCell _depositVoucherCode;
 
+    // Source-chain allowlist: L1 chainId -> SET of bridge contracts on that
+    // chain whose deposit events this bridge accepts. A deposit passes if its
+    // proof-bound (chainId, contractAddr) hits any present entry — so an L1
+    // bridge rotation can keep the old and the new address trusted at once for
+    // a migration window, then drop the old one. An absent entry (false) means
+    // that address is not accepted. Owner-managed via `setTrustedL1Bridge`;
+    // deliberately NOT carried through `onCodeUpgrade` — after a code upgrade
+    // the bridge accepts no deposits until the owner re-seeds it (fail-closed).
+    mapping(uint256 => mapping(uint256 => bool)) _trustedL1Bridge;
+
     // ZK verifying key (VkBlob) for the FINAL ETH-deposit circuit
-    // (receipt-proof of an L1 deposit event, 11 public inputs). Audit overlay
-    // (max_key_byte_len=3, axiom-eth @1d61be0, Hermez SRS k=18):
+    // (receipt-proof of an L1 deposit event, 12 public inputs). Hermez SRS k=18:
     //   deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin
-    // 3982 bytes; sha256=724687a4db00b11afd24500715e6b0ab0ee73a27dbbfcef0cb865d03ede79b9c
+    // 5006 bytes; sha256=9dacd998af5fd03af8097cb80a571df098c925bba235af61d920cc808360fae3
     bytes constant VK_BLOB =
-        hex"564b424c4f4200000200010000000000ec0000007b22726c63223a7b2262617365223a7b226b223a31382c226e756d5f6164"
-        hex"766963655f7065725f7068617365223a5b31332c31305d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f"
-        hex"6164766963655f7065725f7068617365223a5b312c312c305d2c226c6f6f6b75705f62697473223a382c226e756d5f696e73"
-        hex"74616e63655f636f6c756d6e73223a317d2c226e756d5f726c635f636f6c756d6e73223a317d2c226b656363616b223a7b22"
-        hex"636f6d705f6c6f616465725f706172616d73223a7b226d61785f686569676874223a302c2273686172645f63617073223a5b"
-        hex"36345d7d7d7d8a0e00000212000000001c00000058c338696a199ecb26464c9bdedd6f46e6fa0c9974d91b9fcaa627c329df"
-        hex"f21a4e7b0e1f40caf730f9cb23b5583598194673b2bc3c7f181c20266ff8b4d3cf263c5fe8e4306d821943491717d0628ffd"
-        hex"ba76fcecc7821125a36b7248605e5f23761a6622b0bab9300986d70b8e5f49efe221acd3f85713f09de804432b80930b5fd2"
-        hex"1dccbc7228aff95afe27989687390e02314dbb76851aca0f0eed3554fc18b3be9a3a4da11db71bf86500e86212ab3b3c524d"
-        hex"02c197c14dd773879e342c05db935101e59d4c505fb8904c071dfa423f0bb5fe7be040f3b164bd414f161d01a414d27ff209"
-        hex"38c7329fb35a79bdeb029c823e35c2c23dcd45fb800a8a550926ef2a097b473418d4da72ee708a6b7aa4dc14912f8f8049fd"
-        hex"838e12fdc22db81f3ae5d1abb6834b98f06b160f2402e5368e5a0e5eae6437eb1096346ad5e3ef297e9d67129484b9797c0c"
-        hex"12c21a0f171fa8035f7831455362885767e579397306f0300e82850ab65baf1a2c6413e6b4b26a3825f17c67c1128e55dc01"
-        hex"eaa1321775436210f7b4c48fb0d03b39b3ddbe7a2a902bec503ecb50008f63ebae412918b7b6ebafd72e8145607fc294acc3"
-        hex"08adc81c0d985bdfadd2e0f4297ea2f05b111787ab3f4537bc311d35a40b6a156bdc03c7c17f6110352baeac0ca4d6837225"
-        hex"0f5c7c76d89c1d5550a57d13f17e67b98a1c1a71ca9de880486a8b10647d332eb9ff59c66b6a56ed01c2dd35b6d93ba36b04"
-        hex"bc2bf1a6fd5614d1b2f8c6476e0031f7fbdf4532a47e07ad3808551616565afbce736e174807a458e7c5f0ad5c21cacdf703"
-        hex"04b8136bf95b60a13d7d33633adae6395c4c3acdaf8e05828414862c7518f494da8f47fd68f854413fc6917c8818a8c78128"
-        hex"6a0a82d25bcdd58f9e0b0a4b31b8ee5ff6eda8b5c4fb3502b167b186dd22e00ee9284d8a7d661d7e1202a74fa70b29d3e084"
-        hex"d0121a66df1b6a87c9162b77a20b79cc785803e3ef2e1c2edf78611a1017746a8bb4ed98b9dde95e471130760b46db39f142"
-        hex"7c7f14118e2bea2730dee6c55a7a502883359d80b9f937d1d6dc61ee7126e18707567b6b841255f461f426bbf28ca86293f8"
-        hex"3687830e54385d9b5743d8a4e392288174f6dd0df25695a24d2fd554368ef8c41f2b45fdd037ac01b8e8ccf7f0f6d3c3857c"
-        hex"f7081f7c7e7ad8449e295b7a6656e4fcafa40ded1d39d92b818a99bce25cf1d08c212347730df4d54c6f85a6edbe67d06014"
-        hex"654168d00f7a23a709f01abdc0a98d18c76ee5bce93da6baa42eda8b4992f83e3b9fc900c671a6dec1f8039f5515bc162673"
-        hex"00f1b4711430de437f8b91a8cfe9f1f4e8e3b5fefd5135e50a88e872cd2681c677121c3981041154c711afaefcebd2e065cb"
-        hex"f627e595274eb594b001d014b3a432f192f08b0bfa3713754830bd36e875b4c6173b3f7408077f973f786d2005866eaedcfd"
-        hex"e789b1e798a96aaaf55a4d62278ec8bbb65611be6a87fde5aa12d1a9854221a14a0585c23cf28d8658b185bfb74fea043965"
-        hex"c9b7bfb919a56a0794e491ba93e43211e392910b3ddc450be0674db64f37b16f739e390d1bbab0180a6cab91fd77bb16a3ff"
-        hex"cfcef7001d8f295c4ebd73708524db7a46889d51b2001bcf5bff9887f0592419d4b9ac2cd0faef322a90baff1f2f76154c39"
-        hex"b41de82aac47ba03e73a3ab987e68c8d7ba2c663ec3166d2fcaa09d68c2dfe7c6b0bd32b301238886bd2ecaa09053ef3d9b8"
-        hex"fc53a49cc47b0a5c36d33bb079b0eba0d009b17c7e85db3015721f4a57c8722599dc176c4cb670d9c52027799ac89465762f"
-        hex"3eaf467abb7f4dbf14d13795c01cc4e3ac479d3c4ee7bfb3f9fc272636e6c20b605a9a9f05fd2ba27aad65c05dc40ce668f9"
-        hex"4b24a8ef05a900c50f1bff96251eed77380dd1390f0d0e9530c5b206a482251aa2429e4a73e04c6cfc2a8b491003875645b9"
-        hex"f0876ae51563afa03af9682436016d37b68c2faf9715455a484f032b8570ed29ee9113cf671db62041d768568bc4fc6b53d7"
-        hex"667d36bbe65e0d13921e1f36f05e3a548919bf85600c75b03e0656779d58361d59c834f8444cd6ff611c727efdb3134fa1ba"
-        hex"f22c9aaa92b91cf7ef569c261749d2607198888d50bf612066eec72a02304f193ae103b033d0af59daf50f2febaea3a774d3"
-        hex"c6c666152a0748574bd676f097bcba8cdf81d7c07d84a836c5c785c3704fb2f8750b2c702f2307a268a6798ab772c2189fbf"
-        hex"e02fb84df048ad6485bc63236438a49e4780611656ab894ca47a5d8704f7ae7f5580606e576d29b857998cca7888737c5990"
-        hex"cb2f9bf221fa9c755abcad0f96b1985e2a22083a07bf50b2cb5c972b7907918e3122d5e2f0199bb6b7a1bee5ba28d2d24cd9"
-        hex"87f7cce829a750b481568df38d213a1bb3fc371ce8dc1ea7d3053977dd4aaf3a6020ae3c069323bae486f963f7eaf8087bd3"
-        hex"d221a948343487f749aa989554b9e631cf68cc7680325922d8fa7172ec1bdcd25c58fa015369bed84c1fdd3477ae2e850867"
-        hex"13bfc9494e54a22509a0b212ef8954dd012ee06a3ebe30150ddebef92a42d9a824e819dd547473a489553b150aa00c5007ed"
-        hex"405e018f54ae470dcd92fa1d3d97f6821bf86ed301319e749102ecb13fa86a28cc3d9fc8c686963ea0cd30d8b86f911953fb"
-        hex"10b9af1e2ad635213810460d865d1164ad4a381ff79452570c6bd885542b1e647c1467365b480f1744b6c872444c7b2b9852"
-        hex"8d24adabe4009787070c06880c09a03b1c3a74765426f246da5443b102673151f01f4565f34cc74fd05f40712896219e8098"
-        hex"66c5270be7c04fefefb6a1021eaf2c9dea98a3c6f6e21aad2cef57ec03fd09fa99097e0215d75df2a6f29bec75c95213508d"
-        hex"5979d331052c7fca5c52bc7e83bca1403e16b19fce292a294787762574331e2080f30d100b71e9d3e96863571fd882061906"
-        hex"acdb7936c28658055b38cfa99cbeb4487cb62de67bb76633f3f3fa828aa90f2c3ba6a6aef8f3a8fb76ad47c1b96d2bbdbe4d"
-        hex"5e6619cc315ce2025ba0beaf3f12f9dd99de097127f1d4ec2302b533db3240e5851a4a61b43879a86eaa75b98b15b968a003"
-        hex"8a3d59789c7e79f8aac2bddba6109145915d424523cd358553c28f17a077ba1f8fcbb76e5f0db57831b718cfb451626bd90e"
-        hex"7ae58a5f55aff1b81908e3fee306b158ad7b7471f772f92baaae5b363eb6a9affd0cdc257c87b67d0c0c7f9087e0259a5e95"
-        hex"9397f717a26975ee3145c9251a4729ae320e082d6167872a306494b807e1f7848a41fbcd0acb08ea8d04fa9bcfcc6dd9e1e8"
-        hex"9e112ea6591e0bfa9778082b2f9492eb9d97b10f5aa2bb8c4afd030744f611a879d7e053b0257b1c07b3c223906ca62ce15a"
-        hex"1a1df17172cb48f71d8060a272b734e4e3198c20440f7790a0efa43d1fd592a82bbdd7770903c53c223ee3b07400f64acab1"
-        hex"2d1c72d43d0c4316391acd0d95cfbae31d1f90a9807db9fd8562645df81eeb431f12c845d0d43eb86da26ab80b545ddb4be0"
-        hex"2acc0e0edce11cb819c4296ecfb58c2b384cfb78800730032a6bad373c1e7f4bfc6d18902f40d3e235231ab889c3272be859"
-        hex"51278437dc3c1ae1dd362f34510a7feece60d533f7f46fc21bbcf107a3157eb896452c35a121746391c2e8bdca280243b909"
-        hex"d319e9ba56077e5408ee2f02e03efea630f5c434014a00cc35dc088bb0a15becc84202c8a0329c1f3eed7a2e9f5bc9dcc08d"
-        hex"dc61286896602e47a654f6056543bc8cb594789aef95b561870edd4ebb7001256db0abdec933a0c43bb47e8072ba448d57b8"
-        hex"e53fc64535a3972defe039c896c664c0af8f73857a0669ee013d6d56d177f10e06b0c8ad61864b2b5b3696a5b3e246f6ceba"
-        hex"608855eb0b26799565576a29208b56c7c27726723a09eb89e23ee0514aefd65d28931ad53313e869bcbf9f502fa6a5c722ea"
-        hex"43f8fe279904b495cf0562068aa564a4521c31d05ac8ae16e2d6c1ae6a7c0672b60002075214800490db0a8f92e5819c94d4"
-        hex"5acad547ac1c1a2e279d100ae947dbf76f2dce5feddb50d76b98b79061370135fbdffde1fd87530a60fbcb98b24d81e8ff17"
-        hex"0a99b5c4ab8149912e4feac3c993551707ed2dc88426a0143e00960877754a0639180de871ef03ecd05e2b1f10eb382e433d"
-        hex"7b5dc3a3e2e7b8b811f5382af20046da3bc2d2de007ac087118b4368a183c55d132fe1913153eec842cb7adeb310221fe504"
-        hex"278c690efeafd02a6471df7c23818e5571b5306adb1dbe245a1ea009f375b7e8344c7e66e5271b03d2902b15c19dcbf45aca"
-        hex"2c20a42d93a733f06d265c2004a2d5f9acaadce4a1e6ba7b837c526455dba336420ea21ea382b332fa10d922b27709acc3a8"
-        hex"18a50a6dcf7654fa518338fe8a904667c8a7e6141fb99f01483eb2e25265a70cef454b8f5e1c14e333e2ec1bf7ebd9397014"
-        hex"a78fad3cb805635da4fd6eda1d47e8122aa41636b5720c92cbda71b747699b7b3dccfc72fa06de6f4b9ece392d0bec6f1348"
-        hex"cf7300c9018eef2c89cf8e0728d1505030e95224584ed95748dcc29c75d3391c8a894f3c017e77f1084440343c6aa65bd087"
-        hex"9c043066c425727627dc7a21e39b16dd616dae1566ef25343b7663012ca39c2a5524c291fd3fe41bb579d482b4c1de058087"
-        hex"b8cadc733b734815f5ad6e7ee6e1552f36e69d30cdd050030173f8e70b786296dcaac7c7c547077ea7e5d58bc99cb5203da9"
-        hex"f4cfd204ca4daf3f9365e91b94d94f11bd2e5ce73b4579cdf78bfee19b17bcb032717022813810193e765ab372f558d4c21d"
-        hex"d5c0572ba5c3f0f347129b0698660bf3886a03a87b76ede67eb0a223666b4e6e389cbf005faf38ae1af0d22eac47bd3b1125"
-        hex"777b23d1dcd502446e1e9a02b6935501051ceda9a21f6783032bb08360abfa1143892fd6544225914450b4a1c17f48f3c232"
-        hex"c91a77f94dd3b11a7b3024c7f6cf6bbd7ec974d96895c4ce03cb7a916f0383cacc2bbc648d30ee12f7df844d6716ba78860f"
-        hex"6785dc304e2057d5ea5525cdd88dda13af97b4819a0349d9e6c2d896c8077124463635f63470c64b362e6f3a1cf1dabca203"
-        hex"db61fe2d0bc5c9a41d7e59d3bf6ed498f97c208e9b367ff1760c0219fc5142ac9af3241aefc56f17770ce0789c2e6a04d046"
-        hex"c3112744a9864a4ee3ff9859bcfdd07edc24fc1e22fde32d2693af2c94ddf55b36dac541e279be745cb664238fd28f8fed15"
-        hex"091638a0fb0da1eacb6862d297e9e185974834b7e55514429ca7b6e9e0a76100";
+        
+        hex"564b424c4f4200000200010000000000ec0000007b22726c63223a7b2262617365223a7b226b223a31382c226e756d5f6164766963655f7065725f70"
+        hex"68617365223a5b31372c31335d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b31"
+        hex"2c312c305d2c226c6f6f6b75705f62697473223a382c226e756d5f696e7374616e63655f636f6c756d6e73223a317d2c226e756d5f726c635f636f6c"
+        hex"756d6e73223a327d2c226b656363616b223a7b22636f6d705f6c6f616465725f706172616d73223a7b226d61785f686569676874223a302c22736861"
+        hex"72645f63617073223a5b36345d7d7d7d8a1200000212000000002400000058c338696a199ecb26464c9bdedd6f46e6fa0c9974d91b9fcaa627c329df"
+        hex"f21a4e7b0e1f40caf730f9cb23b5583598194673b2bc3c7f181c20266ff8b4d3cf263c5fe8e4306d821943491717d0628ffdba76fcecc7821125a36b"
+        hex"7248605e5f23761a6622b0bab9300986d70b8e5f49efe221acd3f85713f09de804432b80930b5fd21dccbc7228aff95afe27989687390e02314dbb76"
+        hex"851aca0f0eed3554fc18b3be9a3a4da11db71bf86500e86212ab3b3c524d02c197c14dd773879e342c058175537a1dc6dfc62cbc14ec73a57991d051"
+        hex"b3e8e7008002f8469672c51d7e1ef9c6dd3592c2f442d338f77c0fcf2fbf435f14d811e778d32418d496eb6e4c18ef2a097b473418d4da72ee708a6b"
+        hex"7aa4dc14912f8f8049fd838e12fdc22db81f3ae5d1abb6834b98f06b160f2402e5368e5a0e5eae6437eb1096346ad5e3ef297e9d67129484b9797c0c"
+        hex"12c21a0f171fa8035f7831455362885767e579397306f0300e82850ab65baf1a2c6413e6b4b26a3825f17c67c1128e55dc01eaa1321775436210f7b4"
+        hex"c48fb0d03b39b3ddbe7a2a902bec503ecb50008f63ebae412918b7b6ebafd72e8145607fc294acc308adc81c0d985bdfadd2e0f4297ea2f05b111787"
+        hex"ab3f4537bc311d35a40b6a156bdc03c7c17f6110352baeac0ca4d68372250f5c7c76d89c1d5550a57d13f17e67b98a1c1a71ca9de880486a8b10647d"
+        hex"332eb9ff59c66b6a56ed01c2dd35b6d93ba36b04bc2bf1a6fd5614d1b2f8c6476e0031f7fbdf4532a47e07ad3808551616565afbce736e174807a458"
+        hex"e7c5f0ad5c21cacdf70304b8136bf95b60a13d7d33633adae6395c4c3acdaf8e05828414862c7518f494da8f47fd68f854413fc6917c8818a8c78128"
+        hex"6a0a82d25bcdd58f9e0b0a4b31b8ee5ff6eda8b5c4fb3502b167b186dd22e00ee9284d8a7d661d7e1202a74fa70b29d3e084d0121a66df1b6a87c916"
+        hex"2b77a20b79cc785803e3ef2e1c2edf78611a1017746a8bb4ed98b9dde95e471130760b46db39f1427c7f14118e2bea2730dee6c55a7a502883359d80"
+        hex"b9f937d1d6dc61ee7126e18707567b6b841255f461f426bbf28ca86293f83687830e54385d9b5743d8a4e392288174f6dd0df25695a24d2fd554368e"
+        hex"f8c41f2b45fdd037ac01b8e8ccf7f0f6d3c3857cf7081f7c7e7ad8449e295b7a6656e4fcafa40ded1d39d92b818a99bce25cf1d08c212347730df4d5"
+        hex"4c6f85a6edbe67d06014654168d00f7a23a709f01abdc0a98d18c76ee5bce93da6baa42eda8b4992f83e3b9fc900c671a6dec1f8039f5515bc162673"
+        hex"00f1b4711430de437f8b91a8cfe9f1f4e8e3b5fefd5135e50a88e872cd2681c677121c3981041154c711afaefcebd2e065cbf627e595274eb594b001"
+        hex"d014b3a432f192f08b0bfa3713754830bd36e875b4c6173b3f7408077f973f786d20c04fbf93ecf26d9d8f1a625f22b7e3beb48f2a6d6d6a539d87fd"
+        hex"b70b8739561c1cff5483251c4eec6e7d9845f7fadf43bc91f25cdb18d446bd63979516f2f42b6aa54609a9f8b6da2cb6e1e4908d4d41d5552bbc5082"
+        hex"11883d21d287040ad90dd498ff381e8c325587cc4248247b779cc02b46998e9c9df732aeb650abf8cd15dc12e6b3cb77afae0b6b74f0506047cba035"
+        hex"f511fbe3704d6f8be17b8b40020666ea07c515e4f2c9315187e24e6aa4b34ebe0cec2cf0e765fc8a0e2ad500061245f5f0350f1731f025a6593756ea"
+        hex"e400fb453197621c26caf83154ab58ddbb140043e8e85a1ea61c2b003d5036b275b3592f0d9c23d077c6b5e202dda41e382bdbe685857049e51232e7"
+        hex"9d5c726369e76226a1856b35f7d8099215fac7854009ddd3a20d0390434a7d88a1b758ded170386c40210593dcff1050233e1e738d1094e491ba93e4"
+        hex"3211e392910b3ddc450be0674db64f37b16f739e390d1bbab0180a6cab91fd77bb16a3ffcfcef7001d8f295c4ebd73708524db7a46889d51b2001bcf"
+        hex"5bff9887f0592419d4b9ac2cd0faef322a90baff1f2f76154c39b41de82aac47ba03e73a3ab987e68c8d7ba2c663ec3166d2fcaa09d68c2dfe7c6b0b"
+        hex"d32bd7d83ad76d31e7c4e32ee2a76493510a25a2ca22c9dbd7027f9d1665b6d5542f91d4220bd73c6db8254f02cb1703975ba426dc84820a63f80166"
+        hex"b1029a4a95281f020cb11e4ce3fdf322487aac31dee2b8af94c6766cb7bbc6e76e03f09b1229b3a6325e0b8a5f3f15d9a013bd50314f65245b182ed0"
+        hex"96036610c95e6c61111f41d96069893b17a23322789f7a9ff0a58c0ce759236cab7e5fdcd98d5d176b112ee80f0de3f424ba597a31c7804b7b82a32d"
+        hex"e6acb74ae6ac7fb37eaf715df32f14d6fafce908de9bcdd831b91e4d053e315647e3c5036c2a25b40f6cc8e3710a35dcc890504a4de880b608cffdf1"
+        hex"ee1cf04a8d35a79588bf9dece040ba47dd2a0f403a38eaa9c2c5fdcbfd810f87e8fdaf83f54436f4d0f385f8c5698009e41bdd1067bb5ae8079664c2"
+        hex"6d235199b4831762017535d9894183cf2d4543c6a02b8bf34bbbafec7675c4957b8444904cee62d192aaf75c8d2f42fb4e85d61da428de867a1a717c"
+        hex"c0eec7de9ba178c671be17c1dfda0446558491d88e9066d7da0eead2aec05e1754737734dd929ee1aeda274ba4a3a748d8dce77fb037ec72e02a21f8"
+        hex"0c6636581bd495fce13b52b16b4236b7fdc4b53285951819c9dd6cb12313ef621078706473e424ad0ceb50f72e9f80d93a15dcd3176bf5fff9d4815d"
+        hex"7d0cabac330c2d73977efc101d66a787c915ce9cb5092cc7ff96aef0a78a0f70370defaf6b15375eb840bd653b6700675f71195b21c8a157d66de8d0"
+        hex"912ce1f5911de5311a5eb9dfe283bc8b1d089a7f779deed6a32cb87c2f9eb6060e6c886e5902a0113cdd1251d1273fba7674b6e6d14f67c0c7df0874"
+        hex"d6b395426081e8a2f801369d18e286267683b67094e8b2ad12f99bf41b256b1d203912b4fc75e34b221a4a11b5fb3a6256e8de628ca35e9cb6e2ae30"
+        hex"325fb9f83b5c0cf56bf006639f0d71ced889f722a66e88abf3960ed437975ec91fa3e9e2d03475abadde36106105bec07cc86b05579141345a51a803"
+        hex"764bd8befbe8dbcd23a5c30d958e60c7e21dfe7592ff0ae07dec2550b1f6991cc79d01e634257a97e89c016676c26b531c2239b6aba10646df33bfcb"
+        hex"2ea3c007356cf038db7aaaa5d6fb8c95ebce4dd8f525f3b7d462ca5206351dddec032d4ef725be1207b76ee2dc0448ed4712dec14203b4e47ec97907"
+        hex"75f84eba13bc71ce5b9af9d1ffda5364adcccdc9c4af4d0b3e227e92325c55998410d9034f9a3f0a66ac7e1a4208cec82feb85b3b8fe598514280e91"
+        hex"1fabcbd233fec1a6d618b0501cfe363e2508671cc47dbb976b5f2ab390207fa4cea27079c33243ebd17b49e351201f26ac7db57615d9432f82a2dabf"
+        hex"451d225bd28db3865e3ec2d4a439e1dbccb0f2b7fe8135d31f21a852bc0a170f721c4cb98c4fc4cfb496994812172c927ff617cbfd8cc0e25bbd8628"
+        hex"e284e3f72e24f3605cebe0a84da1f00310335c9af460271099819ca4c85d8fa43d9ffab5e4272dc672cdf182f9b25864706ac010155f9e123e2ff827"
+        hex"940e14407d53e565cb2f80b42e86a3fe0f5a9d5f0ec1013984bd132249f69978085cd7853a9907a54622e8096bee5bfc77ea01d0cb8e46ece8f3bf61"
+        hex"881eda9be5536d98f9cb2d087420f7699f91310338616d7c8b68ec44065edf4257036460dbb0a39647022769502064784b15111865d6942dc23128dc"
+        hex"ec08d427e2e0ab869f3e202cb70bdf4f87164e0873e8300a02a342559bf43143ded6ab5aa3679a49044f198cec552b84fe1bdd17974cea18496802ab"
+        hex"37ef3d27adb4be9df6411fef3617f73693774f9280232eaba2b5b9a4897f7432a0bcb0ed4a41630a94a3b048c66e8c7949d5f1ec372c2a8171ede20c"
+        hex"e0dccff2b51716eb1a0d48fb8d122a0de6aac1820219d29085294c3025672a4646a5600249eb1da8cd4920ad5923e41a809b3674ba2bff2c242489d0"
+        hex"8ce7f7650ad5c9c403e6e5f5d7890fe70cb8f3ed22673dd5e944c2efa10d5beb4fd4eb7ff7e46d18e36f43a9570486676cd95dea26b8ea97b5cbb32b"
+        hex"b52ecdcbd9db165c0da595b1e36adff57020f322b66d91d9d7286a97c77a977b6b23ed7b9d389ba6876449d146a45caa8d0d27dbee4b55f0c62b41b2"
+        hex"28c62c72f2189ea4021065b9524dce95e4c7aa8cdc952dac3fb805900424052b03c786f8d51a1245731dcfa56b5602a60159e49941941e5822f124ac"
+        hex"c76a0129df0be513e12cceee3a3eef2544d1c336f180e020952ce72e4c66fc0e5afe6955051358ad3003cf2064844c2fd4bdfc8508b38593780bf690"
+        hex"181a2694f92c4a022dc04aed12069c94345c8db15b7c4576a69f97f347f399871b5e324716d40b96ea2cb324840b214932f3ef72775e6defe0aa2a06"
+        hex"1e658cbcbb6e1165cbe0dc20d14b30be2f2217411278e151b142531db87bbca58ce902a124571d425a99a0bcc5d47880481ee7fad587b3e5fc05b1f3"
+        hex"52d0def52e3aa0aae5a6f0d2ac1ad30d3d311935731c9d029f379042c37a942a493052f89044eca06340b476d32f0bd7f3f355ad4817fd0538fb43e6"
+        hex"a7919a2180f440a20d3d1c770727f51df94e8192a55518f9122ff912279537d80e0ad5e748177f15c302ba2af36e9a75b27b715ccf7ee45dda21f1be"
+        hex"7cf5ad7c1a1f50aee4e98a9b85c96772f3c591b73e8b1ced40faf76bf2074c6a505cb8faf14a8fa04e81a9d2f436a187b28d6542c3ae9c78653a8071"
+        hex"2428a034ba767a06f76224ea0b67b60fab6e605512e2d99f7e85b62f70485029d0158e2ace1752e3c1494fdd925235f2164284e67b14d2b739e929ee"
+        hex"c7d7ec04dc1d68f73384d6aaf593fb455a7eae3c07284f41cfd61d98750e998cb5816efc0f099036623ca2d4a469aed5ac06d0f0f5a1be9651fd9f67"
+        hex"4eb4193d8e380b2710295b97afc6d82f30d52e2fe83003b2eab970afb68eaabfbd71e657eba06503e522865368a100fe84e67f794ba3324ec4e32660"
+        hex"9d3eb99ce6a91ab51a2b8e5277217b23a64ea97964d116c459de5ce215aeedd089bd25cd26f52b05abd73f4f8b03ccdb740bb5d75c1cd3b8824b5ae3"
+        hex"bb6c8cb6340cb4c5f1c2081bfc248967e51aedb6dc4d9fe1555978cc58c9fd063e5f4ba2352407aae2f9a919ba60bbe7381d9078e99e7ed4e5a2c378"
+        hex"b652146b5319389119e46ecc45d4b0d5ac63c3b9bd1e6cfced9053f8cd3dc1719b530a7b288eb5e9fc1402181b8fd33402eca7ecd40f9b1f41d423e9"
+        hex"037e3ce5a0e4a1cb10f6e71fbe6e67e523088bdb5d182a75721c92dcfebf5735776d339d1d7277e86ace1b0e93aae1d0deced11bc151008ae101fc94"
+        hex"49b8d00fcdaffc8c7690a42c4874710484e927d07913c8818430a31ea82e8bf72f65a90bee2dc4f8217ff3b2a2a92cbb4e485d4b8fdc7041ef638eb1"
+        hex"0c2592ef6793209e0a00d635dc506f3427a153fd1e1c4d2f2542679a33886021e21097adeba70179dd758f225ff82c376667297fc466b12d073063a3"
+        hex"f2151cfb21059b42270f4ac64f1c0f2bfa368b575a1fdd24ca99c33281460c8552302a15d82233e99a3b13a8e53b08358581adbd4e2303bc3aae485c"
+        hex"f0873ab7e5c88bee8a2f9a50811c82c394553cffa8034c3a9672e35301b434745dda6c8bb8a00fa37b0e769f19c723928f3c3c828e1e4f6460be3008"
+        hex"90cd4f20aa19932da3dc5c0e511d72ada43af2618a808a02c907b05aec6d944901dc08ca4d4098003f28c8616f1eeefc5d1e30f28beaf2f4f2dba93a"
+        hex"4f11174ecf64b7ce554d177aa1cc1b8d7404754eff61faaea0723eedd455ddc40d7b8f6c52be7a49b6b9aa2e48333bab64196d1ef3077248692615b0"
+        hex"07a0b05df067b5e3a7f3f4c038b09a098c33b4a5131158eb86b0af4e87f38fe0b8637edde73b6413e43396fcf735a2b70c47e67b861a8b13c86683a0"
+        hex"45c2ac148ed62548e1793bd378c71b3929b2a1558520c41e4b021eee1fe82e09a9440ec59d1428f7a774033c28679174b4a487046efe7b13c220e155"
+        hex"87099f5ed94688bbde9b6751678fa406ef398427bf6f81467d61de3d6c1c4e473ff66fd250365bae77aefdb6564aa32e50a9fe0f14d1f866c14de14e"
+        hex"4804da57857d02a2220a227b238b326cecca71f4af8990285781ff42946d7839c01e69d87e4e7a6ea746db3d4b378af123165f4b00bf423601702464"
+        hex"3439ab84e817dacb28d544ff80854c938d9d2bafbf3dea2f6dc23db0153123ec8f142dffef1b4a516663c2cd0eb6bdd103c2afd885c7afafc8241028"
+        hex"23d99583a21632b21911644f6509820d6207f56d83bb879db7ae080cd4e3b31b2cd6b14548918978270b39542579e7abbd4c1ef890d1a1716e3f2456"
+        hex"53a129621841150457948873c406cd2c40ab8b03b098cbc5fd758bd2418342ef2b37401373d5dcbca412005c2d06a04a7770d588c12bed62df2cae31"
+        hex"71aab098adbca7588f99ba7543fc816e1317dbd4ae57cff424d134208c5b7a81f0f71a3976d82e067b6d881ceb6aba9f4816a99d2c432bea9649eaf7"
+        hex"0862b05a226aae214bc9d2b7a7b7168261046194b9286213532123f45831df8f0d90880de3786c9042dae8425aec7f52fbcd7a16670da85e67a3554a"
+        hex"97af98c18a1fec341f46090feeb5e4961955e0e98254dbe6490b";
 
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
@@ -181,7 +199,7 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
     ///       `updateCode` upgrade) the voucher code arrives via the
     ///       `onCodeUpgrade` payload. There is no standalone setter (B2 fix),
     ///       so the only way to populate / rotate `_depositVoucherCode` is a
-    ///       full `updateCode` upgrade of USDCBridge.
+    ///       full `updateCode` upgrade of eccUSDCBridge.
     /// @param pubkey — owner public key for admin operations
     /// @param usdcWallet — address of the Exchange's TIP-3 USDC TokenWallet (subscriber target)
     constructor(
@@ -321,6 +339,33 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
     // Cross-chain bridge — inbound (any chain -> AN): verify proof, deploy DepositVoucher, mint ECC
     // ========================================================
 
+    /// @notice Owner-managed source-chain allowlist entry: add or remove ONE L1
+    ///         bridge contract from the trusted SET of `chainId`. `l1Bridge` is
+    ///         the L1 address left-padded to uint256, exactly as the circuit
+    ///         exposes it in the public inputs (fr[3]). `allowed=true` trusts it,
+    ///         `false` revokes it; several addresses may be trusted on the same
+    ///         chain at once (rotation window). Applies to `finalizeDeposit`
+    ///         only — the outbound path and the TIP-3/owner-mint flows are
+    ///         unaffected.
+    function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        if (allowed) {
+            _trustedL1Bridge[chainId][l1Bridge] = true;
+        } else {
+            delete _trustedL1Bridge[chainId][l1Bridge];
+        }
+    }
+
+    /// @notice Returns the trusted L1 bridge SET for `chainId` (address -> true).
+    function getTrustedL1Bridges(uint256 chainId) external view returns (mapping(uint256 => bool)) {
+        return _trustedL1Bridge[chainId];
+    }
+
+    /// @notice True if `l1Bridge` is in the trusted set of `chainId`.
+    function isTrustedL1Bridge(uint256 chainId, uint256 l1Bridge) external view returns (bool) {
+        return _trustedL1Bridge[chainId][l1Bridge];
+    }
+
     /// @notice Finalizes an L1 deposit proven by the final ETH-deposit halo2
     ///         circuit (receipt-proof of the L1 deposit event). The relayer
     ///         passes the proof and its public-inputs blob verbatim; we verify
@@ -332,15 +377,24 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
     ///                         `proof_cell` operand of TVM opcode
     ///                         ZKHALO2VERIFYWITHVK (0xC7 0x4A).
-    /// @param publicInputs  — the circuit instance column: 11 × 32-byte LE Fr
-    ///                         (deposit_id, sender, amount, contract, dapp_hi,
-    ///                         dapp_lo, an_account_hi, an_account_lo, + 3 receipt/
-    ///                         block hashes). Verified verbatim; business fields
-    ///                         read at fixed offsets — see `_parsePublicInputs`.
-    function finalizeDeposit(bytes proof, bytes publicInputs) public {
+    /// @param publicInputs  — the circuit instance column: 12 × 32-byte LE Fr
+    ///                         (deposit_id, sender, amount, contract, chain_id,
+    ///                         dapp_hi, dapp_lo, an_account_hi, an_account_lo,
+    ///                         + 2 block-hash halves + promise commit). Verified
+    ///                         verbatim; business fields read at fixed offsets —
+    ///                         see `_parsePublicInputs`.
+    function finalizeDeposit(bytes proof, bytes publicInputs) public view {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
+        // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
+        // pins which (chain, bridge contract) pairs this side trusts. The deposit
+        // passes if its proven address is in the chain's trusted set — an absent
+        // entry is false, so unknown chains/addresses reject. The != 0 guard
+        // keeps a stray `_trustedL1Bridge[chainId][0]=true` from ever admitting a
+        // zero contract.
+        require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
+                ERR_UNSUPPORTED_SRC_CHAIN);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -353,11 +407,13 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         );
         ensureBalance();
 
-        // Anti-replay anchor = proof-bound (deposit_id, source contract); the
-        // dapp component is pinned to 0 (see _parsePublicInputs).
-        // amount/recipient are NOT in the key — they are fixed by the proof, so a
-        // replay can never re-route or re-mint: same key ⇒ same voucher ⇒ no-op.
-        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId));
+        // Anti-replay anchor = proof-bound (deposit_id, source contract, source
+        // chain); the dapp component is pinned to 0 (see _parsePublicInputs).
+        // chainId is IN the key: two different L1s may legitimately emit the
+        // same (deposit_id, contract) pair. amount/recipient are NOT in the
+        // key — they are fixed by the proof, so a replay can never re-route or
+        // re-mint: same key ⇒ same voucher ⇒ no-op.
+        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId, f.chainId));
 
         TvmCell stateInit = abi.encodeStateInit({
             contr: DepositVoucher,
@@ -369,7 +425,7 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
             stateInit: stateInit,
             value: 2 vmshell,
             flag: 1
-        }(f.depositId, f.contractAddr, f.dappId, f.amount, f.anAccount);
+        }(f.depositId, f.contractAddr, f.dappId, f.chainId, f.amount, f.anAccount);
     }
 
     /// @notice Internal callback from a freshly deployed `DepositVoucher`. Mints
@@ -381,10 +437,11 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         uint256 depositId,
         uint256 contractAddr,
         uint256 dappId,
+        uint256 chainId,
         uint128 amount,
         uint256 anAccount
     ) public {
-        uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId));
+        uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId));
         TvmCell stateInit = abi.encodeStateInit({
             contr: DepositVoucher,
             varInit: { _depositHash: depositHash },
@@ -409,13 +466,13 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
 
         address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
         emit DepositFinalized{dest: addrExtern}(
-            depositId, contractAddr, dappId, amount, anAccount
+            depositId, contractAddr, dappId, chainId, amount, anAccount
         );
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a
     // standalone setter. The only way to change `_depositVoucherCode` is via
-    // a full `updateCode` upgrade of USDCBridge (the new code+layout pass
+    // a full `updateCode` upgrade of eccUSDCBridge (the new code+layout pass
     // through `onCodeUpgrade`). This removes the "owner can swap voucher
     // logic in one tx and free-mint" backdoor flagged in PR2112 review (B2).
 
@@ -482,6 +539,13 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
     ///         only way to rotate `_depositVoucherCode` post-deploy, per B2); it
     ///         is empty on the zerostate path. When non-empty it takes
     ///         precedence over `depositVoucherCode`.
+    ///
+    ///         `_trustedL1Bridge` is deliberately absent from the tuple: the
+    ///         encode side may be a PREVIOUS code generation that does not know
+    ///         the field (or knows it with a different type), so the tuple shape
+    ///         stays fixed across generations. After any upgrade the allowlist
+    ///         starts empty (deposits fail closed) until the owner re-seeds it
+    ///         via `setTrustedL1Bridge`.
     function onCodeUpgrade(TvmCell cell) private {
         tvm.accept();
         tvm.resetStorage();
@@ -544,7 +608,7 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
 
     /// @notice Returns contract version and name.
     function getVersion() external pure returns (string, string) {
-        return (version, "USDCBridge");
+        return (version, "eccUSDCBridge");
     }
 
     // ========================================================
@@ -553,15 +617,15 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
 
     /// @dev Read the deposit fields out of the PROVEN public-inputs blob (the
     ///      contract verified the proof over this exact blob, so every value
-    ///      here is proof-bound). Layout = 11 × 32-byte LE Fr; offsets per the
+    ///      here is proof-bound). Layout = 12 × 32-byte LE Fr; offsets per the
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
-    ///      3=contract, 4..5=dapp_id(hi..lo), 6..7=an_account(hi..lo),
-    ///      8..10=receipt/block hashes (ignored on the AN side). Only the first
-    ///      8 Fr are needed.
+    ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
+    ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit
+    ///      (9..11 ignored on the AN side). Only the first 9 Fr are needed.
     function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
-        TvmSlice s = publicInputs.toSlice();
+        TvmSlice s = TvmSlice(publicInputs);
         uint256[] fr;
-        for (uint k = 0; k < 8; k++) {
+        for (uint k = 0; k < 9; k++) {
             uint256 v = 0;
             for (uint i = 0; i < 32; i++) {
                 if (s.bits() < 8) { s = s.loadRef().toSlice(); }
@@ -571,17 +635,18 @@ contract USDCBridge is USDCBridgeModifiers, ISubscriber {
         }
         require(fr[2] <= uint256(type(uint64).max), ERR_OVERFLOW);
         // The circuit splits the 256-bit AN account into two 16-byte halves
-        // (fr[6]=high, fr[7]=low) — reassemble it. The workchain concept is
-        // retired on AN, so the recipient always lives in workchain 0 (see
-        // confirmDeposit's makeAddrStd).
+        // (fr[6]=high, fr[7]=low), exactly like dapp_id above — reassemble it.
+        // The workchain concept is retired on AN, so the recipient always lives
+        // in workchain 0 (see confirmDeposit's makeAddrStd).
         f.depositId    = fr[0];
         f.amount       = uint128(fr[2]);
         f.contractAddr = fr[3];
+        f.chainId      = fr[4];
         // Deposits into AN always land in dapp 0, so the dapp halves carried by
-        // the circuit (fr[4]=high, fr[5]=low) are not used. Pinning the field to
+        // the circuit (fr[5]=high, fr[6]=low) are not used. Pinning the field to
         // 0 keeps the deposit identity — and therefore the DepositVoucher
         // address — independent of what the L1 side reports.
         f.dappId       = 0;
-        f.anAccount    = (fr[6] << 128) | fr[7];
+        f.anAccount    = (fr[7] << 128) | fr[8];
     }
 }

@@ -7,13 +7,18 @@ from pathlib import Path
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_ZKPROOF,
+    ERR_UNSUPPORTED_SRC_CHAIN,
     USDC_BRIDGE_ADDR,
     build_public_inputs,
     fixtures_available,
     fr_le,
     init_bridge_instance,
     load_fixture_proof,
+    PI_LEN,
+    parse_pi_fields,
+    seed_trust_from_pi,
 )
 from test_base import MessagePipeline
 
@@ -23,9 +28,13 @@ BC_AN_01_ROOT = Path(__file__).resolve().parent.parent / "fixtures" / "bc_an_01"
 
 
 def bc_an_01_fixtures_ready() -> bool:
+    """Dual-proof PoC fixtures must be 12-PI (384 B) — regenerate after contracts/bridge."""
     for sub in ("dapp_a", "dapp_b"):
         d = BC_AN_01_ROOT / sub
-        if not (d / "proof.bin").is_file() or not (d / "public_inputs.bin").is_file():
+        pi = d / "public_inputs.bin"
+        if not (d / "proof.bin").is_file() or not pi.is_file():
+            return False
+        if pi.stat().st_size != PI_LEN:
             return False
     return True
 
@@ -40,7 +49,7 @@ def get_minted(tb, bridge_tvc) -> int:
 
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "getTotalBridged",
         {"tokenId": str(USDC_ECC_ID)},
         address=USDC_BRIDGE_ADDR,
@@ -50,9 +59,10 @@ def get_minted(tb, bridge_tvc) -> int:
 
 
 def finalize_and_drain(tb, bridge_tvc, pipe: MessagePipeline, proof: bytes, pi: bytes):
+    seed_trust_from_pi(tb, bridge_tvc, pi)
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "finalizeDeposit",
         {"proof": proof.hex(), "publicInputs": pi.hex()},
         address=USDC_BRIDGE_ADDR,
@@ -69,83 +79,86 @@ def test_bc_an_01_tampered_dapp_id_rejects_same_proof(tb):
     tvc = init_bridge_instance(tb, "bc01_tamper")
     proof, pi = load_fixture_proof(0)
     mutated = bytearray(pi)
-    mutated[5 * 32] ^= 0x01  # dappIdLow limb
+    mutated[6 * 32] ^= 0x01  # dappId low limb (fr[6])
     try:
+        seed_trust_from_pi(tb, tvc, bytes(mutated))
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": proof.hex(), "publicInputs": bytes(mutated).hex()},
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_failure(r, ERR_INVALID_ZKPROOF)
     finally:
-        tb.cleanup_instance("USDCBridge", "bc01_tamper")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "bc01_tamper")
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
 def test_bc_an_01_replay_key_differs_by_dapp_id(tb):
-    """Contract replay anchor includes dappId — different dapp ⇒ different voucher slot."""
+    """PI blobs differ when circuit dapp limbs differ (on-chain pins dappId=0)."""
     _, pi_a = load_fixture_proof(0)
+    base = parse_pi_fields(pi_a)
     pi_b = build_public_inputs(
-        deposit_id=fr_le(pi_a, 0),
-        sender=fr_le(pi_a, 1),
-        amount=fr_le(pi_a, 2),
-        contract_addr=fr_le(pi_a, 3),
-        dapp_id=fr_le(pi_a, 4) << 128 | fr_le(pi_a, 5),
-        an_account_hi=fr_le(pi_a, 6),
-        an_account_lo=fr_le(pi_a, 7),
+        deposit_id=base["deposit_id"],
+        sender=base["sender"],
+        amount=base["amount"],
+        contract_addr=base["contract_addr"],
+        chain_id=base["chain_id"],
+        dapp_id=base["dapp_id"],
+        an_account_hi=base["an_account_hi"],
+        an_account_lo=base["an_account_lo"],
     )
     pi_c = build_public_inputs(
-        deposit_id=fr_le(pi_a, 0),
-        sender=fr_le(pi_a, 1),
-        amount=fr_le(pi_a, 2),
-        contract_addr=fr_le(pi_a, 3),
-        dapp_id=(fr_le(pi_a, 4) << 128 | fr_le(pi_a, 5)) ^ 1,
-        an_account_hi=fr_le(pi_a, 6),
-        an_account_lo=fr_le(pi_a, 7),
+        deposit_id=base["deposit_id"],
+        sender=base["sender"],
+        amount=base["amount"],
+        contract_addr=base["contract_addr"],
+        chain_id=base["chain_id"],
+        dapp_id=base["dapp_id"] ^ 1,
+        an_account_hi=base["an_account_hi"],
+        an_account_lo=base["an_account_lo"],
     )
     assert pi_b != pi_c
-    # Same depositId + contractAddr but different dapp limbs → different PI blobs.
     assert fr_le(pi_b, 0) == fr_le(pi_c, 0)
     assert fr_le(pi_b, 3) == fr_le(pi_c, 3)
-    assert (fr_le(pi_b, 4), fr_le(pi_b, 5)) != (fr_le(pi_c, 4), fr_le(pi_c, 5))
+    assert (fr_le(pi_b, 5), fr_le(pi_b, 6)) != (fr_le(pi_c, 5), fr_le(pi_c, 6))
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
-def test_bc_an_02_no_l1_bridge_allowlist_pre_zk(tb):
-    """BC-AN-02 — arbitrary contractAddr in PI is not rejected before ZK."""
+def test_bc_an_02_untrusted_l1_bridge_rejects_pre_zk(tb):
+    """BC-AN-02 — untrusted (chainId, contractAddr) rejected before ZK."""
     tvc = init_bridge_instance(tb, "bc02_allow")
     try:
         pi = build_public_inputs(contract_addr=0xDEADBEEF).hex()
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": "00", "publicInputs": pi},
             address=USDC_BRIDGE_ADDR,
         )
-        tb.assert_failure(r, ERR_INVALID_ZKPROOF)
+        tb.assert_failure(r, ERR_UNSUPPORTED_SRC_CHAIN)
     finally:
-        tb.cleanup_instance("USDCBridge", "bc02_allow")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "bc02_allow")
 
 
-@pytest.mark.skipif(not bc_an_01_fixtures_ready(), reason="run scripts/audit/generate_bc_an_01_dual_proofs.sh")
+@pytest.mark.skipif(not bc_an_01_fixtures_ready(), reason="regenerate 12-PI fixtures: scripts/audit/generate_bc_an_01_dual_proofs.sh")
 def test_bc_an_01_double_mint_same_deposit_two_dapp_ids(tb):
-    """BC-AN-01 regression — upstream pins dappId=0 (contracts/dex_bridge).
+    """BC-AN-01 regression — contracts/bridge pins on-chain dappId=0.
 
     Two valid proofs with different dapp limbs must NOT double-mint: replay
-    anchor uses f.dappId (always 0), not PI fr[4]/fr[5].
+    anchor uses f.dappId (always 0), not PI fr[5]/fr[6].
     """
     bridge_tvc = init_bridge_instance(tb, "bc01_poc")
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     proof_a, pi_a = load_bc_proof("dapp_a")
     proof_b, pi_b = load_bc_proof("dapp_b")
     try:
         dep_a, dep_b = fr_le(pi_a, 0), fr_le(pi_b, 0)
-        dapp_a = (fr_le(pi_a, 4) << 128) | fr_le(pi_a, 5)
-        dapp_b = (fr_le(pi_b, 4) << 128) | fr_le(pi_b, 5)
+        dapp_a = (fr_le(pi_a, 5) << 128) | fr_le(pi_a, 6)
+        dapp_b = (fr_le(pi_b, 5) << 128) | fr_le(pi_b, 6)
         assert dep_a == dep_b, "PoC requires same depositId"
         assert dapp_a != dapp_b, "PoC requires different dappId in PI"
 
@@ -159,4 +172,4 @@ def test_bc_an_01_double_mint_same_deposit_two_dapp_ids(tb):
         assert minted2 == minted1, "second finalize must not mint again (dappId pinned to 0)"
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "bc01_poc")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "bc01_poc")

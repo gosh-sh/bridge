@@ -40,13 +40,13 @@ use std::{
 };
 
 use acki_nacki_interface::{ContractCallRequest, ExtendedAddress, IAckiNacki, TransactionStatus};
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256, Address};
 use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
     error::RelayerError,
-    types::{DepositEvent, DepositProofBundle, NUM_PUBLIC_INPUTS},
+    types::{DepositEvent, DepositProofBundle, DepositPublicInputs, NUM_PUBLIC_INPUTS},
 };
 
 /// Outcome of an [`AnSubmitter::submit`] call.
@@ -180,26 +180,144 @@ pub type VerifierDecision = Arc<dyn Fn(&DepositProofBundle) -> bool + Send + Syn
 pub struct MockAnSubmitter {
     inner: Mutex<MockInner>,
     verifier: VerifierDecision,
+    /// When set, mirrors USDCBridge `_acceptedBlockHash[chainId][blockHash]` (DEP-N-4).
+    anchor_gate: Option<AnchorGateConfig>,
+    /// When set, mirrors `setExpectedAnDappId` / `ERR_WRONG_DAPP` (223).
+    expected_dapp_id: Option<U256>,
+}
+
+/// Accepted block hashes for one source `chainId` (proof-bound PI `chainId`).
+struct AnchorGateConfig {
+    chain_id: u64,
+    accepted_hashes: HashSet<B256>,
+}
+
+/// DEP-N-5 voucher replay identity: `(srcChainId, depositId, contractAddr, dappId)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct VoucherIdentity {
+    pub chain_id: u64,
+    pub deposit_id: u64,
+    pub contract: Address,
+    pub dapp_id: U256,
+}
+
+/// How the mock AN nullifier set keys finalized deposits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NullifierScheme {
+    /// Pre-DEP-N-5: `depositId` only (cross-chain collision risk).
+    DepositIdOnly,
+    /// Post-patch: full voucher identity (DEP-N-5).
+    DepN5,
 }
 
 struct MockInner {
-    nullifiers: HashSet<u64>,
+    nullifier_scheme: NullifierScheme,
+    legacy_nullifiers: HashSet<u64>,
+    dep_n5_nullifiers: HashSet<VoucherIdentity>,
     finalized_log: Vec<u64>,
+    /// Mirrors AN `makeAddrStd(0, account)` — workchain from L1 event is ignored (QC-AN-J4).
+    last_mint_workchain: i8,
+    last_mint_account: Option<U256>,
+    /// When set, cumulative mock mint across finalizes must not exceed this bound.
+    mint_cap: Option<U256>,
+    minted_total: U256,
+}
+
+fn voucher_identity(event: &DepositEvent, bundle: &DepositProofBundle) -> VoucherIdentity {
+    VoucherIdentity {
+        chain_id: bundle.parsed.chain_id.as_limbs()[0],
+        deposit_id: event.deposit_id,
+        contract: event.source_contract,
+        dapp_id: bundle.parsed.dapp_id(),
+    }
 }
 
 impl MockAnSubmitter {
-    /// All bundles accepted (the common happy path).
+    /// All bundles accepted (depositId-only nullifier — legacy pre-DEP-N-5).
     pub fn accepting() -> Self {
         Self::with_verifier(Arc::new(|_| true))
     }
 
-    pub fn with_verifier(verifier: VerifierDecision) -> Self {
+    /// DEP-N-5 identity: `(chainId, depositId, contract, dappId)` voucher keys.
+    pub fn accepting_dep_n5() -> Self {
         Self {
             inner: Mutex::new(MockInner {
-                nullifiers: HashSet::new(),
+                nullifier_scheme: NullifierScheme::DepN5,
+                legacy_nullifiers: HashSet::new(),
+                dep_n5_nullifiers: HashSet::new(),
                 finalized_log: Vec::new(),
+                last_mint_workchain: 0,
+                last_mint_account: None,
+                mint_cap: None,
+                minted_total: U256::ZERO,
             }),
+            verifier: Arc::new(|_| true),
+            anchor_gate: None,
+            expected_dapp_id: None,
+        }
+    }
+
+    fn fresh_inner() -> MockInner {
+        MockInner {
+            nullifier_scheme: NullifierScheme::DepositIdOnly,
+            legacy_nullifiers: HashSet::new(),
+            dep_n5_nullifiers: HashSet::new(),
+            finalized_log: Vec::new(),
+            last_mint_workchain: 0,
+            last_mint_account: None,
+            mint_cap: None,
+            minted_total: U256::ZERO,
+        }
+    }
+
+    pub fn with_verifier(verifier: VerifierDecision) -> Self {
+        Self {
+            inner: Mutex::new(Self::fresh_inner()),
             verifier,
+            anchor_gate: None,
+            expected_dapp_id: None,
+        }
+    }
+
+    /// Mirror `require(_acceptedBlockHash[chainId][blockHash], ERR_UNKNOWN_BLOCK)`.
+    pub fn with_anchor_gate(chain_id: u64, accepted_hashes: HashSet<B256>) -> Self {
+        Self {
+            inner: Mutex::new(Self::fresh_inner()),
+            verifier: Arc::new(|_| true),
+            anchor_gate: Some(AnchorGateConfig {
+                chain_id,
+                accepted_hashes,
+            }),
+            expected_dapp_id: None,
+        }
+    }
+
+    /// Mirror `setExpectedAnDappId` / `ERR_WRONG_DAPP` (223) on proof-bound dappId.
+    pub fn with_expected_dapp_id(expected_dapp_id: U256) -> Self {
+        Self {
+            inner: Mutex::new(Self::fresh_inner()),
+            verifier: Arc::new(|_| true),
+            anchor_gate: None,
+            expected_dapp_id: Some(expected_dapp_id),
+        }
+    }
+
+    /// Mirror AN `setMintCap` / `ERR_MINT_CAP_EXCEEDED` (229) on cumulative mint.
+    pub fn with_mint_cap(cap: U256) -> Self {
+        Self {
+            inner: Mutex::new(MockInner {
+                nullifier_scheme: NullifierScheme::DepositIdOnly,
+                legacy_nullifiers: HashSet::new(),
+                dep_n5_nullifiers: HashSet::new(),
+                finalized_log: Vec::new(),
+                last_mint_workchain: 0,
+                last_mint_account: None,
+                mint_cap: Some(cap),
+                minted_total: U256::ZERO,
+            }),
+            verifier: Arc::new(|_| true),
+            anchor_gate: None,
+            expected_dapp_id: None,
         }
     }
 
@@ -207,7 +325,7 @@ impl MockAnSubmitter {
     /// processed it).
     pub fn seed_finalized(&self, deposit_id: u64) {
         let mut inner = self.inner.lock().expect("poisoned lock");
-        inner.nullifiers.insert(deposit_id);
+        inner.legacy_nullifiers.insert(deposit_id);
     }
 
     pub fn finalized_count(&self) -> usize {
@@ -225,6 +343,26 @@ impl MockAnSubmitter {
             .finalized_log
             .clone()
     }
+
+    /// Workchain credited on the last successful mock mint (always 0 — QC-AN-J4).
+    pub fn last_mint_workchain(&self) -> i8 {
+        self.inner.lock().expect("poisoned lock").last_mint_workchain
+    }
+
+    /// `anAccount` from proof public inputs on the last successful mock mint.
+    pub fn last_mint_account(&self) -> Option<U256> {
+        self.inner.lock().expect("poisoned lock").last_mint_account
+    }
+}
+
+/// Reconstruct the 32-byte block hash committed in the twelve public inputs.
+fn parsed_block_hash(pi: &DepositPublicInputs) -> B256 {
+    let hi = pi.block_hash_high.to_be_bytes::<32>();
+    let lo = pi.block_hash_low.to_be_bytes::<32>();
+    let mut out = [0u8; 32];
+    out[0..16].copy_from_slice(&hi[16..32]);
+    out[16..32].copy_from_slice(&lo[16..32]);
+    B256::from(out)
 }
 
 #[async_trait]
@@ -234,7 +372,7 @@ impl AnSubmitter for MockAnSubmitter {
             .inner
             .lock()
             .expect("poisoned lock")
-            .nullifiers
+            .legacy_nullifiers
             .contains(&deposit_id))
     }
 
@@ -246,8 +384,42 @@ impl AnSubmitter for MockAnSubmitter {
         // The proof must bind to the deposit we're finalising.
         bundle.check_binds_to(event)?;
 
+        if let Some(gate) = &self.anchor_gate {
+            let proven_chain = bundle.parsed.chain_id.as_limbs()[0];
+            if proven_chain != gate.chain_id {
+                return Ok(rejected(
+                    EXIT_UNKNOWN_SOURCE,
+                    "finalizeDeposit reverted",
+                    "mock anchor gate: chainId not allowlisted",
+                ));
+            }
+            let block_hash = parsed_block_hash(&bundle.parsed);
+            if !gate.accepted_hashes.contains(&block_hash) {
+                return Ok(rejected(
+                    EXIT_UNKNOWN_BLOCK,
+                    "finalizeDeposit reverted",
+                    "mock anchor gate: proof-bound blockHash not in _acceptedBlockHash",
+                ));
+            }
+        }
+
+        if let Some(expected) = self.expected_dapp_id {
+            if bundle.parsed.dapp_id() != expected {
+                return Ok(rejected(
+                    EXIT_WRONG_DAPP,
+                    "finalizeDeposit reverted",
+                    "mock dapp gate: proof-bound dappId != setExpectedAnDappId",
+                ));
+            }
+        }
+
         let mut inner = self.inner.lock().expect("poisoned lock");
-        if inner.nullifiers.contains(&event.deposit_id) {
+        let identity = voucher_identity(event, bundle);
+        let already = match inner.nullifier_scheme {
+            NullifierScheme::DepositIdOnly => inner.legacy_nullifiers.contains(&event.deposit_id),
+            NullifierScheme::DepN5 => inner.dep_n5_nullifiers.contains(&identity),
+        };
+        if already {
             return Ok(SubmitOutcome::AlreadyFinalized);
         }
         if !(self.verifier)(bundle) {
@@ -255,8 +427,29 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "ZKHALO2VERIFYWITHVK rejected the deposit proof".to_string(),
             });
         }
-        inner.nullifiers.insert(event.deposit_id);
+        if let Some(cap) = inner.mint_cap {
+            let amount = bundle.parsed.amount;
+            let next = inner.minted_total + amount;
+            if next > cap {
+                return Ok(rejected(
+                    EXIT_MINT_CAP_EXCEEDED,
+                    "finalizeDeposit reverted",
+                    "mock cumulative mint would exceed setMintCap",
+                ));
+            }
+            inner.minted_total = next;
+        }
+        match inner.nullifier_scheme {
+            NullifierScheme::DepositIdOnly => {
+                inner.legacy_nullifiers.insert(event.deposit_id);
+            },
+            NullifierScheme::DepN5 => {
+                inner.dep_n5_nullifiers.insert(identity);
+            },
+        }
         inner.finalized_log.push(event.deposit_id);
+        inner.last_mint_workchain = 0;
+        inner.last_mint_account = Some(bundle.parsed.an_account());
         Ok(SubmitOutcome::Finalized {
             tx_hash: None,
         })
@@ -570,6 +763,80 @@ mod tests {
             } => assert!(reason.contains("ZKHALO2VERIFYWITHVK")),
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mock_anchor_gate_rejects_unadmitted_block_hash() {
+        let ev = event(5);
+        let b = bundle(&ev);
+        let submitter = MockAnSubmitter::with_anchor_gate(1, HashSet::new());
+        match submitter.submit(&ev, &b).await.unwrap() {
+            SubmitOutcome::Rejected { reason } => {
+                assert!(reason.contains("ERR_UNKNOWN_BLOCK"));
+                assert!(reason.contains("224"));
+            }
+            other => panic!("expected reject: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_anchor_gate_accepts_admitted_block_hash() {
+        let ev = event(6);
+        let b = bundle(&ev);
+        let mut accepted = HashSet::new();
+        accepted.insert(ev.block_hash);
+        let submitter = MockAnSubmitter::with_anchor_gate(1, accepted);
+        assert!(matches!(
+            submitter.submit(&ev, &b).await.unwrap(),
+            SubmitOutcome::Finalized { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_dapp_gate_rejects_wrong_dapp_id() {
+        let ev = event(8);
+        let b = bundle(&ev);
+        let submitter = MockAnSubmitter::with_expected_dapp_id(U256::from(0xAAAAu64));
+        match submitter.submit(&ev, &b).await.unwrap() {
+            SubmitOutcome::Rejected { reason } => {
+                assert!(reason.contains("ERR_WRONG_DAPP"));
+                assert!(reason.contains("223"));
+            }
+            other => panic!("expected reject: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_dapp_gate_accepts_matching_dapp_id() {
+        let ev = event(9);
+        let dapp = U256::from(0xD499u64);
+        let b = bundle(&ev);
+        let submitter = MockAnSubmitter::with_expected_dapp_id(dapp);
+        assert!(matches!(
+            submitter.submit(&ev, &b).await.unwrap(),
+            SubmitOutcome::Finalized { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_dep_n5_cross_chain_same_deposit_id_both_finalize() {
+        let sub = MockAnSubmitter::accepting_dep_n5();
+        let dapp = U256::from(0xD499u64);
+        let mut ev_a = event(7);
+        ev_a.source_chain_id = 11_155_111;
+        let mut ev_b = event(7);
+        ev_b.source_chain_id = 8_453;
+        let b_a = bundle(&ev_a);
+        let b_b = bundle(&ev_b);
+        assert!(matches!(
+            sub.submit(&ev_a, &b_a).await.unwrap(),
+            SubmitOutcome::Finalized { .. }
+        ));
+        assert!(matches!(
+            sub.submit(&ev_b, &b_b).await.unwrap(),
+            SubmitOutcome::Finalized { .. }
+        ));
+        assert_eq!(sub.finalized_count(), 2);
     }
 
     #[test]

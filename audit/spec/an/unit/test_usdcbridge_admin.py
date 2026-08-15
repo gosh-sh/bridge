@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_NONCE,
     ERR_INVALID_SENDER,
     ERR_NOT_OWNER,
@@ -14,7 +15,6 @@ from bridge_helpers import (
     USDC_BRIDGE_ADDR,
     init_bridge_instance,
 )
-
 pytestmark = pytest.mark.unit
 
 USDC_WALLET = "0:1111111111111111111111111111111111111111111111111111111111111111"
@@ -24,7 +24,7 @@ ALT_PUBKEY = "0x" + "b" * 64
 
 
 def get_total_minted(tb, tvc) -> int:
-    r = tb.call(tvc, "USDCBridge", "getTotalMinted", {}, address=USDC_BRIDGE_ADDR)
+    r = tb.call(tvc, BRIDGE_CONTRACT, "getTotalMinted", {}, address=USDC_BRIDGE_ADDR)
     tb.assert_success(r)
     return int(r.response["value0"])
 
@@ -35,7 +35,7 @@ def test_on_transfer_received_wrong_sender(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "onTransferReceived",
             {
                 "from": DEPOSITOR,
@@ -48,7 +48,7 @@ def test_on_transfer_received_wrong_sender(tb):
         )
         tb.assert_failure(r, ERR_INVALID_SENDER)
     finally:
-        tb.cleanup_instance("USDCBridge", "tip_sender")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "tip_sender")
 
 
 def test_on_transfer_received_happy_mints(tb):
@@ -59,7 +59,7 @@ def test_on_transfer_received_happy_mints(tb):
         before = get_total_minted(tb, tvc)
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "onTransferReceived",
             {
                 "from": DEPOSITOR,
@@ -73,7 +73,7 @@ def test_on_transfer_received_happy_mints(tb):
         tb.assert_success(r, "onTransferReceived")
         assert get_total_minted(tb, tvc) == before + amount
     finally:
-        tb.cleanup_instance("USDCBridge", "tip_ok")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "tip_ok")
 
 
 def test_mint_and_send_not_owner(tb):
@@ -82,14 +82,14 @@ def test_mint_and_send_not_owner(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": "1000000", "nonce": "1"},
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_failure(r, ERR_NOT_OWNER)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_noown")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_noown")
 
 
 def test_mint_and_send_happy(tb):
@@ -99,7 +99,7 @@ def test_mint_and_send_happy(tb):
         before = get_total_minted(tb, tvc)
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": "1000000", "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -107,11 +107,11 @@ def test_mint_and_send_happy(tb):
         )
         tb.assert_success(r, "mintAndSend")
         assert get_total_minted(tb, tvc) == before + 1_000_000
-        nr = tb.call(tvc, "USDCBridge", "getNonces", {}, address=USDC_BRIDGE_ADDR)
+        nr = tb.call(tvc, BRIDGE_CONTRACT, "getNonces", {}, address=USDC_BRIDGE_ADDR)
         tb.assert_success(nr)
         assert int(nr.response["mintNonce"]) == 1
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_mint")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_mint")
 
 
 def test_mint_and_send_zero_amount(tb):
@@ -120,7 +120,7 @@ def test_mint_and_send_zero_amount(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": "0", "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -128,7 +128,7 @@ def test_mint_and_send_zero_amount(tb):
         )
         tb.assert_failure(r, ERR_ZERO_AMOUNT)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_zero")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_zero")
 
 
 def test_mint_and_send_accumulator_not_whole_usdc(tb):
@@ -137,7 +137,7 @@ def test_mint_and_send_accumulator_not_whole_usdc(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSendAccumulator",
             {"buyer": RECIPIENT, "value": "1000001", "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -145,7 +145,7 @@ def test_mint_and_send_accumulator_not_whole_usdc(tb):
         )
         tb.assert_failure(r, ERR_NOT_WHOLE_USDC)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_whole")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_whole")
 
 
 def test_mint_and_send_amount_overflow(tb):
@@ -154,7 +154,7 @@ def test_mint_and_send_amount_overflow(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": str(1 << 64), "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -162,7 +162,7 @@ def test_mint_and_send_amount_overflow(tb):
         )
         tb.assert_failure(r, ERR_OVERFLOW)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_ovf")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_ovf")
 
 
 def test_set_pubkey_rotates_owner(tb):
@@ -171,20 +171,20 @@ def test_set_pubkey_rotates_owner(tb):
     try:
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "setPubkey",
             {"pubkey": ALT_PUBKEY},
             sign_keys=tb.admin_keys,
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_success(r, "setPubkey")
-        gr = tb.call(tvc, "USDCBridge", "getOwnerPubkey", {}, address=USDC_BRIDGE_ADDR)
+        gr = tb.call(tvc, BRIDGE_CONTRACT, "getOwnerPubkey", {}, address=USDC_BRIDGE_ADDR)
         tb.assert_success(gr)
         assert gr.response["value0"].lower().replace("0x", "") == ALT_PUBKEY[2:]
 
         r2 = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": "1000000", "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -192,4 +192,4 @@ def test_set_pubkey_rotates_owner(tb):
         )
         tb.assert_failure(r2, ERR_NOT_OWNER)
     finally:
-        tb.cleanup_instance("USDCBridge", "adm_spk")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "adm_spk")

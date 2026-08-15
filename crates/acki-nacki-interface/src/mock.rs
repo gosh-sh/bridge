@@ -30,6 +30,8 @@ pub struct MockAckiNacki {
     /// Receipt status for `call_contract` / `send_transaction` (default
     /// Confirmed).
     finalize_receipt_status: Arc<Mutex<TransactionStatus>>,
+    /// Optional TVM exit code on finalize-style receipts (e.g. 51 duplicate).
+    finalize_receipt_exit_code: Arc<Mutex<Option<i32>>>,
 }
 
 impl MockAckiNacki {
@@ -41,6 +43,7 @@ impl MockAckiNacki {
             block_number: Arc::new(Mutex::new(1)),
             fail_mode: Arc::new(Mutex::new(false)),
             finalize_receipt_status: Arc::new(Mutex::new(TransactionStatus::Confirmed)),
+            finalize_receipt_exit_code: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -48,6 +51,15 @@ impl MockAckiNacki {
     /// status.
     pub fn set_finalize_receipt_status(&self, status: TransactionStatus) {
         *self.finalize_receipt_status.lock().unwrap() = status;
+    }
+
+    /// Attach a TVM `compute.exit_code` to finalize-style receipts.
+    pub fn set_finalize_receipt_exit_code(&self, code: i32) {
+        *self.finalize_receipt_exit_code.lock().unwrap() = Some(code);
+    }
+
+    pub fn clear_finalize_receipt_exit_code(&self) {
+        *self.finalize_receipt_exit_code.lock().unwrap() = None;
     }
 
     /// Enable failure mode (all transactions will fail)
@@ -96,7 +108,23 @@ impl IAckiNacki for MockAckiNacki {
         // Create receipt
         let block_number = *self.block_number.lock().unwrap();
         let status = *self.finalize_receipt_status.lock().unwrap();
-        let receipt = TransactionReceipt::new(tx_hash, status, Some(block_number), 50000, vec![]);
+        let exit_code = *self.finalize_receipt_exit_code.lock().unwrap();
+        let aborted = matches!(
+            status,
+            TransactionStatus::Reverted | TransactionStatus::Failed
+        );
+        let receipt = if exit_code.is_some() || aborted {
+            TransactionReceipt::with_compute(
+                tx_hash,
+                status,
+                Some(block_number),
+                50000,
+                exit_code,
+                aborted,
+            )
+        } else {
+            TransactionReceipt::new(tx_hash, status, Some(block_number), 50000, vec![])
+        };
 
         self.receipts.lock().unwrap().insert(tx_hash, receipt);
 

@@ -64,6 +64,7 @@ pub mod daemon;
 pub mod error;
 pub mod prover;
 pub mod relayer;
+pub mod rpc_preflight;
 pub mod source;
 pub mod state;
 pub mod submitter;
@@ -79,6 +80,10 @@ pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
+pub use rpc_preflight::{
+    ensure_matching_source_prover_chain_ids, ensure_supported_chain_id_value,
+    resolve_supported_chain_id,
+};
 pub use source::{
     fetch_deposit_from_receipt, is_deposit_block_finalized, is_retryable_eth_rpc_error,
     receipt_log_index_from_block_log, resolve_from_block, AckiNackiBridge, DepositSource,
@@ -88,10 +93,15 @@ pub use state::{DeploymentIdentity, RelayerState, StateLock};
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
+    VoucherIdentity,
 };
 pub use supported_chains::{
-    is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
-    CHAIN_ID_SEPOLIA, SUPPORTED_DEPOSIT_CHAIN_IDS,
+    is_production_deposit_chain, is_supported_deposit_chain, is_testnet_only_deposit_chain,
+    parse_deployment_profile, production_and_testnet_only_disjoint,
+    production_deposit_chains_display, supported_deposit_chain_name,
+    supported_deposit_chains_display, validate_chain_for_deployment_profile,
+    DepositDeploymentProfile, CHAIN_ID_SEPOLIA, SUPPORTED_DEPOSIT_CHAIN_IDS,
+    PRODUCTION_DEPOSIT_CHAIN_IDS, TESTNET_ONLY_DEPOSIT_CHAIN_IDS, CHAIN_ID_BASE,
 };
 pub use types::{
     parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,

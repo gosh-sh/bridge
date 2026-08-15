@@ -8,13 +8,13 @@ pytest.importorskip("hypothesis")
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_ZKPROOF,
     USDC_BRIDGE_ADDR,
     build_public_inputs,
     get_total_bridged_minted,
     init_bridge_instance,
 )
-
 pytestmark = [pytest.mark.integration, pytest.mark.property, pytest.mark.slow]
 
 
@@ -23,7 +23,7 @@ def f7_d_bridge(tb):
     """One bridge instance per Hypothesis test item (reused across examples)."""
     tvc = init_bridge_instance(tb, "f7_d_garbage")
     yield tvc
-    tb.cleanup_instance("USDCBridge", "f7_d_garbage")
+    tb.cleanup_instance(BRIDGE_CONTRACT, "f7_d_garbage")
 
 
 @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -34,7 +34,7 @@ def test_random_proof_with_valid_shaped_pi_no_mint(tb, f7_d_bridge, proof: bytes
     pi = build_public_inputs().hex()
     r = tb.call(
         f7_d_bridge,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "finalizeDeposit",
         {"proof": proof.hex(), "publicInputs": pi},
         address=USDC_BRIDGE_ADDR,

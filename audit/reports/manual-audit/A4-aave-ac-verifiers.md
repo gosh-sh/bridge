@@ -12,7 +12,7 @@
 - [x] Owner cannot touch user principal — **holds** (no owner path transfers principal out)
 - [x] Yield vs principal (`accruedYield`, `harvestYield`) — **holds** (harvest bounded by yield; principal never decremented)
 - [x] `liquidReserveBps` bounds — capped at 50% (`MAX_LIQUID_RESERVE_BPS`), owner-only, affects only supply sizing
-- [x] Pause scope vs owner ops — user entrypoints gated; owner AAVE-evacuation ungated by design
+- [x] Pause scope vs owner ops — **#20 / TD-58:** no bridge `pause()`; user entrypoints not pause-gated; owner AAVE paths `onlyOwner`
 - [x] Verifier adapter: proof length, try/catch, address(0) — all correct; **one missing `extcodesize` guard** (A4-01)
 - [x] Production SHPLONK vs mock in tests/deploy — prod wires SHPLONK aggregators (real Yul crypto); Groth16 stub adapters are test-only
 - [x] Oracle fail-closed (future path) — **holds** (OR-1..OR-4); unused by public surface today
@@ -48,13 +48,12 @@ only limits `_amountSupplyable()` (how much idle USDC may be pushed into AAVE). 
 (`withdrawByProof`) pull from AAVE on demand regardless of the reserve, so a manipulated reserve cannot
 block or divert user payouts. No security impact.
 
-### 4. Pause scope — correct
+### 4. Pause scope — **removed (#20 / TD-58)**
 
-`deposit`, `verifyBlock`, `applyBkSetUpdate`, and `withdrawByProof` carry `whenNotPaused`. Owner AAVE
-management (`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`) is deliberately
-**not** pause-gated so funds can be evacuated during an incident. Verified by
-`AckiNackiBridgePauseTest` (`test_*_blockedWhilePaused`, `test_ownerControls_workWhilePaused`).
-Centralization caveat: see A4-02.
+`AckiNackiBridge` has **no** `pause()` / `whenNotPaused`. `deposit`, `verifyBlock`, `applyBkSetUpdate`, and
+`withdrawByProof` are gated only by feature wiring (`VerifyBlockDisabled`, etc.) and `nonReentrant`. Owner AAVE
+management remains `onlyOwner`. Emergency stop is **operational** (relayer pause, USDC token pause/blacklist) —
+see `DepositPauseAsymmetry.t.sol`, TD-24.
 
 ### 5. Verifier adapters — no bypass, one deployment-risk item
 
@@ -89,8 +88,8 @@ Circuit 4 in production. The gnark-wrapped Groth16 adapters (`PrimaryVerifier`,
 test-only. The known R15 caveat — "the gnark wrapper's `Define` is an identity stub that does not verify
 the inner Halo2 SHPLONK proof" (see `BridgeWithdrawalVerifier` NatSpec, Phase 8) — applies to the
 gnark path, which is not the production path. The SHPLONK Yul verifier does perform real verification
-(`ShplonkSpikeOnChainTest` / `ShplonkDeployLibTest` confirm tampered calldata reverts). `DeployRealBridge`
-starts the bridge **paused** whenever any verifier is wired, requiring an explicit post-sign-off unpause.
+(`ShplonkSpikeOnChainTest` / `ShplonkDeployLibTest` confirm tampered calldata reverts). Deploy scripts wire
+verifiers at genesis; **no** on-chain `pause()` / `unpause()` (#20).
 
 ### 7. Oracle — fail-closed, unused today
 
@@ -107,7 +106,7 @@ Axiom paths truncates for `blockNumber ≥ 2³²` (not reachable for centuries).
 | ID | Sev | BC/QC/OK | Summary | PoC / Evidence |
 |----|-----|----------|---------|-----|
 | A4-01 | Low | QC | `ShplonkHalo2Verifier.verify` trusts `staticcall` success with no `extcodesize` guard; an empty-code/EOA Yul-verifier address makes every proof pass (verifier bypass on all ZK entrypoints). Mitigated by deploy lib, not by runtime. | `ShplonkHalo2Verifier.sol:22`; no code-size check in ctor `:15-18`; deploy guard `ShplonkDeployLib.sol:56-63` |
-| A4-02 | Info | OK | Centralization: owner can `pause()` indefinitely, freezing `withdrawByProof` (cross-chain payouts) and `deposit`. No timelock/guardian. Funds not stealable; withdrawals censorable while paused. | `AckiNackiBridge.pause():1179`, `whenNotPaused` on `withdrawByProof:1008` |
+| A4-02 | Info | OK | **OBSOLETE (#20):** bridge `pause()` removed — no owner freeze of `deposit`/`withdrawByProof`. Residual: owner centralization on AAVE/yield paths only | n/a |
 | A4-03 | Info | OK | `emergencyWithdrawAll` folds accrued yield into the liquid USDC balance and zeroes `suppliedPrincipal`, so `accruedYield()` reads 0 afterwards and residual yield is no longer harvestable (becomes treasury over-collateral). No user-fund loss. | `emergencyWithdrawAll():1136-1149`, `accruedYield():1258-1262` |
 | A4-04 | Info | OK | Docs drift: `bridge_verification.md` AC-5 lists `blockHeaderOracle` (+ non-existent `verifier`, `wethGateway`, `aWETH`) as `immutable`; in code `blockHeaderOracle` is a plain storage var (no `immutable`, but also no setter → effectively fixed). Same drift class: `DeployRealBridge.s.sol:193` console label still says "FallbackVerifier (Groth16)" though 1B is SHPLONK. | `AckiNackiBridge.sol:100`; `docs/operations/bridge_verification.md` AC-5; `DeployRealBridge.s.sol:193` |
 | A4-05 | Info | OK | Oracle `isBlockHashAvailable` returns `true` for historical blocks unconditionally; `uint32(blockNumber)` truncation in Axiom paths. View-only / unused; still fails closed via `verifyBlockHash`. | `AxiomBlockHeaderOracle.sol:90-110,148,177` |
@@ -119,7 +118,7 @@ Axiom paths truncates for `blockNumber ≥ 2³²` (not reachable for centuries).
 | A4-INV-1 | For every owner-reachable state, `totalAssets() ≥ treasuryBalance` (solvency); no owner path decreases `treasuryBalance` or transfers principal to an EOA. |
 | A4-INV-2 | After `harvestYield(amount)`, `aUsdcBalance() ≥ suppliedPrincipal` still holds (principal stays fully backed; harvest is bounded by `accruedYield()`). |
 | A4-INV-3 | `suppliedPrincipal` decreases only via `_pullFromAave` / `emergencyWithdrawAll`; USDC leaves the contract to a non-AAVE address only as yield (`harvestYield`) or a verified payout (`withdrawByProof`). |
-| A4-INV-4 | While `paused`, `deposit` / `verifyBlock` / `applyBkSetUpdate` / `withdrawByProof` revert with `BridgePaused`; `supplyToAave` / `withdrawFromAave` / `emergencyWithdrawAll` / `harvestYield` remain owner-callable. |
+| A4-INV-4 | **OBSOLETE (#20):** no bridge pause; user ops fail only on disabled verifiers / token hooks (TD-58) |
 | A4-INV-5 | Every AN→ETH aggregator adapter returns `true` only if `proof.length ≥ (12 + NUM_INNER)*32`, the re-exposed instances `[12..]` equal the bridge-supplied public inputs, **and** the Yul SHPLONK verifier accepts `instances‖proof`. |
 | A4-INV-6 | `ShplonkHalo2Verifier.verify` should return `true` only when the target Yul verifier has non-empty code and does not revert — currently unenforced (A4-01); add `extcodesize > 0` in the wrapper ctor or `verify`. |
 | A4-INV-7 | `AxiomBlockHeaderOracle.getBlockHash` fails closed: reverts for future blocks, historical-without-witness, and zeroed recent `blockhash()`. |

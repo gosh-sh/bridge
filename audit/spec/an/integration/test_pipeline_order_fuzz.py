@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("hypothesis")
 from hypothesis import given, strategies as st
 
-from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance
+from bridge_helpers import USDC_BRIDGE_ADDR, fixtures_available, get_total_bridged_minted, init_bridge_instance, BRIDGE_CONTRACT
 from pipeline_fuzz_helpers import (
     canonical_bridged_minted,
     deliver_random_indices,
@@ -46,7 +46,7 @@ def test_mpl_random_delivery_never_overmints(tb, proof_indices: list[int], seed:
 
     bridge_tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     rng = random.Random(seed)
 
     try:
@@ -64,7 +64,7 @@ def test_mpl_random_delivery_never_overmints(tb, proof_indices: list[int], seed:
         assert get_total_bridged_minted(tb, bridge_tvc) <= canonical, "AN-MPL-2 final bound"
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
@@ -74,7 +74,7 @@ def test_mpl_replay_interleave_never_double_mints(tb, seed: int):
     tag = f"mpl_rep_{seed & 0xFFFF}"
     bridge_tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     rng = random.Random(seed)
     single_cap = sum_proof_amounts([0])
 
@@ -91,7 +91,7 @@ def test_mpl_replay_interleave_never_double_mints(tb, seed: int):
         assert get_total_bridged_minted(tb, bridge_tvc) <= single_cap, "AN-MPL-3 replay cap"
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
@@ -104,7 +104,7 @@ def test_mpl_two_deposit_permutations_match_fifo(tb):
         tag = f"mpl_perm_{int(swap)}"
         bridge_tvc = init_bridge_instance(tb, tag)
         pipe = MessagePipeline(tb)
-        pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+        pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
         try:
             finalize_enqueue(tb, bridge_tvc, pipe, 0)
             finalize_enqueue(tb, bridge_tvc, pipe, 1)
@@ -114,4 +114,4 @@ def test_mpl_two_deposit_permutations_match_fifo(tb):
             assert get_total_bridged_minted(tb, bridge_tvc) == canonical
         finally:
             pipe.cleanup()
-            tb.cleanup_instance("USDCBridge", tag)
+            tb.cleanup_instance(BRIDGE_CONTRACT, tag)

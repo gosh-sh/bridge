@@ -15,6 +15,7 @@ pytest.importorskip("hypothesis")
 from hypothesis import given, strategies as st
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     EVM_RECIPIENT_20B,
     USDC_BRIDGE_ADDR,
     USDC_ECC_ID,
@@ -34,7 +35,7 @@ def seed_bridged_mint(tb, tag: str) -> tuple[object, int]:
     """One successful proof_00 deposit through the pipeline."""
     bridge_tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     jr = finalize_enqueue(tb, bridge_tvc, pipe, 0)
     drain_fifo(pipe)
     register_voucher(pipe, jr)
@@ -63,7 +64,7 @@ def test_withdraw_burn_monotone_and_capped_after_deposit(tb, amounts: list[int])
                 continue
             r = tb.call_internal(
                 bridge_tvc,
-                "USDCBridge",
+                BRIDGE_CONTRACT,
                 "initiateWithdrawal",
                 {"dstChainId": "11155111", "recipient": EVM_RECIPIENT_20B},
                 sender=WITHDRAW_SENDER,
@@ -77,7 +78,7 @@ def test_withdraw_burn_monotone_and_capped_after_deposit(tb, amounts: list[int])
             assert burned <= minted, "AN-ACC-2 minted >= burned (deposit-only)"
             burned_prev = burned
     finally:
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)
 
 
 @pytest.mark.skipif(not fixtures_available(), reason="deposit_10proofs not synced")
@@ -90,7 +91,7 @@ def test_deposit_drain_then_withdraw_headroom(tb, seed: int):
     try:
         r = tb.call_internal(
             bridge_tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "1", "recipient": EVM_RECIPIENT_20B},
             sender=WITHDRAW_SENDER,
@@ -103,4 +104,4 @@ def test_deposit_drain_then_withdraw_headroom(tb, seed: int):
         assert minted == minted_cap
         assert burned <= minted
     finally:
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)

@@ -37,6 +37,99 @@ pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
     CHAIN_ID_SEPOLIA,
 ];
 
+/// Testnet-only chains (shellnet / fixtures). Must not appear on production deploy paths.
+pub const TESTNET_ONLY_DEPOSIT_CHAIN_IDS: &[u64] = &[CHAIN_ID_SEPOLIA];
+
+/// Production deposit sources (six L2 mainnets — no Sepolia).
+pub const PRODUCTION_DEPOSIT_CHAIN_IDS: &[u64] = &[
+    CHAIN_ID_OP_MAINNET,
+    CHAIN_ID_WORLD_CHAIN,
+    CHAIN_ID_MANTLE,
+    CHAIN_ID_BASE,
+    CHAIN_ID_ARBITRUM_ONE,
+    CHAIN_ID_BLAST,
+];
+
+/// Deployment profile for ops policy gates (TD-16).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DepositDeploymentProfile {
+    /// Mainnet L2 production — Sepolia forbidden.
+    Production,
+    /// Shellnet, dev, audit — Sepolia allowed.
+    ShellnetOrDev,
+}
+
+/// Parse `PROFILE` env values used by ops scripts and runbooks.
+pub fn parse_deployment_profile(profile: &str) -> Option<DepositDeploymentProfile> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "prod" | "production" => Some(DepositDeploymentProfile::Production),
+        "shellnet" | "dev" | "testnet" | "audit" => Some(DepositDeploymentProfile::ShellnetOrDev),
+        _ => None,
+    }
+}
+
+/// Whether `chain_id` is allowed on production deposit deployments.
+pub fn is_production_deposit_chain(chain_id: u64) -> bool {
+    PRODUCTION_DEPOSIT_CHAIN_IDS.contains(&chain_id)
+}
+
+/// Testnet-only chains (today: Sepolia) — never production mint paths.
+pub fn is_testnet_only_deposit_chain(chain_id: u64) -> bool {
+    TESTNET_ONLY_DEPOSIT_CHAIN_IDS.contains(&chain_id)
+}
+
+/// `prod ∩ testnet_only` must be empty (DEP-T16 / TD-16).
+pub fn production_and_testnet_only_disjoint() -> bool {
+    PRODUCTION_DEPOSIT_CHAIN_IDS
+        .iter()
+        .all(|id| !is_testnet_only_deposit_chain(*id))
+}
+
+/// Ops policy: which `eth_chainId` values are valid for a deployment profile.
+pub fn validate_chain_for_deployment_profile(
+    chain_id: u64,
+    profile: DepositDeploymentProfile,
+) -> Result<(), String> {
+    match profile {
+        DepositDeploymentProfile::Production => {
+            if is_testnet_only_deposit_chain(chain_id) {
+                return Err(format!(
+                    "chainId {chain_id} (testnet-only, e.g. Sepolia) is forbidden for \
+                     production deposit deployments — free testnet USDC mint risk"
+                ));
+            }
+            if !is_production_deposit_chain(chain_id) {
+                return Err(format!(
+                    "chainId {chain_id} is not in PRODUCTION_DEPOSIT_CHAIN_IDS: {}",
+                    production_deposit_chains_display()
+                ));
+            }
+            Ok(())
+        },
+        DepositDeploymentProfile::ShellnetOrDev => {
+            if !is_supported_deposit_chain(chain_id) {
+                return Err(format!(
+                    "chainId {chain_id} is not supported; allowed: {}",
+                    supported_deposit_chains_display()
+                ));
+            }
+            Ok(())
+        },
+    }
+}
+
+/// Render production allowlist for error messages.
+pub fn production_deposit_chains_display() -> String {
+    PRODUCTION_DEPOSIT_CHAIN_IDS
+        .iter()
+        .map(|id| match supported_deposit_chain_name(*id) {
+            Some(name) => format!("{id} ({name})"),
+            None => id.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Human-readable name for a supported chain id, if known.
 pub fn supported_deposit_chain_name(chain_id: u64) -> Option<&'static str> {
     match chain_id {
@@ -100,5 +193,40 @@ mod tests {
             rendered.matches(',').count(),
             SUPPORTED_DEPOSIT_CHAIN_IDS.len() - 1
         );
+    }
+
+    #[test]
+    fn td_16_prod_testnet_only_disjoint() {
+        assert!(production_and_testnet_only_disjoint());
+        assert!(!is_production_deposit_chain(CHAIN_ID_SEPOLIA));
+        assert!(is_testnet_only_deposit_chain(CHAIN_ID_SEPOLIA));
+    }
+
+    #[test]
+    fn td_16_prod_profile_rejects_sepolia() {
+        let err = validate_chain_for_deployment_profile(
+            CHAIN_ID_SEPOLIA,
+            DepositDeploymentProfile::Production,
+        )
+        .unwrap_err();
+        assert!(err.contains("testnet-only"));
+    }
+
+    #[test]
+    fn td_16_shellnet_profile_accepts_sepolia() {
+        validate_chain_for_deployment_profile(
+            CHAIN_ID_SEPOLIA,
+            DepositDeploymentProfile::ShellnetOrDev,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn td_16_prod_profile_accepts_base() {
+        validate_chain_for_deployment_profile(
+            CHAIN_ID_BASE,
+            DepositDeploymentProfile::Production,
+        )
+        .unwrap();
     }
 }

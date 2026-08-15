@@ -33,7 +33,7 @@ pub fn receipt_proof_from_receipt(receipt: &TransactionReceipt) -> Result<Receip
     let key = encode_tx_index(tx_index);
     let proof_nodes = trie.get_proof(&key)?;
     let receipt_rlp = encode_receipt(receipt)?;
-    let block = minimal_block_header(H256::from(receipt_root));
+    let block = minimal_block_header(H256::from(receipt_root), H256::zero());
     let block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
 
     Ok(ReceiptProof {
@@ -44,13 +44,13 @@ pub fn receipt_proof_from_receipt(receipt: &TransactionReceipt) -> Result<Receip
     })
 }
 
-fn minimal_block_header(receipts_root: H256) -> Block<Transaction> {
+fn minimal_block_header(receipts_root: H256, transactions_root: H256) -> Block<Transaction> {
     Block {
         parent_hash: H256::zero(),
         uncles_hash: H256::from(EMPTY_UNCLES_HASH),
         author: Some(Address::zero()),
         state_root: H256::zero(),
-        transactions_root: H256::zero(),
+        transactions_root,
         receipts_root,
         logs_bloom: Some(Bloom::default()),
         difficulty: U256::zero(),
@@ -293,6 +293,48 @@ fn build_receipt_trie(
     }
 
     Ok(trie)
+}
+
+/// Build a transactions trie proof for a single typed-tx leaf (synthetic / keygen).
+pub fn transaction_proof_from_wire_bytes(tx_bytes: Vec<u8>, tx_index: u64) -> Result<TransactionProof> {
+    use axiom_eth::providers::transaction::get_tx_key_from_index;
+
+    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE) {
+        return Err(anyhow!(
+            "synthetic tx proof requires EIP-1559 wire bytes (0x02 prefix)"
+        ));
+    }
+
+    let memdb = Arc::new(MemoryDB::new(true));
+    let hasher = Arc::new(HasherKeccak::new());
+    let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::clone(&hasher));
+    let key = get_tx_key_from_index(tx_index as usize);
+    trie.insert(key.clone(), tx_bytes.clone()).context("insert tx leaf")?;
+    let transactions_root: [u8; 32] = trie
+        .root()?
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("transactions trie root must be 32 bytes"))?;
+    let proof_nodes = trie.get_proof(&key)?;
+
+    Ok(TransactionProof {
+        tx_bytes,
+        proof_nodes,
+        transactions_root,
+    })
+}
+
+/// Re-encode `block_header_rlp` so field 4/5 match the trie roots in the witness.
+pub fn align_block_header_roots(
+    receipt_proof: &mut ReceiptProof,
+    transactions_root: [u8; 32],
+) -> Result<()> {
+    let block = minimal_block_header(
+        H256::from_slice(&receipt_proof.receipt_root),
+        H256::from_slice(&transactions_root),
+    );
+    receipt_proof.block_header_rlp = crate::rlp_utils::encode_block_header(&block)?;
+    Ok(())
 }
 
 #[cfg(test)]

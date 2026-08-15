@@ -331,15 +331,35 @@ test:an:audit:
     changes:
       - audit/spec/an/**/*
       - audit/spec/an-contracts/**/*
+      - deposit-prover/fixtures/deposit_10proofs/**
       - scripts/sync_an_contracts.sh
       - scripts/setup_an_audit_tools.sh
       - scripts/ci_an_audit.sh
+      - scripts/check_vk_srs_pin.sh
+      - scripts/check_mock_vs_shplonk_smoke.sh
+      - scripts/check_mutation_kill_smoke.sh
+      - scripts/td_53_dry_run_recovery_smoke.sh
+      - scripts/check_td65_g3_smoke.sh
+      - scripts/check_an_overlay_patch_matrix.sh
+      - deposit-prover/tests/td_43_mock_vs_shplonk.rs
+      - deposit-prover/tests/td_49_mutation_kill.rs
+      - deposit-prover/src/opcode_triple_verify.rs
+      - crates/deposit-relayer-daemon/tests/td_49_mutation_kill_matrix.rs
+      - crates/deposit-relayer-daemon/tests/td_53_e2e_runbook_recovery.rs
+      - crates/deposit-relayer-daemon/tests/td_65_g3_revert_loop.rs
+      - crates/deposit-relayer-daemon/tests/f10_interface_reverted.rs
+      - scripts/check_td04_deploy_readiness.sh
+      - docs/operations/td-04-an-deploy-owner-handoff.md
+      - audit/spec/ethereum/DepositMutationKill.t.sol
+      - scripts/embed_deposit_vk_blob.py
 
 # F10 — deposit-relayer off-chain pipeline (Rust; excluded from workspace)
 test:deposit-relayer:audit:
   extends: .rust_base
   stage: test
   script:
+    - chmod +x scripts/check_deposit_audit_gates.sh
+    - ./scripts/check_deposit_audit_gates.sh
     - cd crates/deposit-relayer-daemon && cargo test --locked
   only:
     refs:
@@ -347,6 +367,16 @@ test:deposit-relayer:audit:
       - merge_requests
     changes:
       - crates/deposit-relayer-daemon/**/*
+      - deposit-prover/fixtures/deposit_10proofs/**
+      - audit/spec/an-contracts/exchange/**
+      - scripts/check_deposit_audit_gates.sh
+      - scripts/check_vk_srs_pin.sh
+      - scripts/check_pi_count_docs.sh
+      - scripts/check_mock_vs_shplonk_smoke.sh
+      - scripts/check_mutation_kill_smoke.sh
+      - scripts/td_53_dry_run_recovery_smoke.sh
+      - scripts/check_td65_g3_smoke.sh
+      - scripts/check_an_overlay_patch_matrix.sh
       - crates/acki-nacki-interface/**/*
       - audit/**/*
 

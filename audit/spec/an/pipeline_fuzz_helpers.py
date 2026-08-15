@@ -6,6 +6,7 @@ import random
 from typing import Iterable, List, Sequence
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     FAKE_MISSING_DEST,
     MAX_PROOF_INDEX,
     USDC_BRIDGE_ADDR,
@@ -15,6 +16,8 @@ from bridge_helpers import (
     init_bridge_instance,
     load_fixture_proof,
     max_available_proof_index,
+    parse_pi_fields,
+    seed_trust_from_pi,
     ten_proofs_available,
 )
 from test_base import JsonResult, MessagePipeline, TestBase
@@ -42,9 +45,10 @@ def finalize_enqueue(
     tb: TestBase, bridge_tvc, pipe: MessagePipeline, proof_idx: int
 ) -> JsonResult:
     proof, pi = load_fixture_proof(proof_idx)
+    seed_trust_from_pi(tb, bridge_tvc, pi)
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "finalizeDeposit",
         {"proof": proof.hex(), "publicInputs": pi.hex()},
         address=USDC_BRIDGE_ADDR,
@@ -86,16 +90,16 @@ def canonical_bridged_minted(
     """FIFO reference: sequential finalize + drain for each proof index."""
     tvc = init_bridge_instance(tb, tag)
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, tvc)
     try:
         for idx in proof_indices:
             jr = finalize_enqueue(tb, tvc, pipe, idx)
-            drain_fifo(pipe)
             register_voucher(pipe, jr)
+            drain_fifo(pipe)
         return get_total_bridged_minted(tb, tvc)
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", tag)
+        tb.cleanup_instance(BRIDGE_CONTRACT, tag)
 
 
 def sum_proof_amounts(indices: Iterable[int]) -> int:
@@ -107,15 +111,16 @@ def sum_proof_amounts(indices: Iterable[int]) -> int:
 
 
 def canonical_max_minted_from_history(proof_indices: Sequence[int]) -> int:
-    """Upper bound on bridge minted: first successful finalize per deposit_id only."""
-    seen_deposit_ids: set[int] = set()
+    """Upper bound: first successful finalize per (depositId, contractAddr, chainId)."""
+    seen_keys: set[tuple[int, int, int]] = set()
     total = 0
     for idx in proof_indices:
         _, pi = load_fixture_proof(idx)
-        deposit_id = fr_le(pi, 0)
-        if deposit_id in seen_deposit_ids:
+        fields = parse_pi_fields(pi)
+        key = (fields["deposit_id"], fields["contract_addr"], fields["chain_id"])
+        if key in seen_keys:
             continue
-        seen_deposit_ids.add(deposit_id)
+        seen_keys.add(key)
         total += fr_le(pi, 2)
     return total
 
@@ -133,7 +138,7 @@ def owner_mint_and_send(tb: TestBase, tvc, *, value: int, nonce: int) -> None:
     """Owner path — bumps `_totalMinted`, not bridged counter."""
     r = tb.call(
         tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "mintAndSend",
         {"recipient": OWNER_RECIPIENT, "value": str(value), "nonce": str(nonce)},
         sign_keys=tb.admin_keys,

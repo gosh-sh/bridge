@@ -101,8 +101,8 @@ ETH-side (live in `AckiNackiBridge.sol`):
 | Property | Statement |
 |---|---|
 | **DEP-1** | Every successful `deposit()` emits a `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts (`InvalidAnAccount`). |
-| **DEP-2** | `MAX_DEPOSIT_AMOUNT = 100 ether` is enforced; `msg.value` of zero reverts. |
-| **DEP-3** | `treasuryBalance` is incremented by exactly `msg.value` on every successful `deposit()`. |
+| **DEP-2** | `MAX_DEPOSIT_AMOUNT = type(uint64).max` is enforced; `amount == 0` reverts (`InvalidAmount`). |
+| **DEP-3** | `treasuryBalance` is incremented by exactly the `amount` pulled via `usdc.transferFrom` on every successful `deposit()`. |
 | **DEP-4** | `deposit()` is `nonReentrant`; no external calls are made inside it (yield routing to AAVE is owner-triggered separately via `supplyToAave`). |
 
 AN-side (planned, lands with the future `VERHALO2SHPLONK` opcode + `TokenBridge.finalizeDeposit`):

@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_HASH_MISMATCH,
     ERR_INVALID_ZKPROOF,
     USDC_BRIDGE_ADDR,
     build_public_inputs,
     init_bridge_instance,
 )
-
 pytestmark = pytest.mark.unit
 
 
@@ -22,14 +22,14 @@ def test_finalize_deposit_public_inputs_too_short(tb):
         pi = build_public_inputs()[:64]  # 2 Fr, need 8 for parse
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": "00", "publicInputs": pi.hex()},
             address=USDC_BRIDGE_ADDR,
         )
         tb.assert_failure(r, message="truncated publicInputs")
     finally:
-        tb.cleanup_instance("USDCBridge", "pi_short")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "pi_short")
 
 
 def test_finalize_deposit_zero_an_account_not_rejected_pre_zk(tb):
@@ -39,7 +39,7 @@ def test_finalize_deposit_zero_an_account_not_rejected_pre_zk(tb):
         pi = build_public_inputs(an_account_hi=0, an_account_lo=0).hex()
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "finalizeDeposit",
             {"proof": "00", "publicInputs": pi},
             address=USDC_BRIDGE_ADDR,
@@ -47,7 +47,7 @@ def test_finalize_deposit_zero_an_account_not_rejected_pre_zk(tb):
         # Parse + amount check pass; fails at ZK, not at recipient validation.
         tb.assert_failure(r, ERR_INVALID_ZKPROOF)
     finally:
-        tb.cleanup_instance("USDCBridge", "acct_zero")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "acct_zero")
 
 
 def test_deposit_voucher_hash_mismatch(tb):
@@ -60,6 +60,7 @@ def test_deposit_voucher_hash_mismatch(tb):
             "DepositVoucher",
             "constructor",
             {
+                "chainId": "11155111",
                 "depositId": "1",
                 "contractAddr": "2",
                 "dappId": "3",

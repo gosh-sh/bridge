@@ -40,6 +40,7 @@ contract MockERC20 is IERC20 {
 
     function transferFrom(address from, address to, uint256 amount)
         external
+        virtual
         override
         returns (bool)
     {

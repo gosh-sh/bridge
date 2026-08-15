@@ -22,7 +22,7 @@ Use this when spawning subagents on Phase F (`audit/spec/an/`).
 7. `audit/spec/an/BUILD.md` — toolchain + debugger limits
 8. `audit/reports/an-audit-direction.md` — **priority queue / BC-QC**
 9. `audit/reports/non-e2e-verification-cycle.md` — full non-E2E scope
-10. `audit/PROJECT_FACTS.md` — bridge flows (deposit 11 PI, finalizeDeposit)
+10. `audit/PROJECT_FACTS.md` — bridge flows (deposit **12** PI, finalizeDeposit)
 
 DEX-specific knowledge (`06-dex-overview.md` …) is **not** required for bridge.
 
@@ -48,9 +48,9 @@ Setup: `./scripts/setup_an_audit_tools.sh`
 
 ## Contract sources
 
-Upstream: `../acki-nacki` @ **`origin/contracts/dex_bridge`** (`git@github.com:gosh-sh/acki-nacki.git`). `contracts/exchange/`.
+Upstream: `../acki-nacki` @ **`origin/contracts/bridge`** (`git@github.com:gosh-sh/acki-nacki.git`). `contracts/exchange/` → **`eccUSDCBridge.sol`** (12 PI, `_trustedL1Bridge` SET allowlist), `DepositVoucher.sol` (+ `token/`, `eccconfig/` deps). Отдельный `USDCBridge.sol` в upstream **не** используется — после `sync_an_contracts.sh` смотрите `eccUSDCBridge`.
 
-Sync: `./scripts/sync_an_contracts.sh` (default branch `contracts/dex_bridge`; audit VkBlob `724687a4…` preserved via `scripts/preserve_audit_vk_blob.sh`)
+Sync: `./scripts/sync_an_contracts.sh` (default branch `contracts/bridge`; audit VkBlob pin `9dacd998…` restored via `scripts/preserve_audit_vk_blob.sh`)
 Optional vendor clones: `./scripts/setup_audit_vendors.sh` → `audit/vendors/` (gitignored)
 
 ## Methodology (same as ETH pass)
@@ -61,7 +61,7 @@ Optional vendor clones: `./scripts/setup_audit_vendors.sh` → `audit/vendors/` 
 
 ## Primary audit targets (Phase F)
 
-1. `USDCBridge.finalizeDeposit` — 11 public inputs, VK blob, voucher deploy
+1. `USDCBridge.finalizeDeposit` — **12** public inputs (operand `12 × 32` B), VK blob, voucher deploy (audit overlay may document legacy 8-Fr parser — see TD-04)
 2. `DepositVoucher` — confirmDeposit path, recipient binding (256-bit account)
 3. Replay / nullifier (`usedDepositIds` or equivalent)
 4. ECC mint semantics vs proof amount

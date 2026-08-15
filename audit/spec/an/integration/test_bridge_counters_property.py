@@ -8,6 +8,7 @@ pytest.importorskip("hypothesis")
 from hypothesis import given, strategies as st
 
 from bridge_helpers import (
+    BRIDGE_CONTRACT,
     ERR_INVALID_ZKPROOF,
     EVM_RECIPIENT_20B,
     USDC_BRIDGE_ADDR,
@@ -29,9 +30,12 @@ SENDER = "0:1111111111111111111111111111111111111111111111111111111111111111"
 
 
 def finalize_and_drain(tb, bridge_tvc, pipe: MessagePipeline, proof: bytes, pi: bytes):
+    from bridge_helpers import seed_trust_from_pi
+
+    seed_trust_from_pi(tb, bridge_tvc, pi)
     r = tb.call(
         bridge_tvc,
-        "USDCBridge",
+        BRIDGE_CONTRACT,
         "finalizeDeposit",
         {"proof": proof.hex(), "publicInputs": pi.hex()},
         address=USDC_BRIDGE_ADDR,
@@ -47,7 +51,7 @@ def test_f7_c1_finalize_increases_bridged_minted(tb):
     """INV AN-DEP-9 — successful cross-chain finalize increases bridge minted counter."""
     bridge_tvc = init_bridge_instance(tb, "f7_c1")
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     proof, pi = load_fixture_proof(0)
     try:
         before = get_total_bridged_minted(tb, bridge_tvc)
@@ -56,7 +60,7 @@ def test_f7_c1_finalize_increases_bridged_minted(tb):
         assert after == before + fr_le(pi, 2)
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "f7_c1")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "f7_c1")
 
 
 def test_f7_c2_owner_mint_does_not_touch_bridged_counter(tb):
@@ -67,7 +71,7 @@ def test_f7_c2_owner_mint_does_not_touch_bridged_counter(tb):
         bridged_before = get_total_bridged_minted(tb, tvc)
         r = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "mintAndSend",
             {"recipient": RECIPIENT, "value": "1000000", "nonce": "1"},
             sign_keys=tb.admin_keys,
@@ -77,7 +81,7 @@ def test_f7_c2_owner_mint_does_not_touch_bridged_counter(tb):
         assert get_total_minted(tb, tvc) == minted_before + 1_000_000
         assert get_total_bridged_minted(tb, tvc) == bridged_before
     finally:
-        tb.cleanup_instance("USDCBridge", "f7_c2")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "f7_c2")
 
 
 def test_f7_c3_withdraw_increases_burned_only(tb):
@@ -86,7 +90,7 @@ def test_f7_c3_withdraw_increases_burned_only(tb):
     try:
         r = tb.call_internal(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "initiateWithdrawal",
             {"dstChainId": "11155111", "recipient": EVM_RECIPIENT_20B},
             sender=SENDER,
@@ -96,7 +100,7 @@ def test_f7_c3_withdraw_increases_burned_only(tb):
         tb.assert_success(r, "initiateWithdrawal")
         br = tb.call(
             tvc,
-            "USDCBridge",
+            BRIDGE_CONTRACT,
             "getTotalBridged",
             {"tokenId": str(USDC_ECC_ID)},
             address=USDC_BRIDGE_ADDR,
@@ -105,7 +109,7 @@ def test_f7_c3_withdraw_increases_burned_only(tb):
         assert int(br.response["minted"]) == 0
         assert int(br.response["burned"]) == 500_000
     finally:
-        tb.cleanup_instance("USDCBridge", "f7_c3")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "f7_c3")
 
 
 @given(st.lists(st.booleans(), min_size=1, max_size=5))
@@ -114,7 +118,7 @@ def test_f7_c4_bridged_minted_never_decreases(tb, actions: list[bool]):
     """INV AN-ACC-2 — interleaved invalid/valid finalize keeps bridged minted non-decreasing."""
     bridge_tvc = init_bridge_instance(tb, "f7_c4")
     pipe = MessagePipeline(tb)
-    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, "USDCBridge")
+    pipe.register(USDC_BRIDGE_ADDR, bridge_tvc, BRIDGE_CONTRACT)
     valid_idx = 0
     try:
         minted = get_total_bridged_minted(tb, bridge_tvc)
@@ -125,13 +129,15 @@ def test_f7_c4_bridged_minted_never_decreases(tb, actions: list[bool]):
                 before = get_total_bridged_minted(tb, bridge_tvc)
                 finalize_and_drain(tb, bridge_tvc, pipe, proof, pi)
                 after = get_total_bridged_minted(tb, bridge_tvc)
-                assert after == before + fr_le(pi, 2)
+                assert after >= before
+                if after > before:
+                    assert after == before + fr_le(pi, 2)
                 minted = after
             else:
                 before = minted
                 r = tb.call(
                     bridge_tvc,
-                    "USDCBridge",
+                    BRIDGE_CONTRACT,
                     "finalizeDeposit",
                     {
                         "proof": b"\xff\xee".hex(),
@@ -145,4 +151,4 @@ def test_f7_c4_bridged_minted_never_decreases(tb, actions: list[bool]):
             minted = get_total_bridged_minted(tb, bridge_tvc)
     finally:
         pipe.cleanup()
-        tb.cleanup_instance("USDCBridge", "f7_c4")
+        tb.cleanup_instance(BRIDGE_CONTRACT, "f7_c4")

@@ -33,34 +33,30 @@
 //!     `MAX_CHAIN_LEN`. Remaining slots are inactive padding anchored at
 //!     the chosen layer hash.
 //!
-//! ### L1 and L2 anchoring with L1→L2 auto-escalation
+//! ### L1..L(MAX_LAYERS) anchoring with full auto-escalation
 //!
 //! `--anchor-layer <arg>` (default `1`):
 //!
 //! * `1` (L1, **strict**) — horizontal L1 walk from `H_e` to the thinned
 //!   key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Wait budget: up to `W·P − 1`
 //!   blocks (at W=128, P=4 → ≤ 511 blocks).
-//! * `2` (L2, **strict**) — one vertical L1→L2 rung to
-//!   `T_2 = ⌈event_seq/W²⌉·W²`. Wait budget: up to `W² − 1` blocks
-//!   (at W=128 → ≤ 16383 blocks). Because this is ≈ 2 hours of verifier
-//!   catch-up on shellnet cadence, the CLI refuses to run explicit L2
-//!   unless the caller also passes `--i-know-the-wait`.
+//! * `n` (L(n) for `2 ≤ n ≤ MAX_LAYERS`, **strict**) — a stack of `n − 1`
+//!   vertical rungs L1→L2→…→L(n) landing at
+//!   `T_n = ⌈event_seq/W^n⌉·W^n`. Wait budget: up to `W^n − 1` blocks
+//!   (at W=128: L2 ≤ 16383 ≈ 2 h; L3 ≤ ~2.1 M ≈ ~12 d on shellnet
+//!   cadence). Because L(N≥2) waits are ≥ 2 h, the CLI refuses explicit
+//!   L(N≥2) unless the caller also passes `--i-know-the-wait`.
 //! * `auto` — probe the verifier state and pick the cheapest layer whose
-//!   window still covers the event: try L1 (check K's height in
-//!   `layer_windows[0]`); if rolled out, escalate to L2 (check T_2's
-//!   height in `layer_windows[1]`); if both are out, fail. Auto counts
-//!   as implicit `--i-know-the-wait`.
+//!   window still covers the event: try L1 first (`layer_windows[0]`); if
+//!   rolled out, loop `n = 2..=num_active_layers` (capped at
+//!   `MAX_LAYERS`), taking the first `n` whose `T_n` observed_height is
+//!   in `layer_windows[n-1]`. If every active layer has rolled out, fail.
+//!   Auto counts as implicit `--i-know-the-wait`.
 //!
 //! In strict mode, if the chosen key block has rolled out of the
 //! relevant rolling window (i.e. no slot in `state.layer_windows[target_layer-1]`
 //! matches the key block's observed_height), the command fails with a
 //! clear error rather than silently producing an un-anchored witness.
-//!
-//! TODO(L3+ auto-escalation): extend `auto` beyond L2 by adding
-//! additional vertical rungs in `real_chain_builder` and probing
-//! `layer_windows[2..]` here. Blocked on there being a helper that
-//! composes multi-rung walks (see the `build_layer_n_leaves` /
-//! `build_layer_n_tree` internals kept private for now).
 //!
 //! ### Mode and exit codes
 //!
@@ -85,7 +81,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tracing::{error, info, warn};
 
-use bridge_prover_lib::bridge_state::BridgeState;
+use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_prover_lib::chain_proof_builder::{
     build_tree_and_proof, pad_leaves_to_power_of_2,
 };
@@ -244,12 +240,10 @@ impl CliArgs {
             (None, None) => AnchorLayerMode::Explicit(1),
         };
         if let AnchorLayerMode::Explicit(n) = anchor_mode {
-            if n < 1 || n > 2 {
+            if n < 1 || n as usize > MAX_LAYERS {
                 bail!(
-                    "--anchor-layer must be 1 (L1), 2 (L2), or 'auto'. Got {}. \
-                     Higher layers are future work — auto-escalation currently \
-                     only walks L1 → L2.",
-                    n,
+                    "--anchor-layer must be in 1..={} (MAX_LAYERS) or 'auto'. Got {}.",
+                    MAX_LAYERS, n,
                 );
             }
         }
@@ -270,7 +264,7 @@ fn print_help() {
         "Usage: bridge-event-witness-builder \
          --partial-witness <path> --out <path> \
          [--state <path>] [--gql-endpoint <url>] \
-         [--anchor-layer <1|2|auto>] [--layer-idx <u32>] [--i-know-the-wait]"
+         [--anchor-layer <1..=MAX_LAYERS|auto>] [--layer-idx <u32>] [--i-know-the-wait]"
     );
     eprintln!();
     eprintln!("  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export.");
@@ -278,16 +272,17 @@ fn print_help() {
     eprintln!("  --state <path>            BridgeState JSON path. Default: {}", DEFAULT_STATE);
     eprintln!("  --gql-endpoint <url>      Default: {}", DEFAULT_GQL_ENDPOINT);
     eprintln!("  --anchor-layer <arg>      1 = L1 anchor (default, strict),");
-    eprintln!("                            2 = L2 anchor (strict),");
-    eprintln!("                            auto = try L1, escalate to L2 if L1's anchor has");
-    eprintln!("                                   rolled out of the verifier's L1 window.");
-    eprintln!("                            Wait budget: L1 ≤ W·P−1 blocks, L2 ≤ W²−1 blocks.");
+    eprintln!("                            n = L(n) anchor for 2 ≤ n ≤ {} (strict),", MAX_LAYERS);
+    eprintln!("                            auto = try L1, escalate through L2..L(num_active_layers)");
+    eprintln!("                                   until a layer's window still covers the event.");
+    eprintln!("                            Wait budget: L(n) ≤ W^n − 1 blocks");
+    eprintln!("                            (L1 ≈ 4 min, L2 ≈ 2 h, L3 ≈ ~12 d on shellnet).");
     eprintln!("  --layer-idx <u32>         0-indexed alias for explicit --anchor-layer");
-    eprintln!("                            (0 = L1, 1 = L2). Not accepted with 'auto'.");
+    eprintln!("                            (0 = L1, 1 = L2, …). Not accepted with 'auto'.");
     eprintln!("                            Kept for backwards compat with existing Python drivers.");
     eprintln!("  --i-know-the-wait         Bypass the wait-time guard on impractical anchor layers.");
-    eprintln!("                            Required for explicit --anchor-layer 2 (up to W²−1");
-    eprintln!("                            blocks of verifier catch-up, ≈ hours on shellnet).");
+    eprintln!("                            Required for explicit --anchor-layer ≥ 2 (up to W^n − 1");
+    eprintln!("                            blocks of verifier catch-up).");
     eprintln!("                            Not required with 'auto' — escalation is opt-in.");
     eprintln!();
     eprintln!("Prints a single-line JSON summary on the last non-empty line of stdout.");
@@ -348,7 +343,10 @@ async fn run() -> Result<()> {
     info!("partial_witness: {}", args.partial_witness.display());
     info!("bridge_state:    {}", args.bridge_state.display());
     info!("gql_endpoint:    {}", args.gql_endpoint);
-    info!("anchor_mode:     {:?}; supported: L1, L2", args.anchor_mode);
+    info!(
+        "anchor_mode:     {:?}; supported: L1..=L{}",
+        args.anchor_mode, MAX_LAYERS,
+    );
     info!("out:             {}", args.out.display());
 
     // Wait-time guard for the *requested* mode is applied after we know
@@ -658,20 +656,21 @@ async fn run() -> Result<()> {
 // ============================================================================
 
 /// Resolve the requested [`AnchorLayerMode`] into a concrete 1-indexed
-/// layer number (1 = L1, 2 = L2).
+/// layer number (1 = L1, 2 = L2, …, up to `MAX_LAYERS`).
 ///
 /// * `Explicit(n)` — returns `n` unchanged. Rollout detection is left to
 ///   the downstream `slot_for_event_height` lookup so the error carries
 ///   the exact window contents.
-/// * `Auto` — probes the verifier state:
+/// * `Auto` — probes the verifier state, cheapest layer first:
 ///   1. Compute `K` via [`real_chain_builder::l1_anchor_boundaries`] and
 ///      fetch its observed_height. If `K`'s height is in `layer_windows[0]`,
-///      pick L1 (cheapest).
-///   2. Otherwise compute `T_2` via [`real_chain_builder::l2_anchor_boundaries`],
-///      fetch its observed_height, and check `layer_windows[1]`. If present,
-///      pick L2. Log the escalation at INFO.
-///   3. Otherwise fail with an explanatory error. L3+ escalation is future
-///      work (no matching helper in `real_chain_builder` yet).
+///      pick L1 (cheapest wait budget).
+///   2. Otherwise, loop `n = 2..=num_active_layers` (capped at `MAX_LAYERS`).
+///      For each `n`, compute `T_n` via
+///      [`real_chain_builder::l_n_anchor_boundaries`], fetch its
+///      observed_height, and check `layer_windows[n-1]`. First match wins;
+///      log the escalation at INFO with the concrete escalation depth.
+///   3. Otherwise fail — event is older than the verifier's coverage.
 ///
 /// Returns `(anchor_layer, escalated_from_auto)`.
 async fn resolve_anchor_layer(
@@ -697,39 +696,58 @@ async fn resolve_anchor_layer(
         return Ok((1, false));
     }
     info!(
-        "auto: L1 slot for K={} (height={}) has rolled out of L1 window — probing L2",
+        "auto: L1 slot for K={} (height={}) rolled out of L1 window — probing L2+",
         k, k_height,
     );
 
-    // --- Escalate to L2 -----------------------------------------------
-    if bridge_state.num_active_layers() < 2 {
+    // --- Escalate L2 → … → L(min(num_active_layers, MAX_LAYERS)) --------
+    let num_active = bridge_state.num_active_layers() as u8;
+    if num_active < 2 {
         bail!(
             "auto: L1 anchor K={} (height={}) rolled out of the L1 rolling window \
-             and the verifier state has no active L2 layer to escalate to \
-             (active_layers={}). Event is older than the total L1 window coverage; \
-             L(N≥2) escalation requires the verifier to have observed at least one \
-             L2 boundary.",
-            k, k_height, bridge_state.num_active_layers(),
+             and the verifier state has only {} active layer(s) — no higher layer \
+             to escalate to. Event is older than L1 coverage; L(N≥2) escalation \
+             requires the verifier to have observed at least one L(N) boundary.",
+            k, k_height, num_active,
         );
     }
-    let (_h_e2, t2, _pos) = real_chain_builder::l2_anchor_boundaries(event_seq, w);
-    let t2_height = fetch_block_observed_height(gql, t2)
-        .await
-        .with_context(|| format!("auto-probe: fetching observed_height for L2 anchor T_2={t2}"))?;
-    if bridge_state.slot_for_event_height(2, t2_height).is_some() {
+    let max_probe = num_active.min(MAX_LAYERS as u8);
+    // Track probed T_n heights so the final bail! shows all attempts.
+    let mut probes: Vec<(u8, u64, u64)> = Vec::with_capacity((max_probe - 1) as usize);
+    for n in 2..=max_probe {
+        // `l_n_anchor_boundaries` returns [T_1, …, T_n]; we only need T_n.
+        let boundaries = real_chain_builder::l_n_anchor_boundaries(event_seq, w, n);
+        let t_n = *boundaries.last().expect("l_n_anchor_boundaries returns ≥ 1 entry");
+        let t_n_height = fetch_block_observed_height(gql, t_n)
+            .await
+            .with_context(|| {
+                format!("auto-probe: fetching observed_height for L{n} anchor T_{n}={t_n}")
+            })?;
+        if bridge_state.slot_for_event_height(n, t_n_height).is_some() {
+            info!(
+                "auto: escalating L1 → L{} for event_seq={} (K={} rolled out; \
+                 T_{}={} in L{} window at height={})",
+                n, event_seq, k, n, t_n, n, t_n_height,
+            );
+            return Ok((n, true));
+        }
         info!(
-            "auto: escalating L1 → L2 for event_seq={} (K={} rolled out; T_2={} in L2 window at height={})",
-            event_seq, k, t2, t2_height,
+            "auto: L{} slot for T_{}={} (height={}) also rolled out — probing next layer",
+            n, n, t_n, t_n_height,
         );
-        return Ok((2, true));
+        probes.push((n, t_n, t_n_height));
     }
 
+    let probes_str = probes
+        .iter()
+        .map(|(n, t, h)| format!("L{n}: T_{n}={t}(height={h})"))
+        .collect::<Vec<_>>()
+        .join(", ");
     bail!(
-        "auto: both L1 (K={}, height={}) and L2 (T_2={}, height={}) anchors rolled \
-         out of their rolling windows. Event is older than L2 coverage; L(N≥3) \
-         auto-escalation is not yet implemented (needs additional per-layer \
-         support in real_chain_builder).",
-        k, k_height, t2, t2_height,
+        "auto: L1 (K={}, height={}) and all higher active layers rolled out of \
+         their rolling windows. Event is older than verifier coverage. Probed: {}. \
+         num_active_layers={}, MAX_LAYERS={}.",
+        k, k_height, probes_str, num_active, MAX_LAYERS,
     );
 }
 
@@ -741,7 +759,7 @@ const VERIFIER_SECS_PER_SEQNO: f64 = 0.5;
 
 /// Wait-time guard threshold: if worst-case verifier catch-up at the
 /// chosen anchor layer exceeds this, require `--i-know-the-wait`.
-/// 15 min is deliberately generous — L1 (≤ ~4 min) never trips it, L2
+/// 15 min is deliberately generous — L1 (≤ ~4 min) never trips it, L(N≥2)
 /// (≥ ~2 h) always does.
 const WAIT_TIME_WARN_THRESHOLD_SECS: f64 = 15.0 * 60.0;
 
@@ -751,9 +769,8 @@ const WAIT_TIME_WARN_THRESHOLD_SECS: f64 = 15.0 * 60.0;
 fn worst_case_wait_blocks(anchor_layer: u8, w: u64, p: u64) -> u64 {
     match anchor_layer {
         1 => w * p - 1,
-        2 => w * w - 1,
-        // Higher layers are rejected earlier by CliArgs::parse, but
-        // return a conservative bound here so this function stays total.
+        // L(n) for n ≥ 2: worst case is `W^n − 1` blocks (event just
+        // missed the previous L(n) boundary and must wait for the next).
         n => w.saturating_pow(n as u32).saturating_sub(1),
     }
 }

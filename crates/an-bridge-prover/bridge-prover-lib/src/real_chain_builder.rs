@@ -651,6 +651,210 @@ async fn build_layer_n_leaves(
     Ok(leaves)
 }
 
+// ============================================================================
+// Event-anchor chain building
+// ============================================================================
+//
+// The functions below build a chain that anchors a *single event* (not a
+// bundle transition) into one of the verifier's `layer_windows[]` slots. The
+// event's own L1 root is the chain's start, and the chain terminates at some
+// L(target_layer) root the verifier already mirrors.
+//
+// Two topologies are supported here:
+//
+// * `target_layer = 1` — horizontal L1 walk from `H_e` (event's W-aligned
+//   L1 KB) to `K` (the next W·P-aligned KB, which the verifier stores). The
+//   chain has ≤ P−1 active rungs. Wait time budget: up to W·P−1 blocks after
+//   the event before its K is proven.
+//
+// * `target_layer = 2` — one vertical L1→L2 rung. The event's L1 root is
+//   opened at the appropriate data-leaf slot of the L2 tree at `T_2`
+//   (⌈event_seq/W²⌉·W²), and the tree root equals the verifier's mirrored
+//   L2 root at T_2. Wait time budget: up to W²−1 blocks after the event.
+//
+// Higher target_layer (3+) is future work: extend by chaining additional
+// vertical rungs L2→L3, L3→L4, etc. Not implemented in this cut.
+
+/// Return value of [`build_event_anchor_chain`].
+pub struct EventAnchorChainResult {
+    /// Active links only (unpadded). The caller pads to `MAX_CHAIN_LEN` with
+    /// `DenseChainLink::inactive(final_chain_root, link_depth)`.
+    pub active_links: Vec<DenseChainLink>,
+    /// Root at the end of the chain. Should equal the verifier's mirrored
+    /// L(target_layer) root at `anchor_kb_seqno` when all inputs are consistent.
+    pub final_chain_root: [u8; 32],
+    /// Depth of each link's Merkle proof (padded L1/L(N) tree depth).
+    pub link_depth: usize,
+    /// Verifier-side anchor block seqno: `K` for target_layer=1,
+    /// `T_2` for target_layer=2.
+    pub anchor_kb_seqno: u64,
+}
+
+/// Build the event-anchoring chain from an event's L1 root up to the chosen
+/// verifier-stored layer root. See the module-level docs for the topology.
+///
+/// This is the single composed entry point used by
+/// `bridge-event-witness-builder`; it deliberately keeps
+/// [`build_layer_n_leaves`] / [`build_layer_n_tree`] private inside this
+/// module so downstream code has a narrow, stable surface.
+pub async fn build_event_anchor_chain(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    target_layer: u8,
+    window_size: u64,
+    thinning_factor_p: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    let w = window_size;
+    match target_layer {
+        1 => build_event_anchor_chain_l1(gql, event_seq, event_l1_root, w, thinning_factor_p).await,
+        2 => build_event_anchor_chain_l2(gql, event_seq, event_l1_root, w).await,
+        n => bail!(
+            "target_layer={} not yet supported (only 1 and 2 in this cut). \
+             L(N≥3) anchoring is future work — see build_event_anchor_chain docs.",
+            n
+        ),
+    }
+}
+
+/// Horizontal L1 walk from `H_e` to `K` (both W-aligned; K is W·P-aligned).
+/// Emits `hops = (K − H_e)/W` active rungs.
+async fn build_event_anchor_chain_l1(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    w: u64,
+    p: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    let h_e = (event_seq / w) * w + w;
+    let k = (event_seq / (w * p)) * (w * p) + (w * p);
+    let hops = (k - h_e) / w;
+
+    let mut chain_leaf_value = event_l1_root;
+    let mut active_links: Vec<DenseChainLink> = Vec::with_capacity(hops as usize);
+    let mut link_depth: usize = 0;
+
+    for i in 1..=hops {
+        let seq_i = h_e + i * w;
+        let tree = build_layer1_tree(gql, seq_i, chain_leaf_value, w)
+            .await
+            .with_context(|| {
+                format!("building L1 tree at seq={seq_i} for forward-hop {i}/{hops}")
+            })?;
+        let (root_i, siblings) =
+            chain_proof_builder::build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
+        link_depth = siblings.len();
+        info!(
+            "  L1 hop {}/{}: tree at seq={}, chain_pos={}, root={}",
+            i, hops, seq_i, tree.chain_leaf_position, hex::encode(root_i),
+        );
+        active_links.push(DenseChainLink {
+            active: true,
+            siblings,
+            position: tree.chain_leaf_position,
+            leaf_native: chain_leaf_value,
+        });
+        chain_leaf_value = root_i;
+    }
+
+    // When hops == 0 we produced no rungs and no tree; the caller is
+    // expected to pass in the block_tree_proof depth for inactive padding.
+    // We report `0` here to signal "not observed"; the caller must fall
+    // back to its own known link depth in that case.
+    Ok(EventAnchorChainResult {
+        active_links,
+        final_chain_root: chain_leaf_value,
+        link_depth,
+        anchor_kb_seqno: k,
+    })
+}
+
+/// Vertical L1→L2 rung: open the event's L1 root at its data-leaf position
+/// inside the L2 tree at `T_2 = ⌈event_seq/W²⌉·W²`.
+async fn build_event_anchor_chain_l2(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    w: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    let h_e = (event_seq / w) * w + w;
+    let w2 = w * w;
+    let t2 = (event_seq / w2) * w2 + w2;
+    ensure!(
+        h_e <= t2 && (t2 - h_e) % w == 0,
+        "internal: H_e={} not W-aligned inside L2 tree at T_2={} (W={})",
+        h_e, t2, w,
+    );
+    let k = (t2 - h_e) / w; // hop count from H_e forward to T_2 at L1 stride
+    ensure!(
+        k < w,
+        "internal: L2 window offset k={} exceeds W-1 (W={}) — event outside T_2's L2 window",
+        k, w,
+    );
+    // data_leaves[i] = L1 root at T_2 - (W-1-i)*W, so position of H_e is 2 + (W-1-k).
+    let position = 2 + (w - 1 - k) as usize;
+
+    // Fetch the L2 tree's prev_same_layer_root (L2 root at T_2 - W², or zero
+    // when T_2 == W²).
+    let prev_same_root = if t2 > w2 {
+        let prev_l2_seq = t2 - w2;
+        fetch_layer_root(gql, prev_l2_seq, 2)
+            .await
+            .with_context(|| {
+                format!(
+                    "fetching prev L2 root from block {} for L2 tree at T_2={} \
+                     (vertical L1→L2 rung)",
+                    prev_l2_seq, t2,
+                )
+            })?
+    } else {
+        [0u8; 32]
+    };
+
+    let leaves = build_layer_n_leaves(gql, t2, 2, prev_same_root, w)
+        .await
+        .with_context(|| format!("building L2 leaves at T_2={} for vertical L1→L2 rung", t2))?;
+
+    ensure!(
+        position < leaves.len(),
+        "internal: L2 leaf position {} out of bounds (len={})",
+        position, leaves.len(),
+    );
+    if leaves[position] != event_l1_root {
+        bail!(
+            "L2 tree data leaf at position {} = {} does not match self-computed \
+             R_1@H_e = {}. Either GQL data drifted since block_tree_proof was \
+             built, or H_e = {} does not correspond to this L2 window (T_2 = {}).",
+            position,
+            hex::encode(leaves[position]),
+            hex::encode(event_l1_root),
+            h_e, t2,
+        );
+    }
+
+    let (root, siblings) = chain_proof_builder::build_tree_and_proof(&leaves, position);
+    let link_depth = siblings.len();
+    info!(
+        "L1→L2 rung: L2 tree at T_2={}, H_e={} at data-leaf position {} (k={}), \
+         computed L2 root = {}",
+        t2, h_e, position, k, hex::encode(root),
+    );
+
+    let active_links = vec![DenseChainLink {
+        active: true,
+        siblings,
+        position,
+        leaf_native: event_l1_root,
+    }];
+
+    Ok(EventAnchorChainResult {
+        active_links,
+        final_chain_root: root,
+        link_depth,
+        anchor_kb_seqno: t2,
+    })
+}
+
 /// Fetch a specific layer's root hash from a block's `history_proofs` via GQL.
 ///
 /// `pub` so integration tests and downstream binaries can probe individual

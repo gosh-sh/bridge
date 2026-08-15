@@ -33,20 +33,28 @@
 //!     `MAX_CHAIN_LEN`. Remaining slots are inactive padding anchored at
 //!     the chosen layer hash.
 //!
-//! ### L1-only anchor; L1→L5 escalation deferred
+//! ### L1 and explicit L2 anchoring; L(N≥3) auto-escalation deferred
 //!
-//! This first cut handles **only** L1 anchoring. If the event's block has
-//! rolled out of the L1 rolling window (i.e. no slot in
-//! `state.layer_windows[0]` matches the key block's observed_height), the
-//! command fails with a clear error rather than silently producing an
-//! un-anchored witness.
+//! This cut supports two explicit anchor layers, selected via
+//! `--anchor-layer <1|2>` (default 1):
 //!
-//! TODO(L1→L5 escalation): when no L1 slot matches, walk up: look for the
-//! event's parent L2 key block in `state.layer_windows[1]`, then L3, …
-//! Each escalation step adds one active `dense_chain` link bridging the
-//! lower-layer root to the chosen higher layer's root. The chain must
-//! follow the production `real_chain_builder::build_layer_n_tree` shape so
-//! the recomputed `final_root` matches the verifier's mirrored layer hash.
+//! * `--anchor-layer 1` (L1) — horizontal L1 walk from `H_e` to the thinned
+//!   key block `K = ⌈event_seq/(W·P)⌉·(W·P)`. Wait time budget: up to
+//!   `W·P − 1` blocks (at W=128, P=4 → ≤ 511 blocks).
+//! * `--anchor-layer 2` (L2) — one vertical L1→L2 rung to
+//!   `T_2 = ⌈event_seq/W²⌉·W²`. Wait time budget: up to `W² − 1` blocks
+//!   (at W=128 → ≤ 16383 blocks).
+//!
+//! In both cases, if the chosen key block has rolled out of the relevant
+//! rolling window (i.e. no slot in `state.layer_windows[target_layer-1]`
+//! matches the key block's observed_height), the command fails with a clear
+//! error rather than silently producing an un-anchored witness.
+//!
+//! TODO(L1→L5 auto-escalation): implement transparent escalation for old
+//! events whose L1 slot has rolled out: walk up through L2/L3/... using
+//! additional vertical rungs from `real_chain_builder::build_layer_n_leaves`.
+//! Follow-up to this pass — first land explicit L1/L2 support, then add the
+//! escalation policy (bootstrap-from-middle scanning).
 //!
 //! ### Mode and exit codes
 //!
@@ -55,7 +63,8 @@
 //!   --partial-witness  <path>                  (required)
 //!   --state            ./state/prover_state.json
 //!   --gql-endpoint     http://localhost/graphql
-//!   --layer-idx        0                       (L1 only for now)
+//!   --anchor-layer     1                       (1 = L1 [default], 2 = L2)
+//!   --layer-idx        0                       (0-indexed alias for --anchor-layer)
 //!   --out              <path>                  (required)
 //! ```
 //!
@@ -107,7 +116,9 @@ struct CliArgs {
     partial_witness: PathBuf,
     bridge_state: PathBuf,
     gql_endpoint: String,
-    layer_idx: u32,
+    /// 1-indexed target anchor layer: 1 = L1, 2 = L2. Only these two are
+    /// supported in this cut; higher layers are future work.
+    anchor_layer: u8,
     out: PathBuf,
 }
 
@@ -117,7 +128,12 @@ impl CliArgs {
         let mut partial_witness: Option<PathBuf> = None;
         let mut bridge_state: Option<PathBuf> = None;
         let mut gql_endpoint: Option<String> = None;
-        let mut layer_idx: u32 = 0;
+        // The 1-indexed anchor layer is the user-facing flag. `--layer-idx`
+        // (0-indexed) is accepted for backwards compat with existing Python
+        // drivers; if both flags are given they must resolve to the same
+        // value.
+        let mut anchor_layer_1indexed: Option<u8> = None;
+        let mut layer_idx_0indexed: Option<u32> = None;
         let mut out: Option<PathBuf> = None;
 
         while let Some(a) = args.next() {
@@ -134,9 +150,15 @@ impl CliArgs {
                     let v = args.next().context("--gql-endpoint needs a URL")?;
                     gql_endpoint = Some(v);
                 }
+                "--anchor-layer" => {
+                    let v = args.next().context("--anchor-layer needs 1 or 2")?;
+                    let n: u8 = v.parse::<u8>().context("--anchor-layer must be 1 or 2")?;
+                    anchor_layer_1indexed = Some(n);
+                }
                 "--layer-idx" => {
                     let v = args.next().context("--layer-idx needs a u32")?;
-                    layer_idx = v.parse::<u32>().context("--layer-idx must be a u32")?;
+                    layer_idx_0indexed =
+                        Some(v.parse::<u32>().context("--layer-idx must be a u32")?);
                 }
                 "--out" => {
                     let v = args.next().context("--out needs a path")?;
@@ -154,11 +176,41 @@ impl CliArgs {
             partial_witness.ok_or_else(|| anyhow::anyhow!("--partial-witness is required"))?;
         let out = out.ok_or_else(|| anyhow::anyhow!("--out is required"))?;
 
+        // Resolve anchor_layer from either flag. Default 1 (L1).
+        let anchor_layer: u8 = match (anchor_layer_1indexed, layer_idx_0indexed) {
+            (Some(a), Some(b)) => {
+                let from_idx = (b as u8)
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?;
+                if a != from_idx {
+                    bail!(
+                        "--anchor-layer {} and --layer-idx {} disagree ({} vs {}). \
+                         Pass only one, or make them consistent.",
+                        a, b, a, from_idx,
+                    );
+                }
+                a
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => (b as u8)
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?,
+            (None, None) => 1,
+        };
+        if anchor_layer < 1 || anchor_layer > 2 {
+            bail!(
+                "--anchor-layer must be 1 (L1) or 2 (L2). Got {}. \
+                 Higher layers are future work — see TODO(L1→L5 auto-escalation) \
+                 in bin/build.rs.",
+                anchor_layer,
+            );
+        }
+
         Ok(Self {
             partial_witness,
             bridge_state: bridge_state.unwrap_or_else(|| PathBuf::from(DEFAULT_STATE)),
             gql_endpoint: gql_endpoint.unwrap_or_else(|| DEFAULT_GQL_ENDPOINT.to_string()),
-            layer_idx,
+            anchor_layer,
             out,
         })
     }
@@ -168,14 +220,18 @@ fn print_help() {
     eprintln!(
         "Usage: bridge-event-witness-builder \
          --partial-witness <path> --out <path> \
-         [--state <path>] [--gql-endpoint <url>] [--layer-idx <u32>]"
+         [--state <path>] [--gql-endpoint <url>] \
+         [--anchor-layer <1|2>] [--layer-idx <u32>]"
     );
     eprintln!();
     eprintln!("  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export.");
     eprintln!("  --out <path>              Output path for the enriched PrivateWitness JSON.");
     eprintln!("  --state <path>            BridgeState JSON path. Default: {}", DEFAULT_STATE);
     eprintln!("  --gql-endpoint <url>      Default: {}", DEFAULT_GQL_ENDPOINT);
-    eprintln!("  --layer-idx <u32>         Anchor layer (0 = L1). Only 0 supported in this cut.");
+    eprintln!("  --anchor-layer <1|2>      1 = L1 anchor (default), 2 = L2 anchor.");
+    eprintln!("                            Wait budget: L1 ≤ W·P−1 blocks, L2 ≤ W²−1 blocks.");
+    eprintln!("  --layer-idx <u32>         0-indexed alias for --anchor-layer (0 = L1, 1 = L2).");
+    eprintln!("                            Kept for backwards compat with existing Python drivers.");
     eprintln!();
     eprintln!("Prints a single-line JSON summary on the last non-empty line of stdout.");
 }
@@ -187,7 +243,10 @@ struct OutputSummary<'a> {
     block_seq_no: u64,
     /// Event's own W-aligned key block `H_e` (covers the block_tree_proof).
     key_block_seq_no: u64,
-    /// Thinned key block `K` (verifier-stored L1 anchor).
+    /// Verifier-side anchor key block seqno: `K = ⌈event_seq/(W·P)⌉·(W·P)` for
+    /// L1 anchoring, `T_2 = ⌈event_seq/W²⌉·W²` for L2 anchoring. Field name
+    /// kept as `thinned_key_block_seq_no` for backwards compatibility with
+    /// existing consumers of this JSON summary.
     thinned_key_block_seq_no: u64,
     layer_idx: u32,
     layer_hash_hex: &'a str,
@@ -232,20 +291,12 @@ async fn run() -> Result<()> {
     info!("partial_witness: {}", args.partial_witness.display());
     info!("bridge_state:    {}", args.bridge_state.display());
     info!("gql_endpoint:    {}", args.gql_endpoint);
-    info!("layer_idx:       {} (only 0 supported for now)", args.layer_idx);
+    info!(
+        "anchor_layer:    L{} (layer_idx={}); supported: L1, L2",
+        args.anchor_layer,
+        args.anchor_layer - 1,
+    );
     info!("out:             {}", args.out.display());
-
-    if args.layer_idx != 0 {
-        // TODO(L1→L5 escalation): allow layer_idx > 0 and build a
-        // multi-step dense_chain whose intermediate Merkle proofs follow
-        // `real_chain_builder::build_layer_n_tree`. This first cut keeps
-        // the implementation surface small and predictable.
-        bail!(
-            "--layer-idx {} not yet supported (only L1 / layer_idx=0). \
-             See TODO(L1→L5 escalation) in src/main.rs.",
-            args.layer_idx
-        );
-    }
 
     // ---- Load partial witness -------------------------------------------
     let raw = std::fs::read_to_string(&args.partial_witness)
@@ -305,44 +356,25 @@ async fn run() -> Result<()> {
         events_tree_proof.siblings_hex.len(),
     );
 
-    // ---- Identify key blocks for this event ----------------------------
+    // ---- Identify H_e (event's L1 key block) ---------------------------
     // Production L1 tree at key block H covers blocks [H - W, ..., H - 1].
     // The unique multiple of W in [event_seq+1, event_seq+W] is the key
     // block whose history_proof[1] is the L1 hash containing this event's
     // block leaf — we call this `H_e` (`key_block_seq`).
     //
-    // Under prover thinning (P > 1), the verifier only persists L1 roots
-    // for `(W*P)`-aligned key blocks. Let `K = thinned_key_block_seq` be
-    // the smallest `(W*P)`-aligned key block ≥ `H_e`. When `H_e != K`,
-    // Circuit 4 chains forward from `R_1@H_e` to `R_1@K` via a sequence
-    // of `hops = (K - H_e) / W` forward Merkle openings at position 1
-    // (`prev_same_layer_root`) of each intermediate L1 tree — the
-    // "horizontal" path from BRIDGE_PROVER_THINNING_SPEC.md §2.3 (Forward
-    // move) / §6.1. `hops ∈ {0, …, P-1}` fits well within MAX_CHAIN_LEN.
+    // For L1 anchoring the verifier's stored KB is `K = ⌈event_seq/(W·P)⌉·(W·P)`
+    // and we build a horizontal L1 walk H_e → K. For L2 anchoring the
+    // verifier's stored KB is `T_2 = ⌈event_seq/W²⌉·W²` and we build a single
+    // vertical L1→L2 rung. Both paths are dispatched through
+    // `real_chain_builder::build_event_anchor_chain`.
     let w = HISTORY_WINDOW_SIZE;
     let p = THINNING_FACTOR_P;
     let key_block_seq = ((event_seq / w) * w) + w;
-    let thinned_key_block_seq = ((event_seq / (w * p)) * (w * p)) + (w * p);
-    let hops = (thinned_key_block_seq - key_block_seq) / w;
-    if (hops as usize) > MAX_CHAIN_LEN {
-        bail!(
-            "internal: hops={} exceeds MAX_CHAIN_LEN={} (W={}, P={}, event_seq={}, \
-             H_e={}, K={}). This should not happen when P ≤ MAX_CHAIN_LEN.",
-            hops, MAX_CHAIN_LEN, w, p, event_seq, key_block_seq, thinned_key_block_seq,
-        );
-    }
     let window_start = key_block_seq - w;
     let block_offset_in_window = event_seq - window_start;
     info!(
-        "H_e={} (event's W-aligned KB, window=[{}..{}), offset={}); \
-         K={} (thinned, W*P={}-aligned); hops={}",
-        key_block_seq,
-        window_start,
-        key_block_seq,
-        block_offset_in_window,
-        thinned_key_block_seq,
-        w * p,
-        hops,
+        "H_e={} (event's W-aligned KB, window=[{}..{}), offset={})",
+        key_block_seq, window_start, key_block_seq, block_offset_in_window,
     );
 
     // ---- Build block_tree_proof -----------------------------------------
@@ -360,110 +392,120 @@ async fn run() -> Result<()> {
         hex::encode(l1_root_self_computed),
     );
 
-    // ---- Build horizontal forward chain H_e → K (L1 only) --------------
-    // Each hop i ∈ 1..=hops walks one W-step at layer 1: it proves that
-    // the previous L1 root (starting from R_1@H_e) sits at slot 1
-    // (`prev_same_layer_root`) of the L1 tree at `H_e + i·W`. After
-    // `hops` such openings the accumulated root equals R_1@K, which the
-    // verifier holds in `layer_windows[0]`.
-    //
-    // Uses `real_chain_builder::build_layer1_tree` — the same primitive
-    // Circuit 2's `build_chain_same_layer` uses — so the tree shape is
-    // byte-for-byte identical to the node's construction.
-    let mut chain_leaf_value = l1_root_self_computed; // R_1@H_e
-    let mut active_links: Vec<DenseChainLink> = Vec::with_capacity(hops as usize);
-    for i in 1..=hops {
-        let seq_i = key_block_seq + i * w;
-        let tree = real_chain_builder::build_layer1_tree(&gql, seq_i, chain_leaf_value, w)
-            .await
-            .with_context(|| format!("building L1 tree at seq={seq_i} for forward-hop {i}/{hops}"))?;
-        let (root_i, siblings) = build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
-        info!(
-            "  hop {}/{}: L1 tree at seq={}, chain_leaf_pos={}, resulting root={}",
-            i, hops, seq_i, tree.chain_leaf_position, hex::encode(root_i),
+    // ---- Build the event-anchor chain (L1 horizontal or L1→L2 vertical) -
+    // The composed helper picks the topology from `args.anchor_layer` and
+    // returns the active links + the reconstructed final root.
+    let chain_result = real_chain_builder::build_event_anchor_chain(
+        &gql,
+        event_seq,
+        l1_root_self_computed,
+        args.anchor_layer,
+        w,
+        p,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "building event-anchor chain (target_layer=L{}) failed",
+            args.anchor_layer
+        )
+    })?;
+    let num_active = chain_result.active_links.len();
+    if num_active > MAX_CHAIN_LEN {
+        bail!(
+            "internal: {} active chain links exceed MAX_CHAIN_LEN={} \
+             (anchor_layer=L{}, event_seq={}, W={}, P={}, anchor_kb={})",
+            num_active, MAX_CHAIN_LEN, args.anchor_layer, event_seq, w, p,
+            chain_result.anchor_kb_seqno,
         );
-        active_links.push(DenseChainLink {
-            active: true,
-            siblings,
-            position: tree.chain_leaf_position,
-            leaf_native: chain_leaf_value,
-        });
-        chain_leaf_value = root_i;
     }
-    let final_chain_root = chain_leaf_value; // == R_1@K when hops>0, else R_1@H_e
+    info!(
+        "chain built: anchor_layer=L{}, anchor_kb={}, active_links={}, final_root={}",
+        args.anchor_layer,
+        chain_result.anchor_kb_seqno,
+        num_active,
+        hex::encode(chain_result.final_chain_root),
+    );
 
-    // ---- Build anchor (L1 only) ----------------------------------------
-    // The verifier stores L1 roots keyed by the thinned KB's observed
-    // height, not the event's covering KB. So look up `layer_windows[0]`
-    // at K's height.
-    let anchor_key_block_seq = thinned_key_block_seq;
+    // ---- Look up the verifier's mirrored layer hash --------------------
+    // The verifier stores L(target_layer) roots keyed by the anchor KB's
+    // observed_height. Layer numbering here is 1-indexed (L1, L2, ...).
+    let anchor_key_block_seq = chain_result.anchor_kb_seqno;
     let key_block_height = fetch_block_observed_height(&gql, anchor_key_block_seq)
         .await
         .with_context(|| {
-            format!("fetching observed_height for thinned key block {anchor_key_block_seq}")
+            format!(
+                "fetching observed_height for anchor key block {anchor_key_block_seq} \
+                 (target_layer=L{})",
+                args.anchor_layer,
+            )
         })?;
     info!(
-        "thinned key block {} observed_height = {}",
-        anchor_key_block_seq, key_block_height
+        "anchor key block {} observed_height = {}",
+        anchor_key_block_seq, key_block_height,
     );
 
-    let l1_slot = bridge_state.slot_for_event_height(1, key_block_height).ok_or_else(|| {
-        // TODO(L1→L5 escalation): when the key block's height has rolled
-        // out of layer 1's rolling window, escalate to L2/L3/... rather
-        // than failing.
-        anyhow::anyhow!(
-            "thinned key block height {} not found in L1 window {:?} \
-             — block has rolled out of the L1 rolling window. \
-             L1→L5 escalation not yet implemented (see TODO in src/main.rs).",
-            key_block_height,
-            bridge_state.layer_windows[0]
-                .iter_chronological()
-                .map(|(_, h)| h)
-                .collect::<Vec<_>>(),
-        )
-    })?;
-    info!("L1 slot for this thinned key block: {}", l1_slot);
+    let target_layer_idx0 = (args.anchor_layer - 1) as usize;
+    let slot = bridge_state
+        .slot_for_event_height(args.anchor_layer, key_block_height)
+        .ok_or_else(|| {
+            // TODO(L1→L5 auto-escalation): if the anchor KB's height has
+            // rolled out of L(anchor_layer)'s rolling window, transparently
+            // walk up to the next layer rather than failing here.
+            anyhow::anyhow!(
+                "anchor key block height {} not found in L{} window {:?} \
+                 — block has rolled out of the L{} rolling window. \
+                 Auto-escalation to higher layers is not yet implemented; \
+                 rerun with a higher `--anchor-layer` if the state has \
+                 progressed to that layer.",
+                key_block_height,
+                args.anchor_layer,
+                bridge_state.layer_windows[target_layer_idx0]
+                    .iter_chronological()
+                    .map(|(_, h)| h)
+                    .collect::<Vec<_>>(),
+                args.anchor_layer,
+            )
+        })?;
+    info!(
+        "L{} slot for this anchor key block: {}",
+        args.anchor_layer, slot,
+    );
 
-    // The circuit publishes a single `final_root` public input. The verifier
-    // checks this value off-circuit against its mirror of `layer_windows`,
-    // so we only need to pick the chosen layer hash here (no flattened
-    // candidate vector, no choice index).
-    let chosen_layer_hash = bridge_state.layer_windows[0]
+    let chosen_layer_hash = bridge_state.layer_windows[target_layer_idx0]
         .iter_chronological()
-        .nth(l1_slot)
+        .nth(slot)
         .map(|(h, _)| h)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "internal: L1 slot {} found but not present when iterating chronologically",
-                l1_slot,
+                "internal: L{} slot {} found but not present when iterating chronologically",
+                args.anchor_layer, slot,
             )
         })?;
 
-    if chosen_layer_hash != final_chain_root {
+    if chosen_layer_hash != chain_result.final_chain_root {
         // Not necessarily fatal: the self-computed roots depend on
         // higher_layer_root / prev_same_layer_root values fetched from
         // GQL. A mismatch here means the proof, while structurally
         // valid, will not satisfy the circuit. Surface it loudly.
         warn!(
-            "final chain root mismatch — verifier mirror (R_1@K) = {}, locally \
-             rebuilt (R_1@H_e chained through {} forward hop(s)) = {}. \
-             The proof will not satisfy the circuit until every L1 tree along \
-             the chain matches the node's construction byte-for-byte.",
+            "final chain root mismatch — verifier mirror (L{} root @ anchor KB) = {}, \
+             locally rebuilt = {}. The proof will not satisfy the circuit until \
+             every tree along the chain matches the node's construction byte-for-byte.",
+            args.anchor_layer,
             hex::encode(chosen_layer_hash),
-            hops,
-            hex::encode(final_chain_root),
+            hex::encode(chain_result.final_chain_root),
         );
     }
 
-    // Assemble MAX_CHAIN_LEN links: `hops` active forward-hop openings
-    // followed by inactive padding anchored at the final chain root.
-    // Depth must match the L1 tree's proof depth so
+    // Assemble MAX_CHAIN_LEN links: `num_active` chain rungs followed by
+    // inactive padding anchored at the chosen (verifier-mirrored) root.
+    // Depth must match each active link's Merkle proof depth so
     // `verify_chain_of_dense_proofs` accepts the padding.
     let inactive_depth = block_tree_proof.siblings_hex.len();
-    let mut dense_chain_native: Vec<DenseChainLink> =
-        Vec::with_capacity(MAX_CHAIN_LEN);
-    dense_chain_native.extend(active_links);
-    for _ in (hops as usize)..MAX_CHAIN_LEN {
+    let mut dense_chain_native: Vec<DenseChainLink> = Vec::with_capacity(MAX_CHAIN_LEN);
+    dense_chain_native.extend(chain_result.active_links);
+    for _ in num_active..MAX_CHAIN_LEN {
         dense_chain_native.push(DenseChainLink::inactive(chosen_layer_hash, inactive_depth));
     }
     debug_assert_eq!(dense_chain_native.len(), MAX_CHAIN_LEN);
@@ -478,11 +520,11 @@ async fn run() -> Result<()> {
         .collect();
 
     let anchor = AnchorRef {
-        layer_idx: args.layer_idx,
+        layer_idx: (args.anchor_layer - 1) as u32,
         height: key_block_height,
         layer_hash_hex: hex::encode(chosen_layer_hash),
         dense_chain: dense_chain_ser,
-        num_active_chain_steps: hops as u32,
+        num_active_chain_steps: num_active as u32,
     };
 
     let events_tree_depth = events_tree_proof.siblings_hex.len();
@@ -508,12 +550,12 @@ async fn run() -> Result<()> {
         event_message_hash_hex: &witness.event_message_hash_hex,
         block_seq_no: witness.block_seq_no,
         key_block_seq_no: key_block_seq,
-        thinned_key_block_seq_no: thinned_key_block_seq,
-        layer_idx: args.layer_idx,
+        thinned_key_block_seq_no: anchor_key_block_seq,
+        layer_idx: (args.anchor_layer - 1) as u32,
         layer_hash_hex: &witness.anchor.as_ref().unwrap().layer_hash_hex,
         events_tree_depth,
         block_tree_depth,
-        num_active_chain_steps: hops as u32,
+        num_active_chain_steps: num_active as u32,
         out: args.out.to_string_lossy().into_owned(),
     };
     println!("{}", serde_json::to_string(&summary)?);

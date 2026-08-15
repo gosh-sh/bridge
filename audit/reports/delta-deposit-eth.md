@@ -147,6 +147,21 @@ Open baseline rows **не удалены** — formal author ack still pending.
 
 ---
 
+## Wave 2 kickoff (2026-08-15)
+
+| Item | Detail |
+|------|--------|
+| Commit | `7bd7366` — Phase 2 deposit-ETH handoff pushed to `origin/audit-new` |
+| `github/main` | @ `a7a1130` — **already merged into** `audit-new` (no delta merge this sprint) |
+| `origin/main` | @ `c9d5412` — lags github; track **`github/main`** for dev commits |
+| `acki-nacki` sync | `contracts/bridge` @ `d9f7dc9b1` — no drift |
+| T2-1 | `td_43_all_fixture_triples_pass_opcode_triple` — all 10 Blake2b fixtures pass opcode verify |
+| Docs | `wave-2-security-plan.md`, `phase-g-status.md` refresh |
+
+Next: W2-1 withdraw security baseline; tier 3 tvm-debugger smoke (T3-2).
+
+---
+
 ## Следующий шаг (aggregate)
 
-Owner ops TD-04 deploy (вне worker). Autopilot: gates green + TD-64 corpus maintenance on chain header upgrades. Delta handoff complete — worker may pause until owner or maintenance trigger.
+Owner ops TD-04 deploy (вне worker). Autopilot: `git fetch github` each sprint; gates green. Wave 2 security focus: withdraw egress (W2-1).

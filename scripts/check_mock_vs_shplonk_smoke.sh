@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TD-43 / DEP-MOCK-VS-REAL — CI smoke: MockProver green ≠ SHPLONK opcode triple.
 #
-# Runs deposit-prover/td_43_mock_vs_shplonk (5 tests). Requires TD-42 VkBlob pin
+# Runs deposit-prover/td_43_mock_vs_shplonk (6 tests, incl. T2-1 all fixtures). Requires TD-42 VkBlob pin
 # (check_vk_srs_pin.sh) to run first in check_deposit_audit_gates.sh.
 #
 # Skip (exit 0) when neither fixture Blake2b triple nor Hermez SRS is available.

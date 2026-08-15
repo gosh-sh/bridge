@@ -1,92 +1,72 @@
-# Phase G — продолжение аудита на `audit-new`
+# Phase G / Wave 2 — статус на `audit-new`
 
-**База:** `audit-new` (merge `origin/main` + audit overlay, commit `4a29137+`).  
-**Канон кода:** `origin/main` (`c9d5412`). **`main` не меняем** — работа только в `audit-new`.
+**Обновлено:** 2026-08-15  
+**HEAD:** `7bd7366+` (Phase 2 deposit-ETH + eccUSDCBridge migration)  
+**Канон dev code:** `github/main` @ `a7a1130` — **уже внутри** `audit-new` (merge-base = github tip).  
+**Следующий sprint:** `git fetch github` — если появились новые коммиты, merge → `audit-new`.
 
 ---
 
-## G1.5 — ETH deposit baseline + edge tests (2026-08-13)
+## Deposit-ETH handoff — CLOSED (2026-08-15)
 
-| Артефакт | Содержание |
+Baseline walkthrough завершён; вопросы переданы авторам. Артефакты:
+
+| Документ | Назначение |
 |----------|------------|
-| `baseline-deposit-eth.md` | **только open** вопросы (не перечислять закрытые каждый раз) |
-| `baseline-deposit-eth-locked.md` | карта тест→инвариант для закрытых пунктов |
-| `delta-deposit-eth.md` | новые находки vs июльский аудит |
-| `DepositEdgeCases.t.sol`, `DepositWorkchain.t.sol` | +12 edge-case tests |
-| `f10a_binding.rs` | 12 PI (QC-PROV-01 partial close) |
+| `baseline-deposit-eth.md` / `locked` | open QC vs зелёные тесты |
+| `phase-2-deposit-eth-milestone.md` | Phase 2 rollup |
+| `deposit-verify-three-tier-backlog.md` | tier 1–3 test expansion |
+| `wave-2-security-plan.md` | Wave 2 security scope |
 
 ---
 
-## G1 — Closeout sync (этот коммит)
+## Wave 2 — текущий фокус
 
-Обновлены: `closeout-eth.md`, `closeout-an.md`, `questions-cross-chain.md`, HANDOFF-файлы.
-
-Пункты **resolved in main** помечены; overlay-тесты адаптированы (56 ETH + 74 AN + 68 relayer).
-
----
-
-## G2 — BC-AN-02 (следующий фокус)
-
-| ID | Тема | Действие |
-|----|------|----------|
-| BC-AN-02 | нет allowlist L1 `contractAddr` на AN | ждём ack / `immutable EXPECTED_L1_BRIDGE` или документировать trust model |
-
-PoC: `audit/spec/an/integration/test_bc_an_02_no_l1_bridge_allowlist_pre_zk.py`
+| ID | Задача | Статус |
+|----|--------|--------|
+| T2-1 | Все `deposit_10proofs` → opcode triple | **done** (`td_43_all_fixture_triples_pass_opcode_triple`) |
+| T3-2/3 | tvm-debugger opcode + fixtures | backlog |
+| W2-1 | ETH `withdrawByProof` security | next baseline |
+| Main sync | `fetch github` each sprint | ongoing |
 
 ---
 
-## G3 — QC-OFF-06 live path
+## Закрыто в Phase 2 / walkthrough
 
-| Статус | Деталь |
-|--------|--------|
-| **partial QC** | `td_65_g3_revert_loop.rs` (8): exit 51 → `AlreadyFinalized`; generic `Reverted` → HOL; `is_finalized` stub; notes `td-65-g3-live-notes.md` |
-| mock | `f10_competing_submit.rs` — competing relayers, no double-mint |
-| mock | `f10_interface_reverted.rs` — generic Revert → `Rejected` |
-| open | shellnet E2E двух relayer'ов (E-AN-01); nullifier read API (QC-OFF-05) |
-
-Нужен: e2e с двумя relayer'ами на shellnet или nullifier read API.
+| ID | Disposition |
+|----|-------------|
+| BC-AN-02 | Ack — `setTrustedL1Bridge` on `eccUSDCBridge` |
+| QC-AN-J1..J5, BC-AN-02 | Ack / ops / defer |
+| QC-OFF-01..13, QC-PROV-* | Ack / ops / defer / вопросы devs |
+| QC-A1-2..4 | передано авторам |
 
 ---
 
-## G4 — Author ack (открыто)
+## Открыто (не блокирует Wave 2 старт)
 
-**ETH:** QC-A1-2, A1-3, A1-4, A2-1, A2-2, A2-4, WD-Q1, WD-Q3, WD-Q4 (~9).  
-**AN:** QC-AN-02, 04, 09; partial 01, 05, 06, 10; joint J1, J3, J5.  
-**Off-chain:** QC-OFF-01, 02–06 (частично), QC-PROV-01, QC-PROV-04.
-
----
-
-## G5 — E-AN-01 shellnet E2E
-
-**deferred** — после G2/G3 или по запросу ops.  
-Mock recovery path: TD-53 (`td_53_e2e_runbook_recovery.rs`, `td-53-shellnet-e2e-runbook-notes.md`).
+| ID | Тема |
+|----|------|
+| QC-OFF-05 | `is_finalized` read API — вопрос devs |
+| QC-OFF-06 | exit code classifier — вопрос devs |
+| QC-OFF-13 | live tvm-sdk matrix — defer |
+| TD-04 / E-AN-01 | live deploy / shellnet E2E — ops |
+| Author ack | ответы на переданные L1/cross/off-chain вопросы |
 
 ---
 
-## Gates (`audit-new`, 2026-08-13)
-
-| Gate | Результат |
-|------|-----------|
-| `contracts/ethereum && forge test` | 126 passed |
-| `audit/spec/ethereum` profile audit | 69 passed |
-| `make pre-push-an` | 42 passed |
-| `make audit-an-test` | 74 passed |
-| `cargo test` deposit-relayer | 68 passed |
-
-Команда:
+## Gates
 
     make pre-push-audit
+    bash scripts/check_deposit_audit_gates.sh
+    AN_AUDIT_INTEGRATION=1 bash scripts/ci_an_audit.sh
 
----
-
-## G6 — Phase 2 deposit ETH milestone (2026-08-14)
-
-| Артефакт | Содержание |
-|----------|------------|
-| `phase-2-deposit-eth-milestone.md` | TD-36–68 rollup, META CI gates, ops blockers, Phase 3 outline |
-| `check_deposit_audit_gates.sh` | TD-68 → TD-42 → TD-43 → TD-49 → TD-04 overlay matrix |
-
-**Verdict:** Phase 2 **closed (mock/CI)**; P0 ops carry-over TD-04 live deploy.
+| Gate block | TD |
+|------------|-----|
+| PI count | TD-68 |
+| VkBlob pin | TD-42 |
+| Mock≠SHPLONK | TD-43 |
+| Mutation kill | TD-49 |
+| TD-53 / TD-65 / TD-04 | smoke |
 
 ---
 
@@ -94,8 +74,6 @@ Mock recovery path: TD-53 (`td_53_e2e_runbook_recovery.rs`, `td-53-shellnet-e2e-
 
 | Документ | Назначение |
 |----------|------------|
-| `closeout-eth.md` | ETH QC register |
-| `closeout-an.md` | AN BC/QC + F10 |
-| `HANDOFF-an-cross-chain-ru.txt` | RU summary для авторов |
-| `HANDOFF-f10-prover-relayer-ru.txt` | off-chain HANDOFF |
-| `phase-2-deposit-eth-milestone.md` | Phase 2 TD-36–68 rollup + Phase 3 outline |
+| `wave-2-security-plan.md` | Wave 2 plan + main sync policy |
+| `closeout-eth.md` / `closeout-an.md` | QC registers |
+| `HANDOFF-an-cross-chain-ru.txt` | RU handoff для авторов |

@@ -123,6 +123,25 @@ fn td_43_real_proof_00_passes_opcode_triple() {
         .expect("real Blake2b triple must pass SHPLONK opcode path");
 }
 
+/// T2-1 — every synced `deposit_10proofs/proof_XX` Blake2b triple passes opcode verify.
+#[test]
+fn td_43_all_fixture_triples_pass_opcode_triple() {
+    let vk = fs::read(vk_blob_path()).expect("vk blob");
+    let config = audit_circuit_config();
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/deposit_10proofs");
+    for i in 0..10 {
+        let dir = base.join(format!("proof_{:02}", i));
+        let triple = try_load_opcode_triple_from(&dir).unwrap_or_else(|| {
+            panic!(
+                "TD-43/T2-1: missing Blake2b triple in {} (need proof.bin + public_inputs.bin)",
+                dir.display()
+            )
+        });
+        verify_deposit_opcode_triple(&vk, &triple.proof, &triple.pubin, config.degree)
+            .unwrap_or_else(|e| panic!("proof_{:02} opcode triple rejected: {e}", i));
+    }
+}
+
 #[test]
 fn td_43_corrupted_real_proof_fails_shplonk() {
     let input = load_proof_00_input();

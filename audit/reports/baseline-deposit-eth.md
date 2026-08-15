@@ -1,7 +1,7 @@
 # Baseline — ETH deposit (open questions only)
 
 **Ветка:** `audit-new`  
-**Обновлено:** 2026-08-14 (Phase 2 evidence cross-ref; author ack pending)  
+**Обновлено:** 2026-08-15 (Phase 2 evidence; **walkthrough closed** 2026-08-15; author ack pending)  
 **Scope:** L1 `deposit()` + off-chain ETH→AN deposit pipeline.
 
 Закрытые пункты **не перечисляем** — см. `baseline-deposit-eth-locked.md`.  

@@ -34,7 +34,7 @@ No expansion required for sign-off; tier 1 is regression anchor only.
 
 | ID | Task | Acceptance | Gate |
 |----|------|------------|------|
-| T2-1 | **All** `deposit_10proofs/*` pass opcode triple | each dir: `vk_blob` + 384 B `public_inputs.bin` + `proof.bin` → `verify_deposit_opcode_triple` OK | extend `td_43_mock_vs_shplonk.rs` or new `td_43_all_fixtures_opcode.rs` |
+| T2-1 | **All** `deposit_10proofs/*` pass opcode triple | each dir: `vk_blob` + 384 B `public_inputs.bin` + `proof.bin` → `verify_deposit_opcode_triple` OK | **done** — `td_43_all_fixture_triples_pass_opcode_triple` |
 | T2-2 | Corruption matrix on `proof_00` | 1-byte flip proof/pi/vk → fail; real triple → pass | extend TD-43 (partial today) |
 | T2-3 | Proptest: random garbage triple → always fail | proptest on `verify_deposit_opcode_triple` | `deposit-prover/tests/` new file |
 | T2-4 | Full prove → export Blake2b → opcode verify (slow) | one synthetic + one fixture path | optional nightly; needs `data/kzg_params_18.srs` |

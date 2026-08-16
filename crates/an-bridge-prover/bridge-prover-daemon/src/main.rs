@@ -355,7 +355,7 @@ async fn handle_bundle(
         "key block {}: {} bundle ready (primary {}ms, layer {}ms)",
         bundle.block_seq_no,
         bundle.fin_type.as_str(),
-        bundle.primary_proof_gen_ms,
+        bundle.attestation_proof_gen_ms,
         bundle.layer_proof_gen_ms,
     );
     let req = bundle_to_proof_request(bundle);
@@ -425,7 +425,7 @@ async fn handle_bk_update(
         "bk-update {}: {} rotation ready ({}ms proof)",
         update.block_seq_no,
         update.fin_type.as_str(),
-        update.primary_proof_gen_ms,
+        update.attestation_proof_gen_ms,
     );
     let req = bkupdate_to_ipc_request(update);
     ipc::write_bk_update_request(&req)?;
@@ -497,13 +497,13 @@ fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
         last_seen_block_seqno: b.last_seen_block_seq_no as u32,
         block_id_hex: hex::encode(b.block_id_be),
         attestation_circuit: to_ipc_circuit(b.fin_type),
-        primary_proof_hex: hex::encode(&b.attestation_proof),
+        attestation_proof_hex: hex::encode(&b.attestation_proof),
         layer_proof_hex: hex::encode(&b.layer_hashes_proof),
         bk_set_poseidon_hash_hex: hex::encode(b.bk_set_commitment_be),
         num_layers: b.num_layers,
         layer_hash_frs_hex: b.layer_hashes_be.iter().map(hex::encode).collect(),
         prev_max_level_layer_hash_hex: hex::encode(b.prev_max_level_layer_hash_be),
-        primary_proof_gen_ms: b.primary_proof_gen_ms,
+        attestation_proof_gen_ms: b.attestation_proof_gen_ms,
         layer_proof_gen_ms: b.layer_proof_gen_ms,
     }
 }
@@ -519,13 +519,13 @@ fn bkupdate_to_ipc_request(u: &BkUpdateProofArtifacts) -> ipc::BkUpdateRequest {
         last_seen_bk_update_seqno: u.last_seen_bk_update_seq_no as u32,
         block_id_hex: hex::encode(u.block_id_be),
         attestation_circuit: to_ipc_circuit(u.fin_type),
-        primary_proof_hex: hex::encode(&u.attestation_proof),
+        attestation_proof_hex: hex::encode(&u.attestation_proof),
         old_bk_set_poseidon_hash_hex: hex::encode(u.old_bk_set_commitment_be),
         new_bk_set_poseidon_hash_hex: hex::encode(u.new_bk_set_commitment_be),
         merkle_sibling_h01_hex: hex::encode(u.merkle_sibling_h01_be),
         merkle_sibling_h4_7_hex: hex::encode(u.merkle_sibling_h4_7_be),
         merkle_sibling_h8_15_hex: hex::encode(u.merkle_sibling_h8_15_be),
-        primary_proof_gen_ms: u.primary_proof_gen_ms,
+        attestation_proof_gen_ms: u.attestation_proof_gen_ms,
     }
 }
 

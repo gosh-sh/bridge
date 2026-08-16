@@ -693,7 +693,7 @@ kill $(cat logs/pids.txt | cut -d= -f2)
   "last_seen_block_seqno": 1024,
   "block_id_hex": "…",   // raw 32-byte BE chain hash = uint256(bytes32(blockId))
   "attestation_circuit": "primary",   // or "fallback" — picks the VK (1a vs 1b)
-  "primary_proof_hex": "…",   "primary_proof_gen_ms": 102392,
+  "attestation_proof_hex": "…",   "attestation_proof_gen_ms": 102392,
   "layer_proof_hex":   "…",   "layer_proof_gen_ms":   137310,
   "bk_set_poseidon_hash_hex": "…",
   "num_layers": 2,

@@ -382,7 +382,7 @@ pub struct BundleProofArtifacts {
     pub attestation_proof: Vec<u8>,
     pub layer_hashes_proof: Vec<u8>,
     // Diagnostic timings (for logs / stats)
-    pub primary_proof_gen_ms: u64,
+    pub attestation_proof_gen_ms: u64,
     pub layer_proof_gen_ms: u64,
     // Live GQL-derived per-layer bundle used by `ack_bundle` to advance the
     // driver's in-memory `BridgeState::append_bundle`. This mirrors the
@@ -427,7 +427,7 @@ pub struct BkUpdateProofArtifacts {
     /// `ProverBkSet` snapshot. Same 48-byte compressed BLS pubkeys as the
     /// pre-rotation table.
     pub new_pubkeys: HashMap<u16, Vec<u8>>,
-    pub primary_proof_gen_ms: u64,
+    pub attestation_proof_gen_ms: u64,
 }
 
 /// Which attestation circuit was used. Mirrors

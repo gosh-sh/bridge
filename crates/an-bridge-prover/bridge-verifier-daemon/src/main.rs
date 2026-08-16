@@ -325,10 +325,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let primary_proof_bytes = match hex::decode(&request.primary_proof_hex) {
+            let attestation_proof_bytes = match hex::decode(&request.attestation_proof_hex) {
                 Ok(b) => b,
                 Err(e) => {
-                    let msg = format!("invalid primary_proof_hex: {}", e);
+                    let msg = format!("invalid attestation_proof_hex: {}", e);
                     error!("block {}: {}", next_seqno, msg);
                     write_failure(next_seqno, &msg);
                     stats.total_proofs += 1;
@@ -358,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
                     "Circuit 1a (Primary)",
                     verifier::verify_primary_proof(
                         &key_manager,
-                        &primary_proof_bytes,
+                        &attestation_proof_bytes,
                         &primary_instances,
                     ),
                 ),
@@ -366,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
                     "Circuit 1b (Fallback)",
                     verifier::verify_fallback_proof(
                         &key_manager,
-                        &primary_proof_bytes,
+                        &attestation_proof_bytes,
                         &primary_instances,
                     ),
                 ),
@@ -756,12 +756,12 @@ fn process_bk_update_bundle(
                 )
             }
         };
-        let primary_proof_bytes = match hex::decode(&req.primary_proof_hex) {
+        let attestation_proof_bytes = match hex::decode(&req.attestation_proof_hex) {
             Ok(b) => b,
             Err(e) => {
                 return finalize_bk_update_failure(
                     seq_no,
-                    &format!("invalid primary_proof_hex: {e}"),
+                    &format!("invalid attestation_proof_hex: {e}"),
                     last_seen_bk_update_seqno,
                 )
             }
@@ -775,12 +775,12 @@ fn process_bk_update_bundle(
         match req.attestation_circuit {
             ipc::AttestationCircuit::Primary => verifier::verify_primary_proof(
                 key_manager,
-                &primary_proof_bytes,
+                &attestation_proof_bytes,
                 &public_instances,
             ),
             ipc::AttestationCircuit::Fallback => verifier::verify_fallback_proof(
                 key_manager,
-                &primary_proof_bytes,
+                &attestation_proof_bytes,
                 &public_instances,
             ),
         }

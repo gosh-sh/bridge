@@ -299,7 +299,7 @@ struct PartnerProofRequest {
     #[serde(default, rename = "last_seen_block_seqno")]
     _last_seen_block_seqno: u32,
     block_id_hex: String,
-    primary_proof_hex: String,
+    attestation_proof_hex: String,
     layer_proof_hex: String,
     bk_set_poseidon_hash_hex: String,
     num_layers: u8,
@@ -421,7 +421,7 @@ impl ProverProofsBlockSource {
         }
 
         let primary = proof_validation::decode_verify_block_proof(
-            &req.primary_proof_hex,
+            &req.attestation_proof_hex,
             FinalizationType::Primary,
             false,
             self.accept_halo2_proofs,
@@ -497,7 +497,7 @@ struct PartnerBkUpdateRequest {
     block_id_hex: String,
     #[serde(default = "default_attestation_primary")]
     attestation_circuit: String,
-    primary_proof_hex: String,
+    attestation_proof_hex: String,
     old_bk_set_poseidon_hash_hex: String,
     new_bk_set_poseidon_hash_hex: String,
     merkle_sibling_h01_hex: String,
@@ -592,7 +592,7 @@ impl BkUpdateProofsSource {
         };
 
         let attestation_proof = proof_validation::decode_verify_block_proof(
-            &req.primary_proof_hex,
+            &req.attestation_proof_hex,
             fin_type,
             false,
             self.accept_halo2_proofs,
@@ -760,7 +760,7 @@ mod tests {
             "block_height": 512,
             "last_seen_block_seqno": 0,
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
-            "primary_proof_hex": "0x".to_string() + &"ab".repeat(2048),
+            "attestation_proof_hex": "0x".to_string() + &"ab".repeat(2048),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(2048),
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
@@ -802,7 +802,7 @@ mod tests {
             "block_height": seq_no,
             "last_seen_block_seqno": 0,
             "block_id_hex": "0200000000000000000000000000000000000000000000000000000000000000",
-            "primary_proof_hex": "0x".to_string() + &"ab".repeat(2048),
+            "attestation_proof_hex": "0x".to_string() + &"ab".repeat(2048),
             "layer_proof_hex": "0x".to_string() + &"cd".repeat(2048),
             "bk_set_poseidon_hash_hex": "0400000000000000000000000000000000000000000000000000000000000000",
             "num_layers": 1,
@@ -854,7 +854,7 @@ mod tests {
             "block_seq_no": 24,
             "attestation_circuit": "primary",
             "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
-            "primary_proof_hex": proof_hex,
+            "attestation_proof_hex": proof_hex,
             "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
             "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
             "merkle_sibling_h01_hex": "0x".to_string() + &"aa".repeat(32),

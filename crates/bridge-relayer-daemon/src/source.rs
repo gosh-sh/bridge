@@ -295,8 +295,6 @@ impl BlockSource for FixturesBlockSource {
 /// (`bridge-prover-lib::ipc::ProofRequest`).
 #[derive(Deserialize)]
 struct PartnerProofRequest {
-    #[serde(default, rename = "schema_version")]
-    _schema_version: u32,
     block_seq_no: u32,
     #[serde(default, rename = "last_seen_block_seqno")]
     _last_seen_block_seqno: u32,
@@ -491,8 +489,6 @@ impl BlockSource for ProverProofsBlockSource {
 /// (`block_id_hex` Fr LE + `block_id_hash_hex` raw BE) has collapsed.
 #[derive(Deserialize)]
 struct PartnerBkUpdateRequest {
-    #[serde(default, rename = "schema_version")]
-    _schema_version: u32,
     block_seq_no: u32,
     #[serde(default, rename = "block_height")]
     _block_height: u64,

@@ -12,20 +12,10 @@ use serde::{Deserialize, Serialize};
 
 const PROOFS_DIR: &str = "proofs";
 
-/// Current `ProofRequest` / `BkUpdateRequest` wire schema version. Bump on
-/// any change to either struct's on-disk shape; the verifier rejects
-/// mismatched versions instead of silently re-interpreting fields. See
-/// `git log` for the per-bump rationale.
-pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 7;
-
-fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
-
 /// Discriminates which attestation circuit produced `primary_proof_hex`.
 ///
 /// Both circuits share the 4-public-instance layout; the verifier picks the
-/// matching VK based on this tag. Default (for legacy proof files written
-/// before schema v3) is `Primary`, matching the v2 wire shape where the
-/// prover only ever emitted Circuit 1a.
+/// matching VK based on this tag.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AttestationCircuit {
@@ -43,12 +33,6 @@ fn default_attestation_circuit() -> AttestationCircuit { AttestationCircuit::Pri
 /// JSON structure for combined proof files (Circuit 1a or 1b + Circuit 2).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ProofRequest {
-    /// Wire-format version. v2 added `block_height`. Older (v1) files
-    /// implicitly map to `schema_version = 1` via `#[serde(default = ...)]`
-    /// but only after they're shaped to fit — see `read_proof_request`.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-
     /// Key block sequence number.
     pub block_seq_no: u32,
     /// Thread-anchored `BlockHeight.height` of the key block. In Acki Nacki
@@ -154,25 +138,12 @@ pub async fn wait_for_result(seq_no: u32, timeout: Duration) -> anyhow::Result<V
     }
 }
 
-/// Read a proof request file (used by verifier). Rejects schema versions the
-/// daemon was not built for — a mismatch almost certainly means the prover
-/// and verifier are on different commits, which would silently mis-mirror
-/// state if we just re-interpreted fields.
+/// Read a proof request file (used by verifier).
 pub fn read_proof_request(seq_no: u32) -> anyhow::Result<ProofRequest> {
     let path = proof_file_path(seq_no);
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read proof file: {}", path))?;
-    let req: ProofRequest = serde_json::from_str(&data)
-        .context("failed to parse proof request JSON")?;
-    if req.schema_version != PROOF_REQUEST_SCHEMA_VERSION {
-        anyhow::bail!(
-            "proof file {} has schema_version={} but verifier expects {}",
-            path,
-            req.schema_version,
-            PROOF_REQUEST_SCHEMA_VERSION
-        );
-    }
-    Ok(req)
+    serde_json::from_str(&data).context("failed to parse proof request JSON")
 }
 
 /// Write a verification result (used by verifier).
@@ -229,7 +200,7 @@ pub fn fold_hash_be_to_fr(bytes_be: &[u8]) -> Fr {
 }
 
 // ---------------------------------------------------------------------------
-// BK-set update IPC bundle (schema v7 — 16-leaf block-id tree)
+// BK-set update IPC bundle (16-leaf depth-4 block-id tree)
 // ---------------------------------------------------------------------------
 
 /// File-name prefix for bk-set-update bundles. The prover writes
@@ -251,11 +222,6 @@ const BKUPD_PREFIX: &str = "bkupd";
 /// private working data (`ProverBkSet`) and never travels in IPC.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BkUpdateRequest {
-    /// Wire-format version. Same constant as `ProofRequest`, so a mismatch
-    /// reliably signals a prover/verifier commit drift.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-
     /// Bk-set-update block sequence number. The seq_no of the block that
     /// announces the new BK set (i.e. the block whose `L2 != L3`).
     pub block_seq_no: u32,
@@ -348,24 +314,12 @@ pub fn write_bk_update_request(req: &BkUpdateRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a bk-update bundle (verifier side). Same strict version check as
-/// `read_proof_request` — a mismatch almost certainly means daemons are on
-/// different commits.
+/// Read a bk-update bundle (verifier side).
 pub fn read_bk_update_request(seq_no: u32) -> anyhow::Result<BkUpdateRequest> {
     let path = bkupd_file_path(seq_no);
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read bk-update file: {}", path))?;
-    let req: BkUpdateRequest = serde_json::from_str(&data)
-        .context("failed to parse bk-update request JSON")?;
-    if req.schema_version != PROOF_REQUEST_SCHEMA_VERSION {
-        anyhow::bail!(
-            "bk-update file {} has schema_version={} but verifier expects {}",
-            path,
-            req.schema_version,
-            PROOF_REQUEST_SCHEMA_VERSION
-        );
-    }
-    Ok(req)
+    serde_json::from_str(&data).context("failed to parse bk-update request JSON")
 }
 
 /// Write a bk-update verification result (verifier side).
@@ -412,9 +366,8 @@ mod tests {
     }
 
     #[test]
-    fn bkupd_request_roundtrip_preserves_v7() {
+    fn bkupd_request_roundtrips() {
         let req = BkUpdateRequest {
-            schema_version: PROOF_REQUEST_SCHEMA_VERSION,
             block_seq_no: 1024,
             block_height: 1024,
             last_seen_bk_update_seqno: 0,
@@ -430,7 +383,6 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: BkUpdateRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, PROOF_REQUEST_SCHEMA_VERSION);
         assert_eq!(back.block_seq_no, 1024);
         assert_eq!(back.attestation_circuit, AttestationCircuit::Primary);
         assert_eq!(back.old_bk_set_poseidon_hash_hex, "cc".repeat(32));

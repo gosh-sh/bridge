@@ -492,7 +492,6 @@ fn bundle_to_proof_request(b: &BundleProofArtifacts) -> ipc::ProofRequest {
     // demand via `ipc::hash_hex_to_fr`. Same wire semantics as
     // `BkUpdateRequest.block_id_hex`.
     ipc::ProofRequest {
-        schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: b.block_seq_no as u32,
         block_height: b.block_height,
         last_seen_block_seqno: b.last_seen_block_seq_no as u32,
@@ -515,7 +514,6 @@ fn bkupdate_to_ipc_request(u: &BkUpdateProofArtifacts) -> ipc::BkUpdateRequest {
     // instance for Circuit 1a/1b is derived on demand via
     // `ipc::hash_hex_to_fr`.
     ipc::BkUpdateRequest {
-        schema_version: ipc::PROOF_REQUEST_SCHEMA_VERSION,
         block_seq_no: u.block_seq_no as u32,
         block_height: u.block_height,
         last_seen_bk_update_seqno: u.last_seen_bk_update_seq_no as u32,

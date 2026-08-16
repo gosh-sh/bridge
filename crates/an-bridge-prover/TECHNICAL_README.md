@@ -157,7 +157,7 @@ The library is designed to serve two independent binaries:
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
 - `LiveProverConfig`, `SeedPolicy`, `LiveBundleEvent`, `LiveBkUpdateEvent`, `BundleProofArtifacts`, `BkUpdateProofArtifacts`, `BundleFinalizationType`, `DriverError`, `DriverResult`
-- `LiveProverDriver::new(gql, key_manager, state, prover_bk_set, cfg)` — as of 2026-07-27 refactor, the ctor takes a `ProverBkSet` (persisted schema-versioned struct) directly, not a decoded `HashMap<u16, Vec<u8>>`. Pubkeys are read internally via `driver.prover_bk_set().pubkeys()?`. The old `bk_set: HashMap<u16, Vec<u8>>` parameter is gone.
+- `LiveProverDriver::new(gql, key_manager, state, prover_bk_set, cfg)` — as of 2026-07-27 refactor, the ctor takes a `ProverBkSet` (the persisted prover-private pubkey table) directly, not a decoded `HashMap<u16, Vec<u8>>`. Pubkeys are read internally via `driver.prover_bk_set().pubkeys()?`. The old `bk_set: HashMap<u16, Vec<u8>>` parameter is gone.
 - `bk_set_fetcher` primitives for producing a `ProverBkSet` at daemon startup:
   - `load_bk_set_from_config(path)` — read a genesis snapshot from JSON (the default cold-boot seed source).
   - `bk_set_at_height(client, genesis, target_height)` — fold `bkSetUpdates` (height ≤ target) onto a genesis snapshot, for cold-start against a rotating chain long past genesis. Enabled by `BRIDGE_BK_SET_BOOTSTRAP=fold_at_height`.

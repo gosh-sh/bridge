@@ -5,7 +5,7 @@
 //! the pubkey bytes of each signer to do the BLS aggregation check).
 //!
 //! This file is **prover-only** — the verifier daemon (which models the
-//! future ETH bridge contract) NEVER loads it, because the contract will
+//! ETH bridge contract) NEVER loads it, because the contract will
 //! only ever store the **commitment**, not the full pubkey table. The
 //! commitment lives in `BridgeState::stored_bk_set_commitment`.
 //!
@@ -28,19 +28,11 @@ use serde::{Deserialize, Serialize};
 use crate::bridge_state::BridgeState;
 use bridge_poseidon as poseidon;
 
-/// Current `ProverBkSet` schema version. Bumped if the on-disk shape changes.
-pub const PROVER_BK_SET_SCHEMA_VERSION: u32 = 1;
-
-fn default_schema_version() -> u32 { PROVER_BK_SET_SCHEMA_VERSION }
-
 /// On-disk format for the prover-private pubkey table. Keys are
 /// `signer_index`; values are 48-byte compressed BLS G1 pubkeys serialised
 /// as lowercase hex strings for readability.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProverBkSet {
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-
     /// Poseidon commitment of `pubkeys`. Must agree with
     /// `BridgeState::stored_bk_set_commitment` at every read site.
     pub commitment: [u8; 32],
@@ -70,7 +62,6 @@ impl ProverBkSet {
             .map(|(idx, pk)| (*idx, hex::encode(pk)))
             .collect();
         Self {
-            schema_version: PROVER_BK_SET_SCHEMA_VERSION,
             commitment,
             pubkeys_hex,
             last_applied_update_seq_no,
@@ -164,13 +155,6 @@ impl ProverBkSet {
             .with_context(|| format!("failed to read {path}"))?;
         let v: Self = serde_json::from_str(&data)
             .with_context(|| format!("failed to parse {path}"))?;
-        anyhow::ensure!(
-            v.schema_version == PROVER_BK_SET_SCHEMA_VERSION,
-            "prover_bk_set at {} has schema_version={} but daemon expects {}",
-            path,
-            v.schema_version,
-            PROVER_BK_SET_SCHEMA_VERSION,
-        );
         Ok(Some(v))
     }
 

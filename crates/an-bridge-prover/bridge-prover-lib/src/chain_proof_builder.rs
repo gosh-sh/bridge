@@ -34,7 +34,7 @@ pub fn compute_block_leaf_hash(
     envelope_hash: &[u8; 32],
     ext_messages_root: &[u8; 32],
 ) -> [u8; 32] {
-    let sponge = tvm_vm::executor::zk_stuff::bn254::poseidon::PoseidonSponge::new();
+    let sponge = PoseidonSponge::new();
     let mut buf = [0u8; 96];
     buf[..32].copy_from_slice(block_id);
     buf[32..64].copy_from_slice(envelope_hash);

@@ -1,15 +1,15 @@
-//! Vendored Poseidon-bn254 helpers used by the GraphQL-metadata block proof
-//! pathway — byte-identical to the node's `history-proof` crate. Keep in sync
-//! if upstream constants change.
+//! Poseidon-bn254 dense-Merkle helpers used by the GraphQL-metadata block
+//! proof pathway — byte-identical to the node's `history-proof` crate. Keep
+//! in sync if upstream constants change.
 //!
 //! Underlying primitive: `pse_poseidon::Poseidon<halo2_Fr, T=3, RATE=2>` with
 //! `R_F=8, R_P=57`. Inputs are chunked into 31-byte pieces, right-padded to
 //! 32 bytes with a single trailing zero, interpreted as little-endian field
 //! elements, fed into the sponge, then the 32-byte LE output is returned.
 //!
-//! This module is layered on top of `bridge_poseidon` (which owns the
-//! byte-hashing primitive used for Circuit 1A's BK-set commitment) and
-//! adds the dense Poseidon Merkle-tree helpers used by Circuit 2 (history
+//! This module is layered on top of `bridge_poseidon` (the single
+//! byte-hashing source of truth for the whole bridge workspace) and adds
+//! the dense Poseidon Merkle-tree helpers used by Circuit 2 (history
 //! layers) and Circuit 4 (event proofs).
 
 pub const HISTORY_PROOF_WINDOW_SIZE: usize = 128;
@@ -128,9 +128,10 @@ pub fn compute_ext_message_leaf_hash(
 mod tests {
     use super::*;
 
-    /// Etalon vector lifted from `tvm_vm::executor::zk_stuff::bn254::poseidon::
-    /// test_poseidon_bytes_flat`. If this fails, our Poseidon parameters have
-    /// drifted from the node and no on-chain proof will verify.
+    /// Etalon vector originally captured from the node's
+    /// `zk_stuff::bn254::poseidon::test_poseidon_bytes_flat` test. If this
+    /// fails, our Poseidon parameters have drifted from the node and no
+    /// on-chain proof will verify.
     #[test]
     fn poseidon_digest_matches_node_etalon() {
         let h = PoseidonHasher::new();

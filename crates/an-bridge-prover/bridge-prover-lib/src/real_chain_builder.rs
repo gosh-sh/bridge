@@ -30,14 +30,17 @@
 //!       L(prev_num_layers+1) root.
 //!     * Rungs 2..G — each intermediate L(L) tree at target carries target's
 //!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`).
-//!       This is not a rule from the History-proofs proposal; it's a
-//!       consequence of the chronological fill order in
-//!       [`build_layer_n_leaves`]: the loop over the W contributing L(L−1)
-//!       boundaries pushes them in ascending seq_no, from
-//!       `target − (W−1)·W^(L−1)` (i=0) up to `target` itself (i=W−1). So
-//!       target's own L(L−1) root always lands in `data_leaves[W−1]` =
-//!       `leaves[2 + W − 1]`, and every rung `L−1 → L` opens at that fixed
-//!       slot. Each opening walks up exactly one layer.
+//!       The source of truth for this layout is the acki-nacki node's
+//!       `HistoryBlockData::calculate_root_hash` (the reference cited at
+//!       [`build_chain_for_new_layer`] line 368), which places the W L(L−1)
+//!       contributions of a target-L(L) tree in ascending seq_no order —
+//!       so target's own L(L−1) contribution lands in `data_leaves[W−1]` =
+//!       `leaves[2 + W − 1]`. Our [`build_layer_n_leaves`] mirrors that
+//!       order verbatim, and a runtime `ensure!` in
+//!       [`build_chain_for_new_layer`] (around line 430) checks the
+//!       correspondence for each rung — surfacing a loud parse error if
+//!       the node ever changes the layout. Every rung `L−1 → L` opens at
+//!       that fixed slot; each opening walks up exactly one layer.
 //!   Under steady-state W·P cadence G is always 1 (single-layer jump per
 //!   bundle). G ≥ 2 only occurs on fresh mid-chain bootstrap that lands at a
 //!   compound boundary (e.g. seeding `layers=1` right before an L3 boundary,
@@ -727,8 +730,22 @@ pub async fn build_event_anchor_chain(
 /// Pure boundary math for L1 event anchoring.
 ///
 /// Given an event's block seq_no, returns the triple `(H_e, K, hops)`:
-/// * `H_e = ⌈event_seq/W⌉·W` — the W-aligned L1 tree containing the event.
-/// * `K = ⌈event_seq/(W·P)⌉·(W·P)` — the thinned L1 anchor the verifier stores.
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
+///   root of the batch containing `event_seq` is emitted. Per the History-
+///   proofs proposal (§ "Construct the Layer 1 Batch Proof" and the
+///   L1 example), batch `M` covers block heights `[M·W, (M+1)·W − 1]`
+///   and its root `#L1(M)` is stored **in the common section of the
+///   first block of batch M+1**, which sits at height `(M+1)·W`. With
+///   `M = ⌊event_seq/W⌋`, that height is exactly what the code computes.
+///   Note this is *not* `⌈event_seq/W⌉·W`: when `event_seq` is itself
+///   the first block of a batch (a KB, `event_seq % W == 0`), the
+///   ceiling formula returns `event_seq` itself — the tree whose root
+///   sits *there* covers the previous batch `[event_seq − W, event_seq − 1]`
+///   and does NOT include the event. We must advance to the next KB.
+/// * `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` — seq_no of the next thinned
+///   L1 anchor the verifier mirrors on-chain (the verifier stores L1
+///   roots at every W·P-th KB, not every KB). Same "strictly next
+///   multiple" pattern as `H_e`.
 /// * `hops = (K − H_e) / W` — forward-hop rung count between them.
 ///
 /// Invariants: `H_e ≤ K`, `(K − H_e) % W == 0`, `hops < P`.
@@ -747,13 +764,25 @@ pub fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
 /// Pure boundary math for L2 event anchoring.
 ///
 /// Returns `(H_e, T_2, position)`:
-/// * `H_e = ⌈event_seq/W⌉·W` — the event's W-aligned L1 tree.
-/// * `T_2 = ⌈event_seq/W²⌉·W²` — the L2 tree the event lives in.
-/// * `position` — data-leaf index of `H_e` inside the L2 tree:
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
+///   root of the batch containing `event_seq` is emitted (see
+///   [`l1_anchor_boundaries`] for the derivation).
+/// * `T_2 = ⌊event_seq/W²⌋·W² + W²` — seq_no of the KEY BLOCK where the
+///   L2 root of the L2-batch containing `event_seq` is emitted. Per the
+///   proposal (§ "Layer 2" example), the L2 batch `M₂ = ⌊event_seq/W²⌋`
+///   covers L1 batches `[M₂·W, (M₂+1)·W − 1]` (i.e. block heights
+///   `[M₂·W², (M₂+1)·W² − 1]`), and its root `#L2(M₂)` lives in the
+///   common section of the first block of L2-batch `M₂+1`, at seq_no
+///   `(M₂+1)·W²`. Same "strictly next multiple" pattern as `H_e`: on an
+///   exact `W²` boundary the code advances to the next KB, because the
+///   root sitting at `event_seq` itself covers the *previous* L2 batch.
+/// * `position` — data-leaf index of `H_e` inside the L2 tree at `T_2`:
 ///   `position = 2 + (W − 1 − k)` where `k = (T_2 − H_e)/W`. The `+2`
 ///   offset accounts for the first two L2 leaves being
-///   `[higher_layer_root, prev_same_layer_root]` (see the module-level
-///   layout doc). `k < W` always holds because `H_e ∈ (T_2 − W², T_2]`.
+///   `[higher_layer_root, prev_same_layer_root]`, matching the
+///   chronological data-leaf layout of `HistoryBlockData::calculate_root_hash`
+///   in the acki-nacki node. `k < W` always holds because
+///   `H_e ∈ (T_2 − W², T_2]`.
 ///
 /// Pub for the same reason as [`l1_anchor_boundaries`].
 pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
@@ -767,12 +796,26 @@ pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
 
 /// Pure boundary math for L(n) event anchoring (n ≥ 2).
 ///
-/// Returns the boundary stack `[T_1, T_2, …, T_n]` where
-/// `T_1 = H_e = ⌈event_seq/W⌉·W` and `T_m = ⌈event_seq/W^m⌉·W^m` for `m ≥ 2`.
-/// Each consecutive pair `(T_m, T_{m+1})` describes one vertical rung of the
-/// L(n) chain: the L(m) root at `T_m` is opened at data-leaf position
+/// Returns the boundary stack `[T_1, T_2, …, T_n]`, each entry being the
+/// seq_no of a KEY BLOCK (*not* a tree):
+/// * `T_1 = H_e = ⌊event_seq/W⌋·W + W` — the KB emitting the L1 root of
+///   the batch containing the event (see [`l1_anchor_boundaries`]).
+/// * `T_m = ⌊event_seq/W^m⌋·W^m + W^m` for `m ≥ 2` — the KB emitting the
+///   L(m) root of the L(m)-batch containing the event. This is the
+///   recursive generalisation of the L1/L2 rule from the History-proofs
+///   proposal: L(m)-batch `M_m = ⌊event_seq/W^m⌋` covers `W` consecutive
+///   L(m−1) batches, and its root `#L(m)(M_m)` is emitted in the common
+///   section of the first block of L(m)-batch `M_m + 1`, at seq_no
+///   `(M_m + 1)·W^m`. Not `⌈event_seq/W^m⌉·W^m`: on an exact `W^m`
+///   boundary the root at `event_seq` covers the *previous* L(m) batch,
+///   so we advance to the next KB.
+///
+/// Each consecutive pair `(T_m, T_{m+1})` describes one vertical rung of
+/// the L(n) chain: the L(m) root at `T_m` is opened at data-leaf position
 /// `2 + (W − 1 − k_m)` of the L(m+1) tree at `T_{m+1}`, where
-/// `k_m = (T_{m+1} − T_m) / W^m ∈ [0, W − 1]`.
+/// `k_m = (T_{m+1} − T_m) / W^m ∈ [0, W − 1]`. Chronological data-leaf
+/// ordering follows `HistoryBlockData::calculate_root_hash` in the
+/// acki-nacki node.
 ///
 /// Panics on `n == 0`. The caller is expected to bound `n ≤ MAX_LAYERS`.
 ///

@@ -607,6 +607,163 @@ impl GqlClient {
             .with_context(|| format!("parse_block_attestation for block {target_seq_no}"))
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // withdraw-E2E orchestrator helpers
+    //
+    // These three queries mirror the Python driver in
+    // `crates/an-bridge-prover/python/helper/bridge_e2e.py` (`GqlClient`).
+    // The withdraw-E2E orchestrator in `bridge-relayer-daemon` calls them
+    // to discover a newly-emitted `WithdrawalInitiated` ExtOut event and
+    // resolve the block context the Circuit-4 witness exporter needs.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Fetch recent ExtOut messages emitted by a specific bridge account.
+    /// Returns the last `limit` messages in schema order (oldest first).
+    ///
+    /// `Message.block_id` is `null` on ExtOut in this GQL schema; we fall
+    /// back to `src_transaction.block_id`, matching the Python driver.
+    pub async fn query_bridge_extouts(
+        &self,
+        account_id_hex: &str,
+        dapp_id_hex: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<BridgeExtOutMessage>> {
+        let q = format!(
+            r#"{{
+              blockchain {{
+                account(account_id: "{account_id_hex}", dapp_id: "{dapp_id_hex}") {{
+                  messages(msg_type: [ExtOut], last: {limit}) {{
+                    edges {{ node {{
+                      id boc dst created_at
+                      block_id src_dapp_id
+                      src_transaction {{ block_id }}
+                    }} }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let data = self.query(&q).await?;
+        let edges = data
+            .pointer("/blockchain/account/messages/edges")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(edges.len());
+        for edge in &edges {
+            let node = edge.get("node").unwrap_or(&Value::Null);
+            let id = node.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let boc = node.get("boc").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let dst = node.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let created_at = node.get("created_at").and_then(|v| v.as_u64());
+            let src_dapp_id = node
+                .get("src_dapp_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let block_id = node
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    node.get("src_transaction")
+                        .and_then(|tx| tx.get("block_id"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                });
+            out.push(BridgeExtOutMessage {
+                id,
+                boc,
+                dst,
+                created_at,
+                src_dapp_id,
+                block_id,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Resolve the on-chain `dapp_id` for an account. Zerostate-deployed
+    /// contracts typically return the same value as the input; surfaced so
+    /// the orchestrator can pass the exporter what the exporter expects.
+    /// Returns `None` if the field is absent or empty.
+    pub async fn query_account_dapp_id(
+        &self,
+        account_id_hex: &str,
+        dapp_id_hex: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let q = format!(
+            r#"{{ blockchain {{ account(account_id: "{account_id_hex}", dapp_id: "{dapp_id_hex}") {{ info {{ dapp_id }} }} }} }}"#
+        );
+        let data = self.query(&q).await?;
+        Ok(data
+            .pointer("/blockchain/account/info/dapp_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// Resolve a block via direct `block(hash:)` lookup.
+    ///
+    /// Note: what `Message.src_transaction.block_id` returns is the block's
+    /// `hash` field (BOC hash), NOT its consensus `block_id`. Use this to
+    /// obtain the canonical block_id, envelope_hash, seq_no, and height.
+    pub async fn query_block_by_hash(&self, block_hash: &str) -> anyhow::Result<GqlBlockByHash> {
+        let q = format!(
+            r#"{{ blockchain {{ block(hash: "{block_hash}") {{ hash block_id seq_no height envelope_hash key_block }} }} }}"#
+        );
+        let data = self.query(&q).await?;
+        let block = data
+            .pointer("/blockchain/block")
+            .ok_or_else(|| anyhow::format_err!("block(hash:{block_hash}) returned no field"))?;
+        if block.is_null() {
+            anyhow::bail!("block(hash:{block_hash}) not found");
+        }
+        Ok(GqlBlockByHash {
+            hash: block
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            block_id: block
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            seq_no: block.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0),
+            height: block.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+            envelope_hash: block
+                .get("envelope_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            key_block: block.get("key_block").and_then(|v| v.as_bool()).unwrap_or(false),
+        })
+    }
+}
+
+/// One ExtOut message row from
+/// [`GqlClient::query_bridge_extouts`]. `block_id` is `None` only if both
+/// `Message.block_id` and `src_transaction.block_id` were absent.
+#[derive(Debug, Clone)]
+pub struct BridgeExtOutMessage {
+    pub id: String,
+    pub boc: String,
+    pub dst: String,
+    pub created_at: Option<u64>,
+    pub src_dapp_id: Option<String>,
+    pub block_id: Option<String>,
+}
+
+/// Block metadata returned by [`GqlClient::query_block_by_hash`].
+#[derive(Debug, Clone)]
+pub struct GqlBlockByHash {
+    pub hash: String,
+    pub block_id: String,
+    pub seq_no: u64,
+    pub height: u64,
+    pub envelope_hash: String,
+    pub key_block: bool,
 }
 
 /// Convert one `BlockAttestation` GraphQL object into a `ParsedAttestation`

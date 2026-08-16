@@ -18,6 +18,7 @@ pub mod relayer;
 pub mod source;
 pub mod state;
 pub mod types;
+pub mod withdraw_e2e;
 pub mod withdraw_prover;
 pub mod withdrawal;
 
@@ -48,6 +49,10 @@ pub use source::{
 };
 pub use state::RelayerState;
 pub use types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
+pub use withdraw_e2e::{
+    capture_next_withdrawal_event, run_once as run_withdraw_e2e_once,
+    snapshot_baseline_msg_ids, CapturedEvent, WithdrawE2EConfig, WithdrawE2ESummary,
+};
 pub use withdraw_prover::{
     MockWithdrawalProver, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
     WithdrawalProver, PROVER_BIN,

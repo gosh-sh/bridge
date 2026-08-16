@@ -36,15 +36,15 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::{local::PrivateKeySigner, Signer},
 };
+use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    discover_event_proofs, BackoffConfig, BkSetUpdateSubmitOutcome,
+    discover_event_proofs, run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome,
     BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
     DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
     LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
     RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
     SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
-    TickOutcome,
-    WithdrawSubmitOutcome, WithdrawalProver, check_startup_drift,
+    TickOutcome, WithdrawE2EConfig, WithdrawSubmitOutcome, WithdrawalProver, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -430,6 +430,86 @@ enum Cmd {
         #[arg(long)]
         accept_halo2_proofs: bool,
     },
+    /// End-to-end withdraw pipeline: capture live `WithdrawalInitiated`
+    /// ExtOut event → export partial witness → enrich → prove → optional
+    /// on-chain `withdrawByProof`.
+    ///
+    /// Replaces the Python driver's steps 5–7 with a single in-process
+    /// call (see `bridge_relayer_daemon::withdraw_e2e`). If any of the
+    /// three submit-side flags (`--rpc-url`, `--bridge-address`,
+    /// `--private-key`) are omitted, the command stops after proving and
+    /// only logs the produced proof metadata.
+    WithdrawE2E {
+        /// GraphQL endpoint (e.g. `https://shellnet.ackinacki.org/bk/v2/graphql`).
+        #[arg(long, env = "GQL_ENDPOINT")]
+        gql_endpoint: String,
+        /// Path to the `prover_state.json` snapshot the enricher reads.
+        #[arg(long, env = "PROVER_STATE_PATH")]
+        prover_state_path: PathBuf,
+        /// History-proof window size (`W`). Must match the value the
+        /// state file was written with.
+        #[arg(long, default_value_t = 128)]
+        window_size: usize,
+        /// Emitting bridge account (64-hex, no `0x`).
+        #[arg(long)]
+        bridge_account_id: String,
+        /// Emitting bridge dapp_id (64-hex, no `0x`).
+        #[arg(long)]
+        bridge_dapp_id: String,
+        /// ExtOut `dst` sentinel to filter on. Defaults to
+        /// `WithdrawalInitiated`'s `makeAddrExtern(618)` value.
+        #[arg(
+            long,
+            default_value = ":000000000000000000000000000000000000000000000000000000000000026a"
+        )]
+        event_dst: String,
+        /// Total time budget for the event-capture stage, in seconds.
+        #[arg(long, default_value_t = 300)]
+        event_wait_s: u64,
+        /// Poll interval during the capture stage, in seconds.
+        #[arg(long, default_value_t = 2)]
+        event_poll_interval_s: u64,
+        /// Anchor layer mode: `auto` (probe L1 → L2 → …) or an explicit
+        /// layer number (`1`, `2`, …).
+        #[arg(long, default_value = "auto")]
+        anchor_layer: String,
+        /// Ack the L(n≥2) wait budget when `--anchor-layer` picks an
+        /// explicit `n≥2`. Auto mode counts as an implicit ack.
+        #[arg(long)]
+        i_know_the_wait: bool,
+        /// Where to write the enriched witness JSON.
+        #[arg(long)]
+        work_dir: PathBuf,
+        /// `crates/an-bridge-prover` workspace root (holds the
+        /// `bridge-event-halo2-prover` release binary + params).
+        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
+        an_bridge_prover_dir: PathBuf,
+        /// Override the prover subprocess's working directory (i.e.
+        /// where `./params/*` lives). Defaults to `--an-bridge-prover-dir`.
+        #[arg(long)]
+        prover_work_dir: Option<PathBuf>,
+        /// Optional dir to persist `proof_event_{seq:06}.json`.
+        #[arg(long)]
+        prover_out_dir: Option<PathBuf>,
+        /// Subprocess prover timeout, in seconds.
+        #[arg(long, default_value_t = 1800)]
+        prover_timeout_s: u64,
+        /// Seqno stamped into witness/proof filenames.
+        #[arg(long, default_value_t = 0)]
+        prover_seq_no: u32,
+        /// If set together with `--bridge-address` + `--private-key`,
+        /// also drive `withdrawByProof` on Ethereum after proving.
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: Option<String>,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Option<Address>,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: Option<String>,
+        /// If the submit trio is supplied, do only an `eth_call`
+        /// dry-run (no signed tx).
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
 }
@@ -743,6 +823,54 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "submit-withdraw failed");
                 e
             }),
+        Cmd::WithdrawE2E {
+            gql_endpoint,
+            prover_state_path,
+            window_size,
+            bridge_account_id,
+            bridge_dapp_id,
+            event_dst,
+            event_wait_s,
+            event_poll_interval_s,
+            anchor_layer,
+            i_know_the_wait,
+            work_dir,
+            an_bridge_prover_dir,
+            prover_work_dir,
+            prover_out_dir,
+            prover_timeout_s,
+            prover_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+        } => withdraw_e2e_cli(WithdrawE2ECliArgs {
+            gql_endpoint,
+            prover_state_path,
+            window_size,
+            bridge_account_id,
+            bridge_dapp_id,
+            event_dst,
+            event_wait_s,
+            event_poll_interval_s,
+            anchor_layer,
+            i_know_the_wait,
+            work_dir,
+            an_bridge_prover_dir,
+            prover_work_dir,
+            prover_out_dir,
+            prover_timeout_s,
+            prover_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+        })
+        .await
+        .map_err(|e| {
+            error!(?e, "withdraw-e2e failed");
+            e
+        }),
         Cmd::SubmitBkUpdate {
             proofs_dir,
             block_seq_no,
@@ -1674,6 +1802,132 @@ async fn submit_withdraw(
         },
     }
     Ok(())
+}
+
+/// Grouped arg struct so the `Cmd::WithdrawE2E` destructure has one
+/// name to hand off to [`withdraw_e2e_cli`] instead of 20 positional
+/// parameters — avoids the `too_many_arguments` clippy lint that
+/// several other subcommands here trip.
+struct WithdrawE2ECliArgs {
+    gql_endpoint: String,
+    prover_state_path: PathBuf,
+    window_size: usize,
+    bridge_account_id: String,
+    bridge_dapp_id: String,
+    event_dst: String,
+    event_wait_s: u64,
+    event_poll_interval_s: u64,
+    anchor_layer: String,
+    i_know_the_wait: bool,
+    work_dir: PathBuf,
+    an_bridge_prover_dir: PathBuf,
+    prover_work_dir: Option<PathBuf>,
+    prover_out_dir: Option<PathBuf>,
+    prover_timeout_s: u64,
+    prover_seq_no: u32,
+    rpc_url: Option<String>,
+    bridge_address: Option<Address>,
+    private_key: Option<String>,
+    dry_run: bool,
+}
+
+async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
+    let anchor_mode = parse_anchor_layer(&args.anchor_layer)?;
+
+    let cfg = WithdrawE2EConfig {
+        gql_endpoint: args.gql_endpoint,
+        prover_state_path: args.prover_state_path,
+        window_size: args.window_size,
+        bridge_account_id_hex: args.bridge_account_id,
+        bridge_dapp_id_hex: args.bridge_dapp_id,
+        event_dst_filter: args.event_dst,
+        event_wait: Duration::from_secs(args.event_wait_s),
+        event_poll_interval: Duration::from_secs(args.event_poll_interval_s),
+        anchor_mode,
+        i_know_the_wait: args.i_know_the_wait,
+        work_dir: args.work_dir,
+        an_bridge_prover_dir: args.an_bridge_prover_dir,
+        prover_work_dir: args.prover_work_dir,
+        prover_out_dir: args.prover_out_dir,
+        prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        prover_seq_no: args.prover_seq_no,
+    };
+
+    let summary = run_withdraw_e2e_once(cfg).await?;
+
+    info!(
+        message_id = %summary.captured.message_id,
+        block_seq_no = summary.captured.block_seq_no,
+        block_id = %summary.captured.block_id_hex,
+        witness_path = %summary.witness_path.display(),
+        proof_len = summary.proof.proof_hex.len() / 2,
+        self_verified = summary.proof.self_verified,
+        layer_idx = summary.enrich.layer_idx,
+        auto_escalated = summary.enrich.auto_escalated,
+        "withdraw-e2e: capture + prove complete",
+    );
+
+    let submit = match (args.rpc_url, args.bridge_address, args.private_key) {
+        (Some(rpc), Some(addr), Some(pk)) => Some((rpc, addr, pk)),
+        (None, None, None) => {
+            info!("no ETH submit trio supplied — stopping after prove");
+            return Ok(());
+        },
+        _ => anyhow::bail!(
+            "must supply all three of --rpc-url / --bridge-address / --private-key together (or none)"
+        ),
+    };
+    let (rpc_url, bridge_address, private_key) = submit.unwrap();
+
+    let proof_bytes = summary.proof.proof_bytes()?;
+    let pub_inputs = summary.proof.public_inputs()?;
+
+    if args.dry_run {
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let bridge = EthBridgeClient::new(bridge_address, provider);
+        match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
+            DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
+            DryRunOutcome::WouldRevert {
+                reason,
+            } => anyhow::bail!("dry-run reverted: {reason}"),
+        }
+        return Ok(());
+    }
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Reverted {
+            reason,
+        } => anyhow::bail!("withdrawByProof reverted: {reason}"),
+    }
+    Ok(())
+}
+
+/// Parse the `--anchor-layer` flag into [`AnchorLayerMode`]. Accepts
+/// case-insensitive `"auto"` or a positive layer index.
+fn parse_anchor_layer(s: &str) -> anyhow::Result<AnchorLayerMode> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Ok(AnchorLayerMode::Auto);
+    }
+    let n: u8 = t
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--anchor-layer must be `auto` or a positive integer: {e}"))?;
+    if n == 0 {
+        anyhow::bail!("--anchor-layer=0 is not valid; use `1` or higher");
+    }
+    Ok(AnchorLayerMode::Explicit(n))
 }
 
 async fn submit_bk_update(

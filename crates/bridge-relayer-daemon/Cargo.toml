@@ -45,6 +45,11 @@ bridge-snark-wrap = { path = "../bridge-snark-wrap" }
 # `SubprocessCircuit4SnarkProver` shell-out to `export-c4-poseidon-snark`
 # (NB-Q9 PR-B). Same shape as the 1A/1B/2 lane above.
 bridge-event-prover-lib = { path = "../bridge-event-prover-lib" }
+# Event-witness exporter + enricher (Circuit 4 private witness). Used by the
+# in-process withdraw_e2e driver to build/enrich a `PrivateWitness` from a
+# freshly-captured WithdrawalInitiated ExtOut BOC before invoking the
+# SubprocessWithdrawalProver.
+bridge-event-witness = { path = "../bridge-event-witness" }
 # Direct halo2-base dep pulls in `Params` / `ParamsProver` traits needed for
 # SRS downsize + serialize in `ensure_srs_for_event`. Workspace = ensures the
 # same halo2-axiom rev as bridge-prover-lib / bridge-snark-wrap resolve to.

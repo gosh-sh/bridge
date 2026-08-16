@@ -1886,6 +1886,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bridge-event-prover-lib",
+ "bridge-event-witness",
  "bridge-gql-fetcher",
  "bridge-prover-lib",
  "bridge-snark-wrap",

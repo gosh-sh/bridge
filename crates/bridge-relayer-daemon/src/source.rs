@@ -315,8 +315,6 @@ struct PartnerProofRequest {
 /// where the shape gates should be bypassed.
 pub struct ProverProofsBlockSource {
     proofs_dir: PathBuf,
-    /// When true, skip `result_<seqno>.json` verification gate.
-    skip_verified_gate: bool,
     /// When true, bypass the SHPLONK shape gates — for diagnostics against a
     /// local mock bridge.
     accept_halo2_proofs: bool,
@@ -326,14 +324,8 @@ impl ProverProofsBlockSource {
     pub fn new(proofs_dir: impl Into<PathBuf>) -> Self {
         Self {
             proofs_dir: proofs_dir.into(),
-            skip_verified_gate: false,
             accept_halo2_proofs: false,
         }
-    }
-
-    pub fn skip_verified_gate(mut self, skip: bool) -> Self {
-        self.skip_verified_gate = skip;
-        self
     }
 
     pub fn accept_halo2_proofs(mut self, accept: bool) -> Self {
@@ -378,36 +370,10 @@ impl ProverProofsBlockSource {
         best
     }
 
-    fn result_path(&self, seq_no: u64) -> PathBuf {
-        self.proofs_dir.join(format!("result_{seq_no}.json"))
-    }
-
     fn load_block(&self, seq_no: u64) -> Result<Option<AnBlockData>, RelayerError> {
         let path = self.proof_path(seq_no);
         if !path.exists() {
             return Ok(None);
-        }
-
-        if !self.skip_verified_gate {
-            let result_path = self.result_path(seq_no);
-            if result_path.exists() {
-                let result: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&result_path)?)?;
-                let primary = result
-                    .get("primary_verified")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let layer = result
-                    .get("layer_verified")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !(primary && layer) {
-                    return Err(RelayerError::other(format!(
-                        "result_{seq_no}.json exists but verification failed (primary={primary}, \
-                         layer={layer})"
-                    )));
-                }
-            }
         }
 
         let req: PartnerProofRequest = serde_json::from_slice(&std::fs::read(&path)?)
@@ -512,7 +478,6 @@ fn default_attestation_primary() -> String {
 /// Reads BK-set rotation bundles from the partner prover's `proofs/` directory.
 pub struct BkUpdateProofsSource {
     proofs_dir: PathBuf,
-    skip_verified_gate: bool,
     accept_halo2_proofs: bool,
 }
 
@@ -520,14 +485,8 @@ impl BkUpdateProofsSource {
     pub fn new(proofs_dir: impl Into<PathBuf>) -> Self {
         Self {
             proofs_dir: proofs_dir.into(),
-            skip_verified_gate: false,
             accept_halo2_proofs: false,
         }
-    }
-
-    pub fn skip_verified_gate(mut self, skip: bool) -> Self {
-        self.skip_verified_gate = skip;
-        self
     }
 
     pub fn accept_halo2_proofs(mut self, accept: bool) -> Self {
@@ -539,11 +498,6 @@ impl BkUpdateProofsSource {
         self.proofs_dir.join(format!("bkupd_{seq_no:06}.json"))
     }
 
-    fn bkupd_result_path(&self, seq_no: u64) -> PathBuf {
-        self.proofs_dir
-            .join(format!("bkupd_result_{seq_no:06}.json"))
-    }
-
     /// Load a single bk-update bundle keyed by `block_seq_no`.
     pub fn load_update(
         &self,
@@ -552,23 +506,6 @@ impl BkUpdateProofsSource {
         let path = self.bkupd_path(seq_no);
         if !path.exists() {
             return Ok(None);
-        }
-
-        if !self.skip_verified_gate {
-            let result_path = self.bkupd_result_path(seq_no);
-            if result_path.exists() {
-                let result: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&result_path)?)?;
-                let verify_ok = result
-                    .get("verify_ok")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !verify_ok {
-                    return Err(RelayerError::other(format!(
-                        "bkupd_result_{seq_no:06}.json exists but verify_ok=false"
-                    )));
-                }
-            }
         }
 
         let req: PartnerBkUpdateRequest = serde_json::from_slice(&std::fs::read(&path)?)
@@ -782,11 +719,6 @@ mod tests {
             serde_json::to_string(&proof).unwrap(),
         )
         .unwrap();
-        std::fs::write(
-            dir.path().join("result_512.json"),
-            r#"{"block_seq_no":512,"primary_verified":true,"layer_verified":true,"error":null}"#,
-        )
-        .unwrap();
 
         let src = ProverProofsBlockSource::new(dir.path());
         let b = src.fetch(512).await.unwrap().unwrap();
@@ -825,7 +757,7 @@ mod tests {
         write_bundle_proof(dir.path(), 1_084_416);
         write_bundle_proof(dir.path(), 1_084_928);
 
-        let src = ProverProofsBlockSource::new(dir.path()).skip_verified_gate(true);
+        let src = ProverProofsBlockSource::new(dir.path());
 
         // Cursor just past a previous key block → next available is 1_084_416.
         let b = src.fetch(1_083_905).await.unwrap().unwrap();
@@ -861,11 +793,6 @@ mod tests {
         std::fs::write(
             dir.path().join("bkupd_000024.json"),
             serde_json::to_string(&bkupd).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("bkupd_result_000024.json"),
-            r#"{"block_seq_no":24,"verify_ok":true}"#,
         )
         .unwrap();
 

@@ -53,6 +53,5 @@ pub use withdraw_prover::{
     WithdrawalProver, PROVER_BIN,
 };
 pub use withdrawal::{
-    discover_event_proofs, is_event_proof_file, result_path_for, PartnerWithdrawalProof,
-    WithdrawalPublicInputs, WithdrawalResultGate,
+    discover_event_proofs, is_event_proof_file, PartnerWithdrawalProof, WithdrawalPublicInputs,
 };

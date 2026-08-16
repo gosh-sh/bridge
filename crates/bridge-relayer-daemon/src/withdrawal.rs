@@ -18,6 +18,18 @@ use serde::Deserialize;
 
 use crate::error::RelayerError;
 
+// Historical note (2026-08-16): a `WithdrawalResultGate` struct + a
+// `proof_event_*.result.json` polling loop used to live here, gating each
+// on-chain `withdrawByProof` submission on `verified && anchor_matched
+// && proof_valid` fields written by `bridge-verifier-daemon`. That
+// daemon was a Rust mirror of the Solidity verifier used during early
+// bring-up when the on-chain verifier did not yet exist; keeping the
+// gate meant the production relayer waited for a dev-only sidecar to
+// rubber-stamp every proof. Deleted along with the `skip_verified_gate`
+// opt-out. Authoritative acceptance is now the on-chain verifier's
+// success on the actual `withdrawByProof` transaction (or its `eth_call`
+// dry-run) — nothing else.
+
 /// Ten public inputs for Circuit 4 (single-final-root layout).
 pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 10;
 
@@ -101,34 +113,10 @@ impl PartnerWithdrawalProof {
     }
 }
 
-/// Verifier ACK written next to each `proof_event_NNN.json` as
-/// `proof_event_NNN.result.json` by `bridge-verifier-daemon`. The
-/// withdraw daemon gates submission on `verified && anchor_matched &&
-/// proof_valid` unless `--skip-verified-gate` is passed.
-#[derive(Clone, Debug, Deserialize)]
-pub struct WithdrawalResultGate {
-    #[serde(default)]
-    pub verified: bool,
-    #[serde(default)]
-    pub anchor_matched: bool,
-    #[serde(default)]
-    pub proof_valid: bool,
-}
-
-impl WithdrawalResultGate {
-    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, RelayerError> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| RelayerError::other(format!("parse proof_event result JSON: {e}")))
-    }
-
-    /// The gate is satisfied only when the verifier confirmed all three.
-    pub fn is_accepted(&self) -> bool {
-        self.verified && self.anchor_matched && self.proof_valid
-    }
-}
-
-/// `true` for `proof_event_*.json` files that are *not* the sibling
-/// `proof_event_*.result.json` ACK.
+/// `true` for `proof_event_*.json` files. The `.result.json` suffix (a
+/// sidecar the retired `bridge-verifier-daemon` used to write) is still
+/// filtered out so a stray dev-mode sidecar in the same directory does
+/// not confuse the discovery scan.
 pub fn is_event_proof_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -136,22 +124,10 @@ pub fn is_event_proof_file(path: &Path) -> bool {
     name.starts_with("proof_event_") && name.ends_with(".json") && !name.ends_with(".result.json")
 }
 
-/// Map `…/proof_event_NNN.json` → `…/proof_event_NNN.result.json`.
-pub fn result_path_for(proof_path: &Path) -> PathBuf {
-    let mut s = proof_path.as_os_str().to_os_string();
-    // strip trailing `.json`, append `.result.json`
-    let as_str = s.to_string_lossy().to_string();
-    if let Some(stem) = as_str.strip_suffix(".json") {
-        return PathBuf::from(format!("{stem}.result.json"));
-    }
-    s.push(".result.json");
-    PathBuf::from(s)
-}
-
 /// Discover `proof_event_*.json` bundles in `dir`, sorted by filename so
-/// lower seqnos are processed first. The sibling `*.result.json` ACKs are
-/// excluded. Missing directory yields an empty list (not an error) so the
-/// daemon can start before the prover has produced anything.
+/// lower seqnos are processed first. Missing directory yields an empty
+/// list (not an error) so the daemon can start before the prover has
+/// produced anything.
 pub fn discover_event_proofs(dir: &Path) -> Result<Vec<PathBuf>, RelayerError> {
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
@@ -318,23 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn result_gate_requires_all_three() {
-        let g = WithdrawalResultGate::from_json_bytes(
-            br#"{"verified":true,"anchor_matched":true,"proof_valid":true}"#,
-        )
-        .unwrap();
-        assert!(g.is_accepted());
-        let bad = WithdrawalResultGate::from_json_bytes(
-            br#"{"verified":true,"anchor_matched":false,"proof_valid":true}"#,
-        )
-        .unwrap();
-        assert!(!bad.is_accepted());
-        // Missing fields default to false → not accepted.
-        let empty = WithdrawalResultGate::from_json_bytes(b"{}").unwrap();
-        assert!(!empty.is_accepted());
-    }
-
-    #[test]
     fn event_proof_file_classification() {
         assert!(is_event_proof_file(Path::new("/x/proof_event_000000.json")));
         assert!(!is_event_proof_file(Path::new(
@@ -342,14 +301,6 @@ mod tests {
         )));
         assert!(!is_event_proof_file(Path::new("/x/proof_001536.json")));
         assert!(!is_event_proof_file(Path::new("/x/result_001536.json")));
-    }
-
-    #[test]
-    fn result_path_mapping() {
-        assert_eq!(
-            result_path_for(Path::new("/x/proof_event_000007.json")),
-            PathBuf::from("/x/proof_event_000007.result.json")
-        );
     }
 
     #[test]

@@ -78,7 +78,6 @@ impl MockWithdrawalProver {
             .collect();
         Self {
             canned: PartnerWithdrawalProof {
-                schema_version: 1,
                 seq_no: 0,
                 proof_hex: hex::encode(vec![
                     0xAAu8;

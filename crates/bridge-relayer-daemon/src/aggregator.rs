@@ -519,7 +519,6 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
         calldata_binds_instances(&calldata, &instances_hex)?;
 
         Ok(PartnerWithdrawalProof {
-            schema_version: 1,
             seq_no,
             proof_hex: hex::encode(&calldata),
             public_instances_hex: instances_hex,

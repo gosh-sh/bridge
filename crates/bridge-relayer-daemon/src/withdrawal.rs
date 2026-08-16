@@ -32,8 +32,6 @@ pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPU
 #[derive(Clone, Debug, Deserialize)]
 pub struct PartnerWithdrawalProof {
     #[serde(default)]
-    pub schema_version: u32,
-    #[serde(default)]
     pub seq_no: u64,
     pub proof_hex: String,
     pub public_instances_hex: Vec<String>,

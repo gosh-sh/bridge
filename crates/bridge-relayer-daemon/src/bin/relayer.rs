@@ -1244,7 +1244,6 @@ async fn prove_withdraw(
 
     // Persist in the `proof_event` schema that `submit-withdraw` reads.
     let json = serde_json::json!({
-        "schema_version": proof.schema_version,
         "seq_no": proof.seq_no,
         "proof_hex": proof.proof_hex,
         "public_instances_hex": proof.public_instances_hex,
@@ -1290,7 +1289,6 @@ async fn prove_withdraw_shplonk(
     // Persist in the `proof_event` schema that `submit-withdraw` reads. The
     // `proof_hex` here is the SHPLONK aggregator calldata (not raw Halo2).
     let json = serde_json::json!({
-        "schema_version": proof.schema_version,
         "seq_no": proof.seq_no,
         "proof_hex": proof.proof_hex,
         "public_instances_hex": proof.public_instances_hex,

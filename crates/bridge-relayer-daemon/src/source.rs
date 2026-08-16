@@ -755,7 +755,6 @@ mod tests {
     async fn prover_proofs_source_loads_shplonk_bundle() {
         let dir = tempfile::tempdir().unwrap();
         let proof = serde_json::json!({
-            "schema_version": 2,
             "block_seq_no": 512,
             "block_height": 512,
             "last_seen_block_seqno": 0,
@@ -797,7 +796,6 @@ mod tests {
 
     fn write_bundle_proof(dir: &std::path::Path, seq_no: u64) {
         let proof = serde_json::json!({
-            "schema_version": 2,
             "block_seq_no": seq_no,
             "block_height": seq_no,
             "last_seen_block_seqno": 0,
@@ -850,7 +848,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proof_hex = "0x".to_string() + &"ab".repeat(2048);
         let bkupd = serde_json::json!({
-            "schema_version": 7,
             "block_seq_no": 24,
             "attestation_circuit": "primary",
             "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",

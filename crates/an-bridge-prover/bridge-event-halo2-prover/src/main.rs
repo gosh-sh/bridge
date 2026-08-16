@@ -41,9 +41,6 @@ const PARAMS_DIR: &str = "./params";
 /// byte-identical circuits (helpful when debugging keygen determinism).
 const SELFTEST_SEED: u64 = 0xC0FFEE_5E_5E_5E_u64;
 
-/// Output JSON schema. Bump if any field semantics change.
-const OUTPUT_SCHEMA_VERSION: u32 = 1;
-
 #[derive(Serialize, Deserialize)]
 struct CliArgs {
     fixture: Option<PathBuf>,
@@ -113,7 +110,6 @@ fn print_help() {
 
 #[derive(Serialize)]
 struct OutputSummary<'a> {
-    schema_version: u32,
     mode: &'a str,
     seq_no: u32,
     self_verified: bool,
@@ -199,7 +195,6 @@ fn run() -> Result<()> {
             .with_context(|| format!("failed to create {}", dir.display()))?;
         let fname = dir.join(format!("proof_event_{:06}.json", seq_no));
         let on_disk = serde_json::json!({
-            "schema_version": OUTPUT_SCHEMA_VERSION,
             "seq_no": seq_no,
             "proof_hex": proof_hex,
             "public_instances_hex": public_instances_hex,
@@ -216,7 +211,6 @@ fn run() -> Result<()> {
 
     // Stdout summary — must be the last non-empty line for dex-style consumers.
     let summary = OutputSummary {
-        schema_version: OUTPUT_SCHEMA_VERSION,
         mode,
         seq_no,
         self_verified: ok,

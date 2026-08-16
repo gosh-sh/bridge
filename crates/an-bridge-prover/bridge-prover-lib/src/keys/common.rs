@@ -12,9 +12,7 @@
 
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
-use anyhow::Context;
 use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
@@ -22,7 +20,7 @@ use halo2_base::halo2_proofs::{
         bn256::{Bn256, Fr, G1Affine},
         serde::SerdeObject,
     },
-    plonk::{keygen_pk, keygen_vk, Circuit, ProvingKey, VerifyingKey},
+    plonk::{ProvingKey, VerifyingKey},
     poly::{commitment::Params, kzg::commitment::ParamsKZG},
     SerdeFormat,
 };
@@ -114,54 +112,22 @@ pub(crate) fn save_pk(
 
 /// Load a KZG SRS whose `params.k()` is exactly `k`.
 /// Resolution order:
-/// 1. Exact `kzg_bn254_{k}.srs` whose header `k` matches (or is larger →
-///    downsize in place and rewrite).
-/// 2. Largest on-disk `kzg_bn254_*.srs` with header degree ≥ `k`, downsized
-///    and written to the exact path for the next load.
+/// 1. Fast path: `kzg_bn254_{k}.srs` exists and its header matches `k` →
+///    verify Hermez provenance and return.
+/// 2. Otherwise scan `params_dir` for the largest `kzg_bn254_*.srs` with
+///    header degree ≥ `k`, downsize, and write to the exact path so the
+///    next load hits the fast path.
 pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     let exact_path = params_dir.join(format!("kzg_bn254_{k}.srs"));
-
-    if exact_path.exists() {
-        match read_srs_file(&exact_path) {
-            Ok(srs) if srs.k() == k => {
-                assert_hermez_ceremony(&exact_path, &srs);
-                return srs;
-            }
-            Ok(mut srs) if srs.k() > k => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    file_k = srs.k(),
-                    circuit_k = k,
-                    "SRS file degree exceeds requested k; downsizing (likely a misnamed larger ceremony)"
-                );
-                assert_hermez_ceremony(&exact_path, &srs);
-                srs.downsize(k);
-                let _ = write_srs_file(&exact_path, &srs);
-                return srs;
-            }
-            Ok(srs) => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    file_k = srs.k(),
-                    circuit_k = k,
-                    "SRS file degree is smaller than requested k; ignoring and searching for a larger ceremony"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    error = %e,
-                    "failed to read exact SRS file; searching for a larger ceremony"
-                );
-            }
+    if let Ok(srs) = read_srs_file(&exact_path) {
+        if srs.k() == k {
+            assert_hermez_at(&exact_path, &srs);
+            return srs;
         }
     }
 
     if let Some((src_path, mut srs)) = find_largest_ceremony_ge(params_dir, k) {
-        assert_hermez_ceremony(&src_path, &srs);
+        assert_hermez_at(&src_path, &srs);
         let src_k = srs.k();
         if src_k > k {
             srs.downsize(k);
@@ -194,42 +160,22 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     );
 }
 
-/// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects Acki Nacki chain ceremony
-/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Re-exported from
-/// `bridge_prover_lib::keys` so the `bootstrap_hermez_srs` binary can share
-/// the same anchor byte-string.
+/// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects any untrusted chain ceremony
+/// any synthetic `gen_srs` trapdoor.
 pub const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
 
-fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
-    let mut buf = Vec::with_capacity(128);
-    srs.s_g2()
-        .write_raw(&mut buf)
-        .expect("write to Vec cannot fail");
-    if buf.len() < HERMEZ_S_G2_HEAD.len() {
-        panic!(
-            "SRS {} s_g2 encoding too small ({} bytes)",
-            path.display(),
-            buf.len()
-        );
-    }
-    let head = &buf[..HERMEZ_S_G2_HEAD.len()];
-    if head != HERMEZ_S_G2_HEAD {
-        panic!(
-            "SRS {} is not Hermez Perpetual Powers of Tau (s_g2 head {:02x?}, \
-             expected {:02x?}). Quarantine chain-ceremony files and bootstrap \
-             Hermez SRS — no fallbacks.",
-            path.display(),
-            head,
-            HERMEZ_S_G2_HEAD
-        );
+fn assert_hermez_at(path: &Path, srs: &ParamsKZG<Bn256>) {
+    if let Err(e) = assert_hermez_srs(srs) {
+        panic!("SRS {}: {e:#}", path.display());
     }
 }
 
-/// Public Result-based sibling of the private `assert_hermez_ceremony` above,
-/// for callers outside `load_srs` that want to bail rather than panic (e.g.
-/// the offline snark exporters in `bridge-snark-utils` which call
-/// `gen_srs` directly). Same anchor bytes, same failure mode — no
-/// toxic-waste SRS proceeds past this check.
+/// Refuse to proceed unless `srs` was produced by the Hermez Perpetual
+/// Powers of Tau ceremony (identified by its `s_g2` head, see
+/// [`HERMEZ_S_G2_HEAD`]). Called both from [`load_srs`] (via
+/// [`assert_hermez_at`]) and from the offline snark exporters in
+/// `bridge-snark-utils` which call `gen_srs` directly — no toxic-waste
+/// SRS proceeds past this check.
 pub fn assert_hermez_srs(srs: &ParamsKZG<Bn256>) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(128);
     srs.s_g2()
@@ -325,185 +271,26 @@ fn find_largest_ceremony_ge(
     best.map(|(_, path, srs)| (path, srs))
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Shared per-circuit manager state
-// ─────────────────────────────────────────────────────────────────────
-
-/// SRS + optional VK/PK/config cache with disk-backed lifecycle.
-/// Composed by each per-circuit manager (`PrimaryKeyManager`, etc.) so the
-/// mechanical parts (SRS load, cache-hit check, keygen timing/logging,
-/// save-and-set, on-demand PK load/unload, accessor panic messages) live in
-/// exactly one place. Per-circuit files only carry their circuit-specific
-/// bits: witness construction inside `ensure_keys`, degree constants, and
-/// (for `LayerHashesKeyManager`) any extra accessors.
-pub(crate) struct KeyManagerState {
-    params_dir: PathBuf,
-    prefix: &'static str,
-    /// Operator-facing hint appended to the `load_pk` log line (e.g.
-    /// `"~3.7 GB"`). Purely cosmetic — wall-clock elapsed is always logged
-    /// after the load regardless.
-    pk_size_hint: Option<&'static str>,
-    srs: ParamsKZG<Bn256>,
-    k: u32,
-    vk: Option<VerifyingKey<G1Affine>>,
-    pk: Option<ProvingKey<G1Affine>>,
-    config: Option<BaseCircuitParams>,
-}
-
-impl KeyManagerState {
-    /// Construct: load SRS at `srs_k` (may exceed circuit `k` when the
-    /// ceremony was oversized — see `LayerHashesKeyManager::KEYGEN_SRS_K`
-    /// / `EventKeyManager::KEYGEN_SRS_K`), best-effort load any cached
-    /// config/VK from disk; log if PK file is present (loaded on demand).
-    pub(crate) fn new(
-        params_dir: &Path,
-        prefix: &'static str,
-        k: u32,
-        srs_k: u32,
-        pk_size_hint: Option<&'static str>,
-    ) -> Self {
-        std::fs::create_dir_all(params_dir).ok();
-        let srs = load_srs(params_dir, srs_k);
-        let mut state = Self {
-            params_dir: params_dir.to_path_buf(),
-            prefix,
-            pk_size_hint,
-            srs,
-            k,
-            vk: None,
-            pk: None,
-            config: None,
-        };
-        if let Ok(config) = load_config(&state.params_dir, prefix) {
-            info!("found {} config: {:?}", prefix, config);
-            if let Some(vk) = try_load_vk(&state.params_dir, prefix, &config) {
-                info!("loaded {} VK from cache", prefix);
-                state.vk = Some(vk);
-            }
-            if pk_path(&state.params_dir, prefix).exists() {
-                info!("{} PK found on disk (will load on demand)", prefix);
-            }
-            state.config = Some(config);
-        }
-        state
-    }
-
-    /// True iff `ensure_keys` can skip regeneration: VK in memory AND PK
-    /// present on disk.
-    pub(crate) fn keys_cached(&self) -> bool {
-        self.vk.is_some() && pk_path(&self.params_dir, self.prefix).exists()
-    }
-
-    /// Run keygen_vk + keygen_pk with prefix-labelled timing/logging, then
-    /// persist VK + PK + config to disk and install VK + config into `self`.
-    /// The PK is intentionally dropped after save (freeing ~2.8–3.7 GB for
-    /// the BLS circuits); callers reload on demand via [`Self::load_pk`].
-    pub(crate) fn run_keygen<C>(
-        &mut self,
-        circuit: &C,
-        base_params: BaseCircuitParams,
-    ) -> anyhow::Result<()>
-    where
-        C: Circuit<Fr>,
-    {
-        info!("{} base_circuit_params: {:?}", self.prefix, base_params);
-
-        let t = Instant::now();
-        let vk = keygen_vk(&self.srs, circuit)
-            .with_context(|| format!("{} keygen_vk failed", self.prefix))?;
-        info!("{} keygen_vk: {:?}", self.prefix, t.elapsed());
-
-        let t = Instant::now();
-        let pk = keygen_pk(&self.srs, vk.clone(), circuit)
-            .with_context(|| format!("{} keygen_pk failed", self.prefix))?;
-        info!("{} keygen_pk: {:?}", self.prefix, t.elapsed());
-
-        save_vk(&self.params_dir, self.prefix, &vk)?;
-        save_pk(&self.params_dir, self.prefix, &pk)?;
-        save_config(&self.params_dir, self.prefix, &base_params)?;
-
-        self.vk = Some(vk);
-        self.config = Some(base_params);
-        // `pk` drops here — memory freed; reload on demand via `load_pk`.
-        Ok(())
-    }
-
-    /// Load PK from disk into memory. Idempotent — no-op if already loaded.
-    /// Requires `ensure_keys` (or a cached config on disk) to have populated
-    /// `self.config` first.
-    pub(crate) fn load_pk(&mut self) -> anyhow::Result<()> {
-        if self.pk.is_some() {
-            return Ok(());
-        }
-        let config = self.config.as_ref().ok_or_else(|| {
-            anyhow::format_err!("{} config not loaded — run ensure_keys first", self.prefix)
-        })?;
-        match self.pk_size_hint {
-            Some(hint) => {
-                info!("loading {} PK from disk ({})...", self.prefix, hint)
-            }
-            None => info!("loading {} PK from disk...", self.prefix),
-        }
-        let t = Instant::now();
-        let pk = try_load_pk(&self.params_dir, self.prefix, config).ok_or_else(|| {
-            anyhow::format_err!(
-                "failed to load {} PK from {}",
-                self.prefix,
-                pk_path(&self.params_dir, self.prefix).display()
-            )
-        })?;
-        info!("{} PK loaded in {:?}", self.prefix, t.elapsed());
-        self.pk = Some(pk);
-        Ok(())
-    }
-
-    /// Drop PK from memory. Cheap idempotent no-op if already unloaded.
-    pub(crate) fn unload_pk(&mut self) {
-        if self.pk.is_some() {
-            self.pk = None;
-            info!("{} PK unloaded from memory", self.prefix);
-        }
-    }
-
-    // ---- accessors ----
-
-    pub(crate) fn params_dir(&self) -> &Path {
-        &self.params_dir
-    }
-    pub(crate) fn srs(&self) -> &ParamsKZG<Bn256> {
-        &self.srs
-    }
-    pub(crate) fn k(&self) -> u32 {
-        self.k
-    }
-    pub(crate) fn vk_opt(&self) -> Option<&VerifyingKey<G1Affine>> {
-        self.vk.as_ref()
-    }
-    pub(crate) fn vk(&self) -> &VerifyingKey<G1Affine> {
-        self.vk
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} VK not loaded", self.prefix))
-    }
-    pub(crate) fn pk(&self) -> &ProvingKey<G1Affine> {
-        self.pk
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} PK not loaded", self.prefix))
-    }
-    pub(crate) fn config(&self) -> &BaseCircuitParams {
-        self.config
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} config not loaded", self.prefix))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Smallest Hermez ceremony actually kept under
+    /// `crates/an-bridge-prover/params/` (see repo layout). Larger than
+    /// strictly necessary for these tests, but avoids committing a
+    /// dedicated fixture ceremony just for the unit suite.
+    const FIXTURE_SRC_K: u32 = 17;
+    /// Downsize target — arbitrary as long as `< FIXTURE_SRC_K`.
+    const FIXTURE_DST_K: u32 = 15;
+
     fn fixture_srs(k: u32) -> PathBuf {
-        // Prefer repo-root params/ (workspace member lives under crates/an-bridge-prover/).
+        // Repo layout: workspace member lives at
+        // `crates/an-bridge-prover/bridge-prover-lib`; the params/ dir
+        // lives at `crates/an-bridge-prover/params`. Cover that first, then
+        // fall back to legacy repo-root / CWD paths.
         let candidates = [
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../params"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../params"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../params"),
             PathBuf::from("params"),
@@ -519,13 +306,13 @@ mod tests {
 
     #[test]
     fn load_srs_downsizes_from_parent_ceremony_when_exact_missing() {
-        let src = fixture_srs(12);
+        let src = fixture_srs(FIXTURE_SRC_K);
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::copy(&src, tmp.path().join("kzg_bn254_12.srs")).unwrap();
+        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_SRC_K}.srs"))).unwrap();
 
-        let srs = load_srs(tmp.path(), 10);
-        assert_eq!(srs.k(), 10);
-        assert!(tmp.path().join("kzg_bn254_10.srs").exists());
+        let srs = load_srs(tmp.path(), FIXTURE_DST_K);
+        assert_eq!(srs.k(), FIXTURE_DST_K);
+        assert!(tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs")).exists());
 
         // Same toxic waste as the parent ceremony.
         let parent = read_srs_file(&src).unwrap();
@@ -534,15 +321,17 @@ mod tests {
 
     #[test]
     fn load_srs_downsizes_misnamed_larger_file() {
-        let src = fixture_srs(12);
+        let src = fixture_srs(FIXTURE_SRC_K);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Partner-style footgun: k=12 bytes living under the k=10 filename.
-        std::fs::copy(&src, tmp.path().join("kzg_bn254_10.srs")).unwrap();
+        // Partner-style footgun: FIXTURE_SRC_K bytes living under the
+        // FIXTURE_DST_K filename.
+        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))).unwrap();
 
-        let srs = load_srs(tmp.path(), 10);
-        assert_eq!(srs.k(), 10);
-        let reread = read_srs_file(&tmp.path().join("kzg_bn254_10.srs")).unwrap();
-        assert_eq!(reread.k(), 10);
+        let srs = load_srs(tmp.path(), FIXTURE_DST_K);
+        assert_eq!(srs.k(), FIXTURE_DST_K);
+        let reread =
+            read_srs_file(&tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))).unwrap();
+        assert_eq!(reread.k(), FIXTURE_DST_K);
     }
 }
 

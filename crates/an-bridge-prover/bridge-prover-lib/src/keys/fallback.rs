@@ -21,7 +21,7 @@
 //!
 //! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
 //! on-demand PK load/unload, accessor plumbing) is delegated to the shared
-//! [`super::common::KeyManagerState`]. Only the circuit-specific
+//! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction lives here.
 
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ use halo2_base::halo2_proofs::{
 };
 use tracing::info;
 
-use super::common::KeyManagerState;
+use super::state::KeyManagerState;
 use super::primary::{LIMB_BITS, LOOKUP_BITS, MAX_SIGNERS, NUM_LIMBS, NUM_UNUSABLE_ROWS};
 
 pub(super) const PREFIX: &str = "fallback";

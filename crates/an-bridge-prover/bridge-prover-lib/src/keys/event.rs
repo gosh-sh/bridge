@@ -7,7 +7,7 @@
 //!
 //! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
 //! on-demand PK load/unload, accessor plumbing) is delegated to the shared
-//! [`super::common::KeyManagerState`]. Only the circuit-specific
+//! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction lives here.
 
 use std::path::Path;
@@ -21,7 +21,7 @@ use halo2_base::halo2_proofs::{
 };
 use tracing::info;
 
-use super::common::KeyManagerState;
+use super::state::KeyManagerState;
 
 pub(super) const PREFIX: &str = "event";
 

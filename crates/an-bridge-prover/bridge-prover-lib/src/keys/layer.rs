@@ -6,7 +6,7 @@
 //!
 //! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
 //! on-demand PK load/unload, accessor plumbing) is delegated to the shared
-//! [`super::common::KeyManagerState`]. Only the circuit-specific
+//! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction and the extra
 //! [`LayerHashesKeyManager::num_unusable_rows`] / [`LayerHashesKeyManager::lookup_bits`]
 //! accessors live here.
@@ -26,7 +26,7 @@ use historical_layer_hashes_movement_checker_circuit::{
 };
 use tracing::info;
 
-use super::common::KeyManagerState;
+use super::state::KeyManagerState;
 
 pub(super) const PREFIX: &str = "layer";
 

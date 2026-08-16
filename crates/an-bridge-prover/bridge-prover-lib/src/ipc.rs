@@ -12,28 +12,10 @@ use serde::{Deserialize, Serialize};
 
 const PROOFS_DIR: &str = "proofs";
 
-/// Current `ProofRequest` schema version. Bumped to 2 when `block_height` was
-/// added; bumped to 3 when `attestation_circuit` was added so the verifier
-/// knows which VK (Primary 1a vs Fallback 1b) to use; bumped to 4 alongside
-/// the introduction of the bk-set-update bundle (`BkUpdateRequest`); bumped
-/// to 5 when `layer_block_id_hex` was removed — after the 2026-07-22 Circuit 1
-/// byte-order fix (`uint256(bytes32(root))`), Circuits 1 and 2 emit the same
-/// `block_id_fr`, so the second copy on the wire was pure redundancy; bumped
-/// to 6 when `block_id_hex` semantics were unified with the upstream circuits
-/// crate — `block_id_hex` now carries the raw 32-byte BE chain hash (=
-/// `Solidity uint256(bytes32(blockId))`) in both `ProofRequest` and
-/// `BkUpdateRequest`, and the redundant `BkUpdateRequest.block_id_hash_hex`
-/// was dropped; bumped to 7 when the block-id Merkle tree grew from 8 leaves
-/// (depth 3) to the canonical 16 leaves (depth 4). The v7 `BkUpdateRequest`
-/// wire shape carries **three** BK-set update siblings (`h01`, `h4_7`,
-/// `h8_15`) instead of the two v6 fields (`h0`, `h23`), and the layer-bundle
-/// `NUM_MERKLE_SIBLINGS` grew from 3 to 4 accordingly. The Fr value the halo2
-/// verifier consumes is derived on demand by inner-product-folding the
-/// reversed bytes (see [`hash_hex_to_fr`]). Note: the R15 SHPLONK aggregator
-/// adapter on-chain does *not* auto-reduce — it byte-compares the argument
-/// against the proof's instance before the pairing, so callers must send the
-/// canonical `Fr` image (see `bridge-relayer-daemon::withdrawal::hash_hex_to_block_id_fr`).
-/// The verifier rejects mismatched versions instead of silently re-interpreting fields.
+/// Current `ProofRequest` / `BkUpdateRequest` wire schema version. Bump on
+/// any change to either struct's on-disk shape; the verifier rejects
+/// mismatched versions instead of silently re-interpreting fields. See
+/// `git log` for the per-bump rationale.
 pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 7;
 
 fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }

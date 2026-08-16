@@ -1,7 +1,9 @@
 //! Real Poseidon Merkle chain proof construction from actual block data.
 //!
-//! Builds genuine chain proofs by reconstructing layer-1 Poseidon trees from
-//! intermediate key blocks fetched via GraphQL.
+//! Builds genuine chain proofs by reconstructing per-layer Poseidon trees
+//! (L1 rungs for same-layer bundles, vertical L(N) rungs for new-layer
+//! bundles) from intermediate key blocks fetched via GraphQL. See "Two
+//! chain topologies, dispatched by layer growth" below for the split.
 //!
 //! # Two chain topologies, dispatched by layer growth
 //!
@@ -27,10 +29,15 @@
 //!       2..W+2); opening at that data-leaf position produces target's
 //!       L(prev_num_layers+1) root.
 //!     * Rungs 2..G — each intermediate L(L) tree at target carries target's
-//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`),
-//!       because canonical construction places `latest_layer_root(L−1)` at
-//!       `data_leaves[W−1]` and target itself is the "latest" L(L−1)
-//!       boundary. Each opening walks up exactly one layer.
+//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`).
+//!       This is not a rule from the History-proofs proposal; it's a
+//!       consequence of the chronological fill order in
+//!       [`build_layer_n_leaves`]: the loop over the W contributing L(L−1)
+//!       boundaries pushes them in ascending seq_no, from
+//!       `target − (W−1)·W^(L−1)` (i=0) up to `target` itself (i=W−1). So
+//!       target's own L(L−1) root always lands in `data_leaves[W−1]` =
+//!       `leaves[2 + W − 1]`, and every rung `L−1 → L` opens at that fixed
+//!       slot. Each opening walks up exactly one layer.
 //!   Under steady-state W·P cadence G is always 1 (single-layer jump per
 //!   bundle). G ≥ 2 only occurs on fresh mid-chain bootstrap that lands at a
 //!   compound boundary (e.g. seeding `layers=1` right before an L3 boundary,

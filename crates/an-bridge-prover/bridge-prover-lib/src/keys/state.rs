@@ -27,10 +27,6 @@ use super::common::{
 pub(crate) struct KeyManagerState {
     params_dir: PathBuf,
     prefix: &'static str,
-    /// Operator-facing hint appended to the `load_pk` log line (e.g.
-    /// `"~3.7 GB"`). Purely cosmetic — wall-clock elapsed is always logged
-    /// after the load regardless.
-    pk_size_hint: Option<&'static str>,
     srs: ParamsKZG<Bn256>,
     k: u32,
     vk: Option<VerifyingKey<G1Affine>>,
@@ -48,14 +44,12 @@ impl KeyManagerState {
         prefix: &'static str,
         k: u32,
         srs_k: u32,
-        pk_size_hint: Option<&'static str>,
     ) -> Self {
         std::fs::create_dir_all(params_dir).ok();
         let srs = load_srs(params_dir, srs_k);
         let mut state = Self {
             params_dir: params_dir.to_path_buf(),
             prefix,
-            pk_size_hint,
             srs,
             k,
             vk: None,
@@ -126,19 +120,18 @@ impl KeyManagerState {
         let config = self.config.as_ref().ok_or_else(|| {
             anyhow::format_err!("{} config not loaded — run ensure_keys first", self.prefix)
         })?;
-        match self.pk_size_hint {
-            Some(hint) => {
-                info!("loading {} PK from disk ({})...", self.prefix, hint)
-            }
+        let path = pk_path(&self.params_dir, self.prefix);
+        match std::fs::metadata(&path).ok().map(|m| m.len()) {
+            Some(bytes) => info!(
+                "loading {} PK ({}) from disk...",
+                self.prefix,
+                format_bytes(bytes)
+            ),
             None => info!("loading {} PK from disk...", self.prefix),
         }
         let t = Instant::now();
         let pk = try_load_pk(&self.params_dir, self.prefix, config).ok_or_else(|| {
-            anyhow::format_err!(
-                "failed to load {} PK from {}",
-                self.prefix,
-                pk_path(&self.params_dir, self.prefix).display()
-            )
+            anyhow::format_err!("failed to load {} PK from {}", self.prefix, path.display())
         })?;
         info!("{} PK loaded in {:?}", self.prefix, t.elapsed());
         self.pk = Some(pk);
@@ -181,5 +174,39 @@ impl KeyManagerState {
         self.config
             .as_ref()
             .unwrap_or_else(|| panic!("{} config not loaded", self.prefix))
+    }
+}
+
+/// Format a byte count with a binary IEC unit, one line for the
+/// `load_pk` operator hint. Auto-picks GiB / MiB / KiB so a large BLS
+/// PK reads as "3.62 GiB" while a smaller Circuit-4 PK reads as
+/// "412.7 MiB" instead of "0.40 GiB".
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bytes;
+
+    #[test]
+    fn format_bytes_picks_unit() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2 * 1024), "2.0 KiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 + 512 * 1024), "3.5 MiB");
+        assert_eq!(format_bytes(3_900_000_000), "3.63 GiB");
     }
 }

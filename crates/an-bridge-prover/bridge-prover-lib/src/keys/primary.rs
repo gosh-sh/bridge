@@ -27,10 +27,6 @@ use super::state::KeyManagerState;
 
 pub(super) const PREFIX: &str = "primary";
 
-/// Operator-facing size hint for `load_pk`. Purely cosmetic — the actual
-/// elapsed time is always logged after the load.
-const PK_SIZE_HINT: &str = "~3.7 GB";
-
 // Circuit shape constants shared with the fallback circuit (both circuits
 // use the same K/lookup/limb sizes, only the constraint system differs).
 pub(super) const NUM_UNUSABLE_ROWS: usize = 109;
@@ -57,7 +53,7 @@ impl PrimaryKeyManager {
     /// [`Self::load_pk`] before proving.
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, k, Some(PK_SIZE_HINT)),
+            state: KeyManagerState::new(params_dir, PREFIX, k, k),
         }
     }
 

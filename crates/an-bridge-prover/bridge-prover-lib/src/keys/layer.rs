@@ -33,10 +33,6 @@ pub(super) const PREFIX: &str = "layer";
 pub(super) const NUM_UNUSABLE_ROWS: usize = 109;
 pub(super) const LOOKUP_BITS: usize = 16;
 
-/// Operator-facing size hint for `load_pk`. Purely cosmetic — the actual
-/// elapsed time is always logged after the load.
-const PK_SIZE_HINT: &str = "~2.8 GB";
-
 pub struct LayerHashesKeyManager {
     state: KeyManagerState,
 }
@@ -64,7 +60,7 @@ impl LayerHashesKeyManager {
         // SRS must match the degree baked into cached PKs (see KEYGEN_SRS_K).
         let srs_k = Self::KEYGEN_SRS_K.max(k);
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k, Some(PK_SIZE_HINT)),
+            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k),
         }
     }
 

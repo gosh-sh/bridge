@@ -42,10 +42,6 @@ use super::primary::{LIMB_BITS, LOOKUP_BITS, MAX_SIGNERS, NUM_LIMBS, NUM_UNUSABL
 
 pub(super) const PREFIX: &str = "fallback";
 
-/// Operator-facing size hint for `load_pk`. Purely cosmetic — the actual
-/// elapsed time is always logged after the load.
-const PK_SIZE_HINT: &str = "~3.7 GB";
-
 pub struct FallbackKeyManager {
     state: KeyManagerState,
 }
@@ -63,7 +59,7 @@ impl FallbackKeyManager {
     /// VK/config. PK is left on disk — call [`Self::load_pk`] before proving.
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, k, Some(PK_SIZE_HINT)),
+            state: KeyManagerState::new(params_dir, PREFIX, k, k),
         }
     }
 

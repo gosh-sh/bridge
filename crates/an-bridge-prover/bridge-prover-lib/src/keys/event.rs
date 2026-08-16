@@ -52,7 +52,7 @@ impl EventKeyManager {
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         let srs_k = Self::KEYGEN_SRS_K.max(k);
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k, None),
+            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k),
         }
     }
 

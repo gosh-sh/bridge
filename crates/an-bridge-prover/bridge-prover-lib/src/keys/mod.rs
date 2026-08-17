@@ -11,6 +11,7 @@
 //! compiling; new code should reach for the per-circuit types directly.
 
 mod common;
+mod state;
 pub use common::{assert_hermez_srs, HERMEZ_S_G2_HEAD};
 pub mod event;
 pub mod fallback;

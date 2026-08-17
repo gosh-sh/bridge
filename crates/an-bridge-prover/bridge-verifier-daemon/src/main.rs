@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     //     `GlobalHistoryData` via constructor arguments at deployment:
     //     the prover-as-deployer produces `state/bootstrap_seed.json`, and
     //     the verifier-as-contract consumes it exactly once. Without this,
-    //     the L1 window's first key block (block 8 on `W=8`) was present
+    //     the L1 window's first key block (block `W` — 128 on `W=128`) was present
     //     in the prover state but absent from the verifier — a one-entry
     //     drift from genesis onward.
     if !state.initialized {
@@ -190,7 +190,6 @@ async fn main() -> anyhow::Result<()> {
     // `*.result.json` files get rewritten. That is intentional: the daemon
     // is the source of truth, and re-verification is cheap.
     let mut last_seen_event_seqno: i64 = -1;
-    let mut bootstrapped = state.initialized;
     let mut stats = Stats::default();
     let t_total = Instant::now();
     let mut last_stats_log = Instant::now();
@@ -219,10 +218,15 @@ async fn main() -> anyhow::Result<()> {
             last_stats_log = Instant::now();
         }
 
-        // If not bootstrapped, retry loading the seed file. The prover writes
-        // `state/bootstrap_seed.json` on its own cold start; if the verifier
-        // was started first, this is the loop point at which it picks it up.
-        if !bootstrapped {
+        // If state is still uninitialized, retry loading the seed file. The
+        // prover writes `state/bootstrap_seed.json` on its own cold start; if
+        // the verifier was started first, this is the loop point at which it
+        // picks it up. Guarded on `state.initialized` rather than a local
+        // sticky flag because `append_bundle` also flips `initialized = true`
+        // when the first proof arrives before the seed — in that case the
+        // state is already past the seed's cursor and re-applying it would
+        // regress (and `initialize_bk_set_commitment` panics as a safeguard).
+        if !state.initialized {
             match BootstrapSeed::load(bootstrap::DEFAULT_SEED_PATH)? {
                 Some(seed) => {
                     info!(
@@ -235,7 +239,6 @@ async fn main() -> anyhow::Result<()> {
                     seed.apply(&mut state)?;
                     state.save(STATE_FILE)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
-                    bootstrapped = true;
                 }
                 None => {
                     // Seed file not yet written. Stay idle and try again on the
@@ -322,10 +325,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let primary_proof_bytes = match hex::decode(&request.primary_proof_hex) {
+            let attestation_proof_bytes = match hex::decode(&request.attestation_proof_hex) {
                 Ok(b) => b,
                 Err(e) => {
-                    let msg = format!("invalid primary_proof_hex: {}", e);
+                    let msg = format!("invalid attestation_proof_hex: {}", e);
                     error!("block {}: {}", next_seqno, msg);
                     write_failure(next_seqno, &msg);
                     stats.total_proofs += 1;
@@ -355,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
                     "Circuit 1a (Primary)",
                     verifier::verify_primary_proof(
                         &key_manager,
-                        &primary_proof_bytes,
+                        &attestation_proof_bytes,
                         &primary_instances,
                     ),
                 ),
@@ -363,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
                     "Circuit 1b (Fallback)",
                     verifier::verify_fallback_proof(
                         &key_manager,
-                        &primary_proof_bytes,
+                        &attestation_proof_bytes,
                         &primary_instances,
                     ),
                 ),
@@ -753,12 +756,12 @@ fn process_bk_update_bundle(
                 )
             }
         };
-        let primary_proof_bytes = match hex::decode(&req.primary_proof_hex) {
+        let attestation_proof_bytes = match hex::decode(&req.attestation_proof_hex) {
             Ok(b) => b,
             Err(e) => {
                 return finalize_bk_update_failure(
                     seq_no,
-                    &format!("invalid primary_proof_hex: {e}"),
+                    &format!("invalid attestation_proof_hex: {e}"),
                     last_seen_bk_update_seqno,
                 )
             }
@@ -772,12 +775,12 @@ fn process_bk_update_bundle(
         match req.attestation_circuit {
             ipc::AttestationCircuit::Primary => verifier::verify_primary_proof(
                 key_manager,
-                &primary_proof_bytes,
+                &attestation_proof_bytes,
                 &public_instances,
             ),
             ipc::AttestationCircuit::Fallback => verifier::verify_fallback_proof(
                 key_manager,
-                &primary_proof_bytes,
+                &attestation_proof_bytes,
                 &public_instances,
             ),
         }
@@ -1135,7 +1138,7 @@ fn process_event_proof(
 
     // ---- Cryptographic verification ----
     let t_verify = Instant::now();
-    let proof_valid = event_verifier::verify_event_proof(key_manager, &proof_bytes, &instances);
+    let proof_valid = event_verifier::verify_event_proof(&key_manager.event, &proof_bytes, &instances);
     let verify_elapsed = t_verify.elapsed();
     info!(
         "event {}: Circuit 4 {} ({:?}) | total {:?}",

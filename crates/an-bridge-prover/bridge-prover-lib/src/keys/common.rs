@@ -112,54 +112,22 @@ pub(crate) fn save_pk(
 
 /// Load a KZG SRS whose `params.k()` is exactly `k`.
 /// Resolution order:
-/// 1. Exact `kzg_bn254_{k}.srs` whose header `k` matches (or is larger →
-///    downsize in place and rewrite).
-/// 2. Largest on-disk `kzg_bn254_*.srs` with header degree ≥ `k`, downsized
-///    and written to the exact path for the next load.
+/// 1. Fast path: `kzg_bn254_{k}.srs` exists and its header matches `k` →
+///    verify Hermez provenance and return.
+/// 2. Otherwise scan `params_dir` for the largest `kzg_bn254_*.srs` with
+///    header degree ≥ `k`, downsize, and write to the exact path so the
+///    next load hits the fast path.
 pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     let exact_path = params_dir.join(format!("kzg_bn254_{k}.srs"));
-
-    if exact_path.exists() {
-        match read_srs_file(&exact_path) {
-            Ok(srs) if srs.k() == k => {
-                assert_hermez_ceremony(&exact_path, &srs);
-                return srs;
-            }
-            Ok(mut srs) if srs.k() > k => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    file_k = srs.k(),
-                    circuit_k = k,
-                    "SRS file degree exceeds requested k; downsizing (likely a misnamed larger ceremony)"
-                );
-                assert_hermez_ceremony(&exact_path, &srs);
-                srs.downsize(k);
-                let _ = write_srs_file(&exact_path, &srs);
-                return srs;
-            }
-            Ok(srs) => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    file_k = srs.k(),
-                    circuit_k = k,
-                    "SRS file degree is smaller than requested k; ignoring and searching for a larger ceremony"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    target: "bridge_prover_lib::keys",
-                    path = %exact_path.display(),
-                    error = %e,
-                    "failed to read exact SRS file; searching for a larger ceremony"
-                );
-            }
+    if let Ok(srs) = read_srs_file(&exact_path) {
+        if srs.k() == k {
+            assert_hermez_at(&exact_path, &srs);
+            return srs;
         }
     }
 
     if let Some((src_path, mut srs)) = find_largest_ceremony_ge(params_dir, k) {
-        assert_hermez_ceremony(&src_path, &srs);
+        assert_hermez_at(&src_path, &srs);
         let src_k = srs.k();
         if src_k > k {
             srs.downsize(k);
@@ -192,42 +160,22 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     );
 }
 
-/// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects Acki Nacki chain ceremony
-/// (`c6028acf…`) and any synthetic `gen_srs` trapdoor. Re-exported from
-/// `bridge_prover_lib::keys` so the `bootstrap_hermez_srs` binary can share
-/// the same anchor byte-string.
+/// Hermez `s_g2` head (`928fafb3d0cc…`). Rejects any untrusted chain ceremony
+/// any synthetic `gen_srs` trapdoor.
 pub const HERMEZ_S_G2_HEAD: [u8; 6] = [0x92, 0x8f, 0xaf, 0xb3, 0xd0, 0xcc];
 
-fn assert_hermez_ceremony(path: &Path, srs: &ParamsKZG<Bn256>) {
-    let mut buf = Vec::with_capacity(128);
-    srs.s_g2()
-        .write_raw(&mut buf)
-        .expect("write to Vec cannot fail");
-    if buf.len() < HERMEZ_S_G2_HEAD.len() {
-        panic!(
-            "SRS {} s_g2 encoding too small ({} bytes)",
-            path.display(),
-            buf.len()
-        );
-    }
-    let head = &buf[..HERMEZ_S_G2_HEAD.len()];
-    if head != HERMEZ_S_G2_HEAD {
-        panic!(
-            "SRS {} is not Hermez Perpetual Powers of Tau (s_g2 head {:02x?}, \
-             expected {:02x?}). Quarantine chain-ceremony files and bootstrap \
-             Hermez SRS — no fallbacks.",
-            path.display(),
-            head,
-            HERMEZ_S_G2_HEAD
-        );
+fn assert_hermez_at(path: &Path, srs: &ParamsKZG<Bn256>) {
+    if let Err(e) = assert_hermez_srs(srs) {
+        panic!("SRS {}: {e:#}", path.display());
     }
 }
 
-/// Public Result-based sibling of the private `assert_hermez_ceremony` above,
-/// for callers outside `load_srs` that want to bail rather than panic (e.g.
-/// the offline snark exporters in `bridge-snark-utils` which call
-/// `gen_srs` directly). Same anchor bytes, same failure mode — no
-/// toxic-waste SRS proceeds past this check.
+/// Refuse to proceed unless `srs` was produced by the Hermez Perpetual
+/// Powers of Tau ceremony (identified by its `s_g2` head, see
+/// [`HERMEZ_S_G2_HEAD`]). Called both from [`load_srs`] (via
+/// [`assert_hermez_at`]) and from the offline snark exporters in
+/// `bridge-snark-utils` which call `gen_srs` directly — no toxic-waste
+/// SRS proceeds past this check.
 pub fn assert_hermez_srs(srs: &ParamsKZG<Bn256>) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(128);
     srs.s_g2()
@@ -328,9 +276,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Smallest Hermez ceremony actually kept under
+    /// `crates/an-bridge-prover/params/` (see repo layout). Larger than
+    /// strictly necessary for these tests, but avoids committing a
+    /// dedicated fixture ceremony just for the unit suite.
+    const FIXTURE_SRC_K: u32 = 17;
+    /// Downsize target — arbitrary as long as `< FIXTURE_SRC_K`.
+    const FIXTURE_DST_K: u32 = 15;
+
     fn fixture_srs(k: u32) -> PathBuf {
-        // Prefer repo-root params/ (workspace member lives under crates/an-bridge-prover/).
+        // Repo layout: workspace member lives at
+        // `crates/an-bridge-prover/bridge-prover-lib`; the params/ dir
+        // lives at `crates/an-bridge-prover/params`. Cover that first, then
+        // fall back to legacy repo-root / CWD paths.
         let candidates = [
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../params"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../params"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../params"),
             PathBuf::from("params"),
@@ -346,13 +306,13 @@ mod tests {
 
     #[test]
     fn load_srs_downsizes_from_parent_ceremony_when_exact_missing() {
-        let src = fixture_srs(12);
+        let src = fixture_srs(FIXTURE_SRC_K);
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::copy(&src, tmp.path().join("kzg_bn254_12.srs")).unwrap();
+        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_SRC_K}.srs"))).unwrap();
 
-        let srs = load_srs(tmp.path(), 10);
-        assert_eq!(srs.k(), 10);
-        assert!(tmp.path().join("kzg_bn254_10.srs").exists());
+        let srs = load_srs(tmp.path(), FIXTURE_DST_K);
+        assert_eq!(srs.k(), FIXTURE_DST_K);
+        assert!(tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs")).exists());
 
         // Same toxic waste as the parent ceremony.
         let parent = read_srs_file(&src).unwrap();
@@ -361,15 +321,17 @@ mod tests {
 
     #[test]
     fn load_srs_downsizes_misnamed_larger_file() {
-        let src = fixture_srs(12);
+        let src = fixture_srs(FIXTURE_SRC_K);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Partner-style footgun: k=12 bytes living under the k=10 filename.
-        std::fs::copy(&src, tmp.path().join("kzg_bn254_10.srs")).unwrap();
+        // Partner-style footgun: FIXTURE_SRC_K bytes living under the
+        // FIXTURE_DST_K filename.
+        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))).unwrap();
 
-        let srs = load_srs(tmp.path(), 10);
-        assert_eq!(srs.k(), 10);
-        let reread = read_srs_file(&tmp.path().join("kzg_bn254_10.srs")).unwrap();
-        assert_eq!(reread.k(), 10);
+        let srs = load_srs(tmp.path(), FIXTURE_DST_K);
+        assert_eq!(srs.k(), FIXTURE_DST_K);
+        let reread =
+            read_srs_file(&tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))).unwrap();
+        assert_eq!(reread.k(), FIXTURE_DST_K);
     }
 }
 

@@ -220,7 +220,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
             })?;
 
             let out = generate_event_proof_with_transcript(
-                &km,
+                &km.event,
                 &witness,
                 TranscriptKind::Poseidon,
             )
@@ -229,7 +229,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
             // Native Poseidon self-verify — refuse to hand the aggregator an
             // invalid inner snark (stale event keys are the usual culprit).
             let ok = verify_event_proof_with_transcript(
-                &km,
+                &km.event,
                 &out.proof_bytes,
                 &out.public_instances,
                 TranscriptKind::Poseidon,
@@ -519,7 +519,6 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
         calldata_binds_instances(&calldata, &instances_hex)?;
 
         Ok(PartnerWithdrawalProof {
-            schema_version: 1,
             seq_no,
             proof_hex: hex::encode(&calldata),
             public_instances_hex: instances_hex,

@@ -7,12 +7,6 @@
 //! `prover_bk_set.commitment` against the current
 //! `BRIDGE_BK_SET_CONFIG` file.
 //!
-//! Historically this logic lived only in `bridge-prover-daemon/src/main.rs`
-//! and `bridge-relayer-daemon/src/bin/relayer.rs::run_daemon_live` diverged
-//! (file-only mode, no startup guard). Extracting the two functions here
-//! keeps them in lockstep: any fix to one daemon's bootstrap semantics
-//! automatically applies to the other.
-//!
 //! The two daemons resolve the config-file path differently (prover-daemon
 //! reads [`ENV_BK_SET_CONFIG`] with a hardcoded default; relayer-daemon
 //! resolves it from a clap flag), so the helpers take the path as an

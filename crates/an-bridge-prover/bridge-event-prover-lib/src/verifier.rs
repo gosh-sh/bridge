@@ -2,11 +2,11 @@
 //!
 //! The halo2/KZG verification stack is identical to Circuits 1a and 2, so
 //! we delegate to [`bridge_prover_lib::verifier::verify_kzg_proof`] and
-//! supply Circuit 4's VK from the shared [`KeyManager`].
+//! supply Circuit 4's VK from the [`EventKeyManager`].
 
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
-use bridge_prover_lib::keys::KeyManager;
+use bridge_prover_lib::keys::EventKeyManager;
 use bridge_prover_lib::transcript::TranscriptKind;
 
 /// Verify a Circuit 4 proof against its public instances (Blake2b transcript).
@@ -18,13 +18,13 @@ use bridge_prover_lib::transcript::TranscriptKind;
 /// The instance count is checked implicitly by `verify_proof` against the
 /// VK shape.
 pub fn verify_event_proof(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
     bridge_prover_lib::verifier::verify_kzg_proof(
-        key_manager.event.srs(),
-        key_manager.event_vk(),
+        event_km.srs(),
+        event_km.vk(),
         proof_bytes,
         instances,
     )
@@ -35,14 +35,14 @@ pub fn verify_event_proof(
 /// [`crate::prover::generate_event_proof_with_transcript`] used or
 /// verification returns `false`.
 pub fn verify_event_proof_with_transcript(
-    key_manager: &KeyManager,
+    event_km: &EventKeyManager,
     proof_bytes: &[u8],
     instances: &[Fr],
     transcript: TranscriptKind,
 ) -> bool {
     bridge_prover_lib::verifier::verify_kzg_proof_with_transcript(
-        key_manager.event.srs(),
-        key_manager.event_vk(),
+        event_km.srs(),
+        event_km.vk(),
         proof_bytes,
         instances,
         transcript,

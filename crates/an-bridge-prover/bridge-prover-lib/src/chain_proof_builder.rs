@@ -9,7 +9,8 @@
 use gosh_dense_balanced_tree::{
     compute_root_native, fr_to_bytes, preprocess_dense_proof, DenseChainLink, MAX_CHAIN_LEN,
 };
-use tvm_vm::executor::zk_stuff::bn254::poseidon::PoseidonSponge;
+
+use crate::poseidon_dense::PoseidonHasher;
 
 /// Data needed to build one layer hash tree for chain proof construction.
 #[derive(Clone, Debug)]
@@ -25,36 +26,20 @@ pub struct LayerTreeData {
     pub chain_leaf_value: [u8; 32],
 }
 
-/// Compute a block leaf hash: Poseidon(block_id || envelope_hash || ext_messages_root).
-///
-/// Uses the node's own PoseidonSponge (from tvm_vm) to guarantee byte-identical
-/// results with the node's `compute_block_leaf_hash` in history_proof.rs.
-pub fn compute_block_leaf_hash(
-    block_id: &[u8; 32],
-    envelope_hash: &[u8; 32],
-    ext_messages_root: &[u8; 32],
-) -> [u8; 32] {
-    let sponge = tvm_vm::executor::zk_stuff::bn254::poseidon::PoseidonSponge::new();
-    let mut buf = [0u8; 96];
-    buf[..32].copy_from_slice(block_id);
-    buf[32..64].copy_from_slice(envelope_hash);
-    buf[64..96].copy_from_slice(ext_messages_root);
-    sponge.hash_bytes_flat(&buf).expect("Poseidon hash failed")
-}
-
-/// Combine two 32-byte children into a parent using the node's PoseidonSponge.
-/// This matches the node's `dense_combine(hasher, left, right)`.
-fn node_dense_combine(sponge: &PoseidonSponge, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+/// Combine two 32-byte children into a parent using the workspace Poseidon.
+/// Matches the node's `dense_combine(hasher, left, right)`.
+fn node_dense_combine(hasher: &PoseidonHasher, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(left);
     buf[32..].copy_from_slice(right);
-    sponge.hash_bytes_flat(&buf).expect("Poseidon hash failed")
+    hasher.digest(&buf)
 }
 
 /// Build a Poseidon Merkle tree from leaves and extract a Merkle proof for a given position.
 ///
-/// Uses the node's PoseidonSponge for tree combine to ensure byte-identical
-/// results with the acki-nacki node's `dense_merkle_tree`.
+/// Uses the workspace `PoseidonHasher` (delegates to `bridge_poseidon`) for tree
+/// combine to ensure byte-identical results with the acki-nacki node's
+/// `dense_merkle_tree`.
 ///
 /// Returns (root_bytes, siblings) where siblings is bottom-up.
 pub fn build_tree_and_proof(
@@ -65,7 +50,7 @@ pub fn build_tree_and_proof(
     assert!(num_leaves.is_power_of_two() && num_leaves >= 2);
     let depth = num_leaves.trailing_zeros() as usize;
 
-    let sponge = PoseidonSponge::new();
+    let hasher = PoseidonHasher::new();
 
     let total_nodes = (1 << (depth + 1)) - 1;
     let mut nodes = vec![[0u8; 32]; total_nodes];
@@ -76,11 +61,11 @@ pub fn build_tree_and_proof(
         nodes[leaf_start + i] = *leaf;
     }
 
-    // Build internal nodes bottom-up using node's PoseidonSponge
+    // Build internal nodes bottom-up using the workspace Poseidon.
     for i in (0..leaf_start).rev() {
         let left = nodes[2 * i + 1];
         let right = nodes[2 * i + 2];
-        nodes[i] = node_dense_combine(&sponge, &left, &right);
+        nodes[i] = node_dense_combine(&hasher, &left, &right);
     }
 
     let root = nodes[0];
@@ -100,7 +85,7 @@ pub fn build_tree_and_proof(
     let verify_root = fr_to_bytes(compute_root_native(&proof));
     if root != verify_root {
         tracing::warn!(
-            "Node PoseidonSponge root differs from gosh-dense-balanced-tree root!\n  node: {}\n  gosh: {}",
+            "Workspace Poseidon root differs from gosh-dense-balanced-tree root!\n  workspace: {}\n  gosh: {}",
             hex::encode(root), hex::encode(verify_root)
         );
     }

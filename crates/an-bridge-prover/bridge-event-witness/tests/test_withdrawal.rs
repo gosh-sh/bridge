@@ -46,6 +46,15 @@ fn first_withdrawal_decodes_to_expected_fields() {
     assert_eq!(w.event.recipient_hex, EXPECTED_RECIPIENT_HEX);
     assert_eq!(w.event.dst_chain_id_hex, EXPECTED_DST_CHAIN_ID_HEX);
     assert_eq!(w.event.amount_hex, EXPECTED_AMOUNT_HEX);
+    // sender_hex is the 34-byte cell payload after the 2-byte d1+d2 header,
+    // i.e. the tail of entries[3].cell_repr_data_hex. Check both the length
+    // invariant and that the decoded field matches the raw cell walk.
+    assert_eq!(w.event.sender_hex.len(), 68, "sender_hex length");
+    assert_eq!(
+        w.event.sender_hex,
+        &w.entries[3].cell_repr_data_hex[4..],
+        "sender_hex must equal entries[3] payload after d1+d2 header",
+    );
 
     // Structural invariants the circuit depends on:
     assert_eq!(w.entries[0].refs_count, 1, "wrapper refs_count");

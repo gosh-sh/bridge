@@ -45,7 +45,7 @@ A pre-built copy is already bundled under `python/bin/tvm-cli` — if it works o
 If you need to build it yourself:
 
 ```bash
-git clone https://github.com/tvmlabs/tvm-sdk.git --branch full_dex_and_bridge_test_with_final_halo2_circuit
+git clone https://github.com/tvmlabs/tvm-sdk.git --branch v3.0.5.an
 cd tvm-sdk
 cargo build --release -p tvm_cli   # produces target/release/tvm-cli
 cp target/release/tvm-cli /usr/local/bin/  # or any other directory on your $PATH

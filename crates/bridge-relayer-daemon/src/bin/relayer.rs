@@ -480,18 +480,31 @@ enum Cmd {
         /// Where to write the enriched witness JSON.
         #[arg(long)]
         work_dir: PathBuf,
-        /// `crates/an-bridge-prover` workspace root (holds the
-        /// `bridge-event-halo2-prover` release binary + params).
-        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
-        an_bridge_prover_dir: PathBuf,
-        /// Override the prover subprocess's working directory (i.e.
-        /// where `./params/*` lives). Defaults to `--an-bridge-prover-dir`.
-        #[arg(long)]
-        prover_work_dir: Option<PathBuf>,
+        /// `crates/bridge-evm-aggregator` root (holds
+        /// `target/release/aggregate-proof`). Forwarded to
+        /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK pipeline.
+        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (aggregator's
+        /// byte-identity self-check target).
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR", default_value = "../../contracts/ethereum/verifiers")]
+        verifiers_dir: PathBuf,
+        /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
+        #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
+        params_dir: PathBuf,
+        /// Scratch dir for the intermediate `circuit4.snark` /
+        /// `.instances.bin` from the SHPLONK pipeline.
+        #[arg(long, default_value = "./shplonk-snark")]
+        snark_dir: PathBuf,
+        /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
+        /// Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
         /// Optional dir to persist `proof_event_{seq:06}.json`.
         #[arg(long)]
         prover_out_dir: Option<PathBuf>,
-        /// Subprocess prover timeout, in seconds.
+        /// Aggregator subprocess timeout, in seconds. Circuit-4 outer
+        /// keygen from a cold PK cache is a few minutes.
         #[arg(long, default_value_t = 1800)]
         prover_timeout_s: u64,
         /// Seqno stamped into witness/proof filenames.
@@ -835,8 +848,11 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            an_bridge_prover_dir,
-            prover_work_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            pk_cache_dir,
             prover_out_dir,
             prover_timeout_s,
             prover_seq_no,
@@ -856,8 +872,11 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            an_bridge_prover_dir,
-            prover_work_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            pk_cache_dir,
             prover_out_dir,
             prover_timeout_s,
             prover_seq_no,
@@ -1820,8 +1839,11 @@ struct WithdrawE2ECliArgs {
     anchor_layer: String,
     i_know_the_wait: bool,
     work_dir: PathBuf,
-    an_bridge_prover_dir: PathBuf,
-    prover_work_dir: Option<PathBuf>,
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    params_dir: PathBuf,
+    snark_dir: PathBuf,
+    pk_cache_dir: Option<PathBuf>,
     prover_out_dir: Option<PathBuf>,
     prover_timeout_s: u64,
     prover_seq_no: u32,
@@ -1846,8 +1868,11 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         anchor_mode,
         i_know_the_wait: args.i_know_the_wait,
         work_dir: args.work_dir,
-        an_bridge_prover_dir: args.an_bridge_prover_dir,
-        prover_work_dir: args.prover_work_dir,
+        aggregator_dir: args.aggregator_dir,
+        verifiers_dir: args.verifiers_dir,
+        params_dir: args.params_dir,
+        snark_dir: args.snark_dir,
+        pk_cache_dir: args.pk_cache_dir,
         prover_out_dir: args.prover_out_dir,
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
         prover_seq_no: args.prover_seq_no,

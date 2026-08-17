@@ -27,7 +27,11 @@ nohup ./target/release/relayer withdraw-e2e \
   --bridge-dapp-id    0000000000000000000000000000000000000000000000000000000000000000 \
   --anchor-layer auto \
   --work-dir work_dir \
-  --an-bridge-prover-dir . \
+  --aggregator-dir "$BRIDGE_AGGREGATOR_DIR" \
+  --verifiers-dir  "$BRIDGE_VERIFIERS_DIR" \
+  --params-dir     "$BRIDGE_PARAMS_DIR" \
+  --snark-dir      work_dir/shplonk-snark \
+  --pk-cache-dir   "$BRIDGE_PARAMS_DIR/pk_cache" \
   --prover-out-dir proofs \
   --prover-seq-no "${TS: -6}" \
   --event-wait-s 900 \

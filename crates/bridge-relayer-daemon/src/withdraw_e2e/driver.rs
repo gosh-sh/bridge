@@ -27,8 +27,9 @@ use bridge_event_witness::{
 use bridge_gql_fetcher::gql_client::create_client;
 use bridge_prover_lib::bridge_state::BridgeState;
 
-use crate::withdraw_prover::{
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, WithdrawalProver,
+use crate::aggregator::{
+    Circuit4ShplonkPipeline, InProcessCircuit4SnarkProver, SubprocessAggregator,
+    SubprocessAggregatorConfig,
 };
 use crate::withdrawal::PartnerWithdrawalProof;
 
@@ -70,18 +71,30 @@ pub struct WithdrawE2EConfig {
     pub i_know_the_wait: bool,
     /// Where to write the enriched witness JSON.
     pub work_dir: PathBuf,
-    /// `crates/an-bridge-prover` workspace root. The subprocess prover
-    /// looks for a release binary here (or falls back to `cargo run`).
-    pub an_bridge_prover_dir: PathBuf,
-    /// Optional override for the prover subprocess's working directory
-    /// (i.e. where it expects `./params/*`). Defaults to
-    /// `an_bridge_prover_dir` if `None`.
-    pub prover_work_dir: Option<PathBuf>,
+    /// `crates/bridge-evm-aggregator` root (holds
+    /// `target/release/aggregate-proof`). Forwarded to
+    /// [`SubprocessAggregatorConfig`] inside the SHPLONK pipeline.
+    pub aggregator_dir: PathBuf,
+    /// Directory of committed verifier `.bin` files — the aggregator's
+    /// byte-identity self-check target
+    /// (`BridgeWithdrawalAggregatorVerifier.bin` in particular).
+    pub verifiers_dir: PathBuf,
+    /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys. Both the
+    /// in-process Poseidon C4 prover and the aggregator subprocess read
+    /// from here.
+    pub params_dir: PathBuf,
+    /// Scratch dir for the intermediate `circuit4.snark` /
+    /// `.instances.bin` the [`Circuit4ShplonkPipeline`] emits.
+    pub snark_dir: PathBuf,
+    /// Optional persistent outer-PK cache directory for the
+    /// `aggregate-proof` subprocess. Defaults to `<params_dir>/pk_cache`
+    /// if `None`. See `daemon-live --pk-cache-dir`.
+    pub pk_cache_dir: Option<PathBuf>,
     /// Optional dir to persist `proof_event_{seq:06}.json` alongside
     /// the returned in-memory summary.
     pub prover_out_dir: Option<PathBuf>,
-    /// Subprocess timeout (Circuit 4 keygen+prove from cold PK can take
-    /// minutes; default generously).
+    /// Aggregator subprocess timeout (Circuit-4 outer keygen+aggregate
+    /// from cold PK can take minutes; default generously).
     pub prover_timeout: Duration,
     /// Seqno stamped into the summary + witness/proof filenames.
     pub prover_seq_no: u32,
@@ -149,20 +162,64 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     let partial = export_from_event_boc_base64(&captured.event_boc_b64, &ctx)
         .context("export_from_event_boc_base64 failed")?;
 
+    // Enricher runs against a live-updated BridgeState — the daemon writes new
+    // bundles to prover_state.json as it proves them. On a fresh deploy where
+    // the covering bundle for a just-fired burn is 2+ bundles ahead of seed,
+    // the first attempt fails with either "bridge state is uninitialized" or a
+    // missing layer_hashes[K] anchor. Retry with periodic reloads until the
+    // daemon lands the covering bundle or we exceed the wait budget.
+    const ENRICH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+    const ENRICH_TIMEOUT: Duration = Duration::from_secs(90 * 60);
     info!(
         anchor_mode = ?cfg.anchor_mode,
         i_know_the_wait = cfg.i_know_the_wait,
+        poll_interval_s = ENRICH_POLL_INTERVAL.as_secs(),
+        timeout_s = ENRICH_TIMEOUT.as_secs(),
         "enricher: filling events_tree_proof + block_tree_proof + anchor",
     );
-    let enriched = enrich_witness(
-        &gql,
-        &bridge_state,
-        partial,
-        cfg.anchor_mode,
-        cfg.i_know_the_wait,
-    )
-    .await
-    .context("enrich_witness failed")?;
+    let deadline = std::time::Instant::now() + ENRICH_TIMEOUT;
+    let mut attempt: u32 = 0;
+    let enriched = loop {
+        attempt += 1;
+        // Reload from disk — daemon writes prover_state.json each bundle.
+        let bridge_state_now = BridgeState::load(state_path_str, cfg.window_size)
+            .with_context(|| format!("reload BridgeState from {state_path_str}"))?;
+        info!(
+            attempt,
+            stored_last_seen_block_seq_no = bridge_state_now.stored_last_seen_block_seq_no,
+            num_active_layers = bridge_state_now.num_active_layers(),
+            "enricher attempt",
+        );
+        match enrich_witness(
+            &gql,
+            &bridge_state_now,
+            partial.clone(),
+            cfg.anchor_mode,
+            cfg.i_know_the_wait,
+        )
+        .await
+        {
+            Ok(e) => break e,
+            Err(err) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(err).context(format!(
+                        "enrich_witness failed after {} attempts (timeout {:?})",
+                        attempt, ENRICH_TIMEOUT
+                    ));
+                }
+                let remaining = deadline.duration_since(now);
+                info!(
+                    attempt,
+                    error = %err,
+                    sleep_s = ENRICH_POLL_INTERVAL.as_secs(),
+                    remaining_s = remaining.as_secs(),
+                    "enricher: not ready yet, will retry",
+                );
+                tokio::time::sleep(ENRICH_POLL_INTERVAL).await;
+            }
+        }
+    };
     info!(
         layer_idx = enriched.summary.layer_idx,
         key_block_seq_no = enriched.summary.key_block_seq_no,
@@ -181,30 +238,70 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
         .context("serialize PrivateWitness to JSON")?;
     info!("wrote enriched witness: {}", witness_path.display());
 
-    let mut prover_cfg = SubprocessWithdrawalProverConfig::new(&cfg.an_bridge_prover_dir);
-    if let Some(w) = cfg.prover_work_dir.as_ref() {
-        prover_cfg.work_dir = w.clone();
-    }
-    prover_cfg.out_dir = cfg.prover_out_dir.clone();
-    prover_cfg.seq_no = cfg.prover_seq_no;
-    prover_cfg.timeout = cfg.prover_timeout;
-    let prover = SubprocessWithdrawalProver::new(prover_cfg);
+    // Compose the SHPLONK pipeline the on-chain
+    // `BridgeWithdrawalAggregatorVerifier` accepts:
+    //   1. `InProcessCircuit4SnarkProver` re-proves the witness with a
+    //      Poseidon transcript at K=19, writing `circuit4.snark` +
+    //      `circuit4.instances.bin` into `snark_dir`.
+    //   2. `SubprocessAggregator` shells out to `aggregate-proof
+    //      --name BridgeWithdrawalAggregatorVerifier`, producing the
+    //      22-instance SHPLONK calldata (`instances ‖ proof`) that
+    //      matches the deployed Yul verifier byte-for-byte.
+    // The old subprocess path via `bridge-event-halo2-prover` returned
+    // a raw Blake2 halo2 proof — self-verified locally but rejected
+    // on-chain as `WithdrawalProofRejected()`.
+    std::fs::create_dir_all(&cfg.snark_dir)
+        .with_context(|| format!("mkdir snark_dir {}", cfg.snark_dir.display()))?;
+    let pk_cache_dir = cfg
+        .pk_cache_dir
+        .clone()
+        .unwrap_or_else(|| cfg.params_dir.join("pk_cache"));
+    let mut agg_cfg = SubprocessAggregatorConfig::new(
+        &cfg.aggregator_dir,
+        &cfg.verifiers_dir,
+        &cfg.params_dir,
+    )
+    .with_pk_cache_dir(&pk_cache_dir);
+    agg_cfg.timeout = cfg.prover_timeout;
+    let snark_prover = InProcessCircuit4SnarkProver::new(&cfg.params_dir);
+    let aggregator = SubprocessAggregator::new(agg_cfg);
+    let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
 
     info!(
-        an_bridge_prover_dir = %cfg.an_bridge_prover_dir.display(),
+        aggregator_dir = %cfg.aggregator_dir.display(),
+        verifiers_dir = %cfg.verifiers_dir.display(),
+        params_dir = %cfg.params_dir.display(),
+        snark_dir = %cfg.snark_dir.display(),
+        pk_cache_dir = %pk_cache_dir.display(),
         witness = %witness_path.display(),
-        "invoking bridge-event-halo2-prover",
+        "invoking Circuit4ShplonkPipeline (in-process Poseidon C4 prove → aggregate)",
     );
-    let proof = prover
-        .prove(&witness_path)
+    let proof = pipeline
+        .prove(&witness_path, &cfg.snark_dir, cfg.prover_seq_no as u64)
         .await
-        .context("SubprocessWithdrawalProver::prove failed")?;
+        .context("Circuit4ShplonkPipeline::prove failed")?;
     info!(
         seq_no = proof.seq_no,
         self_verified = proof.self_verified,
         pi_len = proof.public_instances_hex.len(),
-        "prover produced PartnerWithdrawalProof",
+        calldata_bytes = proof.proof_hex.len() / 2,
+        "pipeline produced PartnerWithdrawalProof (SHPLONK aggregator calldata)",
     );
+
+    if let Some(out_dir) = cfg.prover_out_dir.as_ref() {
+        std::fs::create_dir_all(out_dir)
+            .with_context(|| format!("mkdir prover_out_dir {}", out_dir.display()))?;
+        let out_path = out_dir.join(format!("proof_event_{:06}.json", cfg.prover_seq_no));
+        let json = serde_json::json!({
+            "seq_no": proof.seq_no,
+            "proof_hex": proof.proof_hex,
+            "public_instances_hex": proof.public_instances_hex,
+            "self_verified": proof.self_verified,
+        });
+        std::fs::write(&out_path, serde_json::to_vec_pretty(&json)?)
+            .with_context(|| format!("write {}", out_path.display()))?;
+        info!(out = %out_path.display(), "persisted proof_event JSON");
+    }
 
     Ok(WithdrawE2ESummary {
         captured,

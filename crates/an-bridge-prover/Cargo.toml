@@ -52,10 +52,11 @@ pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
 halo2_kzg_srs = { git = "https://github.com/han0110/halo2-kzg-srs" }
 halo2_curves = { git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1", package = "halo2curves" }
 
-# Tracks the same branch of tvm-sdk that acki-nacki uses
-tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit", features = ["gosh"] }
-tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit" }
-tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", branch = "full_dex_and_bridge_test_with_final_halo2_circuit" }
+# Tag v3.0.5.an supersedes the retired `full_dex_and_bridge_test_with_final_halo2_circuit` branch
+# (all of that branch's work is embedded in the tag).
+tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", features = ["gosh"] }
+tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
+tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
 
 # Async + networking
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

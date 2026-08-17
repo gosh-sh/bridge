@@ -12,38 +12,10 @@ use serde::{Deserialize, Serialize};
 
 const PROOFS_DIR: &str = "proofs";
 
-/// Current `ProofRequest` schema version. Bumped to 2 when `block_height` was
-/// added; bumped to 3 when `attestation_circuit` was added so the verifier
-/// knows which VK (Primary 1a vs Fallback 1b) to use; bumped to 4 alongside
-/// the introduction of the bk-set-update bundle (`BkUpdateRequest`); bumped
-/// to 5 when `layer_block_id_hex` was removed — after the 2026-07-22 Circuit 1
-/// byte-order fix (`uint256(bytes32(root))`), Circuits 1 and 2 emit the same
-/// `block_id_fr`, so the second copy on the wire was pure redundancy; bumped
-/// to 6 when `block_id_hex` semantics were unified with the upstream circuits
-/// crate — `block_id_hex` now carries the raw 32-byte BE chain hash (=
-/// `Solidity uint256(bytes32(blockId))`) in both `ProofRequest` and
-/// `BkUpdateRequest`, and the redundant `BkUpdateRequest.block_id_hash_hex`
-/// was dropped; bumped to 7 when the block-id Merkle tree grew from 8 leaves
-/// (depth 3) to the canonical 16 leaves (depth 4). The v7 `BkUpdateRequest`
-/// wire shape carries **three** BK-set update siblings (`h01`, `h4_7`,
-/// `h8_15`) instead of the two v6 fields (`h0`, `h23`), and the layer-bundle
-/// `NUM_MERKLE_SIBLINGS` grew from 3 to 4 accordingly. The Fr value the halo2
-/// verifier consumes is derived on demand by inner-product-folding the
-/// reversed bytes (see [`hash_hex_to_fr`]). Note: the R15 SHPLONK aggregator
-/// adapter on-chain does *not* auto-reduce — it byte-compares the argument
-/// against the proof's instance before the pairing, so callers must send the
-/// canonical `Fr` image (see `bridge-relayer-daemon::withdrawal::hash_hex_to_block_id_fr`).
-/// The verifier rejects mismatched versions instead of silently re-interpreting fields.
-pub const PROOF_REQUEST_SCHEMA_VERSION: u32 = 7;
-
-fn default_schema_version() -> u32 { PROOF_REQUEST_SCHEMA_VERSION }
-
-/// Discriminates which attestation circuit produced `primary_proof_hex`.
+/// Discriminates which attestation circuit produced `attestation_proof_hex`.
 ///
 /// Both circuits share the 4-public-instance layout; the verifier picks the
-/// matching VK based on this tag. Default (for legacy proof files written
-/// before schema v3) is `Primary`, matching the v2 wire shape where the
-/// prover only ever emitted Circuit 1a.
+/// matching VK based on this tag.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AttestationCircuit {
@@ -61,12 +33,6 @@ fn default_attestation_circuit() -> AttestationCircuit { AttestationCircuit::Pri
 /// JSON structure for combined proof files (Circuit 1a or 1b + Circuit 2).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ProofRequest {
-    /// Wire-format version. v2 added `block_height`. Older (v1) files
-    /// implicitly map to `schema_version = 1` via `#[serde(default = ...)]`
-    /// but only after they're shaped to fit — see `read_proof_request`.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-
     /// Key block sequence number.
     pub block_seq_no: u32,
     /// Thread-anchored `BlockHeight.height` of the key block. In Acki Nacki
@@ -76,32 +42,22 @@ pub struct ProofRequest {
     pub block_height: u64,
     /// Sequence number of the previously proved key block.
     pub last_seen_block_seqno: u32,
-    /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
-    /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
-    /// `uint256(bytes32(blockId))`). Both Circuit 1a/1b and Circuit 2 bind
-    /// `block_id_fr = fold(reverse(this))` — reduction mod `Fr` happens on the
-    /// caller side (Rust: [`hash_hex_to_fr`]; on-chain: the relayer sends the
-    /// already-reduced value, and `AckiNackiBridge` applies the same `% BN254_R`
-    /// before the SHA-256 fold compare, since the R15 SHPLONK adapter does NOT
-    /// auto-reduce — it byte-compares the argument against a canonical `Fr`
-    /// instance read out of the proof before the pairing runs). Storing the
-    /// full 256-bit hash preserves the top 2 bits that a `Fr::to_repr()` wire
-    /// format would lose whenever the chain hash `>= p` (~81% of blocks).
-    /// Same value whether 1a or 1b emitted the proof — Circuit 1b's
-    /// same-block_id constraint guarantees the two attestations in the
-    /// fallback pair agree.
+    /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = Solidity
+    /// `uint256(bytes32(blockId))`). Circuits 1a/1b and Circuit 2 bind
+    /// `block_id_fr = fold(reverse(this))`; derive the Fr public instance
+    /// on demand via [`hash_hex_to_fr`]. Kept as the raw hash (not
+    /// `Fr::to_repr`) to preserve the top bits `Fr::to_repr` would truncate
+    /// whenever the hash `>= p` (~81% of blocks).
     pub block_id_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
-    /// Which attestation circuit produced `primary_proof_hex` — discriminates
-    /// the verifying key (Primary vs Fallback). Legacy v2 proof files without
-    /// this field deserialize as `Primary`.
+    /// Which attestation circuit produced `attestation_proof_hex` — discriminates
+    /// the verifying key (Primary vs Fallback).
     #[serde(default = "default_attestation_circuit")]
     pub attestation_circuit: AttestationCircuit,
     /// Hex-encoded attestation-circuit proof bytes (1a or 1b — discriminated
-    /// by `attestation_circuit`). Field name preserved across the v3 bump for
-    /// backwards-readable JSON; the verifier picks the matching VK by tag.
-    pub primary_proof_hex: String,
+    /// by `attestation_circuit`; verifier picks the matching VK by tag).
+    pub attestation_proof_hex: String,
 
     // ---- Circuit 2 (Layer Hashes Movement) ----
     /// Hex-encoded Circuit 2 proof bytes.
@@ -116,11 +72,11 @@ pub struct ProofRequest {
     pub prev_max_level_layer_hash_hex: String,
 
     // ---- Proof generation timings (added: per-circuit wall-clock, ms) ----
-    /// Wall-clock time spent generating the Circuit 1a (primary) proof, in
-    /// milliseconds. Excludes PK load/unload. `#[serde(default)]` so older
-    /// proof JSONs (without this field) still deserialize as 0.
+    /// Wall-clock time spent generating the attestation-circuit proof (1a
+    /// or 1b), in milliseconds. Excludes PK load/unload. `#[serde(default)]`
+    /// so older proof JSONs without this field still deserialize as 0.
     #[serde(default)]
-    pub primary_proof_gen_ms: u64,
+    pub attestation_proof_gen_ms: u64,
     /// Wall-clock time spent generating the Circuit 2 (layer) proof, in
     /// milliseconds. Excludes PK load/unload.
     #[serde(default)]
@@ -172,25 +128,12 @@ pub async fn wait_for_result(seq_no: u32, timeout: Duration) -> anyhow::Result<V
     }
 }
 
-/// Read a proof request file (used by verifier). Rejects schema versions the
-/// daemon was not built for — a mismatch almost certainly means the prover
-/// and verifier are on different commits, which would silently mis-mirror
-/// state if we just re-interpreted fields.
+/// Read a proof request file (used by verifier).
 pub fn read_proof_request(seq_no: u32) -> anyhow::Result<ProofRequest> {
     let path = proof_file_path(seq_no);
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read proof file: {}", path))?;
-    let req: ProofRequest = serde_json::from_str(&data)
-        .context("failed to parse proof request JSON")?;
-    if req.schema_version != PROOF_REQUEST_SCHEMA_VERSION {
-        anyhow::bail!(
-            "proof file {} has schema_version={} but verifier expects {}",
-            path,
-            req.schema_version,
-            PROOF_REQUEST_SCHEMA_VERSION
-        );
-    }
-    Ok(req)
+    serde_json::from_str(&data).context("failed to parse proof request JSON")
 }
 
 /// Write a verification result (used by verifier).
@@ -247,7 +190,7 @@ pub fn fold_hash_be_to_fr(bytes_be: &[u8]) -> Fr {
 }
 
 // ---------------------------------------------------------------------------
-// BK-set update IPC bundle (schema v7 — 16-leaf block-id tree)
+// BK-set update IPC bundle (16-leaf depth-4 block-id tree)
 // ---------------------------------------------------------------------------
 
 /// File-name prefix for bk-set-update bundles. The prover writes
@@ -269,11 +212,6 @@ const BKUPD_PREFIX: &str = "bkupd";
 /// private working data (`ProverBkSet`) and never travels in IPC.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BkUpdateRequest {
-    /// Wire-format version. Same constant as `ProofRequest`, so a mismatch
-    /// reliably signals a prover/verifier commit drift.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-
     /// Bk-set-update block sequence number. The seq_no of the block that
     /// announces the new BK set (i.e. the block whose `L2 != L3`).
     pub block_seq_no: u32,
@@ -283,29 +221,20 @@ pub struct BkUpdateRequest {
     /// `stored_last_bk_set_update_seq_no` at the time this bundle is
     /// produced). The verifier checks `block_seq_no > this`.
     pub last_seen_bk_update_seqno: u32,
-    /// Chain's raw 32-byte block hash BE (= GraphQL `Block.id` = SHA-256 root
-    /// of the 16-leaf depth-4 `block_merkle_tree_leaves` = Solidity
-    /// `uint256(bytes32(blockId))`). This is the single value
-    /// `applyBkSetUpdate` receives on-chain: the R15 SHPLONK adapter does NOT
-    /// auto-reduce (it byte-compares against a canonical `Fr` instance before
-    /// the pairing), so the relayer must send the already-reduced value; the
-    /// contract applies the same `% BN254_R` to the SHA-256 fold root before
-    /// comparing so both consumers agree. Rust verify derives the Fr public
-    /// instance on demand via [`hash_hex_to_fr`]; the pre-v6 dual-field
-    /// encoding (`block_id_hex` = Fr LE repr + `block_id_hash_hex` = raw hash
-    /// BE) is gone — the Fr form was redundant since it's a pure function of
-    /// the raw hash.
+    /// Chain's raw 32-byte block hash BE — same encoding as
+    /// [`ProofRequest::block_id_hex`]. Consumed by `applyBkSetUpdate`
+    /// on-chain and by the Rust verifier via [`hash_hex_to_fr`].
     pub block_id_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
-    /// Which attestation circuit produced `primary_proof_hex`.
+    /// Which attestation circuit produced `attestation_proof_hex`.
     #[serde(default = "default_attestation_circuit")]
     pub attestation_circuit: AttestationCircuit,
     /// Hex-encoded attestation-circuit proof bytes. Verified against
     /// public instances `[block_id, L2, block_seq_no, last_seen]` —
     /// `L2` must equal the verifier's `stored_bk_set_commitment`, which is
     /// what authorises the update.
-    pub primary_proof_hex: String,
+    pub attestation_proof_hex: String,
 
     // ---- OPEN bk-set update payload ----
     /// L2 = old BK-set Poseidon commitment, as hex (32 bytes LE).
@@ -326,7 +255,7 @@ pub struct BkUpdateRequest {
 
     // ---- Timings (optional, for the prover's heartbeat log) ----
     #[serde(default)]
-    pub primary_proof_gen_ms: u64,
+    pub attestation_proof_gen_ms: u64,
 }
 
 /// JSON structure for a bk-update verification result. Mirrors
@@ -366,24 +295,12 @@ pub fn write_bk_update_request(req: &BkUpdateRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a bk-update bundle (verifier side). Same strict version check as
-/// `read_proof_request` — a mismatch almost certainly means daemons are on
-/// different commits.
+/// Read a bk-update bundle (verifier side).
 pub fn read_bk_update_request(seq_no: u32) -> anyhow::Result<BkUpdateRequest> {
     let path = bkupd_file_path(seq_no);
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read bk-update file: {}", path))?;
-    let req: BkUpdateRequest = serde_json::from_str(&data)
-        .context("failed to parse bk-update request JSON")?;
-    if req.schema_version != PROOF_REQUEST_SCHEMA_VERSION {
-        anyhow::bail!(
-            "bk-update file {} has schema_version={} but verifier expects {}",
-            path,
-            req.schema_version,
-            PROOF_REQUEST_SCHEMA_VERSION
-        );
-    }
-    Ok(req)
+    serde_json::from_str(&data).context("failed to parse bk-update request JSON")
 }
 
 /// Write a bk-update verification result (verifier side).
@@ -430,25 +347,23 @@ mod tests {
     }
 
     #[test]
-    fn bkupd_request_roundtrip_preserves_v7() {
+    fn bkupd_request_roundtrips() {
         let req = BkUpdateRequest {
-            schema_version: PROOF_REQUEST_SCHEMA_VERSION,
             block_seq_no: 1024,
             block_height: 1024,
             last_seen_bk_update_seqno: 0,
             block_id_hex: "ab".repeat(32),
             attestation_circuit: AttestationCircuit::Primary,
-            primary_proof_hex: "00".to_string(),
+            attestation_proof_hex: "00".to_string(),
             old_bk_set_poseidon_hash_hex: "cc".repeat(32),
             new_bk_set_poseidon_hash_hex: "dd".repeat(32),
             merkle_sibling_h01_hex: "ee".repeat(32),
             merkle_sibling_h4_7_hex: "ff".repeat(32),
             merkle_sibling_h8_15_hex: "aa".repeat(32),
-            primary_proof_gen_ms: 12345,
+            attestation_proof_gen_ms: 12345,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: BkUpdateRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, PROOF_REQUEST_SCHEMA_VERSION);
         assert_eq!(back.block_seq_no, 1024);
         assert_eq!(back.attestation_circuit, AttestationCircuit::Primary);
         assert_eq!(back.old_bk_set_poseidon_hash_hex, "cc".repeat(32));

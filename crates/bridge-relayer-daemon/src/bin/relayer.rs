@@ -36,15 +36,15 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::{local::PrivateKeySigner, Signer},
 };
+use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    discover_event_proofs, result_path_for, BackoffConfig, BkSetUpdateSubmitOutcome,
+    discover_event_proofs, run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome,
     BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
     DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
     LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
     RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
     SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
-    TickOutcome,
-    WithdrawSubmitOutcome, WithdrawalProver, WithdrawalResultGate, check_startup_drift,
+    TickOutcome, WithdrawE2EConfig, WithdrawSubmitOutcome, WithdrawalProver, check_startup_drift,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -182,9 +182,6 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Skip the partner `result_*.json` verification gate.
-        #[arg(long)]
-        skip_verified_gate: bool,
     },
     /// Submit one `verifyBlock` for a specific partner proof bundle.
     SubmitVerifyBlock {
@@ -200,8 +197,6 @@ enum Cmd {
         private_key: String,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
-        skip_verified_gate: bool,
     },
     /// Read-only pre-flight for a partner `proof_<seqno>.json` bundle.
     VerifyProverProof {
@@ -215,8 +210,6 @@ enum Cmd {
         bridge_address: Address,
         #[arg(long)]
         no_simulate: bool,
-        #[arg(long)]
-        skip_verified_gate: bool,
         /// Allow ~8 KB Halo2 proof bytes through load (anchor checks only).
         #[arg(long)]
         accept_halo2_proofs: bool,
@@ -283,15 +276,13 @@ enum Cmd {
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
     },
-    /// Long-running daemon reading partner `proof_event_*.json` bundles from
-    /// `bridge-verifier-daemon` and submitting `withdrawByProof` on Ethereum.
-    /// The withdraw-side twin of `daemon-prover`: it gates on the sibling
-    /// `proof_event_*.result.json` ACK, skips nullifiers already consumed
-    /// on-chain (idempotent restart), and retries transient reverts with
-    /// exponential backoff until SIGINT/SIGTERM.
+    /// Long-running daemon reading `proof_event_*.json` bundles and submitting
+    /// `withdrawByProof` on Ethereum. The withdraw-side twin of
+    /// `daemon-prover`: skips nullifiers already consumed on-chain (idempotent
+    /// restart) and retries transient reverts with exponential backoff until
+    /// SIGINT/SIGTERM.
     DaemonWithdraw {
-        /// Directory containing `proof_event_*.json` + `*.result.json`
-        /// (partner verifier daemon `proofs/` folder).
+        /// Directory containing `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
         #[arg(long, env = "RPC_URL")]
@@ -309,9 +300,6 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Skip the partner `proof_event_*.result.json` verification gate.
-        #[arg(long)]
-        skip_verified_gate: bool,
         /// Simulate (`eth_call`) each pending withdrawal but never send a
         /// transaction. Useful to confirm the pipeline before spending gas.
         #[arg(long)]
@@ -325,8 +313,8 @@ enum Cmd {
     ///   1. one `daemon-prover` tick — advance the on-chain AN anchor from the
     ///      next available partner `proof_<seqno>.json` (`verifyBlock`);
     ///   2. one `daemon-withdraw` scan — pay out every ready
-    ///      `proof_event_*.json` (`withdrawByProof`), gated on the sibling
-    ///      `*.result.json` ACK and skipping nullifiers already used on-chain.
+    ///      `proof_event_*.json` (`withdrawByProof`), skipping nullifiers
+    ///      already used on-chain.
     ///
     /// Both legs read the SAME `--proofs-dir`. Because the two legs run
     /// sequentially in one task sharing one provider, there is only ever a
@@ -334,8 +322,8 @@ enum Cmd {
     /// exponential backoff (interruptible by SIGINT/SIGTERM); the prover
     /// cursor persists to `--state`.
     DaemonBridge {
-        /// Directory containing BOTH `proof_<seqno>.json` (+ `result_*.json`)
-        /// and `proof_event_*.json` (+ `*.result.json`).
+        /// Directory containing BOTH `proof_<seqno>.json` and
+        /// `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
         #[arg(long, env = "RPC_URL")]
@@ -353,10 +341,6 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Skip the partner `result_*.json` / `proof_event_*.result.json`
-        /// verification gate on BOTH legs.
-        #[arg(long)]
-        skip_verified_gate: bool,
         /// Simulate (`eth_call`) the withdraw leg but never send a
         /// `withdrawByProof` transaction. The prover leg still submits
         /// `verifyBlock` (there is no dry-run for the anchor advance).
@@ -444,9 +428,87 @@ enum Cmd {
         #[arg(long, env = "RELAYER_PRIVATE_KEY")]
         private_key: String,
         #[arg(long)]
-        skip_verified_gate: bool,
-        #[arg(long)]
         accept_halo2_proofs: bool,
+    },
+    /// End-to-end withdraw pipeline: capture live `WithdrawalInitiated`
+    /// ExtOut event → export partial witness → enrich → prove → optional
+    /// on-chain `withdrawByProof`.
+    ///
+    /// Replaces the Python driver's steps 5–7 with a single in-process
+    /// call (see `bridge_relayer_daemon::withdraw_e2e`). If any of the
+    /// three submit-side flags (`--rpc-url`, `--bridge-address`,
+    /// `--private-key`) are omitted, the command stops after proving and
+    /// only logs the produced proof metadata.
+    WithdrawE2E {
+        /// GraphQL endpoint (e.g. `https://shellnet.ackinacki.org/bk/v2/graphql`).
+        #[arg(long, env = "GQL_ENDPOINT")]
+        gql_endpoint: String,
+        /// Path to the `prover_state.json` snapshot the enricher reads.
+        #[arg(long, env = "PROVER_STATE_PATH")]
+        prover_state_path: PathBuf,
+        /// History-proof window size (`W`). Must match the value the
+        /// state file was written with.
+        #[arg(long, default_value_t = 128)]
+        window_size: usize,
+        /// Emitting bridge account (64-hex, no `0x`).
+        #[arg(long)]
+        bridge_account_id: String,
+        /// Emitting bridge dapp_id (64-hex, no `0x`).
+        #[arg(long)]
+        bridge_dapp_id: String,
+        /// ExtOut `dst` sentinel to filter on. Defaults to
+        /// `WithdrawalInitiated`'s `makeAddrExtern(618)` value.
+        #[arg(
+            long,
+            default_value = ":000000000000000000000000000000000000000000000000000000000000026a"
+        )]
+        event_dst: String,
+        /// Total time budget for the event-capture stage, in seconds.
+        #[arg(long, default_value_t = 300)]
+        event_wait_s: u64,
+        /// Poll interval during the capture stage, in seconds.
+        #[arg(long, default_value_t = 2)]
+        event_poll_interval_s: u64,
+        /// Anchor layer mode: `auto` (probe L1 → L2 → …) or an explicit
+        /// layer number (`1`, `2`, …).
+        #[arg(long, default_value = "auto")]
+        anchor_layer: String,
+        /// Ack the L(n≥2) wait budget when `--anchor-layer` picks an
+        /// explicit `n≥2`. Auto mode counts as an implicit ack.
+        #[arg(long)]
+        i_know_the_wait: bool,
+        /// Where to write the enriched witness JSON.
+        #[arg(long)]
+        work_dir: PathBuf,
+        /// `crates/an-bridge-prover` workspace root (holds the
+        /// `bridge-event-halo2-prover` release binary + params).
+        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
+        an_bridge_prover_dir: PathBuf,
+        /// Override the prover subprocess's working directory (i.e.
+        /// where `./params/*` lives). Defaults to `--an-bridge-prover-dir`.
+        #[arg(long)]
+        prover_work_dir: Option<PathBuf>,
+        /// Optional dir to persist `proof_event_{seq:06}.json`.
+        #[arg(long)]
+        prover_out_dir: Option<PathBuf>,
+        /// Subprocess prover timeout, in seconds.
+        #[arg(long, default_value_t = 1800)]
+        prover_timeout_s: u64,
+        /// Seqno stamped into witness/proof filenames.
+        #[arg(long, default_value_t = 0)]
+        prover_seq_no: u32,
+        /// If set together with `--bridge-address` + `--private-key`,
+        /// also drive `withdrawByProof` on Ethereum after proving.
+        #[arg(long, env = "RPC_URL")]
+        rpc_url: Option<String>,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Option<Address>,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        private_key: Option<String>,
+        /// If the submit trio is supplied, do only an `eth_call`
+        /// dry-run (no signed tx).
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
@@ -539,7 +601,6 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
-            skip_verified_gate,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -553,7 +614,6 @@ async fn main() -> anyhow::Result<()> {
                 bridge_address,
                 private_key,
                 backoff,
-                skip_verified_gate,
             )
             .await
             .map_err(|e| {
@@ -568,7 +628,6 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
-            skip_verified_gate,
         } => submit_verify_block(
             proofs_dir,
             block_seq_no,
@@ -576,7 +635,6 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
-            skip_verified_gate,
         )
         .await
         .map_err(|e| {
@@ -589,7 +647,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             no_simulate,
-            skip_verified_gate,
             accept_halo2_proofs,
         } => verify_prover_proof(
             proofs_dir,
@@ -597,7 +654,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             !no_simulate,
-            skip_verified_gate,
             accept_halo2_proofs,
         )
         .await
@@ -653,7 +709,6 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
-            skip_verified_gate,
             dry_run,
         } => {
             let backoff = BackoffConfig {
@@ -668,7 +723,6 @@ async fn main() -> anyhow::Result<()> {
                 private_key,
                 Duration::from_secs(poll_secs),
                 backoff,
-                skip_verified_gate,
                 dry_run,
             )
             .await
@@ -686,7 +740,6 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
-            skip_verified_gate,
             dry_run,
         } => {
             let backoff = BackoffConfig {
@@ -702,7 +755,6 @@ async fn main() -> anyhow::Result<()> {
                 private_key,
                 Duration::from_secs(poll_secs),
                 backoff,
-                skip_verified_gate,
                 dry_run,
             )
             .await
@@ -771,13 +823,60 @@ async fn main() -> anyhow::Result<()> {
                 error!(?e, "submit-withdraw failed");
                 e
             }),
+        Cmd::WithdrawE2E {
+            gql_endpoint,
+            prover_state_path,
+            window_size,
+            bridge_account_id,
+            bridge_dapp_id,
+            event_dst,
+            event_wait_s,
+            event_poll_interval_s,
+            anchor_layer,
+            i_know_the_wait,
+            work_dir,
+            an_bridge_prover_dir,
+            prover_work_dir,
+            prover_out_dir,
+            prover_timeout_s,
+            prover_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+        } => withdraw_e2e_cli(WithdrawE2ECliArgs {
+            gql_endpoint,
+            prover_state_path,
+            window_size,
+            bridge_account_id,
+            bridge_dapp_id,
+            event_dst,
+            event_wait_s,
+            event_poll_interval_s,
+            anchor_layer,
+            i_know_the_wait,
+            work_dir,
+            an_bridge_prover_dir,
+            prover_work_dir,
+            prover_out_dir,
+            prover_timeout_s,
+            prover_seq_no,
+            rpc_url,
+            bridge_address,
+            private_key,
+            dry_run,
+        })
+        .await
+        .map_err(|e| {
+            error!(?e, "withdraw-e2e failed");
+            e
+        }),
         Cmd::SubmitBkUpdate {
             proofs_dir,
             block_seq_no,
             rpc_url,
             bridge_address,
             private_key,
-            skip_verified_gate,
             accept_halo2_proofs,
         } => submit_bk_update(
             proofs_dir,
@@ -785,7 +884,6 @@ async fn main() -> anyhow::Result<()> {
             rpc_url,
             bridge_address,
             private_key,
-            skip_verified_gate,
             accept_halo2_proofs,
         )
         .await
@@ -1078,7 +1176,6 @@ async fn run_prover_daemon(
     bridge_address: Address,
     private_key: String,
     backoff: BackoffConfig,
-    skip_verified_gate: bool,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
     let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -1089,8 +1186,7 @@ async fn run_prover_daemon(
         .connect_http(rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source =
-        Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
+    let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
@@ -1108,7 +1204,6 @@ async fn run_prover_daemon(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn submit_verify_block(
     proofs_dir: PathBuf,
     block_seq_no: u64,
@@ -1116,9 +1211,8 @@ async fn submit_verify_block(
     bridge_address: Address,
     private_key: String,
     dry_run: bool,
-    skip_verified_gate: bool,
 ) -> anyhow::Result<()> {
-    let source = ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate);
+    let source = ProverProofsBlockSource::new(&proofs_dir);
     let block = source
         .fetch(block_seq_no)
         .await?
@@ -1163,19 +1257,15 @@ async fn submit_verify_block(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn verify_prover_proof(
     proofs_dir: PathBuf,
     block_seq_no: u64,
     rpc_url: String,
     bridge_address: Address,
     simulate: bool,
-    skip_verified_gate: bool,
     accept_halo2_proofs: bool,
 ) -> anyhow::Result<()> {
-    let source = ProverProofsBlockSource::new(&proofs_dir)
-        .skip_verified_gate(skip_verified_gate)
-        .accept_halo2_proofs(accept_halo2_proofs);
+    let source = ProverProofsBlockSource::new(&proofs_dir).accept_halo2_proofs(accept_halo2_proofs);
     let block = source
         .fetch(block_seq_no)
         .await?
@@ -1244,7 +1334,6 @@ async fn prove_withdraw(
 
     // Persist in the `proof_event` schema that `submit-withdraw` reads.
     let json = serde_json::json!({
-        "schema_version": proof.schema_version,
         "seq_no": proof.seq_no,
         "proof_hex": proof.proof_hex,
         "public_instances_hex": proof.public_instances_hex,
@@ -1290,7 +1379,6 @@ async fn prove_withdraw_shplonk(
     // Persist in the `proof_event` schema that `submit-withdraw` reads. The
     // `proof_hex` here is the SHPLONK aggregator calldata (not raw Halo2).
     let json = serde_json::json!({
-        "schema_version": proof.schema_version,
         "seq_no": proof.seq_no,
         "proof_hex": proof.proof_hex,
         "public_instances_hex": proof.public_instances_hex,
@@ -1346,21 +1434,18 @@ async fn shutdown_signal() {
 }
 
 /// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
-/// bundles, submitting `withdrawByProof` for each. Gates each proof on its
-/// `*.result.json` ACK (unless `skip_verified_gate`), skips nullifiers
-/// already consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
+/// bundles, submitting `withdrawByProof` for each. Skips nullifiers already
+/// consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
 ///
 /// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
 /// submit revert), signalling the caller to back off before the next scan.
 /// Permanent per-proof problems (parse errors, bad public inputs, proofs
-/// that fail the SHPLONK aggregator shape gate, or an ACK that isn't
-/// accepted) park the proof in `st.done` and
-/// the scan drains the rest of the directory. Lower-level infra failures
+/// that fail the SHPLONK aggregator shape gate) park the proof in `st.done`
+/// and the scan drains the rest of the directory. Lower-level infra failures
 /// (RPC down during dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<P, N>(
     bridge: &EthBridgeClient<P, N>,
     proofs_dir: &Path,
-    skip_verified_gate: bool,
     dry_run: bool,
     st: &mut WithdrawScanState,
 ) -> anyhow::Result<bool>
@@ -1380,30 +1465,6 @@ where
     for proof_path in proofs {
         if st.done.contains(&proof_path) {
             continue;
-        }
-
-        // Gate on the verifier ACK unless explicitly skipped.
-        if !skip_verified_gate {
-            let result_path = result_path_for(&proof_path);
-            match std::fs::read(&result_path) {
-                Ok(bytes) => match WithdrawalResultGate::from_json_bytes(&bytes) {
-                    Ok(gate) if gate.is_accepted() => {},
-                    Ok(_) => {
-                        warn!(proof = %proof_path.display(), "verifier ACK present but not accepted (verified/anchor_matched/proof_valid); parking");
-                        st.done.insert(proof_path);
-                        continue;
-                    },
-                    Err(e) => {
-                        warn!(?e, proof = %proof_path.display(), "unpardeable result ACK; skipping this scan");
-                        continue;
-                    },
-                },
-                Err(_) => {
-                    // ACK not written yet — verifier hasn't finished.
-                    info!(proof = %proof_path.display(), "no result ACK yet; will re-check");
-                    continue;
-                },
-            }
         }
 
         let bundle = match std::fs::read(&proof_path)
@@ -1491,14 +1552,12 @@ where
 }
 
 /// Withdraw-side twin of `run_prover_daemon`. Polls `proofs_dir` for
-/// `proof_event_*.json` bundles, gates each on its `*.result.json` ACK,
-/// skips nullifiers already consumed on-chain (so restarts are idempotent
-/// and re-scanning the same directory is cheap), and submits
-/// `withdrawByProof`. Transient reverts (e.g. anchor not yet registered by
-/// the verifyBlock lane) back off exponentially and are retried; permanent
-/// per-proof failures are logged and the proof is parked so the loop keeps
-/// draining the rest of the directory.
-#[allow(clippy::too_many_arguments)]
+/// `proof_event_*.json` bundles, skips nullifiers already consumed on-chain
+/// (so restarts are idempotent and re-scanning the same directory is cheap),
+/// and submits `withdrawByProof`. Transient reverts (e.g. anchor not yet
+/// registered by the verifyBlock lane) back off exponentially and are
+/// retried; permanent per-proof failures are logged and the proof is parked
+/// so the loop keeps draining the rest of the directory.
 async fn run_withdraw_daemon(
     proofs_dir: PathBuf,
     rpc_url: String,
@@ -1506,7 +1565,6 @@ async fn run_withdraw_daemon(
     private_key: String,
     poll_interval: Duration,
     backoff: BackoffConfig,
-    skip_verified_gate: bool,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -1525,7 +1583,6 @@ async fn run_withdraw_daemon(
         proofs_dir = %proofs_dir.display(),
         ?poll_interval,
         dry_run,
-        skip_verified_gate,
         "daemon-withdraw starting"
     );
 
@@ -1534,7 +1591,7 @@ async fn run_withdraw_daemon(
 
     loop {
         let had_transient_failure =
-            withdraw_scan_once(&bridge, &proofs_dir, skip_verified_gate, dry_run, &mut st).await?;
+            withdraw_scan_once(&bridge, &proofs_dir, dry_run, &mut st).await?;
 
         info!(
             paid = st.paid,
@@ -1587,7 +1644,6 @@ async fn run_bridge_daemon(
     private_key: String,
     poll_interval: Duration,
     backoff: BackoffConfig,
-    skip_verified_gate: bool,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -1599,8 +1655,7 @@ async fn run_bridge_daemon(
         .connect_http(rpc_url.parse()?);
 
     // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
-    let source =
-        Arc::new(ProverProofsBlockSource::new(&proofs_dir).skip_verified_gate(skip_verified_gate));
+    let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
     let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
     let cfg = RelayerConfig::new(state_path);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
@@ -1617,7 +1672,6 @@ async fn run_bridge_daemon(
         proofs_dir = %proofs_dir.display(),
         ?poll_interval,
         dry_run,
-        skip_verified_gate,
         "daemon-bridge starting (unified verifyBlock + withdrawByProof)"
     );
 
@@ -1664,14 +1718,7 @@ async fn run_bridge_daemon(
         }
 
         // ── Leg 2: pay out ready withdrawal proofs (withdrawByProof). ──
-        match withdraw_scan_once(
-            &wd_bridge,
-            &proofs_dir,
-            skip_verified_gate,
-            dry_run,
-            &mut wd_state,
-        )
-        .await
+        match withdraw_scan_once(&wd_bridge, &proofs_dir, dry_run, &mut wd_state).await
         {
             Ok(transient) => had_transient |= transient,
             Err(e) => {
@@ -1757,18 +1804,141 @@ async fn submit_withdraw(
     Ok(())
 }
 
+/// Grouped arg struct so the `Cmd::WithdrawE2E` destructure has one
+/// name to hand off to [`withdraw_e2e_cli`] instead of 20 positional
+/// parameters — avoids the `too_many_arguments` clippy lint that
+/// several other subcommands here trip.
+struct WithdrawE2ECliArgs {
+    gql_endpoint: String,
+    prover_state_path: PathBuf,
+    window_size: usize,
+    bridge_account_id: String,
+    bridge_dapp_id: String,
+    event_dst: String,
+    event_wait_s: u64,
+    event_poll_interval_s: u64,
+    anchor_layer: String,
+    i_know_the_wait: bool,
+    work_dir: PathBuf,
+    an_bridge_prover_dir: PathBuf,
+    prover_work_dir: Option<PathBuf>,
+    prover_out_dir: Option<PathBuf>,
+    prover_timeout_s: u64,
+    prover_seq_no: u32,
+    rpc_url: Option<String>,
+    bridge_address: Option<Address>,
+    private_key: Option<String>,
+    dry_run: bool,
+}
+
+async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
+    let anchor_mode = parse_anchor_layer(&args.anchor_layer)?;
+
+    let cfg = WithdrawE2EConfig {
+        gql_endpoint: args.gql_endpoint,
+        prover_state_path: args.prover_state_path,
+        window_size: args.window_size,
+        bridge_account_id_hex: args.bridge_account_id,
+        bridge_dapp_id_hex: args.bridge_dapp_id,
+        event_dst_filter: args.event_dst,
+        event_wait: Duration::from_secs(args.event_wait_s),
+        event_poll_interval: Duration::from_secs(args.event_poll_interval_s),
+        anchor_mode,
+        i_know_the_wait: args.i_know_the_wait,
+        work_dir: args.work_dir,
+        an_bridge_prover_dir: args.an_bridge_prover_dir,
+        prover_work_dir: args.prover_work_dir,
+        prover_out_dir: args.prover_out_dir,
+        prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        prover_seq_no: args.prover_seq_no,
+    };
+
+    let summary = run_withdraw_e2e_once(cfg).await?;
+
+    info!(
+        message_id = %summary.captured.message_id,
+        block_seq_no = summary.captured.block_seq_no,
+        block_id = %summary.captured.block_id_hex,
+        witness_path = %summary.witness_path.display(),
+        proof_len = summary.proof.proof_hex.len() / 2,
+        self_verified = summary.proof.self_verified,
+        layer_idx = summary.enrich.layer_idx,
+        auto_escalated = summary.enrich.auto_escalated,
+        "withdraw-e2e: capture + prove complete",
+    );
+
+    let submit = match (args.rpc_url, args.bridge_address, args.private_key) {
+        (Some(rpc), Some(addr), Some(pk)) => Some((rpc, addr, pk)),
+        (None, None, None) => {
+            info!("no ETH submit trio supplied — stopping after prove");
+            return Ok(());
+        },
+        _ => anyhow::bail!(
+            "must supply all three of --rpc-url / --bridge-address / --private-key together (or none)"
+        ),
+    };
+    let (rpc_url, bridge_address, private_key) = submit.unwrap();
+
+    let proof_bytes = summary.proof.proof_bytes()?;
+    let pub_inputs = summary.proof.public_inputs()?;
+
+    if args.dry_run {
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let bridge = EthBridgeClient::new(bridge_address, provider);
+        match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
+            DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
+            DryRunOutcome::WouldRevert {
+                reason,
+            } => anyhow::bail!("dry-run reverted: {reason}"),
+        }
+        return Ok(());
+    }
+
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let chain_id = probe.get_chain_id().await?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse()?);
+    let bridge = EthBridgeClient::new(bridge_address, provider);
+
+    match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Reverted {
+            reason,
+        } => anyhow::bail!("withdrawByProof reverted: {reason}"),
+    }
+    Ok(())
+}
+
+/// Parse the `--anchor-layer` flag into [`AnchorLayerMode`]. Accepts
+/// case-insensitive `"auto"` or a positive layer index.
+fn parse_anchor_layer(s: &str) -> anyhow::Result<AnchorLayerMode> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Ok(AnchorLayerMode::Auto);
+    }
+    let n: u8 = t
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--anchor-layer must be `auto` or a positive integer: {e}"))?;
+    if n == 0 {
+        anyhow::bail!("--anchor-layer=0 is not valid; use `1` or higher");
+    }
+    Ok(AnchorLayerMode::Explicit(n))
+}
+
 async fn submit_bk_update(
     proofs_dir: PathBuf,
     block_seq_no: u64,
     rpc_url: String,
     bridge_address: Address,
     private_key: String,
-    skip_verified_gate: bool,
     accept_halo2_proofs: bool,
 ) -> anyhow::Result<()> {
-    let source = BkUpdateProofsSource::new(&proofs_dir)
-        .skip_verified_gate(skip_verified_gate)
-        .accept_halo2_proofs(accept_halo2_proofs);
+    let source = BkUpdateProofsSource::new(&proofs_dir).accept_halo2_proofs(accept_halo2_proofs);
     let update = source
         .fetch_bk_update(block_seq_no)
         .await?

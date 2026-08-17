@@ -12,7 +12,7 @@ Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 
 > **Notation:** `seq_no` is Acki Nacki block sequence number.
 > "Key block" = every `SEQ_NO % (W*P) == 0` block; only key blocks trigger a
-> bundle proof (currently `W=8, P=64`, so stride 512).
+> bundle proof (currently `W=128, P=4`, so stride 512).
 
 ---
 

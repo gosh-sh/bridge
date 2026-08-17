@@ -1,7 +1,9 @@
 //! Real Poseidon Merkle chain proof construction from actual block data.
 //!
-//! Builds genuine chain proofs by reconstructing layer-1 Poseidon trees from
-//! intermediate key blocks fetched via GraphQL.
+//! Builds genuine chain proofs by reconstructing per-layer Poseidon trees
+//! (L1 rungs for same-layer bundles, vertical L(N) rungs for new-layer
+//! bundles) from intermediate key blocks fetched via GraphQL. See "Two
+//! chain topologies, dispatched by layer growth" below for the split.
 //!
 //! # Two chain topologies, dispatched by layer growth
 //!
@@ -27,10 +29,18 @@
 //!       2..W+2); opening at that data-leaf position produces target's
 //!       L(prev_num_layers+1) root.
 //!     * Rungs 2..G — each intermediate L(L) tree at target carries target's
-//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`),
-//!       because canonical construction places `latest_layer_root(L−1)` at
-//!       `data_leaves[W−1]` and target itself is the "latest" L(L−1)
-//!       boundary. Each opening walks up exactly one layer.
+//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`).
+//!       The source of truth for this layout is the acki-nacki node's
+//!       `HistoryBlockData::calculate_root_hash` (the reference cited at
+//!       [`build_chain_for_new_layer`] line 368), which places the W L(L−1)
+//!       contributions of a target-L(L) tree in ascending seq_no order —
+//!       so target's own L(L−1) contribution lands in `data_leaves[W−1]` =
+//!       `leaves[2 + W − 1]`. Our [`build_layer_n_leaves`] mirrors that
+//!       order verbatim, and a runtime `ensure!` in
+//!       [`build_chain_for_new_layer`] (around line 430) checks the
+//!       correspondence for each rung — surfacing a loud parse error if
+//!       the node ever changes the layout. Every rung `L−1 → L` opens at
+//!       that fixed slot; each opening walks up exactly one layer.
 //!   Under steady-state W·P cadence G is always 1 (single-layer jump per
 //!   bundle). G ≥ 2 only occurs on fresh mid-chain bootstrap that lands at a
 //!   compound boundary (e.g. seeding `layers=1` right before an L3 boundary,
@@ -65,7 +75,7 @@ use anyhow::{bail, ensure, Context};
 use gosh_dense_balanced_tree::DenseChainLink;
 use tracing::{info, warn};
 
-use crate::bridge_state::BridgeState;
+use crate::bridge_state::{BridgeState, MAX_LAYERS};
 use crate::chain_proof_builder::{
     self, build_chain_proofs, pad_leaves_to_power_of_2, LayerTreeData,
 };
@@ -482,7 +492,7 @@ async fn build_chain_for_new_layer(
 ///   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root) for the
 ///                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
 ///   [W+2..pow2]: zero padding (to next power of 2)
-async fn build_layer1_tree(
+pub async fn build_layer1_tree(
     gql: &GqlClient,
     key_block_seqno: u64,
     chain_leaf_value: [u8; 32],
@@ -651,6 +661,364 @@ async fn build_layer_n_leaves(
     Ok(leaves)
 }
 
+// ============================================================================
+// Event-anchor chain building
+// ============================================================================
+//
+// The functions below build a chain that anchors a *single event* (not a
+// bundle transition) into one of the verifier's `layer_windows[]` slots. The
+// event's own L1 root is the chain's start, and the chain terminates at some
+// L(target_layer) root the verifier already mirrors.
+//
+// Two topologies are supported here:
+//
+// * `target_layer = 1` — horizontal L1 walk from `H_e` (event's W-aligned
+//   L1 KB) to `K` (the next W·P-aligned KB, which the verifier stores). The
+//   chain has ≤ P−1 active rungs. Wait time budget: up to W·P−1 blocks after
+//   the event before its K is proven.
+//
+// * `target_layer = n` (2 ≤ n ≤ MAX_LAYERS) — a stack of `n − 1` vertical
+//   rungs L1→L2, L2→L3, …, L(n−1)→L(n). Each rung `m → m+1` opens the
+//   L(m) root at `T_m` inside the L(m+1) tree at `T_{m+1}`, where
+//   `T_m = ⌈event_seq / W^m⌉·W^m` and `T_1 = H_e`. Wait time budget: up to
+//   `W^n − 1` blocks after the event. Terminates at the L(n) root the
+//   verifier mirrors at `T_n`.
+
+/// Return value of [`build_event_anchor_chain`].
+pub struct EventAnchorChainResult {
+    /// Active links only (unpadded). The caller pads to `MAX_CHAIN_LEN` with
+    /// `DenseChainLink::inactive(final_chain_root, link_depth)`.
+    pub active_links: Vec<DenseChainLink>,
+    /// Root at the end of the chain. Should equal the verifier's mirrored
+    /// L(target_layer) root at `anchor_kb_seqno` when all inputs are consistent.
+    pub final_chain_root: [u8; 32],
+    /// Depth of each link's Merkle proof (padded L1/L(N) tree depth).
+    pub link_depth: usize,
+    /// Verifier-side anchor block seqno: `K` for target_layer=1,
+    /// `T_n = ⌈event_seq / W^n⌉·W^n` for target_layer=n (n ≥ 2).
+    pub anchor_kb_seqno: u64,
+}
+
+/// Build the event-anchoring chain from an event's L1 root up to the chosen
+/// verifier-stored layer root. See the module-level docs for the topology.
+///
+/// This is the single composed entry point used by
+/// `bridge-event-witness-builder`; it deliberately keeps
+/// [`build_layer_n_leaves`] / [`build_layer_n_tree`] private inside this
+/// module so downstream code has a narrow, stable surface.
+pub async fn build_event_anchor_chain(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    target_layer: u8,
+    window_size: u64,
+    thinning_factor_p: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    let w = window_size;
+    match target_layer {
+        1 => build_event_anchor_chain_l1(gql, event_seq, event_l1_root, w, thinning_factor_p).await,
+        n if (2..=MAX_LAYERS as u8).contains(&n) => {
+            build_event_anchor_chain_ln(gql, event_seq, event_l1_root, n, w).await
+        }
+        n => bail!(
+            "target_layer={} out of range: must be in 1..={} (MAX_LAYERS).",
+            n, MAX_LAYERS,
+        ),
+    }
+}
+
+/// Pure boundary math for L1 event anchoring.
+///
+/// Given an event's block seq_no, returns the triple `(H_e, K, hops)`:
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
+///   root of the batch containing `event_seq` is emitted. Per the History-
+///   proofs proposal (§ "Construct the Layer 1 Batch Proof" and the
+///   L1 example), batch `M` covers block heights `[M·W, (M+1)·W − 1]`
+///   and its root `#L1(M)` is stored **in the common section of the
+///   first block of batch M+1**, which sits at height `(M+1)·W`. With
+///   `M = ⌊event_seq/W⌋`, that height is exactly what the code computes.
+///   Note this is *not* `⌈event_seq/W⌉·W`: when `event_seq` is itself
+///   the first block of a batch (a KB, `event_seq % W == 0`), the
+///   ceiling formula returns `event_seq` itself — the tree whose root
+///   sits *there* covers the previous batch `[event_seq − W, event_seq − 1]`
+///   and does NOT include the event. We must advance to the next KB.
+/// * `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` — seq_no of the next thinned
+///   L1 anchor the verifier mirrors on-chain (the verifier stores L1
+///   roots at every W·P-th KB, not every KB). Same "strictly next
+///   multiple" pattern as `H_e`.
+/// * `hops = (K − H_e) / W` — forward-hop rung count between them.
+///
+/// Invariants: `H_e ≤ K`, `(K − H_e) % W == 0`, `hops < P`.
+///
+/// Pub so callers (e.g. `bridge-event-witness-builder`'s auto-escalation
+/// probe) can predict `K` without running the full chain builder. The
+/// live builder ([`build_event_anchor_chain_l1`]) consumes exactly this
+/// triple.
+pub fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
+    let h_e = (event_seq / w) * w + w;
+    let k = (event_seq / (w * p)) * (w * p) + (w * p);
+    let hops = (k - h_e) / w;
+    (h_e, k, hops)
+}
+
+/// Pure boundary math for L2 event anchoring.
+///
+/// Returns `(H_e, T_2, position)`:
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
+///   root of the batch containing `event_seq` is emitted (see
+///   [`l1_anchor_boundaries`] for the derivation).
+/// * `T_2 = ⌊event_seq/W²⌋·W² + W²` — seq_no of the KEY BLOCK where the
+///   L2 root of the L2-batch containing `event_seq` is emitted. Per the
+///   proposal (§ "Layer 2" example), the L2 batch `M₂ = ⌊event_seq/W²⌋`
+///   covers L1 batches `[M₂·W, (M₂+1)·W − 1]` (i.e. block heights
+///   `[M₂·W², (M₂+1)·W² − 1]`), and its root `#L2(M₂)` lives in the
+///   common section of the first block of L2-batch `M₂+1`, at seq_no
+///   `(M₂+1)·W²`. Same "strictly next multiple" pattern as `H_e`: on an
+///   exact `W²` boundary the code advances to the next KB, because the
+///   root sitting at `event_seq` itself covers the *previous* L2 batch.
+/// * `position` — data-leaf index of `H_e` inside the L2 tree at `T_2`:
+///   `position = 2 + (W − 1 − k)` where `k = (T_2 − H_e)/W`. The `+2`
+///   offset accounts for the first two L2 leaves being
+///   `[higher_layer_root, prev_same_layer_root]`, matching the
+///   chronological data-leaf layout of `HistoryBlockData::calculate_root_hash`
+///   in the acki-nacki node. `k < W` always holds because
+///   `H_e ∈ (T_2 − W², T_2]`.
+///
+/// Pub for the same reason as [`l1_anchor_boundaries`].
+pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
+    let h_e = (event_seq / w) * w + w;
+    let w2 = w * w;
+    let t2 = (event_seq / w2) * w2 + w2;
+    let k = (t2 - h_e) / w;
+    let position = 2 + (w - 1 - k) as usize;
+    (h_e, t2, position)
+}
+
+/// Pure boundary math for L(n) event anchoring (n ≥ 2).
+///
+/// Returns the boundary stack `[T_1, T_2, …, T_n]`, each entry being the
+/// seq_no of a KEY BLOCK (*not* a tree):
+/// * `T_1 = H_e = ⌊event_seq/W⌋·W + W` — the KB emitting the L1 root of
+///   the batch containing the event (see [`l1_anchor_boundaries`]).
+/// * `T_m = ⌊event_seq/W^m⌋·W^m + W^m` for `m ≥ 2` — the KB emitting the
+///   L(m) root of the L(m)-batch containing the event. This is the
+///   recursive generalisation of the L1/L2 rule from the History-proofs
+///   proposal: L(m)-batch `M_m = ⌊event_seq/W^m⌋` covers `W` consecutive
+///   L(m−1) batches, and its root `#L(m)(M_m)` is emitted in the common
+///   section of the first block of L(m)-batch `M_m + 1`, at seq_no
+///   `(M_m + 1)·W^m`. Not `⌈event_seq/W^m⌉·W^m`: on an exact `W^m`
+///   boundary the root at `event_seq` covers the *previous* L(m) batch,
+///   so we advance to the next KB.
+///
+/// Each consecutive pair `(T_m, T_{m+1})` describes one vertical rung of
+/// the L(n) chain: the L(m) root at `T_m` is opened at data-leaf position
+/// `2 + (W − 1 − k_m)` of the L(m+1) tree at `T_{m+1}`, where
+/// `k_m = (T_{m+1} − T_m) / W^m ∈ [0, W − 1]`. Chronological data-leaf
+/// ordering follows `HistoryBlockData::calculate_root_hash` in the
+/// acki-nacki node.
+///
+/// Panics on `n == 0`. The caller is expected to bound `n ≤ MAX_LAYERS`.
+///
+/// Pub for the same reason as [`l1_anchor_boundaries`]: auto-probe callers
+/// need to predict `T_n` without running the full chain builder.
+pub fn l_n_anchor_boundaries(event_seq: u64, w: u64, n: u8) -> Vec<u64> {
+    assert!(n >= 1, "l_n_anchor_boundaries: n must be ≥ 1");
+    let mut boundaries = Vec::with_capacity(n as usize);
+    let mut step = w;
+    for _ in 1..=n {
+        let t = (event_seq / step) * step + step;
+        boundaries.push(t);
+        // `step *= w` may overflow past MAX_LAYERS but callers bound n.
+        step = step.saturating_mul(w);
+    }
+    boundaries
+}
+
+/// Horizontal L1 walk from `H_e` to `K` (both W-aligned; K is W·P-aligned).
+/// Emits `hops = (K − H_e)/W` active rungs.
+async fn build_event_anchor_chain_l1(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    w: u64,
+    p: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    let (h_e, k, hops) = l1_anchor_boundaries(event_seq, w, p);
+
+    let mut chain_leaf_value = event_l1_root;
+    let mut active_links: Vec<DenseChainLink> = Vec::with_capacity(hops as usize);
+    let mut link_depth: usize = 0;
+
+    for i in 1..=hops {
+        let seq_i = h_e + i * w;
+        let tree = build_layer1_tree(gql, seq_i, chain_leaf_value, w)
+            .await
+            .with_context(|| {
+                format!("building L1 tree at seq={seq_i} for forward-hop {i}/{hops}")
+            })?;
+        let (root_i, siblings) =
+            chain_proof_builder::build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
+        link_depth = siblings.len();
+        info!(
+            "  L1 hop {}/{}: tree at seq={}, chain_pos={}, root={}",
+            i, hops, seq_i, tree.chain_leaf_position, hex::encode(root_i),
+        );
+        active_links.push(DenseChainLink {
+            active: true,
+            siblings,
+            position: tree.chain_leaf_position,
+            leaf_native: chain_leaf_value,
+        });
+        chain_leaf_value = root_i;
+    }
+
+    // When hops == 0 we produced no rungs and no tree; the caller is
+    // expected to pass in the block_tree_proof depth for inactive padding.
+    // We report `0` here to signal "not observed"; the caller must fall
+    // back to its own known link depth in that case.
+    Ok(EventAnchorChainResult {
+        active_links,
+        final_chain_root: chain_leaf_value,
+        link_depth,
+        anchor_kb_seqno: k,
+    })
+}
+
+/// Generalized vertical stack for L(n) event anchoring (n ≥ 2).
+///
+/// Walks `n − 1` rungs: L1@H_e → L2@T_2 → L3@T_3 → … → L(n)@T_n. Each rung
+/// `m → m+1` builds the L(m+1) tree at `T_{m+1}`, verifies that its data
+/// leaf at `position = 2 + (W − 1 − k_m)` matches the previously produced
+/// root (defence-in-depth against GQL/data drift), then emits the Merkle
+/// opening as a `DenseChainLink`.
+///
+/// Reduces to a single L1→L2 rung when `n == 2` (matches the prior
+/// L2-only implementation byte-for-byte in the shape of `active_links`).
+///
+/// `n` is checked against `MAX_LAYERS` upstream (`build_event_anchor_chain`
+/// dispatch); we assert it here as a defence-in-depth internal invariant.
+async fn build_event_anchor_chain_ln(
+    gql: &GqlClient,
+    event_seq: u64,
+    event_l1_root: [u8; 32],
+    n: u8,
+    w: u64,
+) -> anyhow::Result<EventAnchorChainResult> {
+    ensure!(
+        (2..=MAX_LAYERS as u8).contains(&n),
+        "internal: build_event_anchor_chain_ln called with n={} (must be 2..={})",
+        n, MAX_LAYERS,
+    );
+
+    let boundaries = l_n_anchor_boundaries(event_seq, w, n);
+    // boundaries[i-1] == T_i, so boundaries[0] = H_e (= T_1), boundaries[n-1] = T_n.
+    let h_e = boundaries[0];
+    let t_n = *boundaries.last().unwrap();
+
+    let mut chain_leaf_value = event_l1_root;
+    let mut active_links: Vec<DenseChainLink> = Vec::with_capacity((n - 1) as usize);
+    let mut link_depth: usize = 0;
+    let num_rungs = (n - 1) as usize;
+
+    // Iterate rungs m = 1..n (target layer at each step is m+1).
+    for m_idx in 0..num_rungs {
+        let m = (m_idx + 1) as u8;
+        let target_layer = m + 1;
+        let t_m = boundaries[m_idx];
+        let t_m1 = boundaries[m_idx + 1];
+        // W^m (lower step) and W^(m+1) (this layer's step).
+        let w_m: u64 = w.pow(m as u32);
+        let w_m1: u64 = w.pow(target_layer as u32);
+
+        ensure!(
+            t_m <= t_m1 && (t_m1 - t_m) % w_m == 0,
+            "internal: T_{}={} not W^{}-aligned inside L{} tree at T_{}={} (W={})",
+            m, t_m, m, target_layer, target_layer, t_m1, w,
+        );
+        let k_m = (t_m1 - t_m) / w_m;
+        ensure!(
+            k_m < w,
+            "internal: L{} rung offset k={} exceeds W-1 (W={}) — T_{}={} outside T_{}={}'s window",
+            target_layer, k_m, w, m, t_m, target_layer, t_m1,
+        );
+        let position = 2 + (w - 1 - k_m) as usize;
+
+        // Fetch this layer's prev_same_layer_root (root at T_{m+1} - W^{m+1},
+        // or zero when T_{m+1} == W^{m+1} — the very first L(m+1) boundary).
+        let prev_same_root = if t_m1 > w_m1 {
+            let prev_seq = t_m1 - w_m1;
+            fetch_layer_root(gql, prev_seq, target_layer)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching prev L{} root from block {} for L{} tree at T_{}={} \
+                         (vertical L{}→L{} rung, event_seq={})",
+                        target_layer, prev_seq, target_layer, target_layer, t_m1,
+                        m, target_layer, event_seq,
+                    )
+                })?
+        } else {
+            [0u8; 32]
+        };
+
+        let leaves = build_layer_n_leaves(gql, t_m1, target_layer, prev_same_root, w)
+            .await
+            .with_context(|| {
+                format!(
+                    "building L{} leaves at T_{}={} for vertical L{}→L{} rung",
+                    target_layer, target_layer, t_m1, m, target_layer,
+                )
+            })?;
+
+        ensure!(
+            position < leaves.len(),
+            "internal: L{} rung leaf position {} out of bounds (len={})",
+            target_layer, position, leaves.len(),
+        );
+        if leaves[position] != chain_leaf_value {
+            bail!(
+                "L{} data leaf at position {} = {} does not match chain leaf {} \
+                 (rung L{}→L{}, T_{}={}, T_{}={}, event_seq={}). Either GQL data \
+                 drifted since the previous rung was built, or the boundary stack \
+                 is inconsistent for this event.",
+                target_layer, position,
+                hex::encode(leaves[position]),
+                hex::encode(chain_leaf_value),
+                m, target_layer,
+                m, t_m, target_layer, t_m1,
+                event_seq,
+            );
+        }
+
+        let (root, siblings) = chain_proof_builder::build_tree_and_proof(&leaves, position);
+        link_depth = siblings.len();
+        info!(
+            "L{}→L{} rung: tree at T_{}={}, T_{}={} at data-leaf position {} (k={}), \
+             computed L{} root = {}",
+            m, target_layer, target_layer, t_m1, m, t_m, position, k_m,
+            target_layer, hex::encode(root),
+        );
+
+        active_links.push(DenseChainLink {
+            active: true,
+            siblings,
+            position,
+            leaf_native: chain_leaf_value,
+        });
+        chain_leaf_value = root;
+    }
+
+    // Silence unused-var warning when n == 2 (h_e only appears in log context above).
+    let _ = h_e;
+
+    Ok(EventAnchorChainResult {
+        active_links,
+        final_chain_root: chain_leaf_value,
+        link_depth,
+        anchor_kb_seqno: t_n,
+    })
+}
+
 /// Fetch a specific layer's root hash from a block's `history_proofs` via GQL.
 ///
 /// `pub` so integration tests and downstream binaries can probe individual
@@ -672,4 +1040,206 @@ async fn fetch_block_leaf_hash_from_boc(gql: &GqlClient, seqno: u64) -> anyhow::
         &block.envelope_hash,
         &block.tracked_ext_out_messages_root,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-arithmetic tests for the event-anchor boundary helpers. The
+    //! live GQL-consuming paths (`build_event_anchor_chain_l1`/`_l2`) are
+    //! covered by the manual E2E in `E2E_RUN_STATE_2026_08_15.md`; adding
+    //! a mock GqlClient is deferred (would need a trait refactor).
+    use super::{l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries};
+
+    // Production values on shellnet: W = 128, P = 4.
+    const W: u64 = 128;
+    const P: u64 = 4;
+
+    // ---- L1 -----------------------------------------------------------
+
+    #[test]
+    fn l1_event_at_zero_snaps_to_first_tree() {
+        // event_seq = 0 → H_e = W, K = W·P (both smallest positive boundaries).
+        let (h_e, k, hops) = l1_anchor_boundaries(0, W, P);
+        assert_eq!(h_e, W);
+        assert_eq!(k, W * P);
+        assert_eq!(hops, P - 1); // (W·P − W) / W = P − 1
+    }
+
+    #[test]
+    fn l1_event_exactly_on_h_e_still_climbs_next_tree() {
+        // event_seq == W is *inside* the L1 tree at 2W (⌈W/W⌉·W = W … wait,
+        // actually H_e = (W/W)*W + W = 2W). The event sits at the tail of
+        // tree 2W. Bumped-to-next-W behaviour is intentional — matches the
+        // circuit's convention that H_e is *strictly greater than* the
+        // event block's seq.
+        let (h_e, k, hops) = l1_anchor_boundaries(W, W, P);
+        assert_eq!(h_e, 2 * W);
+        assert_eq!(k, W * P);
+        assert_eq!(hops, P - 2);
+    }
+
+    #[test]
+    fn l1_event_exactly_on_k_lands_next_thinned_anchor() {
+        // event_seq == W·P → H_e = W·P + W, K = 2·W·P.
+        let (h_e, k, hops) = l1_anchor_boundaries(W * P, W, P);
+        assert_eq!(h_e, W * P + W);
+        assert_eq!(k, 2 * W * P);
+        assert_eq!(hops, P - 1);
+    }
+
+    #[test]
+    fn l1_shellnet_run_2026_08_15_boundaries() {
+        // Regression pin for the 2026-08-15 shellnet E2E: event at
+        // seq_no=8251308 → H_e = K = 8251392, hops = 0 (event happened
+        // to land on a W·P-aligned tree).
+        let (h_e, k, hops) = l1_anchor_boundaries(8_251_308, W, P);
+        assert_eq!(h_e, 8_251_392);
+        assert_eq!(k, 8_251_392);
+        assert_eq!(hops, 0);
+    }
+
+    #[test]
+    fn l1_hops_bounded_by_p_minus_one() {
+        // For any event_seq, hops = (K − H_e)/W ∈ [0, P − 1]. Sweep an
+        // arbitrary window to double-check the invariant holds.
+        for offset in 0..(W * P * 3) {
+            let (h_e, k, hops) = l1_anchor_boundaries(offset, W, P);
+            assert_eq!(k % (W * P), 0, "K must be W·P-aligned (event_seq={offset})");
+            assert_eq!(h_e % W, 0, "H_e must be W-aligned (event_seq={offset})");
+            assert!(h_e <= k, "H_e must not exceed K (event_seq={offset})");
+            assert!(hops < P, "hops < P must hold (event_seq={offset}, hops={hops})");
+            assert_eq!((k - h_e) / W, hops);
+        }
+    }
+
+    // ---- L2 -----------------------------------------------------------
+
+    #[test]
+    fn l2_event_at_zero_snaps_to_first_l2_tree() {
+        // event_seq = 0 → H_e = W, T_2 = W², k = (W² − W)/W = W − 1.
+        // position = 2 + (W − 1 − (W − 1)) = 2 (the first data-leaf slot,
+        // corresponding to the earliest L1 tree in this L2 window).
+        let (h_e, t2, position) = l2_anchor_boundaries(0, W);
+        assert_eq!(h_e, W);
+        assert_eq!(t2, W * W);
+        assert_eq!(position, 2);
+    }
+
+    #[test]
+    fn l2_event_at_last_l1_tree_in_window_lands_on_final_slot() {
+        // event_seq = W² − W − 1 → H_e = W² − W → T_2 = W², k = 1,
+        // position = 2 + (W − 1 − 1) = W. This is the *last* data-leaf
+        // slot before the L2 tree pads to next-pow2.
+        let event_seq = W * W - W - 1;
+        let (h_e, t2, position) = l2_anchor_boundaries(event_seq, W);
+        assert_eq!(h_e, W * W - W);
+        assert_eq!(t2, W * W);
+        assert_eq!(position, W as usize);
+    }
+
+    #[test]
+    fn l2_event_at_w_squared_climbs_to_next_l2_tree() {
+        // event_seq = W² → H_e = W² + W, T_2 = 2·W², k = W − 1,
+        // position = 2 + 0 = 2. Event is the "just-past-boundary" case:
+        // it's the first block in the new L2 window, and its L1 tree sits
+        // at the earliest data-leaf slot (position 2) of the L2 tree at 2·W².
+        let (h_e, t2, position) = l2_anchor_boundaries(W * W, W);
+        assert_eq!(h_e, W * W + W);
+        assert_eq!(t2, 2 * W * W);
+        assert_eq!(position, 2);
+    }
+
+    #[test]
+    fn l2_position_invariants_across_full_window() {
+        // Sweep across an entire L2 window and verify position ∈ [2, W+1].
+        let base = 5 * W * W; // arbitrary later window
+        for offset in 0..(W * W) {
+            let (h_e, t2, position) = l2_anchor_boundaries(base + offset, W);
+            assert_eq!(t2 % (W * W), 0, "T_2 must be W²-aligned");
+            assert_eq!(h_e % W, 0, "H_e must be W-aligned");
+            assert!(h_e <= t2, "H_e must not exceed T_2");
+            assert!(
+                position >= 2 && position <= (W + 1) as usize,
+                "position {} out of [2, W+1] (event_seq={})",
+                position, base + offset,
+            );
+        }
+    }
+
+    // ---- L(N) ---------------------------------------------------------
+
+    #[test]
+    fn ln_event_at_zero_boundaries_are_pure_powers_of_w() {
+        // event_seq = 0 → T_i = W^i for i = 1..=5.
+        let boundaries = l_n_anchor_boundaries(0, W, 5);
+        assert_eq!(boundaries.len(), 5);
+        assert_eq!(boundaries[0], W);
+        assert_eq!(boundaries[1], W * W);
+        assert_eq!(boundaries[2], W * W * W);
+        assert_eq!(boundaries[3], W * W * W * W);
+        // W^5 is well within u64 range for W = 128 (128^5 ≈ 3.4 × 10^10).
+        assert_eq!(boundaries[4], W.pow(5));
+    }
+
+    #[test]
+    fn ln_agrees_with_l1_and_l2_helpers() {
+        // The dedicated L1 and L2 helpers are the authoritative reference
+        // for the first two entries. Sweep a range of event seqs and check.
+        for offset in [0u64, 1, W - 1, W, W + 1, W * W - 1, W * W, 5 * W * W + 42] {
+            let boundaries = l_n_anchor_boundaries(offset, W, 3);
+            let (h_e_l1, _, _) = l1_anchor_boundaries(offset, W, P);
+            let (h_e_l2, t2, _) = l2_anchor_boundaries(offset, W);
+            assert_eq!(boundaries[0], h_e_l1, "T_1 mismatch (event_seq={offset})");
+            assert_eq!(boundaries[0], h_e_l2, "T_1 mismatch vs L2 (event_seq={offset})");
+            assert_eq!(boundaries[1], t2, "T_2 mismatch (event_seq={offset})");
+        }
+    }
+
+    #[test]
+    fn ln_rung_invariants_across_full_l3_window() {
+        // For n = 3 boundaries [T_1, T_2, T_3], each rung m→m+1 must satisfy
+        // k_m = (T_{m+1} - T_m) / W^m ∈ [0, W-1], and position = 2 + (W-1-k_m)
+        // must lie in [2, W+1]. Sweep an arbitrary L3 window.
+        let base = 3 * W.pow(3); // arbitrary later L3 window
+        // W^3 = 128^3 = 2_097_152 — too many to sweep exhaustively; take a
+        // representative stride.
+        let step = W * W / 8; // 2048 samples per L3 window
+        let mut offset = 0u64;
+        while offset < W.pow(3) {
+            let boundaries = l_n_anchor_boundaries(base + offset, W, 3);
+            for m_idx in 0..2 {
+                let t_m = boundaries[m_idx];
+                let t_m1 = boundaries[m_idx + 1];
+                let w_m = W.pow((m_idx + 1) as u32);
+                assert!(t_m <= t_m1, "T_{} > T_{} (event_seq={})", m_idx + 1, m_idx + 2, base + offset);
+                assert_eq!(
+                    (t_m1 - t_m) % w_m,
+                    0,
+                    "T_{} − T_{} not W^{}-aligned",
+                    m_idx + 2, m_idx + 1, m_idx + 1,
+                );
+                let k_m = (t_m1 - t_m) / w_m;
+                assert!(k_m < W, "k_{} = {} exceeds W-1 (event_seq={})", m_idx + 1, k_m, base + offset);
+                let position = 2 + (W - 1 - k_m) as usize;
+                assert!(
+                    position >= 2 && position <= (W + 1) as usize,
+                    "L{} rung position {} out of [2, W+1]",
+                    m_idx + 2, position,
+                );
+            }
+            offset += step;
+        }
+    }
+
+    #[test]
+    fn ln_event_on_w_cubed_boundary_climbs_next_l3_tree() {
+        // event_seq = W³ exactly → T_1 = W³ + W, T_2 = W³ + W², T_3 = 2·W³.
+        // Rung 1: k_1 = (T_2 - T_1)/W = (W² - W)/W = W - 1, position = 2.
+        // Rung 2: k_2 = (T_3 - T_2)/W² = (W³ - W²)/W² = W - 1, position = 2.
+        let w3 = W.pow(3);
+        let boundaries = l_n_anchor_boundaries(w3, W, 3);
+        assert_eq!(boundaries[0], w3 + W);
+        assert_eq!(boundaries[1], w3 + W * W);
+        assert_eq!(boundaries[2], 2 * w3);
+    }
 }

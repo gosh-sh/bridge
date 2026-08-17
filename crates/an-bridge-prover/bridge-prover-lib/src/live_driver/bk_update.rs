@@ -245,12 +245,12 @@ pub(super) async fn drive_next_bk_update(
             }
         }
     };
-    let primary_proof_gen_ms = t_upd_proof.elapsed().as_millis() as u64;
+    let attestation_proof_gen_ms = t_upd_proof.elapsed().as_millis() as u64;
     info!(
         "bk-update {}: {} proof generated in {} ms",
         upd_seqno,
         fin_type.as_str(),
-        primary_proof_gen_ms,
+        attestation_proof_gen_ms,
     );
 
     // The pre-refactor daemon assembled an `ipc::BkUpdateRequest` here; we
@@ -284,6 +284,6 @@ pub(super) async fn drive_next_bk_update(
         transcript_kind: transcript,
         attestation_proof: upd_proof.proof_bytes,
         new_pubkeys,
-        primary_proof_gen_ms,
+        attestation_proof_gen_ms,
     }))
 }

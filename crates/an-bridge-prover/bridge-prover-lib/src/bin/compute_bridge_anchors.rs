@@ -25,12 +25,12 @@
 //! Defaults:
 //!   endpoint       = $BRIDGE_GQL_ENDPOINT (or shellnet public GraphQL)
 //!   bk-set-config  = $BRIDGE_BK_SET_CONFIG (or ../bk_set.shellnet.json)
-//!   seed-seqno     = latest already-produced `W*P = 1024` boundary at or below
+//!   seed-seqno     = latest already-produced `W*P = 512` boundary at or below
 //!                    chain head (`--at-head` forces this even if --seed-seqno
 //!                    was passed)
 //!
-//! `--seed-seqno` must be a multiple of `1024` (shellnet bundle boundary
-//! `W*P = 128*8`).
+//! `--seed-seqno` must be a multiple of `512` (shellnet bundle boundary
+//! `W*P = 128*4`).
 
 use std::path::PathBuf;
 
@@ -63,7 +63,10 @@ fn le_repr_to_solidity_be_hex(le_repr: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(be))
 }
 
-const BUNDLE_BOUNDARY: u64 = 128 * 8; // W * P on shellnet.
+// Bundle boundary = W * P. Sourced from the single-source-of-truth constants
+// so this can't drift when either W or P is changed.
+const BUNDLE_BOUNDARY: u64 = bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64
+    * bridge_prover_lib::THINNING_FACTOR_P;
 
 const DEFAULT_ENDPOINT: &str = "https://shellnet.ackinacki.org/graphql";
 const DEFAULT_BK_SET_CONFIG_RELPATH: &str = "../bk_set.shellnet.json";

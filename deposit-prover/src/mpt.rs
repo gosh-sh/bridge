@@ -127,7 +127,7 @@ pub async fn generate_transaction_proof(
     block_number: u64,
     tx_index: u64,
 ) -> Result<TransactionProof> {
-    use axiom_eth::providers::transaction::{get_transaction_rlp, get_tx_key_from_index};
+    use axiom_eth::providers::transaction::get_tx_key_from_index;
     use cita_trie::{MemoryDB, PatriciaTrie, Trie};
     use hasher::HasherKeccak;
 
@@ -159,15 +159,19 @@ pub async fn generate_transaction_proof(
     let mut target_tx_bytes = None;
     for (idx, tx) in block.transactions.iter().enumerate() {
         let key = get_tx_key_from_index(idx);
-        // ethers::types::Transaction is the same shape axiom-eth expects; convert
-        // via serde round-trip is unnecessary — cast through ethers_core by
-        // RLP-encoding with axiom's helper after a cheap clone into core types.
-        let core_tx: ethers_core::types::Transaction =
-            serde_json::from_value(serde_json::to_value(tx).context("tx serialize")?)
-                .context("tx deserialize as ethers_core")?;
-        let tx_rlp = get_transaction_rlp(&core_tx)
-            .context(format!("Failed to RLP-encode tx {}", idx))?
-            .to_vec();
+        // Use the node's canonical signed-tx wire bytes as the trie leaf. This is
+        // the exact encoding the block's `transactionsRoot` commits to for EVERY
+        // tx type (legacy / 2930 / 1559 / 4844-blob / 7702-setcode). Re-encoding
+        // from the JSON tx object via a type-specific RLP encoder silently
+        // mis-handles blob (type 3, sidecar-stripped envelope) and setcode
+        // (type 4, `authorization_list`) transactions, which makes the
+        // reconstructed root diverge from the header whenever a congested live
+        // block contains one of those — even though our own deposit tx is 1559.
+        let raw: ethers::types::Bytes = provider
+            .request("eth_getRawTransactionByHash", [tx.hash])
+            .await
+            .context(format!("Failed to fetch raw tx {} ({:?})", idx, tx.hash))?;
+        let tx_rlp = raw.to_vec();
         if idx == tx_index as usize {
             target_tx_bytes = Some(tx_rlp.clone());
         }

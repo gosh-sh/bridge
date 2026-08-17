@@ -13,9 +13,7 @@
 //! daemon, which has no node connection, then loads that file on cold start
 //! and applies the same seed — guaranteeing that both mirrors share the same
 //! anchor point (the first key block at seq_no = W, one entry per active
-//! layer) and from there advance in lockstep via verified proofs. (Phase 1
-//! gap: the prover had this anchor in state but the verifier did not, so the
-//! verifier started one key block behind.)
+//! layer) and from there advance in lockstep via verified proofs. 
 //!
 //! The seed file is written **once** on cold start. Subsequent restarts pick
 //! up persisted `BridgeState` directly and never re-read the seed.

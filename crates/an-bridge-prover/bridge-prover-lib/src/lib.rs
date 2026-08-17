@@ -26,5 +26,21 @@ pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 ///   * `P` must divide `W = crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE`
 ///     so the on-chain `layerWindows[L≥2]` cadence is unchanged.
 ///
-/// Current test config: `W = 128`, `P = 4`. 
-pub const THINNING_FACTOR_P: u64 = 4;
+/// Current config: `W = 128`, `P = 8` (bundle stride `W·P = 1024`).
+///
+/// Re-applied 2026-08-17 as prep for Deploy #7 on Sepolia. Earlier same-day
+/// attempt was reverted because live Deploy #6's on-chain
+/// `expectedPrevAnchor(1)` was fossilized under P=4 arithmetic and a
+/// cold-restart at P=8 would have reverted the first `verifyBlock` with
+/// `PrevAnchorMismatch`. There's no in-place P transition on a live bridge —
+/// a P bump requires a fresh deploy at the new P. Deploy #7 is a fresh
+/// bridge at fresh W·P=1024-aligned anchors, so this constant is now
+/// consistent with the on-chain genesis stamp again.
+///
+/// Cadence at P=8 / shellnet 3 b/s: 1024 seq_nos / bundle → 341 s chain-time
+/// vs ~597 s prover-time (warm cache). Prover still ~1.75× slower than
+/// chain; not real-time sustainable but survives long enough for a single
+/// withdrawal E2E from a fresh-head seed. Spec §1.2 notes P=8 is the
+/// recommended setting within the `MAX_CHAIN_LEN=11 ∧ W=128` ceiling;
+/// steady-state throughput requires a producer-side W bump or faster HW.
+pub const THINNING_FACTOR_P: u64 = 8;

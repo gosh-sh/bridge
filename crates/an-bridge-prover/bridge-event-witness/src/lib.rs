@@ -19,18 +19,31 @@
 //!   * `block_tree_proof`  — Merkle proof from `block_leaf` to `root_1`
 //!   * `anchor`             — verifier-state-derived layer hash + dense chain
 //!
+//! ### Enrichment library API
+//!
+//! [`enrich::enrich_witness`] — takes a loaded `PrivateWitness` +
+//! `BridgeState` + `GqlClient` and returns an enriched witness plus a
+//! summary struct. This is the in-process entry point used by both the
+//! `bridge-event-witness-builder` binary and by the withdraw-E2E
+//! orchestrator embedded in `bridge-relayer-daemon`.
+//!
 //! ### Binaries
 //!
 //!   * `bridge-event-private-witness-export` (`bin/export.rs`) — hermetic
 //!     CLI wrapper over [`export_from_event_boc_base64`]. No GQL, no state.
-//!   * `bridge-event-witness-builder` (`bin/build.rs`) — daemon-side
-//!     enrichment: reads a partial `PrivateWitness` JSON, queries GQL +
-//!     bridge state, writes an enriched `PrivateWitness` JSON the Halo2
-//!     prover can consume.
+//!   * `bridge-event-witness-builder` (`bin/build.rs`) — thin CLI wrapper
+//!     over [`enrich::enrich_witness`]. Handles argument parsing, state
+//!     file / partial JSON loading, and output serialization.
 
 pub mod boc_walk;
+pub mod enrich;
 pub mod event_decode;
 pub mod schema;
+
+pub use enrich::{
+    enrich_witness, AnchorLayerMode, EnrichSummary, EnrichedWitness,
+    HISTORY_WINDOW_SIZE, THINNING_FACTOR_P,
+};
 
 use anyhow::{Context, Result};
 use tvm_block::{Deserializable, Message, Serializable};

@@ -427,7 +427,7 @@ mod tests {
             transcript_kind: TranscriptKind::Blake2b,
             attestation_proof: vec![],
             layer_hashes_proof: vec![],
-            primary_proof_gen_ms: 0,
+            attestation_proof_gen_ms: 0,
             layer_proof_gen_ms: 0,
             state_layer_hashes: vec![],
         }
@@ -466,7 +466,7 @@ mod tests {
             transcript_kind: TranscriptKind::Blake2b,
             attestation_proof: vec![],
             new_pubkeys: HashMap::new(),
-            primary_proof_gen_ms: 0,
+            attestation_proof_gen_ms: 0,
         }
     }
 

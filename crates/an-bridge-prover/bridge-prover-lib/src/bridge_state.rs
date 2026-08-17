@@ -2,8 +2,7 @@
 //!
 //! Both prover and verifier daemons hold this exact same shape so that the
 //! verifier's view is a byte-for-byte mirror of what the Ethereum contract
-//! would store. See `bridge-event-prove-circuit/README.md` ("Full Contract
-//! Sketch") for the Solidity-side reference.
+//! would store.
 //!
 //! Per-layer rolling window of width `W = HISTORY_PROOF_WINDOW_SIZE`:
 //!   * `data[W]`       — most recent layer-root hashes (circular buffer)
@@ -146,13 +145,9 @@ pub struct BridgeState {
     pub stored_last_seen_block_height: u64,
     /// True once the first key block has been applied.
     pub initialized: bool,
-    /// Schema version (bumped from v1's flat `Vec<LayerHashEntry>` shape).
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
     /// Ring of the most recent `RECENT_BUNDLES_CAP` self-verification outcomes
     /// (oldest at front, newest at back). Written by `bridge-prover-daemon`
-    /// after each Circuit 1a + Circuit 2 generation cycle. Empty on schema v2
-    /// state files thanks to `#[serde(default)]`.
+    /// after each Circuit 1a + Circuit 2 generation cycle. 
     #[serde(default)]
     pub recent_bundles: VecDeque<BundleResult>,
 
@@ -162,13 +157,10 @@ pub struct BridgeState {
     ///
     /// Updates are gated through [`BridgeState::apply_bk_set_update`] which
     /// requires `update_seq_no > stored_last_bk_set_update_seq_no` so replays
-    /// and out-of-order applies are rejected. Older schema files (v3 and
-    /// below) deserialize this as zero via `#[serde(default)]`.
+    /// and out-of-order applies are rejected. 
     #[serde(default)]
     pub stored_last_bk_set_update_seq_no: u64,
 }
-
-fn default_schema_version() -> u32 { 4 }
 
 /// Snapshot of one on-chain `HistoryWindow` as returned by
 /// `AckiNackiBridge.getLayerWindow(uint8)` (added 2026-08). Neutral of
@@ -202,8 +194,6 @@ pub struct ContractFullState {
 }
 
 impl BridgeState {
-    /// Create an uninitialized state with `MAX_LAYERS` zero windows of the
-    /// given width.
     pub fn new(window_size: usize) -> Self {
         Self {
             window_size,
@@ -212,7 +202,6 @@ impl BridgeState {
             stored_last_seen_block_seq_no: 0,
             stored_last_seen_block_height: 0,
             initialized: false,
-            schema_version: 4,
             recent_bundles: VecDeque::new(),
             stored_last_bk_set_update_seq_no: 0,
         }
@@ -220,7 +209,7 @@ impl BridgeState {
 
     /// Apply a verified bk-set transition to the contract-mirror state.
     ///
-    /// This is the off-chain analogue of the future Solidity
+    /// This is the off-chain analogue of the  Solidity
     /// `applyBkSetUpdate` entry point: same inputs, same checks. It is
     /// commitment-only by design — the full pubkey table is the prover's
     /// private working set (see `ProverBkSet`) and never touches this state
@@ -295,9 +284,7 @@ impl BridgeState {
     /// applied; erroring if state is already initialized guarantees the
     /// commitment field has exactly two writers over the lifetime of a
     /// state file: this method (genesis) and `apply_bk_set_update`
-    /// (rotations). `append_bundle` does not touch it — mirroring
-    /// Solidity's `verifyBlock`, which reads the commitment but never
-    /// writes it.
+    /// (rotations). 
     pub fn initialize_bk_set_commitment(
         &mut self,
         commitment: [u8; 32],
@@ -491,7 +478,6 @@ impl BridgeState {
             // Contract does not persist L2 height — leave at 0. See docstring.
             stored_last_seen_block_height: 0,
             initialized: cfs.last_seen_block_seq_no > 0,
-            schema_version: 4,
             recent_bundles: VecDeque::new(),
             stored_last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
         })
@@ -676,10 +662,12 @@ mod tests {
     }
 
     #[test]
-    fn v3_state_file_deserializes_with_default_bk_update_seqno() {
-        // Schema v3 state JSON (without `stored_last_bk_set_update_seq_no`)
-        // must still load cleanly with the new field defaulting to 0.
-        let v3_json = r#"{
+    fn legacy_state_file_deserializes_with_defaults() {
+        // Legacy state JSON (without `stored_last_bk_set_update_seq_no` /
+        // `recent_bundles`, and with a now-removed `schema_version` field)
+        // must still load cleanly: the missing fields default to 0/empty
+        // and the unknown `schema_version` is silently dropped.
+        let legacy_json = r#"{
             "window_size": 4,
             "layer_windows": [],
             "stored_bk_set_commitment": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
@@ -688,7 +676,7 @@ mod tests {
             "initialized": true,
             "schema_version": 3
         }"#;
-        let st: BridgeState = serde_json::from_str(v3_json).unwrap();
+        let st: BridgeState = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(st.stored_last_bk_set_update_seq_no, 0);
         assert!(st.recent_bundles.is_empty());
     }
@@ -769,7 +757,6 @@ mod tests {
         // Contract does not persist L2 height — see docstring.
         assert_eq!(dst.stored_last_seen_block_height, 0);
         assert!(dst.initialized);
-        assert_eq!(dst.schema_version, 4);
         // Byte-for-byte parity on every window slot.
         for i in 0..MAX_LAYERS {
             let sw = &src.layer_windows[i];

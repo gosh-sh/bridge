@@ -154,12 +154,12 @@ pub(super) async fn drive_next_bundle(
             )
         }
     };
-    let primary_proof_gen_ms = t_primary.elapsed().as_millis() as u64;
+    let attestation_proof_gen_ms = t_primary.elapsed().as_millis() as u64;
     info!(
         "key block {}: {} proof generated in {} ms",
         target_seqno,
         fin_type.as_str(),
-        primary_proof_gen_ms,
+        attestation_proof_gen_ms,
     );
 
     // ---- Circuit 2: layer hashes movement proof ----
@@ -220,7 +220,7 @@ pub(super) async fn drive_next_bundle(
         transcript_kind: transcript,
         attestation_proof: primary_proof.proof_bytes,
         layer_hashes_proof: layer_proof.proof_bytes,
-        primary_proof_gen_ms,
+        attestation_proof_gen_ms,
         layer_proof_gen_ms,
         state_layer_hashes,
     }))

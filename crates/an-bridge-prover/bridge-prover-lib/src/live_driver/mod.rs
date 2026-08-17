@@ -983,13 +983,14 @@ mod tests {
 
     #[test]
     fn seed_policy_explicit_validates_alignment() {
-        // Explicit seed must be > 0 and divisible by W*P = 512 in the
-        // default config. 1024 is fine; 1025 is not; 0 is not.
+        // Explicit seed must be > 0 and divisible by W*P = 1024 in the
+        // default config (P=8 since 2026-08-17, Deploy #7 prep). 2048 is
+        // fine; 1025 is not; 0 is not.
         let step = HISTORY_WINDOW_SIZE * crate::THINNING_FACTOR_P;
-        assert_eq!(step, 512);
+        assert_eq!(step, 1024);
         // We can't construct a real GqlClient / KeyManager in a unit test,
         // so we only sanity-check the alignment math the ctor uses.
-        assert!(1024 % step == 0);
+        assert!(2048 % step == 0);
         assert!(1025 % step != 0);
     }
 

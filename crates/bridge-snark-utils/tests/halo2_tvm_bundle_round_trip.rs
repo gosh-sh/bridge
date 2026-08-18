@@ -2,7 +2,7 @@
 //!
 //! Validates the **3-operand** wire format consumed by the AN-side
 //! `ZKHALO2VERIFYWITHVK` opcode (see `crate::halo2_tvm_bundle` and
-//! `docs/zkhalo2verifywithvk_reference.md`).
+//! `docs/archive/zkhalo2verifywithvk_reference.md`).
 //!
 //! ## What this test proves
 //!

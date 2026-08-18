@@ -57,7 +57,7 @@
 //!   interim.
 //! - The AN-side `TokenBridge.finalizeDeposit` entry point itself is on the
 //!   partner branch `poseidon_dex_with_verify` (see
-//!   `docs/zkhalo2verifywithvk_reference.md`).
+//!   `docs/archive/zkhalo2verifywithvk_reference.md`).
 
 pub mod an_config;
 pub mod daemon;

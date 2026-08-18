@@ -92,7 +92,7 @@ use crate::{
 /// column), this makes the VK fully **witness-independent** — a single embedded
 /// VK verifies every real deposit regardless of bridge address or MPT depth.
 /// No axiom-eth fork change is needed (upstream). See
-/// `docs/deposit_vk_witness_independence.md`.
+/// `docs/archive/deposit_vk_witness_independence.md`.
 ///
 /// Must be `>=` every real deposit's `used_capacity` (measured: 1-node = 11,
 /// 3-node = 21, ~5/node; the `max_depth = 10` worst case is ~55-60) and must

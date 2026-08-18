@@ -50,10 +50,10 @@ See header of $0 for full docs.
 Example manifest (scripts/partner_packs/circuit4_for_alina.manifest):
 
     # Files to include (repo-relative paths). Optional 'src => dest' rename.
-    docs/an_partner_questions_circuit4_2026-05-17.md
-    docs/an_partner_circuit4_concept_response_2026-05-21.md
-    docs/an_partner_circuit4_alina_replies_2026-05-21.md => 03_alina_replies_2026-05-21.md
-    docs/an_partner_integration_plan.md
+    docs/archive/an_partner_questions_circuit4_2026-05-17.md
+    docs/archive/an_partner_circuit4_concept_response_2026-05-21.md
+    docs/archive/an_partner_circuit4_alina_replies_2026-05-21.md => 03_alina_replies_2026-05-21.md
+    docs/archive/an_partner_integration_plan.md
 
     ---
     ## Reading order

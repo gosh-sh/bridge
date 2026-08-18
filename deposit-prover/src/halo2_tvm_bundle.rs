@@ -59,7 +59,7 @@
 //! byte-for-byte. v2 (`version = 2`) reuses `header[10]` as a [`CircuitShape`]
 //! discriminator so an RLC / `EthCircuitImpl`-shaped (deposit) VK can be
 //! carried; the opcode-side v2 reader is blocked on the gosh halo2 fork bump
-//! (see `docs/deposit_finalize_vk_gap_2026-05-28.md`).
+//! (see `docs/archive/deposit_finalize_vk_gap_2026-05-28.md`).
 //!
 //! All length prefixes are `u32` LE because (a) VKs are always well
 //! under 4 GB and (b) it keeps the parser branch-free vs varints.
@@ -123,7 +123,7 @@ pub const VK_BLOB_VERSION: u8 = 1;
 /// reconstructing the constraint system on `VerifyingKey::read`. It exists
 /// to carry **RLC / `EthCircuitImpl`-shaped** deposit VKs, which the
 /// single-phase `BaseCircuitBuilder` cannot reconstruct (see
-/// `docs/deposit_finalize_vk_gap_2026-05-28.md`). The matching opcode-side
+/// `docs/archive/deposit_finalize_vk_gap_2026-05-28.md`). The matching opcode-side
 /// reader is blocked on the gosh halo2 fork bump (todo o3a).
 pub const VK_BLOB_VERSION_V2: u8 = 2;
 

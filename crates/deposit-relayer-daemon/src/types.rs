@@ -224,7 +224,7 @@ pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String,
 /// The three operands the AN-side `ZKHALO2VERIFYWITHVK` opcode consumes,
 /// plus the decoded public inputs for building the `finalizeDeposit` call.
 ///
-/// Stack ABI (per `docs/zkhalo2verifywithvk_reference.md`):
+/// Stack ABI (per `docs/archive/zkhalo2verifywithvk_reference.md`):
 ///
 /// ```text
 /// bottom: vk_cell            ← `vk_blob`        (VkBlob v2 RLC for deposit)

@@ -26,7 +26,7 @@ import "./helpers/UsdcTestLib.sol";
 ///
 /// Uses a mock `IBridgeWithdrawalVerifier` because the R15 gnark wrapper is
 /// still an identity stub — tracked as Phase 8 of
-/// `docs/an_partner_integration_plan.md`. Once the real Halo2-in-gnark
+/// `docs/archive/an_partner_integration_plan.md`. Once the real Halo2-in-gnark
 /// verifier lands, this suite stays unchanged and a sibling E2E suite picks
 /// up real bound proofs.
 ///

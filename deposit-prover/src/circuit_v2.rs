@@ -830,7 +830,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // `TokenBridge.finalizeDeposit` checks that public input against the bridge's
         // configured deposit-source address. Keeping the address out of the fixed
         // column makes the VK witness-independent (see
-        // `docs/deposit_vk_witness_independence.md`).
+        // `docs/archive/deposit_vk_witness_independence.md`).
         assert_eq!(
             address_bytes.len(),
             20,

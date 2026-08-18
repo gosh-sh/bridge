@@ -17,7 +17,7 @@
 #   `powersOfTau28_hez_final.ptau`). Test SRS retired.
 
 # Top-level reference docs (consumer-side / producer-side reference + opcode reference).
-docs/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
+docs/archive/zkhalo2verifywithvk_reference.md => 01_zkhalo2verifywithvk_reference.md
 
 # Producer-side ref impl (the bytes you'll see on the wire are produced by this).
 crates/bridge-snark-utils/src/halo2_tvm_bundle.rs => 02_producer_halo2_tvm_bundle.rs
@@ -198,5 +198,5 @@ cargo test -p tvm_vm --lib zk_halo2_with_vk_bundle     # 9 VkBlob unit tests
   (consumer side).
 - `tvm-sdk/docs/vm-instructions/acki-nacki-vm-instructions.md` —
   canonical TVM-instructions doc entry (3-operand ABI documented).
-- `acki-nacki-bridge/docs/zkhalo2verifywithvk_reference.md` —
+- `acki-nacki-bridge/docs/archive/zkhalo2verifywithvk_reference.md` —
   producer-side integration reference (this pack's `01_…`).

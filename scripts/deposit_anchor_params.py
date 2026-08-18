@@ -6,7 +6,7 @@ The deposit proof binds the event to a block whose header hashes to public
 inputs #9/#10, but it cannot show that block is on the canonical chain — a
 privately mined block with a fabricated event proves equally well. So the AN
 bridge gates `finalizeDeposit` on an anchor set that someone populates from
-outside the proof (BC-D01; see docs/reviews/deposit_circuit_audit_2026-08-03.md).
+outside the proof (BC-D01; see docs/archive/reviews/deposit_circuit_audit_2026-08-03.md).
 
 Whoever holds that key is asserting canonicality, which means two obligations
 that no contract can enforce: read the hash from a source independent of the

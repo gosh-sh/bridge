@@ -34,5 +34,5 @@ else
   echo "  skip: set SEPOLIA_RPC + BRIDGE_ADDRESS for live anchor check"
 fi
 
-echo "[4/4] Manual steps — docs/production_plan.md Phase 1.3–1.5"
+echo "[4/4] Manual steps — docs/archive/production_plan.md Phase 1.3–1.5"
 echo "Done."

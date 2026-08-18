@@ -1,5 +1,5 @@
 {
-  "_comment": "Canonical Sepolia block hashes for every block a fixture witness references, read from eth_getBlockByNumber on 2026-07-30. tests/fixture_headers.rs asserts keccak(block_header_rlp) matches, so a witness can never again ship a header with a consensus field silently dropped (see docs/reviews/pr20_review_2026-07-29.md R2). Refresh with scripts/recanonicalize_fixture_headers.py.",
+  "_comment": "Canonical Sepolia block hashes for every block a fixture witness references, read from eth_getBlockByNumber on 2026-07-30. tests/fixture_headers.rs asserts keccak(block_header_rlp) matches, so a witness can never again ship a header with a consensus field silently dropped (see docs/archive/reviews/pr20_review_2026-07-29.md R2). Refresh with scripts/recanonicalize_fixture_headers.py.",
   "chain_id": 11155111,
   "blocks": {
     "11025192": "0x34fbf8176bf9d318a360f2106568446a81ba2a460e9f4a32b9b263baa25d5436",

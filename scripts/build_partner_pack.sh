@@ -19,6 +19,17 @@
 #                         like `01_design_memo.md`).
 #                         Default: scripts/partner_packs/<pack-name>.manifest
 #
+# ⚠️ Manifest paths pointing into docs/archive/ (2026-08-18):
+#     circuit4_for_alina.manifest ships four documents out of docs/archive/,
+#     and halo2_tvm_for_serhii.manifest one. Those paths resolve today, but
+#     docs/archive/ is a staging area scheduled for deletion once the
+#     documentation is rewritten — see DOCS.md. When it goes, these packs
+#     will fail on a missing file. Either repoint them at the rewritten
+#     documents or drop the prose entries and ship code and artefacts only.
+#     Everything else in the repository has already been moved off those
+#     paths; these manifests were left alone deliberately, to be updated by
+#     whoever owns the partner bundles.
+#
 # Behaviour:
 #     - Stages files under /tmp/<pack-name>/ preserving the manifest order.
 #     - Renders a README.md prepended with provenance (repo URL, commit

@@ -157,9 +157,22 @@ pub struct BridgeState {
     ///
     /// Updates are gated through [`BridgeState::apply_bk_set_update`] which
     /// requires `update_seq_no > stored_last_bk_set_update_seq_no` so replays
-    /// and out-of-order applies are rejected. 
+    /// and out-of-order applies are rejected.
     #[serde(default)]
     pub stored_last_bk_set_update_seq_no: u64,
+
+    /// Schema v5 (2026-08-18): anchor level the state was bootstrapped at.
+    /// `1` = L1 (bundle stride W·P), `2` = L2 (bundle stride W²). `0` is
+    /// used only for pre-v5 files loaded via serde default — those are
+    /// treated as L1 for backward compat (see startup drift check in
+    /// `bridge-relayer-daemon` / `bridge-prover-daemon`), but the daemon
+    /// refuses to run L2 against a legacy-loaded state.
+    ///
+    /// This mirrors [`crate::bootstrap::BootstrapSeed::anchor_level`] and
+    /// is written when a fresh seed is applied via
+    /// [`crate::bootstrap::BootstrapSeed::apply`].
+    #[serde(default)]
+    pub anchor_level: u8,
 }
 
 impl BridgeState {
@@ -173,6 +186,11 @@ impl BridgeState {
             initialized: false,
             recent_bundles: VecDeque::new(),
             stored_last_bk_set_update_seq_no: 0,
+            // 0 == "unset". `BootstrapSeed::apply` overwrites this from the
+            // seed's own `anchor_level`; the daemon startup drift check
+            // interprets the trio (state.anchor_level, cfg.anchor_mode,
+            // state.initialized) — see relayer.rs.
+            anchor_level: 0,
         }
     }
 
@@ -569,6 +587,10 @@ mod tests {
         let st: BridgeState = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(st.stored_last_bk_set_update_seq_no, 0);
         assert!(st.recent_bundles.is_empty());
+        // v5 `anchor_level`: legacy files must decode with 0 (the sentinel
+        // for "unknown"), so the daemon startup drift check can distinguish
+        // pre-L2 state from an explicit L1 commitment.
+        assert_eq!(st.anchor_level, 0);
     }
 
     #[test]

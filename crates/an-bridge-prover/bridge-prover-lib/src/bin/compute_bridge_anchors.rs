@@ -2,10 +2,12 @@
 //!
 //!   * `GENESIS_BK_SET_COMMITMENT`         — Poseidon commitment of the current
 //!                                           BK set (from `bk_set.*.json`).
-//!   * `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` — layer-1 root at the seed key
-//!                                           block, i.e. the same anchor the
-//!                                           on-chain bridge stores after its
-//!                                           genesis stamp.
+//!   * `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` — layer-`L` root at the seed key
+//!                                           block, where `L` is the chosen
+//!                                           anchor level (1 by default, 2
+//!                                           under `--level 2`). This is the
+//!                                           same anchor the on-chain bridge
+//!                                           stores after its genesis stamp.
 //!
 //! No proving, no keygen, no SRS — this is a thin wrapper over the same helpers
 //! the daemon uses on cold start:
@@ -14,30 +16,34 @@
 //!   → `bridge_prover_lib::bootstrap::fetch_from_node`
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
-//! rule). Prints two env-var lines suitable for `.env.shellnet`.
+//! rule). Prints env-var lines suitable for `.env.shellnet`.
 //!
 //! USAGE
 //!   cargo run --release --bin compute_bridge_anchors -- \
 //!     [--endpoint https://shellnet.ackinacki.org/graphql] \
 //!     [--bk-set-config ../bk_set.shellnet.json] \
-//!     [--seed-seqno N | --at-head]
+//!     [--seed-seqno N | --at-head] \
+//!     [--level 1|2]
 //!
 //! Defaults:
 //!   endpoint       = $BRIDGE_GQL_ENDPOINT (or shellnet public GraphQL)
 //!   bk-set-config  = $BRIDGE_BK_SET_CONFIG (or ../bk_set.shellnet.json)
-//!   seed-seqno     = latest already-produced `W*P = 512` boundary at or below
-//!                    chain head (`--at-head` forces this even if --seed-seqno
-//!                    was passed)
+//!   level          = $BRIDGE_ANCHOR_LEVEL (or 1)
+//!                    - level=1: L1 mode, bundle boundary W·P = 1024
+//!                    - level=2: L2 mode, bundle boundary W²  = 16384
+//!   seed-seqno     = latest already-produced level-aligned boundary at or
+//!                    below chain head (`--at-head` forces this even if
+//!                    --seed-seqno was passed)
 //!
-//! `--seed-seqno` must be a multiple of `512` (shellnet bundle boundary
-//! `W*P = 128*4`).
+//! `--seed-seqno` must be a multiple of the level's bundle boundary
+//! (`W·P = 1024` for L1, `W² = 16384` for L2 at the current W=128, P=8).
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use bridge_gql_fetcher::{bk_set_fetcher, gql_client};
 use bridge_poseidon::compute_bk_set_poseidon;
-use bridge_prover_lib::bootstrap::fetch_from_node;
+use bridge_prover_lib::{bootstrap::fetch_from_node, AnchorMode};
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 
 /// Convert a 32-byte `Fr::to_repr()` (little-endian) array to the hex-string
@@ -63,10 +69,9 @@ fn le_repr_to_solidity_be_hex(le_repr: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(be))
 }
 
-// Bundle boundary = W * P. Sourced from the single-source-of-truth constants
-// so this can't drift when either W or P is changed.
-const BUNDLE_BOUNDARY: u64 = bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64
-    * bridge_prover_lib::THINNING_FACTOR_P;
+// Bundle boundary is level-dependent — sourced from `AnchorMode::stride()` at
+// runtime once `--level` is parsed, so it can't drift when either W or P is
+// changed (both feed `BUNDLE_STRIDE_L1`/`BUNDLE_STRIDE_L2` in the library).
 
 const DEFAULT_ENDPOINT: &str = "https://shellnet.ackinacki.org/graphql";
 const DEFAULT_BK_SET_CONFIG_RELPATH: &str = "../bk_set.shellnet.json";
@@ -76,6 +81,7 @@ struct Args {
     bk_set_config: PathBuf,
     seed_seqno: Option<u64>,
     at_head: bool,
+    level: u8,
 }
 
 fn parse_args() -> Result<Args> {
@@ -88,10 +94,17 @@ fn parse_args() -> Result<Args> {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_BK_SET_CONFIG_RELPATH)
         });
 
+    let default_level: u8 = std::env::var("BRIDGE_ANCHOR_LEVEL")
+        .ok()
+        .map(|s| s.parse::<u8>().context("BRIDGE_ANCHOR_LEVEL must be 1 or 2"))
+        .transpose()?
+        .unwrap_or(1);
+
     let mut endpoint = default_endpoint;
     let mut bk_set_config = default_bk_set;
     let mut seed_seqno: Option<u64> = None;
     let mut at_head = false;
+    let mut level = default_level;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -110,6 +123,13 @@ fn parse_args() -> Result<Args> {
                 seed_seqno = Some(v);
             }
             "--at-head" => at_head = true,
+            "--level" => {
+                level = it
+                    .next()
+                    .context("--level requires a value (1 or 2)")?
+                    .parse::<u8>()
+                    .context("--level value must be 1 or 2")?;
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -118,10 +138,12 @@ fn parse_args() -> Result<Args> {
         }
     }
 
-    Ok(Args { endpoint, bk_set_config, seed_seqno, at_head })
+    Ok(Args { endpoint, bk_set_config, seed_seqno, at_head, level })
 }
 
 fn print_help() {
+    let stride_l1 = AnchorMode::L1.stride();
+    let stride_l2 = AnchorMode::L2.stride();
     println!(
         "\
 compute_bridge_anchors — derive AckiNackiBridge constructor anchors from live chain
@@ -129,6 +151,7 @@ compute_bridge_anchors — derive AckiNackiBridge constructor anchors from live 
 USAGE:
     compute_bridge_anchors [--endpoint URL] [--bk-set-config PATH]
                            [--seed-seqno N | --at-head]
+                           [--level 1|2]
 
 OPTIONS:
     --endpoint URL           GraphQL endpoint (default: $BRIDGE_GQL_ENDPOINT
@@ -136,19 +159,35 @@ OPTIONS:
     --bk-set-config PATH     JSON map {{index -> hex pubkey}} (default:
                              $BRIDGE_BK_SET_CONFIG or ../bk_set.shellnet.json)
     --seed-seqno N           Seed at explicit key-block seq_no (must be a
-                             multiple of {BUNDLE_BOUNDARY})
-    --at-head                Seed at the latest already-produced {BUNDLE_BOUNDARY}
+                             multiple of the level's bundle boundary:
+                             {stride_l1} for L1, {stride_l2} for L2)
+    --at-head                Seed at the latest already-produced level-aligned
                              boundary at or below chain head (default)
+    --level 1|2              Anchor level for the emitted genesis stamp
+                             (default: $BRIDGE_ANCHOR_LEVEL or 1).
+                             Level 1 = L1 anchoring (stride {stride_l1}),
+                             Level 2 = L2 anchoring (stride {stride_l2}).
     -h, --help               Show this help
 ",
         DEFAULT_ENDPOINT = DEFAULT_ENDPOINT,
-        BUNDLE_BOUNDARY = BUNDLE_BOUNDARY,
+        stride_l1 = stride_l1,
+        stride_l2 = stride_l2,
     );
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
+
+    // Anchor level → bundle stride. Single source of truth: `AnchorMode`.
+    let anchor_mode = AnchorMode::from_level(args.level)
+        .map_err(|e| anyhow::anyhow!("invalid --level: {e}"))?;
+    let bundle_boundary: u64 = anchor_mode.stride();
+    eprintln!(
+        "anchor level = {} (bundle boundary = {})",
+        anchor_mode.level(),
+        bundle_boundary,
+    );
 
     // 1. BK set → Poseidon commitment (32 LE bytes).
     let bk_set = bk_set_fetcher::load_bk_set_from_config(
@@ -182,12 +221,13 @@ async fn main() -> Result<()> {
     eprintln!("chain head seq_no = {}", head_seqno);
 
     let seed_seqno = if args.at_head || args.seed_seqno.is_none() {
-        (head_seqno / BUNDLE_BOUNDARY) * BUNDLE_BOUNDARY
+        (head_seqno / bundle_boundary) * bundle_boundary
     } else {
         let n = args.seed_seqno.unwrap();
-        if !n.is_multiple_of(BUNDLE_BOUNDARY) {
+        if !n.is_multiple_of(bundle_boundary) {
             bail!(
-                "--seed-seqno {n} is not a multiple of the bundle boundary {BUNDLE_BOUNDARY}",
+                "--seed-seqno {n} is not a multiple of the level-{level} bundle boundary {bundle_boundary}",
+                level = anchor_mode.level(),
             );
         }
         if n > head_seqno {
@@ -199,39 +239,50 @@ async fn main() -> Result<()> {
     };
     if seed_seqno == 0 {
         bail!(
-            "resolved seed_seqno = 0 (chain head {head_seqno} < first bundle boundary {BUNDLE_BOUNDARY})",
+            "resolved seed_seqno = 0 (chain head {head_seqno} < first level-{level} bundle boundary {bundle_boundary})",
+            level = anchor_mode.level(),
         );
     }
-    eprintln!("seed key-block seq_no = {} (boundary {})", seed_seqno, BUNDLE_BOUNDARY);
+    eprintln!("seed key-block seq_no = {} (boundary {})", seed_seqno, bundle_boundary);
 
     // 3. Pull the key-block envelope, extract layer_hashes.
     let seed = fetch_from_node(&gql, seed_seqno, bk_commit)
         .await
         .context("fetch_from_node")?;
 
-    // 4. Anchor = layer-1 root. Contract's genesis stamp records exactly this.
+    // 4. Anchor = layer-`level` root. Contract's genesis stamp records
+    // exactly this — the on-chain `expectedPrevAnchor(level)` cell must match
+    // the daemon's per-bundle `prev_anchor` submission at cold-start.
     //
-    // Shellnet single-thread runs produce a single layer entry; the daemon
-    // takes `window(pick).latest()` (see BridgeState::prev_max_level_layer_hash_for)
-    // which on a fresh seed is the only entry present.
+    // Shellnet single-thread runs at L1 produce a single layer=1 entry; the
+    // daemon takes `window(pick).latest()` (see
+    // BridgeState::prev_max_level_layer_hash_for) which on a fresh seed is
+    // the only entry present.  Under `--level 2` the seed key-block must
+    // sit on a W²-aligned boundary AND must expose a layer=2 root; if it
+    // doesn't, refuse to emit a bogus L1 anchor as an L2 anchor.
     if seed.layer_hashes.is_empty() {
         bail!(
             "seed block {} has zero layer_hashes — cannot compute genesis anchor",
             seed_seqno
         );
     }
-    let layer1 = seed
+    let level = anchor_mode.level();
+    let picked = seed
         .layer_hashes
         .iter()
-        .find(|(_, layer)| *layer == 1)
+        .find(|(_, layer)| *layer == level)
         .with_context(|| {
             format!(
-                "seed block {} has no layer=1 entry (found layers: {:?})",
+                "seed block {} has no layer={} entry (found layers: {:?}). \
+                 Under --level 2 the seed must be a W²-aligned key block \
+                 that already carries an L2 root; retry with --at-head or \
+                 pick a later boundary.",
                 seed_seqno,
+                level,
                 seed.layer_hashes.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
             )
         })?;
-    let genesis_anchor = layer1.0;
+    let genesis_anchor = picked.0;
 
     // Extra info for review before broadcast.
     eprintln!(
@@ -262,6 +313,7 @@ async fn main() -> Result<()> {
     );
     println!("GENESIS_SEED_SEQNO={seed_seqno}");
     println!("GENESIS_SEED_HEIGHT={}", seed.block_height);
+    println!("GENESIS_ANCHOR_LEVEL={}", anchor_mode.level());
 
     Ok(())
 }

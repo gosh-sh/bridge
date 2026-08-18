@@ -31,7 +31,14 @@ use crate::bridge_state::BridgeState;
 
 /// Current schema version of the on-disk seed file. Bump when the layout of
 /// `BootstrapSeed` changes in a non-additive way.
-pub const SEED_SCHEMA_VERSION: u32 = 1;
+///
+/// **v2 (2026-08-18)**: added [`BootstrapSeed::anchor_level`]. v1 seeds are
+/// implicitly L1 (only L1 anchoring existed pre-v2) but the loader refuses
+/// to open them so operators are forced to acknowledge the L1/L2 selection
+/// on cold-restart. Manual migration:
+/// `mv state state.pre_L2_$(date +%Y%m%d_%H%M%S)` then re-bootstrap with
+/// `BRIDGE_ANCHOR_LEVEL` set explicitly.
+pub const SEED_SCHEMA_VERSION: u32 = 2;
 
 /// Default path for the persisted seed. Daemons may override but typically
 /// both read/write the same `state/bootstrap_seed.json`.
@@ -57,6 +64,25 @@ pub struct BootstrapSeed {
     pub block_seq_no: u64,
     /// Poseidon commitment of the BK set active at the seed block.
     pub bk_set_commitment: [u8; 32],
+    /// Anchor level at which the bridge is operating: `1` for L1 anchoring
+    /// (bundle stride W·P), `2` for L2 anchoring (bundle stride W²). The
+    /// startup drift check refuses to open a seed whose level does not
+    /// match the daemon's `BRIDGE_ANCHOR_LEVEL` — mixing levels on a live
+    /// bridge would submit a `verifyBlock` that either advances the wrong
+    /// on-chain window or trips `PrevAnchorMismatch`. Serialized as a
+    /// plain u8 so legacy v1 files (no field) can still be inspected
+    /// with `jq`; loader has an explicit backfill hook.
+    #[serde(default = "default_seed_anchor_level")]
+    pub anchor_level: u8,
+}
+
+/// Default `anchor_level` for seeds deserialized from a v1 file. v1 always
+/// meant L1 (the only mode that existed pre-2026-08-18), so backfilling to
+/// `1` is safe; the schema-version check in [`BootstrapSeed::load`] rejects
+/// v1 files first anyway — this hook only exists so `serde_json::from_str`
+/// itself doesn't error before we get to the version check.
+fn default_seed_anchor_level() -> u8 {
+    1
 }
 
 impl BootstrapSeed {
@@ -75,6 +101,11 @@ impl BootstrapSeed {
             self.block_height,
             self.block_seq_no,
         )?;
+        // Stamp the anchor level onto the state at genesis. Must happen
+        // AFTER `initialize_bk_set_commitment` (which requires the state be
+        // uninitialized) but before any subsequent bundle append could
+        // observe it. See `BridgeState::anchor_level` docstring.
+        state.anchor_level = self.anchor_level;
         Ok(())
     }
 
@@ -128,6 +159,19 @@ pub async fn fetch_from_node(
     first_key_seqno: u64,
     bk_set_commitment: [u8; 32],
 ) -> anyhow::Result<BootstrapSeed> {
+    fetch_from_node_at_level(gql, first_key_seqno, bk_set_commitment, 1).await
+}
+
+/// Level-aware fetch variant. `anchor_level` is stored verbatim on the seed
+/// and cross-checked at startup against the daemon's `BRIDGE_ANCHOR_LEVEL`.
+/// L1 callers can keep using [`fetch_from_node`]; L2 callers must go through
+/// this entry point.
+pub async fn fetch_from_node_at_level(
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
+    first_key_seqno: u64,
+    bk_set_commitment: [u8; 32],
+    anchor_level: u8,
+) -> anyhow::Result<BootstrapSeed> {
     let block = gql
         .query_proof_block_by_seqno(first_key_seqno)
         .await
@@ -146,6 +190,7 @@ pub async fn fetch_from_node(
         block_height,
         block_seq_no: first_key_seqno,
         bk_set_commitment,
+        anchor_level,
     })
 }
 
@@ -162,6 +207,7 @@ mod tests {
             block_height: 8,
             block_seq_no: 8,
             bk_set_commitment: [9u8; 32],
+            anchor_level: 1,
         };
         assert!(!state.initialized);
         seed.apply(&mut state).unwrap();
@@ -171,6 +217,7 @@ mod tests {
         assert_eq!(state.stored_bk_set_commitment, [9u8; 32]);
         assert_eq!(state.window(1).data_len, 1);
         assert_eq!(state.window(1).latest(), Some([7u8; 32]));
+        assert_eq!(state.anchor_level, 1, "apply must stamp anchor_level onto state");
     }
 
     #[test]
@@ -182,6 +229,7 @@ mod tests {
             block_height: 8,
             block_seq_no: 8,
             bk_set_commitment: [9u8; 32],
+            anchor_level: 1,
         };
         seed.apply(&mut state).unwrap();
         // Second apply must fail — the commitment stamp is genesis-only.
@@ -202,10 +250,12 @@ mod tests {
             block_height: 8,
             block_seq_no: 8,
             bk_set_commitment: [3u8; 32],
+            anchor_level: 2,
         };
         seed.save(path_s).unwrap();
         let loaded = BootstrapSeed::load(path_s).unwrap().unwrap();
         assert_eq!(seed, loaded);
+        assert_eq!(loaded.anchor_level, 2, "anchor_level must round-trip");
     }
 
     #[test]
@@ -213,5 +263,33 @@ mod tests {
         let path = std::env::temp_dir().join("definitely_not_present_bootstrap_seed.json");
         let _ = std::fs::remove_file(&path);
         assert!(BootstrapSeed::load(path.to_str().unwrap()).unwrap().is_none());
+    }
+
+    /// A v1 file (no `anchor_level`, `schema_version = 1`) must be rejected
+    /// by [`BootstrapSeed::load`] so operators are forced through the
+    /// documented `mv state state.pre_L2_…` migration path. Serde's
+    /// default-hook must NOT silently backfill the level to 1 and let the
+    /// caller advance past the version check.
+    #[test]
+    fn legacy_v1_file_is_rejected_at_load() {
+        let dir = std::env::temp_dir().join("bootstrap_seed_v1_rejection");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seed_v1.json");
+        let path_s = path.to_str().unwrap();
+        // Hand-written v1 payload (no `anchor_level` field).
+        let v1_json = r#"{
+            "schema_version": 1,
+            "layer_hashes": [[[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], 1]],
+            "block_height": 8,
+            "block_seq_no": 8,
+            "bk_set_commitment": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        }"#;
+        std::fs::write(path_s, v1_json).unwrap();
+        let err = BootstrapSeed::load(path_s).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("schema_version=1") && msg.contains("expects 2"),
+            "v1 rejection message should name both versions, got: {msg}"
+        );
     }
 }

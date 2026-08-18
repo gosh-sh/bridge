@@ -401,6 +401,13 @@ enum Cmd {
         /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
+        /// Anchor level for the LiveProverDriver step math and bundle
+        /// stride. `1` = L1 (default, stride W·P = 1024); `2` = L2
+        /// (stride W² = 16384). Must match the on-chain genesis stamp
+        /// level for the deployed bridge — a mismatch trips the startup
+        /// drift check.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
+        anchor_level: u8,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -791,6 +798,7 @@ async fn main() -> anyhow::Result<()> {
             aggregator_dir,
             verifiers_dir,
             pk_cache_dir,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -805,6 +813,8 @@ async fn main() -> anyhow::Result<()> {
                 verifiers_dir,
                 pk_cache_dir,
             };
+            let anchor_mode = bridge_prover_lib::AnchorMode::from_level(anchor_level)
+                .map_err(|e| anyhow::anyhow!("--anchor-level: {e}"))?;
             run_daemon_live(
                 args.state,
                 rpc_url,
@@ -817,6 +827,7 @@ async fn main() -> anyhow::Result<()> {
                 bootstrap_seqno,
                 backoff,
                 aggregation,
+                anchor_mode,
             )
             .await
             .map_err(|e| {
@@ -2020,6 +2031,7 @@ async fn run_daemon_live(
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
+    anchor_mode: bridge_prover_lib::AnchorMode,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
@@ -2134,6 +2146,7 @@ async fn run_daemon_live(
             // the old `export-1a1b2-poseidon-snark` subprocess that
             // independently re-fetched + re-proved every bundle.
             transcript: TranscriptKind::Poseidon,
+            anchor_mode,
             ..Default::default()
         },
     )
@@ -2159,6 +2172,8 @@ async fn run_daemon_live(
         driver_last_seen = driver_state.stored_last_seen_block_seq_no,
         on_chain_bk_upd = on_chain.last_bk_set_update_seq_no,
         driver_bk_upd = driver_state.stored_last_bk_set_update_seq_no,
+        anchor_level = anchor_mode.level(),
+        bundle_stride = anchor_mode.stride(),
         "daemon-live startup anchors"
     );
     if driver_state.initialized
@@ -2173,6 +2188,52 @@ async fn run_daemon_live(
             on_chain.last_seen_block_seq_no,
             prover_state_dir.display(),
         );
+    }
+
+    // Anchor-level cross-check. Rules from §3 of `l2_anchoring_implementation_plan.md`:
+    //   - state.anchor_level == cfg.level                                    → OK
+    //   - state.anchor_level == 0 (legacy v4-schema) + cfg == L1             → OK, treat as L1
+    //   - state.anchor_level == 0 + cfg == L2                                → refuse
+    //   - state.anchor_level != 0 && state.anchor_level != cfg.level         → refuse
+    // Skip on uninitialized state — the seed will stamp the correct level on
+    // its first `apply`.
+    if driver_state.initialized {
+        let cfg_level = anchor_mode.level();
+        let state_level = driver_state.anchor_level;
+        let mismatch = match (state_level, cfg_level) {
+            (0, 1) => false,                       // legacy → L1 backward compat
+            (0, _) => true,                        // legacy → non-L1 requires migration
+            (s, c) => s != c,                      // explicit mismatch
+        };
+        if mismatch {
+            anyhow::bail!(
+                "startup drift: state anchor_level={} but daemon configured for L{} \
+                 (BRIDGE_ANCHOR_LEVEL / --anchor-level). Rename {} to \
+                 state.pre_L{cfg_level}_$(date +%Y%m%d_%H%M%S) and rebootstrap. \
+                 Never auto-migrate between anchor levels on a live bridge — a mid-run \
+                 flip would submit a verifyBlock against the wrong on-chain window.",
+                state_level,
+                cfg_level,
+                prover_state_dir.display(),
+                cfg_level = cfg_level,
+            );
+        }
+        // Chain-side sanity: the on-chain lastSeenBlockSeqNo must sit on a
+        // stride-aligned boundary for the level we think we're running.
+        // If not, this is a strong signal we're pointing at a bridge that
+        // was deployed under a different level.
+        if on_chain.last_seen_block_seq_no != 0
+            && on_chain.last_seen_block_seq_no % anchor_mode.stride() != 0
+        {
+            anyhow::bail!(
+                "on-chain last_seen_block_seq_no={} is not a multiple of the L{} bundle stride {} — \
+                 either the bridge was deployed under a different anchor level, or this daemon is \
+                 pointed at the wrong contract.",
+                on_chain.last_seen_block_seq_no,
+                cfg_level,
+                anchor_mode.stride(),
+            );
+        }
     }
 
     let cfg = RelayerConfig::new(&state_path);

@@ -238,6 +238,17 @@ pub struct LiveProverConfig {
     /// Rolling-window width per layer. Matches [`HISTORY_WINDOW_SIZE`] by
     /// default.
     pub history_window_size: u64,
+    /// Anchor-level mode. See [`crate::AnchorMode`]. Default is
+    /// [`crate::AnchorMode::L1`]; opt in to
+    /// [`crate::AnchorMode::L2`] to switch the driver onto the
+    /// supercritical W²-stride schedule described in
+    /// `docs/l2_anchoring_proposal.md`.
+    ///
+    /// Field is present-but-unwired at this stage: seed alignment,
+    /// `find_next_bundle_boundary`, and the Circuit 2 dispatch still use the
+    /// L1 stride unconditionally. Wiring lands in the follow-up commit
+    /// (Stage 4 of `l2_anchoring_implementation_plan.md`).
+    pub anchor_mode: crate::AnchorMode,
     /// Safety cap; see [`DEFAULT_MAX_BK_UPDATES_PER_ITER`].
     pub max_bk_updates_per_iter: usize,
     /// How the driver picks the bootstrap seed. See [`SeedPolicy`].
@@ -267,9 +278,30 @@ impl Default for LiveProverConfig {
         Self {
             thinning_factor_p: crate::THINNING_FACTOR_P,
             history_window_size: HISTORY_WINDOW_SIZE,
+            anchor_mode: crate::AnchorMode::L1,
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
             transcript: TranscriptKind::Blake2b,
+        }
+    }
+}
+
+impl LiveProverConfig {
+    /// Bundle stride in seq_nos derived from the current [`crate::AnchorMode`]
+    /// and the cfg's `W`/`P` fields.
+    ///
+    /// * L1: `history_window_size * thinning_factor_p` (== W·P at defaults).
+    /// * L2: `history_window_size²`                     (== W² at defaults).
+    ///
+    /// All internal call sites (`SeedPolicy::Explicit` alignment check,
+    /// `advance_bootstrap`, `next_target_seqno_upper_bound`, and the
+    /// [`crate::live_driver::thinning::find_next_bundle_boundary`] call)
+    /// route through this method so the L1 → L2 switch is a single-source
+    /// change on the config.
+    pub fn bundle_stride(&self) -> u64 {
+        match self.anchor_mode {
+            crate::AnchorMode::L1 => self.history_window_size * self.thinning_factor_p,
+            crate::AnchorMode::L2 => self.history_window_size * self.history_window_size,
         }
     }
 }
@@ -607,11 +639,16 @@ impl LiveProverDriver {
                 );
             }
             (SeedPolicy::Explicit(n), false) => {
-                let step = cfg.history_window_size * cfg.thinning_factor_p;
+                let step = cfg.bundle_stride();
                 anyhow::ensure!(
                     n > 0 && n % step == 0,
-                    "SeedPolicy::Explicit({}) invalid: must be > 0 and divisible by W*P={}",
-                    n, step,
+                    "SeedPolicy::Explicit({}) invalid: must be > 0 and divisible by \
+                     bundle_stride={} (anchor_mode={:?}, W={}, P={})",
+                    n,
+                    step,
+                    cfg.anchor_mode,
+                    cfg.history_window_size,
+                    cfg.thinning_factor_p,
                 );
                 DriverStage::NeedsSeed { seed_seqno: Some(n) }
             }
@@ -663,11 +700,10 @@ impl LiveProverDriver {
             .await
             .map_err(DriverError::gql_transient)?;
         let chain_head_seqno = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
-        let next_target_seqno = match find_next_thinned_key_block(
+        let next_target_seqno = match crate::live_driver::thinning::find_next_bundle_boundary(
             self.state.stored_last_seen_block_seq_no,
             chain_head_seqno,
-            self.cfg.history_window_size,
-            self.cfg.thinning_factor_p,
+            self.cfg.bundle_stride(),
         ) {
             Some(n) => n,
             None => {
@@ -865,7 +901,7 @@ impl LiveProverDriver {
     /// returned an empty list). Bounds the value by W*P above the cursor
     /// so callers see a sane number.
     fn next_target_seqno_upper_bound(&self) -> u64 {
-        let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
+        let step = self.cfg.bundle_stride();
         ((self.state.stored_last_seen_block_seq_no / step) + 1) * step
     }
 
@@ -893,7 +929,7 @@ impl LiveProverDriver {
     /// Advance the bootstrap state machine. Returns
     /// `(chain_head_seqno, still_waiting_for_seed_seqno_opt)`.
     async fn advance_bootstrap(&mut self) -> DriverResult<(u64, Option<u64>)> {
-        let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
+        let step = self.cfg.bundle_stride();
         let latest_blocks = self
             .gql
             .query_latest_blocks(5)

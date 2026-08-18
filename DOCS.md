@@ -63,7 +63,7 @@ covering one genre for one audience. The archive exists so that step loses no kn
 | `docs/withdrawal-direction.md` | design + reference | AN → ETH: `verifyBlock`, `applyBkSetUpdate`, Circuit 4 payout, anchors and windows | `circuit_4_open_questions.md`, `an_eth_daemon_withdraw_e2e_*.md`, `shellnet_an_eth_relayer_wiring.md` |
 | `docs/operations.md` | operations | Running the daemons, the two live lanes, deploy timing, failure modes actually hit, monitoring queries | `archive/crates/an-bridge-prover/docs/live_*_runbook.md` (the freshest material in the archive), `archive/audit/*runbook*.md`, `bridge_verification.md` §11 |
 | `docs/verification.md` | verification | How to convince yourself a proof and a deployment are correct, stage by stage | `verifying_an_proof.md`, `bridge_verification.md`, `manual_verification_runbook.md` |
-| `docs/aave-yield.md` | design + operations | The three pockets, `harvestYield` vs `skimExcessUsdc`, invariants, ordering rules | `aave_integration.md` — a line-by-line verified rewrite of it exists on branch `docs/verify-against-code-2026-08-18` |
+| `docs/aave-yield.md` | design + operations | The three pockets, `harvestYield` vs `skimExcessUsdc`, invariants, ordering rules | `aave_integration.md` for the design argument (threat model, the two invariants, the verification protocol); the facts it gets wrong are listed under *Known traps* below |
 | `docs/user-guide.md` | user | End-user deposit and withdrawal flow | `archive/user/USER_GUIDE.md` |
 
 **Known traps in the source material** — carry these into the rewrite, they are verified against the
@@ -106,7 +106,8 @@ must be answered by some document in the target set before the archive is delete
 | Status, plans, handoffs | `production_plan`, `testnet_security_status`, `m7_eth_side_prover_status_*`, `handoff_m7_*`, `live_e2e_prover_relayer_plan`, `audit/F10-deposit-pipeline-remediation-plan`, `audit/HANDOFF-f10-prover-relayer-ru.txt`, `SUMMARY`, `FIX_TASK_FOR_AGENT` |
 | Reviews and partner threads | `reviews/pr27_answers_nb_q1_q11_*`, `reviews/pr20_review_*`, `reviews/deposit_circuit_audit_*`, `reviews/alina_circuit4_single_final_root_*` (+ pdf), `reviews/alina_review_pack_*`, `reviews/an_partner_questions_circuit4_*_audit`, `reviews/an_token_bridge_pr2112_review`, `an_partner_phase0_questions`, `an_partner_questions_2026-05-11.txt`, `aave_integration` |
 
-**One open dependency before deleting the archive:** `archive/FIX_TASK_FOR_AGENT.md` describes a live
-user-facing bug — the frontend advertises a withdrawal flow the contract does not expose, so a user
-can believe funds came back when nothing happened. Confirm that fix landed in `frontend/` before the
-file goes, or the only written record of the bug goes with it.
+**No blocker on deletion.** `archive/FIX_TASK_FOR_AGENT.md` described a live user-facing bug — the
+frontend advertising a withdrawal flow the contract does not expose, so a user could believe funds
+came back when nothing had happened. That fix landed: as of 2026-08-18 the string `withdraw` does not
+occur anywhere under `frontend/src/`, and `withdraw_form.rs` is gone. Nothing is lost when the
+archive is deleted.

@@ -15,7 +15,8 @@ the code in places. Detail:
   contradicted by the code in several places. Read it as history — what someone believed on a given
   date — never as a description of the system. Do not cite it in new work, do not follow its
   procedures, and do not repeat its claims without re-checking them against the source. Every file
-  in it carries an `ARCHIVED` banner. The folder is scheduled for deletion.
+  in it carries an `ARCHIVED` banner, except the one review PDF, which cannot hold one. The folder
+  is scheduled for deletion.
 
 **Paths inside *this* file were deliberately not rewritten during the move.** Wherever this document
 says `docs/<name>.md`, the file now lives at `docs/archive/<name>.md` — including the "canonical

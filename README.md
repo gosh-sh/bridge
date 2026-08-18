@@ -1,326 +1,147 @@
 # Acki Nacki Bridge
 
-A cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/), using zero-knowledge proofs end-to-end. Ethereum-side state is held by `AckiNackiBridge.sol`; AN-side state is verified through a four-circuit Halo2 / Groth16 stack consumed by `verifyBlock(...)`.
+A cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/), with
+zero-knowledge proofs on both directions of travel. USDC is custodied by `AckiNackiBridge.sol` on
+Ethereum; Acki Nacki state is committed on-chain from Halo2 proofs verified by SHPLONK aggregator
+verifiers deployed as Yul bytecode.
 
-## Overview
+> **Where the truth is.** This README orients you; it is not a specification. The document derived
+> from the sources line by line, with a `file:line` citation for every behavioural claim, is
+> [`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md). The rest of the documentation is being
+> rewritten — [`DOCS.md`](DOCS.md) tracks what exists and what is coming. When any prose disagrees
+> with the code, the code wins.
 
-The bridge provides two cryptographically-distinct directions:
+---
 
-- **Ethereum → Acki Nacki (deposits)**. The user calls `AckiNackiBridge.deposit()` on Ethereum; a `Deposit` event is emitted. An off-chain prover (`deposit-prover/`) generates a Halo2 SHPLONK proof of that event. The AN side verifies the Halo2 proof **natively** through a TVM opcode (`VERHALO2SHPLONK` — work-in-progress in `tvm-sdk`; see Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md`) and mints tokens to the user. No Ethereum-side `withdraw` is exposed.
-- **Acki Nacki → Ethereum (state attestation)**. `AckiNackiBridge.verifyBlock(...)` advances a rolling commitment to the Acki Nacki side by checking a tuple of two cross-circuit-bound Halo2 proofs, each wrapped in gnark Groth16 to fit Ethereum's EIP-170 24 KB limit: a Primary (1A) or Fallback (1B) attestation, and a Circuit 2 layer-hashes movement proof. A future Circuit 3 will add an optional BK-set update proof.
+## The two directions
 
-Future genuine cross-chain withdrawals (token burn on AN → ETH release on Ethereum) will land alongside a burn-proof circuit + state-anchored verification — see §3 Phase 4 open design question and Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md`. The legacy v1 refund-style `withdraw(depositId, ...)` was retired in Phase 4.3 (2026-05-17).
+**Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
+`deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)`. The contract takes custody via
+`transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
+the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
+(receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
+consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints. The
+per-transaction cap is `type(uint64).max` units — sized so the amount fits the AN mint path, not as a
+TVL limit.
+
+**Acki Nacki → Ethereum (state attestation + payout).** Three permissionless entrypoints:
+
+| Call | Does |
+|---|---|
+| `verifyBlock` | Advances the rolling commitment to AN state from a cross-bound pair of proofs: Circuit 1A (≥ 2/3 attestation quorum) **or** 1B (> 1/2 split), plus Circuit 2 (layer-hash movement). |
+| `applyBkSetUpdate` | Rotates the AN validator-set (BK-set) commitment through a 16-leaf, depth-4 block-id tree. |
+| `withdrawByProof` | Pays out USDC against a Circuit-4 proof of a `WithdrawalInitiated` event, anchored into state that `verifyBlock` already recorded. Nullifier-guarded and chain-id scoped. |
+
+There is no refund-style `withdraw(depositId, …)`; it was retired. There is no pause switch and no
+upgrade path — every verifier binding is `immutable`, so replacing a verifier means deploying a new
+bridge.
+
+Idle USDC can be routed into AAVE V3 by the owner. That module cannot reach user principal: yield
+collection is bounded by the surplus above the book value of user deposits, and the functions that
+collect it do not appear in the principal-accounting equation at all. Details in
+[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §10.
+
+---
 
 ## Architecture
 
 ```
-                  Ethereum → Acki Nacki (Deposits)
-┌────────────────────┐         ┌──────────────────────────────┐
-│ AckiNackiBridge    │         │ deposit-prover (Rust + Halo2)│
-│   deposit()        │ ──▶ event ──▶ off-chain prover ────────│
-│   (idle ETH →      │         │  • MPT receipt-inclusion     │
-│    AAVE V3 yield)  │         │  • event log binding         │
-└────────────────────┘         │  • keccak coprocessor        │
-                               └──────────────────────────────┘
-                                              │
-                                              ▼ Halo2 SHPLONK proof
-                               ┌──────────────────────────────┐
-                               │ AN-side native verification  │
-                               │ VERHALO2SHPLONK TVM opcode   │
-                               │ (`tvm-sdk`, in development)  │
-                               └──────────────────────────────┘
+                 Ethereum → Acki Nacki (deposit)
+  user ──approve+deposit──▶ AckiNackiBridge ──Deposit event──▶ tx receipt log
+                                  │                                 │
+                            custody (USDC)                    MPT receipt proof
+                                  │                                 ▼
+                            AAVE V3 (optional)          deposit-prover (Halo2, off-chain)
+                                                                    │
+                                                        SHPLONK proof + 12 public inputs
+                                                                    ▼
+                                                    AN USDCBridge.finalizeDeposit
+                                                    (ZKHALO2VERIFYWITHVK opcode)
 
-
-                  Acki Nacki → Ethereum (State attestation)
-┌─────────────────────────┐         ┌──────────────────────────────┐
-│ AN node + relayer       │ ──▶     │ bridge-snark-utils   │
-│ • blocks, attestations, │  data   │ • Circuit 1A/1B (attestation)│
-│   layer-hashes, BK sets │         │ • Circuit 2 (layer hashes)   │
-└─────────────────────────┘         │ • Halo2 SHPLONK + gnark wrap │
-                                    └──────────────────────────────┘
-                                                  │
-                                                  ▼ Groth16 proofs + public inputs
-                               ┌──────────────────────────────────┐
-                               │ AckiNackiBridge.verifyBlock(...) │
-                               │ • PrimaryVerifier / Fallback     │
-                               │ • LayerHashesMovementVerifier    │
-                               │ • cross-circuit binding +        │
-                               │   monotonic seq + chain anchor   │
-                               └──────────────────────────────────┘
+                 Acki Nacki → Ethereum (state + payout)
+  AN node ──GraphQL──▶ an-bridge-prover ──Circuits 1A/1B, 2, 4──▶ bridge-relayer-daemon
+                                                                          │
+                                              verifyBlock / applyBkSetUpdate / withdrawByProof
+                                                                          ▼
+                                                                  AckiNackiBridge
+                                                                          │
+                                    Primary / Fallback / LayerHashes / BridgeWithdrawal adapters
+                                                                          ▼
+                                              ShplonkHalo2Verifier ──▶ Yul Halo2Verifier (CREATE)
 ```
 
-### Pipeline detail — Ethereum → Acki Nacki (deposits)
+---
 
-1. User calls `AckiNackiBridge.deposit()` with ETH (`MAX_DEPOSIT_AMOUNT = 100 ether`). Contract increments `depositCounter`, adds to `treasuryBalance`, emits `Deposit(depositId, sender, amount, timestamp)`.
-2. Idle ETH can be routed by the owner into AAVE V3 via `supplyToAave()` for yield (see `docs/aave_integration.md`).
-3. `deposit-prover` (Rust + axiom-eth) fetches the transaction receipt + MPT inclusion path from an Ethereum RPC and builds a Halo2 circuit that proves the `Deposit` event was emitted by the bridge contract in a real Ethereum block.
-4. The Halo2 proof is consumed natively on the AN side by the `VERHALO2SHPLONK` TVM opcode (under development in `tvm-sdk`); the AN-side bridge contract validates the public inputs and mints the corresponding token to the user.
+## Repository layout
 
-### Pipeline detail — Acki Nacki → Ethereum (state attestation)
+| Path | What lives there |
+|---|---|
+| `contracts/ethereum/src/` | The bridge, four verifier adapters, the SHPLONK shim, oracles. Solidity 0.8.19, Foundry. |
+| `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, plus reference calldata. The `.bin` is what deploys. |
+| `contracts/ethereum/script/` | Deploy scripts; `ShplonkDeployLib.sol` wires `.bin` → shim → typed adapter. |
+| `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
+| `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
+| `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by prover and relayer. |
+| `crates/an-bridge-prover/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
+| `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
+| `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 aggregator spike. |
+| `frontend/` | WASM deposit UI (Yew). |
+| `docs/` | [`ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) plus material staged for rewriting — start at [`DOCS.md`](DOCS.md). |
 
-1. Acki Nacki blocks carry an 8-leaf SHA-256 Merkle `block_id`, a Poseidon commitment to the BK set, BLS-aggregated attestations (Primary or Fallback finalization), and layer-hash data tied to a dense balanced Poseidon Merkle chain.
-2. `bridge-snark-utils` (Rust crate, excluded from the root workspace) drives the partner's four-circuit Halo2 stack to produce:
-   - Circuit 1A (Primary attestation) **or** Circuit 1B (Fallback attestation) — public inputs `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`.
-   - Circuit 2 (Layer-hashes movement) — 14 public inputs `[block_id, bk_set_poseidon, num_layers, layer_hash[0..10], prev_max_level_layer_hash]`.
-3. Each Halo2 proof is wrapped via the per-circuit gnark Groth16 wrappers under `crates/bridge-snark-utils/gnark-wrappers/circuit-{1a,1b,2}/` to produce a ~256-byte Groth16 proof and an auto-generated Solidity verifier (~26 KB source / ~7 KB runtime) under `contracts/ethereum/src/*Groth16VerifierGenerated.sol`.
-4. The relayer (`crates/bridge-relayer-daemon`) submits the proof tuple to `AckiNackiBridge.verifyBlock(...)`, which enforces:
-   - `bkSetCommitment == storedBkSetCommitment` (BK-set anchor),
-   - `blockSeqNo > storedLastSeenBlockSeqNo` (strict monotonicity),
-   - `prevMaxLevelLayerHash == storedPrevMaxLevelLayerHash` (chain anchor),
-   - `1 ≤ numLayers ≤ MAX_LAYER_HASHES (10)` and tail zeroes,
-   - both Groth16 verifiers accept the proofs.
+**Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
+and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
+forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/an-bridge-prover/`
+(gosh-fork halo2-base), `crates/bridge-snark-utils/`, both relayer daemons, and `frontend/`.
 
-## Project Structure
+---
 
-```
-acki-nacki-bridge/
-├── contracts/ethereum/         # Solidity smart contracts (Foundry)
-│   ├── src/
-│   │   ├── AckiNackiBridge.sol                       # Main bridge: deposit + verifyBlock + AAVE
-│   │   ├── IPrimaryVerifier.sol / PrimaryVerifier.sol
-│   │   ├── IFallbackVerifier.sol / FallbackVerifier.sol
-│   │   ├── ILayerHashesMovementVerifier.sol / LayerHashesMovementVerifier.sol
-│   │   ├── *Groth16VerifierGenerated.sol             # gnark-generated, per-circuit
-│   │   ├── Halo2Verifier.sol / Blake2bHalo2Verifier.sol  # legacy Halo2 Yul verifiers (tests)
-│   │   ├── Blake2bTranscript.sol / Blake2bChallengeComputer.sol
-│   │   ├── IBlockHeaderOracle.sol / MockBlockHeaderOracle.sol / AxiomBlockHeaderOracle.sol
-│   │   └── IAavePool.sol / IWrappedTokenGatewayV3.sol / IERC20.sol
-│   ├── test/                   # Foundry tests (109 across 12 suites)
-│   └── script/                 # Deployment scripts (Deploy{Real,Test}Bridge.s.sol)
-│
-├── crates/                     # Main Cargo workspace + standalone crates
-│   ├── acki-nacki-interface/           # AN client traits + mock implementations (workspace member)
-│   ├── eth-frontend/                   # Ethereum client wrapper (workspace member, deposit-only)
-│   ├── bridge-snark-utils/     # 4-circuit Halo2 prover + gnark wrappers (standalone)
-│   │   └── gnark-wrappers/
-│   │       ├── circuit-1a/             # Primary attestation Groth16 wrapper
-│   │       ├── circuit-1b/             # Fallback attestation Groth16 wrapper
-│   │       └── circuit-2/              # Layer-hashes Groth16 wrapper
-│   └── bridge-relayer-daemon/          # AN-watching relayer (standalone)
-│
-├── deposit-prover/             # Standalone Rust crate (axiom-eth ecosystem; ETH→AN Halo2 proof)
-│   ├── src/
-│   │   ├── circuit_v2.rs               # Halo2 circuit: proves Deposit event via MPT
-│   │   ├── ethereum_fetcher.rs         # Fetches receipts + MPT proofs from Ethereum
-│   │   ├── mpt.rs / rlp_utils.rs       # MPT proof construction
-│   │   ├── prover.rs / aggregation.rs  # Halo2 proof generation
-│   │   └── types.rs
-│   └── configs/                # Circuit configuration files
-│
-├── frontend/                   # WASM web frontend (Yew + Rust, excluded from workspace)
-│
-├── docs/                       # Architecture + audit + protocol documents
-├── Makefile, build.sh, setup.sh, test.sh
-└── docker-compose.yml / Dockerfile
+## Build and test
+
+```bash
+make setup                 # toolchains and dependencies
+make build                 # Rust workspace + Solidity
+make test                  # both test suites
+make check                 # format-check + lint + test (what CI runs)
 ```
 
-### Cargo workspaces
-
-Three Cargo workspaces, kept separate because of dependency-tree conflicts in the Halo2 ecosystem:
-
-| Workspace                                  | Halo2 ecosystem                | Purpose                                |
-| ------------------------------------------ | ------------------------------ | -------------------------------------- |
-| Root (`Cargo.toml`)                        | —                              | Workspace; `eth-frontend`, `acki-nacki-interface` |
-| `deposit-prover/`                          | axiom-eth + halo2-pse 2023_04  | ETH→AN deposit-event Halo2 circuit     |
-| `crates/bridge-snark-utils/`       | halo2-axiom 0.4.x (gosh fork)  | AN→ETH 4-circuit Halo2 prover (excluded from root, own `Cargo.lock`) |
-| `crates/bridge-relayer-daemon/`            | —                              | Relayer (excluded from root, mirrors the orchestrator layout) |
-| `frontend/`                                | —                              | Yew WASM frontend (excluded)            |
-
-## Smart Contracts
-
-All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19 via Foundry.
-
-### Core
-
-| Contract                          | Description                                                                                                                                                                                                                            |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AckiNackiBridge.sol`             | Main bridge. `deposit()` accepts ETH and emits a `Deposit` event. `verifyBlock(...)` advances the AN→ETH commitment after verifying the per-circuit Groth16 proofs and the cross-circuit / monotonic / chain-anchor invariants. Idle ETH can be supplied to AAVE V3 by the owner. |
-| `IBlockHeaderOracle.sol`          | Interface for block hash oracles (`getBlockHash`, `isBlockHashAvailable`, `getLatestVerifiedBlock`). Currently unused by the public surface; preserved for the future burn-proof flow.                                                  |
-
-### AN→ETH state verifiers (Phase 4)
-
-| Contract                                          | Description                                                                                                                                                                |
-| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IPrimaryVerifier.sol` / `PrimaryVerifier.sol`    | Interface + adapter for Circuit 1A (Primary attestation, ≥2/3 BLS quorum). Adapter assembles the 4 public inputs and calls the gnark verifier in a `try/catch`.            |
-| `IFallbackVerifier.sol` / `FallbackVerifier.sol`  | Same shape, for Circuit 1B (Fallback attestation, >1/2 split).                                                                                                              |
-| `ILayerHashesMovementVerifier.sol` / `LayerHashesMovementVerifier.sol` | Adapter for Circuit 2 (Layer-hashes movement). Assembles 14 public inputs.                                                                                |
-| `PrimaryGroth16VerifierGenerated.sol`             | gnark-generated Groth16 verifier (BN254), produced by `crates/bridge-snark-utils/gnark-wrappers/circuit-1a/`. **Do not edit manually**.                            |
-| `FallbackGroth16VerifierGenerated.sol`            | Same, produced from `gnark-wrappers/circuit-1b/`.                                                                                                                           |
-| `LayerHashesGroth16VerifierGenerated.sol`         | Same, produced from `gnark-wrappers/circuit-2/`.                                                                                                                            |
-
-> **Audit note (R15, Decision Log 2026-05-17)**: the current `circuit.go` in each `gnark-wrappers/` slot is a no-op stub — it adds identity assertions only, not a real in-gnark Halo2 SHPLONK verifier. That means the on-chain `*Groth16VerifierGenerated.sol` does **not** today cryptographically constrain the Halo2 proof. The Foundry suite continues to pass; what's affected is the *interpretation* of those passes as forgery resistance. Phase 8 of `docs/an_partner_integration_plan.md` is the R&D track that closes this gap. Mainnet `v2.0.0` is explicitly gated on it.
-
-### Oracle / AAVE / legacy
-
-| Contract                                  | Description                                                                                                                                                              |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `MockBlockHeaderOracle.sol`               | Test oracle. Owner can `setBlockHash()` manually; falls back to `blockhash()` for recent blocks.                                                                          |
-| `AxiomBlockHeaderOracle.sol`              | Production oracle. Integrates with [Axiom V2](https://www.axiom.xyz/) for trustless block hash verification.                                                              |
-| `IAavePool.sol` / `IWrappedTokenGatewayV3.sol` / `IERC20.sol` | Minimal AAVE V3 interfaces for the bridge's optional yield path.                                                                                       |
-| `Halo2Verifier.sol` / `Blake2bHalo2Verifier.sol` / `Blake2bTranscript.sol` / `Blake2bChallengeComputer.sol` | Bare Halo2 Yul verifiers (Keccak / Blake2b transcripts). Exceed EIP-170 in a single deployment but exercised in tests for sanity coverage of the underlying Halo2 circuits. |
-
-## Testing
-
-### Test Coverage Summary
-
-| Suite                                                       | Count                | Command                                                              |
-| ----------------------------------------------------------- | -------------------- | -------------------------------------------------------------------- |
-| Solidity (Foundry) — 12 suites                              | 109                  | `cd contracts/ethereum && forge test`                                |
-| Rust workspace (`eth-frontend`, `acki-nacki-interface`)     | small unit suite     | `cargo test --workspace`                                             |
-| `bridge-relayer-daemon` unit tests                          | 13                   | `cd crates/bridge-relayer-daemon && cargo test`                      |
-| `bridge-snark-utils` round-trip tests               | several              | `cd crates/bridge-snark-utils && cargo test`                 |
-| `deposit-prover` lib tests                                  | (depends on Ethereum RPC) | `cd deposit-prover && cargo test`                              |
-
-### Foundry suites (current)
-
-| Suite                          | Count | Notes |
-| ------------------------------ | ----: | ----- |
-| `AckiNackiBridgeAaveTest`      |    20 | AAVE supply / withdraw / yield (owner paths) |
-| `AckiNackiBridgeVerifyBlockTest` |  17 | Phase 4 — real bound Primary + Layer-hashes proofs |
-| `AckiNackiBridgeRelayerLoopTest` |  6 | Phase 5.1 — 10-block on-chain drive with mocks |
-| `AxiomBlockHeaderOracleTest`   |    16 | Oracle constructor + queries |
-| `Blake2bHalo2VerifierTest`     |     7 | Blake2b transcript + EIP-152 |
-| `KeccakHalo2VerifierTest`      |     1 | Keccak fallback path |
-| `Halo2PoseidonVerifierTest`    |     7 | Poseidon preimage |
-| `PrimaryVerifierTest`          |     8 | Circuit 1A adapter |
-| `FallbackVerifierTest`         |     8 | Circuit 1B adapter |
-| `LayerHashesMovementVerifierTest` | 10 | Circuit 2 adapter |
-| `FuzzHalo2VerifierTest`        |     6 | Bare Halo2 Yul fuzz |
-| `FuzzAckiNackiBridgeDepositTest` |   3 | Deposit-side fuzz |
-
-Run a single suite:
+Contracts on their own:
 
 ```bash
 cd contracts/ethereum
-forge test --match-contract LayerHashesMovementVerifierTest -vv
+forge test                                                   # full suite
+forge test --match-contract AckiNackiBridgeWithdrawByProof -vv
+FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # needs a mainnet RPC
 ```
 
-### Rust tests
+The suite is inventoried per file, with what each one covers, in
+[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §13. Two build settings there are
+deliberate and worth knowing before you touch them: `optimizer_runs = 1` and `via_ir = true`. The
+bridge sits close to the EIP-170 size limit, and several functions are otherwise stack-too-deep.
+
+Standalone crates build from their own directories:
 
 ```bash
-cargo test --workspace                                # eth-frontend + acki-nacki-interface
-cd crates/bridge-relayer-daemon && cargo test         # relayer (13 unit tests)
-cd crates/bridge-snark-utils && cargo test    # 4-circuit prover round-trips
-cd deposit-prover && cargo test                       # ETH→AN deposit circuit
+cd crates/an-bridge-prover && cargo build --release
+cd crates/bridge-relayer-daemon && cargo test
 ```
 
-## ZK Proof Details
+---
 
-### ETH → AN deposit (Halo2 Keccak-transcript)
+## Running it against a live network
 
-- **Proof system**: Halo2 with KZG polynomial commitments + SHPLONK batching on BN254.
-- **Transcript**: Keccak256 (EVM-compatible).
-- **Circuit**: `DepositEventCircuitV2` — proves a `Deposit` event by verifying receipt RLP, receipt-trie inclusion, event log signature, event-data extraction, and block-hash binding.
-- **Keccak coprocessor**: keccak-heavy operations are delegated to a coprocessor circuit via Poseidon promise commitments (~500× constraint savings per hash).
-- **Public inputs** (7): `[depositId, sender, amount, contractAddress, blockHashHigh, blockHashLow, promiseCommit]`.
-- **On-chain consumer**: AN side, natively via the future `VERHALO2SHPLONK` TVM opcode (Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md`).
+Deployment, environment variables and genesis parameters: `docs/ETH-contracts-spec.md` §12. One
+constraint bites early — the genesis seed must sit on a key-block boundary, currently
+`W·P = 128 × 8 = 1024`.
 
-### AN → ETH state (Halo2 Blake2b-transcript + gnark Groth16)
+Operating procedures (bootstrapping the prover daemons, the two live proving lanes, deploy timing,
+recovery from the failure modes actually hit in production) are being rewritten; `DOCS.md` tracks
+progress. Until they land, the daemons' own `--help` output and the crate READMEs under
+`crates/an-bridge-prover/` are the working reference.
 
-- **Proof system**: Halo2 SHPLONK on BN254, Blake2b transcript (matches AN-side native transcript).
-- **Circuits**: 1A (Primary attestation), 1B (Fallback attestation), 2 (Layer-hashes movement). Circuit 3 (BK-set rotation) is pending partner sign-off.
-- **gnark wrapper**: Each Halo2 proof is wrapped into a 256-byte Groth16 BN254 proof + an auto-generated `*Groth16VerifierGenerated.sol` (~26 KB source / ~7 KB runtime), keeping the on-chain verifier under EIP-170.
-- **Public inputs**:
-  - Circuit 1A/1B (4 Fr): `[block_id, bk_set_poseidon, block_seq_no, last_seen_block_seqno]`.
-  - Circuit 2 (14 Fr): `[block_id, bk_set_poseidon, num_layers, layer_hash[0..10], prev_max_level_layer_hash]`.
-- **On-chain gas**: ~225 k per 1A/1B + ~293 k for Circuit 2 + ~180 k wrapper overhead ≈ 700 k per `verifyBlock` call.
+---
 
-## Prerequisites
+## Status
 
-- **Rust** (stable, 1.70+) — main language for all crates.
-- **Go** (1.21+) — for the AN→ETH gnark wrappers (Groth16 proof wrapping).
-- **Foundry** (`forge`, `cast`, `anvil`) — Solidity development and testing.
-- **Node.js** / **Trunk** — only required for the WASM frontend.
-
-### Quick install
-
-```bash
-./setup.sh
-```
-
-Or manually: install Rust via rustup, Foundry via `foundryup`, and Go from <https://go.dev/doc/install>.
-
-## Building
-
-```bash
-./build.sh                                            # Build everything (Rust + Solidity)
-./build.sh --test                                     # Build + run tests
-./build.sh --all                                      # Build + fmt + clippy + tests
-
-cargo build --workspace                               # Main workspace
-cd crates/bridge-snark-utils && cargo build   # AN→ETH 4-circuit prover
-cd crates/bridge-relayer-daemon && cargo build        # Relayer
-cd deposit-prover && cargo build                      # ETH→AN deposit prover
-cd contracts/ethereum && forge build                  # Solidity contracts
-```
-
-### gnark wrappers (AN→ETH side, one-time per circuit)
-
-```bash
-cd crates/bridge-snark-utils/gnark-wrappers/circuit-2
-go build .
-./circuit-2 setup ../../proofs/.../halo2_proof.json    # generates Groth16Verifier.sol + keys
-./circuit-2 prove ../../proofs/.../halo2_proof.json    # 256-byte Groth16 proof
-```
-
-Repeat for `circuit-1a/`, `circuit-1b/`. The generated `Groth16Verifier.sol` is copied to `contracts/ethereum/src/{Primary,Fallback,LayerHashes}Groth16VerifierGenerated.sol`.
-
-## Development
-
-### Code quality
-
-```bash
-cargo fmt --all
-cargo clippy --workspace
-cd contracts/ethereum && forge fmt && forge test -vvv
-```
-
-### Docker
-
-```bash
-docker-compose up -d
-docker-compose exec dev bash
-```
-
-### Foundry configuration
-
-Key settings in `contracts/ethereum/foundry.toml`:
-
-- `solc_version = "0.8.19"` — Solidity compiler version.
-- `optimizer_runs = 1` — Optimised for deployment size (not runtime gas).
-- `via_ir = true` — Required for the larger Yul verifiers (`Halo2Verifier`, `Blake2bHalo2Verifier`).
-
-## Technology Stack
-
-| Component                | Technology                                                                |
-| ------------------------ | ------------------------------------------------------------------------- |
-| Smart contracts          | Solidity 0.8.19, Foundry                                                  |
-| ZK proof system          | Halo2 (KZG + SHPLONK on BN254)                                            |
-| AN→ETH wrapper           | gnark Groth16 (Go), per-circuit                                           |
-| AN→ETH transcript        | Blake2b (matches AN-side)                                                 |
-| ETH→AN transcript        | Keccak256                                                                 |
-| AN-side verification     | Native Halo2 SHPLONK via `VERHALO2SHPLONK` TVM opcode (in `tvm-sdk`, WIP) |
-| ETH→AN deposit prover    | axiom-eth (Rust)                                                          |
-| AN→ETH state prover      | `bridge-snark-utils` (Rust + gosh halo2 fork)                     |
-| Poseidon hash            | T=3, RATE=2, R_F=8, R_P=57                                                |
-| Block hash oracle        | Axiom V2 (production), `blockhash()` (recent)                             |
-| Ethereum client          | ethers-rs                                                                 |
-| Relayer                  | `bridge-relayer-daemon` crate (`Relayer::tick()` / `run_loop()`)          |
-| AAVE yield integration   | AAVE V3 mainnet (optional, owner-managed)                                 |
-| Frontend                 | Yew + WebAssembly                                                         |
-| Testing                  | Foundry (Solidity), `cargo test` (Rust)                                   |
-
-## Further reading
-
-- `docs/an_partner_integration_plan.md` — Active integration plan + Decision Log + risk register.
-- `docs/four_circuit_architecture.md` — Per-circuit architecture deep-dive.
-- `docs/bridge_verification.md` — Property-driven verification reference (DEP-#, LH-#, BK-#, OR-#, AC-#, FORK-#).
-- `docs/manual_verification_runbook.md` — Hands-on, copy-pasteable manual review plan.
-- `docs/aave_integration.md` — AAVE V3 yield integration design.
-- `docs/verifying_an_proof.md` — End-to-end verification of an AN-side layer-hash proof.
-- `docs/verifying_eth_proof_on_an.md` — End-to-end verification of an ETH-side deposit proof on the AN side.
-- `docs/audit_trail_v2.md` — Cumulative audit trail.
-
-## License
-
-MIT
+Shellnet / Sepolia. Not audited for mainnet. Known trade-offs and limitations are enumerated in
+[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §15 — read that section before making any
+claim about the bridge's security properties.

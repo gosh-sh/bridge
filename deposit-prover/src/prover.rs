@@ -801,7 +801,11 @@ pub fn generate_solidity_verifier(
     // 3. Get verifying key from proving key
     let vk = pk.get_vk();
 
-    // 4. Public instance count must match the live circuit / AN opcode (11).
+    // 4. Public instance count must match the live circuit / AN opcode.
+    //    Driven by `NUM_PUBLIC_INPUTS` (= 12 since the chainId PI landed):
+    //    [depositId, sender, amount, contractAddress, chainId, dappIdHi,
+    //     dappIdLo, anAccountHi, anAccountLo, blockHashHi, blockHashLo,
+    //     promiseCommit].
     let num_instance = vec![NUM_PUBLIC_INPUTS];
 
     // 5. Generate Solidity verifier using SHPLONK

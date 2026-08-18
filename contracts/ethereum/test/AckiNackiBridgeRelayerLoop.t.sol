@@ -33,7 +33,7 @@ import "./mocks/MockERC20.sol";
 ///   `storedLayerHashes[..]` flat cache);
 /// - `expectedPrevAnchor(numLayers)` returns the correct chain anchor to
 ///   thread into the next block's `prevMaxLevelLayerHash` argument (per-layer
-///   pick — see AB-Q4 and `docs/ETH-contracts-spec.md` §4);
+///   pick — see AB-Q4 and `docs/EVM-contracts-spec.md` §4);
 /// - mixing Primary and Fallback finalization types in the same loop works;
 /// - one `BlockVerified(blockId, blockSeqNo, finType, numLayers)` event fires
 ///   per block (no duplicates, no holes).

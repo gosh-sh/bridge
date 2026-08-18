@@ -8,7 +8,7 @@ That is the whole rule. Documentation, READMEs and code comments elsewhere in th
 system as it is; the archive describes what someone believed on a given date and is contradicted by
 the code in places. Detail:
 
-* **`docs/ETH-contracts-spec.md` is the only verified document.** Derived by reading the Solidity
+* **`docs/EVM-contracts-spec.md` is the only verified document.** Derived by reading the Solidity
   sources at commit `a69ba36`, with a `file:line` citation for every behavioural claim. Its bare
   `src/`, `test/`, `script/`, `verifiers/` paths are relative to `contracts/ethereum/`.
 * **`docs/archive/` (66 files) is everything else, and it is not authoritative.** Unmaintained, and

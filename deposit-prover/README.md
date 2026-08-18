@@ -127,4 +127,4 @@ Some tests reach an Ethereum RPC and will not run offline.
 
 - [axiom-eth](https://github.com/axiom-crypto/axiom-eth)
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
-- `docs/ETH-contracts-spec.md` §6 — the `Deposit` event and the Ethereum-side deposit path
+- `docs/EVM-contracts-spec.md` §6 — the `Deposit` event and the Ethereum-side deposit path

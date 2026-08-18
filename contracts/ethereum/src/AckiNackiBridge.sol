@@ -19,7 +19,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      - **Withdraw on ETH side**: deliberately not exposed in this milestone.
 ///        A genuine cross-chain withdrawal will land alongside a burn-proof
 ///        circuit + state-anchored verification. That milestone has since
-///        shipped as `withdrawByProof` (`docs/ETH-contracts-spec.md` §7.2);
+///        shipped as `withdrawByProof` (`docs/EVM-contracts-spec.md` §7.2);
 ///        this header predates it. The legacy v1 refund-style
 ///        `withdraw(depositId, recipient, amount, blockNumber, proof)` was
 ///        retired in Phase 4.3 (2026-05-17) — see Decision Log.
@@ -630,7 +630,7 @@ contract AckiNackiBridge {
     /// `storedLayerHashes[10]` cache and the `storedPrevMaxLevelLayerHash`
     /// SSTORE are no longer written on the hot path (SSTORE savings ≈ 32k gas
     /// per call). `storedPrevMaxLevelLayerHash` is now the immutable genesis
-    /// seed. See `docs/ETH-contracts-spec.md` §4.
+    /// seed. See `docs/EVM-contracts-spec.md` §4.
     ///   - each non-zero `layerHashes[i]` appended to its layer's rolling window
     ///
     /// @param finType            Primary or Fallback finalization path.
@@ -750,7 +750,7 @@ contract AckiNackiBridge {
         // hot path — the authoritative per-layer state lives in `_layerWindows`
         // and is written exclusively by `_appendLayer` below. Off-chain readers
         // migrate to `getLatestPerLayer()` / `_highestActiveLayer()` /
-        // `expectedPrevAnchor(numLayers)`. See `docs/ETH-contracts-spec.md` §4.
+        // `expectedPrevAnchor(numLayers)`. See `docs/EVM-contracts-spec.md` §4.
         storedLastSeenBlockSeqNo = blockSeqNo;
         _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
@@ -1050,7 +1050,7 @@ contract AckiNackiBridge {
     ///         (removed). The per-layer view over `_layerWindows` is the
     ///         authoritative source; a shallow-successor-after-deep block no
     ///         longer overwrites deeper layers with zero. See
-    ///         `docs/ETH-contracts-spec.md` §4.
+    ///         `docs/EVM-contracts-spec.md` §4.
     function getLatestPerLayer() external view returns (uint256[MAX_LAYER_HASHES] memory) {
         uint256[MAX_LAYER_HASHES] memory out;
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {

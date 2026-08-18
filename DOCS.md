@@ -9,7 +9,8 @@ from scratch instead of patched. Read this file before adding any document.
 
 | Path | Status |
 |---|---|
-| [`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) | **Verified.** The Ethereum contract system as implemented, derived by reading the Solidity sources at commit `a69ba36`, every behavioural claim carrying a `file:line` citation. Safe to act on. |
+| [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) | **Verified.** The Ethereum contract system as implemented, derived by reading the Solidity sources at commit `a69ba36`, every behavioural claim carrying a `file:line` citation. Safe to act on. |
+| [`docs/EVM-custody-and-accounting.md`](docs/EVM-custody-and-accounting.md) | **Verified.** What the bridge owes versus what it holds, the exact operation order on the deposit and payout paths, and the labelled rules (DEP-#, CUST-#, CEI-#) restated against the code. EVM side only. |
 | [`docs/aave-yield.md`](docs/aave-yield.md) | **Verified.** Operator runbook for the AAVE module: where the money sits, which collector applies to which pocket, the two ways to get it wrong, and the owner/`yieldRecipient` divergence. Written against the same commit. |
 | `docs/archive/` (66 files) | Everything else the repository had. **Staged for deletion.** Not maintained, not authoritative, and in several places contradicted by the code. Source material for the rewrite — nothing more. |
 | `README.md`, `AGENTS.md`, `*/README.md`, `.cursor/skills/**` | Left in place, unchanged, by decision. See *Reference conventions* below. |
@@ -26,7 +27,7 @@ preserved so a half-remembered path still finds its file: `docs/reviews/x.md` �
   their `docs/…` paths still read as they did before the move. Apply the rule above when following one.
 * Inside `docs/archive/`, cross-references were left untouched. The files are being replaced, not
   maintained.
-* `docs/ETH-contracts-spec.md` cites `src/…`, `test/…`, `script/…`, `verifiers/…` relative to
+* `docs/EVM-contracts-spec.md` cites `src/…`, `test/…`, `script/…`, `verifiers/…` relative to
   **`contracts/ethereum/`** — it was written next to those sources and moved without rewriting its
   citations.
 
@@ -58,12 +59,12 @@ covering one genre for one audience. The archive exists so that step loses no kn
 
 | Document | Genre | Must cover | Source material in the archive |
 |---|---|---|---|
-| `docs/ETH-contracts-spec.md` | reference (exists) | Contract system, ABI, storage, deploy, tests, security observations | — already verified |
+| `docs/EVM-contracts-spec.md` | reference (exists) | Contract system, ABI, storage, deploy, tests, security observations | — already verified |
 | `docs/architecture.md` | design | Four circuits, cross-circuit binding, the two directions end to end, trust assumptions | `four_circuit_architecture.md`, `audit_trail_v2.md`, `integration_analysis.md`, `storage_v2_abi_note.md` |
 | `docs/deposit-direction.md` | design + reference | ETH → AN: 12 public inputs, proven `chainId`, MPT depth, VK reproducibility, the AN-side consumer | `deposit_*.md` (7 files), `verifying_eth_proof_on_an.md`, `zk_halo2_an_side_design.md`, `zkhalo2verifywithvk_reference.md` |
 | `docs/withdrawal-direction.md` | design + reference | AN → ETH: `verifyBlock`, `applyBkSetUpdate`, Circuit 4 payout, anchors and windows | `circuit_4_open_questions.md`, `an_eth_daemon_withdraw_e2e_*.md`, `shellnet_an_eth_relayer_wiring.md` |
 | `docs/operations.md` | operations | Running the daemons, the two live lanes, deploy timing, failure modes actually hit, monitoring queries | `archive/crates/an-bridge-prover/docs/live_*_runbook.md` (the freshest material in the archive), `archive/audit/*runbook*.md`, `bridge_verification.md` §11 |
-| `docs/verification.md` | verification | How to convince yourself a proof and a deployment are correct, stage by stage | `verifying_an_proof.md`, `bridge_verification.md`, `manual_verification_runbook.md` |
+| `docs/verification.md` | verification | How to convince yourself a proof and a deployment are correct, stage by stage. The **contract-side** invariants of that material — DEP-#, CUST-#, CEI-# — were re-derived early, in answer to audit question QC-A1-4, and now live in `EVM-custody-and-accounting.md`; what remains here is the proof pipeline (LH-#, CC-#, OR-#, FORK-#) | `verifying_an_proof.md`, `bridge_verification.md`, `manual_verification_runbook.md` |
 | ~~`docs/aave-yield.md`~~ | operations | **Written 2026-08-19.** Still open on the design side: threat model, the solvency and principal-conservation invariants, and the correctness-verification protocol are only in the archived `aave_integration.md` and need re-deriving from the code | — |
 | `docs/user-guide.md` | user | End-user deposit and withdrawal flow | `archive/user/USER_GUIDE.md` |
 
@@ -109,7 +110,7 @@ miss*, not for volume.
    document is stale and the PR says so. ~20 lines of script; catches exactly the failure mode seen
    here. *Recommended, highest leverage of anything on this list.*
 3. **Cite symbols, not line numbers.** `AckiNackiBridge.supplyToAave` survives a reformat;
-   `:1240` does not. `ETH-contracts-spec.md` carries ~400 line citations, and keeping them valid
+   `:1240` does not. `EVM-contracts-spec.md` carries ~400 line citations, and keeping them valid
    already forced line-count-neutral edits during the consolidation. *Recommended for new documents;
    converting the spec is a separate, larger job.*
 4. **Two document types per component** — a spec (design, invariants, trade-offs) and a README

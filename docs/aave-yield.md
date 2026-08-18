@@ -5,7 +5,7 @@ Line references are to that file.*
 
 Idle USDC is lent to the AAVE V3 USDC market. This page is what an operator needs: where the money
 is, which command collects what, and the two ways to get it wrong. The contract-level detail is in
-[`ETH-contracts-spec.md`](ETH-contracts-spec.md) §10.
+[`EVM-contracts-spec.md`](EVM-contracts-spec.md) §10.
 
 ## Where the money is
 

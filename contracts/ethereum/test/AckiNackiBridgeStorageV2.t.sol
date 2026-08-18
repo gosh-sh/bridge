@@ -16,7 +16,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeStorageV2Test
-/// @notice Storage v2.0 (2026-08-04) invariants — see `docs/ETH-contracts-spec.md` §4.
+/// @notice Storage v2.0 (2026-08-04) invariants — see `docs/EVM-contracts-spec.md` §4.
 ///
 /// Coverage:
 /// 1. `storedPrevMaxLevelLayerHash()` is IMMUTABLE — always returns the

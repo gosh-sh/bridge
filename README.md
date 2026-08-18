@@ -7,7 +7,7 @@ verifiers deployed as Yul bytecode.
 
 > **Where the truth is.** This README orients you; it is not a specification. The document derived
 > from the sources line by line, with a `file:line` citation for every behavioural claim, is
-> [`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md). The rest of the documentation is being
+> [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md). The rest of the documentation is being
 > rewritten — [`DOCS.md`](DOCS.md) tracks what exists and what is coming. When any prose disagrees
 > with the code, the code wins.
 
@@ -39,7 +39,7 @@ bridge.
 Idle USDC can be routed into AAVE V3 by the owner. That module cannot reach user principal: yield
 collection is bounded by the surplus above the book value of user deposits, and the functions that
 collect it do not appear in the principal-accounting equation at all. Contract detail in
-[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §10; the operator runbook is
+[`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) §10; the operator runbook is
 [`docs/aave-yield.md`](docs/aave-yield.md).
 
 ---
@@ -87,7 +87,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
 | `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 aggregator spike. |
 | `frontend/` | WASM deposit UI (Yew). |
-| `docs/` | [`ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) plus material staged for rewriting — start at [`DOCS.md`](DOCS.md). |
+| `docs/` | [`EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) plus material staged for rewriting — start at [`DOCS.md`](DOCS.md). |
 
 **Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
 and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
@@ -115,7 +115,7 @@ FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # needs a mainnet 
 ```
 
 The suite is inventoried per file, with what each one covers, in
-[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §13. Two build settings there are
+[`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) §13. Two build settings there are
 deliberate and worth knowing before you touch them: `optimizer_runs = 1` and `via_ir = true`. The
 bridge sits close to the EIP-170 size limit, and several functions are otherwise stack-too-deep.
 
@@ -130,7 +130,7 @@ cd crates/bridge-relayer-daemon && cargo test
 
 ## Running it against a live network
 
-Deployment, environment variables and genesis parameters: `docs/ETH-contracts-spec.md` §12. One
+Deployment, environment variables and genesis parameters: `docs/EVM-contracts-spec.md` §12. One
 constraint bites early — the genesis seed must sit on a key-block boundary, currently
 `W·P = 128 × 8 = 1024`.
 
@@ -144,5 +144,5 @@ progress. Until they land, the daemons' own `--help` output and the crate README
 ## Status
 
 Shellnet / Sepolia. Not audited for mainnet. Known trade-offs and limitations are enumerated in
-[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §15 — read that section before making any
+[`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) §15 — read that section before making any
 claim about the bridge's security properties.

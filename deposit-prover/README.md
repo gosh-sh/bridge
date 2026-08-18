@@ -1,90 +1,130 @@
 # Deposit Event Prover
 
-Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit` event was emitted by the `AckiNackiBridge` contract on Ethereum.
+Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit`
+event was emitted by the `AckiNackiBridge` contract on Ethereum.
 
-> **Phase 4.3 status (2026-05-17)**: this crate emits a raw Halo2 SHPLONK proof; the proof is consumed natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode (in development in `tvm-sdk`). The legacy Go gnark wrapper that used to live under `gnark-wrapper/` plus the Rust `groth16_wrapper` adapter under `src/groth16_wrapper/` were retired together with the ETH-side `AckiNackiBridge.withdraw()` chain. See Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md` for the rationale.
+*Verified against the sources in this crate at commit `a69ba36`, 2026-08-18. Claims about the
+Acki Nacki side are marked where they cannot be checked from this repository.*
+
+> **Status.** This crate emits a raw Halo2 SHPLONK proof. It is consumed natively on the Acki Nacki
+> side through the **`ZKHALO2VERIFYWITHVK`** TVM opcode — the name `VERHALO2SHPLONK` used in older
+> notes never shipped and appears nowhere in this tree. The legacy Go gnark wrapper under
+> `gnark-wrapper/` and the Rust `groth16_wrapper` adapter were retired together with the ETH-side
+> refund `withdraw()` chain; there is no Groth16 anywhere in this path any more.
 
 ## Why Separate from Main Workspace?
 
-This crate uses **axiom-crypto's halo2-lib v0.4.1** (via axiom-eth), which is incompatible with the halo2-axiom 0.5.x used by other Halo2 experiments in this repo. They cannot coexist in the same Cargo workspace.
+This crate uses **axiom-crypto's halo2-lib v0.4.1** (via axiom-eth), which is incompatible with the
+halo2 backend the AN→ETH circuits use. They cannot coexist in one Cargo workspace, so this crate is
+excluded from the root workspace and built standalone.
 
 ## Circuit: `DepositEventCircuitV2`
 
 The Halo2 circuit (`src/circuit_v2.rs`) proves:
 
-1. **Receipt Trie Inclusion** — Transaction receipt exists in Ethereum's receipt trie (MPT proof)
-2. **Event Log Extraction** — RLP-encoded receipt is parsed, Deposit event log is extracted
-3. **Event Signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,uint256)")`
-4. **Contract Address** — Event was emitted by the correct bridge contract
-5. **Event Data** — depositId, sender, amount extracted and exposed as public inputs
-6. **Block Hash Binding** — Proof is tied to a specific Ethereum block hash
+1. **Receipt trie inclusion** — the transaction receipt exists in Ethereum's receipt trie (MPT
+   proof), with `max_key_byte_len: 3` (`src/circuit_v2.rs:1018`; the bound is derived at `:1011`).
+2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
+3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")`
+   (`src/circuit_v2.rs:170-171`). Six fields: the event carries the Acki Nacki destination.
+4. **Contract address** — the event was emitted by the expected bridge contract.
+5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
+   as public inputs.
+6. **Block hash binding** — the proof is tied to a specific Ethereum block hash.
+7. **Chain binding** — the source chain id is a public input, so a proof from one chain cannot be
+   replayed as another.
 
-### Public Inputs (7 field elements)
+### Public inputs (12 field elements)
 
-| Index | Field             | Description                        |
-| ----- | ----------------- | ---------------------------------- |
-| 0     | `depositId`       | Unique deposit identifier          |
-| 1     | `sender`          | Depositor's Ethereum address       |
-| 2     | `amount`          | Deposit amount in wei              |
-| 3     | `contractAddress` | Bridge contract address            |
-| 4     | `blockHashHigh`   | Upper 128 bits of block hash       |
-| 5     | `blockHashLow`    | Lower 128 bits of block hash       |
-| 6     | `promiseCommit`   | Commitment for cross-chain promise |
+One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:42-55`);
+`NUM_PUBLIC_INPUTS` derives from it (`src/types.rs:11`).
 
-### Circuit Parameters
+| Index | Field | Description |
+|---:|---|---|
+| 0 | `depositId` | Unique deposit identifier |
+| 1 | `sender` | Depositor's Ethereum address |
+| 2 | `amount` | Deposit amount in USDC base units (6 decimals) |
+| 3 | `contractAddress` | Bridge contract address |
+| 4 | `chainId` | Source chain id, proven in-circuit |
+| 5 | `dappIdHigh` | Destination dapp id, upper half |
+| 6 | `dappIdLow` | Destination dapp id, lower half |
+| 7 | `anAccountHigh` | AN destination account, upper 128 bits |
+| 8 | `anAccountLow` | AN destination account, lower 128 bits |
+| 9 | `blockHashHigh` | Upper 128 bits of the block hash |
+| 10 | `blockHashLow` | Lower 128 bits of the block hash |
+| 11 | `promiseCommit` | Keccak-coprocessor promise commitment |
+
+*Earlier revisions of this file documented seven inputs ending at `promiseCommit`; the destination
+and chain-binding inputs were added later.*
+
+### Circuit parameters
 
 ```rust
-MAX_DATA_BYTE_LEN: 128    // Max event data length
-MAX_LOG_NUM: 3             // Max logs per receipt
-TOPIC_NUM_BOUNDS: (0, 4)   // Min/max topics per log
-RECEIPT_PF_MAX_DEPTH: 10   // Max MPT proof depth
+MAX_DATA_BYTE_LEN: 128     // src/circuit_v2.rs:29 — max event data length
+MAX_LOG_NUM: 3             // :30 — max logs per receipt
+TOPIC_NUM_BOUNDS: (0, 4)   // :31 — min/max topics per log
+RECEIPT_PF_MAX_DEPTH: 10   // :32 — max MPT proof depth
 ```
 
 ## On-chain consumption
 
-There is **no on-chain ETH-side ZK consumer** for this proof. The proof is consumed natively on the AN side via the future `VERHALO2SHPLONK` TVM opcode (work-in-progress in `tvm-sdk`). The corresponding AN-side `TokenBridge.finalizeDeposit(halo2Proof, publicInputs, vk)` will:
+There is **no on-chain ETH-side ZK consumer** for this proof — the Ethereum contract only emits the
+event and keeps custody. The proof is consumed on the Acki Nacki side by `USDCBridge`, whose ABI is
+bundled in this repo at `crates/an-bridge-prover/python/contracts/USDCBridge.abi.json`:
 
-1. Verify the Halo2 SHPLONK proof under the immutable VK.
-2. Enforce `publicInputs[3] == ETH_BRIDGE_ADDRESS_FR` (wrong-bridge proofs revert).
-3. Check the per-`depositId` nullifier (replay reverts).
-4. Mint the user's tokens.
+```
+finalizeDeposit(bytes proof, bytes publicInputs)
+```
 
-See `docs/verifying_eth_proof_on_an.md` for the operational verification flow.
+Two arguments, not three: the verifying key is not passed by the caller. The contract parses the
+deposit fields out of `publicInputs` itself and verifies through `ZKHALO2VERIFYWITHVK` against the VK
+embedded in its own code.
 
-## Example Binaries
+<!-- UNVERIFIED 2026-08-18: what USDCBridge enforces beyond the proof check — bridge-address
+equality, per-depositId replay protection, the canonical-block-hash gate, and the mint itself — is
+implemented in the Acki Nacki contract, whose source is not in this repository. Only the ABI is
+bundled here. Confirm against the acki-nacki repo before relying on any of it. -->
 
-| Binary                          | Description                                       |
-| ------------------------------- | ------------------------------------------------- |
-| `fetch_deposit_data`            | Fetch deposit event + MPT proof from Ethereum RPC |
-| `generate_verifier`             | Generate Solidity verifier bytecode (legacy reference; AN side uses native verification) |
-| `generate_aggregation_verifier` | Generate aggregation verifier                     |
-| `test_with_real_data`           | Test circuit with real Ethereum data              |
-| `inspect_snark`                 | Inspect SNARK proof structure                     |
-| `parse_proof_detailed`          | Parse and display proof components                |
+The relayer that carries a proof across is `crates/deposit-relayer-daemon/`.
+
+## Example binaries
+
+Run with `cargo run --release --example <name>`. Present under `examples/`:
+
+| Example | Description |
+|---|---|
+| `fetch_deposit_data` | Fetch a deposit event + MPT proof from an Ethereum RPC |
+| `test_with_real_data` | Exercise the circuit against real Ethereum data |
+| `export_deposit_proof_set` | Export a proof set for downstream consumers |
+| `export_vk_blob` | Export the VK blob the AN side embeds |
+| `verify_opcode_triple` | Check the `(proof, publicInputs, VK)` triple the opcode consumes |
+| `inspect_snark` | Inspect SNARK proof structure |
+| `parse_proof_detailed` | Parse and display proof components |
+| `downsize_srs` | Reduce an SRS to a smaller degree |
+| `mock_fixture` | Produce a mock fixture |
+| `generate_verifier` | Generate Solidity verifier bytecode — legacy reference; the AN side verifies natively |
+| `generate_aggregation_verifier` | Generate an aggregation verifier — same caveat |
+| `export_blake2b_proof` | Export a Blake2b-transcript proof |
 
 ## Development
 
 ```bash
-# Build
 cargo build --release
-
-# Run tests (19 tests)
-cargo test
-
-# Run specific example
+cargo test                 # 42 `#[test]` functions in src/ + tests/ (static count, not a run)
 cargo run --release --example fetch_deposit_data -- --help
 ```
 
+Some tests reach an Ethereum RPC and will not run offline.
+
 ## Dependencies
 
-- **axiom-eth**: Ethereum state proof primitives (receipt trie, MPT, RLP)
-- **halo2-base** (axiom-crypto v0.4.1): Circuit builder
-- **snark-verifier-sdk**: SNARK proof generation and verification
-- **ethers**: Ethereum RPC client
+- **axiom-eth** — Ethereum state-proof primitives (receipt trie, MPT, RLP)
+- **halo2-base** (axiom-crypto v0.4.1) — circuit builder
+- **snark-verifier-sdk** — proof generation and verification
+- **ethers** — Ethereum RPC client
 
 ## References
 
-- [axiom-eth](https://github.com/axiom-crypto/axiom-eth) — Ethereum state proof library
+- [axiom-eth](https://github.com/axiom-crypto/axiom-eth)
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
-- `docs/an_partner_integration_plan.md` Decision Log 2026-05-17 — Phase 4.3 demolition rationale
-- `docs/verifying_eth_proof_on_an.md` — Verification flow on the AN side
+- `docs/ETH-contracts-spec.md` §6 — the `Deposit` event and the Ethereum-side deposit path

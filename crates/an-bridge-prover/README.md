@@ -153,13 +153,24 @@ What works today:
 - ✅ `bridge-event-private-witness-export`: decodes the event.
 - ✅ `bridge-event-halo2-prover`: produces a Halo2 KZG proof of the event.
 
-What's not done yet (planned next):
+Since shipped — this section listed all three as pending, and they are not (verified against the
+sources 2026-08-18):
 
-- 🔲 **Ethereum submitter.** A small helper (likely a `web3.py` script or a Rust binary using `ethers-rs`) that takes the proof file and posts a `proveWithdrawal(...)` transaction to the Ethereum bridge contract.
-- 🔲 **`bridge-event-witness-builder` rewrite.** Today it builds the Circuit-4 witness against the off-chain `bridge-verifier-daemon`'s mirror state. The rewrite will read the Ethereum bridge contract's `layerWindows` storage directly, so the stub no longer depends on running an off-chain verifier daemon.
-- 🔲 **`bridge-prover-daemon` ETH-submission mode.** A variant (or extra mode) of the existing `bridge-prover-daemon` that posts the per-bundle attestation proof (Circuit 1A *or* 1B, selected by the daemon's path classifier — see [`docs/fallback_path.md`](./docs/fallback_path.md)) + Circuit 2 proof to the Ethereum contract via `verifyBlock(...)` instead of writing them to disk for the modelling verifier daemon to read.
+- ✅ **Ethereum submitter.** It is `crates/bridge-relayer-daemon` (a sibling crate, outside this
+  workspace), not a `web3.py` helper. `relayer withdraw-e2e` captures the live event, exports and
+  enriches the witness, shells out to `bridge-event-halo2-prover`, and optionally submits to
+  Ethereum; `relayer submit-withdraw` submits a proof file on its own. The contract function is
+  **`withdrawByProof`** — there is no `proveWithdrawal(...)`.
+- ✅ **Witness building no longer needs the verifier daemon.** `bridge_event_witness` is used as a
+  library (`export_from_event_boc_base64`, `enrich_witness`) and enriches against the live prover
+  driver's `prover_state.json` snapshot rather than `bridge-verifier-daemon`'s mirror state.
+- ✅ **Bundle proofs reach Ethereum** — through the relayer's `daemon-live`, which drives
+  `verifyBlock`. Note the shape differs from what was planned here: submission was **not** added as a
+  mode of `bridge-prover-daemon`. That daemon still writes proofs to disk; the relayer consumes the
+  same `LiveProverDriver` API and does the submitting.
 
-Once all three land, this stub becomes the real end-to-end happy path against a live Ethereum bridge contract.
+Still true: this Python script stops after producing the proof. It is a stub for exercising the
+Acki Nacki half, and the relayer is the real end-to-end path.
 
 ---
 

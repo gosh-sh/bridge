@@ -7,9 +7,11 @@ Circuit 2 (Layer Historical Hashes, K=17). Pairs with
 
 The daemon classifies each key block as **Primary** (one ≥2N/3
 attestation → Circuit 1A) or **Fallback** (paired ≥N/2+1 PRIMARY +
-FALLBACK attestations over the same `block_id` → Circuit 1B). See
-[`docs/fallback_path.md`](../docs/fallback_path.md) for the classifier
-contract and operational notes.
+FALLBACK attestations over the same `block_id` → Circuit 1B). The
+classifier is `BundleFinalizationType` in
+[`bridge-prover-lib/src/live_driver/bundle.rs`](../bridge-prover-lib/src/live_driver/bundle.rs) —
+that code is the contract. (A `docs/fallback_path.md` write-up used to be
+linked here; it was deleted as superseded in `a69ba36`.)
 
 This README is a standalone runbook for exercising the prover/verifier
 pair **without event proving** (Circuit 4) — useful for testing the
@@ -17,7 +19,10 @@ bundle path on either a local devnet or live shellnet. For full E2E
 (Circuit 4 + Python orchestrator) see the workspace-level
 [`TECHNICAL_README.md`](../TECHNICAL_README.md).
 
-> **Notation:** `W = HISTORY_PROOF_WINDOW_SIZE` (128), `P = THINNING_FACTOR_P` (4). Bundle width = `W·P = 512` source blocks.
+> **Notation:** `W = HISTORY_PROOF_WINDOW_SIZE` (128, `bridge-prover-lib/src/poseidon_dense.rs:15`),
+> `P = THINNING_FACTOR_P` (**8**, `bridge-prover-lib/src/lib.rs:46`). Bundle width = `W·P = 1024`
+> source blocks. *`P` was 4 — stride 512 — until `a69ba36`, which bumped it to 8 for the
+> 1024-aligned genesis anchors Deploy #7/#8 needed.*
 
 ---
 

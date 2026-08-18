@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-08-18 — not maintained, not authoritative.**
+> Parts of this document are contradicted by the current code. Do not act on it, and do not cite it
+> from anything new. Authority is the source tree, plus `docs/ETH-contracts-spec.md` for the
+> Ethereum contracts. Kept only as source material while the documentation is rewritten (see
+> `DOCS.md` at the repository root); this folder is scheduled for deletion.
+
 # Verifying an Ethereum Proof on the Acki Nacki Side
 
 > **v2 status (rewritten 2026-05-17 after Phase 4.3).** This doc was previously a 5-stage operational guide that included an on-chain ETH-side `Groth16DepositVerifier` adapter, a gnark Groth16 wrapper around the Halo2 deposit proof, and an "AN-side TVM Groth16 verifier" roadmap. Phase 4.3 (Decision Log 2026-05-17 in `docs/an_partner_integration_plan.md`) retired both the ETH-side adapter and the gnark wrapper, on the grounds that the AN side has no EIP-170 ceiling and can verify Halo2 SHPLONK natively through a new TVM opcode (`VERHALO2SHPLONK`, work-in-progress in `tvm-sdk`). This rewrite reflects the post-demolition flow.

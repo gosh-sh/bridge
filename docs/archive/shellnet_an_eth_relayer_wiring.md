@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-08-18 — not maintained, not authoritative.**
+> Parts of this document are contradicted by the current code. Do not act on it, and do not cite it
+> from anything new. Authority is the source tree, plus `docs/ETH-contracts-spec.md` for the
+> Ethereum contracts. Kept only as source material while the documentation is rewritten (see
+> `DOCS.md` at the repository root); this folder is scheduled for deletion.
+
 # Shellnet AN→ETH relayer wiring — Sepolia `verifyBlock` + `withdrawByProof`
 
 > **⚠ Integration-only crypto (2026-06-08).** Sepolia/shellnet deployments use **identity-stub Groth16 wrappers** for circuits 1A/1B/2/4 until R15 SHPLONK aggregator verifiers land. Do **not** treat on-chain `verifyBlock` / `withdrawByProof` as production-safe. See `docs/testnet_security_status.md`.

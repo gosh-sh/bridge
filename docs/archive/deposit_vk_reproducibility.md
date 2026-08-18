@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-08-18 — not maintained, not authoritative.**
+> Parts of this document are contradicted by the current code. Do not act on it, and do not cite it
+> from anything new. Authority is the source tree, plus `docs/ETH-contracts-spec.md` for the
+> Ethereum contracts. Kept only as source material while the documentation is rewritten (see
+> `DOCS.md` at the repository root); this folder is scheduled for deletion.
+
 > # ⚠️ SUPERSEDED BY TRACK-2 CHAIN-BINDING (2026-07-23)
 > All "11 PI" / `num_instance = [11]` claims below predate Track 2. The current
 > `deposit-prover` circuit exposes **12 PI** (adds `chainId` at slot 4,

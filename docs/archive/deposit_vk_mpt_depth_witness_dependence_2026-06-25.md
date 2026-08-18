@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-08-18 — not maintained, not authoritative.**
+> Parts of this document are contradicted by the current code. Do not act on it, and do not cite it
+> from anything new. Authority is the source tree, plus `docs/ETH-contracts-spec.md` for the
+> Ethereum contracts. Kept only as source material while the documentation is rewritten (see
+> `DOCS.md` at the repository root); this folder is scheduled for deletion.
+
 > # ⛔ SUPERSEDED / MISDIAGNOSIS (corrected 2026-06-25)
 > This document's conclusion — "the deposit VK scales with MPT proof depth; the
 > fix belongs in the `axiom-eth` fork" — is **WRONG**. The real root cause was a

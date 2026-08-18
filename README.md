@@ -38,8 +38,9 @@ bridge.
 
 Idle USDC can be routed into AAVE V3 by the owner. That module cannot reach user principal: yield
 collection is bounded by the surplus above the book value of user deposits, and the functions that
-collect it do not appear in the principal-accounting equation at all. Details in
-[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §10.
+collect it do not appear in the principal-accounting equation at all. Contract detail in
+[`docs/ETH-contracts-spec.md`](docs/ETH-contracts-spec.md) §10; the operator runbook is
+[`docs/aave-yield.md`](docs/aave-yield.md).
 
 ---
 

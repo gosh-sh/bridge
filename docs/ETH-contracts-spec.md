@@ -520,7 +520,9 @@ All deploy scripts except `DeployRealBridge` with `USE_AXIOM_ORACLE=true` wire t
 ## 10. AAVE yield module (owner-only)
 
 Idle USDC can be routed into the AAVE V3 USDC market; user principal accounting (`treasuryBalance`)
-is independent of the aToken balance.
+is independent of the aToken balance. For the operator's view of this module — which collector
+applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` divergence — see
+[`aave-yield.md`](aave-yield.md).
 
 | Function | Line | Behaviour |
 |---|---:|---|

@@ -44,9 +44,25 @@ AAVE, and that absence is the guarantee.
 | `withdrawFromAave(max)` (`:1258`) | stays in AAVE — it pulls only the booked principal | `harvestYield` |
 | `emergencyWithdrawAll()` (`:1270`) | on the contract — it pulls principal **and** interest, and zeroes the book | `skimExcessUsdc` |
 
-So after an emergency unwind `harvestYield` **always** reverts `NoYield`: `aUsdcBalance()` and
-`suppliedPrincipal` are both zero, so there is nothing for it to see. That is correct behaviour, not
-a fault. The yield is on the contract; skim it.
+### After an emergency unwind — three cases, not one
+
+"We ran `emergencyWithdrawAll`" does not by itself decide the answer. Read the two numbers.
+
+| State | Collector |
+|---|---|
+| `accruedYield() == 0`, `excessUsdc() > 0` — the usual state right after the unwind: the position is at zero and the interest came back with the principal | `skimExcessUsdc`. `harvestYield` reverts `NoYield`, correctly — there is nothing in AAVE to see |
+| `accruedYield() > 0` — yield is in AAVE again | `harvestYield`, exactly as normal |
+| both non-zero | both, `harvestYield` first |
+
+Yield can be back in AAVE after an emergency in three ways: the module was re-enabled and re-supplied
+(the normal one); someone sent aUSDC to the bridge directly, which reads as pure yield because the
+book says we supplied nothing; or rounding dust survived the `withdraw(max)`. In all three
+`harvestYield` works — note it has **no** `aaveEnabled` guard (`:1287-1289`), so a disabled module
+does not block collection. `withdrawFromAave`, by contrast, reverts `InvalidAmount` while
+`suppliedPrincipal` is zero (`:1259-1260`).
+
+This is why the rule above is stated over pockets rather than over history: it answers all three
+cases without anyone having to remember what was called last.
 
 ## Two ways to get it wrong
 

@@ -35,6 +35,7 @@ this doc extends.
 - [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
 - [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
 - [Case 6 — USDCBridge key drift (burn side)](#case-6--usdcbridge-key-drift-burn-side)
+- [Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
 - [Change log / known incidents](#change-log--known-incidents)
@@ -246,6 +247,42 @@ cast send $BRIDGE 'unpause()' --rpc-url $RPC --private-key $OWNER_PK
 cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC   # false
 ```
 
+### Step 2.5 — Seed the bridge treasury (fresh deploy only)
+
+`withdrawByProof` pays out from `treasuryBalance` (`AckiNackiBridge.sol:1188`).
+A fresh deploy starts at zero; the crypto path can pass and the tx will
+still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
+(selector `0xbb651fce`). The only path that increments `treasuryBalance`
+is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
+Seed it once, then reuse across demos on the same deploy.
+
+Full recipe in [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty).
+Quick version — mint 1 USDC from the Aave Sepolia faucet, deposit into
+the bridge:
+
+```bash
+export BRIDGE=<new_address>
+export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
+export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export WALLET=0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f      # relayer/deployer
+export AMOUNT=1000000                                          # 1.000000 USDC (6 decimals)
+
+# 1. Mint test USDC to the wallet (permissionless faucet)
+cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
+  --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
+
+# 2. Approve + deposit into the bridge (dummy AN destination is harmless
+#    on testnet — no AN listener will credit this phantom Deposit event)
+cast send $USDC 'approve(address,uint256)' $BRIDGE $AMOUNT \
+  --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
+cast send $BRIDGE 'deposit(uint256,int8,bytes32)' \
+  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
+
+# 3. Verify
+cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC   # -> 1000000
+```
+
 ### Step 3 — Cold-start the bundle daemon
 
 Full procedure in the [verifyBlock runbook Case 1](./live_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy).
@@ -451,6 +488,7 @@ Sepolia revert. The log prints the selector.
 | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` used twice | The `withdraw-e2e` command was re-run against the same captured event. Fire a fresh burn. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
 | `PausedError()` | Bridge is paused | `cast send $BRIDGE 'unpause()' --private-key $OWNER_PK`. |
+| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Dry-run trace (any revert):**
 
@@ -503,6 +541,76 @@ cp ../../../acki-nacki/config/USDCBridge.keys.json \
 If neither key matches — the shellnet operator rotated USDCBridge
 ownership. Ask Sehor for the current keypair. This is not a bridge bug;
 the USDCBridge is external state.
+
+---
+
+## Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty
+
+**Symptom.** Dry-run (or real submit) reverts with selector `0xbb651fce`
+decoded as `WithdrawTreasuryShortfall(<pub.amount>, <treasuryBalance>)`.
+`treasuryBalance == 0` on a fresh deploy is the common case; a partial
+seed followed by a larger burn is the other.
+
+**Why this happens.** In real cross-chain operation, `treasuryBalance` is
+grown by users bridging IN (`deposit()`), and payouts on the AN→ETH leg
+draw from that pool. Shellnet demos usually burn on the AN side without a
+prior ETH→AN deposit — so the treasury never funds itself organically.
+`AckiNackiBridge.sol:1188` enforces `pub.amount > treasuryBalance` →
+revert; there is no admin bypass and no auto-supply from AAVE (the AAVE
+integration is a yield sink for surplus, not a payout source).
+
+**Fix — mint from Aave faucet + deposit.** Testnet USDC lives at the
+Aave Sepolia market address; the same faucet the fork tests use
+(`test/AckiNackiBridgeAaveFork.t.sol:68-73`) has a permissionless
+`mint(address token, address to, uint256 amount)`:
+
+```bash
+cd crates/an-bridge-prover
+set -a && source .env.shellnet && set +a
+
+export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
+export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+export AMOUNT=1000000    # cover at least one burn (1.000000 USDC)
+
+# 1. Mint test USDC into the relayer wallet
+cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show AMOUNT
+
+# 2. Approve the bridge to pull USDC
+cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+# 3. Deposit into the bridge (dummy AN destination — harmless on testnet)
+cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
+  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+# 4. Confirm
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL   # -> AMOUNT
+```
+
+**Why the dummy AN destination is safe on testnet.** `deposit()` emits a
+`Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event
+that a production AN-side listener would consume to credit the AN
+recipient. On shellnet demos there is no such listener wired for
+seed-only deposits, so the phantom event just sits in event history. Do
+NOT do this on a bridge with a live AN-side indexer — pay to a real
+`anAccount` you control on that path, or drain via a legit withdraw
+after seeding.
+
+**Re-run the withdraw.** After the deposit lands, re-run the same
+`withdraw-e2e` (or `replay_withdraw_shplonk.sh`) command. The proof is
+deterministic per `(event, prover_state)`, so if it dry-ran successfully
+against the empty treasury it will submit successfully now.
+
+**Scaling.** Seed size to cover the burn(s) you plan to test. Default
+`test_deploy_and_withdraw_only.py` fires 1 USDC — mint 10 USDC once and
+you're good for the demo cycle. Excess USDC in the treasury is not lost:
+it stays available for future withdraws, and can optionally be swept to
+AAVE via `supplyToAave()` for yield.
 
 ---
 
@@ -570,6 +678,32 @@ crates/an-bridge-prover/
 ## Change log / known incidents
 
 Newest first.
+
+### 2026-08-18 — Deploy #10 first live `WithdrawalExecuted` + treasury-seeding case
+
+- **Milestone.** First successful on-chain `withdrawByProof` against
+  `AckiNackiBridge 0xa44E35151962684f54Af8aaD2675E726ED848E59` — tx
+  `0x35d7254b430f1e475ef16d7f60b295bd0226c906ec5b019d4b2ca408ca657c85`
+  at Sepolia block 11,513,799 (`WithdrawalExecuted` emitted; 1.000000
+  USDC delivered to `0x742d35Cc…f44e`).
+- **Ordering discovery.** After the SHPLONK pipeline fix (commit
+  `b22f6c7`, driver.rs now composes `Circuit4ShplonkPipeline`), dry-run
+  passed the crypto path (anchor check + verifier both green) but the
+  submit reverted with `WithdrawTreasuryShortfall(1_000_000, 0)`
+  (selector `0xbb651fce`). Root cause was operational, not
+  cryptographic: Deploy #10 was freshly bootstrapped and no one had ever
+  bridged IN, so `treasuryBalance == 0`.
+- **Fix landed in this runbook.** New [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
+  with the Aave-faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
+  `USDC.approve(bridge)` → `bridge.deposit(amount, 0, 0x11…11)`). Also
+  added [Step 2.5](#step-25--seed-the-bridge-treasury-fresh-deploy-only)
+  to Case 1 so future fresh-deploy demos do the seed BEFORE firing the
+  burn, and added the selector row to Case 5's revert table.
+- **Rule of thumb.** Fresh deploys must seed the treasury or every
+  `withdrawByProof` will revert on the payout leg regardless of proof
+  quality. Faucet + deposit costs ~2 tx (<30s wall), fund enough to cover
+  the demo's burns. Existing deploys inherit their prior treasury; check
+  with `cast call $BRIDGE 'treasuryBalance()(uint256)'`.
 
 ### 2026-08-17 — Deploy #8: tight-lookahead rerun after Deploy #7 mis-timing
 

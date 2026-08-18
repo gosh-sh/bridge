@@ -26,6 +26,12 @@ BURN_LOG="logs/withdrawal_burn_${TS}.log"
 
 set -a && source .env.shellnet && set +a
 
+# aggregate-proof subprocess cd's into $BRIDGE_AGGREGATOR_DIR, so --snark-dir
+# must be an ABSOLUTE path (a relative "work_dir/..." would resolve against
+# the aggregator's cwd and miss the intermediate .snark file — same bug
+# `replay_withdraw_shplonk.sh:59` guards against).
+SNARK_DIR_ABS=$(python3 -c "import os,sys; print(os.path.abspath('work_dir/shplonk-snark'))")
+
 echo "==> Step 1/3  launch withdraw-e2e REAL SUBMIT (baseline snapshot before burn)"
 nohup ./target/release/relayer withdraw-e2e \
   --gql-endpoint "$BRIDGE_GQL_ENDPOINT" \
@@ -38,7 +44,7 @@ nohup ./target/release/relayer withdraw-e2e \
   --aggregator-dir "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir  "$BRIDGE_VERIFIERS_DIR" \
   --params-dir     "$BRIDGE_PARAMS_DIR" \
-  --snark-dir      work_dir/shplonk-snark \
+  --snark-dir      "$SNARK_DIR_ABS" \
   --pk-cache-dir   "$BRIDGE_PARAMS_DIR/pk_cache" \
   --prover-out-dir proofs \
   --prover-seq-no "${TS: -6}" \

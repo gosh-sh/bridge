@@ -91,6 +91,47 @@ code and were wrong in the old docs:
 `excessUsdc()`, so a `supplyToAave` after an emergency unwind books uncollected yield into
 `suppliedPrincipal`; and `usdc.approve`'s return value is ignored at `:1250`.
 
+## Open decisions — making this self-maintaining
+
+Recorded 2026-08-19, undecided. The aim is that documentation is produced and refreshed as a
+side effect of ordinary development, rather than in cleanup passes like the one that created this
+file. Each item is a decision with a recommendation, not a wish — accept it or strike it.
+
+**Frame the problem correctly.** Nothing here was missing: 66 documents existed and confidently
+described a system that no longer matched them. Optimise for *a wrong document being impossible to
+miss*, not for volume.
+
+1. **A header contract on every document.** Two fields: `verified-against: <commit>` and
+   `covers: <paths>`. *Recommended.* Without them no reviewer can know which document a diff just
+   falsified — and asking them to know is how this folder happened.
+2. **A staleness check in CI.** If `git diff <verified-against>..HEAD -- <covers>` is non-empty, the
+   document is stale and the PR says so. ~20 lines of script; catches exactly the failure mode seen
+   here. *Recommended, highest leverage of anything on this list.*
+3. **Cite symbols, not line numbers.** `AckiNackiBridge.supplyToAave` survives a reformat;
+   `:1240` does not. `ETH-contracts-spec.md` carries ~400 line citations, and keeping them valid
+   already forced line-count-neutral edits during the consolidation. *Recommended for new documents;
+   converting the spec is a separate, larger job.*
+4. **Two document types per component** — a spec (design, invariants, trade-offs) and a README
+   (interfaces, purpose, how to use it). *Agreed.* But note that operations and verification are a
+   third genre that is **not** per-component: deploy timing, the live proving lanes, monitoring
+   queries. Keep two or three of those for the system as a whole, and do not instantiate them per
+   crate. Conflating genres is what made half the archive look replaceable when it was not.
+5. **Generate the surface, never the reasoning.** Signatures, errors, events and defaults can be
+   derived from code. The value of a spec is what the code cannot say: why `optimizer_runs = 1`, why
+   `P` went 4 → 8, why the anchor layer is deliberately not asserted, that `yieldRecipient` does not
+   follow `transferOwnership`. *Recommended:* a generated skeleton whose "why / trade-offs / traps"
+   sections must be filled before review passes.
+6. **A skill triggered by code changes, not by intent.** Right prompt: "you touched code covered by
+   document X — here are its claims about what you changed, check them." A skill that writes a
+   document from scratch produces a restatement of the code. The repo already has a skills
+   convention under `.cursor/skills/`.
+7. **`owner:` and `review-by:` in the same header.** The archive grew because no document had either.
+   Past its date with no re-verification, a document is archived automatically rather than sitting as
+   canon. *Recommended.*
+8. **Scope: not everything gets documents.** A component earns a spec + README when it has an
+   external consumer. An internal helper's consumer is the module next door; doc comments are enough.
+   *Recommended* — this is the only rule on the list that prevents the volume growing back.
+
 ## Archive contents, by theme (transitional — delete with the archive)
 
 Source material for the table above, and the coverage checklist for the rewrite: every theme here

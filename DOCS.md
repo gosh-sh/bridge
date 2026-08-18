@@ -1,5 +1,7 @@
 # Documentation — state and rewrite plan
 
+> **Everything outside `docs/archive/` is current. `docs/archive/` is not.**
+
 **As of 2026-08-18** the repository's prose was consolidated so that documentation can be rewritten
 from scratch instead of patched. Read this file before adding any document.
 

@@ -2,8 +2,11 @@
 
 ## ⚠️ Documentation status (changed 2026-08-18) — read before citing any document
 
-The prose documentation was consolidated so it can be rewritten instead of patched. Two facts govern
-every answer you give:
+**Everything outside `docs/archive/` is current. `docs/archive/` is not.**
+
+That is the whole rule. Documentation, READMEs and code comments elsewhere in the tree describe the
+system as it is; the archive describes what someone believed on a given date and is contradicted by
+the code in places. Detail:
 
 * **`docs/ETH-contracts-spec.md` is the only verified document.** Derived by reading the Solidity
   sources at commit `a69ba36`, with a `file:line` citation for every behavioural claim. Its bare

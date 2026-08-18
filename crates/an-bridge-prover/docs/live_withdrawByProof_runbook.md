@@ -19,7 +19,9 @@ this doc extends.
 > that is verified on-chain. Withdrawals can only be submitted after
 > their covering bundle lands (Circuit 4 anchor-chain verifies against
 > a `layer_hashes` root that `verifyBlock` has already committed).
-> With `W=128, P=8`, one bundle covers 1024 seq_nos of AN chain time.
+> With `W=128, P=8`, an **L1** bundle covers `W·P = 1024` seq_nos
+> (~5.7 min chain-time at 3 seq/s). An **L2** bundle covers
+> `W² = 16384` seq_nos (~91 min chain-time). Case 8+ covers the L2 flow.
 
 ---
 
@@ -36,6 +38,9 @@ this doc extends.
 - [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
 - [Case 6 — USDCBridge key drift (burn side)](#case-6--usdcbridge-key-drift-burn-side)
 - [Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
+- [Case 8 — Fresh L2 deploy: first E2E withdrawal](#case-8--fresh-l2-deploy-first-e2e-withdrawal)
+- [Case 9 — Sequential L2 withdrawals (stress-test loop)](#case-9--sequential-l2-withdrawals-stress-test-loop)
+- [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
 - [Change log / known incidents](#change-log--known-incidents)
@@ -614,6 +619,273 @@ AAVE via `supplyToAave()` for yield.
 
 ---
 
+## Case 8 — Fresh L2 deploy: first E2E withdrawal
+
+**When to use.** Deploying the bridge with `BRIDGE_ANCHOR_LEVEL=2` to
+exercise L2-anchoring end-to-end. Everything from Case 1 applies with
+three level-swaps below; the differences below are the only L2-specific
+deviations.
+
+**Level-swap summary.**
+
+| L1 setting | L2 setting |
+|---|---|
+| `BRIDGE_ANCHOR_LEVEL=1` (or unset) | `BRIDGE_ANCHOR_LEVEL=2` |
+| Bundle stride = `W·P = 1024` seq_nos (~5.7 min chain-time) | Bundle stride = `W² = 16384` seq_nos (~91 min chain-time) |
+| `compute_bridge_anchors` picks `layer == 1` | `compute_bridge_anchors --level 2` picks `layer == 2` |
+| `withdraw-e2e --anchor-layer auto` | `withdraw-e2e --anchor-layer 2 --i-know-the-wait` (strict L2) |
+| Fire burn within ~5 min of daemon start | Burn timing is irrelevant to floor wait (see L2 timing model) |
+
+### Step L0 — Emit L2 genesis anchors
+
+L2 seed emission requires the daemon to have observed at least one T₂
+(W²-aligned) boundary. Chain reaches a T₂ every ~91 min, so if your
+freshness window is short, `compute_bridge_anchors --level 2` may return
+"no L2 boundary seen yet, retry after next T₂". Wait or re-run.
+
+```bash
+cd crates/an-bridge-prover/bridge-prover-lib
+cargo run --release --bin compute_bridge_anchors -- \
+  --level 2 \
+  --at-head \
+  --gql-endpoint https://shellnet.ackinacki.org/graphql
+# Emits:
+#   GENESIS_ANCHOR_LEVEL=2
+#   GENESIS_LAST_SEEN_BLOCK_SEQ_NO=<W²-aligned seq_no>
+#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH=<L2 T₂ root>
+#   GENESIS_BK_SET_COMMITMENT=<current BK-set Poseidon commitment>
+```
+
+**L2 freshness rule.** Chain moves W² every ~91 min. A staleness of
+10 min before `forge script` runs costs ~11% of one bundle vs L1's
+"10 min = one whole bundle" — so L2 is much more forgiving on the
+compute-anchors → deploy gap. Still keep it under ~10 min for cleanliness.
+
+Paste the emitted values into a level-scoped env file
+(`contracts/ethereum/.env.shellnet.l2` and
+`crates/an-bridge-prover/.env.shellnet.l2` recommended, to avoid
+mixing with L1 deploys).
+
+### Step L1 — Deploy with L2 wiring
+
+Same forge command as Case 1 Step 1 — the constructor is level-opaque
+(see change log below). Only the env values differ.
+
+```bash
+cd contracts/ethereum
+set -a && source .env.shellnet.l2 && set +a
+forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+  --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
+```
+
+**Post-deploy sanity — confirm W²-alignment on-chain:**
+
+```bash
+export BRIDGE=<new_address>
+LAST=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
+python3 -c "print('L2-aligned:', $LAST % 16384 == 0, 'last_seen:', $LAST)"
+```
+
+If `L2-aligned == False`, the deploy consumed an L1 seed by mistake —
+**redeploy**. The daemon's startup stride-alignment check will refuse to
+run against a non-W²-aligned contract when `BRIDGE_ANCHOR_LEVEL=2`.
+
+### Step L2 — Unpause + treasury seed
+
+Identical to Case 1 Steps 2 and 2.5 — level-agnostic.
+
+### Step L3 — Cold-start `daemon-live` under L2
+
+Provide `--anchor-level 2` (or `BRIDGE_ANCHOR_LEVEL=2` in env). Everything
+else per the verifyBlock runbook Case 1.
+
+```bash
+export BRIDGE_ANCHOR_LEVEL=2
+./target/release/relayer daemon-live \
+  --anchor-level 2 \
+  ... all other flags per verifyBlock runbook Case 1 ...
+```
+
+**Expected log signature (within 30s of start):**
+
+```
+INFO daemon-live: anchor_mode=L2, bundle_stride=16384
+INFO daemon-live: on-chain last_seen=<seed>, stride-aligned=OK
+INFO daemon-live: seed_policy=Explicit(<seed>), anchor_level=2
+```
+
+**Startup drift refusals.** If either of the following appears, stop
+and fix before proceeding:
+
+- `refuse: on-chain last_seen (=X) % 16384 != 0` — deploy consumed L1
+  seed but daemon is starting L2. Redeploy with L2 genesis values.
+- `refuse: anchor_level mismatch (state=1, cfg=2)` — stale L1
+  `state/prover_state.json` re-used across the redeploy. Delete the
+  file and restart to force re-seed.
+
+### Step L4 — Wait for the first L2 bundle to land
+
+Under L1 this is ~5.7 min chain + ~10 min prover. Under **L2** it is
+~91 min chain + ~10 min prover ≈ **101 min worst-case, ~50 min typical**
+(depending on when start relative to next T₂).
+
+```bash
+watch -n 60 'cast call $BRIDGE storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC'
+# Wait until the value bumps by exactly 16384 (one L2 stride).
+```
+
+Once the value increments, both `_layerWindows[1]` (L1) and
+`_layerWindows[2]` (L2) are populated on-chain in a single
+`verifyBlock` call — `AckiNackiBridge.sol:_appendLayerHashes` iterates
+all active layer slots per successful proof (lines 902–913).
+
+### Step L5 — Fire the burn
+
+Same as Case 1 Step 4 (`test_deploy_and_withdraw_only.py`); the burn
+side is level-agnostic. Note the printed `seq_no` — it feeds the
+covering-bundle math below.
+
+### Step L6 — Wait for covering L2 bundle
+
+```bash
+E=<event_seq_no from python output>
+COVER=$(( (E + 16383) / 16384 * 16384 ))    # next W²-boundary ≥ E
+L=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
+python3 -c "print(f'event={$E} last_seen={$L} covering_T2={$COVER}  wait≈{max(0,($COVER-$L))*0.5/60:.0f} min chain + ~10 min prover')"
+# Poll storedLastSeenBlockSeqNo until >= COVER
+```
+
+### Step L7 — Run `withdraw-e2e` with **explicit** L2
+
+**Do NOT use `--anchor-layer auto`** under L2 stress testing. Auto
+probes L1 first; whenever the event falls inside the L1 window that
+follows the covering T₂ (the common case) it resolves to L1 and the
+run silently downgrades. Force strict L2:
+
+```bash
+cd crates/an-bridge-prover
+set -a && source .env.shellnet.l2 && set +a
+TS=$(date +%Y%m%d_%H%M%S)
+
+./target/release/relayer withdraw-e2e \
+  --gql-endpoint $BRIDGE_GQL_ENDPOINT \
+  --prover-state-path state/prover_state.json \
+  --window-size 128 \
+  --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
+  --bridge-dapp-id    1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
+  --anchor-layer 2 \
+  --i-know-the-wait \
+  --work-dir work_dir_l2 \
+  --an-bridge-prover-dir . \
+  --prover-out-dir proofs_l2 \
+  --prover-seq-no $(date +%s) \
+  --dry-run \
+  2>&1 | tee logs/withdraw_l2_dry_${TS}.log
+```
+
+**Expected log signature (differences vs L1):**
+
+```
+INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
+INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
+INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
+INFO chain built: anchor_layer=L2, active_links=1, ...
+INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2
+```
+
+The `layer_idx=1` line is the ground-truth confirmation that the
+witness is L2-anchored; anything else (`layer_idx=0`) means an
+accidental L1 fallback happened. Under `Explicit(2)` this cannot occur
+by construction — the enricher passes the level through and the slot
+lookup indexes `layer_windows[1]` unconditionally.
+
+Then real submit — same as Case 1 Step 7.
+
+**If the enricher timeout expires** (currently `ENRICH_TIMEOUT = 120 min`
+per `bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172`), the daemon
+never landed a covering L2 bundle inside 2 h. That is a bundle-lane
+issue, not a withdraw-lane issue — check `daemon-live` logs and the
+verifyBlock runbook.
+
+---
+
+## Case 9 — Sequential L2 withdrawals (stress-test loop)
+
+**When to use.** After Case 8's first cycle succeeds, drive 2–3
+additional burns through the same L2 rails to exercise repeated L2
+anchoring under real chain motion.
+
+**Session budget.** With one bundle ~101 min end-to-end and ~5 min per
+`withdraw-e2e` cycle, expect ~2 h between successful withdrawals.
+Three cycles fit in a ~6 h operator session.
+
+**Loop shape (per cycle N = 2, 3, …):**
+
+```bash
+# 1. Confirm previous WithdrawalExecuted landed
+cast logs --address $BRIDGE --rpc-url $RPC \
+  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
+  --from-block -1000 | tail -5
+
+# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 8 Step L2)
+cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC
+
+# 3. Fire fresh burn
+MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
+
+# 4. Wait for covering T₂ (Case 8 Step L6 math)
+
+# 5. Run withdraw-e2e with a fresh --prover-seq-no
+./target/release/relayer withdraw-e2e \
+  ... same flags as Case 8 Step L7 ... \
+  --prover-seq-no $(date +%s)
+```
+
+**What to watch between cycles.**
+
+- Daemon should log a fresh Circuit-2 bundle every ~91 min.
+- On-chain `LayerAnchorAppended` should fire **twice per bundle**
+  (once for L1 slot, once for L2 slot). Missing L2 emissions signal a
+  lost `verifyBlock` on the bundle lane — pause and inspect the daemon
+  before continuing the loop.
+- Between cycles, `storedLastSeenBlockSeqNo` should be a multiple of
+  16384 modulo bundle count. Off-multiple = state divergence.
+
+**Failure isolation.** Because the on-chain anchor path is level-opaque
+(constructor stores a single genesis scalar; `_expectedPrevAnchor` uses
+per-layer picks; `withdrawByProof`'s `_isKnownAnchor` scans all
+layers — see change log), any revert in cycle N ≥ 2 is almost
+certainly reproducing a Case 5 failure mode, not something L2-specific.
+Start with the Case 5 catalog before diagnosing L2.
+
+---
+
+## L2 timing model
+
+Extends [Timing model — why fresh-deploy demos need tight lookahead](#timing-model--why-fresh-deploy-demos-need-tight-lookahead).
+Every "12 min" in the L1 formula becomes "~101 min" under L2. There is
+no L2 fast-case analogous to L1's "burn inside bundle 1 window ≈ 17 min".
+
+| Scenario | catch-up | +covering | +C4+submit | **total** |
+|---|---|---|---|---|
+| Burn during bundle-1 proving window, L1 anchor unavailable | 0 | 101 | 5 | **~106 min** |
+| Burn just after bundle-1 T₂ landed | 101 | 0 | 5 | **~106 min** |
+| Burn during bundle-2 proving window | 0 | 101 | 5 | **~106 min** |
+| Daemon lag = 1 L2 bundle at burn time | 101 | 101 | 5 | **~207 min** |
+
+**Enrich timeout.** `ENRICH_TIMEOUT` was bumped from 90 → 120 min in
+`bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172` to fit the L2
+worst-case (~101 min chain + ~10 min prover + 10 min slack). Two hours
+is snug — if a bundle stalls beyond that, `withdraw-e2e` errors out and
+the operator must diagnose the bundle lane before retrying.
+
+**Consequence for demos.** L2 stress testing is not a "quick demo".
+Plan for a half-day session per 3-cycle run, and treat the ~50 min
+typical between-cycle wait as unavoidable. L2's value is stress-testing
+the deeper anchor chain — timing efficiency is not the goal.
+
+---
+
 ## Health checks
 
 **Prove-lane snapshot:**
@@ -678,6 +950,39 @@ crates/an-bridge-prover/
 ## Change log / known incidents
 
 Newest first.
+
+### 2026-08-18 — L2 anchoring code-complete + operator readiness (pre-Deploy #12)
+
+- **Change.** All 8 stages of
+  [`docs/l2_anchoring_implementation_plan.md`](./l2_anchoring_implementation_plan.md)
+  landed (commit `bf0d41a` closes stages 5–8; `c7923c7` covers 1–4).
+  Level-parametric across the stack:
+  `compute_bridge_anchors --level {1|2}`, `daemon-live --anchor-level`
+  (env `BRIDGE_ANCHOR_LEVEL`), and the existing
+  `withdraw-e2e --anchor-layer {auto|1|2} --i-know-the-wait`.
+  `BootstrapSeed` v2 and `BridgeState` v5 persist `anchor_level` for
+  cross-startup drift detection; the relayer daemon refuses on-chain
+  stride mis-alignment at boot.
+- **`ENRICH_TIMEOUT` bumped 90 → 120 min.** File
+  `bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172`. L2's worst-case
+  single-bundle wait is ~101 min chain + ~10 min prover; the previous
+  90-min budget was L1-tuned and would time out before the enricher
+  could resolve a fresh T₂ boundary. L1 unaffected in healthy runs
+  (typical L1 resolve time is seconds).
+- **Contract is level-opaque — confirmed by code read.**
+  `AckiNackiBridge.sol` constructor (lines 509–537) stores only a
+  scalar `_vb.genesisPrevMaxLevelLayerHash`; `_layerWindows` starts
+  empty. `_expectedPrevAnchor` (lines 990–997) returns that scalar iff
+  `_highestActiveLayer() == 0` (first verifyBlock). After the first
+  successful proof, `_appendLayerHashes` (lines 902–913) writes both
+  `_layerWindows[1]` and `_layerWindows[2]` in one call when the proof
+  carries `numLayers = 2`. No Solidity change required for L2 deploys.
+- **Cases 8, 9, and L2 timing model added to this runbook.** Case 8 is
+  the operator sequence for the first L2 E2E cycle; Case 9 is the
+  sequential-withdrawal stress loop (2–3 cycles per session).
+- **Not yet exercised live.** Deploy #12 (first L2 Sepolia deploy) has
+  not run yet. Case 8's dry-run and Case 9's loop will land as a
+  subsequent change-log entry once executed.
 
 ### 2026-08-18 — Deploy #10 first live `WithdrawalExecuted` + treasury-seeding case
 

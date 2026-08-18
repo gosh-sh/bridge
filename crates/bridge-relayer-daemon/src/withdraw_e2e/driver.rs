@@ -169,7 +169,12 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     // missing layer_hashes[K] anchor. Retry with periodic reloads until the
     // daemon lands the covering bundle or we exceed the wait budget.
     const ENRICH_POLL_INTERVAL: Duration = Duration::from_secs(30);
-    const ENRICH_TIMEOUT: Duration = Duration::from_secs(90 * 60);
+    // 2 h budget covers L2's worst-case single-bundle wait (~101 min:
+    // W² − 1 = 16383 seq_nos at ~3 seq/s ≈ 91 min chain-time + ~10 min
+    // prover wall-time for Circuits 1/2/3). L1 healthy runs resolve in
+    // seconds to a few minutes, so the higher ceiling only affects
+    // pathological cases.
+    const ENRICH_TIMEOUT: Duration = Duration::from_secs(120 * 60);
     info!(
         anchor_mode = ?cfg.anchor_mode,
         i_know_the_wait = cfg.i_know_the_wait,

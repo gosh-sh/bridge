@@ -11,7 +11,7 @@ and operators quote at each other during an incident.
 **Scope: the EVM side only** — `AckiNackiBridge.sol` and the AAVE position it holds. The
 Acki Nacki side keeps its own accounting in `USDCBridge`, a TVM contract in another repository; only
 its ABI is bundled here, so nothing on this page describes it. Where the two meet is the deposit
-proof, covered in [`ETH-contracts-spec.md`](ETH-contracts-spec.md) §6.
+proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
 ## The book number is not a balance
 

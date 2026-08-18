@@ -33,7 +33,7 @@ import "./mocks/MockERC20.sol";
 ///   `storedLayerHashes[..]` flat cache);
 /// - `expectedPrevAnchor(numLayers)` returns the correct chain anchor to
 ///   thread into the next block's `prevMaxLevelLayerHash` argument (per-layer
-///   pick — see AB-Q4 and `docs/archive/storage_v2_abi_note.md`);
+///   pick — see AB-Q4 and `docs/ETH-contracts-spec.md` §4);
 /// - mixing Primary and Fallback finalization types in the same loop works;
 /// - one `BlockVerified(blockId, blockSeqNo, finType, numLayers)` event fires
 ///   per block (no duplicates, no holes).
@@ -150,7 +150,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     /// @notice Drives 10 sequential blocks (mix of Primary and Fallback) and
     ///         asserts the bridge's exposed AN state matches the latest block
     ///         after every step. This is the on-chain acceptance criterion
-    ///         from §5 of `docs/archive/an_partner_integration_plan.md` (relayer
+    ///         for a relayer driving the contract unattended (relayer
     ///         drives 10 blocks → `storedLastSeenBlockSeqNo` advances by
     ///         exactly 10 → all 10 emit `BlockVerified`).
     function test_relayerLoop_10Blocks_mixedFinTypes_advancesState() public {

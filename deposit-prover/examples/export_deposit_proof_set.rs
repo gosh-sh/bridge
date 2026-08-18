@@ -39,7 +39,7 @@ use clap::Parser;
 /// work scales with depth), and dropping the `contract_address` in-circuit
 /// constant in `circuit_v2.rs` removes the address dependence — together the VK
 /// is witness-independent (no axiom-eth fork change needed; see
-/// `docs/archive/deposit_vk_witness_independence.md`). Must be >= every real deposit's
+/// the VK's witness-independence requirement). Must be >= every real deposit's
 /// `used_capacity` (measured: 1-node=11, 3-node=21, ~5/node; max_depth=10 worst
 /// case ~55-60), so 64 leaves a safe margin and still fits k=18.
 const FIXED_KECCAK_CAPACITY: usize = 64;

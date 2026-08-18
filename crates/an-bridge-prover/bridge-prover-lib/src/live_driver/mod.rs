@@ -38,8 +38,8 @@
 //!   The caller must drain via [`poll_next_bk_update`](LiveProverDriver::poll_next_bk_update)
 //!   before bundles can advance past that height.
 //!
-//! See `bridge/docs/archive/an_bridge_prover_live_driver_refactor_plan_2026-07-08.md`
-//! for the full extraction rationale and the two-daemon integration contract
+//! This module's public API *is* the two-daemon integration contract
+//! (`poll_next_bundle` / `ack_bundle` and their bk-update siblings)
 //! (archived after the integration landed on 2026-07-30).
 //!
 //! ## Downstream-consumer contract (Sergey's `bridge-relayer-daemon`)

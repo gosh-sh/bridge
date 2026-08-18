@@ -10,8 +10,8 @@
 //! (roughly double primary's 24), which pushes the R15 SHPLONK aggregator's
 //! Yul verifier over the 24,576-byte EIP-170 limit (~28.4 KB). Bumping the
 //! inner circuit to `K = 21` halves the columns to ~22 and drops the
-//! aggregator Yul to ~21.5 KB. Cf. `docs/archive/r15_verifier_sizing_report.md`
-//! and the `contracts/ethereum/verifiers/README.md` sizing table.
+//! aggregator Yul to ~21.5 KB. Cf. the sizing table in
+//! `contracts/ethereum/verifiers/README.md`.
 //!
 //! The degree-21 KZG SRS shares tau with the degree-20 slice used by the
 //! primary/layer paths, so on-chain aggregation stays consistent.

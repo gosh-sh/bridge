@@ -24,11 +24,11 @@ import "./helpers/UsdcTestLib.sol";
 ///         `circuit4-single-final-root`). Replaces the previous Phase A
 ///         (`verifyEvent`) + Phase B (110-input withdrawal) split.
 ///
-/// Uses a mock `IBridgeWithdrawalVerifier` because the R15 gnark wrapper is
-/// still an identity stub — tracked as Phase 8 of
-/// `docs/archive/an_partner_integration_plan.md`. Once the real Halo2-in-gnark
-/// verifier lands, this suite stays unchanged and a sibling E2E suite picks
-/// up real bound proofs.
+/// Uses a mock `IBridgeWithdrawalVerifier` so this suite exercises the
+/// contract's own checks — identity, chain-id scoping, nullifiers, anchors,
+/// treasury — in isolation from the proof system. The real SHPLONK verifier
+/// is exercised separately by `AckiNackiBridgeProductionWithdrawByProof.t.sol`
+/// against committed bound calldata.
 ///
 /// Coverage:
 ///

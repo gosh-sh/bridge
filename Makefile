@@ -187,7 +187,7 @@ relayer-fmt: ## Check bridge-relayer-daemon formatting
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via an-bridge-prover workspace)
 	@cd crates/an-bridge-prover && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
 
-production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (see docs/archive/production_plan.md)
+production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (gates live in scripts/production_preflight.sh)
 	@chmod +x scripts/production_preflight.sh
 	@./scripts/production_preflight.sh
 

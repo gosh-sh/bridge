@@ -28,7 +28,7 @@
 # Verified empirically (2026-06-26): Hermez k=20 (SHA-256 80394564…) ends in
 # s_g2 = 928fafb3…, whereas the opcode's embedded KZG_S_G2_BYTES = c6028acf…
 # (== the chain `params/kzg_bn254_*.srs` files). Same g1/g2 generators, DIFFERENT
-# tau. See `examples/downsize_srs.rs` and `docs/archive/deposit_vk_witness_independence.md`.
+# tau. See `examples/downsize_srs.rs`.
 
 set -e  # Exit on error
 

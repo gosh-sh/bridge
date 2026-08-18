@@ -1,6 +1,6 @@
 //! Export the deposit circuit's verifying key as a **v2 RLC `VkBlob`** — the
 //! wire the AN-side `ZKHALO2VERIFYWITHVK` opcode reads to verify a deposit
-//! proof natively (see `docs/archive/deposit_finalize_vk_gap_2026-05-28.md`).
+//! proof natively.
 //!
 //! Pipeline:
 //!   1. Rebuild the deposit keygen circuit (`EthCircuitImpl<Fr,
@@ -135,7 +135,7 @@ fn main() -> anyhow::Result<()> {
     // (one embedded VK verifies every real deposit regardless of MPT proof
     // depth). Together with dropping the `contract_address` in-circuit constant
     // (circuit_v2.rs) this makes the VK fully witness-independent — no axiom-eth
-    // fork change is needed. See `docs/archive/deposit_vk_witness_independence.md`.
+    // fork change is needed — the VK must stay witness-independent.
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let circuit_input = DepositEventCircuitV2::new(input, &config);
     let rlc_params = get_default_params();

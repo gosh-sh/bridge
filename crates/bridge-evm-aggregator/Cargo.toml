@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Acki Nacki Bridge Team"]
 license = "MIT OR Apache-2.0"
-description = "R15 / M2 feasibility spike — wraps a Halo2 SHPLONK proof in an AggregationCircuit (snark-verifier-sdk) and emits a Yul EVM verifier. See docs/archive/r15_snark_verifier_roadmap.md."
+description = "R15 / M2 feasibility spike — wraps a Halo2 SHPLONK proof in an AggregationCircuit (snark-verifier-sdk) and emits a Yul EVM verifier. See this crate's README."
 
 [lib]
 name = "bridge_evm_aggregator"

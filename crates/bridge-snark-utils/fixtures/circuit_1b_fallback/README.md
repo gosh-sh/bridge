@@ -1,8 +1,9 @@
 # Bridge Circuit 1B (Fallback BLS attestation) — `ZKHALO2VERIFYWITHVK` fixture
 
 A real, end-to-end-verified set of operands for the AN-side
-`ZKHALO2VERIFYWITHVK` opcode (`0xC7 0x4A`, frozen Variant A — see
-`docs/zkhalo2verifywithvk_reference.md`).
+`ZKHALO2VERIFYWITHVK` opcode (`0xC7 0x4A`, frozen Variant A). The opcode itself lives in `tvm-sdk`,
+outside this repository — that implementation is the authority on its semantics, not any document
+here.
 
 Use this fixture to:
 - Smoke-test a fresh `ZKHALO2VERIFYWITHVK` deployment without re-running
@@ -22,7 +23,7 @@ is sourced from the same ceremony, so verifier and prover agree on the
 KZG commitment scheme byte-for-byte.
 
 To rebuild these fixtures yourself, place Hermez
-`params/kzg_bn254_21.srs` under the orchestrator crate, then:
+`params/kzg_bn254_21.srs` under `crates/bridge-snark-utils/`, then:
 `EXPORT_HALO2_FIXTURE_DIR=fixtures/circuit_1b_fallback cargo test --release --test halo2_tvm_bundle_round_trip -p bridge-snark-utils`
 (nightly toolchain required).
 

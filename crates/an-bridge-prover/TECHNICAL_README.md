@@ -87,7 +87,7 @@ Both halves of the system are **file-based**: `proofs/proof_NNN.json` is the pro
 - 1 entry with `target_type == PRIMARY` → Circuit 1a (`generate_primary_proof`).
 - 2 entries (`PRIMARY` prefinalization + `FALLBACK` target proof, same `block_id`) → Circuit 1b (`generate_fallback_proof`).
 
-Classification is **structural**, not heuristic — the threshold checks (≥2N/3 vs >N/2) are enforced in-circuit. Both circuits emit the same 4-public-instance shape `[block_id, bk_set_commitment, block_seq_no, last_seen]`; the `attestation_circuit` tag in `proof_NNN.json` tells the verifier which VK to use. See [docs/fallback_path.md](docs/fallback_path.md) for the full classifier rules and operational notes.
+Classification is **structural**, not heuristic — the threshold checks (≥2N/3 vs >N/2) are enforced in-circuit. Both circuits emit the same 4-public-instance shape `[block_id, bk_set_commitment, block_seq_no, last_seen]`; the `attestation_circuit` tag in `proof_NNN.json` tells the verifier which VK to use. The full classifier rules are the code: `BundleFinalizationType` in [`bridge-prover-lib/src/live_driver/bundle.rs`](bridge-prover-lib/src/live_driver/bundle.rs). (A `docs/fallback_path.md` write-up was linked here until it was deleted as superseded in `a69ba36`.)
 
 ---
 
@@ -145,14 +145,14 @@ acki-nacki-to-eth-bridge-halo2-prover/
 └── .cargo/config.toml                     # --cfg tokio_unstable (required, do not remove)
 ```
 
-`HISTORY_WINDOW_SIZE` is driven by `bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE` (currently `128`) — node and prover therefore cannot disagree on `W` at the constant level. `THINNING_FACTOR_P` (currently `4`) lives in `bridge-prover-lib/src/lib.rs`.
+`HISTORY_WINDOW_SIZE` is driven by `bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE` (currently `128`) — node and prover therefore cannot disagree on `W` at the constant level. `THINNING_FACTOR_P` (currently **`8`**, `bridge-prover-lib/src/lib.rs:46`) lives in `bridge-prover-lib/src/lib.rs`, so the bundle width is `W·P = 1024`. It was `4` — bundle width 512 — until `a69ba36` raised it for the 1024-aligned genesis anchors Deploy #7/#8 required.
 
 ### Consumers of `bridge-prover-lib`
 
 The library is designed to serve two independent binaries:
 
 1. **This repo's `bridge-prover-daemon`** — the reference consumer, drives Circuits 1A/1B + 2 + bk-updates against a real AN node and hands proofs to the paired `bridge-verifier-daemon` over IPC.
-2. **`crates/bridge-relayer-daemon` (Sergey's ETH-side relayer)** — a separate crate outside this workspace, adds `bridge-prover-lib` as a dep and drives the same [`LiveProverDriver`](bridge-prover-lib/src/live_driver/mod.rs) API against the ETH-side `AckiNackiBridge.sol` contract. See `bridge/docs/archive/alina_bridge_relayer_live_integration_plan_for_sergey_2026-07-09.md` for the integration contract (public API, poll/ack protocol, consistency-check invariants, halo2 transitive-dep note) — archived after the integration landed (2026-07-30); §3.1 GQL-shortcut and §7 sentry-migration sections are annotated SUPERSEDED / MOOT.
+2. **`crates/bridge-relayer-daemon` (Sergey's ETH-side relayer)** — a separate crate outside this workspace, adds `bridge-prover-lib` as a dep and drives the same [`LiveProverDriver`](bridge-prover-lib/src/live_driver/mod.rs) API against the ETH-side `AckiNackiBridge.sol` contract. That integration landed on 2026-07-30; the API surface listed above is the contract, and the relayer's own sources are the reference for how it polls and acks. Note that since `a69ba36` the relayer submits to the Solidity contract directly — it no longer waits on this workspace's `.result.json` ACK files, which remain the prover↔verifier-daemon channel only.
 
 The public API is stable at:
 - `LiveProverDriver::{new, poll_next_bundle, poll_next_bk_update, ack_bundle, ack_bk_update, snapshot_state, snapshot_prover_bk_set, snapshot_bootstrap_seed, key_manager_ref, record_self_verify_result}`
@@ -251,7 +251,7 @@ Then re-run `./target/release/bootstrap_hermez_srs`.
 |---|---|---|---|
 | `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Used for bundle fetch, attestation polling and `bkSetUpdates` diffs at runtime. **Not** consulted for the BK set at bootstrap — startup is file-first (`state/prover_bk_set.json` → `BRIDGE_BK_SET_CONFIG` on cold boot). |
 | `BRIDGE_BK_SET_CONFIG` | prover, verifier | `./bk_set.local.json` | Path to the per-network genesis BK-set JSON. Set to `./bk_set.shellnet.json` when pointing daemons at shellnet. Consulted only on cold boot (as the seed for `state/prover_bk_set.json`) and by the startup guard for commitment-mismatch detection. See [Startup guard & cold-boot mismatch](#startup-guard--cold-boot-mismatch-post-2026-07-27) and [Shellnet BK-set — manual maintenance](#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson). |
-| `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 512), else the daemon refuses to start. |
+| `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 1024 at `P=8`), else the daemon refuses to start (`bridge-prover-daemon/src/main.rs:297-303`). |
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
 All other constants (poll intervals, file paths, `THINNING_FACTOR_P`) are hard-coded; see `bridge-prover-daemon/src/main.rs` and `bridge-verifier-daemon/src/main.rs` if you need to change them.
@@ -518,7 +518,7 @@ Phases printed are identical to Step 5 of the local-devnet runbook; exit code 0 
 - `Resource not found` polling the multisig — the multisig has its own dapp_id, so its address is the self-dapp `acc::acc` form, not `0:acc` or zero-dapp. The orchestrator already uses self-dapp; preserve that in extensions.
 - `403` from `https://shellnet.ackinacki.org/graphql` — the reverse proxy rejects the default Python `urllib` User-Agent. The orchestrator overrides it; custom GQL callers must do the same.
 - Verifier never reaches the event's anchor seq_no — almost always means the seed sits far behind chain head. Wipe + restart (`stop-bridge-test.sh` → `run-bridge-test.sh`) so auto-seed re-anchors at the next `W·P` boundary past current head.
-- `BRIDGE_BOOTSTRAP_SEQNO must be a multiple of 512` — explicit seeds must be `W·P`-aligned; drop the override or pick a valid boundary (`echo $((N - N % 512))`).
+- `BRIDGE_BOOTSTRAP_SEQNO=<n> must be > 0 and divisible by W*P=<bundle_size>` — explicit seeds must be `W·P`-aligned; drop the override or pick a valid boundary (`echo $((N - N % 1024))` at the current `P=8`). The daemon prints the live `bundle_size`, so trust that number over any written here.
 
 ### Shellnet key-refresh checklist (run this after every shellnet redeploy)
 
@@ -706,7 +706,7 @@ Since v5 (2026-07-22, Circuit 1 byte-order fix), `block_id_hex` is a *single* fi
 
 Since v6 (2026-07-23), `block_id_hex` carries the **raw 32-byte BE chain hash** (= `Solidity uint256(bytes32(blockId))`), not the `Fr::to_repr()` LE bytes of the reduced public instance. This preserves the top 2 bits when the chain hash exceeds the Fr modulus (~3/4 of blocks). The Fr the Rust verifier consumes is derived on demand via `ipc::hash_hex_to_fr` (inner-product fold of reversed bytes, matching `attestation_bls_checker_circuit::attestation_data_parser::compute_block_id_fr`); the on-chain Halo2Verifier Yul does the equivalent via `mod(calldataload, f_q)`. Same convention applies to `BkUpdateRequest.block_id_hex`; the pre-v6 sibling `block_id_hash_hex` was dropped since the two fields were derivable from each other.
 
-`attestation_circuit` is the **path-selection tag** (see [docs/fallback_path.md](docs/fallback_path.md)). The 4-public-instance layout is identical for 1a and 1b; only the verifying key differs. Schema v3 added this tag; legacy v2 files deserialise as `"primary"`.
+`attestation_circuit` is the **path-selection tag** (`BundleFinalizationType`, `bridge-prover-lib/src/live_driver/bundle.rs`). The 4-public-instance layout is identical for 1a and 1b; only the verifying key differs. Schema v3 added this tag; legacy v2 files deserialise as `"primary"`.
 
 ### `proofs/proof_event_NNN.json` (Circuit 4, local devnet only)
 

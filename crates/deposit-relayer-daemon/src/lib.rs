@@ -56,8 +56,8 @@
 //!   TVM message ABI. The AN-side nullifier makes re-submission safe in the
 //!   interim.
 //! - The AN-side `TokenBridge.finalizeDeposit` entry point itself is on the
-//!   partner branch `poseidon_dex_with_verify` (see
-//!   `docs/zkhalo2verifywithvk_reference.md`).
+//!   partner branch `poseidon_dex_with_verify`; the `ZKHALO2VERIFYWITHVK`
+//!   opcode lives in `tvm-sdk` and is authoritative for its semantics.
 
 pub mod an_config;
 pub mod daemon;

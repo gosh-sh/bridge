@@ -10,7 +10,7 @@
 //!    circuit's `c = a * b`.
 //!
 //! Item 3 is the M5 advance over the original M2 acceptance (which exposed
-//! only the 12 accumulator limbs). See `docs/r15_snark_verifier_roadmap.md`.
+//! only the 12 accumulator limbs). See this crate's README.
 
 use std::{env, path::PathBuf};
 

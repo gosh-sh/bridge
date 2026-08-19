@@ -1,5 +1,32 @@
 # Acki Nacki Bridge — Agent Context
 
+## ⚠️ Documentation status (changed 2026-08-18) — read before citing any document
+
+**Everything outside `docs/archive/` is current. `docs/archive/` is not.**
+
+That is the whole rule. Documentation, READMEs and code comments elsewhere in the tree describe the
+system as it is; the archive describes what someone believed on a given date and is contradicted by
+the code in places. Detail:
+
+* **`docs/EVM-contracts-spec.md` is the only verified document.** Derived by reading the Solidity
+  sources at commit `a69ba36`, with a `file:line` citation for every behavioural claim. Its bare
+  `src/`, `test/`, `script/`, `verifiers/` paths are relative to `contracts/ethereum/`.
+* **`docs/archive/` (66 files) is everything else, and it is not authoritative.** Unmaintained, and
+  contradicted by the code in several places. Read it as history — what someone believed on a given
+  date — never as a description of the system. Do not cite it in new work, do not follow its
+  procedures, and do not repeat its claims without re-checking them against the source. Every file
+  in it carries an `ARCHIVED` banner, except the one review PDF, which cannot hold one. The folder
+  is scheduled for deletion.
+
+**Paths inside *this* file were deliberately not rewritten during the move.** Wherever this document
+says `docs/<name>.md`, the file now lives at `docs/archive/<name>.md` — including the "canonical
+entry point" list further down, which points entirely into the archive and is therefore historical.
+The root `README.md` was rewritten against the spec on 2026-08-18 and is current.
+
+When code and prose disagree, the code wins. [`DOCS.md`](DOCS.md) at the repository root holds the
+rewrite plan, the target document set, and a list of claims the archived docs get wrong that have
+already been verified against the source — check it before re-deriving any of them.
+
 ## Project Overview
 
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based, multi-threaded blockchain). The bridge enables deposits on Ethereum to be proven on Acki Nacki, and Acki Nacki state (layer hashes) to be verified on Ethereum — both via ZK proofs.

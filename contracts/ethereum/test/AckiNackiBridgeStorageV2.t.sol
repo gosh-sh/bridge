@@ -184,6 +184,118 @@ contract AckiNackiBridgeStorageV2Test is Test {
         assertEq(afterC[4], 0, "L5 still empty");
     }
 
+    /// @notice `getLayerWindow(L)` (added for chain-resurrect, 2026-08) returns
+    ///         the full `HistoryWindow` for layer `L` — data, heights,
+    ///         dataLen, writeCursor, lastHeight — byte-for-byte matching the
+    ///         internal `_layerWindows[L]` state that verifyBlock builds up.
+    ///         Off-chain daemon uses this to reconstruct its BridgeState
+    ///         mirror when starting fresh against an already-advanced
+    ///         contract.
+    function test_getLayerWindow_mirrorsInternalStateAcrossSequence() public {
+        // Empty state: dataLen == 0, writeCursor == 0, all slots zero.
+        AckiNackiBridge.HistoryWindow memory w0 = bridge.getLayerWindow(1);
+        assertEq(w0.dataLen, 0, "dataLen == 0 pre-verify");
+        assertEq(w0.writeCursor, 0, "writeCursor == 0 pre-verify");
+        assertEq(w0.lastHeight, 0, "lastHeight == 0 pre-verify");
+        assertEq(w0.data[0], 0, "data[0] zero pre-verify");
+        assertEq(w0.heights[0], 0, "heights[0] zero pre-verify");
+
+        // NOTE: `_appendLayerHashes(..., blockSeqNo)` on line 755 of
+        // AckiNackiBridge.sol passes `blockSeqNo` as the `blockHeight` slot,
+        // so on-chain `_layerWindows[L].heights[i]` actually stores the
+        // seqNo. Off-chain the daemon distinguishes them, but for the
+        // getter mirror test we only assert what the contract records.
+
+        // Block A (blockId=0xA, seqNo=1) — 4 layers.
+        uint256[] memory a = new uint256[](4);
+        a[0] = A1; a[1] = A2; a[2] = A3; a[3] = A4;
+        _submit(0xA, 1, 4, _layers(a), GENESIS_PREV_ANCHOR);
+
+        // Block B (blockId=0xB, seqNo=2) — 1 layer.
+        uint256[] memory b = new uint256[](1);
+        b[0] = B1;
+        _submit(0xB, 2, 1, _layers(b), A1);
+
+        // Block C (blockId=0xC, seqNo=3) — 2 layers.
+        uint256[] memory c = new uint256[](2);
+        c[0] = C1; c[1] = C2;
+        _submit(0xC, 3, 2, _layers(c), A2);
+
+        // Expected timeline per layer (heights = seqNo per contract):
+        //   L1: A1(h=1) → B1(h=2) → C1(h=3)   → 3 entries, cursor=3
+        //   L2: A2(h=1) → C2(h=3)             → 2 entries, cursor=2
+        //   L3: A3(h=1)                       → 1 entry,   cursor=1
+        //   L4: A4(h=1)                       → 1 entry,   cursor=1
+        //   L5..L10: empty                    → 0 entries, cursor=0
+        AckiNackiBridge.HistoryWindow memory w1 = bridge.getLayerWindow(1);
+        assertEq(w1.dataLen, 3, "L1 dataLen");
+        assertEq(w1.writeCursor, 3, "L1 writeCursor");
+        assertEq(w1.lastHeight, 3, "L1 lastHeight");
+        assertEq(w1.data[0], A1, "L1 slot 0");
+        assertEq(w1.data[1], B1, "L1 slot 1");
+        assertEq(w1.data[2], C1, "L1 slot 2");
+        assertEq(w1.heights[0], 1, "L1 h[0]");
+        assertEq(w1.heights[1], 2, "L1 h[1]");
+        assertEq(w1.heights[2], 3, "L1 h[2]");
+        // Unused slots must read as zero (default storage).
+        assertEq(w1.data[3], 0, "L1 slot 3 zero");
+        assertEq(w1.data[127], 0, "L1 slot W-1 zero");
+
+        AckiNackiBridge.HistoryWindow memory w2 = bridge.getLayerWindow(2);
+        assertEq(w2.dataLen, 2, "L2 dataLen");
+        assertEq(w2.writeCursor, 2, "L2 writeCursor");
+        assertEq(w2.data[0], A2, "L2 slot 0");
+        assertEq(w2.data[1], C2, "L2 slot 1");
+        assertEq(w2.heights[0], 1, "L2 h[0]");
+        assertEq(w2.heights[1], 3, "L2 h[1]");
+
+        AckiNackiBridge.HistoryWindow memory w3 = bridge.getLayerWindow(3);
+        assertEq(w3.dataLen, 1, "L3 dataLen");
+        assertEq(w3.writeCursor, 1, "L3 writeCursor");
+        assertEq(w3.data[0], A3, "L3 slot 0");
+
+        AckiNackiBridge.HistoryWindow memory w4 = bridge.getLayerWindow(4);
+        assertEq(w4.dataLen, 1, "L4 dataLen");
+        assertEq(w4.data[0], A4, "L4 slot 0");
+
+        AckiNackiBridge.HistoryWindow memory w5 = bridge.getLayerWindow(5);
+        assertEq(w5.dataLen, 0, "L5 dataLen (empty)");
+        assertEq(w5.writeCursor, 0, "L5 writeCursor (empty)");
+
+        // Cross-check: getLatestPerLayer heads must equal getLayerWindow heads.
+        uint256[10] memory latest = bridge.getLatestPerLayer();
+        assertEq(latest[0], C1, "L1 head cross-check");
+        assertEq(latest[1], C2, "L2 head cross-check");
+        assertEq(latest[2], A3, "L3 head cross-check");
+        assertEq(latest[3], A4, "L4 head cross-check");
+    }
+
+    /// @notice Layer index 0 must revert with `LayerOutOfRange`.
+    function test_getLayerWindow_revertsOnLayerZero() public {
+        (bool ok, bytes memory ret) = address(bridge).staticcall(
+            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(0))
+        );
+        assertFalse(ok, "call must revert");
+        assertEq(
+            bytes4(ret),
+            AckiNackiBridge.LayerOutOfRange.selector,
+            "revert selector must be LayerOutOfRange"
+        );
+    }
+
+    /// @notice Layer index > MAX_LAYER_HASHES must revert with `LayerOutOfRange`.
+    function test_getLayerWindow_revertsOnLayerAboveMax() public {
+        (bool ok, bytes memory ret) = address(bridge).staticcall(
+            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(11))
+        );
+        assertFalse(ok, "call must revert");
+        assertEq(
+            bytes4(ret),
+            AckiNackiBridge.LayerOutOfRange.selector,
+            "revert selector must be LayerOutOfRange"
+        );
+    }
+
     /// @notice The key v2 semantic: a shallow successor no longer clobbers
     ///         deeper slots with zero. Under v1, `storedLayerHashes[3]`
     ///         (0-indexed) would have gone to 0 after block B (numLayers=1)

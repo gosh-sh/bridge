@@ -162,6 +162,37 @@ pub struct BridgeState {
     pub stored_last_bk_set_update_seq_no: u64,
 }
 
+/// Snapshot of one on-chain `HistoryWindow` as returned by
+/// `AckiNackiBridge.getLayerWindow(uint8)` (added 2026-08). Neutral of
+/// alloy types so `bridge-prover-lib` can consume it without adding an
+/// alloy dependency; the daemon converts alloy-generated bindings to
+/// this shape before calling [`BridgeState::from_contract`].
+#[derive(Clone, Debug)]
+pub struct ContractLayerWindow {
+    /// Full slot buffer. Length must equal the target `window_size`.
+    pub data: Vec<[u8; 32]>,
+    /// Parallel heights buffer, same length as `data`.
+    pub heights: Vec<u64>,
+    /// Number of valid entries currently in the window (saturates at W).
+    pub data_len: u16,
+    /// Next slot to overwrite (always `mod W`).
+    pub write_cursor: u16,
+    /// Height of the last appended entry (zero when empty).
+    pub last_height: u64,
+}
+
+/// Full contract state readable by chain-resurrect: the four scalars
+/// plus all `MAX_LAYERS` windows. Consumed by
+/// [`BridgeState::from_contract`].
+#[derive(Clone, Debug)]
+pub struct ContractFullState {
+    pub last_seen_block_seq_no: u64,
+    pub bk_set_commitment: [u8; 32],
+    pub last_bk_set_update_seq_no: u64,
+    /// Index `L-1` corresponds to layer `L` (1..=MAX_LAYERS).
+    pub layer_windows: [ContractLayerWindow; MAX_LAYERS],
+}
+
 impl BridgeState {
     pub fn new(window_size: usize) -> Self {
         Self {
@@ -371,6 +402,85 @@ impl BridgeState {
         }
         // pick is 1-indexed.
         self.window(pick as u8).latest().unwrap_or([0u8; 32])
+    }
+
+    /// Rebuild a `BridgeState` byte-for-byte from a snapshot of the on-chain
+    /// contract (chain-resurrect path).
+    ///
+    /// This is the seed used when the daemon starts against a contract that
+    /// some other party has already advanced (e.g. a shared test bridge that
+    /// a co-tester has been driving). The four scalar fields plus the
+    /// `MAX_LAYERS` per-layer `HistoryWindow`s are copied verbatim; on-chain
+    /// `heights[i]` slots carry the **block seq_no** used at
+    /// `_appendLayerHashes(..., blockSeqNo)` (Solidity keeps only seq_no,
+    /// not height), so the reconstructed `HistoryWindow.heights[]` and
+    /// `HistoryWindow.last_height` are seq_no values — matching the on-chain
+    /// mirror. The returned state has `initialized = true` iff the contract
+    /// has recorded at least one block (`last_seen_block_seq_no > 0`).
+    ///
+    /// Preconditions (any failure → error):
+    /// * every `layer_windows[i].data.len() == window_size` (and heights
+    ///   the same length) — mismatch means the daemon was launched with a W
+    ///   that does not match what the contract was deployed with, and
+    ///   silently rebuilding a differently-shaped ring would corrupt state.
+    /// * every `data_len <= window_size` and `write_cursor < window_size`.
+    ///
+    /// `stored_last_seen_block_height` cannot be recovered from the contract
+    /// (Solidity does not persist L2 height), so it is set to zero here.
+    /// Callers that need a truthful height must patch it in after
+    /// resurrect (e.g. from a genesis config or an off-chain oracle) —
+    /// the field is not consulted by `append_bundle` monotonicity guards,
+    /// only seq_no is.
+    pub fn from_contract(
+        cfs: ContractFullState,
+        window_size: usize,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(window_size > 0, "from_contract: window_size must be > 0");
+
+        let mut layer_windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYERS);
+        for (idx, cw) in cfs.layer_windows.iter().enumerate() {
+            let layer_num = idx + 1;
+            anyhow::ensure!(
+                cw.data.len() == window_size,
+                "from_contract: layer {} data.len={} != window_size={}",
+                layer_num, cw.data.len(), window_size,
+            );
+            anyhow::ensure!(
+                cw.heights.len() == window_size,
+                "from_contract: layer {} heights.len={} != window_size={}",
+                layer_num, cw.heights.len(), window_size,
+            );
+            anyhow::ensure!(
+                (cw.data_len as usize) <= window_size,
+                "from_contract: layer {} data_len={} exceeds window_size={}",
+                layer_num, cw.data_len, window_size,
+            );
+            anyhow::ensure!(
+                (cw.write_cursor as usize) < window_size,
+                "from_contract: layer {} write_cursor={} not < window_size={}",
+                layer_num, cw.write_cursor, window_size,
+            );
+
+            layer_windows.push(HistoryWindow {
+                data: cw.data.clone(),
+                heights: cw.heights.clone(),
+                data_len: cw.data_len as usize,
+                write_cursor: cw.write_cursor as usize,
+                last_height: cw.last_height,
+            });
+        }
+
+        Ok(Self {
+            window_size,
+            layer_windows,
+            stored_bk_set_commitment: cfs.bk_set_commitment,
+            stored_last_seen_block_seq_no: cfs.last_seen_block_seq_no,
+            // Contract does not persist L2 height — leave at 0. See docstring.
+            stored_last_seen_block_height: 0,
+            initialized: cfs.last_seen_block_seq_no > 0,
+            recent_bundles: VecDeque::new(),
+            stored_last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
+        })
     }
 
     /// Load state from a JSON file (returns new state if file doesn't exist).
@@ -584,5 +694,161 @@ mod tests {
         assert_eq!(s.prev_max_level_layer_hash_for(1), [1u8; 32]);
         // new_num_layers == 0  ->  zero
         assert_eq!(s.prev_max_level_layer_hash_for(0), [0u8; 32]);
+    }
+
+    /// Snapshot a `BridgeState` into a `ContractFullState` shape as the
+    /// on-chain contract would expose it (heights carry seq_no, not L2
+    /// height — see `_appendLayerHashes` in AckiNackiBridge.sol). Test-only
+    /// helper: exercises the exact wire format the daemon consumes when
+    /// re-hydrating from the chain.
+    fn snapshot_as_contract(s: &BridgeState) -> ContractFullState {
+        let mut arr: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYERS);
+        for w in &s.layer_windows {
+            arr.push(ContractLayerWindow {
+                data: w.data.clone(),
+                // The contract stores seq_no in the `heights` slot; the
+                // local mirror stores height there. For a byte-for-byte
+                // round-trip test we mirror whatever this side has (the
+                // contract-vs-local semantic drift is documented on
+                // `from_contract`, which zeroes `stored_last_seen_block_height`).
+                heights: w.heights.clone(),
+                data_len: w.data_len as u16,
+                write_cursor: w.write_cursor as u16,
+                last_height: w.last_height,
+            });
+        }
+        let layer_windows: [ContractLayerWindow; MAX_LAYERS] = arr.try_into().unwrap();
+        ContractFullState {
+            last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
+            bk_set_commitment: s.stored_bk_set_commitment,
+            last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
+            layer_windows,
+        }
+    }
+
+    #[test]
+    fn from_contract_roundtrips_windows_byte_for_byte() {
+        // Build a source state via three bundle applies across layers 1..3.
+        // Seq_no == height in this synthetic replay so the round-trip test
+        // does not need to care about the seq_no-vs-height documented drift.
+        let mut src = BridgeState::new(4);
+        src.initialize_bk_set_commitment([7u8; 32]).unwrap();
+        src.append_bundle(&[([0x11; 32], 1)], 10, 10).unwrap();
+        src.append_bundle(&[([0x22; 32], 1), ([0x33; 32], 2)], 20, 20).unwrap();
+        src.append_bundle(
+            &[([0x44; 32], 1), ([0x55; 32], 2), ([0x66; 32], 3)],
+            30, 30,
+        ).unwrap();
+        src.apply_bk_set_update([7u8; 32], [8u8; 32], 25).unwrap();
+
+        let cfs = snapshot_as_contract(&src);
+        let dst = BridgeState::from_contract(cfs, 4).unwrap();
+
+        assert_eq!(dst.window_size, src.window_size);
+        assert_eq!(dst.stored_bk_set_commitment, src.stored_bk_set_commitment);
+        assert_eq!(
+            dst.stored_last_seen_block_seq_no,
+            src.stored_last_seen_block_seq_no
+        );
+        assert_eq!(
+            dst.stored_last_bk_set_update_seq_no,
+            src.stored_last_bk_set_update_seq_no
+        );
+        // Contract does not persist L2 height — see docstring.
+        assert_eq!(dst.stored_last_seen_block_height, 0);
+        assert!(dst.initialized);
+        // Byte-for-byte parity on every window slot.
+        for i in 0..MAX_LAYERS {
+            let sw = &src.layer_windows[i];
+            let dw = &dst.layer_windows[i];
+            assert_eq!(dw.data, sw.data, "layer {} data mismatch", i + 1);
+            assert_eq!(dw.heights, sw.heights, "layer {} heights mismatch", i + 1);
+            assert_eq!(dw.data_len, sw.data_len, "layer {} data_len mismatch", i + 1);
+            assert_eq!(
+                dw.write_cursor, sw.write_cursor,
+                "layer {} write_cursor mismatch", i + 1
+            );
+            assert_eq!(
+                dw.last_height, sw.last_height,
+                "layer {} last_height mismatch", i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn from_contract_empty_contract_yields_uninitialized_state() {
+        // Zeroed ContractFullState: models a freshly-deployed contract.
+        let empty_layer = || ContractLayerWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        let arr: [ContractLayerWindow; MAX_LAYERS] = std::array::from_fn(|_| empty_layer());
+        let cfs = ContractFullState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            layer_windows: arr,
+        };
+        let s = BridgeState::from_contract(cfs, 4).unwrap();
+        // Genesis-like: no bundles applied on-chain ⇒ initialized == false.
+        assert!(!s.initialized);
+        assert_eq!(s.num_active_layers(), 0);
+    }
+
+    #[test]
+    fn from_contract_rejects_window_size_mismatch() {
+        // Contract data has W=4 but the daemon is configured for W=8 →
+        // silently rebuilding the ring under a different width would corrupt
+        // slot math, so it must be rejected.
+        let short_layer = || ContractLayerWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        let arr: [ContractLayerWindow; MAX_LAYERS] = std::array::from_fn(|_| short_layer());
+        let cfs = ContractFullState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            layer_windows: arr,
+        };
+        let err = BridgeState::from_contract(cfs, 8).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("data.len=4"), "unexpected error: {msg}");
+        assert!(msg.contains("window_size=8"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn from_contract_rejects_out_of_range_write_cursor() {
+        let bad_layer = ContractLayerWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 4, // == window_size, must be strictly less
+            last_height: 0,
+        };
+        let mut arr: [ContractLayerWindow; MAX_LAYERS] = std::array::from_fn(|_| {
+            ContractLayerWindow {
+                data: vec![[0u8; 32]; 4],
+                heights: vec![0u64; 4],
+                data_len: 0,
+                write_cursor: 0,
+                last_height: 0,
+            }
+        });
+        arr[2] = bad_layer;
+        let cfs = ContractFullState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            layer_windows: arr,
+        };
+        let err = BridgeState::from_contract(cfs, 4).unwrap_err();
+        assert!(format!("{err}").contains("write_cursor=4"));
     }
 }

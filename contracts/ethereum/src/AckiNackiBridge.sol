@@ -1075,6 +1075,32 @@ contract AckiNackiBridge {
         return _isKnownLayerAnchor(layer, anchor);
     }
 
+    /// @notice Full contents of layer `L`'s rolling window (data, heights, cursors).
+    ///
+    /// @dev Off-chain-only reader for daemon bootstrap / resurrect. Never
+    ///      called on-chain (would be prohibitively gassy — returns
+    ///      `HISTORY_PROOF_WINDOW * (32 + 8)` bytes plus scalars per call).
+    ///      Used by the relayer daemon to reconstruct its `BridgeState`
+    ///      mirror against an already-advanced contract — the scenario a
+    ///      fresh install, a co-tester's daemon, or a mid-run machine
+    ///      handoff hit when only `getLatestPerLayer()` was exposed
+    ///      (heads-only). See
+    ///      `crates/bridge-relayer-daemon/docs/live_verifyBlock_runbook.md`
+    ///      Case 6 (Chain-resurrect).
+    ///
+    ///      Struct return uses the ABI encoder v2 default in Solidity 0.8
+    ///      and copies storage → memory; adds no hot-path cost since
+    ///      `verifyBlock` does not touch this function.
+    ///
+    /// @param layer 1..=`MAX_LAYER_HASHES`. Zero or out-of-range reverts.
+    /// @return  The layer's full `HistoryWindow` (unused slots read as zero).
+    function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            revert LayerOutOfRange(layer);
+        }
+        return _layerWindows[layer];
+    }
+
     // ---------------------------------------------------------------------
     // AN→ETH withdrawal payout — withdrawByProof (Circuit 4, single-final-root)
     // ---------------------------------------------------------------------

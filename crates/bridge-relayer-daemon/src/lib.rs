@@ -16,6 +16,7 @@ pub mod live_source;
 pub mod proof_validation;
 pub mod relayer;
 pub mod source;
+pub mod startup_decide;
 pub mod state;
 pub mod types;
 pub mod withdraw_e2e;
@@ -47,6 +48,7 @@ pub use source::{
     BkUpdateProofsSource, BkUpdateSource, BlockSource, EmptyBkUpdateSource, FixturesBlockSource,
     InMemoryBlockSource, ProverProofsBlockSource,
 };
+pub use startup_decide::{decide as startup_decide, DecideInputs, StartupDecision};
 pub use state::RelayerState;
 pub use types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
 pub use withdraw_e2e::{

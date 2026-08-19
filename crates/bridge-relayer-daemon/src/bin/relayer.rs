@@ -529,6 +529,13 @@ enum Cmd {
         /// dry-run (no signed tx).
         #[arg(long)]
         dry_run: bool,
+        /// Replay mode: skip baseline snapshot, pick the youngest
+        /// matching WithdrawalInitiated ExtOut event. Use to recover a
+        /// prior burn whose enricher timed out (e.g. daemon crashed
+        /// before the covering bundle landed on-chain). On a
+        /// single-account demo this unambiguously targets the last burn.
+        #[arg(long)]
+        replay_latest: bool,
     },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
@@ -871,6 +878,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
+            replay_latest,
         } => withdraw_e2e_cli(WithdrawE2ECliArgs {
             gql_endpoint,
             prover_state_path,
@@ -895,6 +903,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
+            replay_latest,
         })
         .await
         .map_err(|e| {
@@ -1862,6 +1871,7 @@ struct WithdrawE2ECliArgs {
     bridge_address: Option<Address>,
     private_key: Option<String>,
     dry_run: bool,
+    replay_latest: bool,
 }
 
 async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
@@ -1887,6 +1897,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         prover_out_dir: args.prover_out_dir,
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
         prover_seq_no: args.prover_seq_no,
+        replay_latest: args.replay_latest,
     };
 
     let summary = run_withdraw_e2e_once(cfg).await?;

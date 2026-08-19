@@ -98,6 +98,16 @@ pub struct WithdrawE2EConfig {
     pub prover_timeout: Duration,
     /// Seqno stamped into the summary + witness/proof filenames.
     pub prover_seq_no: u32,
+    /// Replay-mode: skip the baseline snapshot and pick the youngest
+    /// matching WithdrawalInitiated event from the current GQL page. Use
+    /// this when the target burn already fired (e.g. a prior daemon crash
+    /// killed the enricher and the enricher timed out before the covering
+    /// bundle landed on-chain). Baseline+wait is the wrong shape for
+    /// after-the-fact recovery — the burn's msg_id would land in a fresh
+    /// baseline and never be picked up. Empty baseline + youngest-pick
+    /// resolves to the last WithdrawalInitiated from this account, which
+    /// on a single-account demo is unambiguously the target.
+    pub replay_latest: bool,
 }
 
 /// Everything `run_once` produced, in one bundle. The CLI logs the
@@ -129,14 +139,19 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
         "loaded BridgeState",
     );
 
-    let baseline = snapshot_baseline_msg_ids(
-        &gql,
-        &cfg.bridge_account_id_hex,
-        &cfg.bridge_dapp_id_hex,
-        500,
-    )
-    .await
-    .context("baseline ExtOut snapshot")?;
+    let baseline = if cfg.replay_latest {
+        info!("replay_latest: skipping baseline snapshot — capture will pick youngest matching event");
+        std::collections::HashSet::new()
+    } else {
+        snapshot_baseline_msg_ids(
+            &gql,
+            &cfg.bridge_account_id_hex,
+            &cfg.bridge_dapp_id_hex,
+            500,
+        )
+        .await
+        .context("baseline ExtOut snapshot")?
+    };
 
     let captured = capture_next_withdrawal_event(
         &gql,

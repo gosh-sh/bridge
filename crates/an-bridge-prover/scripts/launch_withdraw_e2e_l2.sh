@@ -58,7 +58,7 @@ SNARK_DIR_ABS=$(python3 -c "import os,sys; print(os.path.abspath('work_dir_l2/sh
 echo "==> Step 1/3  launch withdraw-e2e (baseline snapshot before burn, L2)"
 nohup ./target/release/relayer withdraw-e2e \
   --gql-endpoint "$BRIDGE_GQL_ENDPOINT" \
-  --prover-state-path state/prover_state.json \
+  --prover-state-path state_l2/prover_state.json \
   --window-size 128 \
   --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --bridge-dapp-id    0000000000000000000000000000000000000000000000000000000000000000 \

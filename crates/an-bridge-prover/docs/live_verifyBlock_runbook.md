@@ -13,7 +13,16 @@ including Circuit 4 see [`../TECHNICAL_README.md`](../TECHNICAL_README.md).
 
 > **Notation:** `seq_no` is Acki Nacki block sequence number.
 > "Key block" = every `SEQ_NO % (W*P) == 0` block; only key blocks trigger a
-> bundle proof (currently `W=128, P=4`, so stride 512).
+> bundle proof (currently `W=128, P=4`, so stride 1024).
+>
+> **Anchor level.** All L1-only cases below assume `BRIDGE_ANCHOR_LEVEL=1`
+> (default) — bundle-covering cadence 1024. For L2-anchored deploys
+> (`BRIDGE_ANCHOR_LEVEL=2`), the daemon still processes every W·P bundle
+> (Circuit 1a/1b/2 cadence unchanged), but the covering layer-hash
+> boundary the on-chain verifier accepts advances every `W² = 16384`
+> seq_nos (~91 min chain-time on shellnet). See [Case 7](#case-7--l2-anchored-cold-start--anchor-level-2)
+> for the L2 cold-start delta. All other cases (2-6) apply verbatim — the
+> daemon's anchor mode is opaque to steady-state recovery.
 
 ---
 
@@ -28,6 +37,7 @@ including Circuit 4 see [`../TECHNICAL_README.md`](../TECHNICAL_README.md).
 - [Case 4 — Restart after RPC-induced hard-abort](#case-4--restart-after-rpc-induced-hard-abort)
 - [Case 5 — Restart after on-chain revert](#case-5--restart-after-on-chain-revert)
 - [Case 6 — State loss / re-bootstrap from mid-chain](#case-6--state-loss--re-bootstrap-from-mid-chain)
+- [Case 7 — L2-anchored cold-start (`--anchor-level 2`)](#case-7--l2-anchored-cold-start--anchor-level-2)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
 - [Change log / known incidents](#change-log--known-incidents)
@@ -448,6 +458,120 @@ constructor.
 
 ---
 
+## Case 7 — L2-anchored cold-start (`--anchor-level 2`)
+
+**When to use.** Fresh deploy where you want the on-chain verifier to
+accept only L2 (`W²`-stride) covering bundles — analogous to Case 1 but
+for `BRIDGE_ANCHOR_LEVEL=2`. See the withdraw runbook's
+[Case 8](./live_withdrawByProof_runbook.md#case-8--fresh-l2-deploy-first-e2e-withdrawal)
+for the full L2 E2E including the burn + `withdraw-e2e` submit; this
+section covers only the daemon-live half.
+
+**Key deltas vs Case 1:**
+
+| Item | L1 (Case 1) | L2 (Case 7) |
+|---|---|---|
+| Bundle stride (daemon cadence) | `W·P = 1024` | `W·P = 1024` (unchanged) |
+| **Covering** bundle stride (on-chain) | `1024` (~5.7 min) | `W² = 16384` (~91 min) |
+| Env override | (unset / `=1`) | `BRIDGE_ANCHOR_LEVEL=2` |
+| Genesis-anchor derivation | `compute_bridge_anchors --at-head` | `compute_bridge_anchors --level 2 --at-head` |
+| First covering-bundle wait | ~5-10 min from cold start | up to ~101 min (W²−1 chain-time + ~10 min prover) |
+| Local state dir | `state/` | **`state_l2/`** (must be distinct — startup drift check refuses to boot cross-level) |
+| Startup log signature | `seed_policy=Explicit(N)` + `layers=1` | `seed_policy=Explicit(N)` + `layers=2` |
+| Contract selector | `expectedPrevAnchor(1)` | `expectedPrevAnchor(2)` (verifier-side; equality against `storedPrevMaxLevelLayerHash` is level-opaque) |
+
+**Pre-flight (contract sanity, L2):**
+
+```bash
+export BRIDGE=0xf31E316C7E3FD4aDDBd86d6d63a1444947BFFEEE     # Deploy #12 example
+export RPC=https://ethereum-sepolia-rpc.publicnode.com
+
+cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC   # matches GENESIS_LAST_SEEN_BLOCK_SEQNO
+cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(uint256)' --rpc-url $RPC   # matches GENESIS_PREV_MAX_LEVEL_LAYER_HASH (L2 fold)
+cast call $BRIDGE 'storedBkSetCommitment()(uint256)' --rpc-url $RPC     # matches GENESIS_BK_SET_COMMITMENT
+```
+
+Contract itself is level-opaque — the same three storage slots are
+compared regardless of `anchor_level`. The value in
+`storedPrevMaxLevelLayerHash` *is* the L2 fold when derived via
+`--level 2`.
+
+**Env file (`.env.shellnet.l2`) — L2-specific deltas:**
+
+```bash
+BRIDGE_ANCHOR_LEVEL=2                    # strict passthrough; daemon-side stride() → 16384
+BRIDGE_STATE_DIR=./state_l2              # isolate from L1 state; startup drift check refuses cross-level resume
+BRIDGE_BOOTSTRAP_SEQNO=<W²-aligned N>    # from compute_bridge_anchors --level 2 (aligned to 16384)
+```
+
+Everything else (`BRIDGE_ADDRESS`, `RELAYER_PRIVATE_KEY`,
+`BRIDGE_AGGREGATOR_DIR`, etc.) is identical to L1. The `params/` dir
+is shared — same K=20/21/17/19 circuit keys work for both levels.
+
+**Cold-start launch:**
+
+```bash
+cd crates/an-bridge-prover
+mkdir -p state_l2 logs
+# state_l2 must be empty for cold start — no `rm state_l2/*.json` needed if fresh dir
+
+set -a && source .env.shellnet.l2 && set +a
+TS=$(date +%Y%m%d_%H%M%S)
+nohup ./target/release/relayer daemon-live > logs/daemon_l2_${TS}.log 2>&1 &
+echo "PID=$!"
+```
+
+**Expected log signature (L2 cold-start, first ~20s):**
+
+```
+INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<N>)
+INFO relayer: daemon-live startup anchors on_chain_last_seen=<N> driver_last_seen=0
+INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<N>, height=<N>, layers=2
+INFO bridge_prover_lib::live_driver::bundle: === Processing key block at seq_no <N+1024> ===
+```
+
+The **`layers=2`** field is the L2 ground truth. If you see `layers=1`
+after sourcing `.env.shellnet.l2`, either the env var isn't reaching the
+process or you have stale `state_l2/prover_state.json` from a prior L1
+run — see startup-drift note below.
+
+**Startup drift check (L2-specific failure mode).** The daemon refuses
+to boot if `prover_state.anchor_level != BRIDGE_ANCHOR_LEVEL`
+(bridge-prover-daemon/src/main.rs:115). Rename the offending state dir
+(`state_l2 → state_l2.pre_L1_$(date +%s)`) and rebootstrap; never
+auto-migrate anchor levels on a live bridge.
+
+Similarly, if `relayer-state.json` in cwd carries a stale
+`last_observed_on_chain` from a prior deploy (Deploy #11 anchor after
+Deploy #12), the daemon aborts with
+`startup on-chain drift vs last_observed_on_chain`. Snapshot the file
+(`mv relayer-state.json relayer-state.pre_deploy<N>_<ts>.json`) and
+restart — the daemon writes a fresh one on first observation cycle.
+
+**First covering-bundle window (~101 min worst case).** The daemon
+processes 15 sub-bundles (Circuit 1a/1b/2 per W·P stride) while the L2
+covering bundle lands. On-chain `storedLastSeenBlockSeqNo` does NOT
+advance during this window — the verifier only accepts the covering
+bundle at seed + W². Monitor via:
+
+```bash
+tail -f logs/daemon_l2_*.log | grep -E '(=== Processing|layers=|dumped verifyBlock|confirmed)'
+```
+
+The first `verifyBlock confirmed` line arrives at the covering bundle
+(seed + 16384). Before that, `dumped verifyBlock submission` entries
+are diagnostic-only sub-bundle proofs (unless the daemon has been
+extended to submit incremental L2 layer-hash proofs — check
+`daemon-live` code path if the contract accepts them).
+
+**All other L2 recovery paths — Cases 2–6 apply as-is.** The daemon's
+runtime behavior downstream of `bootstrap seed applied` is anchor-level
+opaque. Case 4 drift check, Case 6 re-bootstrap, etc. work identically
+against `state_l2/` + `BRIDGE_ANCHOR_LEVEL=2` — just substitute the L2
+env-file and state-dir paths.
+
+---
+
 ## Health checks (run any time)
 
 **On-chain state snapshot:**
@@ -541,6 +665,34 @@ crates/an-bridge-prover/
 Newest first. Each entry captures **what happened, why, what changed, and
 the reference commits/paths** so we don't have to reconstruct history next
 time we come back to the runbook.
+
+### 2026-08-18 — L2 anchoring landed; Case 7 added
+
+- **What.** `BRIDGE_ANCHOR_LEVEL=2` now switches daemon-live to the L2
+  covering-bundle stride (`W² = 16384`, ~91 min chain-time on
+  shellnet). Runbook grew Case 7 for the L2 cold-start delta; steady-state
+  Cases 2-6 apply verbatim (daemon behavior downstream of bootstrap seed
+  is anchor-level opaque).
+- **Why.** L2 aggregates 16 L1 sub-bundles into one covering proof —
+  one-tenth the on-chain submission cadence for the same coverage.
+  Contract itself is level-opaque (single `storedPrevMaxLevelLayerHash`
+  scalar); the daemon computes the L2 fold before submitting.
+- **Genesis anchors.** `compute_bridge_anchors --level 2 --at-head` picks
+  a `W²`-aligned seed and folds `layer_hashes[0..2]` into
+  `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`. See
+  `crates/an-bridge-prover/bridge-prover-lib/src/bin/compute_bridge_anchors.rs`.
+- **First live L2 deploy.** Deploy #12 (2026-08-18) —
+  `AckiNackiBridge` at `0xf31E316C7E3FD4aDDBd86d6d63a1444947BFFEEE`,
+  seed `9175040` (W²-boundary). See
+  `logs/deploy12_l2_20260819_001713.log` for the deploy transcript.
+- **Startup drift check (new).** `bridge-prover-daemon/src/main.rs:115`
+  refuses to boot if `prover_state.anchor_level != BRIDGE_ANCHOR_LEVEL`
+  — prevents cross-level state reuse. Rename the state dir and
+  rebootstrap; never auto-migrate.
+- **Related.** Withdraw runbook Case 8/9 (fresh L2 deploy, sequential
+  stress-loop); `ENRICH_TIMEOUT` bumped 90→120 min in
+  `bridge-relayer-daemon/src/withdraw_e2e/driver.rs` to cover the L2
+  worst-case single-bundle wait (~101 min).
 
 ### 2026-08-04 — RPC-transport hard-abort false-positive
 

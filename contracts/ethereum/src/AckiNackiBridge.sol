@@ -18,9 +18,9 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      - Owner can harvest accrued yield without touching user principal.
 ///      - **Withdraw on ETH side**: deliberately not exposed in this milestone.
 ///        A genuine cross-chain withdrawal will land alongside a burn-proof
-///        circuit + state-anchored verification in a future milestone (see
-///        `docs/an_partner_integration_plan.md` §3 Phase 4 open design question
-///        and Decision Log entry 2026-05-17). The legacy v1 refund-style
+///        circuit + state-anchored verification. That milestone has since
+///        shipped as `withdrawByProof` (`docs/EVM-contracts-spec.md` §7.2);
+///        this header predates it. The legacy v1 refund-style
 ///        `withdraw(depositId, recipient, amount, blockNumber, proof)` was
 ///        retired in Phase 4.3 (2026-05-17) — see Decision Log.
 ///
@@ -630,7 +630,7 @@ contract AckiNackiBridge {
     /// `storedLayerHashes[10]` cache and the `storedPrevMaxLevelLayerHash`
     /// SSTORE are no longer written on the hot path (SSTORE savings ≈ 32k gas
     /// per call). `storedPrevMaxLevelLayerHash` is now the immutable genesis
-    /// seed. See `docs/storage_v2_abi_note.md`.
+    /// seed. See `docs/EVM-contracts-spec.md` §4.
     ///   - each non-zero `layerHashes[i]` appended to its layer's rolling window
     ///
     /// @param finType            Primary or Fallback finalization path.
@@ -750,7 +750,7 @@ contract AckiNackiBridge {
         // hot path — the authoritative per-layer state lives in `_layerWindows`
         // and is written exclusively by `_appendLayer` below. Off-chain readers
         // migrate to `getLatestPerLayer()` / `_highestActiveLayer()` /
-        // `expectedPrevAnchor(numLayers)`. See `docs/storage_v2_abi_note.md`.
+        // `expectedPrevAnchor(numLayers)`. See `docs/EVM-contracts-spec.md` §4.
         storedLastSeenBlockSeqNo = blockSeqNo;
         _appendLayerHashes(numLayers, layerHashes, blockSeqNo);
 
@@ -1050,7 +1050,7 @@ contract AckiNackiBridge {
     ///         (removed). The per-layer view over `_layerWindows` is the
     ///         authoritative source; a shallow-successor-after-deep block no
     ///         longer overwrites deeper layers with zero. See
-    ///         `docs/storage_v2_abi_note.md`.
+    ///         `docs/EVM-contracts-spec.md` §4.
     function getLatestPerLayer() external view returns (uint256[MAX_LAYER_HASHES] memory) {
         uint256[MAX_LAYER_HASHES] memory out;
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
@@ -1073,6 +1073,32 @@ contract AckiNackiBridge {
     /// @notice View helper: is `anchor` present in layer `L`'s rolling window?
     function isKnownLayerAnchor(uint8 layer, uint256 anchor) external view returns (bool) {
         return _isKnownLayerAnchor(layer, anchor);
+    }
+
+    /// @notice Full contents of layer `L`'s rolling window (data, heights, cursors).
+    ///
+    /// @dev Off-chain-only reader for daemon bootstrap / resurrect. Never
+    ///      called on-chain (would be prohibitively gassy — returns
+    ///      `HISTORY_PROOF_WINDOW * (32 + 8)` bytes plus scalars per call).
+    ///      Used by the relayer daemon to reconstruct its `BridgeState`
+    ///      mirror against an already-advanced contract — the scenario a
+    ///      fresh install, a co-tester's daemon, or a mid-run machine
+    ///      handoff hit when only `getLatestPerLayer()` was exposed
+    ///      (heads-only). See
+    ///      `crates/bridge-relayer-daemon/docs/live_verifyBlock_runbook.md`
+    ///      Case 6 (Chain-resurrect).
+    ///
+    ///      Struct return uses the ABI encoder v2 default in Solidity 0.8
+    ///      and copies storage → memory; adds no hot-path cost since
+    ///      `verifyBlock` does not touch this function.
+    ///
+    /// @param layer 1..=`MAX_LAYER_HASHES`. Zero or out-of-range reverts.
+    /// @return  The layer's full `HistoryWindow` (unused slots read as zero).
+    function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) {
+            revert LayerOutOfRange(layer);
+        }
+        return _layerWindows[layer];
     }
 
     // ---------------------------------------------------------------------

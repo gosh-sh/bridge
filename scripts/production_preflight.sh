@@ -72,7 +72,7 @@ echo "--- [4/5] Foundry production gate tests ---"
   forge test --match-test test_productionPrimaryAttestation_isolated -vv
   forge test --match-test test_productionFallbackAttestation_isolated -vv
   # Full E2E (Primary 1A + Circuit 2 real SHPLONK aggregator proofs) is a hard gate since the
-  # 2026-06-23 bound-witness fix (see docs/production_plan.md §1); a regression must block deploy.
+  # 2026-06-23 bound-witness fix; a regression must block deploy.
   forge test --match-test test_productionVerifyBlock_boundCalldata_advancesState -vv
   echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
 )

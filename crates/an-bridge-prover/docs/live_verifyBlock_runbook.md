@@ -9,7 +9,7 @@ recovery from the failure modes we have actually hit in production.
 Circuit 2 (layer hashes), aggregated by R15 SHPLONK, submitted via
 `verifyBlock`. **No** BK-set updates (Circuit 3 / `applyBkSetUpdate`) and
 **no** event proofs (Circuit 4 / `withdrawByProof`). For the full E2E
-including Circuit 4 see [`../TECHNICAL_README.md`](../TECHNICAL_README.md).
+including Circuit 4 see [`../TECHNICAL_README.md`](../../../../../crates/an-bridge-prover/TECHNICAL_README.md).
 
 > **Notation:** `seq_no` is Acki Nacki block sequence number.
 > "Key block" = every `SEQ_NO % (W*P) == 0` block; only key blocks trigger a

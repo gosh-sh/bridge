@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-08-18 — not maintained, not authoritative.**
+> Parts of this document are contradicted by the current code. Do not act on it, and do not cite it
+> from anything new. Authority is the source tree, plus `docs/EVM-contracts-spec.md` for the
+> Ethereum contracts. Kept only as source material while the documentation is rewritten (see
+> `DOCS.md` at the repository root); this folder is scheduled for deletion.
+
 # `an-bridge-prover` — Live-driver refactor plan
 
 **Date:** 2026-07-08

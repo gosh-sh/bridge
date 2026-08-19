@@ -1,8 +1,8 @@
 //! `Halo2TvmOperands` round-trip test.
 //!
 //! Validates the **3-operand** wire format consumed by the AN-side
-//! `ZKHALO2VERIFYWITHVK` opcode (see `crate::halo2_tvm_bundle` and
-//! `docs/zkhalo2verifywithvk_reference.md`).
+//! `ZKHALO2VERIFYWITHVK` opcode (see `crate::halo2_tvm_bundle`; the opcode
+//! itself lives in `tvm-sdk`, which is authoritative for its semantics).
 //!
 //! ## What this test proves
 //!

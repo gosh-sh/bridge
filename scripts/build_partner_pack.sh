@@ -19,6 +19,17 @@
 #                         like `01_design_memo.md`).
 #                         Default: scripts/partner_packs/<pack-name>.manifest
 #
+# ⚠️ Manifest paths pointing into docs/archive/ (2026-08-18):
+#     circuit4_for_alina.manifest ships four documents out of docs/archive/,
+#     and halo2_tvm_for_serhii.manifest one. Those paths resolve today, but
+#     docs/archive/ is a staging area scheduled for deletion once the
+#     documentation is rewritten — see DOCS.md. When it goes, these packs
+#     will fail on a missing file. Either repoint them at the rewritten
+#     documents or drop the prose entries and ship code and artefacts only.
+#     Everything else in the repository has already been moved off those
+#     paths; these manifests were left alone deliberately, to be updated by
+#     whoever owns the partner bundles.
+#
 # Behaviour:
 #     - Stages files under /tmp/<pack-name>/ preserving the manifest order.
 #     - Renders a README.md prepended with provenance (repo URL, commit
@@ -50,10 +61,10 @@ See header of $0 for full docs.
 Example manifest (scripts/partner_packs/circuit4_for_alina.manifest):
 
     # Files to include (repo-relative paths). Optional 'src => dest' rename.
-    docs/an_partner_questions_circuit4_2026-05-17.md
-    docs/an_partner_circuit4_concept_response_2026-05-21.md
-    docs/an_partner_circuit4_alina_replies_2026-05-21.md => 03_alina_replies_2026-05-21.md
-    docs/an_partner_integration_plan.md
+    docs/archive/an_partner_questions_circuit4_2026-05-17.md
+    docs/archive/an_partner_circuit4_concept_response_2026-05-21.md
+    docs/archive/an_partner_circuit4_alina_replies_2026-05-21.md => 03_alina_replies_2026-05-21.md
+    docs/archive/an_partner_integration_plan.md
 
     ---
     ## Reading order

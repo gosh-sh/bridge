@@ -121,9 +121,7 @@ The embedded `VK_BLOB` is the Circuit 1B fallback attestation VK (`circuit_shape
   - `read_rlc_vk` branch (`EthCircuitImpl<Fr, Noop>` + carried `EthCircuitParams`)
   - Unified gosh halo2 backend (`bump-halo2-lib-v0.4.1` or merged equivalent)
   - **Canonical `tvm-sdk` branch: `halo2_circuit_with_vk`** (native Halo2 SHPLONK
-    opcode line for shellnet). Do **not** use `serhii/node-3406-vergrth16-with-vk` —
-    that is a superseded umbrella branch from the Groth16 era (`VERGRTH16*` opcodes),
-    not the current Halo2 deposit path.
+    opcode line for shellnet). 
   - **Nightly toolchain** for the `gosh` feature (RLC stack needs `trait_alias`)
 - [ ] **`sold` fork** with `gosh.zkhalo2VerifyWithVK` builtin (`sold --tvm-version gosh`)
 - [ ] **Chain SRS alignment:** deposit keygen/proving uses the node's embedded ceremony
@@ -442,7 +440,7 @@ AN_DAPP_ID=0x1a1a1a1a1a deposit-relayer prove-one \
 2. **`dappId` source:** hardcode in contract vs relayer-supplied call args (relayer
    already proves the configured tag).
 3. **Node merge:** confirm shellnet tracks `tvm-sdk` branch `halo2_circuit_with_vk`
-   (Halo2 `ZKHALO2VERIFYWITHVK`, not the retired Groth16 `VERGRTH16*` line).
+   (Halo2 `ZKHALO2VERIFYWITHVK`).
 4. **Gosh halo2 fork:** merge `bump-halo2-lib-v0.4.1` to public `main` so consumers
    can drop local `[patch]` paths.
 

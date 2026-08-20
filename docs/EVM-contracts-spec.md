@@ -483,8 +483,7 @@ contract's fallback entrypoint via `staticcall`.
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
-output exceeds ~28 KB (`verifiers/README.md:16-20`). The earlier gnark Groth16 hybrid for 1B is
-retired; there is no Groth16 verifier in `src/` any more.
+output exceeds ~28 KB (`verifiers/README.md:16-20`). 
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`

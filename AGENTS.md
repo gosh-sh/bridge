@@ -31,6 +31,66 @@ already been verified against the source — check it before re-deriving any of 
 
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based, multi-threaded blockchain). The bridge enables deposits on Ethereum to be proven on Acki Nacki, and Acki Nacki state (layer hashes) to be verified on Ethereum — both via ZK proofs.
 
+## Changelog policy
+
+Every branch that is opened as a pull request into `main` must describe its diff
+against `main` in [`CHANGELOG.md`](CHANGELOG.md). No PR is complete without it.
+
+### Write for the reader, not for the author
+
+The reader is a devops engineer or a developer who deploys the bridge, runs the
+relayers and integrates with the contracts. They did not write the code and will
+not read it. Describe the surface they can observe, in plain language:
+
+- contract surface: external and public functions, events, errors, storage
+  layout changes, upgrade steps, deployed addresses — for both
+  `contracts/ethereum/` (Solidity/Foundry) and `contracts/an/` (TVM)
+- proof surface: circuit public inputs, bincode layout, verification keys.
+  **A rotated verification key is always a breaking change** — proofs produced
+  for the previous circuit stop verifying, and that has to be spelled out.
+- relayer and prover surface: CLI subcommands and flags, systemd units, config
+  files, environment variables, the JSON artifacts they read and write
+  (`proof_<N>.json`, `proof_event_*.json`), retry and idempotency behaviour
+- operational surface: `scripts/`, `Makefile` targets, `build.sh` / `setup.sh` /
+  `test.sh`, `docker-compose.yml`, `.gitlab-ci.yml` jobs
+- chain and network assumptions: supported L1 chain ids, RPC requirements,
+  key-block spacing, anchoring cadence
+
+Say what changed and what the reader has to do about it — redeploy a contract,
+rotate a key, regenerate proofs, carry a setting over by hand, upgrade in a
+particular order. Name functions, flags, files and options exactly as they
+appear in the product.
+
+Leave out internal refactors, private renames, test-only changes and
+implementation detail. If nothing observable changed, there is nothing to write.
+
+Sections, most disruptive first: `Breaking Changes`, `Added`, `Changed`,
+`Fixed`, `Removed`.
+
+### Versions are assigned late
+
+Release numbers are fixed only when a release is actually cut and tagged. While
+work is landing on `main`, nobody knows which release it will ship in.
+
+While working on a branch:
+
+- add entries under `## [Unreleased]` at the top of `CHANGELOG.md`, directly
+  above the newest released version; create that section if it is missing
+- do not invent a version heading, and do not bump `version` in any
+  `Cargo.toml` — neither `workspace.package.version` nor the excluded
+  sub-workspaces (`deposit-prover`, `crates/an-bridge-prover`,
+  `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`,
+  `crates/bridge-snark-utils`, `frontend`)
+- add to the existing groups under `## [Unreleased]` rather than starting a
+  second copy of them
+
+At release time a human — not an agent — picks the real version number, bumps it
+in every affected manifest, renames `## [Unreleased]` to
+`## [<version>] – <YYYY-MM-DD>`, and tags the commit.
+
+Sections of already released versions are history. Do not rewrite them, do not
+move entries out of them, and do not append new entries to them.
+
 ## Git remotes
 
 | Remote | URL | Role |

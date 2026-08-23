@@ -304,13 +304,16 @@ impl LiveProverConfig {
 /// steady state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedPolicy {
-    /// Pin a specific seqno. MUST be `> 0` and divisible by `W * P`.
+    /// Pin a specific seqno. MUST be `> 0` and divisible by the
+    /// configured [`crate::AnchorMode`]'s bundle stride
+    /// (`W * P` under L1, `W²` under L2 — see [`crate::AnchorMode::stride`]).
     ///
     /// Used by manual / reproducible starts (our daemon's
     /// `BRIDGE_BOOTSTRAP_SEQNO=N`).
     Explicit(u64),
-    /// Auto-select: on first poll, snap to the next `W * P`-aligned seqno
-    /// strictly past the current chain head.
+    /// Auto-select: on first poll, snap to the next stride-aligned seqno
+    /// strictly past the current chain head. Stride = `W * P` under L1
+    /// or `W²` under L2 — see [`crate::AnchorMode::stride`].
     ///
     /// Used for automatic starts on a long-running chain (our daemon's
     /// default when no explicit seed; Sergey's daemon on a fresh shellnet).
@@ -888,8 +891,10 @@ impl LiveProverDriver {
 
     /// Best-effort next target seqno used in [`LiveBundleEvent::Nothing`]
     /// when the driver has no chain-head snapshot yet (e.g. GQL just
-    /// returned an empty list). Bounds the value by W*P above the cursor
-    /// so callers see a sane number.
+    /// returned an empty list). Bounds the value by one bundle stride
+    /// (`W * P` under L1, `W²` under L2 — see
+    /// [`crate::AnchorMode::stride`]) above the cursor so callers see a
+    /// sane number.
     fn next_target_seqno_upper_bound(&self) -> u64 {
         let step = self.cfg.bundle_stride();
         ((self.state.stored_last_seen_block_seq_no / step) + 1) * step

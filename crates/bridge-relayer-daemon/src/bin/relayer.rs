@@ -534,6 +534,12 @@ enum Cmd {
         /// prior burn whose enricher timed out (e.g. daemon crashed
         /// before the covering bundle landed on-chain). On a
         /// single-account demo this unambiguously targets the last burn.
+        ///
+        /// SAFETY: single-account / operator-controlled recipient EOA
+        /// only. On any shared relayer wallet this would let one
+        /// operator prove another operator's `WithdrawalInitiated`, so
+        /// this flag is intentionally scoped to `withdraw-e2e` and must
+        /// NEVER be wired into `daemon-live` (per PR#35 review round 2).
         #[arg(long)]
         replay_latest: bool,
     },

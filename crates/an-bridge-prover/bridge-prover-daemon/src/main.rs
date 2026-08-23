@@ -100,7 +100,11 @@ async fn main() -> anyhow::Result<()> {
     }
     match explicit_bootstrap_seqno {
         Some(n) => info!("bootstrap: EXPLICIT seed seq_no = {}", n),
-        None => info!("bootstrap: AUTO (next W*P boundary past chain head)"),
+        None => info!(
+            "bootstrap: AUTO (next L{}-stride boundary [{} blocks] past chain head)",
+            anchor_mode.level(),
+            bundle_size,
+        ),
     }
     info!("send SIGINT (Ctrl-C) to shut down cleanly");
 

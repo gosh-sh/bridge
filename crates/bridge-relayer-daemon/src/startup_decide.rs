@@ -19,12 +19,11 @@
 //!   [`ContractFullState`] shaped by the daemon's `read_full_state`.
 
 use bridge_prover_lib::bridge_state::{
-    BridgeState, ContractFullState as LibContractFullState, ContractLayerWindow as LibContractLayerWindow,
-    MAX_LAYERS,
+    BridgeState, ContractFullState as LibContractFullState, HistoryWindow, MAX_LAYERS,
 };
 use bridge_prover_lib::live_driver::SeedPolicy;
 
-use crate::bridge::{ContractFullState, ContractLayerWindow};
+use crate::bridge::ContractFullState;
 
 /// The four legs of startup routing.
 #[derive(Debug)]
@@ -77,40 +76,35 @@ pub struct DecideInputs<'a> {
     pub anchor_level: u8,
 }
 
-/// Convert the daemon-side (alloy-typed) `ContractLayerWindow` into the
-/// alloy-neutral `bridge_prover_lib` shape consumed by
-/// `BridgeState::from_contract`.
+/// Convert the daemon-side `ContractFullState` (built from alloy bindings,
+/// so slots are BE) into the alloy-neutral `bridge_prover_lib` shape.
 ///
-/// Endianness: chain-side layer window slots are stored as
-/// `[u8;32]` big-endian (produced in `bridge.rs::read_full_state` via
+/// Endianness: chain-side layer window slots are stored as `[u8;32]`
+/// big-endian (produced in `bridge.rs::read_full_state` via
 /// `U256::to_be_bytes`), but `BridgeState.layer_windows` stores LE
 /// (`Fr::to_repr()` output). We reverse each slot per the convention
 /// documented in `history_consistency.rs:59` and memory
-/// `bridge_genesis_anchor_endianness.md`.
-fn to_lib_layer_window(w: &ContractLayerWindow) -> LibContractLayerWindow {
-    let data: Vec<[u8; 32]> = w
-        .data
-        .iter()
-        .map(|slot| {
-            let mut le = *slot;
-            le.reverse();
-            le
-        })
-        .collect();
-    LibContractLayerWindow {
-        data,
-        heights: w.heights.clone(),
-        data_len: w.data_len,
-        write_cursor: w.write_cursor,
-        last_height: w.last_height,
-    }
-}
-
+/// `bridge_genesis_anchor_endianness.md`. Cursors/heights need no
+/// conversion — the `HistoryWindow` shape is already shared.
 fn to_lib_full_state(cfs: &ContractFullState) -> LibContractFullState {
-    // Split the fixed-size array elementwise. `std::array::from_fn`
-    // gives us the layout invariance without needing `TryFrom<Vec<_>>`.
-    let layer_windows: [LibContractLayerWindow; MAX_LAYERS] =
-        std::array::from_fn(|i| to_lib_layer_window(&cfs.layer_windows[i]));
+    let layer_windows: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|i| {
+        let w = &cfs.layer_windows[i];
+        HistoryWindow {
+            data: w
+                .data
+                .iter()
+                .map(|slot| {
+                    let mut le = *slot;
+                    le.reverse();
+                    le
+                })
+                .collect(),
+            heights: w.heights.clone(),
+            data_len: w.data_len,
+            write_cursor: w.write_cursor,
+            last_height: w.last_height,
+        }
+    });
     LibContractFullState {
         last_seen_block_seq_no: cfs.last_seen_block_seq_no,
         // See `history_consistency.rs:59` — BridgeState stores
@@ -419,8 +413,8 @@ mod tests {
 
     const W: usize = 4;
 
-    fn empty_lw() -> ContractLayerWindow {
-        ContractLayerWindow {
+    fn empty_lw() -> HistoryWindow {
+        HistoryWindow {
             data: vec![[0u8; 32]; W],
             heights: vec![0u64; W],
             data_len: 0,
@@ -430,7 +424,7 @@ mod tests {
     }
 
     fn empty_chain() -> ContractFullState {
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] =
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| empty_lw());
         ContractFullState {
             last_seen_block_seq_no: 0,
@@ -446,17 +440,8 @@ mod tests {
     /// with seq_no == height (so heights[] == the on-chain seq_no
     /// mirror). See `bridge_state.rs::from_contract` docstring.
     fn snapshot_as_chain(s: &BridgeState) -> ContractFullState {
-        let mut arr: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYERS);
-        for w in &s.layer_windows {
-            arr.push(ContractLayerWindow {
-                data: w.data.clone(),
-                heights: w.heights.clone(),
-                data_len: w.data_len as u16,
-                write_cursor: w.write_cursor as u16,
-                last_height: w.last_height,
-            });
-        }
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] = arr.try_into().unwrap();
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
+            std::array::from_fn(|i| s.layer_windows[i].clone());
         let commit = U256::from_be_bytes::<32>(s.stored_bk_set_commitment);
         ContractFullState {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
@@ -666,14 +651,14 @@ mod tests {
         // Local built with W=4, chain read with W=8 (contract deployed with
         // a different W). Must be rejected before any of the semantic arms.
         let local = BridgeState::new(4);
-        let wide_lw = || ContractLayerWindow {
+        let wide_lw = || HistoryWindow {
             data: vec![[0u8; 32]; 8],
             heights: vec![0u64; 8],
             data_len: 0,
             write_cursor: 0,
             last_height: 0,
         };
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] =
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| wide_lw());
         let chain = ContractFullState {
             last_seen_block_seq_no: 0,

@@ -50,6 +50,7 @@ use alloy::{
     providers::Provider,
 };
 use async_trait::async_trait;
+use bridge_prover_lib::bridge_state::HistoryWindow;
 
 use crate::{
     error::RelayerError,
@@ -91,27 +92,14 @@ pub const HISTORY_PROOF_WINDOW: usize = 128;
 // used here via the `use` at the top of the file — kept there as the
 // single source of truth.
 
-/// Native mirror of one on-chain `HistoryWindow` (added 2026-08 alongside
-/// `getLayerWindow(uint8)`). Consumed by the daemon's chain-resurrect
-/// path to rebuild `BridgeState` when starting fresh against an
-/// already-advanced contract.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractLayerWindow {
-    /// Full slot buffer, chronological-by-cursor. Unused slots are zero.
-    pub data: Vec<[u8; 32]>,
-    /// Parallel heights buffer.
-    pub heights: Vec<u64>,
-    /// Number of valid entries currently in the window (saturates at W).
-    pub data_len: u16,
-    /// Next slot to overwrite (always `mod W`).
-    pub write_cursor: u16,
-    /// Height of the last appended entry (zero when empty).
-    pub last_height: u64,
-}
-
 /// Full contract state readable by an off-chain resurrect: the four scalar
 /// mirrors plus all 10 layer windows. Sufficient to reconstruct
 /// `BridgeState` byte-for-byte via `BridgeState::from_contract`.
+///
+/// The per-layer window shape is
+/// [`bridge_prover_lib::bridge_state::HistoryWindow`] — the daemon's alloy
+/// adapter widens the on-chain `uint16` `dataLen`/`writeCursor` to `usize`
+/// when populating this snapshot (see `read_full_state`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractFullState {
     pub last_seen_block_seq_no: u64,
@@ -119,7 +107,7 @@ pub struct ContractFullState {
     pub last_bk_set_update_seq_no: u64,
     pub prev_max_level_layer_hash: U256,
     /// Index `L-1` corresponds to layer `L` (1..=10).
-    pub layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES],
+    pub layer_windows: [HistoryWindow; MAX_LAYER_HASHES],
 }
 
 impl ContractFullState {
@@ -805,7 +793,7 @@ where
         // Read all 10 layer windows.
         // `HistoryWindow` on the sol! side has fixed-size arrays that
         // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
-        let mut windows: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
+        let mut windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
         for layer in 1..=MAX_LAYER_HASHES as u8 {
             let w = self
                 .contract
@@ -815,15 +803,17 @@ where
                 .map_err(map_contract_err)?;
             let data: Vec<[u8; 32]> = w.data.iter().map(|u| u.to_be_bytes()).collect();
             let heights: Vec<u64> = w.heights.to_vec();
-            windows.push(ContractLayerWindow {
+            // Widen on-chain `uint16` cursors to `usize` for the shared
+            // `HistoryWindow` shape. `from_contract` validates bounds.
+            windows.push(HistoryWindow {
                 data,
                 heights,
-                data_len: w.dataLen,
-                write_cursor: w.writeCursor,
+                data_len: w.dataLen as usize,
+                write_cursor: w.writeCursor as usize,
                 last_height: w.lastHeight,
             });
         }
-        let layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES] = windows
+        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] = windows
             .try_into()
             .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
 

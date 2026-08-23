@@ -191,15 +191,21 @@ async fn build_chain_same_layer_n(
 
     let (chain_links, num_steps) = build_chain_proofs(&[tree]);
 
-    // Safety guard requested in `l2_anchoring_implementation_plan.md` §2.1:
-    // Case D (subsequent L(N) boundary with N >= 2) is a single-rung horizontal
-    // hop by construction. Anything else here means either the driver picked
-    // a mis-aligned target (should have been caught by the % W^N check in
-    // the caller) or `build_chain_proofs` disagreed with `build_layer_n_tree`
-    // on step count — a silent bug we want to trap in debug builds.
-    debug_assert_eq!(
-        num_steps, 1,
-        "Case D (L{} same-layer) must produce exactly 1 chain step, got {}",
+    // Safety guard requested in `l2_anchoring_implementation_plan.md` §2.1
+    // and hardened per PR #35 follow-up review: Case D (subsequent L(N)
+    // boundary with N >= 2) is a single-rung horizontal hop by construction.
+    // Anything else here means either the driver picked a mis-aligned target
+    // (should have been caught by the % W^N check in the caller) or
+    // `build_chain_proofs` disagreed with `build_layer_n_tree` on step count.
+    // Was `debug_assert_eq!` — but release builds compiled it out, so a
+    // mis-dispatch could silently feed a multi-step chain into Circuit 2
+    // aggregator calldata. Promoted to `ensure!` so the invariant holds in
+    // release too; caller (`chain_proof_builder`) propagates the error.
+    ensure!(
+        num_steps == 1,
+        "Case D (L{} same-layer) must produce exactly 1 chain step, got {} \
+         — driver dispatched Case D at a mis-aligned target or \
+         build_chain_proofs disagreed with build_layer_n_tree on step count",
         layer, num_steps,
     );
 
@@ -283,9 +289,17 @@ async fn build_chain_same_layer(
         key_seqnos.push(seq);
         seq += step_size;
     }
-    debug_assert!(
-        !key_seqnos.is_empty() && *key_seqnos.last().unwrap() == target_seqno,
-        "L1 walk should end at target_seqno by construction",
+    // Same invariant class as the Case D guard above: if this fires in
+    // release we have already committed to building an L1 chain whose last
+    // rung does not land on the target block, and Circuit 2 will produce a
+    // chain root that never matches the on-chain expected anchor. Was
+    // `debug_assert!` — promoted to `ensure!` alongside the Case D guard so
+    // both same-file invariants have the same strength in release builds.
+    ensure!(
+        !key_seqnos.is_empty() && key_seqnos.last().copied() == Some(target_seqno),
+        "L1 walk did not end at target_seqno by construction: \
+         prev_seqno={}, target_seqno={}, step_size={}, walk={:?}",
+        prev_seqno, target_seqno, step_size, key_seqnos,
     );
 
     if key_seqnos.len() > gosh_dense_balanced_tree::MAX_CHAIN_LEN {

@@ -956,6 +956,7 @@ impl LiveProverDriver {
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
+            self.cfg.anchor_mode.level(),
         )
         .await
         .map_err(|e| DriverError::Bootstrapping {

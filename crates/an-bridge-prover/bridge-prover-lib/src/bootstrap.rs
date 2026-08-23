@@ -153,20 +153,16 @@ impl BootstrapSeed {
 ///
 /// `first_key_seqno` must be the seq_no of the first key block (= `W` on a
 /// single-thread testbed). `bk_set_commitment` is computed by the caller from
-/// the BK set in effect at startup.
+/// the BK set in effect at startup. `anchor_level` is stored verbatim on the
+/// seed and cross-checked at startup against the daemon's
+/// `BRIDGE_ANCHOR_LEVEL` — callers must pass the level of the
+/// [`crate::AnchorMode`] they were configured with (`1` for L1, `2` for L2).
+///
+/// A prior revision exposed a parameterless wrapper that silently defaulted
+/// `anchor_level` to `1`; that caused L2 daemons to persist a state file
+/// stamped `anchor_level=1` and refuse to restart on the drift check. The
+/// wrapper was removed so the level cannot be forgotten again.
 pub async fn fetch_from_node(
-    gql: &bridge_gql_fetcher::gql_client::GqlClient,
-    first_key_seqno: u64,
-    bk_set_commitment: [u8; 32],
-) -> anyhow::Result<BootstrapSeed> {
-    fetch_from_node_at_level(gql, first_key_seqno, bk_set_commitment, 1).await
-}
-
-/// Level-aware fetch variant. `anchor_level` is stored verbatim on the seed
-/// and cross-checked at startup against the daemon's `BRIDGE_ANCHOR_LEVEL`.
-/// L1 callers can keep using [`fetch_from_node`]; L2 callers must go through
-/// this entry point.
-pub async fn fetch_from_node_at_level(
     gql: &bridge_gql_fetcher::gql_client::GqlClient,
     first_key_seqno: u64,
     bk_set_commitment: [u8; 32],
@@ -218,6 +214,30 @@ mod tests {
         assert_eq!(state.window(1).data_len, 1);
         assert_eq!(state.window(1).latest(), Some([7u8; 32]));
         assert_eq!(state.anchor_level, 1, "apply must stamp anchor_level onto state");
+    }
+
+    #[test]
+    fn apply_l2_seed_stamps_state_level_2() {
+        // Regression: a prior revision hardcoded `anchor_level = 1` inside the
+        // `fetch_from_node` wrapper. That silently stamped state.anchor_level=1
+        // on L2 daemons; the drift check would then refuse startup on any
+        // restart. Lock the "seed value → state field" invariant here so a
+        // future re-introduction of the default cannot slip through unnoticed.
+        let mut state = BridgeState::new(8);
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([7u8; 32], 2)],
+            block_height: 16_384,
+            block_seq_no: 16_384,
+            bk_set_commitment: [9u8; 32],
+            anchor_level: 2,
+        };
+        seed.apply(&mut state).unwrap();
+        assert!(state.initialized);
+        assert_eq!(state.anchor_level, 2, "L2 seed must stamp state.anchor_level=2");
+        // And the L2 slot got populated verbatim.
+        assert_eq!(state.window(2).data_len, 1);
+        assert_eq!(state.window(2).latest(), Some([7u8; 32]));
     }
 
     #[test]

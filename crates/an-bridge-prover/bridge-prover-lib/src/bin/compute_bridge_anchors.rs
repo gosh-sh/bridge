@@ -246,7 +246,7 @@ async fn main() -> Result<()> {
     eprintln!("seed key-block seq_no = {} (boundary {})", seed_seqno, bundle_boundary);
 
     // 3. Pull the key-block envelope, extract layer_hashes.
-    let seed = fetch_from_node(&gql, seed_seqno, bk_commit)
+    let seed = fetch_from_node(&gql, seed_seqno, bk_commit, anchor_mode.level())
         .await
         .context("fetch_from_node")?;
 

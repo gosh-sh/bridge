@@ -102,32 +102,22 @@ async fn main() -> anyhow::Result<()> {
         state.initialized, state.stored_last_seen_block_seq_no, state.anchor_level
     );
 
-    // Anchor-level cross-check against the on-disk state. Rules mirror the
-    // ones in `bridge-relayer-daemon`'s daemon-live startup (see §3 of
-    // `docs/l2_anchoring_implementation_plan.md`):
-    //   state.anchor_level == cfg.level                 → OK
-    //   state.anchor_level == 0 + cfg == L1             → OK (legacy v4 file)
-    //   state.anchor_level == 0 + cfg == L2             → refuse
-    //   state.anchor_level != 0 && != cfg.level         → refuse
+    // Anchor-level cross-check against the on-disk state. Decision logic
+    // and the full truth table live in `bridge_prover_lib::AnchorMode::
+    // verify_state_level` (see §3 of `docs/l2_anchoring_implementation_plan.md`);
+    // this call site only formats the operator-facing diagnostic.
     // Uninitialized state skips: the seed will stamp the level on apply.
     if state.initialized {
-        let cfg_level = anchor_mode.level();
-        let state_level = state.anchor_level;
-        let mismatch = match (state_level, cfg_level) {
-            (0, 1) => false,
-            (0, _) => true,
-            (s, c) => s != c,
-        };
-        if mismatch {
+        if let Err(drift) = anchor_mode.verify_state_level(state.anchor_level) {
             anyhow::bail!(
                 "startup drift: prover_state anchor_level={} but daemon configured for L{} \
                  (BRIDGE_ANCHOR_LEVEL). Rename {} to {}.pre_L{}_$(date +%Y%m%d_%H%M%S) \
                  and rebootstrap; never auto-migrate anchor levels on a live bridge.",
-                state_level,
-                cfg_level,
+                drift.state_level,
+                drift.cfg_level,
                 STATE_FILE,
                 STATE_FILE,
-                cfg_level,
+                drift.cfg_level,
             );
         }
     }

@@ -104,7 +104,70 @@ impl AnchorMode {
             )),
         }
     }
+
+    /// Cross-check a persisted `anchor_level` byte from a `BridgeState` /
+    /// `RelayerState` file against the anchor level the daemon was configured
+    /// to run at (`self`). Returns `Ok(())` when it is safe to proceed and
+    /// [`AnchorLevelMismatch`] when the daemon must refuse to start.
+    ///
+    /// The rules mirror §3 of `docs/l2_anchoring_implementation_plan.md`
+    /// and were previously duplicated between `bridge-prover-daemon` and
+    /// `bridge-relayer-daemon`:
+    ///
+    /// | state_level | cfg (self) | result | rationale                        |
+    /// |:-----------:|:----------:|:------:|:---------------------------------|
+    /// | 0 (unknown) | L1         | ok     | legacy v4-schema state; assume L1|
+    /// | 0 (unknown) | L2         | err    | can't safely infer prior level   |
+    /// | 1           | L1         | ok     | steady state                     |
+    /// | 1           | L2         | err    | live-bridge flip forbidden       |
+    /// | 2           | L1         | err    | live-bridge flip forbidden       |
+    /// | 2           | L2         | ok     | steady state                     |
+    ///
+    /// Callers should only invoke this on an `initialized` state; an
+    /// uninitialized state carries `anchor_level=0` legitimately (the seed
+    /// stamps the level on `apply`).
+    ///
+    /// This helper only returns the decision; each daemon formats its own
+    /// diagnostic (state-file paths differ) around the resulting error.
+    pub fn verify_state_level(self, state_level: u8) -> Result<(), AnchorLevelMismatch> {
+        let cfg_level = self.level();
+        let mismatch = match (state_level, cfg_level) {
+            (0, 1) => false,     // legacy state file → L1 backward compat
+            (0, _) => true,      // legacy state file → non-L1 requires explicit migration
+            (s, c) => s != c,    // explicit mismatch either direction
+        };
+        if mismatch {
+            Err(AnchorLevelMismatch { state_level, cfg_level })
+        } else {
+            Ok(())
+        }
+    }
 }
+
+/// Startup-drift error raised by [`AnchorMode::verify_state_level`] when the
+/// persisted state's anchor level disagrees with the daemon's configured
+/// mode. Carries the two levels so the caller can format a diagnostic that
+/// includes the local state-file path (which lives outside this crate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorLevelMismatch {
+    /// `anchor_level` byte loaded from the on-disk state (0 = legacy/unknown,
+    /// 1 = L1, 2 = L2).
+    pub state_level: u8,
+    /// The level the daemon was configured for at startup (1 or 2).
+    pub cfg_level: u8,
+}
+
+impl std::fmt::Display for AnchorLevelMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "anchor-level drift: state anchor_level={} but daemon configured for L{}",
+            self.state_level, self.cfg_level,
+        )
+    }
+}
+
+impl std::error::Error for AnchorLevelMismatch {}
 
 #[cfg(test)]
 mod anchor_mode_tests {
@@ -131,5 +194,39 @@ mod anchor_mode_tests {
         assert!(AnchorMode::from_level(3).is_err());
         assert_eq!(AnchorMode::L1.level(), 1);
         assert_eq!(AnchorMode::L2.level(), 2);
+    }
+
+    /// Full truth-table for [`AnchorMode::verify_state_level`]. The daemons
+    /// must never diverge on this decision, so pin the entire matrix here
+    /// (see §3 of `l2_anchoring_implementation_plan.md`).
+    #[test]
+    fn verify_state_level_truth_table() {
+        // (cfg, state_level, expect_ok)
+        let cases: &[(AnchorMode, u8, bool)] = &[
+            // Legacy-state (v4 schema, anchor_level absent → 0).
+            (AnchorMode::L1, 0, true),   // legacy → L1 backward compat
+            (AnchorMode::L2, 0, false),  // legacy → L2 requires migration
+            // Steady state.
+            (AnchorMode::L1, 1, true),
+            (AnchorMode::L2, 2, true),
+            // Live-bridge flips (both directions forbidden).
+            (AnchorMode::L1, 2, false),
+            (AnchorMode::L2, 1, false),
+            // Defensive: unknown future levels vs current cfg — refuse.
+            (AnchorMode::L1, 3, false),
+            (AnchorMode::L2, 3, false),
+        ];
+        for &(mode, state_level, expect_ok) in cases {
+            let got = mode.verify_state_level(state_level);
+            assert_eq!(
+                got.is_ok(),
+                expect_ok,
+                "mode={mode:?} state_level={state_level}: expected ok={expect_ok}, got {got:?}",
+            );
+            if let Err(e) = got {
+                assert_eq!(e.state_level, state_level);
+                assert_eq!(e.cfg_level, mode.level());
+            }
+        }
     }
 }

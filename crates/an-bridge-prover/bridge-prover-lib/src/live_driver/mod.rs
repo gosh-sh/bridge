@@ -232,12 +232,6 @@ pub type DriverResult<T> = Result<T, DriverError>;
 /// CLI knobs, no verifier timeouts — those all live with the caller.
 #[derive(Debug, Clone)]
 pub struct LiveProverConfig {
-    /// Number of consecutive master key blocks aggregated inside a single
-    /// Circuit 2 bundle. Matches [`crate::THINNING_FACTOR_P`] by default.
-    pub thinning_factor_p: u64,
-    /// Rolling-window width per layer. Matches [`HISTORY_WINDOW_SIZE`] by
-    /// default.
-    pub history_window_size: u64,
     /// Anchor-level mode. See [`crate::AnchorMode`]. Default is
     /// [`crate::AnchorMode::L1`]; opt in to
     /// [`crate::AnchorMode::L2`] to switch the driver onto the
@@ -247,9 +241,11 @@ pub struct LiveProverConfig {
     /// Fully wired: every stride-dependent call site — `SeedPolicy::Explicit`
     /// alignment check, [`crate::live_driver::thinning::find_next_bundle_boundary`],
     /// `advance_bootstrap`, and `next_target_seqno_upper_bound` — routes
-    /// through [`LiveProverConfig::bundle_stride`], which dispatches on this
-    /// field. Flipping the mode is a single-source change; no other config
-    /// value needs to move.
+    /// through [`LiveProverConfig::bundle_stride`], which delegates to
+    /// [`crate::AnchorMode::stride`]. Flipping the mode is a single-source
+    /// change; W and P themselves are compile-time constants
+    /// ([`crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE`],
+    /// [`crate::THINNING_FACTOR_P`]) and never live on the cfg.
     pub anchor_mode: crate::AnchorMode,
     /// Safety cap; see [`DEFAULT_MAX_BK_UPDATES_PER_ITER`].
     pub max_bk_updates_per_iter: usize,
@@ -278,8 +274,6 @@ pub struct LiveProverConfig {
 impl Default for LiveProverConfig {
     fn default() -> Self {
         Self {
-            thinning_factor_p: crate::THINNING_FACTOR_P,
-            history_window_size: HISTORY_WINDOW_SIZE,
             anchor_mode: crate::AnchorMode::L1,
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
@@ -289,22 +283,16 @@ impl Default for LiveProverConfig {
 }
 
 impl LiveProverConfig {
-    /// Bundle stride in seq_nos derived from the current [`crate::AnchorMode`]
-    /// and the cfg's `W`/`P` fields.
+    /// Bundle stride in seq_nos for this cfg's anchor mode. Sole source of
+    /// truth for every stride-dependent call site inside the driver.
     ///
-    /// * L1: `history_window_size * thinning_factor_p` (== W·P at defaults).
-    /// * L2: `history_window_size²`                     (== W² at defaults).
-    ///
-    /// All internal call sites (`SeedPolicy::Explicit` alignment check,
-    /// `advance_bootstrap`, `next_target_seqno_upper_bound`, and the
-    /// [`crate::live_driver::thinning::find_next_bundle_boundary`] call)
-    /// route through this method so the L1 → L2 switch is a single-source
-    /// change on the config.
+    /// Delegates to [`crate::AnchorMode::stride`], which reads from the
+    /// top-level constants ([`crate::BUNDLE_STRIDE_L1`],
+    /// [`crate::BUNDLE_STRIDE_L2`]). W and P are compile-time constants and
+    /// never live on the cfg — this method is a thin re-exposure for
+    /// call-site ergonomics.
     pub fn bundle_stride(&self) -> u64 {
-        match self.anchor_mode {
-            crate::AnchorMode::L1 => self.history_window_size * self.thinning_factor_p,
-            crate::AnchorMode::L2 => self.history_window_size * self.history_window_size,
-        }
+        self.anchor_mode.stride()
     }
 }
 
@@ -649,8 +637,8 @@ impl LiveProverDriver {
                     n,
                     step,
                     cfg.anchor_mode,
-                    cfg.history_window_size,
-                    cfg.thinning_factor_p,
+                    HISTORY_WINDOW_SIZE,
+                    crate::THINNING_FACTOR_P,
                 );
                 DriverStage::NeedsSeed { seed_seqno: Some(n) }
             }
@@ -1035,8 +1023,11 @@ mod tests {
     #[test]
     fn default_config_matches_pre_refactor_constants() {
         let cfg = LiveProverConfig::default();
-        assert_eq!(cfg.thinning_factor_p, crate::THINNING_FACTOR_P);
-        assert_eq!(cfg.history_window_size, HISTORY_WINDOW_SIZE);
+        // W and P no longer live on cfg (single source of truth in
+        // top-level constants). Bundle stride is derived from anchor_mode
+        // via AnchorMode::stride().
+        assert_eq!(cfg.anchor_mode, crate::AnchorMode::L1);
+        assert_eq!(cfg.bundle_stride(), HISTORY_WINDOW_SIZE * crate::THINNING_FACTOR_P);
         assert_eq!(cfg.seed_policy, SeedPolicy::Resume);
         // Blake2b default preserves the AN-opcode-compatible flavour for
         // every caller that doesn't override — both our own daemon and

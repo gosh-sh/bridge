@@ -122,6 +122,27 @@ pub struct ContractFullState {
     pub layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES],
 }
 
+impl ContractFullState {
+    /// Highest layer `L >= 2` whose on-chain window has any populated slots,
+    /// or `None` when no layer above 1 has ever been anchored. Mirrors the
+    /// helper on `bridge_prover_lib::bridge_state::ContractFullState` — the
+    /// two types coexist because this crate uses alloy's `U256` on the wire.
+    ///
+    /// Used by the relayer Resurrect startup path to refuse `cfg=L1` against
+    /// a contract that has already anchored at L>=2. The `last_seen % stride`
+    /// alignment check cannot catch this case because every W² boundary is
+    /// simultaneously W·P-aligned (16384 % 1024 == 0). See PR #35 follow-up
+    /// review, should-fix #1.
+    pub fn highest_populated_layer(&self) -> Option<u8> {
+        for i in (1..MAX_LAYER_HASHES).rev() {
+            if self.layer_windows[i].data_len > 0 {
+                return Some((i + 1) as u8);
+            }
+        }
+        None
+    }
+}
+
 /// Outcome of `submit_block`. The relayer interprets this to decide
 /// whether to advance state, retry, or skip.
 #[derive(Clone, Debug)]

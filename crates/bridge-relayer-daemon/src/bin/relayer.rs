@@ -2294,6 +2294,24 @@ async fn run_daemon_live(
                 anchor_mode.stride(),
             );
         }
+
+        // PR #35 follow-up should-fix #1: the modulus check above cannot
+        // catch `cfg=L1` pointed at an L2-advanced contract, because every
+        // W² boundary is simultaneously W·P-aligned (16384 % 1024 == 0).
+        // A semantic check on the on-chain `layer_windows` is the only
+        // way to see this: if the contract already anchored at L>=2, an
+        // L1-configured daemon cannot proceed — the driver would drive
+        // L1-cadence hops into L2-populated windows and revert the first
+        // `verifyBlock` with `PrevAnchorMismatch`.
+        if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L1) {
+            if let Some(l) = chain_full.highest_populated_layer() {
+                anyhow::bail!(
+                    "refuse: daemon configured for L1 but on-chain contract has \
+                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). \
+                     Restart with --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}.",
+                );
+            }
+        }
     }
 
     let cfg = RelayerConfig::new(&state_path);

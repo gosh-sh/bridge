@@ -206,6 +206,29 @@ pub struct ContractFullState {
     pub layer_windows: [ContractLayerWindow; MAX_LAYERS],
 }
 
+impl ContractFullState {
+    /// Highest layer `L >= 2` whose on-chain window has any populated slots,
+    /// or `None` when no layer above 1 has ever been anchored.
+    ///
+    /// Used by the relayer Resurrect path to refuse `cfg=L1` startup against
+    /// a contract that has already anchored at L>=2 — the `last_seen % stride`
+    /// alignment check cannot catch this case because every W² boundary is
+    /// simultaneously W·P-aligned (16384 % 1024 == 0), so an L1-configured
+    /// daemon can otherwise pass every startup guard and then revert the
+    /// first `verifyBlock` on-chain with `PrevAnchorMismatch`. See PR #35
+    /// follow-up review, should-fix #1.
+    pub fn highest_populated_layer(&self) -> Option<u8> {
+        // Layers are 1-indexed on the wire; index i corresponds to layer i+1.
+        // We only care about layers >= 2 (L1 is expected populated).
+        for i in (1..MAX_LAYERS).rev() {
+            if self.layer_windows[i].data_len > 0 {
+                return Some((i + 1) as u8);
+            }
+        }
+        None
+    }
+}
+
 impl BridgeState {
     pub fn new(window_size: usize) -> Self {
         Self {
@@ -545,6 +568,55 @@ impl BridgeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a `ContractFullState` with an empty window at every layer,
+    /// then let the test poke `data_len` on selected layers.
+    fn empty_chain_state() -> ContractFullState {
+        let empty_win = ContractLayerWindow {
+            data: vec![],
+            heights: vec![],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        ContractFullState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            layer_windows: std::array::from_fn(|_| empty_win.clone()),
+        }
+    }
+
+    #[test]
+    fn highest_populated_layer_ignores_l1_only() {
+        // Layer 1 populated, everything above empty → None.
+        // PR #35 follow-up should-fix #1 regression: helper must not report
+        // L1 anchoring as "higher" — L1 is the default and its window will
+        // always be populated on any live bridge.
+        let mut s = empty_chain_state();
+        s.layer_windows[0].data_len = 5;
+        assert_eq!(s.highest_populated_layer(), None);
+    }
+
+    #[test]
+    fn highest_populated_layer_returns_l2() {
+        // Layer 2 populated → Some(2). This is the case that must refuse
+        // Resurrect when the operator asserts cfg=L1.
+        let mut s = empty_chain_state();
+        s.layer_windows[0].data_len = 5;
+        s.layer_windows[1].data_len = 1;
+        assert_eq!(s.highest_populated_layer(), Some(2));
+    }
+
+    #[test]
+    fn highest_populated_layer_prefers_top() {
+        // If both L2 and L3 have data, report L3 (the highest anchored level
+        // — the operator error is worse the further above cfg they are).
+        let mut s = empty_chain_state();
+        s.layer_windows[1].data_len = 4;
+        s.layer_windows[2].data_len = 1;
+        assert_eq!(s.highest_populated_layer(), Some(3));
+    }
 
     #[test]
     fn window_append_wraps() {

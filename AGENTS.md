@@ -494,27 +494,6 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 
 `bridge-prover-orchestrator` and `deposit-prover` are **not** yet in CI (they pull halo2 deps that take minutes to build); their `cargo test` happens only locally. Tracking as future A2.
 
-### Shipping docs / code snapshots to partners (off-tree zip / tar.gz)
-
-For one-off bundles to partners who don't have GitLab access (Alina, Serhii et al.):
-
-```bash
-# Define what goes in the pack:
-$EDITOR scripts/partner_packs/<topic>_for_<recipient>.manifest
-
-# Build (zip + tar.gz + per-archive .sha256, all auto-gitignored):
-scripts/build_partner_pack.sh <topic>_for_<recipient>
-```
-
-The script reads the manifest (one repo-relative path per line; supports `src => dest` renames; everything below a `---` line becomes the README footer), assembles `<topic>_for_<recipient>_<today>/` with a provenance-stamped `README.md` (repo URL + commit SHA + auto-generated TOC), a `MANIFEST.sha256` (per-file hashes inside the pack), and drops `<...>.zip` + `<...>.tar.gz` + matching `.sha256` files at the repo root. All filenames match `/*_for_*.{zip,tar.gz,sha256}` in `.gitignore` so the artefacts never accidentally get committed.
-
-Two manifests already live under `scripts/partner_packs/`:
-
-- `circuit4_for_alina.manifest` — the Q-C4-1..6 + decoded layout + integration plan §3 Phase 8/9 bundle.
-- `halo2_tvm_for_serhii.manifest` — `ZKHALO2VERIFYWITHVK` wire-format pack (design memo + `Halo2TvmBundle` reference impl + green round-trip test).
-
-`scripts/partner_packs/_template.manifest` is the starter template.
-
 ### Reproducing CI locally before pushing
 
 Run `make pre-push` before any non-trivial push — it mirrors every job CI runs and catches the two failure modes that the default `make test` doesn't:

@@ -244,10 +244,12 @@ pub struct LiveProverConfig {
     /// supercritical W²-stride schedule described in
     /// `docs/l2_anchoring_proposal.md`.
     ///
-    /// Field is present-but-unwired at this stage: seed alignment,
-    /// `find_next_bundle_boundary`, and the Circuit 2 dispatch still use the
-    /// L1 stride unconditionally. Wiring lands in the follow-up commit
-    /// (Stage 4 of `l2_anchoring_implementation_plan.md`).
+    /// Fully wired: every stride-dependent call site — `SeedPolicy::Explicit`
+    /// alignment check, [`crate::live_driver::thinning::find_next_bundle_boundary`],
+    /// `advance_bootstrap`, and `next_target_seqno_upper_bound` — routes
+    /// through [`LiveProverConfig::bundle_stride`], which dispatches on this
+    /// field. Flipping the mode is a single-source change; no other config
+    /// value needs to move.
     pub anchor_mode: crate::AnchorMode,
     /// Safety cap; see [`DEFAULT_MAX_BK_UPDATES_PER_ITER`].
     pub max_bk_updates_per_iter: usize,

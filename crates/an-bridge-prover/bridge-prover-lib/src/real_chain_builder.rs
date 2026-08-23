@@ -191,6 +191,18 @@ async fn build_chain_same_layer_n(
 
     let (chain_links, num_steps) = build_chain_proofs(&[tree]);
 
+    // Safety guard requested in `l2_anchoring_implementation_plan.md` §2.1:
+    // Case D (subsequent L(N) boundary with N >= 2) is a single-rung horizontal
+    // hop by construction. Anything else here means either the driver picked
+    // a mis-aligned target (should have been caught by the % W^N check in
+    // the caller) or `build_chain_proofs` disagreed with `build_layer_n_tree`
+    // on step count — a silent bug we want to trap in debug builds.
+    debug_assert_eq!(
+        num_steps, 1,
+        "Case D (L{} same-layer) must produce exactly 1 chain step, got {}",
+        layer, num_steps,
+    );
+
     Ok(RealChainResult {
         chain_links,
         num_steps,
@@ -211,6 +223,28 @@ async fn build_chain_same_layer(
     prev_hash: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<RealChainResult> {
+    // Safety guard requested in `l2_anchoring_implementation_plan.md` §2.1:
+    // this path is L1-only (`num_layers = 1`, `chain_steps = P`). If prev
+    // state already has num_active_layers >= 2, the driver picked a target
+    // that fell out of Case B (new-layer) and Case D (%W^N-aligned) yet the
+    // state carries L2+ history — a classic "L2 daemon mis-picked target"
+    // signature. Loud warn; not fatal because the walk itself is still
+    // valid and downstream ensure!s enforce alignment. verifyBlock will
+    // revert on-chain with PrevAnchorMismatch, which is recoverable, but
+    // this log line lets an operator diagnose the mis-dispatch without
+    // reading the Solidity revert data.
+    let prev_num_layers = state.num_active_layers();
+    if prev_num_layers >= 2 {
+        warn!(
+            "build_chain_same_layer (L1-only path) fired with num_active_layers={} — \
+             expected 1. Driver likely mis-picked target under L2 anchoring; \
+             expect on-chain PrevAnchorMismatch. target_seqno={}, prev_seqno={}",
+            prev_num_layers,
+            target_seqno,
+            state.stored_last_seen_block_seq_no,
+        );
+    }
+
     let step_size = window_size; // L1 step
     let prev_seqno = state.stored_last_seen_block_seq_no;
 

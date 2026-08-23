@@ -23,6 +23,15 @@ including Circuit 4 see [`../TECHNICAL_README.md`](../../../../../crates/an-brid
 > seq_nos (~91 min chain-time on shellnet). See [Case 7](#case-7--l2-anchored-cold-start--anchor-level-2)
 > for the L2 cold-start delta. All other cases (2-6) apply verbatim — the
 > daemon's anchor mode is opaque to steady-state recovery.
+>
+> **L2 maturity status: SMOKE-PENDING.** Shellnet Deploy #12 (2026-08-18)
+> verified cold-start + first covering bundle end-to-end; no multi-day
+> continuous-production run yet on record. L1 is the exercised default
+> (dev, CI, one-fire-and-withdraw E2E per iteration). Both daemons emit a
+> `warn!` on startup when `BRIDGE_ANCHOR_LEVEL=2` is selected — that is
+> expected, not a fault. Circuit 2 itself is level-parametric (same VK,
+> same on-chain verifier); the gap is operational coverage, not the ZK
+> stack.
 
 ---
 

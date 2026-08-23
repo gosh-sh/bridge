@@ -70,9 +70,23 @@ pub const BUNDLE_STRIDE_L2: u64 =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum AnchorMode {
     /// L1 anchoring: one bundle per `W·P` seq_nos, `chain_steps = P` L1 hops.
+    ///
+    /// **Status:** exercised in dev/CI + one fire+withdraw E2E per iteration.
+    /// Known subcritical regime under shellnet 3 seq/s (prover 1.75× slower
+    /// than chain) — sustainable for short runs, drifts over days.
     #[default]
     L1,
     /// L2 anchoring: one bundle per `W²` seq_nos, `chain_steps = 1` L2 hop.
+    ///
+    /// **Status: SMOKE-PENDING.** First live shellnet deploy landed 2026-08-18
+    /// (Deploy #12, `AckiNackiBridge` at `0xf31E316C…FFEEE`, seed 9_175_040).
+    /// Cold-start + first covering bundle verified end-to-end; multi-day
+    /// continuous-production stress run not yet on record. Daemons emit a
+    /// `warn!` on startup when this mode is selected — see
+    /// `crates/an-bridge-prover/docs/live_verifyBlock_runbook.md` Case 7 for
+    /// the expected log signature. Circuit 2 itself is level-parametric
+    /// (same VK across L1/L2); the maturity gap is in operational coverage,
+    /// not the ZK stack.
     L2,
 }
 

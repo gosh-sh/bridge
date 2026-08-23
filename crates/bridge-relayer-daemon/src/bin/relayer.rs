@@ -2169,6 +2169,18 @@ async fn run_daemon_live(
         bundle_stride = anchor_mode.stride(),
         "startup: read on-chain state for routing",
     );
+    // Anchor-mode maturity marker (Sergey's PR#35 review fallback for #2).
+    // L2 has shellnet Deploy #12 smoke but no continuous-production stress
+    // run yet — loud on startup so operators know what regime they're in.
+    if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
+        tracing::warn!(
+            "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
+             cold-start end-to-end; no continuous multi-day production run yet. See \
+             crates/an-bridge-prover/docs/live_verifyBlock_runbook.md Case 7 for the \
+             expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
+             and drift-recovery deltas. Report anomalies against that signature."
+        );
+    }
     let decision = bridge_relayer_daemon::startup_decide(
         bridge_relayer_daemon::DecideInputs {
             local: &state,

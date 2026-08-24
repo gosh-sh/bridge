@@ -52,8 +52,9 @@ or `BRIDGE_PK_CACHE_DIR=<path>` in the env. The daemon forwards it to the
 
 ```bash
 cd bridge/crates/an-bridge-prover
-set -a && source .env.shellnet && set +a
-./target/release/relayer daemon-live 2>&1 | tee logs/perf_baseline.log
+# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+./target/release/relayer daemon-live 2>&1 | tee logs/perf_baseline_${BRIDGE_CONFIG_DIR##*/}.log
 ```
 
 Timing lines to grep:

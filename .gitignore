@@ -30,9 +30,15 @@ contracts/ethereum/lib/
 .env.local
 .env.production
 .env.*.local
-.env.shellnet
 .env.sepolia
 .secrets
+
+# Shellnet deploy env files (.env.shellnet, .env.shellnet.l2) ARE tracked —
+# they carry the shared shellnet deployer burner + genesis anchors that
+# every operator needs to reproduce a deploy. Only personal editor backups
+# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored.
+.env.shellnet.*.bak
+.env.shellnet.*.bak.*
 
 # IDE
 .vscode/
@@ -233,3 +239,17 @@ crates/an-bridge-prover/relayer-state.json.stale_*
 crates/an-bridge-prover/state.stale_*/
 crates/an-bridge-prover/submissions/
 crates/an-bridge-prover/diag/
+
+# Per-mode config dirs (L1_config/, L2_config/) — the runtime subdirs
+# hold live prover state, proofs, and scratch witnesses, never commit.
+# The `env` files carry the current shared shellnet deploy addresses
+# (BRIDGE_ADDRESS, BRIDGE_BOOTSTRAP_SEQNO, BRIDGE_ANCHOR_LEVEL) and are
+# tracked; `shellnet.common` is tracked with a placeholder
+# RELAYER_PRIVATE_KEY — each operator drops their own key in locally
+# and keeps that edit out of any commit.
+crates/an-bridge-prover/L1_config/state/
+crates/an-bridge-prover/L1_config/proofs/
+crates/an-bridge-prover/L1_config/work_dir/
+crates/an-bridge-prover/L2_config/state/
+crates/an-bridge-prover/L2_config/proofs/
+crates/an-bridge-prover/L2_config/work_dir/

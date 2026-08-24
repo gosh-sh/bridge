@@ -22,6 +22,54 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+### Breaking Changes
+
+- **Per-mode config directory layout in `crates/an-bridge-prover/`.**
+  The parallel `state/` + `state_l2/` + `proofs/` + `proofs_l2/` +
+  `.env.shellnet` + `.env.shellnet.l2` layout is retired. Runtime data
+  now lives under `L1_config/{env,state,proofs,work_dir}` and
+  `L2_config/{env,state,proofs,work_dir}`. Shared env lines are
+  extracted to a single `shellnet.common` sourced by each per-mode
+  `env` file. Operators must migrate any existing on-disk state before
+  restarting the daemon (`mv state L1_config/state && mv proofs
+  L1_config/proofs`); the file-first startup guard reads only the new
+  paths.
+
+### Added
+
+- New environment variables consumed by `bridge_prover_lib::paths`:
+  `BRIDGE_CONFIG_DIR` (broad selector — resolves both state and proofs
+  under `$BRIDGE_CONFIG_DIR/`), `BRIDGE_STATE_DIR` and `BRIDGE_PROOFS_DIR`
+  (narrower overrides, win over `BRIDGE_CONFIG_DIR` when set).
+  Operators must `export BRIDGE_CONFIG_DIR=./L1_config` (or
+  `./L2_config`) **before** sourcing the per-mode env file; the env
+  files no longer set `BRIDGE_CONFIG_DIR` themselves.
+- New launch scripts under `crates/an-bridge-prover/scripts/` that
+  source the per-mode env file: `launch_withdraw_e2e.sh` (dry-run L1),
+  `launch_withdraw_e2e_real.sh` (real submit L1),
+  `launch_withdraw_e2e_l2.sh` (dry-run L2), `replay_withdraw_shplonk.sh`
+  (offline replay against a retained enriched witness). All emit
+  per-mode absolute snark-dir paths so the aggregate-proof subprocess
+  finds the intermediate `.snark` file.
+
+### Changed
+
+- `bridge-relayer-daemon` docs Case 1 (`live_relayer_bridge_verifyBlock_runbook.md`)
+  is now a single unified cold-start section with a
+  `BRIDGE_CONFIG_DIR=./L1_config` / `BRIDGE_CONFIG_DIR=./L2_config`
+  selector at the top. Case 7 collapses to a table of
+  the four operator-visible L2 deltas (W²-aligned bootstrap seqno, up
+  to ~101 min first-verify wait, `layers=2` log field, ~15
+  sub-bundle diagnostic window). `live_withdrawByProof_runbook.md`
+  Case 8 was updated to source `L2_config/env` instead of
+  `.env.shellnet.l2`.
+- `bridge-prover-daemon` and `bridge-verifier-daemon` binaries no
+  longer hardcode `./state/` and `proofs/` at compile time; they
+  resolve paths at runtime via `bridge_prover_lib::paths`. Defaults
+  match the pre-refactor literals (`./state`, `./proofs`,
+  `./state/bootstrap_seed.json`), so existing operators who do not set
+  `BRIDGE_CONFIG_DIR` see no behavioral change.
+
 ## [0.1.0] – 2026-06-11
 
 Tagged at `0f7c635`. Changes up to this tag predate this changelog and are not

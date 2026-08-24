@@ -1,0 +1,38 @@
+# L2_config/env — Sepolia E2E with L2 anchoring (bundle stride W² = 16384).
+# Generated 2026-08-18, paired with contracts/ethereum/.env.shellnet.l2.
+#
+# CONSUMED BY:
+#   cd crates/an-bridge-prover
+#   export BRIDGE_CONFIG_DIR=./L2_config
+#   set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+#   ./target/release/relayer daemon-live
+#
+# LEVEL:
+#   BRIDGE_ANCHOR_LEVEL=2 → daemon builds/proves L2 bundles.
+#   Startup drift check in bridge-prover-daemon/src/main.rs refuses to boot
+#   if the prover_state on disk carries a different anchor_level than this
+#   env var. State + proofs live under L2_config/{state,proofs} via
+#   BRIDGE_CONFIG_DIR so L1 state on the same host is not touched.
+
+# Layer the shared bits first.
+source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
+
+# --- Ethereum side ------------------------------------------------------------
+# Deploy #12 — first L2-anchored Sepolia bridge, 2026-08-18.
+# Constructor stamped:
+#   storedLastSeenBlockSeqNo      = 9175040
+#   storedPrevMaxLevelLayerHash   = 0x21f5cc5f…0bf493
+#   storedBkSetCommitment         = 0x08eb0a18…ca71c
+# All three verified on-chain (see logs/deploy12_l2_20260819_001713.log).
+BRIDGE_ADDRESS=0xf31E316C7E3FD4aDDBd86d6d63a1444947BFFEEE
+
+# --- Acki Nacki side ----------------------------------------------------------
+# Must equal contracts/ethereum/.env.shellnet.l2:GENESIS_LAST_SEEN_BLOCK_SEQNO.
+# On first tick the daemon fetches this key block from GQL, builds the
+# BootstrapSeed, and applies it to state — must match on-chain
+# storedLastSeenBlockSeqNo() or first verifyBlock reverts PrevAnchorMismatch.
+BRIDGE_BOOTSTRAP_SEQNO=9175040
+
+# --- L2 anchor mode (strict) --------------------------------------------------
+BRIDGE_ANCHOR_LEVEL=2
+

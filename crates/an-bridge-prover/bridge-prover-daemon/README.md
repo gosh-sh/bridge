@@ -249,6 +249,14 @@ echo "prover_pid=$!" >> logs/pids.txt
 
 Optional: pin the seed for reproducibility via `BRIDGE_BOOTSTRAP_SEQNO=<N>` (must be `> 0` and `% (W·P) == 0`, i.e. multiple of 512). Otherwise the prover auto-pins at the next `W·P` boundary past chain head.
 
+**Per-mode config dir (optional).** By default both daemons use
+`./state/` and `./proofs/` under the working directory. Set
+`BRIDGE_CONFIG_DIR=./L1_config` (or `./L2_config`) to redirect both to
+`$BRIDGE_CONFIG_DIR/state/` and `$BRIDGE_CONFIG_DIR/proofs/` — same layout the `daemon-live`
+runbook uses. Narrower overrides `BRIDGE_STATE_DIR` /
+`BRIDGE_PROOFS_DIR` still win if set explicitly. Resolution lives in
+`bridge_prover_lib::paths`.
+
 For local devnet, `scripts/run-bridge-test.sh` does the wipe+build+launch in one shot.
 
 ---

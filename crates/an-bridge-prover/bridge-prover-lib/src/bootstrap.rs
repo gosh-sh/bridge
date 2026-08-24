@@ -41,8 +41,12 @@ use crate::bridge_state::BridgeState;
 pub const SEED_SCHEMA_VERSION: u32 = 2;
 
 /// Default path for the persisted seed. Daemons may override but typically
-/// both read/write the same `state/bootstrap_seed.json`.
-pub const DEFAULT_SEED_PATH: &str = "./state/bootstrap_seed.json";
+/// both read/write the same `<state_dir>/bootstrap_seed.json`. The
+/// state directory is resolved at call time from env
+/// (`BRIDGE_STATE_DIR` / `BRIDGE_CONFIG_DIR`) — see [`crate::paths`].
+pub fn default_seed_path() -> String {
+    crate::paths::bootstrap_seed_file().to_string_lossy().into_owned()
+}
 
 /// Genesis seed for `BridgeState`.
 ///

@@ -28,7 +28,10 @@ const PARAMS_DIR: &str = "./params";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// How often to log a heartbeat summary while the loop is running.
 const STATS_LOG_INTERVAL: Duration = Duration::from_secs(60);
-const STATE_FILE: &str = "./state/verifier_state.json";
+// &state_file is resolved at runtime from `bridge_prover_lib::paths`;
+// see the `state_file` local in `main()`. This replaces the pre-refactor
+// `./state/verifier_state.json` constant so the path can be redirected via
+// `BRIDGE_STATE_DIR` / `BRIDGE_CONFIG_DIR` for the per-mode L1/L2 layout.
 /// Default GraphQL endpoint when `BRIDGE_GQL_ENDPOINT` is not set. Same env
 /// var the prover daemon honours, so a single export in the shell selects the
 /// network for both daemons. Used only by [`load_bk_set_commitment`] — the
@@ -75,8 +78,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    std::fs::create_dir_all("state").ok();
+    bridge_prover_lib::paths::ensure_state_dir();
     ipc::ensure_proofs_dir();
+
+    let state_file = bridge_prover_lib::paths::verifier_state_file()
+        .to_string_lossy()
+        .into_owned();
+    let proofs_dir = bridge_prover_lib::paths::proofs_dir()
+        .to_string_lossy()
+        .into_owned();
 
     let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
         .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
@@ -136,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
     info!("VKs loaded (primary + fallback + layer + event)");
 
     // 3. Load state.
-    let mut state = BridgeState::load(STATE_FILE, HISTORY_WINDOW_SIZE)?;
+    let mut state = BridgeState::load(&state_file, HISTORY_WINDOW_SIZE)?;
     info!(
         "state loaded: initialized={}, last_key_block={}",
         state.initialized, state.stored_last_seen_block_seq_no
@@ -152,17 +162,18 @@ async fn main() -> anyhow::Result<()> {
     //     in the prover state but absent from the verifier — a one-entry
     //     drift from genesis onward.
     if !state.initialized {
-        match BootstrapSeed::load(bootstrap::DEFAULT_SEED_PATH)? {
+        let seed_path = bootstrap::default_seed_path();
+        match BootstrapSeed::load(&seed_path)? {
             Some(seed) => {
                 info!(
                     "loading bootstrap seed from {}: seqno={}, height={}, layers={}",
-                    bootstrap::DEFAULT_SEED_PATH,
+                    seed_path,
                     seed.block_seq_no,
                     seed.block_height,
                     seed.layer_hashes.len(),
                 );
                 seed.apply(&mut state)?;
-                state.save(STATE_FILE)?;
+                state.save(&state_file)?;
                 info!(
                     "initialized from seed: seqno={}, height={}",
                     state.stored_last_seen_block_seq_no, state.stored_last_seen_block_height,
@@ -171,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
             None => {
                 info!(
                     "no bootstrap seed at {} yet — waiting for prover to write it",
-                    bootstrap::DEFAULT_SEED_PATH,
+                    seed_path,
                 );
             }
         }
@@ -194,7 +205,10 @@ async fn main() -> anyhow::Result<()> {
     let t_total = Instant::now();
     let mut last_stats_log = Instant::now();
 
-    info!("watching proofs/ directory for incoming proofs (block bundles + event proofs)...");
+    info!(
+        "watching {} for incoming proofs (block bundles + event proofs)...",
+        proofs_dir,
+    );
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -227,17 +241,18 @@ async fn main() -> anyhow::Result<()> {
         // state is already past the seed's cursor and re-applying it would
         // regress (and `initialize_bk_set_commitment` panics as a safeguard).
         if !state.initialized {
-            match BootstrapSeed::load(bootstrap::DEFAULT_SEED_PATH)? {
+            let seed_path = bootstrap::default_seed_path();
+            match BootstrapSeed::load(&seed_path)? {
                 Some(seed) => {
                     info!(
                         "bootstrapping from seed at {}: seqno={}, height={}, layers={}",
-                        bootstrap::DEFAULT_SEED_PATH,
+                        seed_path,
                         seed.block_seq_no,
                         seed.block_height,
                         seed.layer_hashes.len(),
                     );
                     seed.apply(&mut state)?;
-                    state.save(STATE_FILE)?;
+                    state.save(&state_file)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
                 }
                 None => {
@@ -261,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
                 &key_manager,
                 &mut state,
                 &mut last_seen_bk_update_seqno,
-                STATE_FILE,
+                &state_file,
             );
             continue;
         }
@@ -510,7 +525,7 @@ async fn main() -> anyhow::Result<()> {
                         request.block_height,
                         next_seq_u64,
                     )?;
-                    state.save(STATE_FILE)?;
+                    state.save(&state_file)?;
                 }
                 // block_id_fr is informational only in v2 state — no longer
                 // stored (the contract mirror tracks per-layer rolling windows,
@@ -585,7 +600,7 @@ async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> any
 
 /// Scan proofs/ for any proof file with seq_no > last_seen.
 fn find_next_proof_file(last_seen: u32) -> Option<u32> {
-    let dir = match std::fs::read_dir("proofs") {
+    let dir = match std::fs::read_dir(bridge_prover_lib::paths::proofs_dir()) {
         Ok(d) => d,
         Err(_) => return None,
     };
@@ -637,7 +652,7 @@ fn write_failure(seq_no: u32, error: &str) {
 
 /// Scan proofs/ for any `bkupd_NNNNNN.json` with seq_no > last_seen.
 fn find_next_bk_update_file(last_seen: u32) -> Option<u32> {
-    let dir = match std::fs::read_dir("proofs") {
+    let dir = match std::fs::read_dir(bridge_prover_lib::paths::proofs_dir()) {
         Ok(d) => d,
         Err(_) => return None,
     };
@@ -967,13 +982,14 @@ struct EventProofResult<'a> {
 }
 
 fn event_result_file_path(seq_no: u32) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("proofs/proof_event_{:06}.result.json", seq_no))
+    bridge_prover_lib::paths::proofs_dir()
+        .join(format!("proof_event_{:06}.result.json", seq_no))
 }
 
 /// Scan `proofs/` for any `proof_event_NNNNNN.json` with seq_no > last_seen.
 /// Returns the lowest unseen seq_no, or `None` if nothing new.
 fn find_next_event_proof_file(last_seen: i64) -> Option<u32> {
-    let dir = match std::fs::read_dir("proofs") {
+    let dir = match std::fs::read_dir(bridge_prover_lib::paths::proofs_dir()) {
         Ok(d) => d,
         Err(_) => return None,
     };
@@ -1013,7 +1029,10 @@ fn process_event_proof(
     let t_start = Instant::now();
 
     // ---- Load and parse the input file ----
-    let path = format!("proofs/proof_event_{:06}.json", seq_no);
+    let path = bridge_prover_lib::paths::proofs_dir()
+        .join(format!("proof_event_{:06}.json", seq_no))
+        .to_string_lossy()
+        .into_owned();
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {

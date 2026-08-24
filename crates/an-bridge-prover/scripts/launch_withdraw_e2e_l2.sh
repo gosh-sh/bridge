@@ -31,16 +31,17 @@ TS=$(date +%Y%m%d_%H%M%S)
 WITHDRAW_LOG="logs/withdraw_l2_dry_${TS}.log"
 BURN_LOG="logs/withdrawal_burn_l2_${TS}.log"
 
-# L2-specific env file. Keeping L1/L2 env separate prevents accidental
-# cross-fire (e.g. L1 BRIDGE_ADDRESS vs L2 deploy).
-if [ ! -f .env.shellnet.l2 ]; then
-  echo "!!! .env.shellnet.l2 not found — copy .env.shellnet and update:"
-  echo "    - BRIDGE_ADDRESS  (L2 deploy)"
-  echo "    - BRIDGE_ANCHOR_LEVEL=2"
-  echo "    - GENESIS_* env vars from 'compute_bridge_anchors --level 2 --at-head'"
+# L2-specific config dir. Keeping L1/L2 env separate prevents accidental
+# cross-fire (e.g. L1 BRIDGE_ADDRESS vs L2 deploy). `L2_config/env` sources
+# `shellnet.common` for the shared vars, then adds L2-only overrides
+# (BRIDGE_ADDRESS, BRIDGE_BOOTSTRAP_SEQNO, BRIDGE_ANCHOR_LEVEL,
+# BRIDGE_CONFIG_DIR=./L2_config).
+if [ ! -f L2_config/env ]; then
+  echo "!!! L2_config/env not found — see docs/live_verifyBlock_runbook.md"
+  echo "    (per-mode config layout: L{1,2}_config/{env,state,proofs})"
   exit 1
 fi
-set -a && source .env.shellnet.l2 && set +a
+set -a && source L2_config/env && set +a
 
 # Guard: make sure we're actually running against an L2 deploy.
 if [ "${BRIDGE_ANCHOR_LEVEL:-1}" != "2" ]; then
@@ -53,24 +54,24 @@ fi
 # must be an ABSOLUTE path (a relative "work_dir/..." would resolve against
 # the aggregator's cwd and miss the intermediate .snark file — same bug
 # `replay_withdraw_shplonk.sh:59` and the L1 launcher guard against).
-SNARK_DIR_ABS=$(python3 -c "import os,sys; print(os.path.abspath('work_dir_l2/shplonk-snark'))")
+SNARK_DIR_ABS=$(python3 -c "import os,sys; print(os.path.abspath('L2_config/work_dir/shplonk-snark'))")
 
 echo "==> Step 1/3  launch withdraw-e2e (baseline snapshot before burn, L2)"
 nohup ./target/release/relayer withdraw-e2e \
   --gql-endpoint "$BRIDGE_GQL_ENDPOINT" \
-  --prover-state-path state_l2/prover_state.json \
+  --prover-state-path L2_config/state/prover_state.json \
   --window-size 128 \
   --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --bridge-dapp-id    0000000000000000000000000000000000000000000000000000000000000000 \
   --anchor-layer 2 \
   --i-know-the-wait \
-  --work-dir work_dir_l2 \
+  --work-dir L2_config/work_dir \
   --aggregator-dir "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir  "$BRIDGE_VERIFIERS_DIR" \
   --params-dir     "$BRIDGE_PARAMS_DIR" \
   --snark-dir      "$SNARK_DIR_ABS" \
   --pk-cache-dir   "$BRIDGE_PARAMS_DIR/pk_cache" \
-  --prover-out-dir proofs_l2 \
+  --prover-out-dir L2_config/proofs \
   --prover-seq-no "${TS: -6}" \
   --event-wait-s 7200 \
   --dry-run \

@@ -1,3 +1,4 @@
+pub mod paths;
 pub mod poseidon_dense;
 pub mod keys;
 pub mod transcript;

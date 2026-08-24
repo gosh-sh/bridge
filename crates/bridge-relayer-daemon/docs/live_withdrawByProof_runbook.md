@@ -103,8 +103,8 @@ and `~5 min` for C4+submit, the "how far behind daemon is" term dominates:
 | 1 (burn during bundle 2 window) | 12 | 12 | 5 | **~29 min** |
 | 7 (Deploy #7 accident, see change log) | 84 | 12 | 5 | **~101 min** |
 
-**Consequence for fresh demos.** Genesis anchors baked into `.env.shellnet`
-by `compute_bridge_anchors --at-head` embed the chain-head lookahead at
+**Consequence for fresh demos.** Genesis anchors baked into `L1_config/env`
+(or `L2_config/env`) by `compute_bridge_anchors --at-head` embed the chain-head lookahead at
 the time you run the tool. That lookahead **is** the daemon's starting
 lag. Two rules:
 
@@ -198,10 +198,20 @@ cargo build --release -p bridge-event-halo2-prover
 
 ```bash
 cd crates/an-bridge-prover
+# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT; do
-  grep -q "^${v}=" .env.shellnet && echo "  ok  $v" || echo "  FAIL $v"
+  [ -n "${!v}" ] && echo "  ok  $v" || echo "  FAIL $v"
 done
 ```
+
+`shellnet.common` holds `RPC_URL`, `RELAYER_PRIVATE_KEY`,
+`BRIDGE_GQL_ENDPOINT`, `BRIDGE_BK_SET_CONFIG`, `BRIDGE_PARAMS_DIR`,
+`BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
+and layers on `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
+`BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. The withdraw scripts
+under `scripts/launch_withdraw_e2e*.sh` source the same per-mode env
+file before invoking the binary.
 
 The withdraw command reads `RPC_URL`, `BRIDGE_ADDRESS`, `RELAYER_PRIVATE_KEY`
 via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
@@ -230,9 +240,10 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```
 
 Paste the printed anchors into
-`contracts/ethereum/.env.shellnet` and
-`crates/an-bridge-prover/.env.shellnet` (see the Deploy #8 template in
-git history for exact field names).
+`contracts/ethereum/.env.shellnet` (deployer-side) and
+`crates/an-bridge-prover/L1_config/env` (daemon-side; use `L2_config/env`
+for `--level 2` deploys). See the Deploy #8 template in git history for
+exact field names.
 
 ### Step 1 — Deploy the bridge
 
@@ -241,7 +252,8 @@ cd contracts/ethereum
 set -a && source .env.shellnet && set +a
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
   --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
-# verify the printed AckiNackiBridge, then paste into daemon .env.shellnet
+# verify the printed AckiNackiBridge, then paste into
+# crates/an-bridge-prover/L{1,2}_config/env as BRIDGE_ADDRESS
 ```
 
 ### Step 2 — Unpause
@@ -331,22 +343,23 @@ watch -n 30 'cast call 0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B \
 
 ```bash
 cd crates/an-bridge-prover
-set -a && source .env.shellnet && set +a
+# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 TS=$(date +%Y%m%d_%H%M%S)
 
 ./target/release/relayer withdraw-e2e \
   --gql-endpoint $BRIDGE_GQL_ENDPOINT \
-  --prover-state-path state/prover_state.json \
+  --prover-state-path "$BRIDGE_CONFIG_DIR/state/prover_state.json" \
   --window-size 128 \
   --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --bridge-dapp-id    1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --anchor-layer auto \
-  --work-dir work_dir \
+  --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
   --an-bridge-prover-dir . \
-  --prover-out-dir proofs \
+  --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \
-  2>&1 | tee logs/withdraw_dry_${TS}.log
+  2>&1 | tee logs/withdraw_dry_${BRIDGE_CONFIG_DIR##*/}_${TS}.log
 ```
 
 Expected log signature:
@@ -571,7 +584,8 @@ Aave Sepolia market address; the same faucet the fork tests use
 
 ```bash
 cd crates/an-bridge-prover
-set -a && source .env.shellnet && set +a
+# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 
 export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
 export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
@@ -662,9 +676,9 @@ cargo run --release --bin compute_bridge_anchors -- \
 compute-anchors → deploy gap. Still keep it under ~10 min for cleanliness.
 
 Paste the emitted values into a level-scoped env file
-(`contracts/ethereum/.env.shellnet.l2` and
-`crates/an-bridge-prover/.env.shellnet.l2` recommended, to avoid
-mixing with L1 deploys).
+(`contracts/ethereum/.env.shellnet.l2` on the deployer side; on the
+daemon side, into `crates/an-bridge-prover/L2_config/env` — sources
+`../shellnet.common` and only overrides the 4 L2-specific lines).
 
 ### Step L1 — Deploy with L2 wiring
 
@@ -720,8 +734,9 @@ and fix before proceeding:
 - `refuse: on-chain last_seen (=X) % 16384 != 0` — deploy consumed L1
   seed but daemon is starting L2. Redeploy with L2 genesis values.
 - `refuse: anchor_level mismatch (state=1, cfg=2)` — stale L1
-  `state/prover_state.json` re-used across the redeploy. Delete the
-  file and restart to force re-seed.
+  `L2_config/state/prover_state.json` re-used across the redeploy (or
+  the wrong `$BRIDGE_CONFIG_DIR` was sourced). Delete the file (or start with a fresh
+  `L2_config/state/`) and restart to force re-seed.
 
 ### Step L4 — Wait for the first L2 bundle to land
 
@@ -764,20 +779,21 @@ run silently downgrades. Force strict L2:
 
 ```bash
 cd crates/an-bridge-prover
-set -a && source .env.shellnet.l2 && set +a
+BRIDGE_CONFIG_DIR=./L2_config
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 TS=$(date +%Y%m%d_%H%M%S)
 
 ./target/release/relayer withdraw-e2e \
   --gql-endpoint $BRIDGE_GQL_ENDPOINT \
-  --prover-state-path state/prover_state.json \
+  --prover-state-path "$BRIDGE_CONFIG_DIR/state/prover_state.json" \
   --window-size 128 \
   --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --bridge-dapp-id    1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --anchor-layer 2 \
   --i-know-the-wait \
-  --work-dir work_dir_l2 \
+  --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
   --an-bridge-prover-dir . \
-  --prover-out-dir proofs_l2 \
+  --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \
   2>&1 | tee logs/withdraw_l2_dry_${TS}.log

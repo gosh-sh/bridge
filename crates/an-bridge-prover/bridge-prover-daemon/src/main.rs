@@ -52,8 +52,11 @@ const ENV_BOOTSTRAP_SEQNO: &str = "BRIDGE_BOOTSTRAP_SEQNO";
 const ENV_ANCHOR_LEVEL: &str = "BRIDGE_ANCHOR_LEVEL";
 const PARAMS_DIR: &str = "./params";
 const LOGS_DIR: &str = "./logs";
-const STATE_FILE: &str = "./state/prover_state.json";
-const PROVER_BK_SET_FILE: &str = "./state/prover_bk_set.json";
+// STATE_FILE / PROVER_BK_SET_FILE are resolved at runtime from
+// `bridge_prover_lib::paths` — see the `state_file` / `prover_bk_set_file`
+// locals in `main()`. The pre-refactor `./state/…` constants have been
+// replaced so the path can be redirected via `BRIDGE_STATE_DIR` /
+// `BRIDGE_CONFIG_DIR` for the per-mode L1/L2 config layout.
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(feature = "self-verify"))]
@@ -69,8 +72,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     std::fs::create_dir_all(LOGS_DIR).ok();
-    std::fs::create_dir_all("state").ok();
+    bridge_prover_lib::paths::ensure_state_dir();
     ipc::ensure_proofs_dir();
+
+    let state_file = bridge_prover_lib::paths::prover_state_file()
+        .to_string_lossy()
+        .into_owned();
+    let prover_bk_set_file = bridge_prover_lib::paths::prover_bk_set_file()
+        .to_string_lossy()
+        .into_owned();
 
     let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
         .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
@@ -112,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Wire dependencies -------------------------------------------------
     let gql = gql_client::create_client(&gql_endpoint)?;
-    let state = BridgeState::load(STATE_FILE, HISTORY_WINDOW_SIZE as usize)?;
+    let state = BridgeState::load(&state_file, HISTORY_WINDOW_SIZE as usize)?;
     info!(
         "state: initialized={}, last_key_block={}, anchor_level={}",
         state.initialized, state.stored_last_seen_block_seq_no, state.anchor_level
@@ -131,8 +141,8 @@ async fn main() -> anyhow::Result<()> {
                  and rebootstrap; never auto-migrate anchor levels on a live bridge.",
                 drift.state_level,
                 drift.cfg_level,
-                STATE_FILE,
-                STATE_FILE,
+                state_file,
+                state_file,
                 drift.cfg_level,
             );
         }
@@ -146,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     // for the BK-pubkey table — intermediate rotations advance it via
     // the bk-update lane in `LiveProverDriver`. `bk_set.local.json` is
     // only read on first-ever startup.
-    let prover_bk_set = match ProverBkSet::load(PROVER_BK_SET_FILE)? {
+    let prover_bk_set = match ProverBkSet::load(&prover_bk_set_file)? {
         Some(loaded) => {
             if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
                 anyhow::bail!(
@@ -174,11 +184,11 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
             let pbs = ProverBkSet::from_pubkeys(&bk_set_from_file, 0);
-            pbs.save(PROVER_BK_SET_FILE)?;
+            pbs.save(&prover_bk_set_file)?;
             info!(
                 "prover_bk_set: cold-boot seeded {} signers → {}",
                 pbs.pubkeys_hex.len(),
-                PROVER_BK_SET_FILE,
+                prover_bk_set_file,
             );
             pbs
         }
@@ -368,8 +378,10 @@ fn parse_anchor_level() -> anyhow::Result<AnchorMode> {
 // -------------------------------------------------------------------------
 
 fn persist(driver: &LiveProverDriver) -> anyhow::Result<()> {
-    driver.snapshot_state().save(STATE_FILE)?;
-    driver.snapshot_prover_bk_set().save(PROVER_BK_SET_FILE)?;
+    let state_file = bridge_prover_lib::paths::prover_state_file();
+    let prover_bk_set_file = bridge_prover_lib::paths::prover_bk_set_file();
+    driver.snapshot_state().save(&state_file.to_string_lossy())?;
+    driver.snapshot_prover_bk_set().save(&prover_bk_set_file.to_string_lossy())?;
     Ok(())
 }
 
@@ -384,13 +396,14 @@ fn persist_seed_if_needed(
         return Ok(());
     }
     if let Some(seed) = driver.snapshot_bootstrap_seed() {
-        seed.save(bootstrap::DEFAULT_SEED_PATH)?;
+        let seed_path = bootstrap::default_seed_path();
+        seed.save(&seed_path)?;
         info!(
             "bootstrap seed persisted: seq_no={}, height={}, layers={} → {}",
             seed.block_seq_no,
             seed.block_height,
             seed.layer_hashes.len(),
-            bootstrap::DEFAULT_SEED_PATH,
+            seed_path,
         );
         *seed_persisted = true;
     }

@@ -587,13 +587,15 @@ load) → submit → wait for Sepolia confirmation → `ack_last_bundle`
   (covering bundle lands at seed + `W·P = 1024`).
 - **L2 (`BRIDGE_CONFIG_DIR=./L2_config`)** — first `verifyBlock confirmed` in
   **up to ~101 min** worst-case (covering bundle lands at seed + `W² = 16384`;
-  ~91 min chain wall time + ~10 min prover). During this window the
-  daemon processes ~15 sub-bundles (Circuit 1a/1b/2 per `W·P` stride);
-  on-chain `storedLastSeenBlockSeqNo` does **not** advance until the L2
-  covering bundle is accepted. `dumped verifyBlock submission` lines
-  before that are diagnostic-only sub-bundle proofs.
+  ~91 min chain wall time + ~10 min prover). L2 has **no thinning and no
+  sub-bundles**: the daemon proves exactly one bundle per W² window with
+  `chain_steps = 1` (single L2 hop; see `AnchorMode::stride` in
+  `bridge-prover-lib/src/lib.rs`). During the wait it polls GQL for the
+  next W²-aligned key block to finalize — no intermediate proofs are
+  produced, so no `dumped verifyBlock submission` lines appear until the
+  covering bundle is ready to submit.
 
-L2 sub-bundle progress watch:
+L2 progress watch:
 
 ```bash
 tail -f logs/live_cold_${BRIDGE_CONFIG_DIR##*/}_*.log | grep -E '(=== Processing|layers=|dumped verifyBlock|confirmed)'
@@ -620,8 +622,15 @@ restart — the daemon writes a fresh one on first observation cycle.
 
 ## Case 2 — Steady-state operation
 
-Once bootstrapped, cadence is **~13 min per key-block** (limited by Circuit 2
-+ SHPLONK aggregation, not RPC).
+Once bootstrapped, cadence is **per bundle**, not per key-block, and depends
+on anchor mode:
+
+- **L1** — bundle every `W·P = 1024` seq_nos (~5 min chain-time). Prover is
+  the limiter (~10–14 min per bundle for Circuit 2 + SHPLONK aggregation),
+  so effective cadence is **~13 min per bundle**.
+- **L2** — bundle every `W² = 16384` seq_nos (~91 min chain-time). Chain is
+  the limiter (prover finishes in ~10 min and idles until the next W²
+  boundary finalizes), so effective cadence is **~91 min per bundle**.
 
 **Where things get written per successful cycle:**
 
@@ -945,11 +954,10 @@ adding `genesisLastSeenBlockSeqNo` to the contract constructor.
 ## Case 7 — L2-anchored cold-start (`--anchor-level 2`)
 
 Merged into [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy) —
-the four L2 deltas (`W²=16384`-aligned bootstrap seqno, up to ~101 min
-first-verify wait, `layers=2` startup-log field, ~15 diagnostic
-sub-bundles pre-promotion) are covered in-line there. Cases 2–6 are
-anchor-level opaque; substitute `./L1_config` ↔ `./L2_config` in any
-command block.
+the three L2 deltas (`W²=16384`-aligned bootstrap seqno, up to ~101 min
+first-verify wait, `layers=2` startup-log field) are covered in-line
+there. Cases 2–6 are anchor-level opaque; substitute `./L1_config` ↔
+`./L2_config` in any command block.
 
 For the L2 E2E withdrawal (burn → `withdraw-e2e` submit), see the
 withdraw runbook's
@@ -1101,7 +1109,7 @@ Scope of *this* deployment (dismisses several open questions upfront):
    ```
    Derives anchors against live chain head, deploys the 6 contracts, extracts `BRIDGE_ADDRESS`, rewrites `L2_config/env`, wipes stale state. Detail: [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch).
 4. **Cold-start the daemon** — [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy). Expect first `verifyBlock confirmed` in up to **~101 min** (L2 covering-bundle wait).
-5. **Long-run watch** — steady state at ~13 min/bundle after the first covering bundle lands ([Case 2](#case-2--steady-state-operation)). Tail the log, snapshot `L2_config/state/prover_state.json` on a schedule.
+5. **Long-run watch** — L2 steady state lands one bundle per `W² = 16384` seq_nos, i.e. **~91 min chain-time between bundles** (prover is idle-waiting most of that window; see [Case 2](#case-2--steady-state-operation)). Tail the log, snapshot `L2_config/state/prover_state.json` on a schedule.
 6. **Failure playbook (only when it fires):** RPC hard-abort → [Case 4](#case-4--restart-after-rpc-induced-hard-abort); on-chain revert → [Case 5](#case-5--restart-after-on-chain-revert); process crash → relaunch is automatic-resurrect from chain ([Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon), no operator action needed).
 
 ### Answers to the PR #31 review questions

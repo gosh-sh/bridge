@@ -40,12 +40,16 @@ including Circuit 4 see [`../TECHNICAL_README.md`](../../../../../crates/an-brid
 - [Quick resume checklist (returning to a running system)](#quick-resume-checklist-returning-to-a-running-system)
 - [Reference addresses (current deploy)](#reference-addresses-current-deploy)
 - [Binary + env prerequisites](#binary--env-prerequisites)
+- [Fund the relayer wallet with Sepolia ETH](#fund-the-relayer-wallet-with-sepolia-eth)
+- [Shared test deploy (open — for quick onboarding)](#shared-test-deploy-open--for-quick-onboarding)
+- [Deploy your own bridge bundle (external users)](#deploy-your-own-bridge-bundle-external-users)
 - [Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
 - [Case 2 — Steady-state operation](#case-2--steady-state-operation)
 - [Case 3 — Clean restart (no state loss)](#case-3--clean-restart-no-state-loss)
 - [Case 4 — Restart after RPC-induced hard-abort](#case-4--restart-after-rpc-induced-hard-abort)
 - [Case 5 — Restart after on-chain revert](#case-5--restart-after-on-chain-revert)
-- [Case 6 — State loss / re-bootstrap from mid-chain](#case-6--state-loss--re-bootstrap-from-mid-chain)
+- [Case 6a — Chain-resurrect (shared contract + fresh daemon)](#case-6a--chain-resurrect-shared-contract--fresh-daemon)
+- [Case 6b — State loss / re-bootstrap from mid-chain](#case-6b--state-loss--re-bootstrap-from-mid-chain)
 - [Case 7 — L2-anchored cold-start (`--anchor-level 2`)](#case-7--l2-anchored-cold-start--anchor-level-2)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
@@ -59,9 +63,10 @@ Run this **before touching anything** — it takes 30 seconds and tells you
 exactly which case (below) applies.
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/an-bridge-prover
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
+cd crates/an-bridge-prover
+set -a && source .env.shellnet && set +a
+export BRIDGE=$BRIDGE_ADDRESS
+export RPC=$RPC_URL
 
 # 1. Is the daemon alive?
 pgrep -af 'relayer daemon-live' || echo "DAEMON NOT RUNNING"
@@ -89,8 +94,8 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 | running | yes | >0 | Watch — mid-cycle retry; only intervene if hard-aborts |
 | not running | yes | 0 | [Case 3](#case-3--clean-restart-no-state-loss) (clean restart) |
 | not running | yes | >0 | [Case 4](#case-4--restart-after-rpc-induced-hard-abort) (RPC hard-abort) — reset counter first |
-| not running | **no** | any | [Case 5](#case-5--restart-after-on-chain-revert) or [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) — do not restart blindly |
-| running/not | state/ missing | — | [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain) (re-bootstrap) |
+| not running | **no** | any | [Case 5](#case-5--restart-after-on-chain-revert) or [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain) — do not restart blindly |
+| running/not | state/ missing | — | [Case 6a](#case-6a--chain-resurrect-shared-contract--fresh-daemon) (auto-resurrect from chain) |
 
 **Authoritative branch (as of 2026-08-04):** `refactoring_and_review_bridge_relayer_demon`
 in `bridge-relayer-daemon/`. The BN254 Fr client fix (`types.rs:83`) is
@@ -119,7 +124,7 @@ Deploy #4 (2026-08-03, active).
 | Genesis `prev_max_level_layer_hash` | `0x268e7b0af653733a850d2fd7ee2cff346145bf5e9c4559f90e024829a7869158` |
 
 Any redeploy invalidates all seven — regenerate `.env.shellnet` from the
-new `bridge-deployer.txt` section (see [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain)).
+new `bridge-deployer.txt` section (see [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain)).
 
 ---
 
@@ -165,6 +170,235 @@ contract's `storedLastSeenBlockSeqNo` at construction (visible in
 
 ---
 
+## Fund the relayer wallet with Sepolia ETH
+
+Two faucets that reliably deliver **without** an anti-Sybil mainnet-deposit
+gate (verified 2026-08):
+
+- **pk910 PoW** — https://sepolia-faucet.pk910.de/  (mine in-browser, ~5–15 min for the target amount)
+- **Google Cloud Web3 faucet** — https://cloud.google.com/application/web3/faucet/ethereum/sepolia  (0.05 ETH/day, no PoW)
+
+Faucets that require depositing ≥0.001 ETH on mainnet first (Alchemy /
+Infura / QuickNode) are usable once you're funded; they hand out 0.05–0.5
+ETH/day and are the practical top-up path after bootstrap.
+
+**Budget.** The one-shot deploy of the 6-contract bundle
+(`DeployShellnetE2EBridge.s.sol`: `AckiNackiBridge` + 4 SHPLONK verifiers +
+`MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
+2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
+submit (one per bundle stride — 512 blocks in L1 mode, 4096 in L2).
+**Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
+
+The [Health checks](#health-checks-run-any-time) block at the end of this
+runbook includes a wallet-balance line — refill from either faucet above
+when it drops below 0.5 ETH.
+
+---
+
+## Shared test deploy (open — for quick onboarding)
+
+The team maintains a **deliberately public** Sepolia burner + bridge bundle,
+deployed so a third-party developer can `git clone` and run
+`./target/release/relayer daemon-live` end-to-end without deploying anything
+or funding a wallet.
+
+**Where to find it.** Current shared-deploy credentials (burner address,
+burner private key, contract addresses, seed seq_no, genesis anchors) live
+in [`../../../bridge-deployer.txt`](../../../bridge-deployer.txt) under the
+latest `Deploy #N (shared)` section. The [Reference addresses](#reference-addresses-current-deploy)
+table above pins one specific deploy for stability of the runbook; check
+`bridge-deployer.txt` for the current shared bundle if the pinned addresses
+have been superseded.
+
+**When to use it.** One-shot smoke test — confirm the daemon builds, picks
+a startup arm, generates a proof, and submits a real `verifyBlock` tx that
+lands on Sepolia.
+
+**When NOT to use it.**
+
+- Continuous / multi-day operation.
+- Any workflow where two developers run against it concurrently. The
+  burner is a single key; concurrent submits from different machines
+  collide on nonce and one side reverts.
+- Anything you care about not being drained. The burner key is committed
+  to `bridge-deployer.txt` — Sepolia key-scraper bots harvest it within
+  minutes. Treat any balance as ephemeral.
+
+For serious work, use [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users)
+to spin up a private burner + private contract bundle.
+
+### Recommended server-side path (headless Linux)
+
+**Best strategy: shared *contract*, your own *key*.** `verifyBlock`
+(`AckiNackiBridge.sol:650`) is permissionless (`external nonReentrant`, no
+role gate) — anyone with a funded Sepolia burner and a valid proof can
+submit against the shared bridge address. Using your own key avoids the
+two problems of the shared burner: nonce collisions when several devs run
+concurrently, and getting drained by faucet-scraper bots. Reserve the
+in-repo burner for a one-shot "does my clone build and land a tx" smoke
+test.
+
+```bash
+# 1. Clone + build (~15 min)
+git clone https://github.com/gosh-sh/bridge.git && cd bridge
+cd crates/an-bridge-prover
+cargo build --release -p bridge-relayer-daemon --bin relayer
+(cd ../bridge-evm-aggregator && cargo build --release)
+
+# 2. Provision params/ (~30 min one-time). See TECHNICAL_README.md
+#    "KZG SRS provisioning"; or rsync ~17 GB from a teammate.
+
+# 3. Wire env — shared contract, YOUR key (fund via API-key faucet:
+#    Alchemy / Infura / QuickNode all work headlessly). Copy the shared
+#    contract addresses + seed seq_no from bridge-deployer.txt.
+cat > .env.shellnet <<'EOF'
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+BRIDGE_ADDRESS=<AckiNackiBridge from bridge-deployer.txt>
+RELAYER_PRIVATE_KEY=<your funded Sepolia burner>
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BOOTSTRAP_SEQNO=<seed seq_no from bridge-deployer.txt>
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+BRIDGE_PARAMS_DIR=./params
+BRIDGE_STATE_DIR=./state
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+EOF
+
+# 4. Launch under tmux/screen for server persistence
+mkdir -p state logs
+tmux new -d -s bridge \
+  "set -a && source .env.shellnet && set +a && \
+   ./target/release/relayer daemon-live 2>&1 | tee logs/live_$(date +%s).log"
+
+# 5. Confirm the startup arm within 30 s
+tmux capture-pane -t bridge -p | grep -E 'startup:|seed_policy='
+```
+
+**Expected first-launch signature against a shared contract with history:**
+the daemon will pick `Resurrect` (not `Cold`) — see [Case 6a](#case-6a--chain-resurrect-shared-contract--fresh-daemon).
+
+**Two gotchas on a shared contract:**
+
+- `publicnode.com` drops long receipt polls under load — if logs show
+  `WARN … transport failure` on the receipt wait, swap to an
+  Alchemy / Infura / dRPC endpoint (`RPC_URL=` in `.env.shellnet`).
+- Multiple daemons racing the same cursor: only one wins per key-block
+  stride; losers hit `BlockSeqNoNotMonotonic` (Case 5). Fine for
+  testing the revert-recovery path, but coordinate on team chat if
+  you need every submit to land. For fully-isolated work, jump to
+  [Deploy your own bridge bundle](#deploy-your-own-bridge-bundle-external-users).
+
+---
+
+## Deploy your own bridge bundle (external users)
+
+Running this E2E requires an on-chain `AckiNackiBridge` **that you own and
+fund**. `verifyBlock` (`AckiNackiBridge.sol:650`) is a state-mutating
+`external nonReentrant` function; every relayer submit is a signed Sepolia
+transaction. The daemon reads its signer from the `RELAYER_PRIVATE_KEY`
+env var (`bridge-relayer-daemon/src/bin/relayer.rs:86`); there is no
+default. The [shared test deploy](#shared-test-deploy-open--for-quick-onboarding)
+above ships a burner + contract for one-shot onboarding, but it is
+single-key and gets drained by faucet bots — for continuous work, spin
+up your own burner + contract bundle here.
+
+### 1. Create a fresh burner wallet
+
+```bash
+cast wallet new
+#  Address:     0x...
+#  Private key: 0x...
+```
+
+Keep the private key in a local file **outside** the repo. Never reuse a
+wallet that holds real funds — the deploy scripts and daemon both accept
+the key over env.
+
+### 2. Fund it with Sepolia ETH
+
+See [Fund the relayer wallet with Sepolia ETH](#fund-the-relayer-wallet-with-sepolia-eth)
+above.
+
+### 3. Deploy the contract bundle
+
+The canonical deploy script is
+[`contracts/ethereum/script/DeployShellnetE2EBridge.s.sol`](../../../contracts/ethereum/script/DeployShellnetE2EBridge.s.sol).
+Full deployer-side runbook lives at
+[`docs/shellnet_e2e_acceptance_runbook.md`](../../../docs/shellnet_e2e_acceptance_runbook.md);
+the minimum env needed is:
+
+```bash
+cd contracts/ethereum
+cp .env.example .env                              # then edit:
+#   SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+#   PRIVATE_KEY=<your burner from §1>
+#   ETHERSCAN_API_KEY=<optional, for source verification>
+
+# Compute genesis anchors against live shellnet chain head.
+# --at-head picks the newest boundary ≤ head aligned to the target
+# anchor level:
+#   L1: newest W*P = 1024-block key-block boundary  (--level 1, default)
+#   L2: newest W² = 16384-block covering boundary   (--level 2)
+# Outputs:
+#   GENESIS_LAST_SEEN_BLOCK_SEQNO      = that boundary (the seed key block)
+#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH  = anchor at the target level
+#                                        (L1: layer-1 root; L2: L2 fold)
+#   GENESIS_BK_SET_COMMITMENT          = Poseidon commitment of bk_set.shellnet.json
+#                                        (stable while shellnet BK rotation is off)
+cd ../../crates/an-bridge-prover/bridge-prover-lib
+cargo run --release --bin compute_bridge_anchors -- \
+  --at-head \
+  --gql-endpoint https://shellnet.ackinacki.org/graphql
+# For L2: append `--level 2`
+
+cd ../../contracts/ethereum
+set -a && source .env && set +a
+export GENESIS_BK_SET_COMMITMENT=0x...
+export GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+export GENESIS_LAST_SEEN_BLOCK_SEQNO=<from compute_bridge_anchors>
+export WIRE_WITHDRAW_BY_PROOF=true            # required by constructor since 7a645e5
+export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a  # placeholder OK for verifyBlock-only
+
+forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+  --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
+```
+
+The current `AckiNackiBridge.sol` has no Pausable inheritance — user
+entrypoints are live the moment the deploy tx confirms. No post-deploy
+unpause step needed.
+
+The broadcast record ends up in
+`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json` —
+extract the 6 contract addresses from there.
+
+### 4. Wire the daemon to your deploy
+
+Populate `crates/an-bridge-prover/.env.shellnet` (create if missing):
+
+```bash
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+BRIDGE_ADDRESS=<AckiNackiBridge from step 3>
+RELAYER_PRIVATE_KEY=<your burner from step 1>
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BOOTSTRAP_SEQNO=<GENESIS_LAST_SEEN_BLOCK_SEQNO from step 3>
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+BRIDGE_PARAMS_DIR=./params
+BRIDGE_STATE_DIR=./state
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+# For L2 anchoring add: BRIDGE_ANCHOR_LEVEL=2  (see Case 7)
+```
+
+Now jump to [Binary + env prerequisites](#binary--env-prerequisites) and
+[Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
+(L1) or [Case 7](#case-7--l2-anchored-cold-start--anchor-level-2) (L2).
+
+*Maintainer-only note:* Alina keeps her personal burner + per-deploy
+change history + genesis-anchor paper trail in
+`~/HALO2_TVM_EXPERIMENTS/bridge-deployer.txt` — off-tree, not shipped.
+
+---
+
 ## Case 1 — First-time bootstrap from a fresh deploy
 
 **When to use.** Contract just deployed; no `state/prover_state.json` yet.
@@ -172,17 +406,19 @@ contract's `storedLastSeenBlockSeqNo` at construction (visible in
 **Pre-flight (contract sanity):**
 
 ```bash
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
+set -a && source .env.shellnet && set +a
+export BRIDGE=$BRIDGE_ADDRESS
+export RPC=$RPC_URL
 
-cast call $BRIDGE 'paused()(bool)'                          --rpc-url $RPC   # false
-cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'      --rpc-url $RPC   # 4887552
+cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'      --rpc-url $RPC   # == $BRIDGE_BOOTSTRAP_SEQNO
 cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' 1    --rpc-url $RPC   # matches env GENESIS_PREV_MAX_LEVEL_LAYER_HASH
 cast call $BRIDGE 'storedBkSetCommitment()(uint256)'        --rpc-url $RPC   # matches env GENESIS_BK_SET_COMMITMENT
 ```
 
-If any of the four don't match the values in `bridge-deployer.txt`, **stop**
-— the deploy is broken. Do not launch the daemon.
+If any of these don't match your deploy's genesis values (from the
+`compute_bridge_anchors` output you pinned at deploy time, or the
+`bridge-deployer.txt` section for the shared deploy), **stop** — the
+deploy is broken. Do not launch the daemon.
 
 **Cold-start launch:**
 
@@ -206,12 +442,70 @@ INFO bridge_prover_lib::keys::fallback:    loaded fallback VK from cache
 INFO bridge_prover_lib::keys::layer:       loaded layer VK from cache
 INFO bridge_prover_lib::keys::event:       loaded event VK from cache
 INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shellnet.json matches prover_bk_set.commitment
-INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(4887552)      ← THIS is the cold-start signature
+INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)   ← cold-start signature
 ```
 
 `seed_policy=Explicit(N)` means the daemon is seeding from
 `BRIDGE_BOOTSTRAP_SEQNO`. `seed_policy=Resume` would mean it found existing
 `state/prover_state.json` and is resuming — wrong for cold start.
+
+**How the daemon picks its startup path.** On startup the daemon reads the
+*full* on-chain state (four scalars + all 10 `_layerWindows` via
+`getLayerWindow(uint8)`) and routes through one of four arms via
+`startup_decide::decide()` (`bridge-relayer-daemon/src/startup_decide.rs`).
+Inputs: local `state/prover_state.json` + on-chain
+`EthBridgeContractState` + `BRIDGE_BOOTSTRAP_SEQNO` +
+`BRIDGE_ANCHOR_LEVEL`. `seed_policy` (`Resume` / `Explicit(N)` / `Auto`)
+is derived — not directly chosen — as a consequence of the arm picked.
+
+| local state file                       | on-chain contract                                | arm            | `seed_policy` |
+|---|---|---|---|
+| absent / `initialized=false`           | genesis (`last_seen == 0`)                       | **Cold**       | `Explicit(N)` if `$BRIDGE_BOOTSTRAP_SEQNO` set else `Auto` |
+| absent / `initialized=false`           | advanced (`last_seen > 0`)                       | **Resurrect**  | `Resume` (state rebuilt from chain first) |
+| present, cursor / commitment / windows byte-match chain | same                                    | **WarmResume** | `Resume` |
+| present, `local_last_seen < chain_last_seen` (co-tester advanced it) | advanced                    | **Resurrect**  | `Resume` (state overwritten from chain) |
+| present, `local_last_seen > chain_last_seen`                        | genesis or older            | **Stop**       | (daemon bails) |
+| present, cursors match but bk-commit / windows diverge              | same cursor                 | **Stop**       | (daemon bails) |
+| window-size mismatch (contract W ≠ daemon `HISTORY_WINDOW_SIZE`)    | (any)                       | **Stop**       | (daemon bails) |
+| anchor-level mismatch (`state.anchor_level != BRIDGE_ANCHOR_LEVEL`) | (any)                       | **Stop**       | (daemon bails; see Case 7) |
+| L1 daemon against contract with `_layerWindows[L>=2].data_len > 0`   | L≥2-advanced               | **Stop**       | (daemon bails; contract is running higher-stride) |
+
+`state.initialized` lives in `state/prover_state.json` and is flipped to
+`true` by `persist_driver` (`live_source.rs:141-157`) after the first
+successful on-chain ACK, **or** by `Resurrect` when it rebuilds the mirror
+from `getLayerWindow` and saves it before driver construction.
+`Explicit(N)` also requires `N > 0 && N % (W*P) == 0` — bad values abort
+in `LiveProverDriver::new`.
+
+**"Byte-match" is not literal on layer windows.** `startup_decide::decide()`
+normalizes endianness before comparing:
+
+- `bk_set_commitment` — chain returns `uint256` (BE); local is
+  `Fr::to_repr()` (LE). `to_lib_full_state` converts chain to LE.
+- `_layerWindows[i].data[j]` — each slot is a BE `uint256`; local is LE.
+  `to_lib_layer_window` reverses per slot.
+- Cold-start genesis prepend — `BootstrapSeed::apply()` pushes the seed's
+  per-layer `history_proofs` into `layer_windows[i].data[0]` for every
+  layer in the seed's max_level (see `bootstrap.rs:17-18`); chain only
+  materializes layer 1's anchor as `storedPrevMaxLevelLayerHash` and
+  leaves `_layerWindows[k>=2]` empty until a verifyBlock promotes them.
+  `windows_match` therefore walks each ring oldest→newest and accepts a
+  `local.len == chain.len + 1` offset: layer 1's genesis slot is
+  byte-verified against `storedPrevMaxLevelLayerHash` (BE→LE); layers
+  2..10 accept the +1 offset without per-slot verification, and the
+  runtime ack-time top-hash check (`history_consistency.rs:38-47`) is
+  the authoritative gate. `last_height` is not compared standalone —
+  the chronological tuple compare covers heights for populated slots
+  (chain's empty-layer `last_height=0` would otherwise false-reject a
+  local layer holding only a genesis prepend).
+
+For cold start (this Case), the log MUST show
+`startup: Cold — contract at genesis, bootstrapping` followed by
+`LiveProverDriver seed policy seed_policy=Explicit(<BOOTSTRAP_SEQNO>)`.
+If instead you see `startup: Resurrect …` or `startup: WarmResume …`,
+the contract already has history — that's expected in the shared-test
+multi-tester scenario (see [Case 6a](#case-6a--chain-resurrect-shared-contract--fresh-daemon))
+and no operator intervention is needed.
 
 **First cycle takes ~15 min:** GQL fetch of seed block → real-chain-builder
 Merkle root → Circuit 2 proof (~2 min) → aggregation (~7 min at `layer PK`
@@ -243,7 +537,7 @@ tail -f crates/an-bridge-prover/logs/live_*.log
 watch -n 30 'ls -lt crates/an-bridge-prover/submissions/ | head -6'
 
 # On-chain progress
-watch -n 60 'cast call 0x36272c871d9389E77d0b95F931BA0B0f74d43818 storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url https://ethereum-sepolia-rpc.publicnode.com'
+watch -n 60 "cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL"
 ```
 
 **Progress signature (per successful cycle):**
@@ -284,7 +578,8 @@ nohup ./target/release/relayer daemon-live > logs/live_restart_${TS}.log 2>&1 &
 
 **Verify Resume:** log must contain `LiveProverDriver seed policy
 seed_policy=Resume`, NOT `Explicit(...)`. If you see `Explicit(...)` after a
-restart, `state/prover_state.json` is missing — go to [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain).
+restart, `state/prover_state.json` is missing — go to [Case 6a](#case-6a--chain-resurrect-shared-contract--fresh-daemon)
+(daemon will auto-resurrect from chain; no operator action needed).
 
 ---
 
@@ -311,8 +606,10 @@ transport failures should retry with backoff, not abort.
 ### 4a. Verify no txs actually landed (nonce check)
 
 ```bash
-cast nonce 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC
-cast nonce 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC --block pending
+set -a && source .env.shellnet && set +a
+RELAYER_ADDR=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+cast nonce $RELAYER_ADDR --rpc-url $RPC_URL
+cast nonce $RELAYER_ADDR --rpc-url $RPC_URL --block pending
 ```
 
 If `latest == pending`, no txs in mempool. If `pending > latest`, wait 1-2 min
@@ -413,10 +710,80 @@ Fix the root cause first, then follow [Case 4c → 4d](#4c-reset-the-attempts-co
 
 ---
 
-## Case 6 — State loss / re-bootstrap from mid-chain
+## Case 6a — Chain-resurrect (shared contract + fresh daemon)
+
+**When it fires.** Any startup where the on-chain contract has history
+(`storedLastSeenBlockSeqNo > 0`) but the local `state/prover_state.json`
+is either absent, `initialized=false`, or has `stored_last_seen_block_seq_no`
+strictly less than chain. This is the **default** operating case for
+multi-tester development against a shared bridge, and for fresh checkouts
+on a new machine that need to catch up with an already-advanced deploy.
+
+**No manual bootstrap needed** — the daemon does it automatically. On
+startup:
+
+1. Reads the full on-chain state via `getLayerWindow(1..=10)` +
+   `storedLastSeenBlockSeqNo` + `storedBkSetCommitment` +
+   `storedLastBkSetUpdateSeqNo`.
+2. Compares against local state via `startup_decide::decide()`.
+3. On the `Resurrect` arm: rebuilds `BridgeState` byte-for-byte from
+   the contract snapshot via `BridgeState::from_contract`, atomically
+   persists it to `state/prover_state.json`, then drives
+   `LiveProverDriver` with `SeedPolicy::Resume`. `BRIDGE_BOOTSTRAP_SEQNO`
+   is **ignored** — the seed comes from chain.
+4. Continues to Case 2 (steady state) on the next key block after chain
+   head.
+
+**What the operator does.**
+
+```bash
+cd crates/an-bridge-prover
+set -a && source .env.shellnet && set +a       # RPC, BRIDGE, private key
+TS=$(date +%Y%m%d_%H%M%S)
+nohup ./target/release/relayer daemon-live > logs/live_${TS}.log 2>&1 &
+```
+
+That's it. No env edits, no `mv state state.stale_*`, no
+`compute_bridge_anchors` re-run. `BRIDGE_BOOTSTRAP_SEQNO` may be left
+stale — it is only consulted on the `Cold` arm (contract at genesis).
+
+**Expected log signature:**
+
+```
+INFO relayer: startup: read on-chain state for routing chain_last_seen=... local_last_seen=0 local_initialized=false
+INFO relayer: startup: Resurrect — rebuilding BridgeState from on-chain snapshot chain_last_seen=...
+INFO relayer: LiveProverDriver seed policy seed_policy=Resume
+```
+
+**When the daemon refuses to auto-resurrect (`Stop` arm).** `decide()`
+bails with an explicit reason for any of these:
+
+- `local_last_seen > chain_last_seen` — you have local state ahead of the
+  contract; investigate (redeploy? state file from wrong environment?)
+  before re-launching.
+- Cursors match but `bk_set_commitment` or `layer_windows` diverge from
+  chain — state file is from a different contract or a diverged fork.
+- `HISTORY_WINDOW_SIZE` mismatch between daemon binary and contract W —
+  rebuild against the deployed W.
+- `state.anchor_level != BRIDGE_ANCHOR_LEVEL` — state file was written
+  under a different anchor level; either restore the matching env or go
+  to [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain).
+- L1 daemon against contract with `_layerWindows[L>=2].data_len > 0` —
+  contract is running higher-stride; either switch to `BRIDGE_ANCHOR_LEVEL=L`
+  or point at a different bridge.
+
+If a `Stop` bail was legitimate (e.g. state file really is unrecoverable),
+proceed to [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain)
+for the manual destructive path.
+
+---
+
+## Case 6b — State loss / re-bootstrap from mid-chain
 
 **When to use.** `state/prover_state.json` deleted / corrupted, OR contract
-redeployed at a different `storedLastSeenBlockSeqNo`.
+redeployed at a different `storedLastSeenBlockSeqNo`, AND [Case 6a](#case-6a--chain-resurrect-shared-contract--fresh-daemon)
+auto-resurrect refused (`Stop` arm) with a reason you understand and
+accept.
 
 **This is destructive.** Only proceed if you've confirmed the contract is at
 a known seed and no in-flight state is worth preserving.
@@ -586,15 +953,21 @@ env-file and state-dir paths.
 **On-chain state snapshot:**
 
 ```bash
-export BRIDGE=0x36272c871d9389E77d0b95F931BA0B0f74d43818
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
-echo "paused:            $(cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC)"
+set -a && source .env.shellnet && set +a
+export BRIDGE=$BRIDGE_ADDRESS
+export RPC=$RPC_URL
 echo "last_seen:         $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
-echo "num_layers:        $(cast call $BRIDGE 'storedNumLayers()(uint8)' --rpc-url $RPC --json | jq -r '.[0]')"
+# num_layers derived from getLatestPerLayer() — highest index with a nonzero hash.
+# (Since storage-v2 / commit f8c5ba0, storedNumLayers()/storedLayerHashes(uint256)/getStoredLayerHashes() are gone.)
+echo "latest_per_layer:  $(cast call $BRIDGE 'getLatestPerLayer()(uint256[10])' --rpc-url $RPC)"
 echo "bk_last_update:    $(cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
 echo "bk_commitment:     $(cast call $BRIDGE 'storedBkSetCommitment()(uint256)' --rpc-url $RPC)"
 echo "expectedPrev(1):   $(cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' 1 --rpc-url $RPC)"
-echo "storedPrev(legacy):$(cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(uint256)' --rpc-url $RPC)"
+echo "storedPrev(genesis): $(cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(uint256)' --rpc-url $RPC)"
+# storedPrevMaxLevelLayerHash is `immutable` (constructor-set) — it holds
+# the genesis seed forever, not the last-block max-level. The dynamic
+# per-block anchor lives in _layerWindows and is folded via
+# expectedPrevAnchor(numLayers) at submit time.
 ```
 
 **Daemon liveness:**
@@ -621,9 +994,12 @@ ls -lt crates/an-bridge-prover/submissions/verifyBlock_seq*.json | head -5
 **Wallet balance:**
 
 ```bash
-cast balance 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC --ether
+RELAYER_ADDR=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+cast balance $RELAYER_ADDR --rpc-url $RPC --ether
 # Each verifyBlock costs ~0.001-0.003 ETH depending on Sepolia gas price.
-# Refill from faucets listed in bridge-deployer.txt if <0.5 ETH.
+# Refill from the faucets listed under
+# [Fund the relayer wallet with Sepolia ETH](#fund-the-relayer-wallet-with-sepolia-eth)
+# if <0.5 ETH.
 ```
 
 ---
@@ -664,7 +1040,7 @@ crates/an-bridge-prover/
 - `logs/` — safe to prune, but keep the most recent for post-mortem.
 - `state/`, `relayer-state.json` — **NEVER** delete a running daemon's
   active state. To reset, archive to `state.stale_<ts>/` +
-  `relayer-state.json.stale_<ts>` first (see [Case 6](#case-6--state-loss--re-bootstrap-from-mid-chain)).
+  `relayer-state.json.stale_<ts>` first (see [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain)).
 - `params/` — never delete; keygen takes ~7 min per circuit.
 
 ---

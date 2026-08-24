@@ -50,7 +50,11 @@ use alloy::{
     providers::Provider,
 };
 use async_trait::async_trait;
-use bridge_prover_lib::bridge_state::HistoryWindow;
+// `ContractFullState` and `HistoryWindow` are the alloy-neutral shape shared
+// with `bridge_prover_lib::bridge_state::BridgeState::from_contract` — the
+// relayer's `read_full_state` populates them (with BE→LE reversal on all
+// `uint256` scalars) so consumers see a single unified byte order.
+use bridge_prover_lib::bridge_state::{ContractFullState, HistoryWindow};
 
 use crate::{
     error::RelayerError,
@@ -91,45 +95,6 @@ pub const HISTORY_PROOF_WINDOW: usize = 128;
 // `MAX_LAYER_HASHES` (layer count = 10) is defined in `crate::types` and
 // used here via the `use` at the top of the file — kept there as the
 // single source of truth.
-
-/// Full contract state readable by an off-chain resurrect: the four scalar
-/// mirrors plus all 10 layer windows. Sufficient to reconstruct
-/// `BridgeState` byte-for-byte via `BridgeState::from_contract`.
-///
-/// The per-layer window shape is
-/// [`bridge_prover_lib::bridge_state::HistoryWindow`] — the daemon's alloy
-/// adapter widens the on-chain `uint16` `dataLen`/`writeCursor` to `usize`
-/// when populating this snapshot (see `read_full_state`).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractFullState {
-    pub last_seen_block_seq_no: u64,
-    pub bk_set_commitment: U256,
-    pub last_bk_set_update_seq_no: u64,
-    pub prev_max_level_layer_hash: U256,
-    /// Index `L-1` corresponds to layer `L` (1..=10).
-    pub layer_windows: [HistoryWindow; MAX_LAYER_HASHES],
-}
-
-impl ContractFullState {
-    /// Highest layer `L >= 2` whose on-chain window has any populated slots,
-    /// or `None` when no layer above 1 has ever been anchored. Mirrors the
-    /// helper on `bridge_prover_lib::bridge_state::ContractFullState` — the
-    /// two types coexist because this crate uses alloy's `U256` on the wire.
-    ///
-    /// Used by the relayer Resurrect startup path to refuse `cfg=L1` against
-    /// a contract that has already anchored at L>=2. The `last_seen % stride`
-    /// alignment check cannot catch this case because every W² boundary is
-    /// simultaneously W·P-aligned (16384 % 1024 == 0). See PR #35 follow-up
-    /// review, should-fix #1.
-    pub fn highest_populated_layer(&self) -> Option<u8> {
-        for i in (1..MAX_LAYER_HASHES).rev() {
-            if self.layer_windows[i].data_len > 0 {
-                return Some((i + 1) as u8);
-            }
-        }
-        None
-    }
-}
 
 /// Outcome of `submit_block`. The relayer interprets this to decide
 /// whether to advance state, retry, or skip.
@@ -793,6 +758,13 @@ where
         // Read all 10 layer windows.
         // `HistoryWindow` on the sol! side has fixed-size arrays that
         // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
+        //
+        // Endianness: on-chain `uint256` slots come out BE via
+        // `U256::to_be_bytes`; `BridgeState.layer_windows` stores LE
+        // (`Fr::to_repr()`). We reverse each slot here so the returned
+        // `ContractFullState` is byte-for-byte comparable to a local
+        // `BridgeState` snapshot. Same convention applies to the two scalar
+        // `uint256` fields (`bk_set_commitment`, `prev_max_level_layer_hash`).
         let mut windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
         for layer in 1..=MAX_LAYER_HASHES as u8 {
             let w = self
@@ -801,7 +773,15 @@ where
                 .call()
                 .await
                 .map_err(map_contract_err)?;
-            let data: Vec<[u8; 32]> = w.data.iter().map(|u| u.to_be_bytes()).collect();
+            let data: Vec<[u8; 32]> = w
+                .data
+                .iter()
+                .map(|u| {
+                    let mut le = u.to_be_bytes::<32>();
+                    le.reverse();
+                    le
+                })
+                .collect();
             let heights: Vec<u64> = w.heights.to_vec();
             // Widen on-chain `uint16` cursors to `usize` for the shared
             // `HistoryWindow` shape. `from_contract` validates bounds.
@@ -819,9 +799,9 @@ where
 
         Ok(ContractFullState {
             last_seen_block_seq_no: last,
-            bk_set_commitment: bk,
+            bk_set_commitment: bk.to_le_bytes::<32>(),
             last_bk_set_update_seq_no: last_bk,
-            prev_max_level_layer_hash: anchor,
+            prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
     }

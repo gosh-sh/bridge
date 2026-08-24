@@ -18,12 +18,10 @@
 //! * Unit-testable without an alloy RPC provider: consumes plain
 //!   [`ContractFullState`] shaped by the daemon's `read_full_state`.
 
-use bridge_prover_lib::bridge_state::{
-    BridgeState, ContractFullState as LibContractFullState, HistoryWindow, MAX_LAYERS,
-};
+use bridge_prover_lib::bridge_state::{BridgeState, ContractFullState, MAX_LAYERS};
+#[cfg(test)]
+use bridge_prover_lib::bridge_state::HistoryWindow;
 use bridge_prover_lib::live_driver::SeedPolicy;
-
-use crate::bridge::ContractFullState;
 
 /// The four legs of startup routing.
 #[derive(Debug)]
@@ -76,53 +74,11 @@ pub struct DecideInputs<'a> {
     pub anchor_level: u8,
 }
 
-/// Convert the daemon-side `ContractFullState` (built from alloy bindings,
-/// so slots are BE) into the alloy-neutral `bridge_prover_lib` shape.
-///
-/// Endianness: chain-side layer window slots are stored as `[u8;32]`
-/// big-endian (produced in `bridge.rs::read_full_state` via
-/// `U256::to_be_bytes`), but `BridgeState.layer_windows` stores LE
-/// (`Fr::to_repr()` output). We reverse each slot per the convention
-/// documented in `history_consistency.rs:59` and memory
-/// `bridge_genesis_anchor_endianness.md`. Cursors/heights need no
-/// conversion — the `HistoryWindow` shape is already shared.
-fn to_lib_full_state(cfs: &ContractFullState) -> LibContractFullState {
-    let layer_windows: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|i| {
-        let w = &cfs.layer_windows[i];
-        HistoryWindow {
-            data: w
-                .data
-                .iter()
-                .map(|slot| {
-                    let mut le = *slot;
-                    le.reverse();
-                    le
-                })
-                .collect(),
-            heights: w.heights.clone(),
-            data_len: w.data_len,
-            write_cursor: w.write_cursor,
-            last_height: w.last_height,
-        }
-    });
-    LibContractFullState {
-        last_seen_block_seq_no: cfs.last_seen_block_seq_no,
-        // See `history_consistency.rs:59` — BridgeState stores
-        // bk_set_commitment as LE (`Fr::to_repr()`); chain `uint256` is
-        // BE-hex of the same scalar. Match that convention here so
-        // `decide()` can compare byte-for-byte against
-        // `local.stored_bk_set_commitment`.
-        bk_set_commitment: cfs.bk_set_commitment.to_le_bytes::<32>(),
-        last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
-        layer_windows,
-    }
-}
-
 /// Chronological equivalence check for local vs chain layer windows.
 ///
-/// **Endianness.** Local `BridgeState` slots are LE (`Fr::to_repr()`); chain
-/// slots arrive from `bridge.rs::read_full_state` as BE. Chain slots are
-/// byte-reversed before comparing.
+/// **Endianness.** Both sides are LE (`Fr::to_repr()`). `read_full_state`
+/// reverses each `uint256` slot at construction time, so this comparator
+/// does not need to reverse anything.
 ///
 /// **Layer-1 genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
 /// documented at `bootstrap.rs:17-18` as a Phase 1 fix ensuring verifier
@@ -171,14 +127,12 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
                 .collect()
         };
         let chain_chrono: Vec<([u8; 32], u64)> = {
-            let len = cw.data_len as usize;
-            let start = if len < w { 0 } else { cw.write_cursor as usize };
+            let len = cw.data_len;
+            let start = if len < w { 0 } else { cw.write_cursor };
             (0..len)
                 .map(|k| {
                     let p = (start + k) % w;
-                    let mut le = cw.data[p];
-                    le.reverse();
-                    (le, cw.heights[p])
+                    (cw.data[p], cw.heights[p])
                 })
                 .collect()
         };
@@ -208,11 +162,8 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
         // deeper layers — startup routing only ensures we do not
         // silently resurrect on a mismatched cursor.
         if local_chrono.len() == chain_chrono.len() + 1 {
-            if i == 0 {
-                let anchor_le = chain.prev_max_level_layer_hash.to_le_bytes::<32>();
-                if local_chrono[0].0 != anchor_le {
-                    return false;
-                }
+            if i == 0 && local_chrono[0].0 != chain.prev_max_level_layer_hash {
+                return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
                 return false;
@@ -311,7 +262,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         } else {
             // Chain-resurrect: rebuild BridgeState from the on-chain
             // snapshot. `from_contract` performs its own shape checks.
-            match BridgeState::from_contract(to_lib_full_state(chain), window_size, anchor_level) {
+            match BridgeState::from_contract(chain.clone(), window_size, anchor_level) {
                 Ok(rebuilt) => StartupDecision::Resurrect {
                     fresh_state: Box::new(rebuilt),
                 },
@@ -354,7 +305,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     if local_seq < chain_seq {
         // Someone else advanced the contract while our local state was
         // idle. Resurrect from the chain snapshot.
-        return match BridgeState::from_contract(to_lib_full_state(chain), window_size, anchor_level) {
+        return match BridgeState::from_contract(chain.clone(), window_size, anchor_level) {
             Ok(rebuilt) => StartupDecision::Resurrect {
                 fresh_state: Box::new(rebuilt),
             },
@@ -369,10 +320,10 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // inconsistent (e.g. same last_seen but different bk commitment)
     // and we must not silently proceed.
     let local_commit = local.stored_bk_set_commitment;
-    // LE matches `BridgeState.stored_bk_set_commitment` (Fr::to_repr).
-    // See `history_consistency.rs:59` for the canonical convention and
-    // memory `bridge_genesis_anchor_endianness.md` for the rationale.
-    let chain_commit = chain.bk_set_commitment.to_le_bytes::<32>();
+    // Both sides LE (`Fr::to_repr()`) — `read_full_state` reverses on read
+    // per the convention in `history_consistency.rs:59` and memory
+    // `bridge_genesis_anchor_endianness.md`.
+    let chain_commit = chain.bk_set_commitment;
     if local_commit != chain_commit {
         return StartupDecision::Stop {
             reason: format!(
@@ -409,7 +360,6 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::U256;
 
     const W: usize = 4;
 
@@ -428,9 +378,9 @@ mod tests {
             std::array::from_fn(|_| empty_lw());
         ContractFullState {
             last_seen_block_seq_no: 0,
-            bk_set_commitment: U256::ZERO,
+            bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: U256::ZERO,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -442,12 +392,11 @@ mod tests {
     fn snapshot_as_chain(s: &BridgeState) -> ContractFullState {
         let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|i| s.layer_windows[i].clone());
-        let commit = U256::from_be_bytes::<32>(s.stored_bk_set_commitment);
         ContractFullState {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
-            bk_set_commitment: commit,
+            bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
-            prev_max_level_layer_hash: U256::ZERO,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -518,7 +467,7 @@ mod tests {
         let seed_seqno: u64 = 5_495_808;
         let mut chain = empty_chain();
         chain.last_seen_block_seq_no = seed_seqno;
-        chain.bk_set_commitment = U256::from_be_bytes::<32>([7u8; 32]);
+        chain.bk_set_commitment = [7u8; 32];
         chain.last_bk_set_update_seq_no = 0;
         // layer_windows already all empty (data_len == 0) via empty_chain().
         let local = BridgeState::new(W);
@@ -611,7 +560,7 @@ mod tests {
         let src = advanced_state(10);
         let mut chain = snapshot_as_chain(&src);
         // Perturb only the bk-set commitment.
-        chain.bk_set_commitment = U256::from_be_bytes::<32>([0xAA; 32]);
+        chain.bk_set_commitment = [0xAA; 32];
         match decide(DecideInputs {
             local: &src,
             chain: &chain,
@@ -662,9 +611,9 @@ mod tests {
             std::array::from_fn(|_| wide_lw());
         let chain = ContractFullState {
             last_seen_block_seq_no: 0,
-            bk_set_commitment: U256::ZERO,
+            bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: U256::ZERO,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         };
         match decide(DecideInputs {

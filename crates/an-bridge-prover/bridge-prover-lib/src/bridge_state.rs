@@ -49,7 +49,6 @@ pub struct BundleResult {
 }
 
 /// Per-layer rolling window. `data.len() == heights.len() == window_size`.
-///
 /// Doubles as the wire-input shape consumed by [`BridgeState::from_contract`]
 /// — the daemon's alloy adapter reads `getLayerWindow(uint8)` and widens
 /// the on-chain `uint16` cursor/data-len to this `usize` shape (see
@@ -69,7 +68,7 @@ pub struct HistoryWindow {
 }
 
 impl HistoryWindow {
-    /// Create an empty window of the requested width.
+  
     pub fn new(window_size: usize) -> Self {
         Self {
             data: vec![[0u8; 32]; window_size],
@@ -93,7 +92,6 @@ impl HistoryWindow {
         self.last_height = height;
     }
 
-    /// Width `W` of this window.
     pub fn window_size(&self) -> usize {
         self.data.len()
     }
@@ -178,18 +176,29 @@ pub struct BridgeState {
     pub anchor_level: u8,
 }
 
-/// Full contract state readable by chain-resurrect: the four scalars
-/// plus all `MAX_LAYERS` windows. Consumed by
-/// [`BridgeState::from_contract`].
+/// Full contract state readable by chain-resurrect: on-chain scalars plus
+/// all `MAX_LAYERS` windows. Consumed directly by
+/// [`BridgeState::from_contract`] (which does not read
+/// `prev_max_level_layer_hash`) and by the relayer's startup-decide
+/// routing table (which does).
 ///
 /// The per-layer window shape is [`HistoryWindow`] — the same type used by
 /// [`BridgeState`] itself. The daemon's alloy adapter widens the on-chain
-/// `uint16` cursor/data-len to `usize` when populating this snapshot.
+/// `uint16` cursor/data-len to `usize` and converts `uint256` scalars to
+/// LE `[u8; 32]` (`Fr::to_repr()` convention) when populating this
+/// snapshot; consumers therefore see one unified byte order.
 #[derive(Clone, Debug)]
 pub struct ContractFullState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: [u8; 32],
     pub last_bk_set_update_seq_no: u64,
+    /// Immutable genesis anchor for layer 1
+    /// (`storedPrevMaxLevelLayerHash`, LE bytes of the on-chain `uint256`).
+    /// Populated by the relayer's `read_full_state`; unused by
+    /// `BridgeState::from_contract` but consulted by `startup_decide` when
+    /// verifying that a local state that carries one extra genesis-prepend
+    /// slot matches the chain's genesis anchor.
+    pub prev_max_level_layer_hash: [u8; 32],
     /// Index `L-1` corresponds to layer `L` (1..=MAX_LAYERS).
     pub layer_windows: [HistoryWindow; MAX_LAYERS],
 }
@@ -239,21 +248,7 @@ impl BridgeState {
     /// Apply a verified bk-set transition to the contract-mirror state.
     ///
     /// This is the off-chain analogue of the  Solidity
-    /// `applyBkSetUpdate` entry point: same inputs, same checks. It is
-    /// commitment-only by design — the full pubkey table is the prover's
-    /// private working set (see `ProverBkSet`) and never touches this state
-    /// because the ETH contract will not store it either.
-    ///
-    /// Preconditions (any failure → unchanged state, error returned):
-    /// * `old_commitment == self.stored_bk_set_commitment` — the update's
-    ///   declared OLD commitment must match what the bridge has stored.
-    /// * `update_block_seq_no > self.stored_last_bk_set_update_seq_no` —
-    ///   monotonicity, prevents replays / out-of-order applies.
-    ///
-    /// On success: rotates the stored commitment to `new_commitment` and
-    /// advances the bk-update seq_no cursor. Does NOT touch
-    /// `stored_last_seen_block_seq_no` (that gates W·P thinning and is the
-    /// layer-bundle cursor — independent from the bk-update cursor).
+    /// `applyBkSetUpdate` entry point: same inputs, same checks. 
     pub fn apply_bk_set_update(
         &mut self,
         old_commitment: [u8; 32],
@@ -272,6 +267,7 @@ impl BridgeState {
             update_block_seq_no,
             self.stored_last_bk_set_update_seq_no,
         );
+        // Monotonicity, prevents replays / out-of-order applies.
         self.stored_bk_set_commitment = new_commitment;
         self.stored_last_bk_set_update_seq_no = update_block_seq_no;
         Ok(())
@@ -306,14 +302,9 @@ impl BridgeState {
     }
 
     /// Genesis-only stamp of the initial BK-set commitment.
-    ///
     /// Off-chain analogue of the Solidity constructor line
-    /// `storedBkSetCommitment = _vb.genesisBkSetCommitment;`
-    /// (AckiNackiBridge.sol). Runs exactly once, before any bundle is
-    /// applied; erroring if state is already initialized guarantees the
-    /// commitment field has exactly two writers over the lifetime of a
-    /// state file: this method (genesis) and `apply_bk_set_update`
-    /// (rotations). 
+    /// Runs exactly once, before any bundle is
+    /// applied; 
     pub fn initialize_bk_set_commitment(
         &mut self,
         commitment: [u8; 32],
@@ -327,26 +318,14 @@ impl BridgeState {
     }
 
     /// Apply the per-layer hashes extracted from a single key block.
-    ///
     /// * `per_layer` — pairs of `(root_hash, layer_number)` from the block's
     ///   `history_proofs` map. Order does not matter; each layer is appended
     ///   into its own window.
     /// * `block_height` / `block_seq_no` — coordinates of the key block that
     ///   produced these hashes.
-    ///
-    /// All layers receive the same `block_height` in their `heights[]` slot.
-    ///
     /// Preconditions (any failure → unchanged state, error returned):
     /// * `block_seq_no > self.stored_last_seen_block_seq_no` — monotonicity,
-    ///   mirrors Solidity `verifyBlock` (AckiNackiBridge.sol:677-679). On a
-    ///   freshly-constructed state (`stored_last_seen = 0`) any positive
-    ///   `block_seq_no` passes, so bootstrap is unaffected.
-    ///
-    /// Does NOT touch `stored_bk_set_commitment` — mirrors Solidity's
-    /// `verifyBlock`, which reads the commitment as a precondition but
-    /// never writes it. The commitment is rotated only by
-    /// `apply_bk_set_update` (and stamped once at genesis by
-    /// `initialize_bk_set_commitment`).
+    ///   mirrors Solidity `verifyBlock` (AckiNackiBridge.sol:677-679). 
     pub fn append_bundle(
         &mut self,
         per_layer: &[([u8; 32], u8)],
@@ -371,8 +350,7 @@ impl BridgeState {
         Ok(())
     }
 
-    /// Number of layers that currently have at least one entry. Used by
-    /// Circuit 2.
+    /// Number of layers that currently have at least one entry. Used by Circuit 2.
     pub fn num_active_layers(&self) -> usize {
         self.layer_windows.iter().filter(|w| w.data_len > 0).count()
     }
@@ -382,7 +360,6 @@ impl BridgeState {
     pub fn flatten_layer_hashes(&self) -> Vec<[u8; 32]> {
         let mut out = Vec::with_capacity(MAX_LAYERS * self.window_size);
         for win in &self.layer_windows {
-            // Walk in chronological order, then pad to W with zeros.
             let mut count = 0;
             for (hash, _h) in win.iter_chronological() {
                 out.push(hash);
@@ -567,6 +544,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows: std::array::from_fn(|_| empty_win.clone()),
         }
     }
@@ -793,6 +771,7 @@ mod tests {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
             bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -861,6 +840,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let s = BridgeState::from_contract(cfs, 4, 1).unwrap();
@@ -886,6 +866,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let err = BridgeState::from_contract(cfs, 8, 1).unwrap_err();
@@ -917,6 +898,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let err = BridgeState::from_contract(cfs, 4, 1).unwrap_err();

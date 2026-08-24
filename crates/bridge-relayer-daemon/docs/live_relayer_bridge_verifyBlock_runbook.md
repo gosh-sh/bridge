@@ -22,9 +22,11 @@ Recall that **Shellnet was restarted at this commit cf664666badf2f12bf0ecc20846a
 
 Live BK set (5 signers, fixed from genesis) is committed at
 [`crates/an-bridge-prover/bk_set.shellnet.json`](../../an-bridge-prover/bk_set.shellnet.json).
-Source of truth is `keys_config.json.bk_nodes.*.bls_pubkey` in the on-disk
+Source of truth is `bk_nodes.*.bls_pubkey` in the on-disk shellnet
+`SHHH_config/keys_config.json` (not `zs_bk_set` — that snapshot is stale).
 
-- Poseidon commitment (matches `GENESIS_BK_SET_COMMITMENT` in `contracts/ethereum/.env.shellnet.l2`):
+- Poseidon commitment (matches `GENESIS_BK_SET_COMMITMENT` in both
+  `contracts/ethereum/.env.shellnet` and `contracts/ethereum/.env.shellnet.l2`):
   `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c`
 - SHA-256 of `bk_set.shellnet.json` (tamper-detection):
   `c77e3d6de5e6ea8ee96c6902f1b6ecb011bba2d631e76fa546e44ee67173898f`
@@ -96,7 +98,7 @@ Operational impact on `withdrawByProof` is detailed in
 - [Case 7 — L2-anchored cold-start (`--anchor-level 2`)](#case-7--l2-anchored-cold-start--anchor-level-2)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
-- [Change log / known incidents](#change-log--known-incidents)
+- [Onboarding wrap-up — new operator on a fresh L2 server](#onboarding-wrap-up--new-operator-on-a-fresh-l2-server)
 
 ---
 
@@ -299,7 +301,7 @@ Infura / QuickNode) are usable once you're funded; they hand out
 (`DeployShellnetE2EBridge.s.sol`: `AckiNackiBridge` + 4 SHPLONK verifiers +
 `MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
 2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
-submit (one per bundle stride — 512 blocks in L1 mode, 4096 in L2).
+submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
 **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
 The [Health checks](#health-checks-run-any-time) block includes a
 wallet-balance line — refill from either faucet when it drops below
@@ -784,7 +786,7 @@ not a transport blip:
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [Change log — 2026-08-03 BN254 Fr fix](#change-log--known-incidents). |
+| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [`changelog.md` — 2026-08-03 BN254 Fr canonicalization client fix](changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). |
 | `0x...PrevAnchorMismatch` | `PrevAnchorMismatch(supplied, stored)` | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. Either the daemon crashed mid-tx (extremely rare) or the chain advanced without us. |
 | `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(...)` | On-chain BK-set was rotated by an `applyBkSetUpdate` we don't know about, OR `bk_set.shellnet.json` drifted from live shellnet BLS keys. |
 | `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | We're trying to submit a `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
@@ -1023,7 +1025,7 @@ directory). The sibling `crates/bridge-relayer-daemon/` directory is
 
 ```
 crates/an-bridge-prover/
-├── shellnet.common                  ← 7 shared env lines (RPC/key/GQL/params/…), gitignored
+├── shellnet.common                  ← 7 shared env lines (RPC/key/GQL/params/…), tracked in git
 ├── L1_config/                       ← L1-anchor mode config dir (BRIDGE_CONFIG_DIR=./L1_config)
 │   ├── env                          ← sources ../shellnet.common + 4 L1 overrides
 │   ├── state/
@@ -1073,4 +1075,46 @@ overrides if set explicitly.
   run repopulates its own subdir.
 - `params/` — never delete; keygen takes ~7 min per circuit.
 
+---
 
+## Onboarding wrap-up — new operator on a fresh L2 server
+
+Written for a colleague picking up this runbook cold on a new
+n14-class machine. Concrete task: **deploy the bundle, cold-start the
+daemon at chain head, leave it running long-term, collect
+`logs/live_cold_L2_config_*.log` + periodic
+`L2_config/state/prover_state.json` snapshots for review.**
+
+Scope of *this* deployment (dismisses several open questions upfront):
+
+- **Single relayer instance** — no parallel provers, no catch-up workers.
+- **L2 anchor mode only** — `BRIDGE_CONFIG_DIR=./L2_config`, stride `W² = 16384`.
+- **Shellnet → Sepolia only** — mainnet is not in scope on this branch.
+- **BK-set fixed from shellnet genesis** — no rotation, no replay.
+
+### Do this, in order
+
+1. **Build + SRS** (~30 min one-time) — [Prereqs Step 2](#step-2--build-binaries-one-time-per-fresh-clone) + [Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-10-min-network--20-min-cpu). K=21 ptau is a manual ~2.4 GB curl; everything else is automatic.
+2. **Wallet** — either reuse the shared shellnet burner already in [`shellnet.common`](../../an-bridge-prover/shellnet.common) (address `0x841709…9f`, ~5 ETH funded) or generate your own via [§1–2](#1-create-a-fresh-burner-wallet). If you use your own, drop the key into `shellnet.common:RELAYER_PRIVATE_KEY` and also export `PRIVATE_KEY=<same>` for the deploy step.
+3. **Deploy the bundle** — one command, from `crates/an-bridge-prover/`:
+   ```bash
+   LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh
+   ```
+   Derives anchors against live chain head, deploys the 6 contracts, extracts `BRIDGE_ADDRESS`, rewrites `L2_config/env`, wipes stale state. Detail: [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch).
+4. **Cold-start the daemon** — [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy). Expect first `verifyBlock confirmed` in up to **~101 min** (L2 covering-bundle wait).
+5. **Long-run watch** — steady state at ~13 min/bundle after the first covering bundle lands ([Case 2](#case-2--steady-state-operation)). Tail the log, snapshot `L2_config/state/prover_state.json` on a schedule.
+6. **Failure playbook (only when it fires):** RPC hard-abort → [Case 4](#case-4--restart-after-rpc-induced-hard-abort); on-chain revert → [Case 5](#case-5--restart-after-on-chain-revert); process crash → relaunch is automatic-resurrect from chain ([Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon), no operator action needed).
+
+### Answers to the PR #31 review questions
+
+| Question | Verdict | Where |
+|---|---|---|
+| Shellnet backlog — new bridge near head, or catch-up / parallel provers? | **New bridge near head.** No catch-up model exists on this branch; `compute_bridge_anchors --at-head` pins the newest stride-aligned boundary ≤ chain head at deploy time. | [§3 "The one thing to know"](#deploy-your-own-bridge-bundle-from-scratch) |
+| Mainnet destination chain + production RPC | **N/A** on this branch. Sepolia (chain 11155111) only. | intro |
+| Bridge address / deploy tx / bootstrap height / initial cursors | Not hand-off items. `deploy_bridge_bundle.sh` derives all four (`BRIDGE_ADDRESS` from the broadcast JSON; the three genesis constants from `compute_bridge_anchors --at-head`) and writes them into `L2_config/env`. | [§3](#deploy-your-own-bridge-bundle-from-scratch) |
+| "Exact verifier stack version" | **Auto-consistent on a fresh deploy from this branch.** The deploy script builds the four SHPLONK verifiers from `contracts/ethereum/verifiers/*.bin`; the daemon proves against `params/*_vk.bin` regenerated on first launch from the same source tree. Nothing to coordinate — a mainnet concern only. | [DeployShellnetE2EBridge.s.sol](../../../contracts/ethereum/script/DeployShellnetE2EBridge.s.sol) |
+| Authoritative genesis BK set + checksum | `bk_set.shellnet.json` in-repo. Poseidon commitment `0x08eb0a…ca71c`, SHA-256 `c77e3d…898f`. Fixed on shellnet from genesis; no rotation. | intro (top of doc) |
+| Who fixes BK-cursor init / replays rotations from genesis? | **N/A on shellnet** (rotation off — confirmed with Sehor 2026-07-08). Mainnet concern only. | intro |
+| Proof artifacts from Alina with block ranges / params / checksums | **Not required.** Bootstrap-near-head means the daemon generates its own bundle proofs forward from the fresh anchor. `params/` (SRS + per-circuit PK/VK, ~17 GB) is regenerated locally per-machine, not shipped. | [Prereqs Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-10-min-network--20-min-cpu) |
+| Funded relayer EOA / secrets transfer / monitoring owner | Colleague-owned burner in `shellnet.common`. Monitoring = his own `tail -f logs/` + the [Health checks](#health-checks-run-any-time) block. Single instance ⇒ single owner. | [Prereqs §1](#1-create-a-fresh-burner-wallet), [Health checks](#health-checks-run-any-time) |
+| n14 sizing / core scaling read | **Correct.** Prover is single-threaded ~10 min/bundle; extra cores don't compound. L2 chain-stride (~91 min) gives ample slack, so n14 is fine for the long-run test. | [daemon_live_performance.md](daemon_live_performance.md) |

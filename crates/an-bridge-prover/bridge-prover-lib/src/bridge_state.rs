@@ -181,12 +181,6 @@ pub struct BridgeState {
 /// [`BridgeState::from_contract`] (which does not read
 /// `prev_max_level_layer_hash`) and by the relayer's startup-decide
 /// routing table (which does).
-///
-/// The per-layer window shape is [`HistoryWindow`] — the same type used by
-/// [`BridgeState`] itself. The daemon's alloy adapter widens the on-chain
-/// `uint16` cursor/data-len to `usize` and converts `uint256` scalars to
-/// LE `[u8; 32]` (`Fr::to_repr()` convention) when populating this
-/// snapshot; consumers therefore see one unified byte order.
 #[derive(Clone, Debug)]
 pub struct ContractFullState {
     pub last_seen_block_seq_no: u64,
@@ -379,8 +373,6 @@ impl BridgeState {
         self.window(layer).slot_for_height(event_height)
     }
 
-    /// Latest hash in the highest occupied layer (the "topmost" window).
-    /// Returned only for the *highest* layer that has any data.
     pub fn highest_layer_latest_hash(&self) -> Option<[u8; 32]> {
         for win in self.layer_windows.iter().rev() {
             if win.data_len > 0 {
@@ -393,7 +385,7 @@ impl BridgeState {
     /// Pick `prev_max_level_layer_hash` for Circuit 2 given that the new key
     /// block carries `new_num_layers` non-empty layers.
     ///
-    /// Matches the previous semantics:
+    /// Matches the semantics:
     ///   * if `new_num_layers >= t`: latest of the highest currently-active layer
     ///   * if `new_num_layers <  t`: latest of layer `new_num_layers`
     /// where `t = num_active_layers()`.
@@ -432,7 +424,8 @@ impl BridgeState {
     /// * every `data_len <= window_size` and `write_cursor < window_size`.
     ///
     /// `stored_last_seen_block_height` cannot be recovered from the contract
-    /// (Solidity does not persist L2 height), so it is set to zero here.
+    /// — Solidity's `_layerWindows[L].heights[]` mirrors `seq_no`, not the
+    /// AN chain-side per-block `height` — so it is set to zero here.
     /// Callers that need a truthful height must patch it in after
     /// resurrect (e.g. from a genesis config or an off-chain oracle) —
     /// the field is not consulted by `append_bundle` monotonicity guards,
@@ -479,7 +472,9 @@ impl BridgeState {
             layer_windows,
             stored_bk_set_commitment: cfs.bk_set_commitment,
             stored_last_seen_block_seq_no: cfs.last_seen_block_seq_no,
-            // Contract does not persist L2 height — leave at 0. See docstring.
+            // Contract's `_layerWindows[L].heights[]` mirrors `seq_no`, not
+            // the AN chain-side per-block `height`. On resurrect there is no
+            // chain source for the latter — leave at 0. See docstring.
             stored_last_seen_block_height: 0,
             initialized: cfs.last_seen_block_seq_no > 0,
             recent_bundles: VecDeque::new(),
@@ -487,8 +482,6 @@ impl BridgeState {
         })
     }
 
-    /// Load state from a JSON file (returns new state if file doesn't exist).
-    /// `window_size` is used only when the file does not exist.
     pub fn load(path: &str, window_size: usize) -> anyhow::Result<Self> {
         if !Path::new(path).exists() {
             return Ok(Self::new(window_size));
@@ -804,7 +797,7 @@ mod tests {
             dst.stored_last_bk_set_update_seq_no,
             src.stored_last_bk_set_update_seq_no
         );
-        // Contract does not persist L2 height — see docstring.
+        // Contract does not persist AN per-block `height` — see docstring.
         assert_eq!(dst.stored_last_seen_block_height, 0);
         assert!(dst.initialized);
         // Byte-for-byte parity on every window slot.

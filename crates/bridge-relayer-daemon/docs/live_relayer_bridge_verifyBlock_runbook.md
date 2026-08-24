@@ -551,8 +551,11 @@ stride-alignment (L1: `%1024`, L2: `%16384`). Two runtime outcomes:
   `compute_bridge_anchors --at-head`): the daemon fetches the seed
   block from GQL immediately and the `bootstrap seed applied` line
   appears within seconds. First `verifyBlock confirmed` follows in
-  ~15 min (L1) or up to ~101 min (L2) — see **First cycle timing**
-  below.
+  ~15 min worst-case (L1) or **~56 min average, up to ~101 min
+  worst-case** (L2) — see **First cycle timing** below. The seed
+  itself is *not* proven; the first ZK-proven bundle is the next
+  stride-boundary above the seed, so the wait is (chain time to that
+  boundary) + ~10 min prover.
 - **`BRIDGE_BOOTSTRAP_SEQNO > shellnet head`** (footgun — you
   hand-picked a future boundary): the daemon enters an **indefinite
   polling loop** emitting `Bootstrapping { seed_seqno=N,
@@ -586,11 +589,16 @@ load) → submit → wait for Sepolia confirmation → `ack_last_bundle`
 - **L1 (`BRIDGE_CONFIG_DIR=./L1_config`)** — first `verifyBlock confirmed` in **~15 min**
   (covering bundle lands at seed + `W·P = 1024`).
 - **L2 (`BRIDGE_CONFIG_DIR=./L2_config`)** — first `verifyBlock confirmed` in
-  **up to ~101 min** worst-case (covering bundle lands at seed + `W² = 16384`;
-  ~91 min chain wall time + ~10 min prover). L2 has **no thinning and no
-  sub-bundles**: the daemon proves exactly one bundle per W² window with
-  `chain_steps = 1` (single L2 hop; see `AnchorMode::stride` in
-  `bridge-prover-lib/src/lib.rs`). During the wait it polls GQL for the
+  **~56 min average, up to ~101 min worst-case**. The seed is written into
+  the contract as the genesis anchor (`GENESIS_LAST_SEEN_BLOCK_SEQNO`) and
+  trusted as-is — **no ZK proof is computed for the bootstrap seq_no**. The
+  first proven bundle is the *next* W²-aligned boundary above the seed
+  (`(k+1)·W²`), which by construction sits above chain head, so time-to-
+  first-verify = (chain time to reach that boundary, uniform in
+  `[0, W²/rate)` ≈ 0–91 min at ~3 b/s) + ~10 min prover. L2 has **no
+  thinning and no sub-bundles**: the daemon proves exactly one bundle per
+  W² window with `chain_steps = 1` (single L2 hop; see `AnchorMode::stride`
+  in `bridge-prover-lib/src/lib.rs`). During the wait it polls GQL for the
   next W²-aligned key block to finalize — no intermediate proofs are
   produced, so no `dumped verifyBlock submission` lines appear until the
   covering bundle is ready to submit.

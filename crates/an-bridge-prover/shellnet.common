@@ -16,12 +16,14 @@
 #     for anything of value on any other network.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
-# Owner is the deployer key from contracts/ethereum/.env.shellnet.* — NOT the
-# relayer. verifyBlock and withdrawByProof are permissionless so the ownership
-# split is fine for the E2E. The relayer key below has ~5.14 ETH.
+# Single shared shellnet burner used for BOTH the deploy (owner) role and the
+# relayer role. `verifyBlock` and `withdrawByProof` are permissionless so one
+# key covers everything for the shellnet E2E. Address:
+# 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307. For the deploy path
+# (`scripts/deploy_bridge_bundle.sh`) re-export the same value as `PRIVATE_KEY`
+# — e.g. `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh`.
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
-# Address is 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f.
-RELAYER_PRIVATE_KEY=0xd6163ee202de592a73fc026501719a9b8761cbbdfb5868edd91da0b8718b4a2c
+RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql

@@ -1,5 +1,7 @@
 # L2_config/env — Sepolia E2E with L2 anchoring (bundle stride W² = 16384).
-# Generated 2026-08-18, paired with contracts/ethereum/.env.shellnet.l2.
+# Generated 2026-08-18. Genesis anchors were derived by
+# `scripts/deploy_bridge_bundle.sh` (LEVEL=2) at deploy time; re-run the
+# script to regenerate everything below atomically.
 #
 # CONSUMED BY:
 #   cd crates/an-bridge-prover
@@ -27,10 +29,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
 BRIDGE_ADDRESS=0xf31E316C7E3FD4aDDBd86d6d63a1444947BFFEEE
 
 # --- Acki Nacki side ----------------------------------------------------------
-# Must equal contracts/ethereum/.env.shellnet.l2:GENESIS_LAST_SEEN_BLOCK_SEQNO.
-# On first tick the daemon fetches this key block from GQL, builds the
-# BootstrapSeed, and applies it to state — must match on-chain
-# storedLastSeenBlockSeqNo() or first verifyBlock reverts PrevAnchorMismatch.
+# Must equal the on-chain storedLastSeenBlockSeqNo() (constructor-stamped from
+# GENESIS_LAST_SEEN_BLOCK_SEQNO at deploy time). On first tick the daemon
+# fetches this key block from GQL, builds the BootstrapSeed, and applies it
+# to state — mismatch reverts first verifyBlock with PrevAnchorMismatch.
 BRIDGE_BOOTSTRAP_SEQNO=9175040
 
 # --- L2 anchor mode (strict) --------------------------------------------------

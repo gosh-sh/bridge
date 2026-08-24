@@ -22,11 +22,10 @@ Recall that **Shellnet was restarted at this commit cf664666badf2f12bf0ecc20846a
 
 Live BK set (5 signers, fixed from genesis) is committed at
 [`crates/an-bridge-prover/bk_set.shellnet.json`](../../an-bridge-prover/bk_set.shellnet.json).
-Source of truth is `bk_nodes.*.bls_pubkey` in the on-disk shellnet
-`SHHH_config/keys_config.json` (not `zs_bk_set` — that snapshot is stale).
 
-- Poseidon commitment (matches `GENESIS_BK_SET_COMMITMENT` in both
-  `contracts/ethereum/.env.shellnet` and `contracts/ethereum/.env.shellnet.l2`):
+- Poseidon commitment (matches on-chain `storedBkSetCommitment()` on any live
+  shellnet bridge deploy, and the `GENESIS_BK_SET_COMMITMENT` line emitted by
+  `compute_bridge_anchors --at-head`):
   `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c`
 - SHA-256 of `bk_set.shellnet.json` (tamper-detection):
   `c77e3d6de5e6ea8ee96c6902f1b6ecb011bba2d631e76fa546e44ee67173898f`
@@ -1095,7 +1094,7 @@ Scope of *this* deployment (dismisses several open questions upfront):
 ### Do this, in order
 
 1. **Build + SRS** (~30 min one-time) — [Prereqs Step 2](#step-2--build-binaries-one-time-per-fresh-clone) + [Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-10-min-network--20-min-cpu). K=21 ptau is a manual ~2.4 GB curl; everything else is automatic.
-2. **Wallet** — either reuse the shared shellnet burner already in [`shellnet.common`](../../an-bridge-prover/shellnet.common) (address `0x841709…9f`, ~5 ETH funded) or generate your own via [§1–2](#1-create-a-fresh-burner-wallet). If you use your own, drop the key into `shellnet.common:RELAYER_PRIVATE_KEY` and also export `PRIVATE_KEY=<same>` for the deploy step.
+2. **Wallet** — either reuse the shared shellnet burner already in [`shellnet.common`](../../an-bridge-prover/shellnet.common) (address `0xb586…2307`, single key for both deployer + relayer roles) or generate your own via [§1–2](#1-create-a-fresh-burner-wallet). If you use your own, drop the key into `shellnet.common:RELAYER_PRIVATE_KEY` and also export `PRIVATE_KEY=<same>` for the deploy step.
 3. **Deploy the bundle** — one command, from `crates/an-bridge-prover/`:
    ```bash
    LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh

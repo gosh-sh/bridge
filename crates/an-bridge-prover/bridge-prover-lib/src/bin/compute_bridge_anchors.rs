@@ -16,7 +16,8 @@
 //!   → `bridge_prover_lib::bootstrap::fetch_from_node`
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
-//! rule). Prints env-var lines suitable for `.env.shellnet`.
+//! rule). Prints env-var lines consumed by `scripts/deploy_bridge_bundle.sh`
+//! (source into the forge deploy env).
 //!
 //! USAGE
 //!   cargo run --release --bin compute_bridge_anchors -- \
@@ -294,7 +295,7 @@ async fn main() -> Result<()> {
         eprintln!("  layer {} root = 0x{}", layer, hex::encode(root));
     }
 
-    // 5. Emit env-var lines suitable for `.env.shellnet`.
+    // 5. Emit env-var lines consumed by `scripts/deploy_bridge_bundle.sh`.
     //
     // BE-hex is required: Foundry's `vm.envUint` parses hex as a big-endian
     // `uint256` literal, while the daemon submits

@@ -24,6 +24,18 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`contracts/ethereum/.env.shellnet` and `.env.shellnet.l2` deleted.**
+  The single shared shellnet burner (`0xb586…2307`) now lives once, in
+  `crates/an-bridge-prover/shellnet.common` under `RELAYER_PRIVATE_KEY`,
+  and covers both the deployer and the relayer role. Manual deploy
+  paths that used to `set -a && source contracts/ethereum/.env.shellnet
+  && forge script …` are retired — use
+  `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL={1,2}
+  ./scripts/deploy_bridge_bundle.sh` from `crates/an-bridge-prover/`
+  instead (the wrapper re-derives genesis anchors from live chain head
+  and writes `L{1,2}_config/env` atomically). Per-deploy provenance
+  (Deploy #8 / #12 anchors) remains in git history.
+
 - **Per-mode config directory layout in `crates/an-bridge-prover/`.**
   The parallel `state/` + `state_l2/` + `proofs/` + `proofs_l2/` +
   `.env.shellnet` + `.env.shellnet.l2` layout is retired. Runtime data

@@ -1,5 +1,7 @@
 # L1_config/env — Sepolia E2E with L1 anchoring (bundle stride W·P = 1024).
-# Generated 2026-08-17, paired with contracts/ethereum/.env.shellnet.
+# Generated 2026-08-17. Genesis anchors were derived by
+# `scripts/deploy_bridge_bundle.sh` (LEVEL=1) at deploy time; re-run the
+# script to regenerate everything below atomically.
 #
 # CONSUMED BY:
 #   cd crates/an-bridge-prover
@@ -24,8 +26,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
 BRIDGE_ADDRESS=0xCbf4bC864d1fC7d8dFC1BfBAb27c95DbAe5D560e
 
 # --- Acki Nacki side ----------------------------------------------------------
-# Must equal contracts/ethereum/.env.shellnet:GENESIS_LAST_SEEN_BLOCK_SEQNO
-# and the on-chain storedLastSeenBlockSeqNo().
+# Must equal the on-chain storedLastSeenBlockSeqNo() (constructor-stamped from
+# GENESIS_LAST_SEEN_BLOCK_SEQNO at deploy time).
 BRIDGE_BOOTSTRAP_SEQNO=9052160
 
 # --- L1 anchor mode -----------------------------------------------------------

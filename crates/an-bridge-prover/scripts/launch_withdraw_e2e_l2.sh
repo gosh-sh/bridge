@@ -4,7 +4,7 @@
 # Mirrors scripts/launch_withdraw_e2e.sh but for a bridge deployed with
 # BRIDGE_ANCHOR_LEVEL=2. Key differences from the L1 launcher:
 #
-#   * Sources .env.shellnet.l2 (recommend keeping L2 env separate from L1
+#   * Sources L2_config/env (recommend keeping L2 env separate from L1
 #     so operator can't accidentally cross-fire).
 #   * Passes --anchor-layer 2 --i-know-the-wait to force strict L2
 #     resolution. Do NOT use --anchor-layer auto here: auto probes L1

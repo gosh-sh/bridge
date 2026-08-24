@@ -144,8 +144,7 @@ forge broadcast log at
 | Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
 | Genesis `prev_max_level_layer_hash` | `0x28df66280644ceb9c08e0a8a5ac924939521577006f00c1b1c6538e6c0474449` |
 | `WITHDRAW_ACC_FR` (USDCBridge account_id as Fr) | `0x1a1a…1a1a` (canonical, palindromic — see below) |
-| Deployer / relayer wallet | `0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f` |
-| Owner (paused/unpause) | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
+| Deployer / relayer / owner wallet (single shared burner) | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
 
 **`WITHDRAW_ACC_FR` derivation** (verify once per deploy — should never
 change on shellnet):
@@ -168,9 +167,10 @@ cast call $BRIDGE 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC
 
 If `expectedWithdrawAcc()` returns anything other than the palindromic
 value above, the deploy used a non-canonical `WITHDRAW_ACC_FR`. Every C4
-submit will revert on the equality check — **stop and redeploy** with
-the correct `WITHDRAW_ACC_FR` in
-[`contracts/ethereum/.env.shellnet`](../../../contracts/ethereum/.env.shellnet).
+submit will revert on the equality check — **stop and redeploy** with the
+correct `WITHDRAW_ACC_FR` exported before invoking
+[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
+(see the deploy walkthrough in the verifyBlock runbook §3).
 
 ---
 
@@ -239,21 +239,22 @@ cargo run --release --bin compute_bridge_anchors -- \
 # note the printed seed_seqno and (chain_head - seed_seqno) — should be < 200
 ```
 
-Paste the printed anchors into
-`contracts/ethereum/.env.shellnet` (deployer-side) and
-`crates/an-bridge-prover/L1_config/env` (daemon-side; use `L2_config/env`
-for `--level 2` deploys). See the Deploy #8 template in git history for
-exact field names.
+The printed anchors do not need to be pasted anywhere by hand —
+[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
+re-derives them internally and writes the corresponding
+`L{1,2}_config/env`. The manual `compute_bridge_anchors` call above is
+only useful for a freshness sanity-check before triggering the script.
 
 ### Step 1 — Deploy the bridge
 
+Delegate to the automated wrapper — it derives anchors against fresh
+chain head, deploys the 6-contract bundle, extracts `BRIDGE_ADDRESS`,
+and rewrites `L1_config/env`:
+
 ```bash
-cd contracts/ethereum
-set -a && source .env.shellnet && set +a
-forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
-# verify the printed AckiNackiBridge, then paste into
-# crates/an-bridge-prover/L{1,2}_config/env as BRIDGE_ADDRESS
+cd crates/an-bridge-prover
+set -a && source shellnet.common && set +a
+PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 ```
 
 ### Step 2 — Unpause
@@ -281,7 +282,7 @@ the bridge:
 export BRIDGE=<new_address>
 export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
 export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-export WALLET=0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f      # relayer/deployer
+export WALLET=0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307      # relayer/deployer (single shared burner)
 export AMOUNT=1000000                                          # 1.000000 USDC (6 decimals)
 
 # 1. Mint test USDC to the wallet (permissionless faucet)
@@ -675,21 +676,20 @@ cargo run --release --bin compute_bridge_anchors -- \
 "10 min = one whole bundle" — so L2 is much more forgiving on the
 compute-anchors → deploy gap. Still keep it under ~10 min for cleanliness.
 
-Paste the emitted values into a level-scoped env file
-(`contracts/ethereum/.env.shellnet.l2` on the deployer side; on the
-daemon side, into `crates/an-bridge-prover/L2_config/env` — sources
+As with L1, the emitted values do not need hand-copying —
+`deploy_bridge_bundle.sh` re-derives them for `--level 2` and rewrites
+`crates/an-bridge-prover/L2_config/env` (which sources
 `../shellnet.common` and only overrides the 4 L2-specific lines).
 
 ### Step L1 — Deploy with L2 wiring
 
-Same forge command as Case 1 Step 1 — the constructor is level-opaque
-(see change log below). Only the env values differ.
+Same wrapper as Case 1 Step 1 with `LEVEL=2` — the constructor is
+level-opaque (see change log below), so only the env values differ:
 
 ```bash
-cd contracts/ethereum
-set -a && source .env.shellnet.l2 && set +a
-forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
-  --rpc-url $SEPOLIA_RPC_URL --broadcast --slow
+cd crates/an-bridge-prover
+set -a && source shellnet.common && set +a
+PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
 ```
 
 **Post-deploy sanity — confirm W²-alignment on-chain:**
@@ -929,7 +929,7 @@ cast call $BRIDGE 'totalEscrowed()(uint256)' --rpc-url $RPC 2>/dev/null || \
   echo "totalEscrowed getter not exposed on this deploy — check via ERC20.balanceOf on the escrow"
 
 # Relayer wallet
-cast balance 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f --rpc-url $RPC --ether
+cast balance 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307 --rpc-url $RPC --ether
 ```
 
 ---

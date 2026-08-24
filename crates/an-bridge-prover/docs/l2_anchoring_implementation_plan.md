@@ -208,8 +208,9 @@ Verification-only — user already added L2+ support.
 
 **Sepolia smoke (fresh Deploy #12 pinned to L2 genesis):**
 1. Pick shellnet W²-boundary `S` with `S ≤ head − W²`.
-2. `compute_bridge_anchors --level 2 --seed-seqno S` → copy env values
-   into `contracts/ethereum/.env.shellnet`.
+2. `compute_bridge_anchors --level 2 --seed-seqno S` → run
+   `scripts/deploy_bridge_bundle.sh LEVEL=2` (it re-derives anchors and
+   feeds the forge deploy internally).
 3. Deploy `AckiNackiBridge` (level-opaque; unchanged).
 4. Nuke `state/`, `relayer-state.json`.
 5. `bridge-relayer-daemon daemon-live --anchor-level 2 --bootstrap-seqno S`.

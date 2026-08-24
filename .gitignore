@@ -33,10 +33,10 @@ contracts/ethereum/lib/
 .env.sepolia
 .secrets
 
-# Shellnet deploy env files (.env.shellnet, .env.shellnet.l2) ARE tracked —
-# they carry the shared shellnet deployer burner + genesis anchors that
-# every operator needs to reproduce a deploy. Only personal editor backups
-# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored.
+# Personal editor backups of shellnet env files
+# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored — the shared
+# shellnet deployer burner + genesis anchors live in
+# crates/an-bridge-prover/shellnet.common (tracked).
 .env.shellnet.*.bak
 .env.shellnet.*.bak.*
 

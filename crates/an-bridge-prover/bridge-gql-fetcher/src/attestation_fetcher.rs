@@ -14,14 +14,11 @@ use tracing::info;
 
 use crate::gql_client::GqlClient;
 
-/// An attestation envelope assembled from GraphQL fields on a later block's
-/// `attestations[]` array.
-///
-/// `raw_bytes` is laid out exactly as `bincode(Envelope<AttestationData>)` so
-/// `attestation_bls_checker_circuit::attestation_data_parser` and `prover.rs`
-/// can index it with their fixed offsets.
 #[derive(Debug, Clone)]
 pub struct ParsedAttestation {
+    /// Laid out exactly as `bincode(Envelope<AttestationData>)` so
+    /// `attestation_bls_checker_circuit::attestation_data_parser` and `prover.rs`
+    /// can index it with their fixed offsets.
     pub raw_bytes: Vec<u8>,
     pub parent_block_id: [u8; 32],
     pub block_id: [u8; 32],
@@ -33,7 +30,7 @@ pub struct ParsedAttestation {
 
 /// Classified attestation evidence for a key block.
 ///
-/// Acki Nacki finalization is a two-path protocol (consensus-protocol.md §4.6):
+/// Acki Nacki finalization is a two-path protocol:
 ///   * **Primary path** — reached ≥2N/3 signers within the `β`-block deadline.
 ///     `Block.attestations[]` contains exactly one entry of `target_type=PRIMARY`.
 ///   * **Fallback path** — primary deadline passed without ≥2N/3; the chain
@@ -51,12 +48,8 @@ pub struct ParsedAttestation {
 /// verifying key differs.
 #[derive(Debug, Clone)]
 pub enum AttestationEvidence {
-    /// One PRIMARY-type attestation. Threshold enforcement (≥2N/3) lives
-    /// inside Circuit 1A; the daemon does not pre-check signer counts.
     Primary(ParsedAttestation),
-    /// Pair of attestations (PRIMARY prefinalization + FALLBACK target) over
-    /// the same `block_id`. Threshold (>N/2 each) is enforced inside
-    /// Circuit 1B via `ThresholdMode::Fallback`.
+    /// Pair of attestations (PRIMARY prefinalization + FALLBACK target) over the same `block_id`. 
     Fallback {
         primary: ParsedAttestation,
         fallback: ParsedAttestation,
@@ -64,7 +57,6 @@ pub enum AttestationEvidence {
 }
 
 impl AttestationEvidence {
-    /// Human-readable tag for logs / IPC.
     pub fn path(&self) -> &'static str {
         match self {
             AttestationEvidence::Primary(_) => "primary",
@@ -72,9 +64,6 @@ impl AttestationEvidence {
         }
     }
 
-    /// `block_id` shared by every attestation in the evidence. For the
-    /// fallback variant this is asserted equal across the two entries during
-    /// construction.
     pub fn block_id(&self) -> [u8; 32] {
         match self {
             AttestationEvidence::Primary(p) => p.block_id,

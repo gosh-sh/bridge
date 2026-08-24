@@ -50,11 +50,11 @@ use alloy::{
     providers::Provider,
 };
 use async_trait::async_trait;
-// `ContractFullState` and `HistoryWindow` are the alloy-neutral shape shared
+// `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
 // with `bridge_prover_lib::bridge_state::BridgeState::from_contract` — the
 // relayer's `read_full_state` populates them (with BE→LE reversal on all
 // `uint256` scalars) so consumers see a single unified byte order.
-use bridge_prover_lib::bridge_state::{ContractFullState, HistoryWindow};
+use bridge_prover_lib::bridge_state::{EthBridgeContractState, HistoryWindow};
 
 use crate::{
     error::RelayerError,
@@ -729,7 +729,7 @@ where
     /// this call and let the normal startup drift routing re-observe on
     /// the next cycle — a one-block skew triggers an immediate re-read,
     /// not a mis-seed.
-    pub async fn read_full_state(&self) -> Result<ContractFullState, RelayerError> {
+    pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
         let last = self
             .contract
             .storedLastSeenBlockSeqNo()
@@ -762,7 +762,7 @@ where
         // Endianness: on-chain `uint256` slots come out BE via
         // `U256::to_be_bytes`; `BridgeState.layer_windows` stores LE
         // (`Fr::to_repr()`). We reverse each slot here so the returned
-        // `ContractFullState` is byte-for-byte comparable to a local
+        // `EthBridgeContractState` is byte-for-byte comparable to a local
         // `BridgeState` snapshot. Same convention applies to the two scalar
         // `uint256` fields (`bk_set_commitment`, `prev_max_level_layer_hash`).
         let mut windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
@@ -797,11 +797,11 @@ where
             .try_into()
             .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
 
-        Ok(ContractFullState {
+        Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk.to_le_bytes::<32>(),
             last_bk_set_update_seq_no: last_bk,
-            prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
+            genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
     }

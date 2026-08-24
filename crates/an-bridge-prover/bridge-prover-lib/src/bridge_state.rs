@@ -25,18 +25,14 @@ use serde::{Deserialize, Serialize};
 /// Layers are 1-indexed (1..=MAX_LAYERS); slot 0 of `layer_windows` is layer 1.
 pub const MAX_LAYERS: usize = 10;
 
-/// Cap on the `BridgeState::recent_bundles` ring. Keeps the state file small
-/// while preserving enough history for an orchestrator to confirm a recent
-/// run of self-verified bundles.
+/// Cap on the `BridgeState::recent_bundles` ring.
 pub const RECENT_BUNDLES_CAP: usize = 16;
 
 /// Per-bundle self-verification outcome recorded by `bridge-prover-daemon`
-/// after it generates and locally verifies its own Circuit 1a + Circuit 2
-/// proofs. Surfaced via `prover_state.json` so an external orchestrator can
-/// poll it without launching a verifier daemon.
+/// after it generates and locally verifies its own Circuit 1a + Circuit 2 proofs. 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BundleResult {
-    /// Thinned key block seq_no this result is for.
+    /// key block seq_no this result is for.
     pub key_block_seq_no: u64,
     /// Circuit 1a self-verify passed.
     pub primary_ok: bool,
@@ -127,7 +123,6 @@ impl HistoryWindow {
 }
 
 /// Shared bridge state — full mirror of the contract's `GlobalHistoryData`.
-///
 /// This struct mirrors what the future Ethereum bridge contract will store.
 /// In particular it holds the BK-set **commitment only** (32 bytes), not the
 /// pubkey list — the contract would never store the full set, and the
@@ -156,7 +151,7 @@ pub struct BridgeState {
 
     /// seq_no of the last bk-set-update block whose transition has
     /// been applied to `stored_bk_set_commitment`. Mirrors what the ETH
-    /// contract will store. Zero on first bootstrap (no updates applied yet).
+    /// contract will store. Zero on first bootstrap.
     #[serde(default)]
     pub stored_last_bk_set_update_seq_no: u64,
 
@@ -177,37 +172,32 @@ pub struct BridgeState {
 }
 
 /// Full contract state readable by chain-resurrect: on-chain scalars plus
-/// all `MAX_LAYERS` windows. Consumed directly by
-/// [`BridgeState::from_contract`] (which does not read
-/// `prev_max_level_layer_hash`) and by the relayer's startup-decide
-/// routing table (which does).
+/// all `MAX_LAYERS` windows. Consumed by [`BridgeState::from_contract`]
+/// and by the relayer's `startup_decide`.
 #[derive(Clone, Debug)]
-pub struct ContractFullState {
+pub struct EthBridgeContractState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: [u8; 32],
     pub last_bk_set_update_seq_no: u64,
-    /// Immutable genesis anchor for layer 1
-    /// (`storedPrevMaxLevelLayerHash`, LE bytes of the on-chain `uint256`).
-    /// Populated by the relayer's `read_full_state`; unused by
-    /// `BridgeState::from_contract` but consulted by `startup_decide` when
-    /// verifying that a local state that carries one extra genesis-prepend
-    /// slot matches the chain's genesis anchor.
-    pub prev_max_level_layer_hash: [u8; 32],
+    /// LE mirror of the contract's `immutable storedPrevMaxLevelLayerHash`
+    /// (constructor-set from `genesisPrevMaxLevelLayerHash`, never mutated).
+    /// Used by `startup_decide` as a bridge-identity check. Not read by
+    /// `from_contract`.
+    pub genesis_prev_max_level_layer_hash: [u8; 32],
     /// Index `L-1` corresponds to layer `L` (1..=MAX_LAYERS).
     pub layer_windows: [HistoryWindow; MAX_LAYERS],
 }
 
-impl ContractFullState {
+impl EthBridgeContractState {
     /// Highest layer `L >= 2` whose on-chain window has any populated slots,
     /// or `None` when no layer above 1 has ever been anchored.
     ///
-    /// Used by the relayer Resurrect path to refuse `cfg=L1` startup against
-    /// a contract that has already anchored at L>=2 — the `last_seen % stride`
-    /// alignment check cannot catch this case because every W² boundary is
-    /// simultaneously W·P-aligned (16384 % 1024 == 0), so an L1-configured
-    /// daemon can otherwise pass every startup guard and then revert the
-    /// first `verifyBlock` on-chain with `PrevAnchorMismatch`. See PR #35
-    /// follow-up review, should-fix #1.
+    /// Client-side sanity check on resurrect. If this returns `Some(_)`, the
+    /// contract has been fed key blocks with `numLayers >= 2`, so a daemon
+    /// configured for L1-only mode is starting against chain state produced
+    /// by a higher-stride mode. The `last_seen % stride` alignment check
+    /// cannot catch this (every W²-aligned cursor is also W·P-aligned), and
+    /// the contract itself is mode-agnostic — so the check belongs on the client.
     pub fn highest_populated_layer(&self) -> Option<u8> {
         // Layers are 1-indexed on the wire; index i corresponds to layer i+1.
         // We only care about layers >= 2 (L1 is expected populated).
@@ -416,31 +406,15 @@ impl BridgeState {
     /// mirror. The returned state has `initialized = true` iff the contract
     /// has recorded at least one block (`last_seen_block_seq_no > 0`).
     ///
-    /// Preconditions (any failure → error):
-    /// * every `layer_windows[i].data.len() == window_size` (and heights
-    ///   the same length) — mismatch means the daemon was launched with a W
-    ///   that does not match what the contract was deployed with, and
-    ///   silently rebuilding a differently-shaped ring would corrupt state.
-    /// * every `data_len <= window_size` and `write_cursor < window_size`.
-    ///
     /// `stored_last_seen_block_height` cannot be recovered from the contract
     /// — Solidity's `_layerWindows[L].heights[]` mirrors `seq_no`, not the
     /// AN chain-side per-block `height` — so it is set to zero here.
-    /// Callers that need a truthful height must patch it in after
-    /// resurrect (e.g. from a genesis config or an off-chain oracle) —
-    /// the field is not consulted by `append_bundle` monotonicity guards,
-    /// only seq_no is.
     pub fn from_contract(
-        cfs: ContractFullState,
+        cfs: EthBridgeContractState,
         window_size: usize,
         anchor_level: u8,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(window_size > 0, "from_contract: window_size must be > 0");
-
-        // Validate the wire snapshot before adopting it. `HistoryWindow`'s
-        // methods (`append`, `iter_chronological`, ...) rely on these
-        // invariants, so we gate on them at the boundary even though the
-        // input is already the target type.
         for (idx, cw) in cfs.layer_windows.iter().enumerate() {
             let layer_num = idx + 1;
             anyhow::ensure!(
@@ -472,9 +446,6 @@ impl BridgeState {
             layer_windows,
             stored_bk_set_commitment: cfs.bk_set_commitment,
             stored_last_seen_block_seq_no: cfs.last_seen_block_seq_no,
-            // Contract's `_layerWindows[L].heights[]` mirrors `seq_no`, not
-            // the AN chain-side per-block `height`. On resurrect there is no
-            // chain source for the latter — leave at 0. See docstring.
             stored_last_seen_block_height: 0,
             initialized: cfs.last_seen_block_seq_no > 0,
             recent_bundles: VecDeque::new(),
@@ -499,8 +470,6 @@ impl BridgeState {
         Ok(st)
     }
 
-    /// Save state to a JSON file atomically.
-    ///
     /// Writes to `path.tmp` first, then `rename`s into place. POSIX `rename`
     /// is atomic on the same filesystem, so any concurrent reader sees either
     /// the previous fully-written file or the new fully-written file — never
@@ -523,9 +492,9 @@ impl BridgeState {
 mod tests {
     use super::*;
 
-    /// Build a `ContractFullState` with an empty window at every layer,
+    /// Build a `EthBridgeContractState` with an empty window at every layer,
     /// then let the test poke `data_len` on selected layers.
-    fn empty_chain_state() -> ContractFullState {
+    fn empty_chain_state() -> EthBridgeContractState {
         let empty_win = HistoryWindow {
             data: vec![],
             heights: vec![],
@@ -533,11 +502,11 @@ mod tests {
             write_cursor: 0,
             last_height: 0,
         };
-        ContractFullState {
+        EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: std::array::from_fn(|_| empty_win.clone()),
         }
     }
@@ -747,12 +716,12 @@ mod tests {
         assert_eq!(s.prev_max_level_layer_hash_for(0), [0u8; 32]);
     }
 
-    /// Snapshot a `BridgeState` into a `ContractFullState` shape as the
+    /// Snapshot a `BridgeState` into a `EthBridgeContractState` shape as the
     /// on-chain contract would expose it (heights carry seq_no, not L2
     /// height — see `_appendLayerHashes` in AckiNackiBridge.sol). Test-only
     /// helper: exercises the exact wire format the daemon consumes when
     /// re-hydrating from the chain.
-    fn snapshot_as_contract(s: &BridgeState) -> ContractFullState {
+    fn snapshot_as_contract(s: &BridgeState) -> EthBridgeContractState {
         // The contract stores seq_no in the `heights` slot; the local
         // mirror stores height there. For a byte-for-byte round-trip test
         // we mirror whatever this side has (the contract-vs-local semantic
@@ -760,11 +729,11 @@ mod tests {
         // `stored_last_seen_block_height`).
         let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|i| s.layer_windows[i].clone());
-        ContractFullState {
+        EthBridgeContractState {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
             bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -820,7 +789,7 @@ mod tests {
 
     #[test]
     fn from_contract_empty_contract_yields_uninitialized_state() {
-        // Zeroed ContractFullState: models a freshly-deployed contract.
+        // Zeroed EthBridgeContractState: models a freshly-deployed contract.
         let empty_layer = || HistoryWindow {
             data: vec![[0u8; 32]; 4],
             heights: vec![0u64; 4],
@@ -829,11 +798,11 @@ mod tests {
             last_height: 0,
         };
         let arr: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| empty_layer());
-        let cfs = ContractFullState {
+        let cfs = EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let s = BridgeState::from_contract(cfs, 4, 1).unwrap();
@@ -855,11 +824,11 @@ mod tests {
             last_height: 0,
         };
         let arr: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| short_layer());
-        let cfs = ContractFullState {
+        let cfs = EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let err = BridgeState::from_contract(cfs, 8, 1).unwrap_err();
@@ -887,11 +856,11 @@ mod tests {
             }
         });
         arr[2] = bad_layer;
-        let cfs = ContractFullState {
+        let cfs = EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
         let err = BridgeState::from_contract(cfs, 4, 1).unwrap_err();

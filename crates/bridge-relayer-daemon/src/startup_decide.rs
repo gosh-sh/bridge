@@ -2,7 +2,7 @@
 //!
 //! Replaces the ad-hoc 3-arm `seed_policy` match + late drift-guard in
 //! `bin/relayer.rs` with an explicit routing table over
-//! (local `BridgeState`, on-chain `ContractFullState`). The four legs are
+//! (local `BridgeState`, on-chain `EthBridgeContractState`). The four legs are
 //! [`StartupDecision::Cold`], [`StartupDecision::WarmResume`],
 //! [`StartupDecision::Resurrect`], [`StartupDecision::Stop`].
 //!
@@ -16,9 +16,9 @@
 //!   orthogonal to the resurrect vs resume decision — the operator's
 //!   `--bootstrap-seqno` flag still drives it.
 //! * Unit-testable without an alloy RPC provider: consumes plain
-//!   [`ContractFullState`] shaped by the daemon's `read_full_state`.
+//!   [`EthBridgeContractState`] shaped by the daemon's `read_full_state`.
 
-use bridge_prover_lib::bridge_state::{BridgeState, ContractFullState, MAX_LAYERS};
+use bridge_prover_lib::bridge_state::{BridgeState, EthBridgeContractState, MAX_LAYERS};
 #[cfg(test)]
 use bridge_prover_lib::bridge_state::HistoryWindow;
 use bridge_prover_lib::live_driver::SeedPolicy;
@@ -59,7 +59,7 @@ pub struct DecideInputs<'a> {
     /// absent — the caller must not distinguish the two cases here).
     pub local: &'a BridgeState,
     /// Full snapshot of the on-chain contract state.
-    pub chain: &'a ContractFullState,
+    pub chain: &'a EthBridgeContractState,
     /// The operator's `--bootstrap-seqno` flag, if any. Only consulted
     /// on the Cold path (bootstrap into a genesis-state contract).
     pub bootstrap_seqno: Option<u64>,
@@ -91,7 +91,7 @@ pub struct DecideInputs<'a> {
 /// - **Pre-wrap** (local data_len ≤ W): local layer-1 window is
 ///   `[genesis_anchor, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
 ///   Local has exactly one extra leading entry that must equal
-///   `chain.prev_max_level_layer_hash` (byte-reversed).
+///   `chain.genesis_prev_max_level_layer_hash` (byte-reversed).
 /// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
 ///   overwrites local's genesis slot): local and chain chronological
 ///   sequences are identical.
@@ -99,7 +99,7 @@ pub struct DecideInputs<'a> {
 /// Layers 2..MAX_LAYERS have no genesis prepend (shellnet's max_level=1
 /// seed block only stamps layer 1); their chronologies must match exactly
 /// modulo the per-slot byte reversal.
-fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
+fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
     let w = local.window_size;
     for i in 0..MAX_LAYERS {
         let lw = &local.layer_windows[i];
@@ -162,7 +162,7 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
         // deeper layers — startup routing only ensures we do not
         // silently resurrect on a mismatched cursor.
         if local_chrono.len() == chain_chrono.len() + 1 {
-            if i == 0 && local_chrono[0].0 != chain.prev_max_level_layer_hash {
+            if i == 0 && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
                 return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
@@ -373,30 +373,30 @@ mod tests {
         }
     }
 
-    fn empty_chain() -> ContractFullState {
+    fn empty_chain() -> EthBridgeContractState {
         let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| empty_lw());
-        ContractFullState {
+        EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
 
-    /// Snapshot a `BridgeState` back into a `ContractFullState` shape.
+    /// Snapshot a `BridgeState` back into a `EthBridgeContractState` shape.
     /// Only sensible when the state was produced by `append_bundle`
     /// with seq_no == height (so heights[] == the on-chain seq_no
     /// mirror). See `bridge_state.rs::from_contract` docstring.
-    fn snapshot_as_chain(s: &BridgeState) -> ContractFullState {
+    fn snapshot_as_chain(s: &BridgeState) -> EthBridgeContractState {
         let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|i| s.layer_windows[i].clone());
-        ContractFullState {
+        EthBridgeContractState {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
             bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -609,11 +609,11 @@ mod tests {
         };
         let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| wide_lw());
-        let chain = ContractFullState {
+        let chain = EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: [0u8; 32],
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         };
         match decide(DecideInputs {

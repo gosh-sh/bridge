@@ -2,7 +2,7 @@
 //! `node-types::ThreadIdentifier`. Only the surface the bridge prover/verifier
 //! and event tooling actually use is implemented.
 //!
-//! Together with `crate::poseidon_dense` this lets the workspace consume the
+//! This lets the workspace consume the
 //! node's GraphQL metadata without depending on the `acki-nacki` workspace.
 
 use std::str::FromStr;

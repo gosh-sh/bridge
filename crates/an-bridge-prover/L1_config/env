@@ -1,0 +1,34 @@
+# L1_config/env — Sepolia E2E with L1 anchoring (bundle stride W·P = 1024).
+# Generated 2026-08-17. Genesis anchors were derived by
+# `scripts/deploy_bridge_bundle.sh` (LEVEL=1) at deploy time; re-run the
+# script to regenerate everything below atomically.
+#
+# CONSUMED BY:
+#   cd crates/an-bridge-prover
+#   export BRIDGE_CONFIG_DIR=./L1_config
+#   set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+#   ./target/release/relayer daemon-live
+#
+# LEVEL:
+#   BRIDGE_ANCHOR_LEVEL=1 (default) → daemon builds/proves L1 bundles.
+#   State + proofs live under L1_config/{state,proofs} via BRIDGE_CONFIG_DIR
+#   so L2 state on the same host is not touched.
+
+# Layer the shared bits first.
+source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
+
+# --- Ethereum side ------------------------------------------------------------
+# Deploy #7 (2026-08-17): fresh redeploy at P=8. Deploy #6 (0x7769…41435)
+# had P=4 fossilized in expectedPrevAnchor(1); no in-place P transition on a
+# live bridge, so a fresh deploy was required. Deploy #7 anchors were
+# freshly derived from `compute_bridge_anchors --at-head` at seed_seqno
+# 8759296 (chain head 8759558 at derivation time; ~87s lag).
+BRIDGE_ADDRESS=0xCbf4bC864d1fC7d8dFC1BfBAb27c95DbAe5D560e
+
+# --- Acki Nacki side ----------------------------------------------------------
+# Must equal the on-chain storedLastSeenBlockSeqNo() (constructor-stamped from
+# GENESIS_LAST_SEEN_BLOCK_SEQNO at deploy time).
+BRIDGE_BOOTSTRAP_SEQNO=9052160
+
+# --- L1 anchor mode -----------------------------------------------------------
+BRIDGE_ANCHOR_LEVEL=1

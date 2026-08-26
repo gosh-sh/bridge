@@ -401,6 +401,13 @@ enum Cmd {
         /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
+        /// Anchor level for the LiveProverDriver step math and bundle
+        /// stride. `1` = L1 (default, stride W·P = 1024); `2` = L2
+        /// (stride W² = 16384). Must match the on-chain genesis stamp
+        /// level for the deployed bridge — a mismatch trips the startup
+        /// drift check.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
+        anchor_level: u8,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -480,18 +487,31 @@ enum Cmd {
         /// Where to write the enriched witness JSON.
         #[arg(long)]
         work_dir: PathBuf,
-        /// `crates/an-bridge-prover` workspace root (holds the
-        /// `bridge-event-halo2-prover` release binary + params).
-        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
-        an_bridge_prover_dir: PathBuf,
-        /// Override the prover subprocess's working directory (i.e.
-        /// where `./params/*` lives). Defaults to `--an-bridge-prover-dir`.
-        #[arg(long)]
-        prover_work_dir: Option<PathBuf>,
+        /// `crates/bridge-evm-aggregator` root (holds
+        /// `target/release/aggregate-proof`). Forwarded to
+        /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK pipeline.
+        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
+        aggregator_dir: PathBuf,
+        /// Directory of committed verifier `.bin` files (aggregator's
+        /// byte-identity self-check target).
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR", default_value = "../../contracts/ethereum/verifiers")]
+        verifiers_dir: PathBuf,
+        /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
+        #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
+        params_dir: PathBuf,
+        /// Scratch dir for the intermediate `circuit4.snark` /
+        /// `.instances.bin` from the SHPLONK pipeline.
+        #[arg(long, default_value = "./shplonk-snark")]
+        snark_dir: PathBuf,
+        /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
+        /// Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
         /// Optional dir to persist `proof_event_{seq:06}.json`.
         #[arg(long)]
         prover_out_dir: Option<PathBuf>,
-        /// Subprocess prover timeout, in seconds.
+        /// Aggregator subprocess timeout, in seconds. Circuit-4 outer
+        /// keygen from a cold PK cache is a few minutes.
         #[arg(long, default_value_t = 1800)]
         prover_timeout_s: u64,
         /// Seqno stamped into witness/proof filenames.
@@ -509,6 +529,19 @@ enum Cmd {
         /// dry-run (no signed tx).
         #[arg(long)]
         dry_run: bool,
+        /// Replay mode: skip baseline snapshot, pick the youngest
+        /// matching WithdrawalInitiated ExtOut event. Use to recover a
+        /// prior burn whose enricher timed out (e.g. daemon crashed
+        /// before the covering bundle landed on-chain). On a
+        /// single-account demo this unambiguously targets the last burn.
+        ///
+        /// SAFETY: single-account / operator-controlled recipient EOA
+        /// only. On any shared relayer wallet this would let one
+        /// operator prove another operator's `WithdrawalInitiated`, so
+        /// this flag is intentionally scoped to `withdraw-e2e` and must
+        /// NEVER be wired into `daemon-live` (per PR#35 review round 2).
+        #[arg(long)]
+        replay_latest: bool,
     },
     /// Print parsed config and exit (for `--help`-style smoke checks).
     Status,
@@ -778,6 +811,7 @@ async fn main() -> anyhow::Result<()> {
             aggregator_dir,
             verifiers_dir,
             pk_cache_dir,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -792,6 +826,8 @@ async fn main() -> anyhow::Result<()> {
                 verifiers_dir,
                 pk_cache_dir,
             };
+            let anchor_mode = bridge_prover_lib::AnchorMode::from_level(anchor_level)
+                .map_err(|e| anyhow::anyhow!("--anchor-level: {e}"))?;
             run_daemon_live(
                 args.state,
                 rpc_url,
@@ -804,6 +840,7 @@ async fn main() -> anyhow::Result<()> {
                 bootstrap_seqno,
                 backoff,
                 aggregation,
+                anchor_mode,
             )
             .await
             .map_err(|e| {
@@ -835,8 +872,11 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            an_bridge_prover_dir,
-            prover_work_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            pk_cache_dir,
             prover_out_dir,
             prover_timeout_s,
             prover_seq_no,
@@ -844,6 +884,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
+            replay_latest,
         } => withdraw_e2e_cli(WithdrawE2ECliArgs {
             gql_endpoint,
             prover_state_path,
@@ -856,8 +897,11 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            an_bridge_prover_dir,
-            prover_work_dir,
+            aggregator_dir,
+            verifiers_dir,
+            params_dir,
+            snark_dir,
+            pk_cache_dir,
             prover_out_dir,
             prover_timeout_s,
             prover_seq_no,
@@ -865,6 +909,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             dry_run,
+            replay_latest,
         })
         .await
         .map_err(|e| {
@@ -1820,8 +1865,11 @@ struct WithdrawE2ECliArgs {
     anchor_layer: String,
     i_know_the_wait: bool,
     work_dir: PathBuf,
-    an_bridge_prover_dir: PathBuf,
-    prover_work_dir: Option<PathBuf>,
+    aggregator_dir: PathBuf,
+    verifiers_dir: PathBuf,
+    params_dir: PathBuf,
+    snark_dir: PathBuf,
+    pk_cache_dir: Option<PathBuf>,
     prover_out_dir: Option<PathBuf>,
     prover_timeout_s: u64,
     prover_seq_no: u32,
@@ -1829,6 +1877,7 @@ struct WithdrawE2ECliArgs {
     bridge_address: Option<Address>,
     private_key: Option<String>,
     dry_run: bool,
+    replay_latest: bool,
 }
 
 async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
@@ -1846,11 +1895,15 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         anchor_mode,
         i_know_the_wait: args.i_know_the_wait,
         work_dir: args.work_dir,
-        an_bridge_prover_dir: args.an_bridge_prover_dir,
-        prover_work_dir: args.prover_work_dir,
+        aggregator_dir: args.aggregator_dir,
+        verifiers_dir: args.verifiers_dir,
+        params_dir: args.params_dir,
+        snark_dir: args.snark_dir,
+        pk_cache_dir: args.pk_cache_dir,
         prover_out_dir: args.prover_out_dir,
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
         prover_seq_no: args.prover_seq_no,
+        replay_latest: args.replay_latest,
     };
 
     let summary = run_withdraw_e2e_once(cfg).await?;
@@ -1995,6 +2048,7 @@ async fn run_daemon_live(
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
+    anchor_mode: bridge_prover_lib::AnchorMode,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::create_client;
     use bridge_prover_lib::{
@@ -2117,14 +2171,29 @@ async fn run_daemon_live(
         local_last_seen = state.stored_last_seen_block_seq_no,
         local_bk_upd = state.stored_last_bk_set_update_seq_no,
         local_initialized = state.initialized,
+        anchor_level = anchor_mode.level(),
+        bundle_stride = anchor_mode.stride(),
         "startup: read on-chain state for routing",
     );
+    // Anchor-mode maturity marker (Sergey's PR#35 review fallback for #2).
+    // L2 has shellnet Deploy #12 smoke but no continuous-production stress
+    // run yet — loud on startup so operators know what regime they're in.
+    if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
+        tracing::warn!(
+            "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
+             cold-start end-to-end; no continuous multi-day production run yet. See \
+             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md \
+             Case 7 for the expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
+             and drift-recovery deltas. Report anomalies against that signature."
+        );
+    }
     let decision = bridge_relayer_daemon::startup_decide(
         bridge_relayer_daemon::DecideInputs {
             local: &state,
             chain: &chain_full,
             bootstrap_seqno,
             window_size: HISTORY_WINDOW_SIZE as usize,
+            anchor_level: anchor_mode.level(),
         },
     );
     let (state, seed_policy) = match decision {
@@ -2172,6 +2241,7 @@ async fn run_daemon_live(
             // the old `export-1a1b2-poseidon-snark` subprocess that
             // independently re-fetched + re-proved every bundle.
             transcript: TranscriptKind::Poseidon,
+            anchor_mode,
             ..Default::default()
         },
     )
@@ -2188,6 +2258,53 @@ async fn run_daemon_live(
     // constructed, and `WarmResume` is only reached when local and chain
     // match byte-for-byte.
     let bridge = Arc::new(bridge_probe);
+
+    // Anchor-level cross-check. Decision logic and the full truth table
+    // live in `bridge_prover_lib::AnchorMode::verify_state_level` (§3 of
+    // `l2_anchoring_implementation_plan.md`); this call site only formats
+    // the operator-facing diagnostic.
+    //
+    // Skip on uninitialized state — the seed will stamp the correct level on
+    // its first `apply`. `state` was moved into `LiveProverDriver::new`; we
+    // read the post-decide view via the live-source snapshot. Chain-side
+    // stride check is re-wired to `chain_full` (already read for routing
+    // above; the old pre-decide `bridge.read_state()` is gone).
+    let driver_state = live_source.driver_snapshot().await;
+    if driver_state.initialized {
+        if let Err(drift) = anchor_mode.verify_state_level(driver_state.anchor_level) {
+            anyhow::bail!(
+                "startup drift: state anchor_level={} but daemon configured for L{} \
+                 (BRIDGE_ANCHOR_LEVEL / --anchor-level). Rename {} to \
+                 state.pre_L{cfg_level}_$(date +%Y%m%d_%H%M%S) and rebootstrap. \
+                 Never auto-migrate between anchor levels on a live bridge — a mid-run \
+                 flip would submit a verifyBlock against the wrong on-chain window.",
+                drift.state_level,
+                drift.cfg_level,
+                prover_state_dir.display(),
+                cfg_level = drift.cfg_level,
+            );
+        }
+        // Chain-side sanity: the on-chain lastSeenBlockSeqNo must sit on a
+        // stride-aligned boundary for the level we think we're running.
+        // If not, this is a strong signal we're pointing at a bridge that
+        // was deployed under a different level.
+        if chain_full.last_seen_block_seq_no != 0
+            && chain_full.last_seen_block_seq_no % anchor_mode.stride() != 0
+        {
+            anyhow::bail!(
+                "on-chain last_seen_block_seq_no={} is not a multiple of the L{} bundle stride {} — \
+                 either the bridge was deployed under a different anchor level, or this daemon is \
+                 pointed at the wrong contract.",
+                chain_full.last_seen_block_seq_no,
+                anchor_mode.level(),
+                anchor_mode.stride(),
+            );
+        }
+
+        // Chain-shape vs anchor-level mismatch (both directions) is caught
+        // inside `startup_decide::decide()` before Resurrect persists any
+        // state — see the top-of-decide gate in `startup_decide.rs`.
+    }
 
     let cfg = RelayerConfig::new(&state_path);
 

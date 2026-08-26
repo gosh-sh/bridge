@@ -232,12 +232,21 @@ pub type DriverResult<T> = Result<T, DriverError>;
 /// CLI knobs, no verifier timeouts — those all live with the caller.
 #[derive(Debug, Clone)]
 pub struct LiveProverConfig {
-    /// Number of consecutive master key blocks aggregated inside a single
-    /// Circuit 2 bundle. Matches [`crate::THINNING_FACTOR_P`] by default.
-    pub thinning_factor_p: u64,
-    /// Rolling-window width per layer. Matches [`HISTORY_WINDOW_SIZE`] by
-    /// default.
-    pub history_window_size: u64,
+    /// Anchor-level mode. See [`crate::AnchorMode`]. Default is
+    /// [`crate::AnchorMode::L1`]; opt in to
+    /// [`crate::AnchorMode::L2`] to switch the driver onto the
+    /// supercritical W²-stride schedule described in
+    /// `docs/l2_anchoring_proposal.md`.
+    ///
+    /// Fully wired: every stride-dependent call site — `SeedPolicy::Explicit`
+    /// alignment check, [`crate::live_driver::thinning::find_next_bundle_boundary`],
+    /// `advance_bootstrap`, and `next_target_seqno_upper_bound` — routes
+    /// through [`LiveProverConfig::bundle_stride`], which delegates to
+    /// [`crate::AnchorMode::stride`]. Flipping the mode is a single-source
+    /// change; W and P themselves are compile-time constants
+    /// ([`crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE`],
+    /// [`crate::THINNING_FACTOR_P`]) and never live on the cfg.
+    pub anchor_mode: crate::AnchorMode,
     /// Safety cap; see [`DEFAULT_MAX_BK_UPDATES_PER_ITER`].
     pub max_bk_updates_per_iter: usize,
     /// How the driver picks the bootstrap seed. See [`SeedPolicy`].
@@ -265,12 +274,25 @@ pub struct LiveProverConfig {
 impl Default for LiveProverConfig {
     fn default() -> Self {
         Self {
-            thinning_factor_p: crate::THINNING_FACTOR_P,
-            history_window_size: HISTORY_WINDOW_SIZE,
+            anchor_mode: crate::AnchorMode::L1,
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
             transcript: TranscriptKind::Blake2b,
         }
+    }
+}
+
+impl LiveProverConfig {
+    /// Bundle stride in seq_nos for this cfg's anchor mode. Sole source of
+    /// truth for every stride-dependent call site inside the driver.
+    ///
+    /// Delegates to [`crate::AnchorMode::stride`], which reads from the
+    /// top-level constants ([`crate::BUNDLE_STRIDE_L1`],
+    /// [`crate::BUNDLE_STRIDE_L2`]). W and P are compile-time constants and
+    /// never live on the cfg — this method is a thin re-exposure for
+    /// call-site ergonomics.
+    pub fn bundle_stride(&self) -> u64 {
+        self.anchor_mode.stride()
     }
 }
 
@@ -282,13 +304,16 @@ impl Default for LiveProverConfig {
 /// steady state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedPolicy {
-    /// Pin a specific seqno. MUST be `> 0` and divisible by `W * P`.
+    /// Pin a specific seqno. MUST be `> 0` and divisible by the
+    /// configured [`crate::AnchorMode`]'s bundle stride
+    /// (`W * P` under L1, `W²` under L2 — see [`crate::AnchorMode::stride`]).
     ///
     /// Used by manual / reproducible starts (our daemon's
     /// `BRIDGE_BOOTSTRAP_SEQNO=N`).
     Explicit(u64),
-    /// Auto-select: on first poll, snap to the next `W * P`-aligned seqno
-    /// strictly past the current chain head.
+    /// Auto-select: on first poll, snap to the next stride-aligned seqno
+    /// strictly past the current chain head. Stride = `W * P` under L1
+    /// or `W²` under L2 — see [`crate::AnchorMode::stride`].
     ///
     /// Used for automatic starts on a long-running chain (our daemon's
     /// default when no explicit seed; Sergey's daemon on a fresh shellnet).
@@ -607,11 +632,16 @@ impl LiveProverDriver {
                 );
             }
             (SeedPolicy::Explicit(n), false) => {
-                let step = cfg.history_window_size * cfg.thinning_factor_p;
+                let step = cfg.bundle_stride();
                 anyhow::ensure!(
                     n > 0 && n % step == 0,
-                    "SeedPolicy::Explicit({}) invalid: must be > 0 and divisible by W*P={}",
-                    n, step,
+                    "SeedPolicy::Explicit({}) invalid: must be > 0 and divisible by \
+                     bundle_stride={} (anchor_mode={:?}, W={}, P={})",
+                    n,
+                    step,
+                    cfg.anchor_mode,
+                    HISTORY_WINDOW_SIZE,
+                    crate::THINNING_FACTOR_P,
                 );
                 DriverStage::NeedsSeed { seed_seqno: Some(n) }
             }
@@ -663,11 +693,10 @@ impl LiveProverDriver {
             .await
             .map_err(DriverError::gql_transient)?;
         let chain_head_seqno = latest_blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
-        let next_target_seqno = match find_next_thinned_key_block(
+        let next_target_seqno = match crate::live_driver::thinning::find_next_bundle_boundary(
             self.state.stored_last_seen_block_seq_no,
             chain_head_seqno,
-            self.cfg.history_window_size,
-            self.cfg.thinning_factor_p,
+            self.cfg.bundle_stride(),
         ) {
             Some(n) => n,
             None => {
@@ -862,10 +891,12 @@ impl LiveProverDriver {
 
     /// Best-effort next target seqno used in [`LiveBundleEvent::Nothing`]
     /// when the driver has no chain-head snapshot yet (e.g. GQL just
-    /// returned an empty list). Bounds the value by W*P above the cursor
-    /// so callers see a sane number.
+    /// returned an empty list). Bounds the value by one bundle stride
+    /// (`W * P` under L1, `W²` under L2 — see
+    /// [`crate::AnchorMode::stride`]) above the cursor so callers see a
+    /// sane number.
     fn next_target_seqno_upper_bound(&self) -> u64 {
-        let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
+        let step = self.cfg.bundle_stride();
         ((self.state.stored_last_seen_block_seq_no / step) + 1) * step
     }
 
@@ -893,7 +924,7 @@ impl LiveProverDriver {
     /// Advance the bootstrap state machine. Returns
     /// `(chain_head_seqno, still_waiting_for_seed_seqno_opt)`.
     async fn advance_bootstrap(&mut self) -> DriverResult<(u64, Option<u64>)> {
-        let step = self.cfg.history_window_size * self.cfg.thinning_factor_p;
+        let step = self.cfg.bundle_stride();
         let latest_blocks = self
             .gql
             .query_latest_blocks(5)
@@ -930,6 +961,7 @@ impl LiveProverDriver {
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
+            self.cfg.anchor_mode.level(),
         )
         .await
         .map_err(|e| DriverError::Bootstrapping {
@@ -997,8 +1029,11 @@ mod tests {
     #[test]
     fn default_config_matches_pre_refactor_constants() {
         let cfg = LiveProverConfig::default();
-        assert_eq!(cfg.thinning_factor_p, crate::THINNING_FACTOR_P);
-        assert_eq!(cfg.history_window_size, HISTORY_WINDOW_SIZE);
+        // W and P no longer live on cfg (single source of truth in
+        // top-level constants). Bundle stride is derived from anchor_mode
+        // via AnchorMode::stride().
+        assert_eq!(cfg.anchor_mode, crate::AnchorMode::L1);
+        assert_eq!(cfg.bundle_stride(), HISTORY_WINDOW_SIZE * crate::THINNING_FACTOR_P);
         assert_eq!(cfg.seed_policy, SeedPolicy::Resume);
         // Blake2b default preserves the AN-opcode-compatible flavour for
         // every caller that doesn't override — both our own daemon and

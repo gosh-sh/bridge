@@ -74,9 +74,7 @@ code and were wrong in the old docs:
 * Deposits take **USDC** via `transferFrom`, signature `deposit(uint256,int8,bytes32)`, cap
   `type(uint64).max`. Any archive text with `msg.value`, ETH deposits or a `100 ether` cap is dead.
   The contract has no `receive()`/`fallback()` — it cannot hold native ETH at all.
-* Verification is **SHPLONK aggregator Yul** for four circuits. The gnark wrappers, the
-  `*Groth16VerifierGenerated.sol` files and the `gnark-wrappers/` trees do not exist.
-* There is no pause switch (removed in `d6bfed4`) and no upgrade path.
+* Verification is **SHPLONK aggregator Yul** for four circuits. 
 * BK-set rotation **shipped** as `applyBkSetUpdate` (16-leaf, depth-4). Archive text calling it
   "pending Phase 1.C" is stale, and so is any monitor asserting the commitment never changes.
 * The payout path is `withdrawByProof` against a Circuit-4 proof, nullifier-guarded. The refund-style

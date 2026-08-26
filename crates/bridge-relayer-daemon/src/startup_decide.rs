@@ -2,7 +2,7 @@
 //!
 //! Replaces the ad-hoc 3-arm `seed_policy` match + late drift-guard in
 //! `bin/relayer.rs` with an explicit routing table over
-//! (local `BridgeState`, on-chain `ContractFullState`). The four legs are
+//! (local `BridgeState`, on-chain `EthBridgeContractState`). The four legs are
 //! [`StartupDecision::Cold`], [`StartupDecision::WarmResume`],
 //! [`StartupDecision::Resurrect`], [`StartupDecision::Stop`].
 //!
@@ -16,15 +16,12 @@
 //!   orthogonal to the resurrect vs resume decision — the operator's
 //!   `--bootstrap-seqno` flag still drives it.
 //! * Unit-testable without an alloy RPC provider: consumes plain
-//!   [`ContractFullState`] shaped by the daemon's `read_full_state`.
+//!   [`EthBridgeContractState`] shaped by the daemon's `read_full_state`.
 
-use bridge_prover_lib::bridge_state::{
-    BridgeState, ContractFullState as LibContractFullState, ContractLayerWindow as LibContractLayerWindow,
-    MAX_LAYERS,
-};
+use bridge_prover_lib::bridge_state::{BridgeState, EthBridgeContractState, MAX_LAYERS};
+#[cfg(test)]
+use bridge_prover_lib::bridge_state::HistoryWindow;
 use bridge_prover_lib::live_driver::SeedPolicy;
-
-use crate::bridge::{ContractFullState, ContractLayerWindow};
 
 /// The four legs of startup routing.
 #[derive(Debug)]
@@ -62,7 +59,7 @@ pub struct DecideInputs<'a> {
     /// absent — the caller must not distinguish the two cases here).
     pub local: &'a BridgeState,
     /// Full snapshot of the on-chain contract state.
-    pub chain: &'a ContractFullState,
+    pub chain: &'a EthBridgeContractState,
     /// The operator's `--bootstrap-seqno` flag, if any. Only consulted
     /// on the Cold path (bootstrap into a genesis-state contract).
     pub bootstrap_seqno: Option<u64>,
@@ -71,60 +68,17 @@ pub struct DecideInputs<'a> {
     /// (silently rebuilding a differently-shaped ring corrupts slot
     /// math).
     pub window_size: usize,
-}
-
-/// Convert the daemon-side (alloy-typed) `ContractLayerWindow` into the
-/// alloy-neutral `bridge_prover_lib` shape consumed by
-/// `BridgeState::from_contract`.
-///
-/// Endianness: chain-side layer window slots are stored as
-/// `[u8;32]` big-endian (produced in `bridge.rs::read_full_state` via
-/// `U256::to_be_bytes`), but `BridgeState.layer_windows` stores LE
-/// (`Fr::to_repr()` output). We reverse each slot per the convention
-/// documented in `history_consistency.rs:59` and memory
-/// `bridge_genesis_anchor_endianness.md`.
-fn to_lib_layer_window(w: &ContractLayerWindow) -> LibContractLayerWindow {
-    let data: Vec<[u8; 32]> = w
-        .data
-        .iter()
-        .map(|slot| {
-            let mut le = *slot;
-            le.reverse();
-            le
-        })
-        .collect();
-    LibContractLayerWindow {
-        data,
-        heights: w.heights.clone(),
-        data_len: w.data_len,
-        write_cursor: w.write_cursor,
-        last_height: w.last_height,
-    }
-}
-
-fn to_lib_full_state(cfs: &ContractFullState) -> LibContractFullState {
-    // Split the fixed-size array elementwise. `std::array::from_fn`
-    // gives us the layout invariance without needing `TryFrom<Vec<_>>`.
-    let layer_windows: [LibContractLayerWindow; MAX_LAYERS] =
-        std::array::from_fn(|i| to_lib_layer_window(&cfs.layer_windows[i]));
-    LibContractFullState {
-        last_seen_block_seq_no: cfs.last_seen_block_seq_no,
-        // See `history_consistency.rs:59` — BridgeState stores
-        // bk_set_commitment as LE (`Fr::to_repr()`); chain `uint256` is
-        // BE-hex of the same scalar. Match that convention here so
-        // `decide()` can compare byte-for-byte against
-        // `local.stored_bk_set_commitment`.
-        bk_set_commitment: cfs.bk_set_commitment.to_le_bytes::<32>(),
-        last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
-        layer_windows,
-    }
+    /// Anchor level the daemon was launched with. Stamped into the
+    /// rebuilt `BridgeState.anchor_level` on Resurrect; contract does
+    /// not persist this field.
+    pub anchor_level: u8,
 }
 
 /// Chronological equivalence check for local vs chain layer windows.
 ///
-/// **Endianness.** Local `BridgeState` slots are LE (`Fr::to_repr()`); chain
-/// slots arrive from `bridge.rs::read_full_state` as BE. Chain slots are
-/// byte-reversed before comparing.
+/// **Endianness.** Both sides are LE (`Fr::to_repr()`). `read_full_state`
+/// reverses each `uint256` slot at construction time, so this comparator
+/// does not need to reverse anything.
 ///
 /// **Layer-1 genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
 /// documented at `bootstrap.rs:17-18` as a Phase 1 fix ensuring verifier
@@ -137,15 +91,15 @@ fn to_lib_full_state(cfs: &ContractFullState) -> LibContractFullState {
 /// - **Pre-wrap** (local data_len ≤ W): local layer-1 window is
 ///   `[genesis_anchor, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
 ///   Local has exactly one extra leading entry that must equal
-///   `chain.prev_max_level_layer_hash` (byte-reversed).
+///   `chain.genesis_prev_max_level_layer_hash` (both LE — see comparator
+///   endianness note at the top of this rustdoc).
 /// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
 ///   overwrites local's genesis slot): local and chain chronological
 ///   sequences are identical.
 ///
 /// Layers 2..MAX_LAYERS have no genesis prepend (shellnet's max_level=1
-/// seed block only stamps layer 1); their chronologies must match exactly
-/// modulo the per-slot byte reversal.
-fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
+/// seed block only stamps layer 1); their chronologies must match exactly.
+fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
     let w = local.window_size;
     for i in 0..MAX_LAYERS {
         let lw = &local.layer_windows[i];
@@ -161,7 +115,9 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
         // chronological tuple comparison below still covers height
         // equality on every populated slot.
 
-        // Walk each ring oldest → newest, byte-reversing chain slots.
+        // Walk each ring oldest → newest. Both sides are already LE
+        // (see comparator rustdoc: `read_full_state` normalises chain
+        // slots at construction, so no reversal here).
         let local_chrono: Vec<([u8; 32], u64)> = {
             let len = lw.data_len;
             let start = if len < w { 0 } else { lw.write_cursor };
@@ -173,14 +129,12 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
                 .collect()
         };
         let chain_chrono: Vec<([u8; 32], u64)> = {
-            let len = cw.data_len as usize;
-            let start = if len < w { 0 } else { cw.write_cursor as usize };
+            let len = cw.data_len;
+            let start = if len < w { 0 } else { cw.write_cursor };
             (0..len)
                 .map(|k| {
                     let p = (start + k) % w;
-                    let mut le = cw.data[p];
-                    le.reverse();
-                    (le, cw.heights[p])
+                    (cw.data[p], cw.heights[p])
                 })
                 .collect()
         };
@@ -200,21 +154,18 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
         // chain as `storedPrevMaxLevelLayerHash` (empirically verified
         // for shellnet Deploy #6: env `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`
         // equals the seed's layer-1 anchor, not its deepest-layer anchor
-        // — despite the "max_level" in the name), so we byte-verify it.
+        // — despite the "max_level" in the name), so we equality-check it.
         // For layers 2..MAX_LAYERS, chain has no per-layer genesis anchor
         // surface; we accept the presence of a genesis prepend but do
-        // not byte-verify that first slot against chain. Runtime
+        // not equality-check that first slot against chain. Runtime
         // ack-time consistency (via `EthBridgeClient::submit_block`'s
         // `expectedPrevAnchor(numLayers)` cross-check, per
         // `history_consistency.rs:38-47`) is the authoritative gate for
         // deeper layers — startup routing only ensures we do not
         // silently resurrect on a mismatched cursor.
         if local_chrono.len() == chain_chrono.len() + 1 {
-            if i == 0 {
-                let anchor_le = chain.prev_max_level_layer_hash.to_le_bytes::<32>();
-                if local_chrono[0].0 != anchor_le {
-                    return false;
-                }
+            if i == 0 && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
+                return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
                 return false;
@@ -244,7 +195,7 @@ fn windows_match(local: &BridgeState, chain: &ContractFullState) -> bool {
 /// A `window_size` mismatch between local and any layer of chain is
 /// treated as an unconditional Stop before any of the above arms fire.
 pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
-    let DecideInputs { local, chain, bootstrap_seqno, window_size } = inputs;
+    let DecideInputs { local, chain, bootstrap_seqno, window_size, anchor_level } = inputs;
 
     // Guard: every chain window must be sized to the launched W. If not,
     // no arm below is meaningful — reject before doing anything else.
@@ -267,6 +218,48 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
                 "local BridgeState.window_size={} != daemon window_size={} — \
                  delete prover_state.json and rebootstrap",
                 local.window_size, window_size,
+            ),
+        };
+    }
+
+    // Anchor-level vs chain-shape mismatch: refuse before the Resurrect arm
+    // persists a state file with the daemon's `anchor_level` stamped over
+    // windows produced under a different level. Both directions are
+    // reachable without an on-disk state at all (fresh install), so this
+    // check has to sit above the initialized/uninitialized fork below.
+    //
+    // The `last_seen % stride` alignment check in the caller does not catch
+    // either direction — every W² boundary is simultaneously W·P-aligned
+    // (16384 % 1024 == 0), so an L2-advanced cursor slips through as an
+    // L1-daemon target, and an L1-driven cursor that happens to land on a
+    // W² multiple slips through as an L2-daemon target.
+    //
+    // Failure mode without this gate: Resurrect copies chain windows into
+    // local state, stamps `anchor_level = <daemon cfg>` on disk, then the
+    // driver drives at the wrong cadence and the first verifyBlock reverts
+    // on `PrevAnchorMismatch`. Worse, the poisoned state file blocks a
+    // restart with the corrected `--anchor-level` (the state-vs-cfg drift
+    // guard trips first), so recovery requires manually moving the file.
+    if anchor_level == 1 {
+        if let Some(l) = chain.highest_populated_layer() {
+            return StartupDecision::Stop {
+                reason: format!(
+                    "refuse: daemon configured for L1 but on-chain contract has \
+                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). \
+                     Restart with --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}."
+                ),
+            };
+        }
+    }
+    if anchor_level >= 2
+        && chain.layer_windows[0].data_len > 0
+        && chain.highest_populated_layer().map_or(true, |l| l < anchor_level)
+    {
+        return StartupDecision::Stop {
+            reason: format!(
+                "refuse: daemon configured for L{anchor_level} but on-chain contract's \
+                 deepest populated layer is 1 (contract has only ever been driven by an \
+                 L1 daemon). Restart with --anchor-level 1 / BRIDGE_ANCHOR_LEVEL=1."
             ),
         };
     }
@@ -313,7 +306,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         } else {
             // Chain-resurrect: rebuild BridgeState from the on-chain
             // snapshot. `from_contract` performs its own shape checks.
-            match BridgeState::from_contract(to_lib_full_state(chain), window_size) {
+            match BridgeState::from_contract(chain.clone(), window_size, anchor_level) {
                 Ok(rebuilt) => StartupDecision::Resurrect {
                     fresh_state: Box::new(rebuilt),
                 },
@@ -356,7 +349,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     if local_seq < chain_seq {
         // Someone else advanced the contract while our local state was
         // idle. Resurrect from the chain snapshot.
-        return match BridgeState::from_contract(to_lib_full_state(chain), window_size) {
+        return match BridgeState::from_contract(chain.clone(), window_size, anchor_level) {
             Ok(rebuilt) => StartupDecision::Resurrect {
                 fresh_state: Box::new(rebuilt),
             },
@@ -371,10 +364,10 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // inconsistent (e.g. same last_seen but different bk commitment)
     // and we must not silently proceed.
     let local_commit = local.stored_bk_set_commitment;
-    // LE matches `BridgeState.stored_bk_set_commitment` (Fr::to_repr).
-    // See `history_consistency.rs:59` for the canonical convention and
-    // memory `bridge_genesis_anchor_endianness.md` for the rationale.
-    let chain_commit = chain.bk_set_commitment.to_le_bytes::<32>();
+    // Both sides LE (`Fr::to_repr()`) — `read_full_state` reverses on read
+    // per the convention in `history_consistency.rs:59` and memory
+    // `bridge_genesis_anchor_endianness.md`.
+    let chain_commit = chain.bk_set_commitment;
     if local_commit != chain_commit {
         return StartupDecision::Stop {
             reason: format!(
@@ -411,12 +404,11 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::U256;
 
     const W: usize = 4;
 
-    fn empty_lw() -> ContractLayerWindow {
-        ContractLayerWindow {
+    fn empty_lw() -> HistoryWindow {
+        HistoryWindow {
             data: vec![[0u8; 32]; W],
             heights: vec![0u64; W],
             data_len: 0,
@@ -425,40 +417,30 @@ mod tests {
         }
     }
 
-    fn empty_chain() -> ContractFullState {
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] =
+    fn empty_chain() -> EthBridgeContractState {
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| empty_lw());
-        ContractFullState {
+        EthBridgeContractState {
             last_seen_block_seq_no: 0,
-            bk_set_commitment: U256::ZERO,
+            bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: U256::ZERO,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
 
-    /// Snapshot a `BridgeState` back into a `ContractFullState` shape.
+    /// Snapshot a `BridgeState` back into a `EthBridgeContractState` shape.
     /// Only sensible when the state was produced by `append_bundle`
     /// with seq_no == height (so heights[] == the on-chain seq_no
     /// mirror). See `bridge_state.rs::from_contract` docstring.
-    fn snapshot_as_chain(s: &BridgeState) -> ContractFullState {
-        let mut arr: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYERS);
-        for w in &s.layer_windows {
-            arr.push(ContractLayerWindow {
-                data: w.data.clone(),
-                heights: w.heights.clone(),
-                data_len: w.data_len as u16,
-                write_cursor: w.write_cursor as u16,
-                last_height: w.last_height,
-            });
-        }
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] = arr.try_into().unwrap();
-        let commit = U256::from_be_bytes::<32>(s.stored_bk_set_commitment);
-        ContractFullState {
+    fn snapshot_as_chain(s: &BridgeState) -> EthBridgeContractState {
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
+            std::array::from_fn(|i| s.layer_windows[i].clone());
+        EthBridgeContractState {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
-            bk_set_commitment: commit,
+            bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
-            prev_max_level_layer_hash: U256::ZERO,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
     }
@@ -479,6 +461,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Cold { policy } => assert_eq!(policy, SeedPolicy::Auto),
             d => panic!("expected Cold, got {d:?}"),
@@ -494,6 +477,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: Some(512),
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Cold { policy } => assert_eq!(policy, SeedPolicy::Explicit(512)),
             d => panic!("expected Cold, got {d:?}"),
@@ -509,6 +493,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::WarmResume => {}
             d => panic!("expected WarmResume, got {d:?}"),
@@ -526,7 +511,7 @@ mod tests {
         let seed_seqno: u64 = 5_495_808;
         let mut chain = empty_chain();
         chain.last_seen_block_seq_no = seed_seqno;
-        chain.bk_set_commitment = U256::from_be_bytes::<32>([7u8; 32]);
+        chain.bk_set_commitment = [7u8; 32];
         chain.last_bk_set_update_seq_no = 0;
         // layer_windows already all empty (data_len == 0) via empty_chain().
         let local = BridgeState::new(W);
@@ -537,6 +522,7 @@ mod tests {
             // cursor is authoritative for the seed seqno.
             bootstrap_seqno: Some(999_999),
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Cold { policy } => {
                 assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
@@ -555,6 +541,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Resurrect { fresh_state } => {
                 assert!(fresh_state.initialized);
@@ -584,6 +571,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Resurrect { fresh_state } => {
                 assert_eq!(fresh_state.stored_last_seen_block_seq_no, 20);
@@ -601,6 +589,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Stop { reason } => {
                 assert!(reason.contains("last_seen=20"), "reason: {reason}");
@@ -615,12 +604,13 @@ mod tests {
         let src = advanced_state(10);
         let mut chain = snapshot_as_chain(&src);
         // Perturb only the bk-set commitment.
-        chain.bk_set_commitment = U256::from_be_bytes::<32>([0xAA; 32]);
+        chain.bk_set_commitment = [0xAA; 32];
         match decide(DecideInputs {
             local: &src,
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Stop { reason } => {
                 assert!(reason.contains("bk-set commitment diverges"), "reason: {reason}");
@@ -640,6 +630,7 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: W,
+            anchor_level: 1,
         }) {
             StartupDecision::Stop { reason } => {
                 assert!(reason.contains("per-layer windows diverge"), "reason: {reason}");
@@ -653,20 +644,20 @@ mod tests {
         // Local built with W=4, chain read with W=8 (contract deployed with
         // a different W). Must be rejected before any of the semantic arms.
         let local = BridgeState::new(4);
-        let wide_lw = || ContractLayerWindow {
+        let wide_lw = || HistoryWindow {
             data: vec![[0u8; 32]; 8],
             heights: vec![0u64; 8],
             data_len: 0,
             write_cursor: 0,
             last_height: 0,
         };
-        let layer_windows: [ContractLayerWindow; MAX_LAYERS] =
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
             std::array::from_fn(|_| wide_lw());
-        let chain = ContractFullState {
+        let chain = EthBridgeContractState {
             last_seen_block_seq_no: 0,
-            bk_set_commitment: U256::ZERO,
+            bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
-            prev_max_level_layer_hash: U256::ZERO,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         };
         match decide(DecideInputs {
@@ -674,11 +665,109 @@ mod tests {
             chain: &chain,
             bootstrap_seqno: None,
             window_size: 4,
+            anchor_level: 1,
         }) {
             StartupDecision::Stop { reason } => {
                 assert!(reason.contains("window width"), "reason: {reason}");
             }
             d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    // Chain-shape helper for anchor-level-vs-chain-shape tests below. Builds
+    // an `EthBridgeContractState` whose layer 1 window has a single populated
+    // entry, and optionally a single populated entry in the layer 2 window
+    // (`with_l2 = true`). Cursor / bk fields set to non-genesis values so
+    // routing does not treat the state as an empty chain.
+    fn chain_with_layer1_and_optional_l2(seq: u64, with_l2: bool) -> EthBridgeContractState {
+        let mut chain = empty_chain();
+        chain.last_seen_block_seq_no = seq;
+        chain.bk_set_commitment = [7u8; 32];
+        chain.layer_windows[0].data_len = 1;
+        chain.layer_windows[0].data[0] = [0x11; 32];
+        chain.layer_windows[0].heights[0] = seq;
+        chain.layer_windows[0].last_height = seq;
+        if with_l2 {
+            chain.layer_windows[1].data_len = 1;
+            chain.layer_windows[1].data[0] = [0x22; 32];
+            chain.layer_windows[1].heights[0] = seq;
+            chain.layer_windows[1].last_height = seq;
+        }
+        chain
+    }
+
+    #[test]
+    fn stop_when_cfg_l1_but_chain_l2_advanced_before_resurrect_save() {
+        // Fresh install (local uninitialized) pointed at an L2-advanced
+        // contract while the operator forgot `--anchor-level 2`. Must
+        // refuse before `decide()` would otherwise choose `Resurrect`
+        // and persist a `state.anchor_level=1` mirroring L2 windows.
+        let chain = chain_with_layer1_and_optional_l2(10, true);
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 1,
+        }) {
+            StartupDecision::Stop { reason } => {
+                assert!(reason.contains("layer_windows[2]"), "reason: {reason}");
+                assert!(reason.contains("--anchor-level 2"), "reason: {reason}");
+            }
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_when_cfg_l2_but_chain_l1_only_at_w2_boundary() {
+        // W=4 → W² = 16. Chain has last_seen=16 (W²-aligned, so any upstream
+        // stride-modulus guard passes) but only layer 1 was ever populated —
+        // classic "L1-driven contract that happens to sit on a W² multiple".
+        // An L2-configured daemon must refuse rather than adopt a chain
+        // snapshot missing the layer it was launched to prove.
+        let chain = chain_with_layer1_and_optional_l2(16, false);
+        assert_eq!(chain.last_seen_block_seq_no % (W as u64 * W as u64), 0);
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop { reason } => {
+                assert!(
+                    reason.contains("only ever been driven by an L1"),
+                    "reason: {reason}",
+                );
+                assert!(reason.contains("--anchor-level 1"), "reason: {reason}");
+            }
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn cfg_l2_does_not_refuse_post_deploy_empty_windows() {
+        // Regression guard for the L2 branch: a just-deployed L2 contract
+        // has a non-zero cursor (constructor stamps genesis seed_seqno) but
+        // every layer window is empty. Must route to Cold, not Stop.
+        let seed_seqno: u64 = 16;
+        let mut chain = empty_chain();
+        chain.last_seen_block_seq_no = seed_seqno;
+        chain.bk_set_commitment = [7u8; 32];
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Cold { policy } => {
+                assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
+            }
+            d => panic!("expected Cold, got {d:?}"),
         }
     }
 }

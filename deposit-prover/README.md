@@ -8,9 +8,7 @@ Acki Nacki side are marked where they cannot be checked from this repository.*
 
 > **Status.** This crate emits a raw Halo2 SHPLONK proof. It is consumed natively on the Acki Nacki
 > side through the **`ZKHALO2VERIFYWITHVK`** TVM opcode — the name `VERHALO2SHPLONK` used in older
-> notes never shipped and appears nowhere in this tree. The legacy Go gnark wrapper under
-> `gnark-wrapper/` and the Rust `groth16_wrapper` adapter were retired together with the ETH-side
-> refund `withdraw()` chain; there is no Groth16 anywhere in this path any more.
+> notes never shipped and appears nowhere in this tree. 
 
 ## Why Separate from Main Workspace?
 

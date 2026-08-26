@@ -327,7 +327,7 @@ async fn generate_layer_proof_for_key_block(
         driver.state(),
         &block.history_proofs,
         target_seqno,
-        driver.cfg().history_window_size,
+        crate::live_driver::HISTORY_WINDOW_SIZE,
     )
     .await
     .context("failed to build real chain proofs")

@@ -37,7 +37,7 @@ BURN_LOG="logs/withdrawal_burn_l2_${TS}.log"
 # (BRIDGE_ADDRESS, BRIDGE_BOOTSTRAP_SEQNO, BRIDGE_ANCHOR_LEVEL,
 # BRIDGE_CONFIG_DIR=./L2_config).
 if [ ! -f L2_config/env ]; then
-  echo "!!! L2_config/env not found — see docs/live_verifyBlock_runbook.md"
+  echo "!!! L2_config/env not found — see crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md"
   echo "    (per-mode config layout: L{1,2}_config/{env,state,proofs})"
   exit 1
 fi

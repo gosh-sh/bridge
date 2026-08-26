@@ -166,6 +166,37 @@ impl BootstrapSeed {
 /// `anchor_level` to `1`; that caused L2 daemons to persist a state file
 /// stamped `anchor_level=1` and refuse to restart on the drift check. The
 /// wrapper was removed so the level cannot be forgotten again.
+/// Convert a proof block's `history_proofs` map into the seed's
+/// `layer_hashes` vector, refusing early if the layer the daemon was
+/// configured to anchor at is absent from the block.
+///
+/// Without this check an L2 daemon pointed at a pre-L2 seed block would
+/// happily store a seed whose `layer_hashes` carries only layer 1, and
+/// the mismatch would only surface much later — either as a
+/// `PrevAnchorMismatch` at the first bundle boundary or as a silent
+/// downgrade if some other code path ever tolerated it. Bailing at seed
+/// construction time gives the operator a message that names the missing
+/// layer and the layers that were present.
+fn build_layer_hashes_for_seed(
+    history_proofs: &std::collections::BTreeMap<u8, [u8; 32]>,
+    anchor_level: u8,
+) -> anyhow::Result<Vec<([u8; 32], u8)>> {
+    let layer_hashes: Vec<([u8; 32], u8)> =
+        history_proofs.iter().map(|(&layer, root)| (*root, layer)).collect();
+    anyhow::ensure!(
+        layer_hashes.iter().any(|(_, l)| *l == anchor_level),
+        "seed block has no layer={} entry in history_proofs (found layers: {:?}). \
+         Under --anchor-level {} the seed key block must already carry a layer-{} root; \
+         either the daemon is pointed at a pre-L{} block or the node did not expose it.",
+        anchor_level,
+        layer_hashes.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+        anchor_level,
+        anchor_level,
+        anchor_level,
+    );
+    Ok(layer_hashes)
+}
+
 pub async fn fetch_from_node(
     gql: &bridge_gql_fetcher::gql_client::GqlClient,
     first_key_seqno: u64,
@@ -179,11 +210,8 @@ pub async fn fetch_from_node(
             format!("could not fetch first key block at seq_no={}", first_key_seqno)
         })?;
     let block_height = block.height;
-    let layer_hashes: Vec<([u8; 32], u8)> = block
-        .history_proofs
-        .iter()
-        .map(|(&layer, root)| (*root, layer))
-        .collect();
+    let layer_hashes = build_layer_hashes_for_seed(&block.history_proofs, anchor_level)
+        .with_context(|| format!("seed block at seq_no={}", first_key_seqno))?;
     Ok(BootstrapSeed {
         schema_version: SEED_SCHEMA_VERSION,
         layer_hashes,
@@ -315,5 +343,31 @@ mod tests {
             msg.contains("schema_version=1") && msg.contains("expects 2"),
             "v1 rejection message should name both versions, got: {msg}"
         );
+    }
+
+    /// An L2 daemon pointed at a seed block that predates the first L2
+    /// boundary must fail fast at seed construction, not silently store a
+    /// seed whose `layer_hashes` is missing the requested anchor level.
+    #[test]
+    fn build_layer_hashes_bails_when_requested_layer_missing() {
+        let mut history_proofs = std::collections::BTreeMap::new();
+        history_proofs.insert(1u8, [0x11; 32]);
+        let err = build_layer_hashes_for_seed(&history_proofs, 2).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no layer=2"), "msg: {msg}");
+        assert!(msg.contains("found layers: [1]"), "msg: {msg}");
+    }
+
+    /// When the requested anchor level is present the helper passes the
+    /// full map through unchanged (order-preserving on the layer key).
+    #[test]
+    fn build_layer_hashes_returns_when_requested_layer_present() {
+        let mut history_proofs = std::collections::BTreeMap::new();
+        history_proofs.insert(1u8, [0x11; 32]);
+        history_proofs.insert(2u8, [0x22; 32]);
+        let out = build_layer_hashes_for_seed(&history_proofs, 2).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|(root, l)| *l == 2 && *root == [0x22; 32]));
+        assert!(out.iter().any(|(root, l)| *l == 1 && *root == [0x11; 32]));
     }
 }

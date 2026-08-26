@@ -103,7 +103,8 @@ async fn main() -> anyhow::Result<()> {
         warn!(
             "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
              cold-start end-to-end; no continuous multi-day production run yet. See \
-             docs/live_verifyBlock_runbook.md Case 7 for the expected log signature \
+             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md \
+             Case 7 for the expected log signature \
              (watch for `layers=2` on the first Circuit 2 bundle) and drift-recovery \
              deltas. Report anomalies against that signature."
         );

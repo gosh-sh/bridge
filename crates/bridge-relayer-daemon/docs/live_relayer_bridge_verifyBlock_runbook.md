@@ -301,7 +301,8 @@ Infura / QuickNode) are usable once you're funded; they hand out
 `MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
 2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
 submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
-**Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
+**Target 
+≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
 The [Health checks](#health-checks-run-any-time) block includes a
 wallet-balance line — refill from either faucet when it drops below
 0.5 ETH.
@@ -508,6 +509,26 @@ cast call $BRIDGE 'storedBkSetCommitment()(uint256)'        --rpc-url $RPC   # m
 If any of these don't match your deploy's genesis values (from the
 `compute_bridge_anchors` output you pinned at deploy time), **stop** —
 the deploy is broken. Do not launch the daemon.
+
+**Wipe stale artifacts (cold-start hygiene).** `deploy_bridge_bundle.sh` and
+the launch snippet below only clear `state/*.json` — the minimum the
+file-first guard requires. Older leftovers (event proofs, SHPLONK
+work_dir, `verifyBlock_*.json` submissions, `state.pre_deploy*_*/` and
+`proofs.pre_deploy*_*/` backup dirs from prior deploys) are harmless to
+the daemon but confuse operators inspecting the config dir after a fresh
+cold start — they look like "this run wrote them" when they did not. If
+you don't need the backup dirs as forensic evidence, blow them away
+before launch:
+
+```bash
+rm -rf "$BRIDGE_CONFIG_DIR"/state.pre_deploy*_*/ \
+       "$BRIDGE_CONFIG_DIR"/proofs.pre_deploy*_*/ \
+       "$BRIDGE_CONFIG_DIR"/work_dir/* \
+       submissions/*
+```
+
+Skip this if you're mid-incident (Cases 4/5/6b) and might need to
+inspect an older `prover_state.json` — the backups are your only copy.
 
 **Cold-start launch:**
 

@@ -2182,8 +2182,8 @@ async fn run_daemon_live(
         tracing::warn!(
             "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
              cold-start end-to-end; no continuous multi-day production run yet. See \
-             crates/an-bridge-prover/docs/live_verifyBlock_runbook.md Case 7 for the \
-             expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
+             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md \
+             Case 7 for the expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
              and drift-recovery deltas. Report anomalies against that signature."
         );
     }
@@ -2301,23 +2301,9 @@ async fn run_daemon_live(
             );
         }
 
-        // PR #35 follow-up should-fix #1: the modulus check above cannot
-        // catch `cfg=L1` pointed at an L2-advanced contract, because every
-        // W² boundary is simultaneously W·P-aligned (16384 % 1024 == 0).
-        // A semantic check on the on-chain `layer_windows` is the only
-        // way to see this: if the contract already anchored at L>=2, an
-        // L1-configured daemon cannot proceed — the driver would drive
-        // L1-cadence hops into L2-populated windows and revert the first
-        // `verifyBlock` with `PrevAnchorMismatch`.
-        if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L1) {
-            if let Some(l) = chain_full.highest_populated_layer() {
-                anyhow::bail!(
-                    "refuse: daemon configured for L1 but on-chain contract has \
-                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). \
-                     Restart with --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}.",
-                );
-            }
-        }
+        // Chain-shape vs anchor-level mismatch (both directions) is caught
+        // inside `startup_decide::decide()` before Resurrect persists any
+        // state — see the top-of-decide gate in `startup_decide.rs`.
     }
 
     let cfg = RelayerConfig::new(&state_path);

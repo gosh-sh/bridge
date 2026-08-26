@@ -17,7 +17,7 @@ WITHDRAW_LOG="logs/withdraw_dry_${TS}.log"
 BURN_LOG="logs/withdrawal_burn_${TS}.log"
 
 if [ ! -f L1_config/env ]; then
-  echo "!!! L1_config/env not found — see docs/live_verifyBlock_runbook.md"
+  echo "!!! L1_config/env not found — see crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md"
   echo "    (per-mode config layout: L{1,2}_config/{env,state,proofs})"
   exit 1
 fi

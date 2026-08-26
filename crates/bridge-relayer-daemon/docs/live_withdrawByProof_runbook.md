@@ -11,7 +11,7 @@ modes we have actually hit.
 `prover_state.json` → Circuit 4 SHPLONK aggregate → `withdrawByProof`.
 **Assumes** the bundle-only path (Circuits 1A + 2 via `daemon-live`) is
 already running or has just been launched — that lane is covered in
-[`live_verifyBlock_runbook.md`](./live_verifyBlock_runbook.md), which
+[`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md), which
 this doc extends.
 
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
@@ -303,7 +303,7 @@ cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC   # -> 1000000
 
 ### Step 3 — Cold-start the bundle daemon
 
-Full procedure in the [verifyBlock runbook Case 1](./live_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy).
+Full procedure in the [verifyBlock runbook Case 1](./live_relayer_bridge_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy).
 Verify the log line `seed_policy=Explicit(<seed_seqno>)` appears within
 30s. The daemon needs a running proof pipeline before the burn fires —
 otherwise the covering bundle waits on daemon startup instead of on
@@ -450,7 +450,7 @@ sequence. Options:
   proof will succeed once coverage lands.
 - **Abandon and redeploy** — only worth it on a fresh testnet where the
   bridge has no other users. Follow the verifyBlock runbook's
-  [Case 6](./live_verifyBlock_runbook.md#case-6--state-loss--re-bootstrap-from-mid-chain)
+  [Case 6](./live_relayer_bridge_verifyBlock_runbook.md#case-6--state-loss--re-bootstrap-from-mid-chain)
   to re-seed at a fresh W·P boundary near current head, then re-run the
   burn. This is what Deploy #7 → #8 did on 2026-08-17 (see change log).
 

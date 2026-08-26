@@ -91,14 +91,14 @@ pub struct DecideInputs<'a> {
 /// - **Pre-wrap** (local data_len ≤ W): local layer-1 window is
 ///   `[genesis_anchor, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
 ///   Local has exactly one extra leading entry that must equal
-///   `chain.genesis_prev_max_level_layer_hash` (byte-reversed).
+///   `chain.genesis_prev_max_level_layer_hash` (both LE — see comparator
+///   endianness note at the top of this rustdoc).
 /// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
 ///   overwrites local's genesis slot): local and chain chronological
 ///   sequences are identical.
 ///
 /// Layers 2..MAX_LAYERS have no genesis prepend (shellnet's max_level=1
-/// seed block only stamps layer 1); their chronologies must match exactly
-/// modulo the per-slot byte reversal.
+/// seed block only stamps layer 1); their chronologies must match exactly.
 fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
     let w = local.window_size;
     for i in 0..MAX_LAYERS {
@@ -115,7 +115,9 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
         // chronological tuple comparison below still covers height
         // equality on every populated slot.
 
-        // Walk each ring oldest → newest, byte-reversing chain slots.
+        // Walk each ring oldest → newest. Both sides are already LE
+        // (see comparator rustdoc: `read_full_state` normalises chain
+        // slots at construction, so no reversal here).
         let local_chrono: Vec<([u8; 32], u64)> = {
             let len = lw.data_len;
             let start = if len < w { 0 } else { lw.write_cursor };
@@ -152,10 +154,10 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
         // chain as `storedPrevMaxLevelLayerHash` (empirically verified
         // for shellnet Deploy #6: env `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`
         // equals the seed's layer-1 anchor, not its deepest-layer anchor
-        // — despite the "max_level" in the name), so we byte-verify it.
+        // — despite the "max_level" in the name), so we equality-check it.
         // For layers 2..MAX_LAYERS, chain has no per-layer genesis anchor
         // surface; we accept the presence of a genesis prepend but do
-        // not byte-verify that first slot against chain. Runtime
+        // not equality-check that first slot against chain. Runtime
         // ack-time consistency (via `EthBridgeClient::submit_block`'s
         // `expectedPrevAnchor(numLayers)` cross-check, per
         // `history_consistency.rs:38-47`) is the authoritative gate for
@@ -216,6 +218,48 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
                 "local BridgeState.window_size={} != daemon window_size={} — \
                  delete prover_state.json and rebootstrap",
                 local.window_size, window_size,
+            ),
+        };
+    }
+
+    // Anchor-level vs chain-shape mismatch: refuse before the Resurrect arm
+    // persists a state file with the daemon's `anchor_level` stamped over
+    // windows produced under a different level. Both directions are
+    // reachable without an on-disk state at all (fresh install), so this
+    // check has to sit above the initialized/uninitialized fork below.
+    //
+    // The `last_seen % stride` alignment check in the caller does not catch
+    // either direction — every W² boundary is simultaneously W·P-aligned
+    // (16384 % 1024 == 0), so an L2-advanced cursor slips through as an
+    // L1-daemon target, and an L1-driven cursor that happens to land on a
+    // W² multiple slips through as an L2-daemon target.
+    //
+    // Failure mode without this gate: Resurrect copies chain windows into
+    // local state, stamps `anchor_level = <daemon cfg>` on disk, then the
+    // driver drives at the wrong cadence and the first verifyBlock reverts
+    // on `PrevAnchorMismatch`. Worse, the poisoned state file blocks a
+    // restart with the corrected `--anchor-level` (the state-vs-cfg drift
+    // guard trips first), so recovery requires manually moving the file.
+    if anchor_level == 1 {
+        if let Some(l) = chain.highest_populated_layer() {
+            return StartupDecision::Stop {
+                reason: format!(
+                    "refuse: daemon configured for L1 but on-chain contract has \
+                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). \
+                     Restart with --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}."
+                ),
+            };
+        }
+    }
+    if anchor_level >= 2
+        && chain.layer_windows[0].data_len > 0
+        && chain.highest_populated_layer().map_or(true, |l| l < anchor_level)
+    {
+        return StartupDecision::Stop {
+            reason: format!(
+                "refuse: daemon configured for L{anchor_level} but on-chain contract's \
+                 deepest populated layer is 1 (contract has only ever been driven by an \
+                 L1 daemon). Restart with --anchor-level 1 / BRIDGE_ANCHOR_LEVEL=1."
             ),
         };
     }
@@ -627,6 +671,103 @@ mod tests {
                 assert!(reason.contains("window width"), "reason: {reason}");
             }
             d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    // Chain-shape helper for anchor-level-vs-chain-shape tests below. Builds
+    // an `EthBridgeContractState` whose layer 1 window has a single populated
+    // entry, and optionally a single populated entry in the layer 2 window
+    // (`with_l2 = true`). Cursor / bk fields set to non-genesis values so
+    // routing does not treat the state as an empty chain.
+    fn chain_with_layer1_and_optional_l2(seq: u64, with_l2: bool) -> EthBridgeContractState {
+        let mut chain = empty_chain();
+        chain.last_seen_block_seq_no = seq;
+        chain.bk_set_commitment = [7u8; 32];
+        chain.layer_windows[0].data_len = 1;
+        chain.layer_windows[0].data[0] = [0x11; 32];
+        chain.layer_windows[0].heights[0] = seq;
+        chain.layer_windows[0].last_height = seq;
+        if with_l2 {
+            chain.layer_windows[1].data_len = 1;
+            chain.layer_windows[1].data[0] = [0x22; 32];
+            chain.layer_windows[1].heights[0] = seq;
+            chain.layer_windows[1].last_height = seq;
+        }
+        chain
+    }
+
+    #[test]
+    fn stop_when_cfg_l1_but_chain_l2_advanced_before_resurrect_save() {
+        // Fresh install (local uninitialized) pointed at an L2-advanced
+        // contract while the operator forgot `--anchor-level 2`. Must
+        // refuse before `decide()` would otherwise choose `Resurrect`
+        // and persist a `state.anchor_level=1` mirroring L2 windows.
+        let chain = chain_with_layer1_and_optional_l2(10, true);
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 1,
+        }) {
+            StartupDecision::Stop { reason } => {
+                assert!(reason.contains("layer_windows[2]"), "reason: {reason}");
+                assert!(reason.contains("--anchor-level 2"), "reason: {reason}");
+            }
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_when_cfg_l2_but_chain_l1_only_at_w2_boundary() {
+        // W=4 → W² = 16. Chain has last_seen=16 (W²-aligned, so any upstream
+        // stride-modulus guard passes) but only layer 1 was ever populated —
+        // classic "L1-driven contract that happens to sit on a W² multiple".
+        // An L2-configured daemon must refuse rather than adopt a chain
+        // snapshot missing the layer it was launched to prove.
+        let chain = chain_with_layer1_and_optional_l2(16, false);
+        assert_eq!(chain.last_seen_block_seq_no % (W as u64 * W as u64), 0);
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop { reason } => {
+                assert!(
+                    reason.contains("only ever been driven by an L1"),
+                    "reason: {reason}",
+                );
+                assert!(reason.contains("--anchor-level 1"), "reason: {reason}");
+            }
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn cfg_l2_does_not_refuse_post_deploy_empty_windows() {
+        // Regression guard for the L2 branch: a just-deployed L2 contract
+        // has a non-zero cursor (constructor stamps genesis seed_seqno) but
+        // every layer window is empty. Must route to Cold, not Stop.
+        let seed_seqno: u64 = 16;
+        let mut chain = empty_chain();
+        chain.last_seen_block_seq_no = seed_seqno;
+        chain.bk_set_commitment = [7u8; 32];
+        let local = BridgeState::new(W);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Cold { policy } => {
+                assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
+            }
+            d => panic!("expected Cold, got {d:?}"),
         }
     }
 }

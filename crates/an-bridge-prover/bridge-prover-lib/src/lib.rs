@@ -84,7 +84,7 @@ pub enum AnchorMode {
     /// Cold-start + first covering bundle verified end-to-end; multi-day
     /// continuous-production stress run not yet on record. Daemons emit a
     /// `warn!` on startup when this mode is selected — see
-    /// `crates/an-bridge-prover/docs/live_verifyBlock_runbook.md` Case 7 for
+    /// `crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md` Case 7 for
     /// the expected log signature. Circuit 2 itself is level-parametric
     /// (same VK across L1/L2); the maturity gap is in operational coverage,
     /// not the ZK stack.

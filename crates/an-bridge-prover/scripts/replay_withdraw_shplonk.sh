@@ -47,7 +47,7 @@ TS=$(date +%Y%m%d_%H%M%S)
 mkdir -p logs L1_config/proofs L1_config/work_dir/shplonk-snark-replay
 
 if [ ! -f L1_config/env ]; then
-  echo "!!! L1_config/env not found — see docs/live_verifyBlock_runbook.md"
+  echo "!!! L1_config/env not found — see crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md"
   exit 1
 fi
 set -a && source L1_config/env && set +a

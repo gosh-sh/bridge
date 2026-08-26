@@ -1085,7 +1085,7 @@ contract AckiNackiBridge {
     ///      fresh install, a co-tester's daemon, or a mid-run machine
     ///      handoff hit when only `getLatestPerLayer()` was exposed
     ///      (heads-only). See
-    ///      `crates/bridge-relayer-daemon/docs/live_verifyBlock_runbook.md`
+    ///      `crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`
     ///      Case 6 (Chain-resurrect).
     ///
     ///      Struct return uses the ABI encoder v2 default in Solidity 0.8

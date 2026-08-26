@@ -301,8 +301,7 @@ Infura / QuickNode) are usable once you're funded; they hand out
 `MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
 2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
 submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
-**Target 
-≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
+**Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
 The [Health checks](#health-checks-run-any-time) block includes a
 wallet-balance line — refill from either faucet when it drops below
 0.5 ETH.

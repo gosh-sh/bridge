@@ -1,0 +1,92 @@
+name: gosh-bridge-relayer-shellnet-l2
+
+x-relayer-build: &relayer-build
+  context: ${BRIDGE_SOURCE_DIR:-../../../..}
+  dockerfile: crates/bridge-relayer-daemon/deploy/shellnet-l2/Dockerfile
+  additional_contexts:
+    relayer_release: ${RELAYER_RELEASE_DIR:-../../../an-bridge-prover/target/release}
+    aggregator_release: ${AGGREGATOR_RELEASE_DIR:-../../../bridge-evm-aggregator/target/release}
+    verifier_bins: ${VERIFIER_BINS_DIR:-../../../../contracts/ethereum/verifiers}
+    foundry_bin: ${FOUNDRY_BIN_DIR:-/usr/local/bin}
+    solc_bin: ${SOLC_BIN_DIR:-/root/.local/share/svm/0.8.19}
+  args:
+    SOURCE_COMMIT: ${EXPECTED_BRIDGE_COMMIT:-local}
+    RELAYER_UID: ${RELAYER_UID:-998}
+    RELAYER_GID: ${RELAYER_GID:-998}
+
+x-relayer-runtime: &relayer-runtime
+  image: ${RELAYER_IMAGE:-gosh-bridge-relayer-l2:local}
+  pull_policy: never
+  user: "${RELAYER_UID:-998}:${RELAYER_GID:-998}"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    RELAYER_RUNTIME_ENV_FILE: /run/secrets/runtime-env
+  volumes:
+    - type: bind
+      source: ${RELAYER_RUNTIME_ENV:-/etc/gosh-bridge-relayer/shellnet-l2.env}
+      target: /run/secrets/runtime-env
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}/params
+      target: /data/params
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}/params/pk_cache
+      target: /data/pk-cache
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}/L2_config
+      target: /data/L2_config
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}/submissions
+      target: /data/submissions
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}/tmp
+      target: /tmp
+      bind:
+        create_host_path: false
+  logging:
+    driver: local
+    options:
+      max-size: 100m
+      max-file: "10"
+  stop_signal: SIGTERM
+  stop_grace_period: 20m
+  restart: "no"
+  networks:
+    - relayer-egress
+
+services:
+  preflight:
+    <<: *relayer-runtime
+    build: *relayer-build
+    profiles:
+      - ops
+    entrypoint:
+      - /opt/gosh-relayer/bin/container-entrypoint.sh
+      - preflight
+
+  relayer:
+    <<: *relayer-runtime
+    build: *relayer-build
+    init: true
+    entrypoint:
+      - /opt/gosh-relayer/bin/container-entrypoint.sh
+      - run
+
+networks:
+  relayer-egress:
+    driver: bridge

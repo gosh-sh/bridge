@@ -174,15 +174,14 @@ the head back. Same-slot replay and already-proven hashes still revert.
   weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
   is anchored.
 
-**Recovery after `disableOwnerRotation()`.** `_currentCommittee` is then
-written only by `submitRotate`, which requires an unbroken period chain.
-Replaying historical rotations can catch up **within one sync-committee
-period (~27 h)** — the weak-subjectivity bound. Past that lag there is no
-on-chain re-anchor (`setCommitteeCommitment` is gone) and the only recovery
-is a contract redeploy with a fresh WS checkpoint. Therefore
-`disableOwnerRotation()` is **not** called until (a) every validating node
-ships the opcode decider (tvm-sdk#284) **and** (b) the M5 relayer is live
-with an SLA + lag alert (~20 h).
+**Recovery after `disableOwnerRotation()`.** Everyday committee advance is then
+only `submitRotate` (unbroken period chain). Catch-up by replaying rotations is
+safe for **at most one sync-committee period (~27 h)**. Past that lag the owner
+calls `reAnchorCommittee(commitment, period)` — a logged WS hop
+(`CommitteeReAnchored`, `reAnchorsApplied++`) that does **not** write exec
+hashes. `setCommitteeCommitment` stays disabled. `disableOwnerRotation()` still
+waits for the opcode decider on every node; the relayer SLA is what keeps
+`reAnchorsApplied` at 0.
 
 **Anchor retention.** `_provenExecutionBlockHash` / `_acceptedBlockHash` are
 permanent; there is no TTL. At checkpoint cadence that is ~225 entries/day,

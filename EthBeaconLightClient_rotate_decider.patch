@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000..019682c5e
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,897 @@
+@@ -0,0 +1,937 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
@@ -67,6 +67,7 @@ index 000000000..019682c5e
 +    uint constant bitCntAddress = 256;
 +    uint128 constant HeadUpdatedEmit = 701;
 +    uint128 constant CommitteeRotatedEmit = 702;
++    uint128 constant CommitteeReAnchoredEmit = 703;
 +
 +    // Error codes (kept clear of the shared USDCBridgeErrors range 204..229).
 +    uint16 constant ERR_NOT_OWNER          = 209;
@@ -79,6 +80,8 @@ index 000000000..019682c5e
 +    uint16 constant ERR_STALE_UPDATE       = 244;
 +    uint16 constant ERR_STALE_PERIOD       = 245;
 +    uint16 constant ERR_OWNER_ROTATION_DISABLED = 246;
++    uint16 constant ERR_REANCHOR_NOT_ARMED = 247;
++    uint16 constant ERR_REANCHOR_NOOP      = 248;
 +
 +    event HeadUpdated(
 +        uint64  finalizedSlot,
@@ -87,6 +90,11 @@ index 000000000..019682c5e
 +        uint256 committeeCommitment
 +    );
 +    event CommitteeRotated(
++        uint64  period,
++        uint256 fromCommitteeCommitment,
++        uint256 toCommitteeCommitment
++    );
++    event CommitteeReAnchored(
 +        uint64  period,
 +        uint256 fromCommitteeCommitment,
 +        uint256 toCommitteeCommitment
@@ -170,15 +178,15 @@ index 000000000..019682c5e
 +    // the weak-subjectivity checkpoint's period.
 +    uint64 _committeePeriod;
 +
-+    // Whether the owner may still advance the committee directly via
-+    // `setCommitteeCommitment`, bypassing the rotate proof. True while
-+    // bootstrapping (before the rotate VkBlob is emitted / while syncing from the
-+    // checkpoint); `disableOwnerRotation()` clears it permanently, which is the
-+    // step that reduces the committee-chain trust assumption from "owner key" to
-+    // "the rotate proof". One-way on purpose (mirrors USDCBridge's
-+    // `_ownerAnchorsEnabled`): a re-enable switch would leave the owner key on
-+    // the path regardless.
++    // Whether the owner may still advance the committee via the *routine*
++    // `setCommitteeCommitment` path. True while bootstrapping; `disableOwnerRotation()`
++    // clears it permanently. After that the permissionless writer is `submitRotate`,
++    // and the only owner committee writer left is the exceptional WS `reAnchorCommittee`.
++    // One-way on purpose (mirrors USDCBridge's `_ownerAnchorsEnabled`).
 +    bool _ownerRotationEnabled = true;
++
++    // How many times `reAnchorCommittee` has fired (telemetry / alerting).
++    uint64 _reAnchorsApplied;
 +
 +    // Canonicality registry: proven finalized execution block hashes.
 +    mapping(uint256 => bool) _provenExecutionBlockHash;
@@ -296,7 +304,8 @@ index 000000000..019682c5e
 +    ///         proof. This is what makes the committee chain trustless from the
 +    ///         weak-subjectivity checkpoint: `submitUpdate` only trusts a
 +    ///         committee equal to `_currentCommittee`, and this is the only
-+    ///         permissionless way that value moves.
++    ///         permissionless way that value moves (owner `reAnchorCommittee` is
++    ///         the exceptional WS hatch after `disableOwnerRotation`).
 +    ///
 +    ///         The rotate proof (`eth-light-client-prover` recursive rotate, M6)
 +    ///         establishes, all bound in-circuit, that (a) the committee whose
@@ -370,11 +379,9 @@ index 000000000..019682c5e
 +    }
 +
 +    /// @notice Bootstraps / owner-advances the trusted sync-committee commitment.
-+    ///         This is the trust seam that `submitRotate` replaces: while
-+    ///         `_ownerRotationEnabled` the owner may set the committee directly
-+    ///         (weak-subjectivity checkpoint, or syncing before the rotate VkBlob
-+    ///         is emitted). `disableOwnerRotation()` turns this off permanently,
-+    ///         leaving the rotate proof as the only committee-advance path.
++    ///         Routine path, gated by `_ownerRotationEnabled`. After
++    ///         `disableOwnerRotation()` use `reAnchorCommittee` for WS recovery
++    ///         — this function reverts `ERR_OWNER_ROTATION_DISABLED`.
 +    /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
 +    /// @param period             — the period it belongs to (rotate monotonicity baseline).
 +    function setCommitteeCommitment(uint256 committeeCommitment, uint64 period)
@@ -386,22 +393,53 @@ index 000000000..019682c5e
 +        _committeePeriod = period;
 +    }
 +
-+    /// @notice Permanently gives up the owner's ability to advance the committee
-+    ///         directly, leaving `submitRotate` (the rotate proof) as the only
-+    ///         writer. This is the call that turns the committee chain from
-+    ///         "trusted by the owner key" into "trustless from the checkpoint".
-+    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors):
-+    ///      a switch back would leave the owner key on the path. Requires the
-+    ///      committee to be bootstrapped first, so this cannot brick rotation.
-+    ///      After this call there is no on-chain re-anchor: `submitRotate` must
-+    ///      keep an unbroken period chain. Safe catch-up is at most one sync-
-+    ///      committee period (~27 h, weak subjectivity). Past that lag the only
-+    ///      recovery is a contract redeploy with a fresh WS checkpoint. Do not
-+    ///      call until the relayer SLA + opcode decider are live on every node.
++    /// @notice Permanently drops the *routine* owner committee path
++    ///         (`setCommitteeCommitment`). After this, `submitRotate` is the only
++    ///         permissionless writer; the owner retains `reAnchorCommittee` as the
++    ///         exceptional weak-subjectivity recovery hop (logged, does not write
++    ///         exec hashes). This is the call that turns everyday committee
++    ///         advance from "trusted by the owner key" into "the rotate proof".
++    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors).
++    ///      Requires the committee to be bootstrapped first. Do not call until
++    ///      the opcode decider is on every node; the relayer SLA still matters
++    ///      because re-anchor is a trust hop, not a substitute for liveness.
 +    function disableOwnerRotation() public onlyOwnerPubkey accept {
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        ensureBalance();
 +        _ownerRotationEnabled = false;
++    }
++
++    /// @notice Weak-subjectivity recovery: owner sets a fresh committee after
++    ///         `disableOwnerRotation()`, when `submitRotate` cannot trustlessly
++    ///         bridge a gap of more than one period. Not the routine bootstrap
++    ///         path (`setCommitteeCommitment`); an exceptional, logged hop that
++    ///         reintroduces owner trust for one checkpoint. Does NOT write
++    ///         execution-block hashes — those still require a step proof.
++    ///         Source the new commitment from ≥ 2 independent checkpoint-sync
++    ///         providers (M0 §7).
++    /// @dev Armed only after disable (`ERR_REANCHOR_NOT_ARMED` otherwise).
++    ///      `period` must not go backwards. Same committee+period reverts
++    ///      `ERR_REANCHOR_NOOP`.
++    /// @param committeeCommitment — Poseidon commitment of the new WS committee.
++    /// @param period             — period it belongs to (must be ≥ current).
++    function reAnchorCommittee(uint256 committeeCommitment, uint64 period)
++        public onlyOwnerPubkey accept
++    {
++        require(!_ownerRotationEnabled, ERR_REANCHOR_NOT_ARMED);
++        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
++        require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
++        require(period >= _committeePeriod, ERR_STALE_PERIOD);
++        require(
++            committeeCommitment != _currentCommittee || period != _committeePeriod,
++            ERR_REANCHOR_NOOP
++        );
++        ensureBalance();
++        uint256 from = _currentCommittee;
++        _currentCommittee = committeeCommitment;
++        _committeePeriod = period;
++        _reAnchorsApplied += 1;
++        address addrExtern = address.makeAddrExtern(CommitteeReAnchoredEmit, bitCntAddress);
++        emit CommitteeReAnchored{dest: addrExtern}(period, from, committeeCommitment);
 +    }
 +
 +    // ========================================================
@@ -440,15 +478,17 @@ index 000000000..019682c5e
 +        return (_l1ChainId, _usdcBridge, _ownerPubkey);
 +    }
 +
-+    /// @notice The committee-chain trust state. `ownerRotationEnabled` is the one
-+    ///         that matters: while true the effective trust root for the committee
-+    ///         is the owner key regardless of the rotate proof.
++    /// @notice The committee-chain trust state. While `ownerRotationEnabled` the
++    ///         effective trust root is the owner key. After disable, everyday
++    ///         advance is the rotate proof; `reAnchorsApplied` counts exceptional
++    ///         WS hops (should stay 0 under a live relayer SLA).
 +    function getCommitteeState() external view returns (
 +        uint256 currentCommittee,
 +        uint64  committeePeriod,
-+        bool    ownerRotationEnabled
++        bool    ownerRotationEnabled,
++        uint64  reAnchorsApplied
 +    ) {
-+        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled);
++        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled, _reAnchorsApplied);
 +    }
 +
 +    function getVersion() external pure returns (string, string) {

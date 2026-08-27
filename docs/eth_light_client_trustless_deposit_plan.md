@@ -227,8 +227,10 @@ months** with two engineers. M-agg and hardening extend from there.
   Open: how aggressively to pre-support Electra/Fulu gindices.
 - **G1/G2 subgroup checks** (audit BLS-1/FORK-2): mandatory here — a wrong-subgroup pubkey/sig
   could forge. Must be constrained, not assumed.
-- **Weak subjectivity / liveness.** Relayer must not fall > 1 period behind. Open: automated
-  re-anchor UX + who signs the WS checkpoint bump (governance).
+- **Weak subjectivity / liveness.** Relayer must not fall > 1 period behind. On-chain recovery
+  past that bound is `EthBeaconLightClient.reAnchorCommittee` (owner, after `disableOwnerRotation()`,
+  emits `CommitteeReAnchored`). Open: operator runbook for sourcing the new checkpoint from ≥ 2
+  independent providers, and whether the owner key is later a multisig.
 - **Two-proof vs aggregate.** MVP = contract cross-check (blockHash ∈ finalized set). Open: whether
   UX/atomicity justifies M-agg.
 - **SRS/opcode.** Confirm VkBlob v2 RLC path handles the new PI count (VK-driven, expected fine);

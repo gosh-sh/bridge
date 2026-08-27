@@ -19,7 +19,9 @@ owner?** That is the rotate proof's job — it is the only permissionless writer
 Trust reduces to a single weak-subjectivity checkpoint: bootstrap
 `_currentCommittee` once from a trusted source, then every subsequent committee is
 proven the legitimate successor of the previous one. After
-`disableOwnerRotation()` the owner key is off the committee-advance path entirely.
+`disableOwnerRotation()` the *routine* owner path is gone; `submitRotate` is the
+only permissionless writer. The owner retains `reAnchorCommittee` as an
+exceptional WS recovery hop (logged; does not write exec hashes).
 
 ## Trust model (R2 — self-contained rotate, chosen)
 
@@ -66,7 +68,8 @@ function submitRotate(bytes proof, bytes publicInputs) public;   // permissionle
 function setCommitteeCommitment(uint256 commitment, uint64 period) // owner, bootstrap-only
     public;                                                        //   (gated by _ownerRotationEnabled)
 function disableOwnerRotation() public;                           // owner, one-way
-function getCommitteeState() external view returns (uint256, uint64, bool);
+function reAnchorCommittee(uint256 commitment, uint64 period) public; // owner, WS hatch after disable
+function getCommitteeState() external view returns (uint256, uint64, bool, uint64);
 ```
 
 `submitRotate` logic:
@@ -82,7 +85,8 @@ The **trust-reduction switch** mirrors `USDCBridge`'s
 `_ownerAnchorsEnabled`/`disableOwnerAnchors`: while `_ownerRotationEnabled` the
 owner may `setCommitteeCommitment` directly (checkpoint bootstrap / syncing before
 the VkBlob exists); `disableOwnerRotation()` clears it permanently, leaving
-`submitRotate` the only writer. One-way on purpose.
+`submitRotate` the only permissionless writer; `reAnchorCommittee` is the
+exceptional WS hatch (logged, no exec-hash write). One-way on purpose.
 
 ## Hardware blocker (why the VkBlob is not emitted yet)
 
@@ -118,6 +122,7 @@ Once emitted, wiring is a drop-in: add `examples/export_rotate_vk_blob.rs`
 |-------|-------|
 | `submitRotate` + parse + monotonic period + committee chain | ✅ contract |
 | `disableOwnerRotation()` trust-reduction switch + `getCommitteeState` | ✅ contract |
+| `reAnchorCommittee` WS hatch (after disable; no exec-hash write) | ✅ contract |
 | Bootstrap `setCommitteeCommitment(commitment, period)` gated by `_ownerRotationEnabled` | ✅ contract |
 | R2 self-contained trust model + PI layout | ✅ designed |
 | Rotate circuit full instance exposure (`pack_rotate_instances` + BLS-in-rotate) | ⏳ (rotate.rs is SSZ-anchor-only today) |

@@ -120,15 +120,17 @@ receives ≥ 1 valid update per sync-committee period (~27 h). If it lapses beyo
 period with no covering update, it **cannot** trustlessly bridge the gap (long-range) →
 requires a governed **re-anchor**.
 
-**Re-anchor procedure (rare, governed):** governance sets a fresh
-`(current_sync_committee_root, genesis_validators_root, anchor_slot)` from a new
-bootstrap, verified against multiple independent sources; documented and logged.
-After `disableOwnerRotation()` the contract has **no** `setCommitteeCommitment`
-path — that call is the trust-reduction switch, and a re-anchor back-door would
-put the owner key back on the committee-advance path. Catch-up via `submitRotate`
-is safe for at most one missed period; past the WS bound the recovery is a
-**contract redeploy** with a new checkpoint. Do not flip the switch until the
-relayer SLA exists (see [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md)
+**Re-anchor procedure (rare, governed):** after `disableOwnerRotation()`, the
+owner calls `reAnchorCommittee(commitment, period)` with a fresh sync-committee
+Poseidon commitment from a new bootstrap, verified against ≥ 2 independent
+checkpoint-sync providers; the contract emits `CommitteeReAnchored` (distinct
+from `CommitteeRotated`) and increments `reAnchorsApplied`. This is **not**
+`setCommitteeCommitment` (that routine path is gone after disable) and it does
+**not** write execution-block hashes — those still need a step proof under the
+new committee. Catch-up via `submitRotate` is safe for at most one missed
+period; past the WS bound this hop is the on-chain recovery (a redeploy is no
+longer required). Under a live relayer SLA `reAnchorsApplied` should stay 0
+(see [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md)
 §Operational constraints).
 
 **Relayer SLA:** submit ≥ 1 update per period **plus** on-demand updates so any pending

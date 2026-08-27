@@ -53,7 +53,8 @@ assigns it when the release is tagged.
   relayer under `crates/bridge-relayer-daemon/deploy/shellnet-l2/`. It includes
   a non-root read-only runtime image, external secret env template, bind-mount
   layout, full artifact/on-chain preflight, parameter finalization and an
-  operator status command.
+  operator status command. The service uses `restart: unless-stopped` for
+  host/Docker recovery and reruns the fail-closed preflight on every start.
 - The `bridge-evm-aggregator` lockfile is now tracked so target-host and image
   builds can use `cargo build --locked` reproducibly.
 - New environment variables consumed by `bridge_prover_lib::paths`:

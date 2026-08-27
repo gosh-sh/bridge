@@ -65,7 +65,7 @@ x-relayer-runtime: &relayer-runtime
       max-file: "10"
   stop_signal: SIGTERM
   stop_grace_period: 20m
-  restart: "no"
+  restart: unless-stopped
   networks:
     - relayer-egress
 

@@ -19,10 +19,12 @@ deployment and anchor derivation are covered by
   all capabilities dropped and `no-new-privileges` enabled.
 - Params, outer proving-key cache, state, submission dumps and scratch space
   are bind-mounted below `RELAYER_RUNTIME_ROOT`.
-- `restart: "no"` is deliberate. Transport failures and logical verifier
-  rejects currently share the same hard-abort counter. Before restarting an
-  exited daemon, reconcile latest/pending nonce, receipt, on-chain cursor and
-  both state JSON files.
+- `restart: unless-stopped` restores the daemon after an unexpected exit or a
+  Docker/host restart while preserving an intentional operator stop. Every
+  container start reruns artifact and on-chain preflight before the daemon can
+  send a transaction. Alert on a growing restart count: a persistent logical
+  rejection still requires stopping the service and reconciling nonce,
+  receipt, on-chain cursor and both state JSON files.
 
 Only one daemon may use a given bridge/EOA/state tuple.
 
@@ -143,5 +145,8 @@ compact `jq` views of both state files. Before the next 16,384-block boundary,
 `hard aborting`, `BridgeReverted`, startup drift, SRS/VK drift, pending nonce,
 or unequal local/on-chain cursors after a receipt.
 
-On a planned host reboot, run the read-only preflight again before
-`docker compose up -d relayer`; the service does not blindly auto-restart.
+After a planned host reboot, the service returns automatically unless an
+operator stopped it explicitly. Confirm recovery with `docker compose ps`,
+logs and `status.sh`; the normal container entrypoint has already rerun the
+same read-only preflight. If that preflight fails, inspect the restart logs and
+run `docker compose run --rm preflight` after correcting the cause.

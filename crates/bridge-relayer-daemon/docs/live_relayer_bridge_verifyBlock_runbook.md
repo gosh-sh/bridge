@@ -163,10 +163,14 @@ only. The operator flow is:
 6. after the first confirmation, require local/on-chain cursor equality and
    perform one controlled stop/start to prove the `WarmResume` path.
 
-`restart: "no"` is intentional until transport failures and logical rejects
-have separate abort semantics. Never start two daemons with the same
-bridge/EOA/state tuple. The remaining sections document contract deployment,
-direct execution and recovery details used by that wrapper.
+`restart: unless-stopped` restores the service after an unexpected exit or a
+Docker/host restart. The container reruns the full fail-closed preflight on
+every start; a pending nonce, artifact drift or state/on-chain mismatch blocks
+the daemon before it can send a transaction. Alert on repeated restarts and
+stop the service for reconciliation after a persistent logical rejection.
+Never start two daemons with the same bridge/EOA/state tuple. The remaining
+sections document contract deployment, direct execution and recovery details
+used by that wrapper.
 
 ## Binary + env prerequisites
 

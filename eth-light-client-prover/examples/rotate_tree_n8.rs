@@ -148,6 +148,11 @@ fn parse_base_v1_vkblob(bytes: &[u8]) -> (BaseCircuitParams, Vec<u8>) {
     assert_eq!(bytes[8], 1, "expected v1 (Base)");
     assert_eq!(bytes[9], 0, "expected Blake2b transcript");
     assert_eq!(bytes[10], 0, "v1 shape byte must be reserved 0");
+    assert_eq!(
+        bytes[11],
+        VKBLOB_ACCUMULATOR_LIMBS,
+        "rotate VkBlob byte 11 must be accumulator_limbs=12 (KZG decider flag)",
+    );
     let mut off = 16;
     let cfg_len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
     off += 4;
@@ -455,6 +460,12 @@ fn main() -> anyhow::Result<()> {
         println!("   Blake2b prove {:.1}s → {} B", t.elapsed().as_secs_f64(), proof.len());
 
         let vk_blob = encode_base_v1_vkblob(&base_params, pk.get_vk());
+        anyhow::ensure!(
+            vk_blob.len() >= 12 && vk_blob[11] == VKBLOB_ACCUMULATOR_LIMBS,
+            "EMIT_VKBLOB wrote accumulator_limbs={} (byte 11), want {VKBLOB_ACCUMULATOR_LIMBS}; \
+             a 0 here would ship an unsound rotate blob (opcode skips the KZG decider)",
+            vk_blob.get(11).copied().unwrap_or(0xFF),
+        );
 
         // Self-check the EXACT opcode Base read + SHPLONK verify path.
         let (cfg_back, vk_bytes_back) = parse_base_v1_vkblob(&vk_blob);

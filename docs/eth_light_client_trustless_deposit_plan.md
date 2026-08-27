@@ -201,7 +201,7 @@ Estimates assume 1 strong ZK engineer reusing the existing chips; parallelizable
 | **M5 — relayer** | `eth-light-client-relayer`: beacon fetch → prove → submit; cadence/liveness; state persistence; `--dry-run`. | 2 wk |
 | **M6 — E2E on testnet** | Holešky/Hoodi beacon → shellnet: advance head across ≥ 2 committee rotations; a real deposit finalizes only after its block is light-client-finalized; negative test (fabricated block rejected). | 2 wk |
 | **M-agg (optional)** | Aggregate light-client + deposit into one proof (snark-verifier) if we want atomic single-proof deposits. | 3–4 wk |
-| **M-audit** | Internal + external audit of the new circuit + contract; close BLS subgroup finding. | 3–4 wk |
+| **M-audit** | Internal + external audit of the new circuit + contract **and the opcode-side KZG-accumulator decider** (tvm-sdk#284 — the only check that a recursive rotate's inner proofs were actually verified); close BLS subgroup finding. | 3–4 wk |
 
 **Critical path (correctness-complete, attester removed):** M0→M6 ≈ **3–4 months** solo, ~**2–3
 months** with two engineers. M-agg and hardening extend from there.

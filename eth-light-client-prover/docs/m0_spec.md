@@ -123,6 +123,13 @@ requires a governed **re-anchor**.
 **Re-anchor procedure (rare, governed):** governance sets a fresh
 `(current_sync_committee_root, genesis_validators_root, anchor_slot)` from a new
 bootstrap, verified against multiple independent sources; documented and logged.
+After `disableOwnerRotation()` the contract has **no** `setCommitteeCommitment`
+path — that call is the trust-reduction switch, and a re-anchor back-door would
+put the owner key back on the committee-advance path. Catch-up via `submitRotate`
+is safe for at most one missed period; past the WS bound the recovery is a
+**contract redeploy** with a new checkpoint. Do not flip the switch until the
+relayer SLA exists (see [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md)
+§Operational constraints).
 
 **Relayer SLA:** submit ≥ 1 update per period **plus** on-demand updates so any pending
 deposit's target block is finalized promptly; alert when lag exceeds ~20 h.

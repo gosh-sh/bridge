@@ -141,6 +141,67 @@ same VkBlob bytes, same opcode handler.
 - Public-input decode mirrors `USDCBridge._parseBlockHash` byte-for-byte (LE, hi<<128|lo).
 - Brace/paren/bracket balance on both files.
 
+## Operational constraints (go / no-go)
+
+These are the rollout limits of the M5 contract + M6 rotate, written so a
+reviewer does not have to reconstruct them from comments. They are **accepted
+for this PR**; ancestry / relayer / audit are later milestones, not silent
+omissions.
+
+**Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
+`finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
+A deposit whose receipt sits in any of the other 31 blocks of that epoch
+cannot pass `finalizeDeposit` until the ancestry/receipts milestone ties it
+to an anchored head. That is an accepted coverage regression vs the attester
+MVP (which could mark *any* block). Gate-flip of `finalizeDeposit` onto this
+oracle waits for ancestry **or** an explicit product decision to live with
+checkpoint-only coverage (relayer only submits deposits in anchored
+checkpoint blocks).
+
+**Missed checkpoints.** The head is skip-*forward*:
+`require(finalizedSlot > _finalizedSlot)` lets the relayer jump to a later
+checkpoint. It cannot go back: a skipped checkpoint's execution hash is never
+registered. So:
+
+- Head liveness does **not** require every 6.4 min update — jumping to the
+  latest checkpoint is enough to keep the committee/WS clock moving.
+- 1/32 deposit coverage **does** require every checkpoint. A deposit in a
+  skipped checkpoint's execution block has no recovery path until ancestry.
+- Intended cadence (M0 §7 / M5 relayer): ≥ 1 update per period (~27 h) for
+  weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
+  is anchored. Continuous every-checkpoint is the coverage mode, not the
+  liveness mode.
+
+**Recovery after `disableOwnerRotation()`.** `_currentCommittee` is then
+written only by `submitRotate`, which requires an unbroken period chain.
+Replaying historical rotations can catch up **within one sync-committee
+period (~27 h)** — the weak-subjectivity bound. Past that lag there is no
+on-chain re-anchor (`setCommitteeCommitment` is gone) and the only recovery
+is a contract redeploy with a fresh WS checkpoint. Therefore
+`disableOwnerRotation()` is **not** called until (a) every validating node
+ships the opcode decider (tvm-sdk#284) **and** (b) the M5 relayer is live
+with an SLA + lag alert (~20 h).
+
+**Anchor retention.** `_provenExecutionBlockHash` / `_acceptedBlockHash` are
+permanent; there is no TTL. At checkpoint cadence that is ~225 entries/day,
+~82 k/year, duplicated across the two contracts — accepted. If ancestry
+extends coverage to every block (~2.6 M/year) a retention window becomes a
+product trade (older deposits stop being claimable) and will be designed
+then, not now.
+
+**Relayer / audit.** M5 relayer is not started; M-audit is not started. The
+attester path stays the canonicality writer until the relayer exists with
+monitoring. External audit of this stack must include the opcode-side
+decider in tvm-sdk#284 — it is the only check that the recursive rotate's
+inner proofs were actually verified.
+
+**`accumulator_limbs = 12`.** Enforced by
+`scripts/check_rotate_vkblob_accumulator.sh` (fixture header + sha256 pin +
+patch hex identity + byte-11-cleared negative probe), by the `EMIT_VKBLOB`
+path in `examples/rotate_tree_n8.rs`, and by `embed_rotate_vk_blob.py` /
+`sync_rotate_opcode_fixtures_to_tvm_sdk.sh` refusing a 0. See
+[`m6_rotate_recursive.md`](m6_rotate_recursive.md) §Decider.
+
 ## Next seams
 
 - **rotate ↔ step**: `submitRotate(proof, publicInputs)` is now **wired to the

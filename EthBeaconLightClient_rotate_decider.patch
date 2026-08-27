@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000..019682c5e
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,889 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
@@ -43,10 +43,19 @@ index 000000000..019682c5e
 +///             `setCommitteeCommitment`).
 +///
 +///         Known scope limit (M5): the proof anchors the *finalized checkpoint*
-+///         block's execution hash. A deposit sitting in a non-checkpoint block
-+///         is covered only once an ancestry/receipts proof ties it to an
-+///         anchored head — a later milestone. Today the relayer submits
-+///         deposits whose block the light client has anchored.
++///         block's execution hash (one execution hash per 32-slot epoch). A
++///         deposit sitting in a non-checkpoint block is covered only once an
++///         ancestry/receipts proof ties it to an anchored head — a later
++///         milestone. Until then this is an accepted coverage regression vs the
++///         attester MVP: the relayer submits deposits whose block the light
++///         client has anchored (checkpoint blocks only).
++///
++///         Head is skip-forward: `submitUpdate` requires
++///         `finalizedSlot > _finalizedSlot`, so a later checkpoint may be
++///         submitted without the skipped ones. A skipped checkpoint cannot be
++///         registered afterwards; deposits in that checkpoint's execution
++///         block wait for the ancestry milestone. Continuous every-checkpoint
++///         anchoring is required for 1/32 coverage, not for head liveness.
 +contract EthBeaconLightClient {
 +    string constant version = "0.1.0";
 +
@@ -231,7 +240,9 @@ index 000000000..019682c5e
 +        // committee (rotate ↔ step join).
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-+        // Monotonic head — reject stale / replayed updates.
++        // Skip-forward: a later checkpoint is accepted (head jumps). A slot
++        // behind the head can never be registered afterwards — missed
++        // checkpoint deposits wait for the ancestry milestone.
 +        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
 +
 +        // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
@@ -374,6 +385,11 @@ index 000000000..019682c5e
 +    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors):
 +    ///      a switch back would leave the owner key on the path. Requires the
 +    ///      committee to be bootstrapped first, so this cannot brick rotation.
++    ///      After this call there is no on-chain re-anchor: `submitRotate` must
++    ///      keep an unbroken period chain. Safe catch-up is at most one sync-
++    ///      committee period (~27 h, weak subjectivity). Past that lag the only
++    ///      recovery is a contract redeploy with a fresh WS checkpoint. Do not
++    ///      call until the relayer SLA + opcode decider are live on every node.
 +    function disableOwnerRotation() public onlyOwnerPubkey accept {
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        ensureBalance();
@@ -810,7 +826,8 @@ index 000000000..019682c5e
 +    //   yet trustless (see `submitRotate`). Keep the owner bootstrap path
 +    //   (`setCommitteeCommitment`) as the committee trust root and do NOT call
 +    //   `disableOwnerRotation()` until every validating node ships the opcode
-+    //   decider extension (tvm-sdk#284).
++    //   decider extension (tvm-sdk#284). Header byte 11 is `accumulator_limbs
++    //   = 12`; `scripts/check_rotate_vkblob_accumulator.sh` refuses a 0.
 +    //
 +    // To rotate: regenerate the fixture in acki-nacki-bridge on a big-RAM host
 +    //   (cd eth-light-client-prover &&

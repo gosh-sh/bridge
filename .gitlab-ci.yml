@@ -185,6 +185,28 @@ build:solidity:
       - contracts/ethereum/node_modules/
     policy: pull-push
 
+# Cheap header gate for the recursive rotate VkBlob: byte 11 must be 12.
+# A 0 here is accepted by ZKHALO2VERIFYWITHVK without pairing the KZG
+# accumulator (inner proofs unchecked). No Rust toolchain needed.
+test:light-client:vkblob-header:
+  image: python:3.12-alpine
+  stage: test
+  tags:
+    - docker
+  script:
+    - apk add --no-cache bash
+    - chmod +x scripts/check_rotate_vkblob_accumulator.sh
+    - ./scripts/check_rotate_vkblob_accumulator.sh
+  rules:
+    - changes:
+        - eth-light-client-prover/fixtures/rotate_vkblob/**/*
+        - eth-light-client-prover/fixtures/step_vkblob/**/*
+        - scripts/check_rotate_vkblob_accumulator.sh
+        - scripts/embed_rotate_vk_blob.py
+        - scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh
+        - EthBeaconLightClient_rotate_decider.patch
+        - eth-light-client-prover/examples/rotate_tree_n8.rs
+
 # Test stage
 test:rust:
   extends: .rust_base

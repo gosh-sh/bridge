@@ -44,8 +44,20 @@ def main() -> int:
     args = ap.parse_args()
 
     blob = BLOB.read_bytes()
+    if len(blob) < 16 or blob[:8] != b"VKBLOB\x00\x00":
+        print(f"error: {BLOB} is not a Base v1 VkBlob", file=sys.stderr)
+        return 2
+    acc = blob[11]
+    if acc != 12:
+        print(
+            f"error: {BLOB} accumulator_limbs (byte 11) = {acc}, want 12.\n"
+            "  Refusing to embed: a rotate blob with byte 11 = 0 is accepted by\n"
+            "  ZKHALO2VERIFYWITHVK without pairing the KZG accumulator.",
+            file=sys.stderr,
+        )
+        return 2
     digest = hashlib.sha256(blob).hexdigest()
-    print(f"fixture: {BLOB}\n  {len(blob)} bytes, sha256 {digest}")
+    print(f"fixture: {BLOB}\n  {len(blob)} bytes, sha256 {digest}, accumulator_limbs={acc}")
 
     src = args.target.read_text()
     literal = LITERAL_RE.search(src)

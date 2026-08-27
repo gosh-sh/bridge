@@ -33,6 +33,13 @@ if [[ ! -d "$(dirname "$DST")" ]]; then
   exit 1
 fi
 
+ACC_LIMBS=$(python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); sys.exit(0 if len(b)>=12 and b[11]==12 else 1)' "$SRC/rotate_vk_blob.bin" && echo 12 || echo bad)
+if [[ "$ACC_LIMBS" != "12" ]]; then
+  echo "error: $SRC/rotate_vk_blob.bin accumulator_limbs (byte 11) != 12; refusing to sync" >&2
+  echo "  a 0 here would ship an unsound rotate fixture (opcode skips the KZG decider)" >&2
+  exit 1
+fi
+
 mkdir -p "$DST"
 install -m 0644 "$SRC/rotate_vk_blob.bin"             "$DST/rotate_vk_blob.bin"
 install -m 0644 "$SRC/rotate_public_inputs.bin"       "$DST/rotate_public_inputs.bin"

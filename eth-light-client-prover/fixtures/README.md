@@ -46,6 +46,8 @@ version=1, transcript=Blake2b, config JSON, `VerifyingKey(RawBytes)`),
   accumulator limbs + `[current_commit, next_commit, period]`. `current_commit`
   is **snark-bound** to the step proof's committee commitment (`inst[0..12]` are
   the accumulator). The VkBlob header sets `accumulator_limbs = 12` (byte 11).
+  Enforced by `scripts/check_rotate_vkblob_accumulator.sh` (fixture + patch hex +
+  sha256 pin + byte-11-cleared probe). A 0 here is a silent soundness skip.
   Regenerate: `EMIT_VKBLOB=1 examples/rotate_tree_n8.rs`.
 
   > ⚠ **Opcode-sound only with the decider extension.** The stock

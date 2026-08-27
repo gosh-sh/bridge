@@ -163,6 +163,29 @@ n14, with headroom for the recursive L2 fold + the root's committee glue. Conclu
 build the tree at fan-in 2; only if a node tips over k21 tighten `VerifierUniversality`
 or shrink the passthrough.
 
+### Production proving cost (warm PK vs the published n14 walls)
+
+The n14 walls **include keygen**. `agg_node` in `rotate_tree_n8.rs` calls `gen_pk`
+per node, even though all four L1 nodes share one VK/PK and both L2 nodes share
+another. Production caches one PK per node *type*:
+
+| Lane | Published wall (cold, includes keygen) | Warm PK (prove only) | Peak RSS |
+|------|----------------------------------------|----------------------|----------|
+| Step (k=19) | ~8.4 min (`keygen_vk` 176 s + `keygen_pk` 127 s + prove 158 s) | **~2.6 min** (158 s) | ~41.5 GB |
+| 8 shards (k=20) | ~35 min (keygen once: vk 209 s + pk 149 s, then 8 proves) | **~25–30 min** after the one-time shard PK | ~tens of GB |
+| Rotate tree (k=21) | ~55–57 min (per-node `gen_pk`; L1 ~560 s ea, L2 ~285 s ea, root 201+151 s) | **~25–35 min** with L1/L2/root PKs cached | ~44 GB |
+
+Margin vs the 27 h period window: a warm rotate is well under 1 h, so >20×
+headroom even if a step is in flight. Keygen of the three rotate PKs is a
+one-time (or rare, on VK rotation) cost, not per period.
+
+**One host, two lanes.** Step ~41 GB + rotate ~44 GB ≈ 85 GB — both fit on a
+125 GB box concurrently. Anchoring does **not** have to pause for a rotation.
+If the operator prefers isolation, a step can wait; missing a checkpoint is a
+coverage loss (see [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md)
+§Operational constraints), not a WS failure, as long as ≥ 1 update lands per
+period.
+
 ### Full N=8 tree — end to end (measured 2026-08-22, n14) ✅
 
 `examples/rotate_tree_n8.rs` assembles the **whole** tree over the REAL Hermez-k20
@@ -489,6 +512,12 @@ Remaining bricks:
    step VkBlob, **wall 1:00:24 for the tree stage, peak RSS 44.5 GB** (`/usr/bin/time -v`).
    ⚠ opcode acceptance is **necessary but not sufficient** — the plain SHPLONK verify
    does not pair `instances[0..12]`; sound emission still awaits the `opcode-ext` decider.
+   **`accumulator_limbs = 12` is now a hard gate**, not a comment: emit
+   (`examples/rotate_tree_n8.rs`) asserts byte 11 == 12 before writing;
+   `scripts/check_rotate_vkblob_accumulator.sh` checks the committed fixture, its
+   sha256 sidecar, the patch-embedded hex, and a byte-11-cleared negative probe;
+   `embed_rotate_vk_blob.py` and `sync_rotate_opcode_fixtures_to_tvm_sdk.sh`
+   refuse to ship a 0. CI job `test:light-client:vkblob-header` runs that script.
    **tvm-sdk fixture — ✅ DONE.** `scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`
    installs the three operands into `tvm-sdk/tvm_vm/halo2_test_data/rotate_light_client`;
    `tvm_vm/src/tests/test_halo2_with_vk.rs` gained 5 `rotate_light_client_*` tests

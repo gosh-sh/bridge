@@ -9,6 +9,23 @@ Pipeline (single event):
   → run the three Rust bins (private-witness-export, witness-builder,
   halo2-prover) → assert daemon verdict (`verified && anchor_matched`).
 
+Scope:
+  AN side only. This driver covers the L1 (single-chain) Circuit 4 event
+  proving path against the on-AN `USDCBridge`. It does NOT drive the
+  Ethereum side (no `withdrawByProof` submission to the L1 EVM bridge)
+  and it does NOT exercise the L2 (multi-chain / thinned) path.
+  Sepolia submission is covered by `bridge-withdraw-e2e-cli`.
+  TODO: extend / add a parallel driver for the L2 path (currently only
+  the L1 topology is embedded here).
+
+Assumed running services (this script does NOT start them):
+  - `bridge-prover-daemon`   — produces bundle proofs.
+  - `bridge-verifier-daemon` — reads Circuit 4 proofs from
+    `$PROVER_DIR/proofs/` and writes verdicts back as `*.result.json`.
+  Both must be healthy and ingesting the target cluster before this
+  script runs; a stuck daemon manifests as a verifier-state or
+  daemon-result timeout below.
+
 Env vars (all optional, defaults are MODE-dependent):
   MODE                  local | shellnet  (default: local)
   PROVER_DIR            default: parent of this script
@@ -29,7 +46,8 @@ Env vars (all optional, defaults are MODE-dependent):
 
 Prereqs (the script does not start these):
   - Live cluster reachable at GRAPHQL_URL.
-  - `bridge-verifier-daemon` running in $PROVER_DIR (Track D4a build).
+  - `bridge-prover-daemon` and `bridge-verifier-daemon` both running
+    in $PROVER_DIR (see "Assumed running services" above).
   - $PROVER_DIR/params/ has primary + layer + event VK/PK.
   - Release builds of bridge-event-private-witness-export,
     bridge-event-witness-builder, bridge-event-halo2-prover.

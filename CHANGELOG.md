@@ -49,6 +49,65 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **New binary `bridge-withdraw-e2e-cli`** — end-user CLI for withdrawing
+  USDC from an Acki Nacki multisig to an EVM recipient via the bridge.
+  Operator-facing counterpart to `daemon-live`: the daemon owns bundle
+  proving; this CLI owns per-withdrawal composition. Runs the six-stage
+  pipeline (preflight → idempotency reserve → burn → capture → Circuit-4
+  SHPLONK proof → `withdrawByProof`) against a running daemon's
+  `prover_state.json`.
+
+  Subcommand surface:
+  ```
+  bridge-withdraw-e2e-cli withdraw \
+    --from <dapp_id>::<account_id> --from-keys /path/to/owner.keys.json \
+    --to 0xRecipient --to-chain 11155111 --amount 1.000000
+  ```
+  Global flags: `--json` (one-line JSON on stdout, human logs on stderr),
+  `--yes` (skip prompt), `--non-interactive` (refuse instead of
+  prompting), `--dry-run` (compose + prove but broadcast nothing on
+  either side), `--allow-retry` (blunt override of the duplicate-
+  in-flight refusal; will be replaced by `--resume` in v2).
+
+  Env vars consumed (each has a matching `--flag`): `BRIDGE_GQL_ENDPOINT`,
+  `USDC_BRIDGE_ACCOUNT_ID` (shellnet default `1a1a…1a1a`),
+  `PROVER_STATE_PATH`, `RPC_URL`, `BRIDGE_ADDRESS`,
+  `RELAYER_PRIVATE_KEY` (signer for `withdrawByProof`; distinct from
+  the AN multisig owner key), `BRIDGE_AGGREGATOR_DIR`,
+  `BRIDGE_VERIFIERS_DIR`, `BRIDGE_PARAMS_DIR`, `BRIDGE_PK_CACHE_DIR`,
+  and `BRIDGE_WITHDRAW_STATE_DIR` (new — per-withdrawal idempotency
+  state table; defaults to `$CONFIG_DIR/withdraw-state/`).
+
+  Exit codes distinguish "nothing broadcast" from "broadcast, outcome
+  unknown" so operator scripts don't blind on a single non-zero:
+  `0` success (or dry-run OK), `2` preflight refused,
+  `3` duplicate in-flight refused, `10` AN burn broadcast but final
+  outcome unknown (reconcile via GQL), `11` capture timeout,
+  `12` proof failed, `13` `withdrawByProof` reverted / dry-run reverted.
+
+  Idempotency: SHA-256 dedup key on `(from, to, to_chain, amount)`. State
+  files under `$BRIDGE_WITHDRAW_STATE_DIR` hold only chain-observable
+  identifiers (AN tx hash, `WithdrawalInitiated` msg id, block seq no,
+  ETH tx hash) — never key material. `--from-keys` and
+  `--eth-private-key` contents are never logged, printed, or persisted.
+
+  Burn payload defaults to `bounce = true` so USDC returns to the source
+  multisig on any bridge revert (the historical Python driver used
+  `bounce = false`; the Rust CLI's default is the safer of the two).
+
+- **Helper scripts under `crates/bridge-withdraw-e2e-cli/scripts/`**:
+  `local_smoke.sh` (dry-run wrapper: full pipeline including
+  `dry_run_withdraw`, no broadcast) and `live_smoke.sh` (real submit).
+  Both source `$BRIDGE_CONFIG_DIR/env` (default `L1_config/env`) for
+  daemon-shared plumbing and expect the caller to export the
+  per-withdrawal identity vars: `WITHDRAW_FROM`, `WITHDRAW_FROM_KEYS`,
+  `WITHDRAW_TO`, `WITHDRAW_TO_CHAIN`, `WITHDRAW_AMOUNT`. Both emit
+  per-mode absolute `--snark-dir` so the aggregate-proof subprocess
+  finds the intermediate `.snark` file. Multisig deploy and EVM-side
+  USDC treasury seeding are intentionally not scripted here — the
+  vendored Python driver and `cast` remain the source of truth for
+  those one-time setup steps.
+
 - New environment variables consumed by `bridge_prover_lib::paths`:
   `BRIDGE_CONFIG_DIR` (broad selector — resolves both state and proofs
   under `$BRIDGE_CONFIG_DIR/`), `BRIDGE_STATE_DIR` and `BRIDGE_PROOFS_DIR`

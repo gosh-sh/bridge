@@ -20,13 +20,16 @@
 //! against the same key on different hosts could still race — but for
 //! the "single user re-running my broken script" case it does the job.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::args::{FromAddress, ToAddress, UsdcAmount};
-use crate::errors::CliResult;
+use crate::errors::{CliError, CliResult};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -84,18 +87,303 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 /// record exists AND its status is not `Failed`. On `Ok`, the returned
 /// [`Record`] is already persisted to disk with `Status::Reserved` — the
 /// caller advances it as stages complete.
+///
+/// `--allow-retry` overrides refuse-duplicate regardless of prior status.
+/// This is the blunt v1 escape hatch; v2's `--resume` will read the prior
+/// record and pick up where it left off.
 pub fn reserve(
-    _state_dir: &Path,
-    _from: &FromAddress,
-    _to: &ToAddress,
-    _amount: &UsdcAmount,
-    _allow_retry: bool,
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
 ) -> CliResult<Record> {
-    unimplemented!("idempotency::reserve — implement in third commit")
+    ensure_state_dir(state_dir)?;
+
+    let key = key(from, to, amount);
+    let path = record_path(state_dir, &key);
+
+    // First-writer-wins probe: create_new is atomic on POSIX + Windows
+    // (fails EEXIST rather than truncating). If it succeeds we own a fresh
+    // reservation; if it fails EEXIST we need to inspect the prior record.
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut f) => {
+            let record = fresh_reserved_record(&key, from, to, amount);
+            let body = serde_json::to_vec_pretty(&record).map_err(|e| {
+                CliError::Preflight {
+                    reason: format!("idempotency: serialize reserved record: {e}"),
+                    source: None,
+                }
+            })?;
+            f.write_all(&body).map_err(|e| CliError::Preflight {
+                reason: format!("idempotency: write {}: {e}", path.display()),
+                source: None,
+            })?;
+            Ok(record)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let prior = read_record(&path)?;
+            if allow_retry || prior.status == Status::Failed {
+                // Overwrite with a fresh Reserved. Keep the same key
+                // (deterministic) so a subsequent lookup still finds us.
+                let record = fresh_reserved_record(&key, from, to, amount);
+                write_record_atomic(state_dir, &path, &record)?;
+                Ok(record)
+            } else {
+                Err(CliError::DuplicateInFlight {
+                    prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                    prior_tx: prior.an_tx_hash,
+                    prior_msg_id: prior.withdrawal_msg_id,
+                })
+            }
+        }
+        Err(e) => Err(CliError::Preflight {
+            reason: format!("idempotency: create {}: {e}", path.display()),
+            source: None,
+        }),
+    }
 }
 
-/// Persist a status/field update to the record's file. Overwrite-in-place;
-/// no history preserved (we only need the latest for refuse-duplicate).
-pub fn update(_state_dir: &Path, _record: &Record) -> CliResult<()> {
-    unimplemented!("idempotency::update — implement in third commit")
+/// Persist a status/field update to the record's file. Overwrite-in-place
+/// via write-temp + rename so a mid-write crash never leaves a torn file.
+/// No history preserved — we only need the latest for refuse-duplicate.
+pub fn update(state_dir: &Path, record: &Record) -> CliResult<()> {
+    ensure_state_dir(state_dir)?;
+    let path = record_path(state_dir, &record.key);
+    write_record_atomic(state_dir, &path, record)
+}
+
+// -- helpers ------------------------------------------------------------
+
+fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
+    fs::create_dir_all(state_dir).map_err(|e| CliError::Preflight {
+        reason: format!("idempotency: mkdir {}: {e}", state_dir.display()),
+        source: None,
+    })
+}
+
+fn record_path(state_dir: &Path, key: &str) -> PathBuf {
+    state_dir.join(format!("{key}.json"))
+}
+
+fn fresh_reserved_record(
+    key: &str,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+) -> Record {
+    Record {
+        key: key.to_string(),
+        status: Status::Reserved,
+        from_extended: from.extended(),
+        to_hex: format!("0x{}", hex::encode(to.address.as_slice())),
+        to_chain: to.chain_id,
+        amount_micro: amount.0,
+        reserved_at: rfc3339_now(),
+        an_tx_hash: None,
+        withdrawal_msg_id: None,
+        block_seq_no: None,
+        proof_json_path: None,
+        eth_tx_hash: None,
+    }
+}
+
+fn read_record(path: &Path) -> CliResult<Record> {
+    let bytes = fs::read(path).map_err(|e| CliError::Preflight {
+        reason: format!("idempotency: read {}: {e}", path.display()),
+        source: None,
+    })?;
+    serde_json::from_slice::<Record>(&bytes).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "idempotency: prior record at {} is corrupt: {e} \
+             (delete it manually if you know it's stale)",
+            path.display()
+        ),
+        source: None,
+    })
+}
+
+fn write_record_atomic(state_dir: &Path, dst: &Path, record: &Record) -> CliResult<()> {
+    // Same-directory tmp file so the rename is a same-filesystem atomic
+    // op — cross-fs renames would fall back to copy+unlink.
+    let tmp = state_dir.join(format!(".{}.tmp", record.key));
+    let body = serde_json::to_vec_pretty(record).map_err(|e| CliError::Preflight {
+        reason: format!("idempotency: serialize record: {e}"),
+        source: None,
+    })?;
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(|e| CliError::Preflight {
+                reason: format!("idempotency: open tmp {}: {e}", tmp.display()),
+                source: None,
+            })?;
+        f.write_all(&body).map_err(|e| CliError::Preflight {
+            reason: format!("idempotency: write tmp {}: {e}", tmp.display()),
+            source: None,
+        })?;
+        f.sync_all().map_err(|e| CliError::Preflight {
+            reason: format!("idempotency: fsync tmp {}: {e}", tmp.display()),
+            source: None,
+        })?;
+    }
+    fs::rename(&tmp, dst).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "idempotency: rename {} -> {}: {e}",
+            tmp.display(),
+            dst.display()
+        ),
+        source: None,
+    })
+}
+
+/// Epoch-seconds RFC 3339 UTC timestamp without a dep on `chrono`/`time`.
+/// Format: `1970-01-01T00:00:00Z` (no fractional seconds — this record is
+/// for reconciliation, not perf tracing).
+fn rfc3339_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    format_utc(secs)
+}
+
+// Trivial UTC seconds → "YYYY-MM-DDTHH:MM:SSZ". Uses the standard civil
+// calendar formula (Howard Hinnant's date algorithms, days-since-epoch
+// variant). Handles all 32-bit years plus a safety margin without any
+// external deps.
+fn format_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+
+    // Days from civil (see http://howardhinnant.github.io/date_algorithms.html)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Address;
+    use std::str::FromStr;
+    use tempfile::TempDir;
+
+    fn sample_from() -> FromAddress {
+        FromAddress {
+            dapp_id_hex: "a".repeat(64),
+            account_id_hex: "b".repeat(64),
+        }
+    }
+
+    fn sample_to() -> ToAddress {
+        ToAddress {
+            address: Address::from_str("0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f").unwrap(),
+            chain_id: 11_155_111,
+        }
+    }
+
+    #[test]
+    fn key_is_deterministic_and_covers_all_identity_fields() {
+        let k1 = key(&sample_from(), &sample_to(), &UsdcAmount(1_000_000));
+        let k2 = key(&sample_from(), &sample_to(), &UsdcAmount(1_000_000));
+        assert_eq!(k1, k2, "same identity → same key");
+        assert_eq!(k1.len(), 64, "sha256 hex");
+
+        let k3 = key(&sample_from(), &sample_to(), &UsdcAmount(2_000_000));
+        assert_ne!(k1, k3, "amount participates in the digest");
+
+        let mut other_from = sample_from();
+        other_from.account_id_hex = "c".repeat(64);
+        let k4 = key(&other_from, &sample_to(), &UsdcAmount(1_000_000));
+        assert_ne!(k1, k4, "from participates in the digest");
+
+        let mut other_to = sample_to();
+        other_to.chain_id = 1;
+        let k5 = key(&sample_from(), &other_to, &UsdcAmount(1_000_000));
+        assert_ne!(k1, k5, "chain_id participates in the digest");
+    }
+
+    #[test]
+    fn reserve_first_time_writes_a_fresh_record() {
+        let dir = TempDir::new().unwrap();
+        let rec = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .expect("first reserve should succeed");
+        assert_eq!(rec.status, Status::Reserved);
+        assert!(rec.an_tx_hash.is_none());
+        assert!(dir.path().join(format!("{}.json", rec.key)).exists());
+    }
+
+    #[test]
+    fn reserve_duplicate_active_refuses() {
+        let dir = TempDir::new().unwrap();
+        let _first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false);
+        match second {
+            Err(CliError::DuplicateInFlight { prior_status, .. }) => {
+                assert_eq!(prior_status, "reserved");
+            }
+            other => panic!("expected DuplicateInFlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserve_allows_retry_over_active_when_flag_set() {
+        let dir = TempDir::new().unwrap();
+        let _first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
+            .expect("--allow-retry should override refuse-duplicate");
+        assert_eq!(second.status, Status::Reserved);
+    }
+
+    #[test]
+    fn reserve_allows_retry_over_failed_without_flag() {
+        let dir = TempDir::new().unwrap();
+        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        first.status = Status::Failed;
+        update(dir.path(), &first).unwrap();
+
+        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .expect("Failed status is retryable without --allow-retry");
+        assert_eq!(second.status, Status::Reserved);
+    }
+
+    #[test]
+    fn update_persists_stage_transition() {
+        let dir = TempDir::new().unwrap();
+        let mut rec = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        rec.status = Status::Burned;
+        rec.an_tx_hash = Some("0xdeadbeef".into());
+        update(dir.path(), &rec).unwrap();
+
+        let disk = read_record(&record_path(dir.path(), &rec.key)).unwrap();
+        assert_eq!(disk.status, Status::Burned);
+        assert_eq!(disk.an_tx_hash.as_deref(), Some("0xdeadbeef"));
+    }
+
+    #[test]
+    fn format_utc_matches_known_epoch_boundaries() {
+        assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(format_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
 }

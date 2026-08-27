@@ -141,6 +141,18 @@ assigns it when the release is tagged.
   `./state/bootstrap_seed.json`), so existing operators who do not set
   `BRIDGE_CONFIG_DIR` see no behavioral change.
 
+- Python E2E drivers deduplicated. `deploy_multisig` / `mint_usdc`
+  moved to new `crates/an-bridge-prover/python/helper/msig.py`;
+  `materialize_usdc_bridge_key_from_node_config` /
+  `validate_usdc_bridge_key` moved to `helper/bridge_e2e.py`. Both
+  `test_deploy_and_withdraw_only.py` and
+  `generate_withdrawals_with_live_event_proving.py` now import the
+  shared implementations. Fresher variant kept in the merge (explicit
+  `RuntimeError` on multisig-materialization timeout, richer
+  owner-key mismatch hints). Also fixes a stray syntax break in
+  `GqlClient.fetch_bridge_extouts` introduced by an earlier
+  docstring trim.
+
 ### Fixed
 
 - **On-AN ABI artifacts realigned to shellnet (`acki-nacki@cf664666b`).**

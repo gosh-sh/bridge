@@ -5,6 +5,7 @@ proving E2E orchestrators.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -463,3 +464,72 @@ def compute_target_seq(event_seq: int) -> tuple[int, int, int]:
     key_block_seq  = ((event_seq // W) + 1) * W
     thinned_kb_seq = ((event_seq // (W * P)) + 1) * (W * P)
     return key_block_seq, thinned_kb_seq, thinned_kb_seq
+
+
+# ── USDCBridge owner-key materialization & validation ────────────────────────
+
+def materialize_usdc_bridge_key_from_node_config(tracer: Tracer, prover_dir: str,
+                                                 usdc_bridge_key_path: str):
+    """Copy `USDCBridge.keys.json` out of the local acki-nacki checkout into
+    the bundled path. The local devnet's owner key isn't stable across
+    `make run`s. Skipped when the caller pinned `USDC_BRIDGE_KEY_PATH`
+    (shellnet path).
+    """
+    acki_nacki_root = os.environ.get(
+        "ACKI_NACKI_ROOT",
+        os.path.abspath(os.path.join(prover_dir, "..", "acki-nacki")),
+    )
+    src = os.path.join(acki_nacki_root, "config", "USDCBridge.keys.json")
+    if not os.path.isfile(src):
+        raise FileNotFoundError(
+            f"USDCBridge owner key missing at {src}; the local cluster's "
+            f"acki-nacki checkout was expected at {acki_nacki_root} "
+            "(override with ACKI_NACKI_ROOT, or pin USDC_BRIDGE_KEY_PATH)"
+        )
+    if os.path.realpath(src) == os.path.realpath(usdc_bridge_key_path):
+        tracer.log(f"  USDCBridge key already points at {src} — skip copy")
+        return
+    shutil.copyfile(src, usdc_bridge_key_path)
+    tracer.log(f"  copied {src}")
+    tracer.log(f"       → {usdc_bridge_key_path}")
+
+
+def validate_usdc_bridge_key(tracer: Tracer, usdc_bridge_key_path: str, *,
+                             overridden: bool):
+    """Cross-check the local USDCBridge keypair against the on-chain owner
+    pubkey via `USDCBridge.getOwnerPubkey()`. Failure here would otherwise
+    surface much later as an opaque 120s timeout waiting for the ECC[3]
+    credit, with `exit_code 209` only visible in node logs.
+    """
+    try:
+        with open(usdc_bridge_key_path) as f:
+            local_pub_hex = json.load(f)["public"].lower()
+    except (OSError, KeyError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"cannot read local USDCBridge key at {usdc_bridge_key_path}: {e}"
+        ) from e
+
+    raw = common.run_getter(USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getOwnerPubkey")
+    if not isinstance(raw, dict) or "value0" not in raw:
+        raise RuntimeError(
+            f"USDCBridge.getOwnerPubkey returned unexpected payload: {raw!r}"
+        )
+    on_chain_pub_int = int(str(raw["value0"]), 0)
+    on_chain_pub_hex = f"{on_chain_pub_int:064x}"
+
+    if on_chain_pub_hex != local_pub_hex:
+        hint = (
+            "set USDC_BRIDGE_KEY_PATH to the keypair the contract was "
+            "deployed with"
+            if overridden
+            else "rerun against a fresh local devnet, or unset "
+                 "USDC_BRIDGE_KEY_PATH to let the orchestrator auto-sync"
+        )
+        raise RuntimeError(
+            "USDCBridge owner key mismatch — mintAndSend would bounce with "
+            f"TVM exit_code 209.\n"
+            f"  local  ({usdc_bridge_key_path}): {local_pub_hex}\n"
+            f"  on-chain (getOwnerPubkey):       {on_chain_pub_hex}\n"
+            f"  hint: {hint}"
+        )
+    tracer.log(f"  USDCBridge owner key OK ({local_pub_hex[:16]}…)")

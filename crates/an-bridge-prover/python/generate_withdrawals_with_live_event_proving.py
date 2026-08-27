@@ -41,7 +41,6 @@ $WORK_DIR on failure.
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -53,14 +52,14 @@ os.environ["PATH"] = os.path.join(_HERE, "bin") + os.pathsep + os.environ.get("P
 from helper import common
 from helper import bridge_e2e as be
 from helper.bridge_e2e import (
-    USDC_BRIDGE_ADDRESS, USDC_BRIDGE_DAPP_ID, USDC_BRIDGE_ACCOUNT_ID,
-    GIVER_ADDRESS, USDC_BRIDGE_ABI,
-    USDC_BRIDGE_KEYS, USDC_BRIDGE_KEYS_SHELLNET,
-    GIVER_ABI, GIVER_KEY_PATH, MSIG_ABI, MSIG_TVC_STEM,
-    WITHDRAWAL_AMOUNT, ECC_ID_FOR_BURN, USDC_TOKEN_ID,
+    USDC_BRIDGE_ADDRESS, USDC_BRIDGE_KEYS, USDC_BRIDGE_KEYS_SHELLNET,
+    WITHDRAWAL_AMOUNT, USDC_TOKEN_ID,
     DST_CHAIN_ID, RECIPIENT_HEX,
     W, P, MAX_LAYERS,
+    materialize_usdc_bridge_key_from_node_config,
+    validate_usdc_bridge_key,
 )
+from helper.msig import deploy_multisig
 
 # ── Mode-dependent configuration ─────────────────────────────────────────────
 MODE = os.environ.get("MODE", "local").lower()
@@ -83,7 +82,7 @@ else:
     DEFAULT_WORK    = "work-local"
     _DEFAULT_USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEYS
     GQL_KWARGS = {}
-    EVENT_INDEXER_TIMEOUT_S    = 120
+    EVENT_INDEXER_TIMEOUT_S    = 180
     VERIFIER_STATE_TIMEOUT_S   = 1800
 
 # An explicit override pins the key path (no auto-materialize). Otherwise we
@@ -105,172 +104,9 @@ tracer: be.Tracer
 gql: be.GqlClient
 
 
-# ── Deployment ────────────────────────────────────────────────────────────────
-
-def deploy_multisig():
-    tracer.log_phase(f"Deploying multisig ({MODE})")
-
-    work_dir = os.path.join(WORK_DIR, "msig_deploy")
-    os.makedirs(work_dir, exist_ok=True)
-    msig_tvc_copy = os.path.join(work_dir, "UpdateCustodianMultisigWallet")
-    shutil.copy(f"{MSIG_TVC_STEM}.tvc", f"{msig_tvc_copy}.tvc")
-    shutil.copy(MSIG_ABI, f"{msig_tvc_copy}.abi.json")
-    msig_abi_copy = f"{msig_tvc_copy}.abi.json"
-
-    if os.path.exists(MSIG_KEY_PATH):
-        os.remove(MSIG_KEY_PATH)
-    raw_msig_address = common.generate_address(msig_tvc_copy, MSIG_KEY_PATH)
-    msig_account_id = raw_msig_address.split(":", 1)[1] if ":" in raw_msig_address else raw_msig_address
-    msig_dapp_id    = msig_account_id
-    msig_address        = f"{msig_dapp_id}::{msig_account_id}"      # CLI / query form
-    msig_address_legacy = f"0:{msig_account_id}"                     # ABI payload form
-    pubkey = common.read_public_key(MSIG_KEY_PATH)
-    tracer.log(f"  multisig address: {msig_address}")
-
-    # Fund ECC[2] (gas + vmshell). Shellnet needs a two-shot pattern with the
-    # canonical WALLET_INIT amounts — single-shot empirically leaves the
-    # account under-funded for deployx. Local devnet works with one shot.
-    total_ecc = WITHDRAWAL_AMOUNT * 4
-    if IS_SHELLNET:
-        value = 10_000_000_000_000     # canonical WALLET_INIT_BALANCE
-        ecc2  = 100_000_000_000_000    # canonical WALLET_INIT_CC
-        for shot, flag in enumerate(("17", "1"), start=1):
-            tracer.log(f"  faucet shot {shot}/2 (flag={flag}): value={value}, ecc[2]={ecc2}")
-            common.call_contract(
-                GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
-                "sendCurrencyWithFlag",
-                {"dest": msig_address_legacy, "value": str(value),
-                 "ecc": {str(ECC_ID_FOR_BURN): str(ecc2)},
-                 "flag": flag, "bounce": False},
-            )
-            time.sleep(3)
-    else:
-        # Canonical bridge pattern from acki-nacki/tests/exchange/
-        # bridge_e2e_self_contained.py::deploy_multisig (and mirrored in
-        # tests/dex/generate_vouchers_with_live_event_proving.py): a single
-        # `sendCurrencyWithFlag` call with flag=17 carrying a large native
-        # `value` and the ECC[2] bootstrap. The follow-up top-up is applied
-        # only AFTER deploy, and only if deploy consumed the ECC balance
-        # (handled below). The earlier two-shot 17→1 loop (borrowed from
-        # test_airegistry/test_registration.py) left the Uninit account in
-        # a state where deployx's stateInit was rejected with
-        # COMPUTE_SKIPPED: The account doesn't have a state.
-        fund_ecc    = max(total_ecc, 100_000_000_000_000)
-        fund_native = 200_000_000_000_000
-        tracer.log(f"  funding via giver single-shot (flag=17), "
-                   f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
-        common.call_contract(
-            GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
-            "sendCurrencyWithFlag",
-            {"dest": msig_address_legacy, "value": str(fund_native),
-             "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
-             "flag": "17", "bounce": False},
-        )
-    time.sleep(8)
-    for _ in range(60):
-        account = common.get_account(msig_address)
-        if 'acc_type' in account:
-            tracer.log(f"  account appeared: {account['acc_type']} "
-                       f"ecc={account.get('ecc_balance')}")
-            break
-        time.sleep(1)
-
-    constructor_params = {
-        "owners_pubkey":   [f"0x{pubkey}"],
-        "owners_address":  [],
-        "reqConfirms":     1,
-        "reqConfirmsData": 1,
-        "value":           100_000_000,
-    }
-    common.execute_cli_cmd(
-        f"deployx --abi {msig_abi_copy} --keys {MSIG_KEY_PATH} "
-        f"--dst-dapp-id {msig_dapp_id} {msig_tvc_copy}.tvc "
-        f"{common.format_params(constructor_params)}",
-        True,
-    )
-    common.wait_account_active(msig_address)
-    tracer.log("  multisig deployed and active")
-
-    # Top up ECC[2] if deploy ate into it.
-    account = common.get_account(msig_address)
-    ecc = account.get("ecc_balance", {}) or {}
-    have = int(ecc.get(str(ECC_ID_FOR_BURN), 0))
-    if have < total_ecc:
-        tracer.log(f"  topping up ECC[{ECC_ID_FOR_BURN}] (have={have}, need={total_ecc})")
-        common.call_contract(
-            GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
-            "sendCurrencyWithFlag",
-            {"dest": msig_address_legacy, "value": "2000000000",
-             "ecc": {str(ECC_ID_FOR_BURN): str(total_ecc)}, "flag": "1"}
-        )
-        time.sleep(5)
-
-    mint_usdc(msig_address_legacy, WITHDRAWAL_AMOUNT)
-    return msig_address, msig_abi_copy
-
-
-def mint_usdc(msig_address_legacy: str, amount: int):
-    """Fund ECC[3] USDC into the multisig via USDCBridge.mintAndSend.
-
-    Resolves the bridge's real on-chain `dapp_id` via GQL (required for
-    `callx` routing on shellnet; harmless on local), then polls until
-    the credit lands on the multisig (fast on local, ~tens of seconds
-    on shellnet). The signing key is mode-selected at module load.
-    """
-    real_dapp = gql.fetch_account_dapp_id(USDC_BRIDGE_ACCOUNT_ID, USDC_BRIDGE_DAPP_ID)
-    if not real_dapp:
-        raise RuntimeError(f"could not resolve USDCBridge dapp_id (acc={USDC_BRIDGE_ACCOUNT_ID})")
-    bridge_addr = f"{real_dapp}::{USDC_BRIDGE_ACCOUNT_ID}"
-
-    nonces = common.run_getter(bridge_addr, USDC_BRIDGE_ABI, "getNonces")
-    mint_nonce = int(nonces["mintNonce"])
-    tracer.log(f"  USDCBridge.mintAndSend → ECC[{USDC_TOKEN_ID}]={amount}, nonce={mint_nonce + 1}")
-    common.call_contract(
-        bridge_addr, USDC_BRIDGE_ABI, USDC_BRIDGE_KEY_PATH,
-        "mintAndSend",
-        {"recipient": msig_address_legacy,
-         "value":     str(amount),
-         "nonce":     str(mint_nonce + 1)},
-        True,
-    )
-
-    msig_account_id = msig_address_legacy.split(":", 1)[1]
-    msig_self_dapp = f"{msig_account_id}::{msig_account_id}"
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        account = common.get_account(msig_self_dapp)
-        ecc = account.get("ecc_balance", {}) or {}
-        have = int(ecc.get(str(USDC_TOKEN_ID), 0))
-        if have >= amount:
-            tracer.log(f"  ECC[{USDC_TOKEN_ID}] credited: {have}")
-            return
-        time.sleep(2)
-    raise RuntimeError(
-        f"USDCBridge.mintAndSend did not credit ECC[{USDC_TOKEN_ID}]={amount} "
-        f"to {msig_address_legacy} within 120s"
-    )
-
-
 # ── Local-devnet bk_set materialization ───────────────────────────────────────
 
 def materialize_bk_set_from_node_config():
-    """Regenerate `<PROVER_DIR>/bk_set.local.json` from the running local cluster's
-    BLS key files. Daemon-side `bridge_prover_lib::bk_set_fetcher` tries the
-    GraphQL `bkSetUpdates` stream first; on a fresh devnet (zero validator
-    churn since genesis) that stream returns empty and the daemon falls back
-    to `./bk_set.local.json` (the default value of `BRIDGE_BK_SET_CONFIG` in
-    the daemon), relative to its cwd, which is `PROVER_DIR`.
-
-    For ad-hoc local runs we cannot rely on a committed `bk_set.local.json` snapshot
-    — node images may regenerate BLS keys when rebuilt from scratch. Source
-    the set from the same `config/block_keeperN_bls.keys.json` files the node
-    containers boot with, enumerated by the running `*-nodeN-*` containers so
-    we don't hard-code the topology size.
-
-    Shellnet path uses GraphQL only — never call this when `MODE=shellnet`.
-
-    `ACKI_NACKI_ROOT` env var overrides the default sibling path.
-    """
     acki_nacki_root = os.environ.get(
         "ACKI_NACKI_ROOT",
         os.path.abspath(os.path.join(PROVER_DIR, "..", "acki-nacki")),
@@ -323,81 +159,6 @@ def materialize_bk_set_from_node_config():
     tracer.log(f"  wrote {out_path}")
 
 
-# ── Local-devnet USDCBridge owner key materialization & validation ────────────
-
-def materialize_usdc_bridge_key_from_node_config():
-    """Overwrite the bundled `python/contracts/USDCBridge.keys.json` with the
-    in-tree `acki-nacki/config/USDCBridge.keys.json` that the local devnet
-    actually deployed the contract with.
-
-    The bundled key is shipped only so `python/` can run drop-in without a
-    hard dep on a sibling checkout. On a freshly-rebuilt devnet the in-tree
-    key can drift from the bundled one — when that happens
-    `USDCBridge.mintAndSend` silently bounces (TVM exit_code 209) and the
-    orchestrator deadlocks waiting for the ECC[3] credit.
-
-    Only called when MODE=local and the user did not pin a path via
-    `USDC_BRIDGE_KEY_PATH`. Honors `ACKI_NACKI_ROOT` for sibling location.
-    """
-    acki_nacki_root = os.environ.get(
-        "ACKI_NACKI_ROOT",
-        os.path.abspath(os.path.join(PROVER_DIR, "..", "acki-nacki")),
-    )
-    src = os.path.join(acki_nacki_root, "config", "USDCBridge.keys.json")
-    if not os.path.isfile(src):
-        raise FileNotFoundError(
-            f"USDCBridge owner key missing at {src}; the local cluster's "
-            f"acki-nacki checkout was expected at {acki_nacki_root} "
-            "(override with ACKI_NACKI_ROOT, or pin USDC_BRIDGE_KEY_PATH)"
-        )
-    if os.path.realpath(src) == os.path.realpath(USDC_BRIDGE_KEY_PATH):
-        tracer.log(f"  USDCBridge key already points at {src} — skip copy")
-        return
-    shutil.copyfile(src, USDC_BRIDGE_KEY_PATH)
-    tracer.log(f"  copied {src}")
-    tracer.log(f"       → {USDC_BRIDGE_KEY_PATH}")
-
-
-def validate_usdc_bridge_key():
-    """Cross-check the local USDCBridge keypair against the on-chain owner
-    pubkey via `USDCBridge.getOwnerPubkey()`. Failure here would otherwise
-    surface much later as an opaque 120s timeout waiting for the ECC[3]
-    credit, with `exit_code 209` only visible in node logs.
-    """
-    try:
-        with open(USDC_BRIDGE_KEY_PATH) as f:
-            local_pub_hex = json.load(f)["public"].lower()
-    except (OSError, KeyError, json.JSONDecodeError) as e:
-        raise RuntimeError(
-            f"cannot read local USDCBridge key at {USDC_BRIDGE_KEY_PATH}: {e}"
-        ) from e
-
-    raw = common.run_getter(USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getOwnerPubkey")
-    if not isinstance(raw, dict) or "value0" not in raw:
-        raise RuntimeError(
-            f"USDCBridge.getOwnerPubkey returned unexpected payload: {raw!r}"
-        )
-    on_chain_pub_int = int(str(raw["value0"]), 0)
-    on_chain_pub_hex = f"{on_chain_pub_int:064x}"
-
-    if on_chain_pub_hex != local_pub_hex:
-        hint = (
-            "set USDC_BRIDGE_KEY_PATH to the keypair the contract was "
-            "deployed with"
-            if USDC_BRIDGE_KEY_PATH_OVERRIDE is not None
-            else "rerun against a fresh local devnet, or unset "
-                 "USDC_BRIDGE_KEY_PATH to let the orchestrator auto-sync"
-        )
-        raise RuntimeError(
-            "USDCBridge owner key mismatch — mintAndSend would bounce with "
-            f"TVM exit_code 209.\n"
-            f"  local  ({USDC_BRIDGE_KEY_PATH}): {local_pub_hex}\n"
-            f"  on-chain (getOwnerPubkey):       {on_chain_pub_hex}\n"
-            f"  hint: {hint}"
-        )
-    tracer.log(f"  USDCBridge owner key OK ({local_pub_hex[:16]}…)")
-
-
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -430,18 +191,24 @@ def main():
         materialize_bk_set_from_node_config()
         if USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
             tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
-            materialize_usdc_bridge_key_from_node_config()
+            materialize_usdc_bridge_key_from_node_config(tracer, PROVER_DIR, USDC_BRIDGE_KEY_PATH)
 
     tracer.log_phase("Validating USDCBridge owner key against on-chain getOwnerPubkey")
     tracer.log(f"  USDC_BRIDGE_KEY_PATH: {USDC_BRIDGE_KEY_PATH}"
                + (" (user-overridden)" if USDC_BRIDGE_KEY_PATH_OVERRIDE else ""))
-    validate_usdc_bridge_key()
+    validate_usdc_bridge_key(tracer, USDC_BRIDGE_KEY_PATH,
+                             overridden=USDC_BRIDGE_KEY_PATH_OVERRIDE is not None)
 
     baseline = gql.fetch_bridge_extouts(limit=500)
     baseline_ids = {n["id"] for n in baseline}
     tracer.log(f"  baseline ExtOut messages from USDCBridge: {len(baseline_ids)}")
 
-    msig_address, msig_abi = deploy_multisig()
+    msig_address, msig_abi = deploy_multisig(
+        tracer, gql,
+        work_dir=WORK_DIR, msig_key_path=MSIG_KEY_PATH,
+        usdc_bridge_key_path=USDC_BRIDGE_KEY_PATH,
+        is_shellnet=IS_SHELLNET,
+    )
 
     # No fire-window gating: the witness builder now emits a horizontal
     # forward chain of L1 openings from `H_e = ⌈event_seq/W⌉·W` to

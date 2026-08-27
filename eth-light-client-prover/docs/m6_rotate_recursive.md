@@ -165,15 +165,16 @@ or shrink the passthrough.
 
 ### Production proving cost (warm PK vs the published n14 walls)
 
-The n14 walls **include keygen**. `agg_node` in `rotate_tree_n8.rs` calls `gen_pk`
-per node, even though all four L1 nodes share one VK/PK and both L2 nodes share
-another. Production caches one PK per node *type*:
+The published n14 walls **include keygen**. `rotate_tree_n8.rs` now caches one PK
+per aggregation *shape* (all four L1 nodes share one PK; both L2 nodes share
+another) — the second and later nodes of a level are prove-only. Production
+figures:
 
 | Lane | Published wall (cold, includes keygen) | Warm PK (prove only) | Peak RSS |
 |------|----------------------------------------|----------------------|----------|
 | Step (k=19) | ~8.4 min (`keygen_vk` 176 s + `keygen_pk` 127 s + prove 158 s) | **~2.6 min** (158 s) | ~41.5 GB |
 | 8 shards (k=20) | ~35 min (keygen once: vk 209 s + pk 149 s, then 8 proves) | **~25–30 min** after the one-time shard PK | ~tens of GB |
-| Rotate tree (k=21) | ~55–57 min (per-node `gen_pk`; L1 ~560 s ea, L2 ~285 s ea, root 201+151 s) | **~25–35 min** with L1/L2/root PKs cached | ~44 GB |
+| Rotate tree (k=21) | ~55–57 min historically (per-node `gen_pk`); driver now keygens once per level | **~25–35 min** with L1/L2/root PKs cached | ~44 GB |
 
 Margin vs the 27 h period window: a warm rotate is well under 1 h, so >20×
 headroom even if a step is in flight. Keygen of the three rotate PKs is a
@@ -181,10 +182,10 @@ one-time (or rare, on VK rotation) cost, not per period.
 
 **One host, two lanes.** Step ~41 GB + rotate ~44 GB ≈ 85 GB — both fit on a
 125 GB box concurrently. Anchoring does **not** have to pause for a rotation.
-If the operator prefers isolation, a step can wait; missing a checkpoint is a
-coverage loss (see [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md)
-§Operational constraints), not a WS failure, as long as ≥ 1 update lands per
-period.
+If the operator prefers isolation, a step can wait; a missed checkpoint of the
+current committee can be late-registered (see
+[`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md) §Operational
+constraints). That is not a WS failure as long as ≥ 1 update lands per period.
 
 ### Full N=8 tree — end to end (measured 2026-08-22, n14) ✅
 

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000..019682c5e
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,889 @@
+@@ -0,0 +1,897 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
@@ -50,11 +50,12 @@ index 000000000..019682c5e
 +///         attester MVP: the relayer submits deposits whose block the light
 +///         client has anchored (checkpoint blocks only).
 +///
-+///         Head is skip-forward: `submitUpdate` requires
-+///         `finalizedSlot > _finalizedSlot`, so a later checkpoint may be
-+///         submitted without the skipped ones. A skipped checkpoint cannot be
-+///         registered afterwards; deposits in that checkpoint's execution
-+///         block wait for the ancestry milestone. Continuous every-checkpoint
++///         Head is skip-forward: a later checkpoint may be submitted without
++///         the skipped ones. A skipped checkpoint *of the current committee*
++///         can still be late-registered (`submitUpdate` records the exec hash
++///         without moving the head back). After `submitRotate` the previous
++///         committee is no longer accepted, so a gap that spans a rotation
++///         waits for the ancestry milestone. Continuous every-checkpoint
 +///         anchoring is required for 1/32 coverage, not for head liveness.
 +contract EthBeaconLightClient {
 +    string constant version = "0.1.0";
@@ -221,10 +222,12 @@ index 000000000..019682c5e
 +    // Light-client update (consumer side of opcode 0xC7 0x4A)
 +    // ========================================================
 +
-+    /// @notice Verifies a beacon sync-step proof and, if it advances the head,
-+    ///         registers the finalized execution block hash as canonical. Fully
-+    ///         permissionless: the proof is the authorization, a bad proof only
-+    ///         wastes the light client's own gas.
++    /// @notice Verifies a beacon sync-step proof and registers the finalized
++    ///         execution block hash as canonical. If `finalizedSlot` is newer
++    ///         than the head, the head advances; if it is older and the hash is
++    ///         unseen, the hash is late-registered without moving the head
++    ///         (recovery for a skipped checkpoint in the current committee).
++    ///         Fully permissionless: the proof is the authorization.
 +    /// @param proof        — SHPLONK proof bytes (no header), the `proof_cell`
 +    ///                        operand of ZKHALO2VERIFYWITHVK.
 +    /// @param publicInputs — the circuit instance column: 10 × 32-byte LE Fr in
@@ -240,10 +243,13 @@ index 000000000..019682c5e
 +        // committee (rotate ↔ step join).
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-+        // Skip-forward: a later checkpoint is accepted (head jumps). A slot
-+        // behind the head can never be registered afterwards — missed
-+        // checkpoint deposits wait for the ancestry milestone.
-+        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
++        // Skip-forward head; late-register a skipped checkpoint of the *current*
++        // committee (slot < head, hash unseen). Same-slot replay and already-
++        // proven hashes revert. After rotate, previous-committee proofs fail
++        // ERR_WRONG_COMMITTEE — that gap waits for ancestry.
++        bool advance = pi.finalizedSlot > _finalizedSlot;
++        bool unseen = !_provenExecutionBlockHash[pi.executionBlockHash];
++        require(advance || (unseen && pi.finalizedSlot < _finalizedSlot), ERR_STALE_UPDATE);
 +
 +        // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
 +        // multi-second WASM extern that vastly exceeds the external-message
@@ -256,12 +262,9 @@ index 000000000..019682c5e
 +
 +        ensureBalance();
 +
-+        // Advance head + register the canonical execution block hash.
-+        _finalizedSlot = pi.finalizedSlot;
-+        _finalizedBeaconRoot = pi.finalizedBeaconRoot;
-+        _finalizedExecutionBlockHash = pi.executionBlockHash;
-+        _updatesApplied += 1;
++        // Register the exec hash on both the advance and late-register paths.
 +        _provenExecutionBlockHash[pi.executionBlockHash] = true;
++        _updatesApplied += 1;
 +
 +        // Push the anchor into the deposit path so `finalizeDeposit` can consult
 +        // it synchronously from its own storage (TVM messaging is async, so the
@@ -274,10 +277,15 @@ index 000000000..019682c5e
 +            }(_l1ChainId, pi.executionBlockHash);
 +        }
 +
-+        address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
-+        emit HeadUpdated{dest: addrExtern}(
-+            pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
-+        );
++        if (advance) {
++            _finalizedSlot = pi.finalizedSlot;
++            _finalizedBeaconRoot = pi.finalizedBeaconRoot;
++            _finalizedExecutionBlockHash = pi.executionBlockHash;
++            address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
++            emit HeadUpdated{dest: addrExtern}(
++                pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
++            );
++        }
 +    }
 +
 +    // ========================================================

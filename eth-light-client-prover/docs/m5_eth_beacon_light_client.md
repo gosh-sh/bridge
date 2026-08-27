@@ -158,19 +158,21 @@ oracle waits for ancestry **or** an explicit product decision to live with
 checkpoint-only coverage (relayer only submits deposits in anchored
 checkpoint blocks).
 
-**Missed checkpoints.** The head is skip-*forward*:
-`require(finalizedSlot > _finalizedSlot)` lets the relayer jump to a later
-checkpoint. It cannot go back: a skipped checkpoint's execution hash is never
-registered. So:
+**Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
+be submitted without the skipped ones. A skipped checkpoint **of the current
+committee** can still be late-registered: `submitUpdate` verifies the proof,
+records the exec hash (and pushes it to `USDCBridge`), and does **not** move
+the head back. Same-slot replay and already-proven hashes still revert.
 
 - Head liveness does **not** require every 6.4 min update — jumping to the
   latest checkpoint is enough to keep the committee/WS clock moving.
-- 1/32 deposit coverage **does** require every checkpoint. A deposit in a
-  skipped checkpoint's execution block has no recovery path until ancestry.
+- 1/32 deposit coverage: catch up later in the same period by late-registering
+  the skipped checkpoint proofs. After `submitRotate` the previous committee
+  is no longer accepted (`ERR_WRONG_COMMITTEE`), so a gap that spans a
+  rotation waits for ancestry.
 - Intended cadence (M0 §7 / M5 relayer): ≥ 1 update per period (~27 h) for
   weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
-  is anchored. Continuous every-checkpoint is the coverage mode, not the
-  liveness mode.
+  is anchored.
 
 **Recovery after `disableOwnerRotation()`.** `_currentCommittee` is then
 written only by `submitRotate`, which requires an unbroken period chain.

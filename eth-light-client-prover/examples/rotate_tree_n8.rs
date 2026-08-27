@@ -49,7 +49,8 @@ use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
 use halo2_base::gates::circuit::{BaseCircuitParams, CircuitBuilderStage};
 use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
 use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
-use halo2_base::halo2_proofs::plonk::{verify_proof, VerifyingKey};
+use halo2_base::gates::flex_gate::MultiPhaseThreadBreakPoints;
+use halo2_base::halo2_proofs::plonk::{verify_proof, ProvingKey, VerifyingKey};
 use halo2_base::halo2_proofs::poly::commitment::{Params, ParamsProver};
 use halo2_base::halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
 use halo2_base::halo2_proofs::poly::kzg::multiopen::VerifierSHPLONK;
@@ -165,6 +166,15 @@ fn parse_base_v1_vkblob(bytes: &[u8]) -> (BaseCircuitParams, Vec<u8>) {
 }
 
 
+/// Cached keygen for one aggregation *shape* (all L1 nodes share one PK; all L2
+/// nodes share another). Production proving cost is prove-only after the first
+/// node of each level — see `docs/m6_rotate_recursive.md` §Production proving cost.
+struct AggNodePk {
+    calc: AggregationConfigParams,
+    pk: ProvingKey<G1Affine>,
+    bp: MultiPhaseThreadBreakPoints,
+}
+
 /// One stock intermediate aggregation node (L1 / L2). Returns a `Snark` whose
 /// protocol carries `accumulator_indices = 0..12`, so a parent folds it.
 fn agg_node(
@@ -173,33 +183,42 @@ fn agg_node(
     k: u32,
     inners: Vec<Snark>,
     has_prev_accumulator: bool,
+    cache: &mut Option<AggNodePk>,
 ) -> Snark {
     println!("── {name}: aggregate {} snark(s), has_prev={has_prev_accumulator}", inners.len());
-    let cfg = AggregationConfigParams { degree: k, lookup_bits: (k - 1) as usize, ..Default::default() };
-    let mut kg = AggregationCircuit::new::<SHPLONK>(
-        CircuitBuilderStage::Keygen,
-        cfg,
-        params,
-        inners.clone(),
-        VerifierUniversality::None,
-    );
-    kg.expose_previous_instances(has_prev_accumulator);
-    let calc = kg.calculate_params(Some(10));
-    println!("   calculated: {calc:?}");
-    let t = Instant::now();
-    let pk = gen_pk(params, &kg, None);
-    let bp = kg.break_points();
-    drop(kg);
+    if cache.is_none() {
+        let cfg = AggregationConfigParams { degree: k, lookup_bits: (k - 1) as usize, ..Default::default() };
+        let mut kg = AggregationCircuit::new::<SHPLONK>(
+            CircuitBuilderStage::Keygen,
+            cfg,
+            params,
+            inners.clone(),
+            VerifierUniversality::None,
+        );
+        kg.expose_previous_instances(has_prev_accumulator);
+        let calc = kg.calculate_params(Some(10));
+        println!("   calculated: {calc:?}");
+        let t = Instant::now();
+        let pk = gen_pk(params, &kg, None);
+        println!("   gen_pk {:.1}s (cached for this level)", t.elapsed().as_secs_f64());
+        let bp = kg.break_points();
+        drop(kg);
+        *cache = Some(AggNodePk { calc, pk, bp });
+    } else {
+        println!("   reuse cached pk");
+    }
+    let cached = cache.as_ref().expect("agg pk cache filled");
     let mut pv = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,
-        calc,
+        cached.calc,
         params,
         inners,
         VerifierUniversality::None,
     )
-    .use_break_points(bp);
+    .use_break_points(cached.bp.clone());
     pv.expose_previous_instances(has_prev_accumulator);
-    let snark = gen_snark_shplonk(params, &pk, pv, None::<&Path>);
+    let t = Instant::now();
+    let snark = gen_snark_shplonk(params, &cached.pk, pv, None::<&Path>);
     let ninst: usize = snark.instances.iter().map(|c| c.len()).sum();
     println!("   {name} done {:.1}s → {} B, {ninst} inst\n", t.elapsed().as_secs_f64(), snark.proof().len());
     snark
@@ -343,6 +362,7 @@ fn main() -> anyhow::Result<()> {
 
     // ---- L1 (×4): aggregate distinct shard pairs {0,1}{2,3}{4,5}{6,7} -------
     let mut l1: Vec<Snark> = Vec::with_capacity(4);
+    let mut l1_pk: Option<AggNodePk> = None;
     for p in 0..4 {
         let node = agg_node(
             &format!("L1[{p}]"),
@@ -350,6 +370,7 @@ fn main() -> anyhow::Result<()> {
             k,
             vec![leaves[2 * p].clone(), leaves[2 * p + 1].clone()],
             false,
+            &mut l1_pk,
         );
         anyhow::ensure!(
             node.instances.iter().map(|c| c.len()).sum::<usize>() == 18,
@@ -360,9 +381,16 @@ fn main() -> anyhow::Result<()> {
 
     // ---- L2 (×2): fold L1 pairs {0,1}{2,3} (recursive accumulator fold) -----
     let mut l2: Vec<Snark> = Vec::with_capacity(2);
+    let mut l2_pk: Option<AggNodePk> = None;
     for p in 0..2 {
-        let node =
-            agg_node(&format!("L2[{p}]"), &params, k, vec![l1[2 * p].clone(), l1[2 * p + 1].clone()], true);
+        let node = agg_node(
+            &format!("L2[{p}]"),
+            &params,
+            k,
+            vec![l1[2 * p].clone(), l1[2 * p + 1].clone()],
+            true,
+            &mut l2_pk,
+        );
         anyhow::ensure!(
             node.instances.iter().map(|c| c.len()).sum::<usize>() == 24,
             "L2[{p}] != 24 inst"

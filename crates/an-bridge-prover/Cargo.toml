@@ -14,6 +14,11 @@ members = [
     # Symlink → ../bridge-relayer-daemon. Path deps in that crate are relative
     # to this member path (see its Cargo.toml header).
     "bridge-relayer-daemon",
+    # Symlink → ../bridge-withdraw-e2e-cli. End-user withdraw CLI; lives at
+    # `crates/bridge-withdraw-e2e-cli` for root-level discoverability and is
+    # symlinked into this sub-workspace so it can path-dep on bridge-relayer-daemon
+    # + bridge-event-witness + bridge-prover-lib (all halo2-backed).
+    "bridge-withdraw-e2e-cli",
 ]
 resolver = "2"
 
@@ -57,6 +62,13 @@ halo2_curves = { git = "https://github.com/privacy-scaling-explorations/halo2cur
 tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", features = ["gosh"] }
 tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
 tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
+# tvm_client is needed by bridge-withdraw-e2e-cli (in-library replacement for
+# tvm-cli shell-outs during preflight / burn). Mirrors the root workspace's
+# pin so the whole graph resolves the same tag.
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+    "std",
+    "rustls-tls-webpki-roots",
+] }
 
 # Async + networking
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

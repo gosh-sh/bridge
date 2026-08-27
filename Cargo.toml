@@ -14,6 +14,11 @@ exclude = [
     "frontend",
     "crates/bridge-snark-utils",
     "crates/bridge-relayer-daemon",
+    # End-user withdraw CLI. Physical crate lives here; symlinked into
+    # crates/an-bridge-prover/ so it can access the halo2-backed relayer +
+    # event-witness libs. Build via `cd crates/an-bridge-prover && cargo build
+    # -p bridge-withdraw-e2e-cli`.
+    "crates/bridge-withdraw-e2e-cli",
     "crates/deposit-relayer-daemon",
     # Sub-workspace migrated from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover
     # 2026-06-18. Uses gosh-fork halo2-base (bump-halo2-lib-v0.4.1); cannot

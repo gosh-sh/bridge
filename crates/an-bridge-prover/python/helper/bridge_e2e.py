@@ -1,31 +1,6 @@
 """
 Shared scaffolding for the Acki Nacki → Ethereum bridge Circuit 4 (event)
 proving E2E orchestrators.
-
-Two variants live alongside each other under `python/`:
-  - generate_withdrawals_with_live_event_proving.py          (local devnet)
-  - generate_withdrawals_with_live_event_proving_shellnet.py (shellnet)
-
-The lanes diverge only in:
-  - GraphQL endpoint defaults + User-Agent + per-request timeouts
-  - Multisig funding strategy (mintAndSend caller / keys / pre-deploy faucet
-    sequence)
-  - Stage timeouts (shellnet is slower)
-
-Everything else — addresses, ABI paths, withdrawal params, history-window
-constants, GQL query shapes, the four pipeline stages (capture metadata,
-wait for verifier state, run three Rust binaries, wait for daemon verdict),
-the boundary math, the fire-window loop — is identical, so it lives here.
-
-Layout:
-  • Constants section  ── addresses, ABIs, withdrawal params, W/P/MAX_LAYERS
-  • `Tracer`           ── monotonic-elapsed log_phase/log helpers
-  • `GqlClient`        ── URL+UA+timeout-parameterised GraphQL caller plus
-                          the four queries the orchestrators use
-  • Pipeline helpers   ── encode_initiate_withdrawal_body,
-                          capture_event_metadata, wait_for_verifier_state,
-                          run_rust_bin, wait_for_daemon_result,
-                          call_initiate_withdrawal, run_event_proving_steps
 """
 
 import json
@@ -79,13 +54,8 @@ RECIPIENT_HEX      = "742d35cc6634c0532925a3b844bc454e4438f44e"
 WITHDRAWAL_EVENT_DST = ":000000000000000000000000000000000000000000000000000000000000026a"
 
 # ── History-window math constants ─────────────────────────────────────────────
-# W = HISTORY_PROOF_WINDOW_SIZE. Production: 128.
-# P = THINNING_FACTOR_P. Prover proves every P-th key block; bundle width = W*P.
-# Keep both in sync with `history_proof::HISTORY_PROOF_WINDOW_SIZE`
-# (acki-nacki/node/libs/history-proof/src/lib.rs) and
-# `bridge-prover-lib::THINNING_FACTOR_P`.
-W           = 128
-P           = 4
+W           = 128   #HISTORY_PROOF_WINDOW_SIZE
+P           = 4     #THINNING_FACTOR_P
 MAX_LAYERS  = 10
 
 

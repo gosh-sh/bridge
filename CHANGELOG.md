@@ -141,6 +141,35 @@ assigns it when the release is tagged.
   `./state/bootstrap_seed.json`), so existing operators who do not set
   `BRIDGE_CONFIG_DIR` see no behavioral change.
 
+### Fixed
+
+- **On-AN ABI artifacts realigned to shellnet (`acki-nacki@cf664666b`).**
+  Dropped stale `anWorkchain int8` from `confirmDeposit` inputs and the
+  `DepositFinalized` event in both runtime copies
+  (`crates/an-bridge-prover/python/contracts/USDCBridge.abi.json` and
+  `crates/bridge-withdraw-e2e-cli/abi/USDCBridge.abi.json`); rewrote
+  `DepositVoucher.abi.json` constructor to the 5-arg
+  `(depositId, contractAddr, dappId, amount, anAccount)` schema.
+  Withdraw runtime paths (`initiateWithdrawal`, `mintAndSend`,
+  `finalizeDeposit`) were already correct — no calldata change.
+- `scripts/check_voucher_abi_consistency.py` default `--compiled` now
+  points at `crates/an-bridge-prover/python/contracts/` (was a
+  nonexistent path).
+
+### Added
+
+- `scripts/check_bridge_abi_in_sync.sh` — `cmp`-based guard that the
+  two runtime `USDCBridge.abi.json` copies stay byte-identical.
+
+### Removed
+
+- `scripts/ursus/USDCBridge.abi.json` and
+  `crates/an-bridge-prover/python/contracts/README.md` — unreferenced
+  ABI mirror and its documentation. Systemd/env templates under
+  `scripts/ursus/` retained.
+- Fossil `.tvc` files under `python/contracts/`
+  (`USDCBridge.tvc`, `DepositVoucher.tvc`); nothing loaded them.
+
 ## [0.1.0] – 2026-06-11
 
 Tagged at `0f7c635`. Changes up to this tag predate this changelog and are not

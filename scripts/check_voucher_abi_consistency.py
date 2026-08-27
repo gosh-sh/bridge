@@ -27,7 +27,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO.parent / "acki-nacki/contracts/exchange"
-DEFAULT_COMPILED = REPO.parent / "acki-nacki/contracts/0.79.3_compiled/exchange"
+DEFAULT_COMPILED = REPO / "crates/an-bridge-prover/python/contracts"
 
 # The voucher constructor's leading parameters are the deposit identity plus the
 # payout; `confirmDeposit` must accept the same list, in the same order.

@@ -68,7 +68,6 @@
 				{"name":"contractAddr","type":"uint256"},
 				{"name":"dappId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"anWorkchain","type":"int8"},
 				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [
@@ -198,7 +197,6 @@
 				{"name":"contractAddr","type":"uint256"},
 				{"name":"dappId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"anWorkchain","type":"int8"},
 				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [

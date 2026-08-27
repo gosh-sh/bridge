@@ -29,6 +29,8 @@ contract AckiNackiBridgeAaveTest is Test {
     event YieldHarvested(address indexed recipient, uint256 amount);
     event EmergencyWithdrawAll(uint256 amount);
     event AaveEnabledSet(bool enabled);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -254,6 +256,36 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(usdc.balanceOf(address(bridge)), 10_700_000, "all USDC home");
     }
 
+    /// @dev ETH-7: a pool that leaves aUSDC after withdraw(max) must not let
+    ///      emergency zero `suppliedPrincipal` — leftover shares would then
+    ///      count as `accruedYield` and `harvestYield` would pay them out.
+    function test_eth7_emergencyLeftoverAToken_reverts_andDoesNotOpenHarvest() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        uint256 principal = bridge.suppliedPrincipal();
+        uint256 leftover = 1 * UsdcTestLib.UNIT;
+        pool.setLeftoverOnMaxWithdraw(leftover);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.EmergencyLeftoverAToken.selector, leftover)
+        );
+        bridge.emergencyWithdrawAll();
+
+        assertEq(bridge.suppliedPrincipal(), principal, "principal book unchanged");
+        assertTrue(bridge.aaveEnabled(), "aave stays enabled on revert");
+        assertEq(bridge.aUsdcBalance(), principal, "aUSDC still held (tx reverted)");
+        // Honest yield path still only the delta above principal, not leftover principal.
+        assertEq(bridge.accruedYield(), 0);
+    }
+
+    function test_eth9_approveFalse_reverts() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        usdc.setApproveReturnsFalse(true);
+        vm.expectRevert(AckiNackiBridge.ApproveFailed.selector);
+        bridge.supplyToAave(type(uint256).max);
+        assertEq(bridge.suppliedPrincipal(), 0, "no principal booked on failed approve");
+    }
+
     // -----------------------------------------------------------------
     // Admin setters
     // -----------------------------------------------------------------
@@ -266,8 +298,25 @@ contract AckiNackiBridgeAaveTest is Test {
     }
 
     function test_transferOwnership_flowsAllAuthorities() public {
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferStarted(address(this), user2);
         bridge.transferOwnership(user2);
+        assertEq(bridge.owner(), address(this), "ETH-8: still old owner until accept");
+        assertEq(bridge.pendingOwner(), user2);
+
+        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
+        vm.prank(user2);
+        bridge.setAaveEnabled(false);
+
+        vm.expectRevert(AckiNackiBridge.OwnershipNotPending.selector);
+        bridge.acceptOwnership();
+
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferred(address(this), user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
         assertEq(bridge.owner(), user2);
+        assertEq(bridge.pendingOwner(), address(0));
 
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
         bridge.setAaveEnabled(false);

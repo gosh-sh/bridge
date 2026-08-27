@@ -29,10 +29,17 @@ contract MockAUSDC is MockERC20 {
 contract MockAavePool is IAavePool {
     IERC20 public immutable underlying;
     MockAUSDC public immutable aToken;
+    /// @notice ETH-7 PoC: when `withdraw(max)` is called, leave this many
+    ///         aTokens unburned (simulates a pool that under-redeems).
+    uint256 public leftoverOnMaxWithdraw;
 
     constructor(address _underlying, address _aToken) {
         underlying = IERC20(_underlying);
         aToken = MockAUSDC(_aToken);
+    }
+
+    function setLeftoverOnMaxWithdraw(uint256 leftover) external {
+        leftoverOnMaxWithdraw = leftover;
     }
 
     function supply(address, uint256 amount, address onBehalfOf, uint16) external override {
@@ -43,6 +50,10 @@ contract MockAavePool is IAavePool {
     function withdraw(address, uint256 amount, address to) external override returns (uint256) {
         uint256 bal = aToken.balanceOf(msg.sender);
         uint256 payout = amount == type(uint256).max ? bal : amount;
+        if (amount == type(uint256).max && leftoverOnMaxWithdraw > 0 && leftoverOnMaxWithdraw < bal)
+        {
+            payout = bal - leftoverOnMaxWithdraw;
+        }
         require(bal >= payout, "pool: insufficient aUSDC");
         aToken.burnFrom(msg.sender, payout);
         require(underlying.transfer(to, payout), "pool: push");

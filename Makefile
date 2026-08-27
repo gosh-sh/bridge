@@ -250,6 +250,8 @@ pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN
 	@echo "$(BLUE)── pre-push-audit: ETH audit closeout gate ──$(NC)"
 	@$(MAKE) bootstrap-foundry-deps
 	@cd contracts/ethereum && forge fmt --check
+	@chmod +x scripts/check_shplonk_artefacts.sh
+	@./scripts/check_shplonk_artefacts.sh
 	@cd contracts/ethereum && forge test
 	@$(MAKE) audit-solidity-test
 	@$(MAKE) pre-push-an
@@ -262,14 +264,16 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@$(MAKE) relayer-fmt
 	@$(MAKE) relayer-clippy
 	@cd contracts/ethereum && forge fmt --check
+	@chmod +x scripts/check_shplonk_artefacts.sh
+	@./scripts/check_shplonk_artefacts.sh
 	@cd contracts/ethereum && forge test
 	@$(MAKE) coverage-solidity
 	@cargo test --workspace --locked
 	@$(MAKE) relayer-test
 	@$(MAKE) aggregator-test
 	@chmod +x scripts/check_eip170_verifier_bins.sh
-	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike 2>/dev/null || \
-	 ./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers 2>/dev/null || true
+	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike 2>/dev/null || true
+	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers
 	@chmod +x scripts/check_withdrawal_verifier_not_stub.sh
 	@./scripts/check_withdrawal_verifier_not_stub.sh
 	@echo "$(GREEN)── pre-push: all green; safe to push ──$(NC)"

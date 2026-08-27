@@ -74,10 +74,10 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     }
 
     function test_productionWithdrawal_isolated_verifies() public {
-        if (!_artefactsPresent()) {
-            emit log("SKIP: verifiers/BridgeWithdrawalAggregatorVerifier{,_calldata}.bin required");
-            return;
-        }
+        require(
+            _artefactsPresent(),
+            "ETH-6: verifiers/BridgeWithdrawalAggregatorVerifier{,_calldata}.bin required"
+        );
         IBridgeWithdrawalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());
@@ -92,9 +92,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     /// Tampering a byte in the proof region (past the 22 instance words) makes the
     /// SHPLONK pairing fail -> the Yul verifier reverts.
     function test_productionWithdrawal_tamperedProof_reverts() public {
-        if (!_artefactsPresent()) {
-            return;
-        }
+        require(_artefactsPresent(), "ETH-6: C4 verifier artefacts required");
         IBridgeWithdrawalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());
@@ -115,9 +113,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     /// Tampering a re-exposed public input makes the adapter's instance check fail
     /// (returns false, no revert) before the pairing is even reached.
     function test_productionWithdrawal_mismatchedPub_returnsFalse() public {
-        if (!_artefactsPresent()) {
-            return;
-        }
+        require(_artefactsPresent(), "ETH-6: C4 verifier artefacts required");
         IBridgeWithdrawalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());

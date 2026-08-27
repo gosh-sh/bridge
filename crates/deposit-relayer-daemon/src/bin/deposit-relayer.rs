@@ -186,8 +186,9 @@ enum Cmd {
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
-        /// `state.json` and advance the cursor (0 = disabled).
-        #[arg(long, default_value_t = 0)]
+        /// `state.json` and advance the cursor (0 = disabled). Production
+        /// systemd sets SKIP_AFTER_ATTEMPTS (QC-OFF-01).
+        #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]

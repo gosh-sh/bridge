@@ -13,6 +13,7 @@ contract MockERC20 is IERC20 {
     mapping(address => uint256) internal _balances;
     mapping(address => mapping(address => uint256)) internal _allowances;
     uint256 public totalSupply;
+    bool public approveReturnsFalse;
 
     constructor(string memory _name, string memory _symbol, uint8 _decimals) {
         name = _name;
@@ -28,8 +29,13 @@ contract MockERC20 is IERC20 {
         return _allowances[owner][spender];
     }
 
+    function setApproveReturnsFalse(bool v) external {
+        approveReturnsFalse = v;
+    }
+
     function approve(address spender, uint256 amount) external override returns (bool) {
         _allowances[msg.sender][spender] = amount;
+        if (approveReturnsFalse) return false;
         return true;
     }
 

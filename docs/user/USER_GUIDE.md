@@ -48,7 +48,7 @@ Both directions have been run end-to-end on the live testnet — see
 | --- | --- |
 | 1 USDC | `1000000` |
 | 10 USDC | `10000000` |
-| 100 USDC (max/deposit) | `100000000` |
+| 100 USDC (example) | `100000000` |
 
 Confirm addresses with your operator — test deployments can change.
 
@@ -176,7 +176,7 @@ relayer-driven (the ETH-side steps are automatic — no manual submission):
 | `transferFrom` failed / revert | You skipped **approve** or approved too little. Redo Step 1. |
 | `InvalidAmount` | `amount` was `0`. Enter a positive number. |
 | `InvalidAnAccount` | `anAccount` was zero or malformed. Use a non-zero 64-hex bytes32. |
-| `DepositTooLarge` | Max is 100 USDC (`100000000`) per deposit. |
+| `DepositTooLarge` | Per-tx cap is `MAX_DEPOSIT_AMOUNT = type(uint64).max` (6-decimal USDC). |
 | Deposit reverts, no token error | Check amount limits, allowance, and `anAccount != 0`. |
 | USDC not on Acki Nacki yet | Proving takes minutes. If still missing, send your **tx hash** + **depositId** (from the `Deposit` event log) to the operator. |
 
@@ -217,7 +217,7 @@ share your MetaMask secret recovery phrase. Test USDC is not real money.
 > `docs/shellnet_usdcbridge_deposit_vk_redeploy.md`.
 
 **Verify the bridge on Etherscan** (run from `contracts/ethereum/`, which pins
-solc 0.8.19 / optimizer / `via_ir`):
+solc 0.8.21 / optimizer / `via_ir`):
 
 ```bash
 forge verify-contract --chain 11155111 --watch --guess-constructor-args \

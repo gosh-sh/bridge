@@ -12,6 +12,7 @@ import "@src/IBridgeWithdrawalVerifier.sol";
 
 import "@bridge-test/helpers/VerifyBlockConfigLib.sol";
 import "@bridge-test/helpers/UsdcTestLib.sol";
+import "@bridge-test/helpers/Bn254FrLib.sol";
 import "@bridge-test/mocks/MockPrimaryVerifier.sol";
 import "@bridge-test/mocks/MockFallbackVerifier.sol";
 import "@bridge-test/mocks/MockLayerHashesMovementVerifier.sol";
@@ -85,7 +86,7 @@ contract DepositCrossFnReentrancyTest is Test {
     function _seedVerifyBlock() internal returns (uint256 l1Anchor) {
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("td25-seed-layer", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("td25-seed-layer", i))));
         }
         l1Anchor = layers[0];
         bridge.verifyBlock(
@@ -127,7 +128,7 @@ contract DepositCrossFnReentrancyTest is Test {
             recipientHi: hi,
             recipientLo: lo,
             dstChainId: block.chainid,
-            senderAccFr: uint256(keccak256("senderAcc")),
+            senderAccFr: Bn254FrLib.toFr(uint256(keccak256("senderAcc"))),
             dappFr: DAPP_FR,
             accFr: ACC_FR,
             nullifier: nullifier,
@@ -137,7 +138,7 @@ contract DepositCrossFnReentrancyTest is Test {
 
     function _secondVerifyBlockLayers() internal view returns (uint256[10] memory layers) {
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("td25-vb2-layer", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("td25-vb2-layer", i))));
         }
     }
 

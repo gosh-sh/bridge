@@ -33,7 +33,7 @@ Items here are **QC** (design / policy questions). They may reference BC rows on
 | Deposit event fields | `depositId`, `sender`, `amount`, `anWorkchain`, `anAccount` | PI fr[0..7]; `f.dappId=0` on-chain (BC-AN-01 **closed**) | ~~BC-AN-01~~ resolved |
 | L1 bridge identity | Fixed deploy address in proof via receipt | `contractAddr` in PI, no allowlist | **BC-AN-02** |
 | Max amount | `MAX_DEPOSIT_AMOUNT` = `uint64.max` per tx (#20) | `uint64` bound on `fr[2]` (QC-AN-01) | QC-AN-J1 — **ETH side raised** |
-| Zero recipient | `InvalidRecipient` on withdraw (#16); deposit `InvalidAnAccount` | No pre-ZK guard (QC-AN-10) | QC-AN-J3 |
+| Zero recipient | `InvalidRecipient` on withdraw (#16); deposit `InvalidAnAccount` | `ERR_ZERO_RECIPIENT` pre-ZK (QC-AN-10 closed Stage II) | QC-AN-J3 |
 | Emergency pause | **No EVM pause** (#20) | No pause on `finalizeDeposit` | QC-AN-J2 — **ETH pause removed** |
 | Workchain | Emitted in `Deposit` | `makeAddrStd(0, anAccount)` always WC 0 | QC-AN-J4 **closed** |
 | Custody model | USDC in bridge / AAVE | ECC mint (currency #3) | QC-AN-J5 |
@@ -46,7 +46,7 @@ Items here are **QC** (design / policy questions). They may reference BC rows on
 |----|----------|---------|--------------|-------------------|-------------|
 | QC-AN-J1 | `MAX_DEPOSIT_AMOUNT` = `uint64.max` (#20) | `uint64` cap on mint path | ETH cap raised; confirm joint min/max policy. | QC-AN-01 partial | **ack (ETH)** — ETH per-tx cap `uint64.max` ≤ AN `uint64` `fr[2]` bound (no overflow into mint path); AN also gates `amount>0` (`ERR_ZERO_AMOUNT`) + per-chain `getMintCap`. Joint effective range = `(0, uint64.max]`. Open only on final mainnet cap values. |
 | QC-AN-J2 | **No EVM pause** (#20) | no pause on AN | ETH pause removed; AN finalize still permissionless for prior L1 events. | *No answer* | **ack (ETH)** — EVM pause removed by design (#20); AN `finalizeDeposit` permissionless. Safety rests on proof + nullifier + source allowlist, not on a pause switch. Asymmetry accepted + documented. |
-| QC-AN-J3 | `InvalidAnAccount` | no pre-ZK `anAccount==0` check (QC-AN-10) | ETH stricter than AN on zero recipient. | *No answer* (QC-AN-10: add AN require, drop ETH guard) | **closed (ETH)** — ETH keeps `InvalidAnAccount` deposit-time fail-fast; AN reconstructs `makeAddrStd(0, account)` so `account==0` mints to an unspendable `0:0…0`. ETH guard retained; recommend AN add a pre-ZK `require(anAccount!=0)` for defense-in-depth (non-blocking). |
+| QC-AN-J3 | `InvalidAnAccount` | AN `require(anAccount != 0)` / empty withdraw recipient (`ERR_ZERO_RECIPIENT`) | Both sides reject zero. | Stage II: add AN require; **keep** ETH guard | **closed Stage II** — AN require landed; ETH `InvalidAnAccount` / `InvalidRecipient` stay. Do not drop ETH fail-fast. See `BRIDGE-AN-10`. |
 | QC-AN-J4 | `anWorkchain` in `Deposit` event | payout `makeAddrStd(0, account)` | Workchain from L1 not enforced on AN. | «Не используется» | **closed (ack)** — workchain in event ignored on AN |
 | QC-AN-J5 | USDC trust (QC-A1-2) | ECC mint, no USDC pause hook | Two-domain custody model. | *No answer* | **ack (ETH)** — two-domain custody by design: USDC/AAVE custody on ETH (owner cannot touch principal, QC-A1-2), ECC#3 mint on AN. No shared pause hook. Documented. |
 

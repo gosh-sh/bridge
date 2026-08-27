@@ -82,8 +82,16 @@ Re-run when changing `check_binds_to`, `deposit()` CEI/accounting, `nonReentrant
 ## Trust assumptions (ETH custody)
 
 - **USDC (Sepolia / mainnet):** bridge assumes standard ERC-20 semantics — exact `transferFrom` credit, no fee-on-transfer. Mainnet USDC is an upgradeable proxy; Circle blacklist/pause on the bridge address would freeze flows (operational risk, not a Solidity bug). **Author confirm:** acceptable for target deployment?
-- **Bridge pause (#20):** `AckiNackiBridge` has **no** `pause()` / `whenNotPaused` on `deposit`, `verifyBlock`, or `withdrawByProof` — only `nonReentrant`. Token pause/blacklist is external (TD-24/58). Relayer BK sentry may pause **off-chain** submission.
-- **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = type(uint64).max` on main (#20); overlay documents aggregate TVL uncapped (`DepositWhaleCap.t.sol`). **Author confirm:** deployment cap policy?
+- **Bridge pause (#20 / Stage II ETH-4):** `AckiNackiBridge` has **no** `pause()` / `whenNotPaused` on `deposit`, `verifyBlock`, or `withdrawByProof` — only `nonReentrant`. Token pause/blacklist is external (TD-24/58). Relayer BK sentry may pause **off-chain** submission. PDF ETH-4 guardian pause is **not** restored; ETH-1/ETH-2 are field-range gated instead (`audit/findings/BRIDGE-ETH-04/`).
+- **ETH-5 constructor:** Circuit 4 withdraw requires the full verifyBlock triple (`WithdrawRequiresVerifyBlock`). Partial 1A/1B/C2 wiring reverts `PartialVerifyBlockWiring`. Deposit-only and verifyBlock-only remain legal. Mainnet `DeployRealBridge` requires `USE_AXIOM_ORACLE` + `WIRE_VERIFY_BLOCK`. See `audit/findings/BRIDGE-ETH-05/`.
+- **ETH-6 artefacts:** pin `contracts/ethereum/verifiers/SHA256SUMS`. Pairing gate `ShplonkArtefactPairing.t.sol` — C4 PASS; 1A/1B/C2 FAIL until n14 regen. See `audit/findings/BRIDGE-ETH-06/`.
+- **solc:** Foundry `solc_version = "0.8.21"` + `via_ir` (ETH-10 / `BRIDGE-ETH-10`).
+- **ETH-8 ownership:** `transferOwnership` nominates `pendingOwner`; `acceptOwnership` completes (ETH-8). See `audit/findings/BRIDGE-ETH-08/`.
+- **ETH-7 emergency leftover aToken:** `emergencyWithdrawAll` reverts `EmergencyLeftoverAToken` if aUSDC remains after `withdraw(max)` — leftover shares must not become `harvestYield`. Liquid excess remains `skimExcessUsdc` (QC-A1-3). See `audit/findings/BRIDGE-ETH-07/`.
+- **ETH-9:** mainnet `DeployRealBridge` requires `altTokenId == 0` (not a constructor `chainid` check — Foundry binds Circuit 4 with `vm.chainId(1)`). `supplyToAave` checks `approve` bool (`ApproveFailed`). FoT still out of scope. See `audit/findings/BRIDGE-ETH-09/`.
+- **QC-AN-10 / WD-AN-07:** ETH keeps `InvalidAnAccount` / `InvalidRecipient`. AN `finalizeDeposit` / `confirmDeposit` / `initiateWithdrawal` require non-zero recipient (`ERR_ZERO_RECIPIENT`). Snapshot code **223**; production sibling `acki-nacki` code **230** (`223` is already `ERR_WRONG_DAPP` there). See `audit/findings/BRIDGE-AN-10/`.
+- **QC-OFF-01:** production `deposit-relayer` uses `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (`scripts/ursus/deposit-relayer.service`). CLI default remains 0.
+- **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = type(uint64).max` on main (#20); overlay documents aggregate TVL uncapped (`DepositWhaleCap.t.sol`). Live docs no longer claim 100 USDC as the contract cap (frontend form still has a 100 USDC convenience cap).
 
 ## Audit classification (ETH pass 2026-07)
 

@@ -42,23 +42,43 @@ Use the view `expectedPrevAnchor(numLayers)` (or the relayer helper that mirrors
 
 `_highestActiveLayer()` does not decrease when AN permanently drops layers (windows retain history). Partner must keep `prev_max_level_layer_hash_for` aligned. Fail-closed stalls are preferred over wrong anchors.
 
-### WD-Q1 — 128-window eviction
+### WD-Q1 — 128-window eviction (ETH-3 / A3-01)
 
-`HISTORY_PROOF_WINDOW = 128`. A Circuit-4 `finalRoot` older than the last 128 L1 anchors reverts `UnknownAnchor`. Funds stay in treasury.
+`HISTORY_PROOF_WINDOW = 128` is a count of **successful `verifyBlock` appends per layer**, not a `blockSeqNo` span. After 128 newer appends on that layer the oldest hash is evicted; `withdrawByProof` with that `finalRoot` reverts `UnknownAnchor`. **Funds stay in the treasury** (no burn, no second spend).
 
-**SLA:** submit `withdrawByProof` (or re-prove against a fresher L1 root) before eviction. Confirm partner Circuit-4 re-prove path before mainnet.
+A `blockSeqNo` jump (strictly greater than `storedLastSeenBlockSeqNo`) is **permitted** so the relayer can catch up with a later valid proof. One call still writes **one** window slot — a jump does not mass-evict. Sequential `last_seen+1` stays an **off-chain** relayer policy (`test_relayerLoop_seqNoFastForward_isPermittedByContract`, `test_seqNoFastForward_doesNotEvictEarlierAnchor`). No on-chain jump cap: a cap would brick catch-up after downtime.
+
+**SLA (withdraw relayer):**
+
+1. **Primary:** submit `withdrawByProof` against the original Circuit 4 `finalRoot` before that hash is evicted (128 subsequent `verifyBlock`s on that layer).
+2. **Fallback:** re-prove Circuit 4 against a **still-in-window** descendant (`test_reproveAgainstLaterInWindowAnchor_succeeds` pins the contract path). Partner dense chain is at most `MAX_CHAIN_LEN = 11` rungs (`gosh-dense-balanced-tree`); pick a remaining window entry within that hop bound. If no such root remains, that withdrawal event is stranded until/unless the circuit hop bound is raised — funds still sit in treasury.
+
+Gate: `cd audit/spec/ethereum && forge test --match-contract WithdrawAnchorEviction -vv`
 
 ### WD-Q4 — withdraw anchor layer
 
 NB-Q1 (2026-08-04): the `WITHDRAW_ANCHOR_LAYER = 1` pin was removed. `withdrawByProof` now scans every layer window via `_isKnownAnchor`, so partner L≥2 witnesses are accepted without a contract upgrade. Every window entry was written by a verified `verifyBlock`, so the layer index adds specificity, not security. Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan of the specific window) remains the ultimate target once the Circuit 4 re-keygen lands.
 
-### A4-Q2 — pause
+### A4-Q2 / ETH-4 — pause (keep #20)
 
-Owner may leave `pause()` on indefinitely (blocks `deposit` / `verifyBlock` / `withdrawByProof`). AAVE owner paths stay available. Mainnet: use a documented pause procedure / multisig; optional timelock is a governance choice, not a fund-safety bug.
+`AckiNackiBridge` has **no** `pause()` / `whenNotPaused` / `BridgePaused` (#20 / TD-58). Stage II PDF asked for a guardian pause so ETH-1 could be stopped; ETH-1/ETH-2 are now gated (`FieldElementOutOfRange`). Restoring pause would reverse #20 (deposit HOL / pause asymmetry). Incident controls that remain:
+
+- Do not wire / disable Circuit 4 (`bridgeWithdrawalVerifier = address(0)` at deploy, or a new deploy).
+- Circle USDC pause/blacklist on the bridge address (external, TD-24/56).
+- Owner AAVE paths (`emergencyWithdrawAll`, `harvestYield`) stay available.
+- Relayer can halt **off-chain** submission.
+
+Do **not** restore an on-chain pause without an explicit product reversal of #20. See `audit/findings/BRIDGE-ETH-04/`.
 
 ### QC-A1-2 — USDC trust
 
 Bridge assumes standard ERC-20 semantics (no fee-on-transfer). Circle blacklist/pause on the bridge address freezes flows — operational risk.
+
+### QC-OFF-01 — deposit-relayer head-of-line skip
+
+The CLI default is `--skip-after-attempts 0` (strict sequential). **Production systemd** (`scripts/ursus/deposit-relayer.service`) sets `SKIP_AFTER_ATTEMPTS=64` before `EnvironmentFile` (the env file may override) and passes `--skip-after-attempts ${SKIP_AFTER_ATTEMPTS}`. Parked ids land in `state.json` → `parked_deposit_ids`; run `finalize-one` for each. See `docs/audit/deposit-relayer-operator-runbook.md`.
+
+Do not ship a live daemon with skip disabled unless operators accept that one stuck `depositId` blocks the queue.
 
 ---
 
@@ -80,8 +100,11 @@ Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inp
 ## Deploy checklist (mainnet)
 
 1. `./scripts/check_withdrawal_verifier_not_stub.sh`
-2. `./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers`
-3. Confirm `WIRE_WITHDRAW_BY_PROOF=true` and withdrawal adapter is `BridgeWithdrawalAggregatorVerifier`
-4. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path
-5. Relayer uses `expectedPrevAnchor(numLayers)` for verifyBlock
-6. Withdraw relayer monitors window age vs `HISTORY_PROOF_WINDOW`
+2. `./scripts/check_shplonk_artefacts.sh` (SHA-256 pin + EIP-170)
+3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing` — all four pairing tests green (1A/1B/C2 currently fail until n14 regen; do not deploy verifyBlock until they pass)
+4. Confirm `WIRE_VERIFY_BLOCK=true` and `USE_AXIOM_ORACLE=true` on mainnet (`DeployRealBridge` `envBool`; ETH-5)
+5. Confirm Circuit 4 is wired together with the verifyBlock triple (constructor `WithdrawRequiresVerifyBlock`)
+6. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path
+7. Relayer uses `expectedPrevAnchor(numLayers)` for verifyBlock
+8. Withdraw relayer monitors window age vs `HISTORY_PROOF_WINDOW`
+9. Production `deposit-relayer` runs with `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (QC-OFF-01; `scripts/ursus/deposit-relayer.service`)

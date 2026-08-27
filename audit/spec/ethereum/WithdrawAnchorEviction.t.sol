@@ -12,6 +12,7 @@ import "@src/IBridgeWithdrawalVerifier.sol";
 
 import "@bridge-test/helpers/VerifyBlockConfigLib.sol";
 import "@bridge-test/helpers/UsdcTestLib.sol";
+import "@bridge-test/helpers/Bn254FrLib.sol";
 import "@bridge-test/mocks/MockPrimaryVerifier.sol";
 import "@bridge-test/mocks/MockFallbackVerifier.sol";
 import "@bridge-test/mocks/MockLayerHashesMovementVerifier.sol";
@@ -40,6 +41,9 @@ contract WithdrawAnchorEvictionTest is Test {
     uint256 internal constant DAPP_FR = 0xD499F4CEC0FFEE01;
     uint256 internal constant ACC_FR = 0xAC0F4CEDEADBEEF1;
 
+    address internal funder = address(0xF00D);
+    address internal constant RECIPIENT = address(0x1111111111111111111111111111111111111111);
+
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
         usdc = new MockERC20("Mock USDC", "mUSDC", 6);
@@ -65,15 +69,13 @@ contract WithdrawAnchorEvictionTest is Test {
                 BK_SET,
                 GENESIS_PREV_ANCHOR
             ),
-            VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
-            )
+            VerifyBlockConfigLib.withWithdraw(IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR)
         );
     }
 
     function _layers(uint256 blockIdx) internal pure returns (uint256[10] memory arr) {
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            arr[i] = uint256(keccak256(abi.encode("evict-layer", blockIdx, i)));
+            arr[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("evict-layer", blockIdx, i))));
         }
     }
 
@@ -107,8 +109,7 @@ contract WithdrawAnchorEvictionTest is Test {
         _submitBlock(WINDOW + 1);
         assertFalse(bridge.isKnownLayerAnchor(1, evictedL1), "post: oldest L1 evicted");
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier
-            .WithdrawalPublicInputs({
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
             tokenId: 0,
             amount: 1,
             recipientHi: 0,
@@ -123,5 +124,72 @@ contract WithdrawAnchorEvictionTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, evictedL1));
         bridge.withdrawByProof(hex"00", pub);
+    }
+
+    /// @dev ETH-3: a `blockSeqNo` jump writes one window slot. The earlier
+    ///      L1 hash stays known — unbounded seq_no is catch-up, not eviction.
+    function test_seqNoFastForward_doesNotEvictEarlierAnchor() public {
+        uint256 firstL1 = _submitBlock(1);
+        assertTrue(bridge.isKnownLayerAnchor(1, firstL1));
+
+        uint256[10] memory jumped = _layers(2);
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("att-jump")),
+            abi.encodePacked(keccak256("lh-jump")),
+            FIRST_BLOCK_ID + 1,
+            BK_SET,
+            1_000_000,
+            ACTIVE_LAYERS,
+            jumped,
+            bridge.expectedPrevAnchor(ACTIVE_LAYERS)
+        );
+
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 1_000_000);
+        assertTrue(bridge.isKnownLayerAnchor(1, firstL1), "seq_no jump must not evict the previous L1 hash");
+        assertTrue(bridge.isKnownLayerAnchor(1, jumped[0]), "jumped head recorded");
+    }
+
+    /// @dev ETH-3 / WD-Q1: after the original `finalRoot` is evicted, a new
+    ///      Circuit 4 proof bound to a still-in-window descendant must pay.
+    ///      The mock verifier does not check the event; this pins the
+    ///      *contract* re-prove path. Partner circuit: dense chain ≤ 11 rungs.
+    function test_reproveAgainstLaterInWindowAnchor_succeeds() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 2 * UsdcTestLib.UNIT);
+
+        uint256 originalL1 = _submitBlock(1);
+        for (uint256 i = 2; i <= WINDOW; i++) {
+            _submitBlock(i);
+        }
+        _submitBlock(WINDOW + 1);
+        assertFalse(bridge.isKnownLayerAnchor(1, originalL1), "original evicted");
+
+        uint256 laterL1 = _layers(2)[0];
+        assertTrue(bridge.isKnownLayerAnchor(1, laterL1), "block-2 L1 still in window");
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _withdrawPub(laterL1, 0xBEEF);
+        assertTrue(bridge.withdrawByProof(hex"00", pub), "re-prove against later anchor");
+        assertEq(usdc.balanceOf(RECIPIENT), 1 * UsdcTestLib.UNIT);
+        assertTrue(bridge.isNullifierUsed(0xBEEF));
+    }
+
+    function _withdrawPub(uint256 finalRoot, uint256 nullifier)
+        internal
+        view
+        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory)
+    {
+        uint256 a = uint256(uint160(RECIPIENT));
+        return IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
+            tokenId: 0,
+            amount: 1 * UsdcTestLib.UNIT,
+            recipientHi: a >> 80,
+            recipientLo: a & ((1 << 80) - 1),
+            dstChainId: block.chainid,
+            senderAccFr: 1,
+            dappFr: DAPP_FR,
+            accFr: ACC_FR,
+            nullifier: nullifier,
+            finalRoot: finalRoot
+        });
     }
 }

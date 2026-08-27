@@ -83,7 +83,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | QC-AN-01 | `unit/test_usdcbridge_finalize_negative.py` | `fr[2]` must fit `uint64` (exit 214) before mint. | «лучше в эфире увеличить до u64. Надо подумать про минимальный размер» | **partial ack** — raise ETH cap direction; min deposit TBD (see QC-AN-J1) |
 | QC-AN-08 | `unit/test_usdcbridge_deposit_edge.py` | Truncated PI rejected before mint. | (no question in Stage II) | **closed (test)** |
 | QC-AN-09 | code review (`tvm.accept()` before ZK) | Permissionless submit; bad proof wastes bridge gas — griefing, not theft. | *No answer* | **open** — in progress |
-| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | No `anAccount==0` guard pre-ZK (ETH reverts `InvalidAnAccount`). | «добавлю require» on AN; «убрать проверку в эфире» — burn on L1 allowed | **partial ack** — deliberate asymmetry; await code on both sides (see QC-AN-J3) |
+| QC-AN-10 | `unit/test_usdcbridge_deposit_edge.py` | No `anAccount==0` guard pre-ZK (ETH reverts `InvalidAnAccount`). | «добавлю require» on AN; «убрать проверку в эфире» — burn on L1 allowed | **closed Stage II** — AN `require(anAccount != 0)` / empty withdraw recipient (`ERR_ZERO_RECIPIENT`); ETH keeps `InvalidAnAccount` / `InvalidRecipient`. |
 
 ### Admin / upgrade / ops
 
@@ -118,7 +118,7 @@ Ethereum Deposit event  →  off-chain deposit-prover (dappId from AN_DAPP_ID co
 | ID | Suggested action | If author agrees |
 |----|------------------|------------------|
 | BC-AN-02 | `immutable EXPECTED_L1_BRIDGE` | Medium |
-| QC-AN-10 | `require(f.anAccount != 0)` on AN; dev plans to drop ETH `InvalidAnAccount` | Partial ack — asymmetric burn model (Stage II) |
+| QC-AN-10 | `require(f.anAccount != 0)` on AN; keep ETH `InvalidAnAccount` | **closed Stage II** — both sides reject zero; do not drop ETH guard |
 
 ---
 

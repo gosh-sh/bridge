@@ -48,6 +48,7 @@ contract DeployGenesisCursorBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
     function run() external {
+        require(block.chainid != 1, "ETH-5: GenesisCursorBridge is not for mainnet");
         uint256 pk = vm.envUint("PRIVATE_KEY");
 
         AckiNackiBridge.VerifyBlockConfig memory vb = AckiNackiBridge.VerifyBlockConfig({

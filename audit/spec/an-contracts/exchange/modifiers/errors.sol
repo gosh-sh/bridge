@@ -14,4 +14,6 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_INVALID_ZKPROOF = 220;
     uint16 constant ERR_UNSUPPORTED_TOKEN = 221;
     uint16 constant ERR_UNSUPPORTED_SRC_CHAIN = 222;
+    /// @notice QC-AN-10 / ETH-wave-5: zero AN account or empty withdraw recipient.
+    uint16 constant ERR_ZERO_RECIPIENT = 223;
 }

@@ -51,7 +51,7 @@ Future genuine cross-chain withdrawals (token burn on AN → ETH release on Ethe
 
 ### Pipeline detail — Ethereum → Acki Nacki (deposits)
 
-1. User calls `AckiNackiBridge.deposit()` with ETH (`MAX_DEPOSIT_AMOUNT = 100 ether`). Contract increments `depositCounter`, adds to `treasuryBalance`, emits `Deposit(depositId, sender, amount, timestamp)`.
+1. User calls `AckiNackiBridge.deposit()` with USDC (`MAX_DEPOSIT_AMOUNT = type(uint64).max`). Contract increments `depositCounter`, adds to `treasuryBalance`, emits `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)`.
 2. Idle ETH can be routed by the owner into AAVE V3 via `supplyToAave()` for yield (see `docs/aave_integration.md`).
 3. `deposit-prover` (Rust + axiom-eth) fetches the transaction receipt + MPT inclusion path from an Ethereum RPC and builds a Halo2 circuit that proves the `Deposit` event was emitted by the bridge contract in a real Ethereum block.
 4. The Halo2 proof is consumed natively on the AN side by the `VERHALO2SHPLONK` TVM opcode (under development in `tvm-sdk`); the AN-side bridge contract validates the public inputs and mints the corresponding token to the user.
@@ -128,7 +128,7 @@ Three Cargo workspaces, kept separate because of dependency-tree conflicts in th
 
 ## Smart Contracts
 
-All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.19 via Foundry.
+All contracts are in `contracts/ethereum/src/` and compiled with Solidity 0.8.21 via Foundry.
 
 ### Core
 
@@ -286,7 +286,7 @@ docker-compose exec dev bash
 
 Key settings in `contracts/ethereum/foundry.toml`:
 
-- `solc_version = "0.8.19"` — Solidity compiler version.
+- `solc_version = "0.8.21"` — Solidity compiler version (ETH-10).
 - `optimizer_runs = 1` — Optimised for deployment size (not runtime gas).
 - `via_ir = true` — Required for the larger Yul verifiers (`Halo2Verifier`, `Blake2bHalo2Verifier`).
 
@@ -294,7 +294,7 @@ Key settings in `contracts/ethereum/foundry.toml`:
 
 | Component                | Technology                                                                |
 | ------------------------ | ------------------------------------------------------------------------- |
-| Smart contracts          | Solidity 0.8.19, Foundry                                                  |
+| Smart contracts          | Solidity 0.8.21, Foundry                                                  |
 | ZK proof system          | Halo2 (KZG + SHPLONK on BN254)                                            |
 | AN→ETH wrapper           | gnark Groth16 (Go), per-circuit                                           |
 | AN→ETH transcript        | Blake2b (matches AN-side)                                                 |

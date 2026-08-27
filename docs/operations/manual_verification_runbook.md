@@ -149,7 +149,7 @@ Confirm by inspection:
 
 - [ ] `deposit()` pulls USDC via `transferFrom`, increments `treasuryBalance`, emits `Deposit(...)`. **No AAVE call on the user path.**
 - [ ] There is **no** `function withdraw(...)` and **no** `import "./IAckiNackiVerifier.sol";` — both retired in Phase 4.3 (2026-05-17). Confirm via `! grep -E "function withdraw\(|IAckiNackiVerifier" contracts/ethereum/src/AckiNackiBridge.sol`.
-- [ ] `MAX_DEPOSIT_AMOUNT = 100 USDC` (6 decimals).
+- [ ] `MAX_DEPOSIT_AMOUNT = type(uint64).max` (6-decimal USDC; AN mint-path width).
 - [ ] The constructor takes `(blockHeaderOracle, aavePool, wethGateway, aWETH, …)` — the legacy `_verifier` parameter is gone (Phase 4.3).
 
 #### `contracts/ethereum/src/AckiNackiBridge.sol::verifyBlock` (the AN→ETH path)
@@ -351,7 +351,7 @@ Sanity-check it's wired (legacy `verifier()` getter is gone — Phase 4.3):
 cast call $BRIDGE "blockHeaderOracle()(address)"   # → $ORACLE
 cast call $BRIDGE "treasuryBalance()(uint256)"     # → 0
 cast call $BRIDGE "depositCounter()(uint256)"      # → 0
-cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"  # → 100000000000000000000
+cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"  # → type(uint64).max
 ```
 
 ### E.3 Make a deposit
@@ -390,7 +390,7 @@ cast send $BRIDGE "deposit()" --value 0 --rpc-url $RPC --private-key $PK
 cast send $BRIDGE "deposit()" --value 101ether --rpc-url $RPC --private-key $PK
 ```
 
-✅ Expected: revert with `DepositTooLarge()`. Confirms `MAX_DEPOSIT_AMOUNT = 100 USDC`.
+✅ Expected: revert with `DepositTooLarge()`. Confirms `MAX_DEPOSIT_AMOUNT = type(uint64).max`.
 
 **Phase E checkpoint** — at this point you have empirically verified:
 

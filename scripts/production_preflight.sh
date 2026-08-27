@@ -56,47 +56,37 @@ warn_missing() {
   fi
 }
 
-echo "--- [1/5] EIP-170 verifier sizes ---"
-chmod +x scripts/check_eip170_verifier_bins.sh
-if ! ./scripts/check_eip170_verifier_bins.sh "${VERIFIERS}"; then
+echo "--- [1/5] ETH-6 SHPLONK artefact pin (hashes + EIP-170) ---"
+chmod +x scripts/check_shplonk_artefacts.sh
+if ! ./scripts/check_shplonk_artefacts.sh; then
   fail=1
 fi
 
-echo "--- [2/5] Required production verifyBlock artefacts (all SHPLONK) ---"
+echo "--- [2/5] Required production verifyBlock artefacts (covered by SHA256SUMS) ---"
 require_file "${VERIFIERS}/PrimaryAggregatorVerifier.bin" "Primary SHPLONK runtime"
 require_file "${VERIFIERS}/FallbackAggregatorVerifier.bin" "Fallback SHPLONK runtime (K=21)"
 require_file "${VERIFIERS}/LayerHashesAggregatorVerifier.bin" "LayerHashes SHPLONK runtime"
 require_file "${VERIFIERS}/PrimaryAggregatorVerifier_calldata.bin" "Primary smoke calldata"
 require_file "${VERIFIERS}/FallbackAggregatorVerifier_calldata.bin" "Fallback smoke calldata"
 require_file "${VERIFIERS}/LayerHashesAggregatorVerifier_calldata.bin" "LayerHashes smoke calldata"
+require_file "${VERIFIERS}/BridgeWithdrawalAggregatorVerifier.bin" "C4 withdrawal SHPLONK"
+require_file "${VERIFIERS}/BridgeWithdrawalAggregatorVerifier_calldata.bin" "C4 smoke calldata"
 
-warn_missing "${VERIFIERS}/BridgeWithdrawalAggregatorVerifier.bin" "C4 withdrawal SHPLONK (Phase 2)"
-
-echo "--- [3/5] Artefact manifest ---"
-(
-  cd "${VERIFIERS}"
-  sha256sum *.bin 2>/dev/null || true
-) | tee "${LOG_DIR}/verifiers.sha256"
-
-echo "--- [4/5] Foundry production gate tests ---"
-(
+echo "--- [3/5] Foundry production pairing gate (ETH-6, no skip) ---"
+if ! (
   cd contracts/ethereum
-  forge test --match-contract "ShplonkAggregatorForgery|ShplonkDeployLib" -vv
-  forge test --match-test test_productionPrimaryAttestation_isolated -vv
-  forge test --match-test test_productionFallbackAttestation_isolated -vv
-  # Full E2E (Primary 1A + Circuit 2 real SHPLONK aggregator proofs) is a hard gate since the
-  # 2026-06-23 bound-witness fix (see docs/production_plan.md §1); a regression must block deploy.
-  forge test --match-test test_productionVerifyBlock_boundCalldata_advancesState -vv
-  echo "OK: full production verifyBlock E2E (1A + 2 SHPLONK)"
-)
+  forge test --match-contract ShplonkArtefactPairing -vv
+); then
+  fail=1
+fi
 
-echo "--- [5/6] Relayer unit tests ---"
+echo "--- [4/5] Relayer unit tests ---"
 (
   cd crates/bridge-relayer-daemon
   cargo test --quiet
 )
 
-echo "--- [6/6] TD-16 prod deposit chain policy (prod ∩ testnet = ∅) ---"
+echo "--- [5/5] TD-16 prod deposit chain policy (prod ∩ testnet = ∅) ---"
 chmod +x scripts/td_16_prod_no_sepolia.sh
 if ! ./scripts/td_16_prod_no_sepolia.sh; then
   fail=1

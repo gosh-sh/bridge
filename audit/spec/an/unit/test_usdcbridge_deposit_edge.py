@@ -7,7 +7,7 @@ import pytest
 from bridge_helpers import (
     BRIDGE_CONTRACT,
     ERR_HASH_MISMATCH,
-    ERR_INVALID_ZKPROOF,
+    ERR_ZERO_RECIPIENT,
     USDC_BRIDGE_ADDR,
     build_public_inputs,
     init_bridge_instance,
@@ -32,8 +32,8 @@ def test_finalize_deposit_public_inputs_too_short(tb):
         tb.cleanup_instance(BRIDGE_CONTRACT, "pi_short")
 
 
-def test_finalize_deposit_zero_an_account_not_rejected_pre_zk(tb):
-    """QC-AN-10 — anAccount==0 is not rejected before ZK (unlike ETH deposit guard)."""
+def test_finalize_deposit_zero_an_account_rejected_pre_zk(tb):
+    """QC-AN-10 — anAccount==0 reverts ERR_ZERO_RECIPIENT before ZK (ETH keeps InvalidAnAccount)."""
     tvc = init_bridge_instance(tb, "acct_zero")
     try:
         pi = build_public_inputs(an_account_hi=0, an_account_lo=0).hex()
@@ -44,8 +44,7 @@ def test_finalize_deposit_zero_an_account_not_rejected_pre_zk(tb):
             {"proof": "00", "publicInputs": pi},
             address=USDC_BRIDGE_ADDR,
         )
-        # Parse + amount check pass; fails at ZK, not at recipient validation.
-        tb.assert_failure(r, ERR_INVALID_ZKPROOF)
+        tb.assert_failure(r, ERR_ZERO_RECIPIENT)
     finally:
         tb.cleanup_instance(BRIDGE_CONTRACT, "acct_zero")
 

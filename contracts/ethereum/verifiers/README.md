@@ -71,4 +71,6 @@ Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c &
 
 Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
 
+**ETH-6:** hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing`. Circuit 4 pairing is green; 1A/1B/C2 `.bin` (2026-08-12) do not accept `_calldata.bin` (2026-06-23) — regen both on n14 before `WIRE_VERIFY_BLOCK` on mainnet.
+
 M2 multiply spike fixtures live under `test/fixtures/r15_spike/` for Foundry only — **not** valid production verifiers.

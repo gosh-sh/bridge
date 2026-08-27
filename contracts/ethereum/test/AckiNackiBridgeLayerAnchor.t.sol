@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import "./helpers/Bn254FrLib.sol";
 
 /// @title AckiNackiBridgeLayerAnchorTest
 /// @notice Regression for AB-Q4 — the chain anchor (`prevMaxLevelLayerHash`)
@@ -194,7 +195,7 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
     }
 
     function _lh(uint256 blockIdx, uint256 layer) internal pure returns (uint256) {
-        return uint256(keccak256(abi.encode("L", blockIdx, layer)));
+        return Bn254FrLib.toFr(uint256(keccak256(abi.encode("L", blockIdx, layer))));
     }
 
     function _build(uint256 blockIdx, uint8 numLayers)

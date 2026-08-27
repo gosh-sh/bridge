@@ -44,7 +44,7 @@ invariants pin the **contract-side** enforcement.
 
 ### A3.3 Open items (see questions.md)
 
-- **WD-Q1 / A3-01** — bounded L1 anchor window (128 entries) can evict a `finalRoot`; liveness depends on re-prove-against-newer-anchor capability. Pinned by `audit/spec/ethereum/WithdrawAnchorEviction.t.sol`.
+- **WD-Q1 / A3-01 / ETH-3** — bounded L1 anchor window (128 `verifyBlock` appends) can evict a `finalRoot`; liveness = submit before eviction or re-prove Circuit 4 against a still-in-window descendant (≤ 11 dense rungs). Seq_no jump is catch-up, not mass-eviction. Pinned by `audit/spec/ethereum/WithdrawAnchorEviction.t.sol`.
 - **WD-Q2 / A3-02** — `address(0)` recipient is accepted on-chain but unpayable on real USDC.
 - **WD-Q3 / A3-03** — the Groth16 adapter (`BridgeWithdrawalVerifier.sol`) is an R15 identity stub; needs a deployment invariant that only the SHPLONK aggregator adapter is wired in production.
 - **WD-Q4 / A3-05** — `WITHDRAW_ANCHOR_LAYER` hard-coded to 1.

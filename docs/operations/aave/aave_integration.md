@@ -96,7 +96,7 @@ The bridge separates three quantities:
 ```solidity
 function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
     if (amount == 0) revert InvalidAmount();
-    if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();  // 100 USDC
+    if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();  // uint64.max
     if (anAccount == bytes32(0)) revert InvalidAnAccount();
     if (!usdc.transferFrom(msg.sender, address(this), amount)) revert TransferFromFailed();
 

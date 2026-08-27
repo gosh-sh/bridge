@@ -17,6 +17,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
+import "./helpers/Bn254FrLib.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofOrder2Test
 /// @notice Q3 regression: order>=2 key blocks record L1 in the layer-1 window,
@@ -68,8 +69,8 @@ contract AckiNackiBridgeWithdrawByProofOrder2Test is Test {
 
     function test_withdrawOnL1Anchor_succeedsWhenNumLayersIsTwo() public {
         uint256[10] memory layers;
-        layers[0] = uint256(keccak256("order2-L1-root"));
-        layers[1] = uint256(keccak256("order2-L2-top"));
+        layers[0] = Bn254FrLib.toFr(uint256(keccak256("order2-L1-root")));
+        layers[1] = Bn254FrLib.toFr(uint256(keccak256("order2-L2-top")));
 
         bridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,

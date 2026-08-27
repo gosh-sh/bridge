@@ -8,6 +8,7 @@ import "@src/IBridgeWithdrawalVerifier.sol";
 import "@bridge-test/mocks/MockERC20.sol";
 import "@bridge-test/mocks/FeeOnTransferERC20.sol";
 import "@bridge-test/mocks/MockAave.sol";
+import "@bridge-test/helpers/Bn254FrLib.sol";
 
 /// @title DepositHandler
 /// @notice Handler for DEP-5 / DEP-3 — monotonic depositCounter and treasury ledger.
@@ -26,7 +27,7 @@ contract DepositHandler is Test {
     /// @dev BOUNDS: amount ∈ [1, MAX_DEPOSIT_AMOUNT]
     function deposit(uint256 amountSeed, uint256 userSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
-        address user = address(uint160(uint256(keccak256(abi.encode("dep-inv", userSeed, depositOps)))));
+        address user = address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("dep-inv", userSeed, depositOps))))));
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
@@ -85,7 +86,7 @@ contract TreasuryHandler is Test {
     /// @dev BOUNDS: amount ∈ [1, MAX_DEPOSIT_AMOUNT]
     function deposit(uint256 amountSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
-        address user = address(uint160(uint256(keccak256(abi.encode(depositNonce++, amountSeed)))));
+        address user = address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode(depositNonce++, amountSeed))))));
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
@@ -156,7 +157,7 @@ contract TreasuryHandler is Test {
     function donateDirectUsdc(uint256 amountSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
         address donor = address(
-            uint160(uint256(keccak256(abi.encode("donate", donateNonce++, amountSeed))))
+            uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("donate", donateNonce++, amountSeed)))))
         );
         usdc.mint(donor, amount);
         vm.startPrank(donor);
@@ -172,7 +173,7 @@ contract TreasuryHandler is Test {
         uint256 amount = bound(amountSeed, 1, tb);
         if (amount > tb) return;
 
-        uint256 nullifier = uint256(keccak256(abi.encode(withdrawNonce++, nullifierSeed)));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256(abi.encode(withdrawNonce++, nullifierSeed))));
         if (bridge.isNullifierUsed(nullifier)) return;
 
         (uint256 hi, uint256 lo) = _split(recipient);
@@ -183,7 +184,7 @@ contract TreasuryHandler is Test {
             recipientHi: hi,
             recipientLo: lo,
             dstChainId: block.chainid,
-            senderAccFr: uint256(keccak256("inv-sender")),
+            senderAccFr: Bn254FrLib.toFr(uint256(keccak256("inv-sender"))),
             dappFr: dappFr,
             accFr: accFr,
             nullifier: nullifier,
@@ -235,7 +236,7 @@ contract FoTTreasuryHandler is Test {
         if (minDepositAmount > bridge.MAX_DEPOSIT_AMOUNT()) return;
         uint256 amount = bound(amountSeed, minDepositAmount, bridge.MAX_DEPOSIT_AMOUNT());
         address user = address(
-            uint160(uint256(keccak256(abi.encode("fot-dep", depositNonce++, amountSeed))))
+            uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("fot-dep", depositNonce++, amountSeed)))))
         );
         uint256 custodyBefore = fot.balanceOf(address(bridge));
         fot.mint(user, amount);
@@ -274,7 +275,7 @@ contract AaveHandler is Test {
 
     function depositAndSupply(uint256 amountSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
-        address user = address(uint160(uint256(keccak256(abi.encode("aave-dep", amountSeed)))));
+        address user = address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("aave-dep", amountSeed))))));
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
@@ -327,7 +328,7 @@ contract VerifyBlockHandler is Test {
 
         uint256[10] memory layers;
         for (uint256 i = 0; i < activeLayers; i++) {
-            layers[i] = uint256(keccak256(abi.encode("vb-handler", seq, i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("vb-handler", seq, i))));
         }
 
         uint256 anchor = bridge.expectedPrevAnchor(activeLayers);
@@ -377,7 +378,7 @@ contract WithdrawReplayHandler is Test {
         if (tb == 0) return;
         uint256 amount = bound(amountSeed, 1, tb);
 
-        uint256 nullifier = uint256(keccak256(abi.encode("wd7", withdrawNonce++)));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd7", withdrawNonce++))));
         if (bridge.isNullifierUsed(nullifier)) return;
 
         _withdraw(amount, nullifier);

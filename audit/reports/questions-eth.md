@@ -49,8 +49,8 @@
 
 | ID | PoC | Auditor view | Ask author |
 |----|-----|--------------|------------|
-| WD-Q1 | `WithdrawAnchorEviction.t.sol` | 128-window by design; liveness if no re-prove. | Re-prove against fresher anchor supported? |
-| WD-Q2 | `WithdrawRecipientZero.t.sol` | Lean hardening: `InvalidRecipient`. Stuck event, not theft. | On-chain reject vs AN guarantee? |
+| WD-Q1 | `WithdrawAnchorEviction.t.sol` | 128-window by design; liveness if no re-prove. | **closed Stage II ETH-3** — SLA + re-prove path in `docs/audit/eth-qc-hardening-runbook.md`; seq_no jump does not mass-evict; no on-chain cap. |
+| WD-Q2 | `WithdrawRecipientZero.t.sol` | Lean hardening: `InvalidRecipient`. Stuck event, not theft. | **closed Stage II** — ETH keeps `InvalidRecipient`; AN `initiateWithdrawal` rejects empty recipient (`ERR_ZERO_RECIPIENT`, `BRIDGE-AN-10`). |
 | WD-Q3 | Deploy smoke tests | Misdeploy risk only; prod uses SHPLONK. | Deploy/CI guard on mainnet? |
 | WD-Q4 | Code comments | Layer 1 coupling intentional. | Fixed vs future PI slot? |
 
@@ -61,7 +61,11 @@
 | ID | PoC | Auditor view | Ask author |
 |----|-----|--------------|------------|
 | QC-A4-1 | `ShplonkEmptyCode.t.sol` | Lean hardening: `extcodesize` guard. | Add before mainnet? |
-| A4-Q2 | `FuzzPauseMatrix.t.sol` | Centralization; not fund loss. | Timelock / max-pause? |
+| A4-Q2 | `DepositPauseAsymmetry.t.sol` | Centralization; not fund loss. | **closed Stage II ETH-4** — keep #20 (no `pause()`). ETH-1/ETH-2 gated; do not restore pause without reversing #20. |
+
+Stage II deploy/CI (ETH-5 / ETH-6 / ETH-10): constructor `WithdrawRequiresVerifyBlock`; `verifiers/SHA256SUMS` + `ShplonkArtefactPairing.t.sol` (1A/1B/C2 pairing still red until n14); Foundry `solc_version = "0.8.21"`. Findings `BRIDGE-ETH-05` / `06` / `10`.
+
+Stage II Wave 5 (QC-AN-10 / QC-OFF-01 / cap docs): AN zero-recipient require; ETH `InvalidAnAccount` / `InvalidRecipient` kept; production `SKIP_AFTER_ATTEMPTS=64`; live docs no longer claim 100 USDC as the contract cap. Finding `BRIDGE-AN-10`.
 
 ---
 

@@ -25,7 +25,8 @@
      --an-bridge-abi-path "$AN_BRIDGE_ABI_PATH" \
      --an-token-bridge "$AN_TOKEN_BRIDGE" \
      --an-sender "$AN_SENDER" \
-     --state ./deposit-relayer-state.json
+     --state ./deposit-relayer-state.json \
+     --skip-after-attempts 64
    ```
 
 3. Monitor logs for `finalized on AN`, `already finalized`, or `deposit parked`.
@@ -76,9 +77,9 @@ deposit-relayer prove-one ... --deposit-id <ID> \
 
 ## Head-of-line blocking — `--skip-after-attempts`
 
-By default the daemon retries the same `depositId` forever (liveness for ordered finalization).
+By default the CLI leaves skip disabled (`--skip-after-attempts 0`). **Production systemd** (`scripts/ursus/deposit-relayer.service`) sets `SKIP_AFTER_ATTEMPTS=64` so one stuck id does not block the queue (QC-OFF-01).
 
-To avoid one stuck deposit blocking the queue:
+To override:
 
 ```bash
 --skip-after-attempts 64   # park after 64 consecutive failures, advance cursor

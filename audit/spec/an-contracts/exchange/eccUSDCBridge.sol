@@ -313,9 +313,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param dstChainId — opaque destination chain identifier (passed through to event)
     /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
     function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
+        require(recipient.length > 0, ERR_ZERO_RECIPIENT);
+        require(recipient.length <= 64, ERR_RECIPIENT_TOO_LONG);
         tvm.accept();
         ensureBalance();
-        require(recipient.length <= 64, ERR_RECIPIENT_TOO_LONG);
 
         mapping(uint32 => varuint32) currencies = msg.currencies;
         uint32[] keys = currencies.keys();
@@ -387,6 +388,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
+        require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
         // pins which (chain, bridge contract) pairs this side trusts. The deposit
         // passes if its proven address is in the chain's trusted set — an absent
@@ -448,6 +450,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             code: _depositVoucherCode
         });
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
         tvm.accept();
         ensureBalance();

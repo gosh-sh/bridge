@@ -18,7 +18,7 @@ Entry point for subagents and humans. Update as BC/QC close.
 | **P2** | F2 manual + admin tests | withdraw/admin/TIP-3 | ✅ F2 + `test_usdcbridge_admin.py` |
 | **P3** | QC-AN-07 | Voucher brick | Research TVM replay when voucher deploy fails mid-flight |
 | **P3** | QC-AN-08 | PI length | ✅ `unit/test_usdcbridge_deposit_edge.py` |
-| **P3** | QC-AN-10 | anAccount == 0 | ✅ pre-ZK QC (no ETH-style revert) |
+| **P3** | QC-AN-10 | anAccount == 0 | ✅ pre-ZK `ERR_ZERO_RECIPIENT`; ETH keeps `InvalidAnAccount` |
 | **P3** | DEP-AN-04 | Voucher hash | ✅ exit 219 |
 | **defer** | E-AN-01 | shellnet | `acki-nacki/tests/exchange/test_usdcbridge_finalize.py` |
 | **next** | F8-F / closeout | BC/QC regressions + `closeout-an.md` | ✅ draft closeout + `test_bc_f8f_regressions.py` |
@@ -43,7 +43,7 @@ Entry point for subagents and humans. Update as BC/QC close.
 | QC-AN-07 | voucher brick | **closed (ack)** | ✅ integration |
 | QC-AN-08 | PI length | **closed (test)** | ✅ unit |
 | QC-AN-09 | accept before ZK | **open** | griefing only |
-| QC-AN-10 | anAccount == 0 | **partial ack** | AN require + drop ETH guard |
+| QC-AN-10 | anAccount == 0 | **closed Stage II** | AN require; ETH guard kept |
 | QC-AN-J4 | workchain unused | **closed (ack)** | — |
 
 **BC count:** 1 open (BC-AN-02). Non-deposit surfaces: **BC=0** per withdraw agent.

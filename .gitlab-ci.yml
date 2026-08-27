@@ -265,6 +265,9 @@ test:solidity:
     - npm install
     # Install forge dependencies (forge-std) - skip if already exists
     - test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
+    # ETH-6: pin SHPLONK .bin hashes before Foundry (pairing is in forge test)
+    - chmod +x ../../scripts/check_shplonk_artefacts.sh
+    - ../../scripts/check_shplonk_artefacts.sh
     # Run tests
     - forge test -vvv
   cache:

@@ -17,7 +17,7 @@ Proposed properties for Phase **F7** (property tests). Map to pytest / Hypothesi
 | AN-DEP-5 | Same valid proof twice → second finalize does not increase `getTotalBridged` | integration ✅ DEP-AN-12 | covered |
 | AN-DEP-6 | Tamper PI limb without new proof → 220 | integration ✅ BC-AN-01 tamper | covered |
 | AN-DEP-7 | Two valid proofs, same depositId, different dappId → **no** second mint (`f.dappId=0`, BC-AN-01 closed) | integration ✅ | covered |
-| AN-DEP-8 | `anAccount == 0` — behaviour documented (no pre-ZK guard) | unit ✅ QC-AN-10 | open QC |
+| AN-DEP-8 | `anAccount == 0` → `ERR_ZERO_RECIPIENT` before ZK; ETH keeps `InvalidAnAccount` | unit ✅ QC-AN-10 | closed Stage II |
 | AN-DEP-9 | Successful cross-chain mint: `Δ getTotalBridged == amount` | integration + F7 property | ✅ F7-C1 |
 | AN-DEP-10 | `contractAddr` in PI not allowlisted (BC-AN-02) | integration pre-ZK | partial |
 

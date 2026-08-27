@@ -12,6 +12,7 @@ from bridge_helpers import (
     ERR_RECIPIENT_TOO_LONG,
     ERR_UNSUPPORTED_TOKEN,
     ERR_ZERO_AMOUNT,
+    ERR_ZERO_RECIPIENT,
     EVM_RECIPIENT_20B,
     USDC_BRIDGE_ADDR,
     USDC_ECC_ID,
@@ -82,6 +83,22 @@ def test_initiate_withdrawal_recipient_too_long(tb):
         tb.assert_failure(r, ERR_RECIPIENT_TOO_LONG)
     finally:
         tb.cleanup_instance(BRIDGE_CONTRACT, "wd_long")
+
+
+def test_initiate_withdrawal_empty_recipient_reverts(tb):
+    """QC-AN-10 / WD-AN-07 — empty recipient must not burn ECC."""
+    tvc = init_bridge_instance(tb, "wd_empty")
+    try:
+        r = tb.call(
+            tvc,
+            BRIDGE_CONTRACT,
+            "initiateWithdrawal",
+            {"dstChainId": "1", "recipient": ""},
+            address=USDC_BRIDGE_ADDR,
+        )
+        tb.assert_failure(r, ERR_ZERO_RECIPIENT)
+    finally:
+        tb.cleanup_instance(BRIDGE_CONTRACT, "wd_empty")
 
 
 def test_initiate_withdrawal_multiple_ecc(tb):

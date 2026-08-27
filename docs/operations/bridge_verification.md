@@ -196,7 +196,7 @@ Currently exercises Axiom V2 Core against a recent mainnet block; preserved for 
 cast call $BRIDGE "blockHeaderOracle()(address)"        # preserved but unused by public surface
 cast call $BRIDGE "depositCounter()(uint256)"
 cast call $BRIDGE "treasuryBalance()(uint256)"
-cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # 100000000000000000000 (100 ether)
+cast call $BRIDGE "MAX_DEPOSIT_AMOUNT()(uint256)"        # type(uint64).max
 ```
 
 (The legacy `verifier()` getter is gone — Phase 4.3.)

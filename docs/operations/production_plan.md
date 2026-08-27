@@ -158,6 +158,7 @@ Keep `withdrawByProof` disabled until this phase completes.
 | Redeploy AN `TokenBridge` with deposit-prover VkBlob | AN / bridge |
 | Land live `IAckiNacki` send in `acki-nacki-interface` | AN SDK |
 | Shellnet VK redeploy per `docs/operations/shellnet/shellnet_usdcbridge_deposit_vk_redeploy.md` | Bridge team |
+| Production daemon: `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (QC-OFF-01) | Ops |
 | E2E: Sepolia `deposit` → `finalizeDeposit` | Bridge team |
 
 ---

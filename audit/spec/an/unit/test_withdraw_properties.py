@@ -10,6 +10,7 @@ from bridge_helpers import (
     ERR_MULTIPLE_ECC,
     ERR_NO_ECC,
     ERR_RECIPIENT_TOO_LONG,
+    ERR_ZERO_RECIPIENT,
     ERR_UNSUPPORTED_TOKEN,
     EVM_RECIPIENT_20B,
     USDC_BRIDGE_ADDR,
@@ -36,7 +37,9 @@ def test_recipient_length_exit_code(tb, length: int):
             {"dstChainId": "1", "recipient": recipient},
             address=USDC_BRIDGE_ADDR,
         )
-        if length > 64:
+        if length == 0:
+            tb.assert_failure(r, ERR_ZERO_RECIPIENT)
+        elif length > 64:
             tb.assert_failure(r, ERR_RECIPIENT_TOO_LONG)
         else:
             tb.assert_failure(r, ERR_NO_ECC)

@@ -180,7 +180,7 @@ contract GasBenchmark is Test {
         usdc.mint(user, maxAmt);
         usdc.approve(address(bridge), maxAmt);
         bridge.deposit(maxAmt, 0, bytes32(uint256(uint160(user))));
-        _snap("user", "deposit", "max_100usdc");
+        _snap("user", "deposit", "max_100usdc"); // label is historical; amount is MAX_DEPOSIT_AMOUNT (uint64.max)
 
         vm.stopPrank();
     }

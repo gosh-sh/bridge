@@ -10,6 +10,7 @@ import "@src/IFallbackVerifier.sol";
 import "@src/ILayerHashesMovementVerifier.sol";
 
 import "@bridge-test/helpers/VerifyBlockConfigLib.sol";
+import "@bridge-test/helpers/Bn254FrLib.sol";
 import "@bridge-test/mocks/MockPrimaryVerifier.sol";
 import "@bridge-test/mocks/MockFallbackVerifier.sol";
 import "@bridge-test/mocks/MockLayerHashesMovementVerifier.sol";
@@ -56,7 +57,7 @@ contract VerifyBlockCEITest is Test {
 
     function _layers(uint256 idx) internal pure returns (uint256[10] memory arr) {
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            arr[i] = uint256(keccak256(abi.encode("cei", idx, i)));
+            arr[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("cei", idx, i))));
         }
     }
 

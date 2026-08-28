@@ -224,8 +224,18 @@ via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
 
 ## Case 1 — First-time E2E from a fresh deploy (optimal sequence)
 
-**When to use.** Bridge Ethreum Contracts are just deployed. Bundle prover daemon just cold-started.
-You want to demonstrate the on-chain withdraw leg with minimum wall time.
+**When to use — L1 only, one-shot fresh-deploy demo.** Prove out the
+`withdrawByProof` leg once, in minimum wall time (~17 min best-case).
+This is a **tight sequence**: bridge Ethereum contracts deploy →
+bundle-prover daemon cold-starts → burn fires, all inside one narrow
+window. The L1 daemon is subcritical (see
+[Timing model](#timing-model--why-fresh-deploy-demos-need-tight-lookahead))
+so its lag grows forever — a second withdraw against the same L1 deploy
+soon slides past the wait-time budget. For **regular, repeated**
+withdrawals use L2 mode:
+[Case 8](#case-8--fresh-l2-deploy-first-e2e-withdrawal) (first L2 cycle)
+and [Case 9](#case-9--sequential-l2-withdrawals-stress-test-loop)
+(stress loop).
 
 **The optimal sequence** — every step gates the next; do not interleave:
 
@@ -260,15 +270,7 @@ set -a && source shellnet.common && set +a
 PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 ```
 
-### Step 2 — Unpause
-
-```bash
-export BRIDGE=<new_address>
-cast send $BRIDGE 'unpause()' --rpc-url $RPC --private-key $OWNER_PK
-cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC   # false
-```
-
-### Step 2.5 — Seed the bridge treasury (fresh deploy only)
+### Step 2 — Seed the bridge treasury (fresh deploy only)
 
 `withdrawByProof` pays out from `treasuryBalance` (`AckiNackiBridge.sol:1188`).
 A fresh deploy starts at zero; the crypto path can pass and the tx will
@@ -398,9 +400,9 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 ## Case 2 — Follow-up withdrawal on an existing deploy
 
-**When to use.** Bridge is already unpaused. Bundle daemon has been running
-for hours/days. Prior withdrawal (or none) already succeeded; you want to
-send another burn through the same rails.
+**When to use.** Bridge is already deployed. Bundle daemon has been
+running for hours/days. Prior withdrawal (or none) already succeeded;
+you want to send another burn through the same rails.
 
 ```bash
 # 1. Confirm daemon is current (within one bundle of head)
@@ -509,7 +511,6 @@ Sepolia revert. The log prints the selector.
 | `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
 | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` used twice | The `withdraw-e2e` command was re-run against the same captured event. Fire a fresh burn. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
-| `PausedError()` | Bridge is paused | `cast send $BRIDGE 'unpause()' --private-key $OWNER_PK`. |
 | `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Dry-run trace (any revert):**
@@ -525,8 +526,8 @@ cast call $BRIDGE \
 
 **Do NOT** delete `state/prover_state.json` or the witness JSON — the
 proof is deterministic per `(event, prover_state)`. Fixing the on-chain
-side (unpause, wait, redeploy) and re-running the same command
-regenerates the same proof against the warm cache.
+side (wait, redeploy) and re-running the same command regenerates the
+same proof against the warm cache.
 
 ---
 
@@ -707,9 +708,9 @@ If `L2-aligned == False`, the deploy consumed an L1 seed by mistake —
 **redeploy**. The daemon's startup stride-alignment check will refuse to
 run against a non-W²-aligned contract when `BRIDGE_ANCHOR_LEVEL=2`.
 
-### Step L2 — Unpause + treasury seed
+### Step L2 — Seed the bridge treasury
 
-Identical to Case 1 Steps 2 and 2.5 — level-agnostic.
+Identical to Case 1 Step 2 — level-agnostic.
 
 ### Step L3 — Cold-start `daemon-live` under L2
 
@@ -1020,8 +1021,9 @@ Newest first.
 - **Fix landed in this runbook.** New [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
   with the Aave-faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
   `USDC.approve(bridge)` → `bridge.deposit(amount, 0, 0x11…11)`). Also
-  added [Step 2.5](#step-25--seed-the-bridge-treasury-fresh-deploy-only)
-  to Case 1 so future fresh-deploy demos do the seed BEFORE firing the
+  added a treasury-seed step (now
+  [Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only)) to
+  Case 1 so future fresh-deploy demos do the seed BEFORE firing the
   burn, and added the selector row to Case 5's revert table.
 - **Rule of thumb.** Fresh deploys must seed the treasury or every
   `withdrawByProof` will revert on the payout leg regardless of proof

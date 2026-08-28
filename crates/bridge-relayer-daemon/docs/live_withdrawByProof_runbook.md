@@ -21,7 +21,7 @@ this doc extends.
 > a `layer_hashes` root that `verifyBlock` has already committed).
 > With `W=128, P=8`, an **L1** bundle covers `W·P = 1024` seq_nos
 > (~5.7 min chain-time at 3 seq/s). An **L2** bundle covers
-> `W² = 16384` seq_nos (~91 min chain-time). Case 6+ covers the L2 flow.
+> `W² = 16384` seq_nos (~91 min chain-time). Case 2 covers the L2 flow.
 
 ---
 
@@ -31,17 +31,18 @@ this doc extends.
 - [Timing model — why fresh-deploy demos need tight lookahead](#timing-model--why-fresh-deploy-demos-need-tight-lookahead)
 - [Reference values (chain-invariant on shellnet)](#reference-values-chain-invariant-on-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
-- [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
-- [Case 2 — Prover subprocess timeout / OOM](#case-2--prover-subprocess-timeout--oom)
-- [Case 3 — On-chain `withdrawByProof` revert](#case-3--on-chain-withdrawbyproof-revert)
-- [Case 4 — USDCBridge key drift (burn side)](#case-4--usdcbridge-key-drift-burn-side)
-- [Case 5 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-5--withdrawtreasuryshortfall--bridge-treasury-empty)
-- [Case 6 — Fresh L2 deploy: first E2E withdrawal](#case-6--fresh-l2-deploy-first-e2e-withdrawal)
-- [Case 7 — Sequential L2 withdrawals (stress-test loop)](#case-7--sequential-l2-withdrawals-stress-test-loop)
+- [Case 1 — L1: First-time E2E from a fresh deploy (optimal sequence)](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence)
+- [Case 2 — L2: fresh deploy and steady-state operation](#case-2--l2-fresh-deploy-and-steady-state-operation)
+  - [Case 2a — Fresh L2 deploy: first E2E withdrawal](#case-2a--fresh-l2-deploy-first-e2e-withdrawal)
+  - [Case 2b — Sequential L2 withdrawals (steady-state / stress loop)](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop)
+- [Case 3 — Incidents & failure modes](#case-3--incidents--failure-modes)
+  - [Case 3a — Prover subprocess timeout / OOM](#case-3a--prover-subprocess-timeout--oom)
+  - [Case 3b — On-chain `withdrawByProof` revert](#case-3b--on-chain-withdrawbyproof-revert)
+  - [Case 3c — USDCBridge key drift (burn side)](#case-3c--usdcbridge-key-drift-burn-side)
+  - [Case 3d — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
-- [Change log / known incidents](#change-log--known-incidents)
 
 ---
 
@@ -75,10 +76,10 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 | Daemon | Event captured | Proof generated | Go to |
 |---|---|---|---|
-| running, current | no | no | fire the burn — [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 7](#case-7--sequential-l2-withdrawals-stress-test-loop) (L2 follow-up) |
+| running, current | no | no | fire the burn — [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop) (L2 follow-up) |
 | running, current | yes | no | run `withdraw-e2e` (proof + submit) |
-| running, behind | yes | no | [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) Step 5 note (L1 catch-up) |
-| running, current | yes | yes, revert | [Case 3](#case-3--on-chain-withdrawbyproof-revert) |
+| running, behind | yes | no | [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) Step 5 note (L1 catch-up) |
+| running, current | yes | yes, revert | [Case 3b](#case-3b--on-chain-withdrawbyproof-revert) |
 | not running | any | any | Fix the bundle lane first — see verifyBlock runbook Case 3–6 |
 
 ---
@@ -220,7 +221,7 @@ via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
 
 ---
 
-## Case 1 — First-time E2E from a fresh deploy (optimal sequence)
+## Case 1 — L1: First-time E2E from a fresh deploy (optimal sequence)
 
 **When to use — L1 only, one-shot fresh-deploy demo.** Prove out the
 `withdrawByProof` leg once, in minimum wall time (~17 min best-case).
@@ -231,8 +232,8 @@ window. The L1 daemon is subcritical (see
 so its lag grows forever — a second withdraw against the same L1 deploy
 soon slides past the wait-time budget. For **regular, repeated**
 withdrawals use L2 mode:
-[Case 6](#case-6--fresh-l2-deploy-first-e2e-withdrawal) (first L2 cycle)
-and [Case 7](#case-7--sequential-l2-withdrawals-stress-test-loop)
+[Case 2a](#case-2a--fresh-l2-deploy-first-e2e-withdrawal) (first L2 cycle)
+and [Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop)
 (stress loop).
 
 **The optimal sequence** — every step gates the next; do not interleave:
@@ -277,7 +278,7 @@ still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
 is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
 Seed it once, then reuse across demos on the same deploy.
 
-Full recipe in [Case 5](#case-5--withdrawtreasuryshortfall--bridge-treasury-empty).
+Full recipe in [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty).
 Quick version — mint 1 USDC from the Aave Sepolia faucet, deposit into
 the bridge:
 
@@ -388,7 +389,7 @@ watch -n 30 'cast call $BRIDGE storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url 
 > `storedLastSeenBlockSeqNo` — there is no such path. The only way to
 > move `L` forward is via `verifyBlock`, and `verifyBlock` requires the
 > bundle-proof pipeline. For **regular repeated** withdrawals switch to
-> L2 (Case 6/7) — L2 is supercritical, so daemon lag is bounded by
+> L2 (Case 2) — L2 is supercritical, so daemon lag is bounded by
 > construction.
 
 ### Step 6 — Run `withdraw-e2e --dry-run`
@@ -425,7 +426,7 @@ INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
 ```
 
 Dry-run returning OK proves the proof is well-formed and the on-chain
-adapter accepts it. If dry-run reverts, jump to [Case 3](#case-3--on-chain-withdrawbyproof-revert)
+adapter accepts it. If dry-run reverts, jump to [Case 3b](#case-3b--on-chain-withdrawbyproof-revert)
 — **do not** submit for real.
 
 ### Step 7 — Real submit
@@ -444,185 +445,25 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 ---
 
-## Case 2 — Prover subprocess timeout / OOM
+## Case 2 — L2: fresh deploy and steady-state operation
 
-**Symptom.** `withdraw-e2e` fails during the prove stage:
+L2 anchoring is the **only** regime that supports repeated withdrawals
+against a single deploy. Chain moves `W² = 16384` seq_no every ~91 min;
+prover finishes each bundle in ~10 min (SHPLONK-wrapped), giving
+`ρ = 0.15` — supercritical. Daemon lag is bounded independent of uptime.
+L1 (Case 1) is subcritical and can only support a one-shot demo per
+deploy — see [prover throughput analysis](../../an-bridge-prover/docs/prover_throughput_analysis.md).
 
-```
-ERROR subprocess_prover: bridge-event-halo2-prover exited status=<code>
-   OR
-ERROR subprocess_prover: timeout after 1800s
-```
-
-**Checks.**
-
-1. Params directory size — Circuit 4 needs the C4 PK (~ several GB) in
-   `params/`. `du -sh params/` should be ~17 GB total.
-2. Free disk on `params/` filesystem — if a prior run truncated the C4
-   PK due to ENOSPC, remove the partial `.pk` and let the next run
-   regenerate (adds ~5 min to that cycle).
-3. RAM headroom — Circuit 4 K=19 needs ~40 GB peak. If host swap-thrashes,
-   the 1800s timeout expires without progress.
-
-**Recovery.** After freeing resources:
-
-```bash
-./target/release/relayer withdraw-e2e \
-  ...same flags as Case 1 step 6... \
-  --prover-timeout-s 3600
-```
-
-Bumping `--prover-timeout-s` doesn't fix a real OOM — it just delays the
-inevitable. Use only when the pipeline was slow (e.g. cold PK cache), not
-when the log shows repeated swap.
+- **[Case 2a](#case-2a--fresh-l2-deploy-first-e2e-withdrawal)** — first
+  E2E withdrawal on a fresh L2 deploy (baseline sequence, ~106 min).
+- **[Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop)** —
+  follow-up / repeated withdrawals against the same L2 deploy after
+  Case 2a succeeds. This is the only "steady-state" path — L1 cannot
+  support it.
 
 ---
 
-## Case 3 — On-chain `withdrawByProof` revert
-
-**Symptom.** `withdraw-e2e --dry-run` (or real submit) fails with a
-Sepolia revert. The log prints the selector.
-
-**Decode with `cast 4byte`** or via `withdrawByProof`'s declared errors:
-
-| Selector | Error | Root cause pattern |
-|---|---|---|
-| `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
-| `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender)` tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. |
-| `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
-| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 5](#case-5--withdrawtreasuryshortfall--bridge-treasury-empty). |
-
-**Dry-run trace (any revert):**
-
-```bash
-# Re-run the exact eth_call with --trace for a decoded reason
-cast call $BRIDGE \
-  'withdrawByProof(bytes,uint256[13])' \
-  <calldata_hex_from_log> \
-  '[<pi array from log>]' \
-  --rpc-url $RPC --trace
-```
-
-**Do NOT** delete `state/prover_state.json` or the witness JSON — the
-proof is deterministic per `(event, prover_state)`. Fixing the on-chain
-side (wait, redeploy) and re-running the same command regenerates the
-same proof against the warm cache.
-
----
-
-## Case 4 — USDCBridge key drift (burn side)
-
-**Symptom.** `test_deploy_and_withdraw_only.py` fails during
-`mintAndSend` step with `exit_code=209` (or similar TVM signature error).
-
-**Root cause pattern.** Bundled `python/contracts/USDCBridge.shellnet.keys.json`
-public key ≠ on-chain `getOwnerPubkey`. 
-
-**Check + fix.**
-
-```bash
-cd crates/an-bridge-prover
-
-# 1. Compare local key vs on-chain
-LOCAL_PUB=$(jq -r '.public' python/contracts/USDCBridge.shellnet.keys.json)
-# On-chain (via tvm-cli or GQL — see python/helper for helpers)
-python3 -c "
-from python.helper.tonos_helper import get_owner_pubkey  # actual util path
-print(get_owner_pubkey(
-  address='0:<USDCBridge_addr>',
-  gql='https://shellnet.ackinacki.org/graphql',
-))"
-
-# 2. If they differ, overlay from acki-nacki config
-cp ../../../acki-nacki/config/USDCBridge.keys.json \
-   python/contracts/USDCBridge.shellnet.keys.json
-```
-
-If neither key matches — the shellnet operator rotated USDCBridge
-ownership. Ask Sehor for the current keypair. This is not a bridge bug;
-the USDCBridge is external state.
-
----
-
-## Case 5 — `WithdrawTreasuryShortfall` — bridge treasury empty
-
-**Symptom.** Dry-run (or real submit) reverts with selector `0xbb651fce`
-decoded as `WithdrawTreasuryShortfall(<pub.amount>, <treasuryBalance>)`.
-`treasuryBalance == 0` on a fresh deploy is the common case; a partial
-seed followed by a larger burn is the other.
-
-**Why this happens.** In real cross-chain operation, `treasuryBalance` is
-grown by users bridging IN (`deposit()`), and payouts on the AN→ETH leg
-draw from that pool. Shellnet demos usually burn on the AN side without a
-prior ETH→AN deposit — so the treasury never funds itself organically.
-`AckiNackiBridge.sol:1188` enforces `pub.amount > treasuryBalance` →
-revert; there is no admin bypass and no auto-supply from AAVE (the AAVE
-integration is a yield sink for surplus, not a payout source).
-
-**Fix — mint from Aave faucet + deposit.** Testnet USDC lives at the
-Aave Sepolia market address; the same faucet the fork tests use
-(`test/AckiNackiBridgeAaveFork.t.sol:68-73`) has a permissionless
-`mint(address token, address to, uint256 amount)`:
-
-```bash
-cd crates/an-bridge-prover
-# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
-
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
-export AMOUNT=1000000    # cover at least one burn (1.000000 USDC)
-
-# 1. Mint test USDC into the relayer wallet
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
-
-cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show AMOUNT
-
-# TWO contracts, TWO methods — only step 3 touches the bridge:
-#   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
-#   * bridge.deposit(amount, …)      — the actual bridge call, which pulls
-#                                      via usdc.transferFrom(...) internally
-#                                      (AckiNackiBridge.sol:585)
-
-# 2. USDC.approve(spender=$BRIDGE_ADDRESS, value=$AMOUNT) — target is $USDC
-cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
-
-# 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
-#    (dummy AN destination — harmless on testnet)
-cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
-
-# 4. Confirm
-cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL   # -> AMOUNT
-```
-
-**Why the dummy AN destination is safe on testnet.** `deposit()` emits a
-`Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event
-that a production AN-side listener would consume to credit the AN
-recipient. On shellnet demos there is no such listener wired for
-seed-only deposits, so the phantom event just sits in event history. Do
-NOT do this on a bridge with a live AN-side indexer — pay to a real
-`anAccount` you control on that path, or drain via a legit withdraw
-after seeding.
-
-**Re-run the withdraw.** After the deposit lands, re-run the same
-`withdraw-e2e` (or `replay_withdraw_shplonk.sh`) command. The proof is
-deterministic per `(event, prover_state)`, so if it dry-ran successfully
-against the empty treasury it will submit successfully now.
-
-**Scaling.** Seed size to cover the burn(s) you plan to test. Default
-`test_deploy_and_withdraw_only.py` fires 1 USDC — mint 10 USDC once and
-you're good for the demo cycle. Excess USDC in the treasury is not lost:
-it stays available for future withdraws, and can optionally be swept to
-AAVE via `supplyToAave()` for yield.
-
----
-
-## Case 6 — Fresh L2 deploy: first E2E withdrawal
+### Case 2a — Fresh L2 deploy: first E2E withdrawal
 
 **When to use.** Deploying the bridge with `BRIDGE_ANCHOR_LEVEL=2` to
 exercise L2-anchoring end-to-end. Everything from Case 1 applies with
@@ -813,9 +654,9 @@ verifyBlock runbook.
 
 ---
 
-## Case 7 — Sequential L2 withdrawals (stress-test loop)
+### Case 2b — Sequential L2 withdrawals (steady-state / stress loop)
 
-**When to use.** After Case 6's first cycle succeeds, drive 2–3
+**When to use.** After Case 2a's first cycle succeeds, drive 2–3
 additional burns through the same L2 rails to exercise repeated L2
 anchoring under real chain motion.
 
@@ -831,17 +672,17 @@ cast logs --address $BRIDGE --rpc-url $RPC \
   'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
   --from-block -1000 | tail -5
 
-# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 6 Step L2)
+# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 2a Step L2)
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC
 
 # 3. Fire fresh burn
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
-# 4. Wait for covering T₂ (Case 6 Step L6 math)
+# 4. Wait for covering T₂ (Case 2a Step L6 math)
 
 # 5. Run withdraw-e2e with a fresh --prover-seq-no
 ./target/release/relayer withdraw-e2e \
-  ... same flags as Case 6 Step L7 ... \
+  ... same flags as Case 2a Step L7 ... \
   --prover-seq-no $(date +%s)
 ```
 
@@ -859,8 +700,205 @@ MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 (constructor stores a single genesis scalar; `_expectedPrevAnchor` uses
 per-layer picks; `withdrawByProof`'s `_isKnownAnchor` scans all
 layers — see change log), any revert in cycle N ≥ 2 is almost
-certainly reproducing a Case 3 failure mode, not something L2-specific.
-Start with the Case 3 catalog before diagnosing L2.
+certainly reproducing a Case 3b failure mode, not something L2-specific.
+Start with the Case 3b catalog before diagnosing L2.
+
+---
+
+## Case 3 — Incidents & failure modes
+
+When a `withdraw-e2e` run fails or reverts, one of the following four
+incident patterns almost always applies. Grouped by where the failure
+surfaces:
+
+- **[Case 3a](#case-3a--prover-subprocess-timeout--oom)** — prover
+  subprocess timeout / OOM (host side; before the on-chain call).
+- **[Case 3b](#case-3b--on-chain-withdrawbyproof-revert)** — on-chain
+  `withdrawByProof` revert (proof is well-formed; contract rejects it).
+- **[Case 3c](#case-3c--usdcbridge-key-drift-burn-side)** — USDCBridge
+  key drift (burn side; the AN-side script itself fails before an event
+  is ever emitted).
+- **[Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty)** —
+  `WithdrawTreasuryShortfall` (crypto path passes; payout leg reverts
+  because the bridge treasury has no USDC).
+
+---
+
+### Case 3a — Prover subprocess timeout / OOM
+
+**Symptom.** `withdraw-e2e` fails during the prove stage:
+
+```
+ERROR subprocess_prover: bridge-event-halo2-prover exited status=<code>
+   OR
+ERROR subprocess_prover: timeout after 1800s
+```
+
+**Checks.**
+
+1. Params directory size — Circuit 4 needs the C4 PK (~ several GB) in
+   `params/`. `du -sh params/` should be ~17 GB total.
+2. Free disk on `params/` filesystem — if a prior run truncated the C4
+   PK due to ENOSPC, remove the partial `.pk` and let the next run
+   regenerate (adds ~5 min to that cycle).
+3. RAM headroom — Circuit 4 K=19 needs ~40 GB peak. If host swap-thrashes,
+   the 1800s timeout expires without progress.
+
+**Recovery.** After freeing resources:
+
+```bash
+./target/release/relayer withdraw-e2e \
+  ...same flags as Case 1 step 6... \
+  --prover-timeout-s 3600
+```
+
+Bumping `--prover-timeout-s` doesn't fix a real OOM — it just delays the
+inevitable. Use only when the pipeline was slow (e.g. cold PK cache), not
+when the log shows repeated swap.
+
+---
+
+### Case 3b — On-chain `withdrawByProof` revert
+
+**Symptom.** `withdraw-e2e --dry-run` (or real submit) fails with a
+Sepolia revert. The log prints the selector.
+
+**Decode with `cast 4byte`** or via `withdrawByProof`'s declared errors:
+
+| Selector | Error | Root cause pattern |
+|---|---|---|
+| `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
+| `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender)` tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. |
+| `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
+| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
+
+**Dry-run trace (any revert):**
+
+```bash
+# Re-run the exact eth_call with --trace for a decoded reason
+cast call $BRIDGE \
+  'withdrawByProof(bytes,uint256[13])' \
+  <calldata_hex_from_log> \
+  '[<pi array from log>]' \
+  --rpc-url $RPC --trace
+```
+
+**Do NOT** delete `state/prover_state.json` or the witness JSON — the
+proof is deterministic per `(event, prover_state)`. Fixing the on-chain
+side (wait, redeploy) and re-running the same command regenerates the
+same proof against the warm cache.
+
+---
+
+### Case 3c — USDCBridge key drift (burn side)
+
+**Symptom.** `test_deploy_and_withdraw_only.py` fails during
+`mintAndSend` step with `exit_code=209` (or similar TVM signature error).
+
+**Root cause pattern.** Bundled `python/contracts/USDCBridge.shellnet.keys.json`
+public key ≠ on-chain `getOwnerPubkey`. 
+
+**Check + fix.**
+
+```bash
+cd crates/an-bridge-prover
+
+# 1. Compare local key vs on-chain
+LOCAL_PUB=$(jq -r '.public' python/contracts/USDCBridge.shellnet.keys.json)
+# On-chain (via tvm-cli or GQL — see python/helper for helpers)
+python3 -c "
+from python.helper.tonos_helper import get_owner_pubkey  # actual util path
+print(get_owner_pubkey(
+  address='0:<USDCBridge_addr>',
+  gql='https://shellnet.ackinacki.org/graphql',
+))"
+
+# 2. If they differ, overlay from acki-nacki config
+cp ../../../acki-nacki/config/USDCBridge.keys.json \
+   python/contracts/USDCBridge.shellnet.keys.json
+```
+
+If neither key matches — the shellnet operator rotated USDCBridge
+ownership. Ask Sehor for the current keypair. This is not a bridge bug;
+the USDCBridge is external state.
+
+---
+
+### Case 3d — `WithdrawTreasuryShortfall` — bridge treasury empty
+
+**Symptom.** Dry-run (or real submit) reverts with selector `0xbb651fce`
+decoded as `WithdrawTreasuryShortfall(<pub.amount>, <treasuryBalance>)`.
+`treasuryBalance == 0` on a fresh deploy is the common case; a partial
+seed followed by a larger burn is the other.
+
+**Why this happens.** In real cross-chain operation, `treasuryBalance` is
+grown by users bridging IN (`deposit()`), and payouts on the AN→ETH leg
+draw from that pool. Shellnet demos usually burn on the AN side without a
+prior ETH→AN deposit — so the treasury never funds itself organically.
+`AckiNackiBridge.sol:1188` enforces `pub.amount > treasuryBalance` →
+revert; there is no admin bypass and no auto-supply from AAVE (the AAVE
+integration is a yield sink for surplus, not a payout source).
+
+**Fix — mint from Aave faucet + deposit.** Testnet USDC lives at the
+Aave Sepolia market address; the same faucet the fork tests use
+(`test/AckiNackiBridgeAaveFork.t.sol:68-73`) has a permissionless
+`mint(address token, address to, uint256 amount)`:
+
+```bash
+cd crates/an-bridge-prover
+# BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+
+export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
+export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+export AMOUNT=1000000    # cover at least one burn (1.000000 USDC)
+
+# 1. Mint test USDC into the relayer wallet
+cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show AMOUNT
+
+# TWO contracts, TWO methods — only step 3 touches the bridge:
+#   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
+#   * bridge.deposit(amount, …)      — the actual bridge call, which pulls
+#                                      via usdc.transferFrom(...) internally
+#                                      (AckiNackiBridge.sol:585)
+
+# 2. USDC.approve(spender=$BRIDGE_ADDRESS, value=$AMOUNT) — target is $USDC
+cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+# 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
+#    (dummy AN destination — harmless on testnet)
+cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
+  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+
+# 4. Confirm
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL   # -> AMOUNT
+```
+
+**Why the dummy AN destination is safe on testnet.** `deposit()` emits a
+`Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event
+that a production AN-side listener would consume to credit the AN
+recipient. On shellnet demos there is no such listener wired for
+seed-only deposits, so the phantom event just sits in event history. Do
+NOT do this on a bridge with a live AN-side indexer — pay to a real
+`anAccount` you control on that path, or drain via a legit withdraw
+after seeding.
+
+**Re-run the withdraw.** After the deposit lands, re-run the same
+`withdraw-e2e` (or `replay_withdraw_shplonk.sh`) command. The proof is
+deterministic per `(event, prover_state)`, so if it dry-ran successfully
+against the empty treasury it will submit successfully now.
+
+**Scaling.** Seed size to cover the burn(s) you plan to test. Default
+`test_deploy_and_withdraw_only.py` fires 1 USDC — mint 10 USDC once and
+you're good for the demo cycle. Excess USDC in the treasury is not lost:
+it stays available for future withdraws, and can optionally be swept to
+AAVE via `supplyToAave()` for yield.
 
 ---
 
@@ -949,141 +987,7 @@ crates/an-bridge-prover/
 - `python/contracts/USDCBridge.shellnet.keys.json` — **NEVER** commit
   changes upstream; keys are shellnet-operator state, not repo state.
 
----
 
-## Change log / known incidents
 
-Newest first.
 
-### 2026-08-18 — L2 anchoring code-complete + operator readiness (pre-Deploy #12)
 
-- **Change.** All 8 stages of
-  [`docs/l2_anchoring_implementation_plan.md`](./l2_anchoring_implementation_plan.md)
-  landed (commit `bf0d41a` closes stages 5–8; `c7923c7` covers 1–4).
-  Level-parametric across the stack:
-  `compute_bridge_anchors --level {1|2}`, `daemon-live --anchor-level`
-  (env `BRIDGE_ANCHOR_LEVEL`), and the existing
-  `withdraw-e2e --anchor-layer {auto|1|2} --i-know-the-wait`.
-  `BootstrapSeed` v2 and `BridgeState` v5 persist `anchor_level` for
-  cross-startup drift detection; the relayer daemon refuses on-chain
-  stride mis-alignment at boot.
-- **`ENRICH_TIMEOUT` bumped 90 → 120 min.** File
-  `bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172`. L2's worst-case
-  single-bundle wait is ~101 min chain + ~10 min prover; the previous
-  90-min budget was L1-tuned and would time out before the enricher
-  could resolve a fresh T₂ boundary. L1 unaffected in healthy runs
-  (typical L1 resolve time is seconds).
-- **Contract is level-opaque — confirmed by code read.**
-  `AckiNackiBridge.sol` constructor (lines 509–537) stores only a
-  scalar `_vb.genesisPrevMaxLevelLayerHash`; `_layerWindows` starts
-  empty. `_expectedPrevAnchor` (lines 990–997) returns that scalar iff
-  `_highestActiveLayer() == 0` (first verifyBlock). After the first
-  successful proof, `_appendLayerHashes` (lines 902–913) writes both
-  `_layerWindows[1]` and `_layerWindows[2]` in one call when the proof
-  carries `numLayers = 2`. No Solidity change required for L2 deploys.
-- **Cases 8, 9, and L2 timing model added to this runbook.** Case 6 is
-  the operator sequence for the first L2 E2E cycle; Case 7 is the
-  sequential-withdrawal stress loop (2–3 cycles per session).
-- **Not yet exercised live.** Deploy #12 (first L2 Sepolia deploy) has
-  not run yet. Case 6's dry-run and Case 7's loop will land as a
-  subsequent change-log entry once executed.
-
-### 2026-08-18 — Deploy #10 first live `WithdrawalExecuted` + treasury-seeding case
-
-- **Milestone.** First successful on-chain `withdrawByProof` against
-  `AckiNackiBridge 0xa44E35151962684f54Af8aaD2675E726ED848E59` — tx
-  `0x35d7254b430f1e475ef16d7f60b295bd0226c906ec5b019d4b2ca408ca657c85`
-  at Sepolia block 11,513,799 (`WithdrawalExecuted` emitted; 1.000000
-  USDC delivered to `0x742d35Cc…f44e`).
-- **Ordering discovery.** After the SHPLONK pipeline fix (commit
-  `b22f6c7`, driver.rs now composes `Circuit4ShplonkPipeline`), dry-run
-  passed the crypto path (anchor check + verifier both green) but the
-  submit reverted with `WithdrawTreasuryShortfall(1_000_000, 0)`
-  (selector `0xbb651fce`). Root cause was operational, not
-  cryptographic: Deploy #10 was freshly bootstrapped and no one had ever
-  bridged IN, so `treasuryBalance == 0`.
-- **Fix landed in this runbook.** New [Case 5](#case-5--withdrawtreasuryshortfall--bridge-treasury-empty)
-  with the Aave-faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
-  `USDC.approve(bridge)` → `bridge.deposit(amount, 0, 0x11…11)`). Also
-  added a treasury-seed step (now
-  [Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only)) to
-  Case 1 so future fresh-deploy demos do the seed BEFORE firing the
-  burn, and added the selector row to Case 3's revert table.
-- **Rule of thumb.** Fresh deploys must seed the treasury or every
-  `withdrawByProof` will revert on the payout leg regardless of proof
-  quality. Faucet + deposit costs ~2 tx (<30s wall), fund enough to cover
-  the demo's burns. Existing deploys inherit their prior treasury; check
-  with `cast call $BRIDGE 'treasuryBalance()(uint256)'`.
-
-### 2026-08-17 — Deploy #8: tight-lookahead rerun after Deploy #7 mis-timing
-
-- **Symptom.** Deploy #7 (`0x822E98…2f90`, seed_seqno=8759296, +262
-  lookahead) launched at 09:15 local. Bundle daemon started, but the
-  burn (`test_deploy_and_withdraw_only.py`) fired ~30 min later at
-  chain head — event landed at seq_no 8767488 while daemon anchor was
-  still at 8759296. Covering bundle was 8 bundles ahead of daemon anchor;
-  projected wait ≈ 90 min.
-- **Root cause.** Between `compute_bridge_anchors --at-head` and the
-  actual burn, chain advanced ~8 bundles. The lookahead+lag interacted
-  so the event's covering bundle was `daemon_anchor + 8·W·P` instead of
-  `daemon_anchor + 1·W·P`.
-- **Recovery (this incident).**
-  1. Killed the daemon (`kill -9` after SIGTERM was ignored during
-     mid-flight aggregator subprocess) and archived `state/` +
-     `relayer-state.json` under `state.deploy7_20260817_094240/` and
-     `relayer-state.deploy7_20260817_094453.json`.
-  2. Re-ran `compute_bridge_anchors --at-head` immediately before the
-     new forge deploy. Fresh anchors seed=8768512, +75 lookahead only.
-  3. Deploy #8 landed at `0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B`
-     with all C4 wiring intact (`accFr` canonical `0x1a1a…1a1a`).
-  4. Bundle daemon cold-started with `seed_policy=Explicit(8768512)`.
-  5. Burn fired at chain head during bundle 1's proving window; event
-     captured at seq_no `8770355`. Covering bundle = 8770560 = bundle 2.
-  6. Total wall time ~17 min (vs 90 min projected on Deploy #7) — a
-     3.3× speedup driven entirely by anchor freshness + burn timing.
-- **Rule of thumb landed in this doc.** For fresh demos, run
-  `compute_bridge_anchors --at-head` within 3 min of `forge script`, and
-  fire the burn within 5 min of daemon startup. Miss either window and
-  the wait grows by ~12 min per additional bundle of catch-up.
-
-### 2026-08-17 — `withdraw-e2e` CLI subcommand landed
-
-- **Change.** Commit `4085c5f` added
-  `bridge-relayer-daemon/src/withdraw_e2e/{mod.rs, driver.rs, capture.rs}`
-  and the `Cmd::WithdrawE2E` CLI variant in `src/bin/relayer.rs`.
-  Replaces the Python driver's steps 5–7 (event capture, witness
-  enrichment, proving, on-chain submit) with a single in-process
-  entry point.
-- **First on-chain demo.** Deploy #8, this runbook. Prior E2E validations
-  (2026-08-15 seq 8251308 etc.) were daemon-verified via
-  `bridge-verifier-daemon`, NOT via on-chain `withdrawByProof`. Deploy #8
-  is the first time `withdrawByProof` executes against a live proof
-  produced by the Rust relayer.
-
-### 2026-08-13 — Horizontal-chain event proving landed (fire-window dropped)
-
-- **Change.** Commit `7bb3da9` removed the fire-window constraint that
-  had forced burns to land inside a specific W·P slot. Combined with
-  `2eacdf7` (explicit L1/L2 dispatch in `build_event_anchor_chain`) the
-  orchestrator can now anchor an event at any layer L ≥ 1 as long as the
-  covering bundle is verified.
-- **Consequence for this runbook.** No fire-window guard. Just fire the
-  burn — `--anchor-layer auto` picks L1 for anything within one bundle
-  of the covering key, L2 for anything within `W` bundles, etc.
-  `--i-know-the-wait` is only needed if you're forcing an explicit
-  layer ≥ 2 (rarely the right call for demos).
-
-### 2026-08-06 — `WIRE_WITHDRAW_BY_PROOF` mandatory outside anvil
-
-- **Change.** Commit `a43993b` in the contracts repo made C4 wiring
-  mandatory on any chain other than anvil (chainid 31337). Sepolia
-  deploys **must** provide `WITHDRAW_ACC_FR` at construction; the
-  constructor rejects zero.
-- **Consequence.** Never set `WIRE_WITHDRAW_BY_PROOF=false` for
-  Sepolia. Every deploy from #4 onward has C4 baked in.
-
----
-
-**Editing this runbook.** Match the parent runbook's rules: dated
-incidents, one-paragraph, cite commits/paths. Prune once the underlying
-change has been stable for >30 days across demos.

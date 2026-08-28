@@ -5,14 +5,20 @@
 //! 1. **Preflight** ([`crate::preflight`]) — exit 2 on refusal.
 //! 2. **Idempotency** ([`crate::idempotency`]) — exit 3 on duplicate.
 //! 3. **Burn** ([`crate::burn`]) — exit 10 on unknown-outcome mid-send.
-//! 4. **Capture** — reuses [`bridge_relayer_daemon::withdraw_e2e::run_once`]
-//!    with `replay_latest = true`. Since we just fired our own burn, the
-//!    youngest matching WithdrawalInitiated from `--from` is unambiguously
-//!    ours; snapshotting a baseline BEFORE the burn and threading it into
-//!    `run_once` would require reimplementing the export → enrich → prove
-//!    pipeline manually. Exit 11 on capture timeout, exit 12 on prover
-//!    failure — both bubble out of the same `run_once` call.
-//! 5. **Submit** — reuses [`bridge_relayer_daemon::bridge::EthBridgeClient`]
+//! 4. **Capture** — chain-follows the multisig `an_tx_hash` through
+//!    USDCBridge's `dst_transaction` to the WithdrawalInitiated ExtOut
+//!    via [`bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event`].
+//!    This is multi-user-safe: filtering by our specific tx hash instead
+//!    of youngest-picking a shared USDCBridge queue means concurrent
+//!    burns from other operators cannot be mis-selected as ours. Exit 11
+//!    on capture timeout (burn bounced, GQL unreachable, or USDCBridge
+//!    never emitted the ExtOut).
+//! 4b. **Resurrect + coverage-wait** — see [`crate::resurrect`].
+//! 5. **Prove** — reuses
+//!    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`] with
+//!    the just-captured event and the resurrected `BridgeState`. Exit 12
+//!    on prover failure.
+//! 6. **Submit** — reuses [`bridge_relayer_daemon::bridge::EthBridgeClient`]
 //!    `dry_run_withdraw` (always) and `submit_withdraw` (unless
 //!    `--dry-run`). Exit 13 on revert.
 //!
@@ -215,29 +221,31 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         source: None,
     })?;
 
-    info!("stage 4/6: capture WithdrawalInitiated event");
+    info!("stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)");
     let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
         CliError::ProofFailed {
             reason: format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
             source: Some(anyhow::anyhow!("{e}")),
         }
     })?;
-    // We just fired a burn; the youngest matching WithdrawalInitiated from
-    // --from is unambiguously ours. Empty baseline + youngest-pick keeps
-    // the capture code path identical to the daemon's `replay_latest`
-    // flow.
-    let captured = bridge_relayer_daemon::withdraw_e2e::capture_next_withdrawal_event(
+    // Multi-user-safe capture: chain-walk from the multisig tx hash we
+    // just broadcast to the ExtOut USDCBridge emits when it processes the
+    // internal message. This never picks up somebody else's concurrent
+    // burn because the initial filter is `transaction(hash: an_tx_hash)`,
+    // which by construction is only satisfied by our own broadcast.
+    let captured = bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event(
         &gql,
+        &burn_receipt.an_tx_hash,
+        &preflight.usdc_bridge_legacy,
+        DEFAULT_EVENT_DST,
         &bridge_account_id_hex,
         &bridge_dapp_id_hex,
-        DEFAULT_EVENT_DST,
-        &std::collections::HashSet::new(),
         EVENT_WAIT,
         EVENT_POLL_INTERVAL,
     )
     .await
     .map_err(|e| CliError::ProofFailed {
-        reason: format!("capture_next_withdrawal_event: {e}"),
+        reason: format!("capture_targeted_withdrawal_event: {e}"),
         source: Some(e),
     })?;
     info!(
@@ -246,6 +254,12 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         block_id = %captured.block_id_hex,
         "captured WithdrawalInitiated event",
     );
+    if let Some(r) = record.as_mut() {
+        r.status = Status::Captured;
+        r.withdrawal_msg_id = Some(captured.message_id.clone());
+        r.block_seq_no = Some(captured.block_seq_no);
+        idempotency::update(&state_dir, r)?;
+    }
 
     // ---- 4b. Resurrect BridgeState from contract; wait for coverage ----
     info!("stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle");

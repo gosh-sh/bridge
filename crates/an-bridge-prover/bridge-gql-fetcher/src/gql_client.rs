@@ -740,6 +740,121 @@ impl GqlClient {
             key_block: block.get("key_block").and_then(|v| v.as_bool()).unwrap_or(false),
         })
     }
+
+    /// Fetch the outbound messages of a transaction by its hash. Returns
+    /// `Ok(None)` if the tx is not (yet) visible via GQL — the caller is
+    /// expected to retry. Empty `Vec` means the tx was found but produced
+    /// no outbound messages (spec-legal but not what a multisig-forward
+    /// path expects).
+    pub async fn query_tx_out_messages(
+        &self,
+        tx_hash: &str,
+    ) -> anyhow::Result<Option<Vec<GqlOutMessageStub>>> {
+        let q = format!(
+            r#"{{ blockchain {{ transaction(hash: "{tx_hash}") {{ out_messages {{ id dst }} }} }} }}"#
+        );
+        let data = self.query(&q).await?;
+        let tx = data.pointer("/blockchain/transaction").unwrap_or(&Value::Null);
+        if tx.is_null() {
+            return Ok(None);
+        }
+        let arr = tx
+            .get("out_messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let out: Vec<GqlOutMessageStub> = arr
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some(GqlOutMessageStub { id, dst })
+            })
+            .collect();
+        Ok(Some(out))
+    }
+
+    /// Fetch the outbound messages of the *destination* transaction of an
+    /// internal message — i.e. the tx that consumed `msg_id`. Returns
+    /// `Ok(None)` if either the message itself or its `dst_transaction`
+    /// is not yet visible (the receiving contract hasn't run yet). The
+    /// caller polls until `Some(_)` appears.
+    pub async fn query_msg_dst_tx_out_messages(
+        &self,
+        msg_id: &str,
+    ) -> anyhow::Result<Option<Vec<GqlOutMessageStub>>> {
+        let q = format!(
+            r#"{{ blockchain {{ message(hash: "{msg_id}") {{ dst_transaction {{ out_messages {{ id dst }} }} }} }} }}"#
+        );
+        let data = self.query(&q).await?;
+        let msg = data.pointer("/blockchain/message").unwrap_or(&Value::Null);
+        if msg.is_null() {
+            return Ok(None);
+        }
+        let dst_tx = msg.get("dst_transaction").unwrap_or(&Value::Null);
+        if dst_tx.is_null() {
+            return Ok(None);
+        }
+        let arr = dst_tx
+            .get("out_messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let out: Vec<GqlOutMessageStub> = arr
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some(GqlOutMessageStub { id, dst })
+            })
+            .collect();
+        Ok(Some(out))
+    }
+
+    /// Fetch a single ExtOut message by id in the same shape as
+    /// [`Self::query_bridge_extouts`] rows. Returns `Ok(None)` if the
+    /// message is not (yet) visible via GQL. Used by the targeted-capture
+    /// path after chain-walking to the WithdrawalInitiated msg_id.
+    pub async fn query_bridge_extout_by_id(
+        &self,
+        msg_id: &str,
+    ) -> anyhow::Result<Option<BridgeExtOutMessage>> {
+        let q = format!(
+            r#"{{ blockchain {{ message(hash: "{msg_id}") {{ id boc dst created_at block_id src_dapp_id src_transaction {{ block_id }} }} }} }}"#
+        );
+        let data = self.query(&q).await?;
+        let m = data.pointer("/blockchain/message").unwrap_or(&Value::Null);
+        if m.is_null() {
+            return Ok(None);
+        }
+        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let boc = m.get("boc").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let created_at = m.get("created_at").and_then(|v| v.as_u64());
+        let src_dapp_id = m
+            .get("src_dapp_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let block_id = m
+            .get("block_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                m.get("src_transaction")
+                    .and_then(|tx| tx.get("block_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        Ok(Some(BridgeExtOutMessage {
+            id,
+            boc,
+            dst,
+            created_at,
+            src_dapp_id,
+            block_id,
+        }))
+    }
 }
 
 /// One ExtOut message row from
@@ -753,6 +868,17 @@ pub struct BridgeExtOutMessage {
     pub created_at: Option<u64>,
     pub src_dapp_id: Option<String>,
     pub block_id: Option<String>,
+}
+
+/// Bare `(id, dst)` pair from a transaction's `out_messages` list. Used
+/// by the targeted-capture chain walk (multisig tx → USDCBridge internal
+/// msg → USDCBridge tx → WithdrawalInitiated ExtOut) so each hop can
+/// pick the "right" outgoing message by destination without dragging the
+/// full `BridgeExtOutMessage` shape.
+#[derive(Debug, Clone)]
+pub struct GqlOutMessageStub {
+    pub id: String,
+    pub dst: String,
 }
 
 /// Block metadata returned by [`GqlClient::query_block_by_hash`].

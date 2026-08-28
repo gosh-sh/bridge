@@ -14,17 +14,18 @@ already running or has just been launched — that lane is covered in
 [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md), which
 this doc extends.
 
-> **Honest scope — single-operator, single-burn-in-flight.** The
-> `withdraw-e2e` orchestrator has **no per-user or per-msg-id
-> targeting**. It correlates the target burn to the on-chain event by
-> "youngest matching `WithdrawalInitiated` ExtOut from the shared
-> USDCBridge account, minus a baseline snapshot taken at capture-stage
-> start" — nothing more (`withdraw_e2e/capture.rs:97-114`). The CLI
-> exposes `--bridge-account-id`, `--bridge-dapp-id`, `--event-dst`, and
+> **Honest scope — single-operator, single-burn-in-flight (relayer
+> daemon path only).** The `relayer withdraw-e2e` binary described in
+> this runbook has **no per-user or per-msg-id targeting**. It
+> correlates the target burn to the on-chain event by "youngest
+> matching `WithdrawalInitiated` ExtOut from the shared USDCBridge
+> account, minus a baseline snapshot taken at capture-stage start" —
+> nothing more (`withdraw_e2e/capture.rs:73-117`). The CLI exposes
+> `--bridge-account-id`, `--bridge-dapp-id`, `--event-dst`, and
 > `--replay-latest`; there is no `--target-msg-id`, no
 > `--target-seq-no`. `--prover-seq-no` is only a local filename stamp.
 >
-> Concretely this means:
+> Concretely this means, for the daemon path:
 >
 > - **Concurrent burns from different users through the same
 >   `USDCBridge` race.** Both operators' `withdraw-e2e` invocations
@@ -48,8 +49,21 @@ this doc extends.
 > This runbook assumes one operator running one burn at a time,
 > waiting for each `withdraw-e2e` cycle to complete before starting
 > the next. That is enough for shellnet demos and stress loops; it is
-> **not** enough for concurrent-operator or production use, which
-> would need a `--target-msg-id` flag before being safe.
+> **not** enough for concurrent-operator or production use of the
+> `relayer withdraw-e2e` binary.
+>
+> **`bridge-withdraw-e2e-cli` is different.** The third-party
+> end-user CLI at
+> `crates/an-bridge-prover/bridge-withdraw-e2e-cli/` fires its burn
+> inline and then targets the resulting `WithdrawalInitiated` ExtOut
+> by chain-following the multisig transaction hash — `transaction(hash:
+> an_tx_hash).out_messages → dst == USDCBridge →
+> message(hash).dst_transaction.out_messages → dst ==
+> makeAddrExtern(618)` (`withdraw_e2e/capture.rs::capture_targeted_withdrawal_event`).
+> That is multi-user-safe: two operators firing in the same second
+> each see only their own tx's outbound chain, so neither can capture
+> the other's event. This runbook does not cover the third-party CLI;
+> see its own `README.md` for operator instructions.
 
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
 > "Covering bundle" = the first bundle whose `key_seq_no ≥ event_seq_no`

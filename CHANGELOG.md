@@ -129,6 +129,23 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`bridge-withdraw-e2e-cli` capture is now multi-user safe.**
+  The CLI no longer youngest-picks a shared `USDCBridge → ExtOut` queue
+  after firing its burn. Instead it chain-follows the multisig transaction
+  hash (`an_tx_hash` returned by `sendTransaction`) through the two GraphQL
+  hops the AN node exposes: `transaction(hash: an_tx_hash).out_messages`
+  → pick outbound whose `dst == USDCBridge` → `message(hash:
+  msig_out_msg_id).dst_transaction.out_messages` → pick outbound whose
+  `dst == makeAddrExtern(618)` → the WithdrawalInitiated msg_id. The
+  msg_id and its block_seq_no are persisted at the `Captured` idempotency
+  stage. Concurrent operators can no longer capture each other's events
+  even in the sub-second window between burns. New functions:
+  `bridge_gql_fetcher::gql_client::{query_tx_out_messages,
+  query_msg_dst_tx_out_messages, query_bridge_extout_by_id}` and
+  `bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event`.
+  The daemon's `run_once` still uses the baseline-snapshot path via
+  `capture_next_withdrawal_event` — no behavior change there.
+
 - `bridge-relayer-daemon` docs Case 1 (`live_relayer_bridge_verifyBlock_runbook.md`)
   is now a single unified cold-start section with a
   `BRIDGE_CONFIG_DIR=./L1_config` / `BRIDGE_CONFIG_DIR=./L2_config`

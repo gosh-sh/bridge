@@ -481,9 +481,11 @@ the level-swaps below; those are the only L2-specific deviations.
 
 ### Step 1 — Deploy and bootstrap `daemon-live` under L2
 
-Follow `live_relayer_bridge_verifyBlock_runbook.md` **Case 1** (unified
-L1/L2 first-time bootstrap) and **Case 7** (L2-anchored cold-start
-specifics) end-to-end, substituting `LEVEL=2` /
+Follow the verifyBlock runbook
+[Case 1](./live_relayer_bridge_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy)
+(unified L1/L2 first-time bootstrap) and
+[Case 7](./live_relayer_bridge_verifyBlock_runbook.md#case-7--l2-anchored-cold-start---anchor-level-2)
+(L2-anchored cold-start specifics) end-to-end, substituting `LEVEL=2` /
 `BRIDGE_CONFIG_DIR=./L2_config` / `BRIDGE_ANCHOR_LEVEL=2` throughout.
 Those cases cover `compute_bridge_anchors --level 2`, the T₂-boundary
 retry rule, `deploy_bridge_bundle.sh LEVEL=2`, and `daemon-live

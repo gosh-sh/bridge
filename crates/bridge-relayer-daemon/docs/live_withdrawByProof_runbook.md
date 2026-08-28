@@ -14,6 +14,43 @@ already running or has just been launched — that lane is covered in
 [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md), which
 this doc extends.
 
+> **Honest scope — single-operator, single-burn-in-flight.** The
+> `withdraw-e2e` orchestrator has **no per-user or per-msg-id
+> targeting**. It correlates the target burn to the on-chain event by
+> "youngest matching `WithdrawalInitiated` ExtOut from the shared
+> USDCBridge account, minus a baseline snapshot taken at capture-stage
+> start" — nothing more (`withdraw_e2e/capture.rs:97-114`). The CLI
+> exposes `--bridge-account-id`, `--bridge-dapp-id`, `--event-dst`, and
+> `--replay-latest`; there is no `--target-msg-id`, no
+> `--target-seq-no`. `--prover-seq-no` is only a local filename stamp.
+>
+> Concretely this means:
+>
+> - **Concurrent burns from different users through the same
+>   `USDCBridge` race.** Both operators' `withdraw-e2e` invocations
+>   see both events as new, both pop the youngest, both prove the same
+>   event. The other burn is orphaned.
+> - **Rapid back-to-back burns from the same operator race.** If a
+>   second burn fires during the first `withdraw-e2e` capture stage,
+>   the tool captures the second (youngest wins). The first is
+>   orphaned in-flight.
+> - **`--replay-latest` picks youngest globally.** If any newer
+>   `WithdrawalInitiated` has surfaced since your burn (another
+>   operator, a stray test run), you prove the wrong one.
+>
+> The Python driver
+> [`generate_withdrawals_with_live_event_proving.py`](../../an-bridge-prover/python/generate_withdrawals_with_live_event_proving.py)
+> that fires the burn uses the same baseline+wait pattern and logs the
+> captured event's `block_seq_no` / `msg_id`, but that identity is
+> **not plumbed into `withdraw-e2e`**. The two tools coordinate only by
+> "shared queue was drained" convention.
+>
+> This runbook assumes one operator running one burn at a time,
+> waiting for each `withdraw-e2e` cycle to complete before starting
+> the next. That is enough for shellnet demos and stress loops; it is
+> **not** enough for concurrent-operator or production use, which
+> would need a `--target-msg-id` flag before being safe.
+
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
 > "Covering bundle" = the first bundle whose `key_seq_no ≥ event_seq_no`
 > that is verified on-chain. Withdrawals can only be submitted after

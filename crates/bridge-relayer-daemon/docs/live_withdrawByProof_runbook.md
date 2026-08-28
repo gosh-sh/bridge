@@ -21,7 +21,7 @@ this doc extends.
 > a `layer_hashes` root that `verifyBlock` has already committed).
 > With `W=128, P=8`, an **L1** bundle covers `W·P = 1024` seq_nos
 > (~5.7 min chain-time at 3 seq/s). An **L2** bundle covers
-> `W² = 16384` seq_nos (~91 min chain-time). Case 8+ covers the L2 flow.
+> `W² = 16384` seq_nos (~91 min chain-time). Case 7+ covers the L2 flow.
 
 ---
 
@@ -32,13 +32,13 @@ this doc extends.
 - [Reference values (chain-invariant on shellnet)](#reference-values-chain-invariant-on-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
-- [Case 3 — Event captured but daemon far behind head](#case-3--event-captured-but-daemon-far-behind-head)
-- [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
-- [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
-- [Case 6 — USDCBridge key drift (burn side)](#case-6--usdcbridge-key-drift-burn-side)
-- [Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
-- [Case 8 — Fresh L2 deploy: first E2E withdrawal](#case-8--fresh-l2-deploy-first-e2e-withdrawal)
-- [Case 9 — Sequential L2 withdrawals (stress-test loop)](#case-9--sequential-l2-withdrawals-stress-test-loop)
+- [Case 2 — Event captured but daemon far behind head](#case-2--event-captured-but-daemon-far-behind-head)
+- [Case 3 — Prover subprocess timeout / OOM](#case-3--prover-subprocess-timeout--oom)
+- [Case 4 — On-chain `withdrawByProof` revert](#case-4--on-chain-withdrawbyproof-revert)
+- [Case 5 — USDCBridge key drift (burn side)](#case-5--usdcbridge-key-drift-burn-side)
+- [Case 6 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty)
+- [Case 7 — Fresh L2 deploy: first E2E withdrawal](#case-7--fresh-l2-deploy-first-e2e-withdrawal)
+- [Case 8 — Sequential L2 withdrawals (stress-test loop)](#case-8--sequential-l2-withdrawals-stress-test-loop)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
@@ -76,10 +76,10 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 | Daemon | Event captured | Proof generated | Go to |
 |---|---|---|---|
-| running, current | no | no | fire the burn — [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 9](#case-9--sequential-l2-withdrawals-stress-test-loop) (L2 follow-up) |
+| running, current | no | no | fire the burn — [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 8](#case-8--sequential-l2-withdrawals-stress-test-loop) (L2 follow-up) |
 | running, current | yes | no | run `withdraw-e2e` (proof + submit) |
-| running, behind | yes | no | [Case 3](#case-3--event-captured-but-daemon-far-behind-head) |
-| running, current | yes | yes, revert | [Case 5](#case-5--on-chain-withdrawbyproof-revert) |
+| running, behind | yes | no | [Case 2](#case-2--event-captured-but-daemon-far-behind-head) |
+| running, current | yes | yes, revert | [Case 4](#case-4--on-chain-withdrawbyproof-revert) |
 | not running | any | any | Fix the bundle lane first — see verifyBlock runbook Case 3–6 |
 
 ---
@@ -232,8 +232,8 @@ window. The L1 daemon is subcritical (see
 so its lag grows forever — a second withdraw against the same L1 deploy
 soon slides past the wait-time budget. For **regular, repeated**
 withdrawals use L2 mode:
-[Case 8](#case-8--fresh-l2-deploy-first-e2e-withdrawal) (first L2 cycle)
-and [Case 9](#case-9--sequential-l2-withdrawals-stress-test-loop)
+[Case 7](#case-7--fresh-l2-deploy-first-e2e-withdrawal) (first L2 cycle)
+and [Case 8](#case-8--sequential-l2-withdrawals-stress-test-loop)
 (stress loop).
 
 **The optimal sequence** — every step gates the next; do not interleave:
@@ -278,7 +278,7 @@ still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
 is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
 Seed it once, then reuse across demos on the same deploy.
 
-Full recipe in [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty).
+Full recipe in [Case 6](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty).
 Quick version — mint 1 USDC from the Aave Sepolia faucet, deposit into
 the bridge:
 
@@ -388,7 +388,7 @@ INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
 ```
 
 Dry-run returning OK proves the proof is well-formed and the on-chain
-adapter accepts it. If dry-run reverts, jump to [Case 5](#case-5--on-chain-withdrawbyproof-revert)
+adapter accepts it. If dry-run reverts, jump to [Case 4](#case-4--on-chain-withdrawbyproof-revert)
 — **do not** submit for real.
 
 ### Step 7 — Real submit
@@ -407,7 +407,7 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 ---
 
-## Case 3 — Event captured but daemon far behind head
+## Case 2 — Event captured but daemon far behind head
 
 **Symptom.** `test_deploy_and_withdraw_only.py` captured a burn at
 `event_seq_no=E`. On-chain `storedLastSeenBlockSeqNo() = L`. `E − L` >
@@ -447,7 +447,7 @@ Do **not** try to short-circuit by manually advancing `storedLastSeenBlockSeqNo`
 
 ---
 
-## Case 4 — Prover subprocess timeout / OOM
+## Case 3 — Prover subprocess timeout / OOM
 
 **Symptom.** `withdraw-e2e` fails during the prove stage:
 
@@ -481,7 +481,7 @@ when the log shows repeated swap.
 
 ---
 
-## Case 5 — On-chain `withdrawByProof` revert
+## Case 4 — On-chain `withdrawByProof` revert
 
 **Symptom.** `withdraw-e2e --dry-run` (or real submit) fails with a
 Sepolia revert. The log prints the selector.
@@ -493,7 +493,7 @@ Sepolia revert. The log prints the selector.
 | `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
 | `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender)` tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
-| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty). |
+| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 6](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Dry-run trace (any revert):**
 
@@ -513,7 +513,7 @@ same proof against the warm cache.
 
 ---
 
-## Case 6 — USDCBridge key drift (burn side)
+## Case 5 — USDCBridge key drift (burn side)
 
 **Symptom.** `test_deploy_and_withdraw_only.py` fails during
 `mintAndSend` step with `exit_code=209` (or similar TVM signature error).
@@ -549,7 +549,7 @@ the USDCBridge is external state.
 
 ---
 
-## Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty
+## Case 6 — `WithdrawTreasuryShortfall` — bridge treasury empty
 
 **Symptom.** Dry-run (or real submit) reverts with selector `0xbb651fce`
 decoded as `WithdrawTreasuryShortfall(<pub.amount>, <treasuryBalance>)`.
@@ -627,7 +627,7 @@ AAVE via `supplyToAave()` for yield.
 
 ---
 
-## Case 8 — Fresh L2 deploy: first E2E withdrawal
+## Case 7 — Fresh L2 deploy: first E2E withdrawal
 
 **When to use.** Deploying the bridge with `BRIDGE_ANCHOR_LEVEL=2` to
 exercise L2-anchoring end-to-end. Everything from Case 1 applies with
@@ -818,9 +818,9 @@ verifyBlock runbook.
 
 ---
 
-## Case 9 — Sequential L2 withdrawals (stress-test loop)
+## Case 8 — Sequential L2 withdrawals (stress-test loop)
 
-**When to use.** After Case 8's first cycle succeeds, drive 2–3
+**When to use.** After Case 7's first cycle succeeds, drive 2–3
 additional burns through the same L2 rails to exercise repeated L2
 anchoring under real chain motion.
 
@@ -836,17 +836,17 @@ cast logs --address $BRIDGE --rpc-url $RPC \
   'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
   --from-block -1000 | tail -5
 
-# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 8 Step L2)
+# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 7 Step L2)
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC
 
 # 3. Fire fresh burn
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
-# 4. Wait for covering T₂ (Case 8 Step L6 math)
+# 4. Wait for covering T₂ (Case 7 Step L6 math)
 
 # 5. Run withdraw-e2e with a fresh --prover-seq-no
 ./target/release/relayer withdraw-e2e \
-  ... same flags as Case 8 Step L7 ... \
+  ... same flags as Case 7 Step L7 ... \
   --prover-seq-no $(date +%s)
 ```
 
@@ -864,8 +864,8 @@ MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 (constructor stores a single genesis scalar; `_expectedPrevAnchor` uses
 per-layer picks; `withdrawByProof`'s `_isKnownAnchor` scans all
 layers — see change log), any revert in cycle N ≥ 2 is almost
-certainly reproducing a Case 5 failure mode, not something L2-specific.
-Start with the Case 5 catalog before diagnosing L2.
+certainly reproducing a Case 4 failure mode, not something L2-specific.
+Start with the Case 4 catalog before diagnosing L2.
 
 ---
 
@@ -986,11 +986,11 @@ Newest first.
   successful proof, `_appendLayerHashes` (lines 902–913) writes both
   `_layerWindows[1]` and `_layerWindows[2]` in one call when the proof
   carries `numLayers = 2`. No Solidity change required for L2 deploys.
-- **Cases 8, 9, and L2 timing model added to this runbook.** Case 8 is
-  the operator sequence for the first L2 E2E cycle; Case 9 is the
+- **Cases 8, 9, and L2 timing model added to this runbook.** Case 7 is
+  the operator sequence for the first L2 E2E cycle; Case 8 is the
   sequential-withdrawal stress loop (2–3 cycles per session).
 - **Not yet exercised live.** Deploy #12 (first L2 Sepolia deploy) has
-  not run yet. Case 8's dry-run and Case 9's loop will land as a
+  not run yet. Case 7's dry-run and Case 8's loop will land as a
   subsequent change-log entry once executed.
 
 ### 2026-08-18 — Deploy #10 first live `WithdrawalExecuted` + treasury-seeding case
@@ -1007,13 +1007,13 @@ Newest first.
   (selector `0xbb651fce`). Root cause was operational, not
   cryptographic: Deploy #10 was freshly bootstrapped and no one had ever
   bridged IN, so `treasuryBalance == 0`.
-- **Fix landed in this runbook.** New [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
+- **Fix landed in this runbook.** New [Case 6](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty)
   with the Aave-faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
   `USDC.approve(bridge)` → `bridge.deposit(amount, 0, 0x11…11)`). Also
   added a treasury-seed step (now
   [Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only)) to
   Case 1 so future fresh-deploy demos do the seed BEFORE firing the
-  burn, and added the selector row to Case 5's revert table.
+  burn, and added the selector row to Case 4's revert table.
 - **Rule of thumb.** Fresh deploys must seed the treasury or every
   `withdrawByProof` will revert on the payout leg regardless of proof
   quality. Faucet + deposit costs ~2 tx (<30s wall), fund enough to cover

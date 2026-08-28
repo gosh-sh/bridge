@@ -51,8 +51,13 @@ this doc extends.
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/an-bridge-prover
-export BRIDGE=0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B
-export RPC=https://ethereum-sepolia-rpc.publicnode.com
+
+# Source the per-mode env — pick L1_config or L2_config depending on the
+# lane you were running. 
+export BRIDGE_CONFIG_DIR=./L1_config       # or ./L2_config for the L2 lane
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+export BRIDGE=$BRIDGE_ADDRESS              # short alias used below
+export RPC=$RPC_URL
 
 # 1. Is the bundle daemon alive and current?
 pgrep -af 'relayer daemon-live' || echo "DAEMON NOT RUNNING"
@@ -333,9 +338,9 @@ bundle (bundle 2 typically). Anything worse and the wait grows linearly
 ### Step 5 — Wait for the covering bundle
 
 ```bash
-# Chain progress
-watch -n 30 'cast call 0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B \
-  storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC'
+# Chain progress ($BRIDGE / $RPC come from the sourced $BRIDGE_CONFIG_DIR/env — see
+# Quick resume checklist; do NOT paste an address literal here, it rotates per deploy)
+watch -n 30 'cast call $BRIDGE storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC'
 
 # Wait until chain last_seen ≥ (event_seq_no rounded UP to next 1024 boundary)
 ```

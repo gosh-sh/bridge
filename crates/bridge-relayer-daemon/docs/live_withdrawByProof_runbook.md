@@ -407,33 +407,6 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 ---
 
-## Case 2 — Follow-up withdrawal on an existing deploy
-
-**When to use.** Bridge is already deployed. Bundle daemon has been
-running for hours/days. Prior withdrawal (or none) already succeeded;
-you want to send another burn through the same rails.
-
-```bash
-# 1. Confirm daemon is current (within one bundle of head)
-cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]'
-# vs chain head via GQL
-curl -s -X POST https://shellnet.ackinacki.org/graphql \
-  -H 'content-type: application/json' \
-  -d '{"query":"{ blockchain { blocks(last: 1) { edges { node { seq_no } } } } }"}' \
-  | jq -r '.data.blockchain.blocks.edges[0].node.seq_no'
-# lag = head - last_seen. Should be < 1024. If not, wait or run Case 3.
-
-# 2. Fire the burn (same script as Case 1 step 4)
-MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
-
-# 3. Run withdraw-e2e --dry-run then real submit (Case 1 steps 6-7)
-```
-
-No fresh anchors needed. No redeploy. Bundle daemon's ongoing cadence
-covers the event within one W·P stride.
-
----
-
 ## Case 3 — Event captured but daemon far behind head
 
 **Symptom.** `test_deploy_and_withdraw_only.py` captured a burn at
@@ -518,7 +491,7 @@ Sepolia revert. The log prints the selector.
 | Selector | Error | Root cause pattern |
 |---|---|---|
 | `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
-| `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` used twice | The `withdraw-e2e` command was re-run against the same captured event. Fire a fresh burn. |
+| `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender)` tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
 | `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty). |
 

@@ -141,7 +141,7 @@ Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
 `scripts/deploy_bridge_bundle.sh` on each deploy), not from this doc.
 Deployer / relayer / owner wallet is the single shared shellnet burner
 `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` documented in
-[`shellnet.common`](../../an-bridge-prover/shellnet.common).
+[`shellnet.common`](../../an-bridge-prover/shellnet.common) or smth that you deployed yourself (see instruction how to deploy and fund your wallet here [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md)).
 
 Two values are chain-invariant on shellnet and worth naming here:
 

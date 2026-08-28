@@ -163,26 +163,6 @@ enum Cmd {
         #[arg(long)]
         no_simulate: bool,
     },
-    /// Long-running daemon reading partner `proof_<seqno>.json` bundles
-    /// from `bridge-prover-daemon` and submitting `verifyBlock` on Ethereum.
-    DaemonProver {
-        /// Directory containing `proof_*.json` + `result_*.json` (partner
-        /// prover daemon `proofs/` folder).
-        #[arg(long, env = "PROVER_PROOFS_DIR")]
-        proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
-        rpc_url: String,
-        #[arg(long, env = "BRIDGE_ADDRESS")]
-        bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
-        private_key: String,
-        #[arg(long, default_value_t = 2)]
-        backoff_initial_secs: u64,
-        #[arg(long, default_value_t = 60)]
-        backoff_max_secs: u64,
-        #[arg(long, default_value_t = 2)]
-        backoff_multiplier: u32,
-    },
     /// Submit one `verifyBlock` for a specific partner proof bundle.
     SubmitVerifyBlock {
         #[arg(long)]
@@ -623,34 +603,6 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| {
                 error!(?e, "daemon failed");
-                e
-            })
-        },
-        Cmd::DaemonProver {
-            proofs_dir,
-            rpc_url,
-            bridge_address,
-            private_key,
-            backoff_initial_secs,
-            backoff_max_secs,
-            backoff_multiplier,
-        } => {
-            let backoff = BackoffConfig {
-                initial: Duration::from_secs(backoff_initial_secs),
-                max: Duration::from_secs(backoff_max_secs),
-                multiplier: backoff_multiplier,
-            };
-            run_prover_daemon(
-                args.state,
-                proofs_dir,
-                rpc_url,
-                bridge_address,
-                private_key,
-                backoff,
-            )
-            .await
-            .map_err(|e| {
-                error!(?e, "daemon-prover failed");
                 e
             })
         },
@@ -1212,41 +1164,6 @@ async fn verify_fixture(
             std::process::exit(1);
         },
     }
-}
-
-async fn run_prover_daemon(
-    state_path: PathBuf,
-    proofs_dir: PathBuf,
-    rpc_url: String,
-    bridge_address: Address,
-    private_key: String,
-    backoff: BackoffConfig,
-) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
-
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
-    let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
-    let metrics = RelayerMetrics::new();
-
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("shutdown signal received");
-    };
-
-    info!(?backoff, proofs_dir = %proofs_dir.display(), "daemon-prover starting");
-    let summary = relayer
-        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-        .await?;
-    info!(?summary, snapshot = ?metrics.snapshot(), "daemon-prover stopped");
-    Ok(())
 }
 
 async fn submit_verify_block(

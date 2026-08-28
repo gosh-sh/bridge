@@ -196,6 +196,16 @@ assigns it when the release is tagged.
 
 ### Removed
 
+- **`relayer daemon-prover` subcommand deleted.** The legacy file-based
+  standalone verifyBlock daemon (reads `proof_<seqno>.json` bundles
+  from `PROVER_PROOFS_DIR`, submits `verifyBlock`) is superseded by
+  `daemon-bridge` (file-based, both legs on one EOA) and `daemon-live`
+  (in-process, GraphQL-driven, bundle-only). No active systemd unit,
+  runbook, CI job, or E2E test invoked `daemon-prover` — the last
+  reference was an "example manual/one-off invocation" in
+  `AGENTS.md` which is also removed. Operators who need the standalone
+  verifyBlock leg can still use `submit-verify-block` (one-shot) or
+  `daemon-bridge` (long-running).
 - `scripts/ursus/USDCBridge.abi.json` and
   `crates/an-bridge-prover/python/contracts/README.md` — unreferenced
   ABI mirror and its documentation. Systemd/env templates under

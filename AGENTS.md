@@ -422,7 +422,9 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --tic
 # (bridge-relayer.service = `relayer daemon-bridge`) on a SINGLE relayer EOA, interleaved
 # sequentially so there is never more than one in-flight tx (nonces can't race). This unified
 # `daemon-bridge` replaces the earlier two-service split (bridge-relayer=daemon-prover +
-# bridge-withdraw=daemon-withdraw); the two standalone subcommands remain for manual/one-off use.
+# bridge-withdraw=daemon-withdraw); the `daemon-withdraw` standalone subcommand remains for
+# manual/one-off use. `daemon-prover` was removed on 2026-08-28 — its verifyBlock leg is
+# covered either by `daemon-bridge` (file-based) or `daemon-live` (in-process).
 #  • leg 1 (was daemon-prover)   → verifyBlock (anchor registration). The block source FALLS
 #    FORWARD to the next available proof_<N>.json (N >= last_seen+1), so it advances a fresh bridge
 #    across the 512-spaced AN key-block stream on its own (each proof bakes the previous key block
@@ -435,8 +437,6 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --tic
 #   See docs/an_eth_daemon_withdraw_e2e_2026-07-03.md.
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # unified AN→ETH (verifyBlock + withdrawByProof)
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-prover \
-    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # standalone verifyBlock leg (fall-forward)
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \

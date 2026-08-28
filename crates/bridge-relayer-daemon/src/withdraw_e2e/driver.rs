@@ -22,9 +22,9 @@ use tracing::info;
 
 use bridge_event_witness::{
     enrich_witness, export_from_event_boc_base64, AnchorLayerMode, BlockContextInput,
-    EnrichSummary,
+    EnrichSummary, EnrichedWitness,
 };
-use bridge_gql_fetcher::gql_client::create_client;
+use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::bridge_state::BridgeState;
 
 use crate::aggregator::{
@@ -121,6 +121,10 @@ pub struct WithdrawE2ESummary {
     pub proof: PartnerWithdrawalProof,
 }
 
+/// File-based entrypoint. Loads `BridgeState` from `cfg.prover_state_path`
+/// and retries enrichment by re-reading the file each attempt — matching
+/// the daemon-writes-as-it-proves pattern. Used by the daemon binary's
+/// `withdraw-e2e` subcommand and local dev drivers.
 pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     std::fs::create_dir_all(&cfg.work_dir)
         .with_context(|| format!("mkdir work_dir {}", cfg.work_dir.display()))?;
@@ -129,8 +133,9 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     let state_path_str = cfg
         .prover_state_path
         .to_str()
-        .context("prover_state_path is not valid UTF-8")?;
-    let bridge_state = BridgeState::load(state_path_str, cfg.window_size)
+        .context("prover_state_path is not valid UTF-8")?
+        .to_string();
+    let bridge_state = BridgeState::load(&state_path_str, cfg.window_size)
         .with_context(|| format!("load BridgeState from {state_path_str}"))?;
     info!(
         window_size = bridge_state.window_size,
@@ -139,43 +144,8 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
         "loaded BridgeState",
     );
 
-    let baseline = if cfg.replay_latest {
-        info!("replay_latest: skipping baseline snapshot — capture will pick youngest matching event");
-        std::collections::HashSet::new()
-    } else {
-        snapshot_baseline_msg_ids(
-            &gql,
-            &cfg.bridge_account_id_hex,
-            &cfg.bridge_dapp_id_hex,
-            500,
-        )
-        .await
-        .context("baseline ExtOut snapshot")?
-    };
-
-    let captured = capture_next_withdrawal_event(
-        &gql,
-        &cfg.bridge_account_id_hex,
-        &cfg.bridge_dapp_id_hex,
-        &cfg.event_dst_filter,
-        &baseline,
-        cfg.event_wait,
-        cfg.event_poll_interval,
-    )
-    .await
-    .context("capture WithdrawalInitiated event")?;
-
-    let ctx = BlockContextInput {
-        block_id: parse_hex32(&captured.block_id_hex).context("block_id_hex")?,
-        block_seq_no: captured.block_seq_no,
-        account_dapp_id: parse_hex32(&captured.account_dapp_id_hex)
-            .context("account_dapp_id_hex")?,
-        account_id: parse_hex32(&captured.account_id_hex).context("account_id_hex")?,
-        envelope_hash: parse_hex32(&captured.envelope_hash_hex).context("envelope_hash_hex")?,
-    };
-    info!("exporter: building partial PrivateWitness from ExtOut BOC");
-    let partial = export_from_event_boc_base64(&captured.event_boc_b64, &ctx)
-        .context("export_from_event_boc_base64 failed")?;
+    let captured = capture_stage(&gql, &cfg).await?;
+    let partial = export_stage(&captured)?;
 
     // Enricher runs against a live-updated BridgeState — the daemon writes new
     // bundles to prover_state.json as it proves them. On a fresh deploy where
@@ -202,7 +172,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     let enriched = loop {
         attempt += 1;
         // Reload from disk — daemon writes prover_state.json each bundle.
-        let bridge_state_now = BridgeState::load(state_path_str, cfg.window_size)
+        let bridge_state_now = BridgeState::load(&state_path_str, cfg.window_size)
             .with_context(|| format!("reload BridgeState from {state_path_str}"))?;
         info!(
             attempt,
@@ -240,6 +210,107 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
             }
         }
     };
+    log_enriched_summary(&enriched);
+
+    prove_and_finalize(&cfg, captured, enriched).await
+}
+
+/// State-in-memory entrypoint. Skips the file load, skips the capture
+/// stage, and single-shots the enricher against `bridge_state`. Intended
+/// for callers that already:
+///   1. captured the `WithdrawalInitiated` event via
+///      [`capture::capture_next_withdrawal_event`], and
+///   2. ensured `bridge_state` covers the captured burn's key block
+///      (typically via the third-party
+///      `bridge-withdraw-e2e-cli::resurrect::wait_for_coverage`, which
+///      polls `AckiNackiBridge.storedLastSeenBlockSeqNo` and calls
+///      [`BridgeState::from_contract`] once the covering bundle lands).
+///
+/// `cfg.prover_state_path`, `cfg.window_size`, `cfg.event_wait`,
+/// `cfg.event_poll_interval`, `cfg.event_dst_filter`, and
+/// `cfg.replay_latest` are ignored on this path — capture is caller's
+/// responsibility.
+pub async fn run_once_with_state(
+    cfg: WithdrawE2EConfig,
+    bridge_state: BridgeState,
+    captured: CapturedEvent,
+) -> Result<WithdrawE2ESummary> {
+    std::fs::create_dir_all(&cfg.work_dir)
+        .with_context(|| format!("mkdir work_dir {}", cfg.work_dir.display()))?;
+
+    let gql = create_client(&cfg.gql_endpoint).context("create GqlClient")?;
+    info!(
+        window_size = bridge_state.window_size,
+        num_active_layers = bridge_state.num_active_layers(),
+        stored_last_seen_block_seq_no = bridge_state.stored_last_seen_block_seq_no,
+        captured_block_seq_no = captured.block_seq_no,
+        "run_once_with_state: caller-provided BridgeState + already-captured event",
+    );
+
+    let partial = export_stage(&captured)?;
+
+    info!(
+        anchor_mode = ?cfg.anchor_mode,
+        i_know_the_wait = cfg.i_know_the_wait,
+        "enricher: single-shot against caller-provided state",
+    );
+    let enriched = enrich_witness(
+        &gql,
+        &bridge_state,
+        partial,
+        cfg.anchor_mode,
+        cfg.i_know_the_wait,
+    )
+    .await
+    .context("enrich_witness failed (caller-provided state did not cover the target burn)")?;
+    log_enriched_summary(&enriched);
+
+    prove_and_finalize(&cfg, captured, enriched).await
+}
+
+async fn capture_stage(gql: &GqlClient, cfg: &WithdrawE2EConfig) -> Result<CapturedEvent> {
+    let baseline = if cfg.replay_latest {
+        info!("replay_latest: skipping baseline snapshot — capture will pick youngest matching event");
+        std::collections::HashSet::new()
+    } else {
+        snapshot_baseline_msg_ids(
+            gql,
+            &cfg.bridge_account_id_hex,
+            &cfg.bridge_dapp_id_hex,
+            500,
+        )
+        .await
+        .context("baseline ExtOut snapshot")?
+    };
+
+    capture_next_withdrawal_event(
+        gql,
+        &cfg.bridge_account_id_hex,
+        &cfg.bridge_dapp_id_hex,
+        &cfg.event_dst_filter,
+        &baseline,
+        cfg.event_wait,
+        cfg.event_poll_interval,
+    )
+    .await
+    .context("capture WithdrawalInitiated event")
+}
+
+fn export_stage(captured: &CapturedEvent) -> Result<bridge_event_witness::schema::PrivateWitness> {
+    let ctx = BlockContextInput {
+        block_id: parse_hex32(&captured.block_id_hex).context("block_id_hex")?,
+        block_seq_no: captured.block_seq_no,
+        account_dapp_id: parse_hex32(&captured.account_dapp_id_hex)
+            .context("account_dapp_id_hex")?,
+        account_id: parse_hex32(&captured.account_id_hex).context("account_id_hex")?,
+        envelope_hash: parse_hex32(&captured.envelope_hash_hex).context("envelope_hash_hex")?,
+    };
+    info!("exporter: building partial PrivateWitness from ExtOut BOC");
+    export_from_event_boc_base64(&captured.event_boc_b64, &ctx)
+        .context("export_from_event_boc_base64 failed")
+}
+
+fn log_enriched_summary(enriched: &EnrichedWitness) {
     info!(
         layer_idx = enriched.summary.layer_idx,
         key_block_seq_no = enriched.summary.key_block_seq_no,
@@ -248,7 +319,13 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
         num_active_chain_steps = enriched.summary.num_active_chain_steps,
         "enricher: witness ready",
     );
+}
 
+async fn prove_and_finalize(
+    cfg: &WithdrawE2EConfig,
+    captured: CapturedEvent,
+    enriched: EnrichedWitness,
+) -> Result<WithdrawE2ESummary> {
     let witness_path = cfg
         .work_dir
         .join(format!("event_{:06}_witness.json", cfg.prover_seq_no));

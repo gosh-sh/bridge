@@ -32,13 +32,14 @@ use tracing::info;
 
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome};
-use bridge_relayer_daemon::withdraw_e2e::{run_once, WithdrawE2EConfig};
+use bridge_relayer_daemon::withdraw_e2e::{run_once_with_state, WithdrawE2EConfig};
 
 use crate::args::{self, WithdrawArgs};
 use crate::burn;
 use crate::errors::{CliError, CliResult};
 use crate::idempotency::{self, Status};
 use crate::preflight;
+use crate::resurrect::{covering_bundle_seq_no, stride_for, wait_for_coverage};
 use tvm_client::net::NetworkConfig;
 use tvm_client::{ClientConfig, ClientContext};
 
@@ -52,6 +53,16 @@ const DEFAULT_EVENT_DST: &str =
 /// need to tune it; if they do we'll promote it later.
 const EVENT_WAIT: Duration = Duration::from_secs(300);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Coverage-wait budget. Sized for the worst case where a burn lands
+/// just past a bundle boundary and the CLI must wait a full next-bundle
+/// chain-time plus the parallel relayer's prove time. At L1
+/// (`stride=1024`, shellnet 3 seq/s ≈ 5.7 min chain-time + prover
+/// wall-time ~6-10 min → ~15 min); L2 (`stride=16384` → ~91 min
+/// chain-time + prover). 2 h ceiling matches the daemon-side
+/// `ENRICH_TIMEOUT`.
+const COVERAGE_WAIT: Duration = Duration::from_secs(120 * 60);
+const COVERAGE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Terminal success record — the one thing `main` prints (human or JSON).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -190,9 +201,9 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         idempotency::update(&state_dir, r)?;
     }
 
-    // ---- 4+5. Capture + Prove (both wrapped in run_once) ----
+    // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
-    // back into its two halves — run_once wants them separately.
+    // back into its two halves — the capture helper wants them separately.
     let (bridge_dapp_id_hex, bridge_account_id_hex) = split_extended(
         &preflight.usdc_bridge_extended,
     )
@@ -204,11 +215,78 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         source: None,
     })?;
 
-    info!("stage 4/6 + 5/6: capture WithdrawalInitiated + Circuit-4 SHPLONK proof");
+    info!("stage 4/6: capture WithdrawalInitiated event");
+    let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
+        CliError::ProofFailed {
+            reason: format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
+            source: Some(anyhow::anyhow!("{e}")),
+        }
+    })?;
+    // We just fired a burn; the youngest matching WithdrawalInitiated from
+    // --from is unambiguously ours. Empty baseline + youngest-pick keeps
+    // the capture code path identical to the daemon's `replay_latest`
+    // flow.
+    let captured = bridge_relayer_daemon::withdraw_e2e::capture_next_withdrawal_event(
+        &gql,
+        &bridge_account_id_hex,
+        &bridge_dapp_id_hex,
+        DEFAULT_EVENT_DST,
+        &std::collections::HashSet::new(),
+        EVENT_WAIT,
+        EVENT_POLL_INTERVAL,
+    )
+    .await
+    .map_err(|e| CliError::ProofFailed {
+        reason: format!("capture_next_withdrawal_event: {e}"),
+        source: Some(e),
+    })?;
+    info!(
+        msg_id = %captured.message_id,
+        block_seq_no = captured.block_seq_no,
+        block_id = %captured.block_id_hex,
+        "captured WithdrawalInitiated event",
+    );
+
+    // ---- 4b. Resurrect BridgeState from contract; wait for coverage ----
+    info!("stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle");
+    let stride = stride_for(anchor_mode);
+    let target_covering_seq_no = covering_bundle_seq_no(captured.block_seq_no, stride);
+    info!(
+        burn_seq_no = captured.block_seq_no,
+        anchor_stride = stride,
+        target_covering_seq_no,
+        "waiting for on-chain coverage",
+    );
+    let ro_provider = ProviderBuilder::new()
+        .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {
+            reason: format!("--rpc-url is not a valid URL: {e}"),
+            source: None,
+        })?);
+    let ro_bridge_for_wait = EthBridgeClient::new(args.bridge_address, ro_provider);
+    let bridge_state = wait_for_coverage(
+        &ro_bridge_for_wait,
+        anchor_mode,
+        target_covering_seq_no,
+        COVERAGE_POLL_INTERVAL,
+        COVERAGE_WAIT,
+    )
+    .await
+    .map_err(|e| CliError::ProofFailed {
+        reason: format!("wait_for_coverage: {e}"),
+        source: Some(e),
+    })?;
+
+    // ---- 5. Prove ----
+    info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
+    // `prover_state_path` and `window_size` are ignored by
+    // `run_once_with_state`, but the config struct still has the fields
+    // (the daemon binary uses them on the file path). Fill in stubs
+    // that make the intent clear if anything ever accidentally reads
+    // them.
     let e2e_cfg = WithdrawE2EConfig {
         gql_endpoint: args.gql_endpoint.clone(),
-        prover_state_path: args.prover_state_path.clone(),
-        window_size: args.window_size,
+        prover_state_path: PathBuf::new(),
+        window_size: 0,
         bridge_account_id_hex,
         bridge_dapp_id_hex,
         event_dst_filter: DEFAULT_EVENT_DST.to_string(),
@@ -225,21 +303,14 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         prover_out_dir: args.prover_out_dir.clone(),
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
         prover_seq_no: 0,
-        // We just fired a burn; the youngest matching WithdrawalInitiated
-        // from --from is unambiguously ours. See module docstring.
         replay_latest: true,
     };
-    let e2e = run_once(e2e_cfg).await.map_err(|e| {
-        // Anyhow chain -> ProofFailed (exit 12). Capture-timeout also
-        // bubbles up here since capture is the first step in run_once; we
-        // fold it into ProofFailed for v1 rather than trying to string-match
-        // the anyhow chain. v2 can split the two if the error taxonomy
-        // matters to consumers.
-        CliError::ProofFailed {
+    let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
+        .await
+        .map_err(|e| CliError::ProofFailed {
             reason: format!("withdraw-e2e pipeline failed: {e}"),
             source: Some(e),
-        }
-    })?;
+        })?;
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
     info!(

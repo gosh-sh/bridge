@@ -1,12 +1,6 @@
 //! Circuit 4 (Event Prove — `WithdrawalInitiated`) prover library
 //! (`bridge-event-prover-lib`).
 //!
-//! Originally lived as `bridge_prover_lib::event_prover` + `event_verifier`;
-//! split out so the prover/verifier surface for Circuit 4 is its own crate,
-//! while the PK/VK/SRS lifecycle stays in
-//! `bridge_prover_lib::keys::EventKeyManager` (a per-circuit sub-manager of
-//! the monolithic `KeyManager` facade).
-//!
 //! Two public surfaces:
 //!   * Free functions [`prover::build_proof_inputs`], [`prover::generate_event_proof`],
 //!     [`prover::generate_event_proof_from_circuit`], [`verifier::verify_event_proof`]

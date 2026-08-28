@@ -19,6 +19,7 @@ mod idempotency;
 mod orchestrator;
 mod output;
 mod preflight;
+mod resurrect;
 
 use std::io::IsTerminal;
 use std::process::ExitCode as ProcExitCode;

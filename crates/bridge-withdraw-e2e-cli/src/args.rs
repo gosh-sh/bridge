@@ -51,10 +51,14 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     about = "Withdraw USDC from an Acki Nacki multisig to an EVM address via the bridge.",
     long_about = "Composes a single-custodian multisig sendTransaction that calls \
                   USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
-                  produces the Circuit-4 SHPLONK proof (against the running daemon's \
-                  prover_state.json), and submits withdrawByProof on the EVM side.\n\n\
-                  Requires: `daemon-live` running against the target bridge deploy; \
-                  `tvm-cli` on PATH; `prover_state.json` reachable at --prover-state-path."
+                  resurrects the prover's mirror of `AckiNackiBridge` state from the \
+                  on-chain contract at --bridge-address, waits for the covering L1/L2 \
+                  anchor bundle to land (fed by a relayer running on some other host), \
+                  produces the Circuit-4 SHPLONK proof, and submits withdrawByProof on \
+                  the EVM side.\n\n\
+                  Third-party end-user CLI: expects only an EVM RPC URL and the deployed \
+                  AckiNackiBridge address — no local `prover_state.json`, no daemon on \
+                  this machine."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -144,15 +148,6 @@ pub struct WithdrawArgs {
         default_value = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
     )]
     pub usdc_bridge_account: String,
-
-    /// Path to the running daemon's `prover_state.json`.
-    #[arg(long, env = "PROVER_STATE_PATH", value_name = "PATH")]
-    pub prover_state_path: PathBuf,
-
-    /// HISTORY_PROOF_WINDOW_SIZE — must match the value the daemon wrote
-    /// the state with.
-    #[arg(long, default_value_t = 128)]
-    pub window_size: usize,
 
     /// Anchor layer selection passed through to the enricher. Use `auto`
     /// (default) on L1 deploys; `2` with `--i-know-the-wait` on L2.

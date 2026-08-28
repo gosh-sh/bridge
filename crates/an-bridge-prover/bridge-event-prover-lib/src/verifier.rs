@@ -17,6 +17,7 @@ use bridge_prover_lib::transcript::TranscriptKind;
 ///
 /// The instance count is checked implicitly by `verify_proof` against the
 /// VK shape.
+/// 
 pub fn verify_event_proof(
     event_km: &EventKeyManager,
     proof_bytes: &[u8],
@@ -30,10 +31,7 @@ pub fn verify_event_proof(
     )
 }
 
-/// Verify a Circuit 4 proof with the chosen Fiat–Shamir transcript. Must
-/// match what
-/// [`crate::prover::generate_event_proof_with_transcript`] used or
-/// verification returns `false`.
+/// Verify a Circuit 4 proof with the chosen Fiat–Shamir transcript. 
 pub fn verify_event_proof_with_transcript(
     event_km: &EventKeyManager,
     proof_bytes: &[u8],

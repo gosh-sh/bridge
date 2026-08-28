@@ -32,7 +32,6 @@ this doc extends.
 - [Reference values (chain-invariant on shellnet)](#reference-values-chain-invariant-on-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
-- [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
 - [Case 3 — Event captured but daemon far behind head](#case-3--event-captured-but-daemon-far-behind-head)
 - [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
 - [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
@@ -77,7 +76,7 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 | Daemon | Event captured | Proof generated | Go to |
 |---|---|---|---|
-| running, current | no | no | fire the burn — [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5, or [Case 2](#case-2--follow-up-withdrawal-on-an-existing-deploy) |
+| running, current | no | no | fire the burn — [Case 1](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 9](#case-9--sequential-l2-withdrawals-stress-test-loop) (L2 follow-up) |
 | running, current | yes | no | run `withdraw-e2e` (proof + submit) |
 | running, behind | yes | no | [Case 3](#case-3--event-captured-but-daemon-far-behind-head) |
 | running, current | yes | yes, revert | [Case 5](#case-5--on-chain-withdrawbyproof-revert) |

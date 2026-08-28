@@ -12,13 +12,6 @@
 //!      sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]` that the
 //!      verifier checks.
 //!
-//! Keygen / real-prover plumbing is deliberately **not** wired in here yet.
-//! The daemon (Track D) will own that — same on-demand PK loading pattern
-//! `KeyManager` already uses for the primary and layer circuits. For now
-//! we expose a `build_circuit` + `build_instances` API consumed by:
-//!   * the MockProver integration test in `tests/event_prover.rs`
-//!   * the future daemon, which will pass these into `create_proof`
-//!
 //! ### Anchor binding contract
 //!
 //! The witness's `anchor.layer_hash_hex` becomes the proof's

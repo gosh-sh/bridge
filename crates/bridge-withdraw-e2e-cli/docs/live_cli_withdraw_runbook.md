@@ -10,11 +10,15 @@ per-withdrawal composition (burn → capture → Circuit-4 SHPLONK proof →
 **Scope of this runbook.** The end-user withdrawal path, driven by the
 new CLI. Every stage of the pipeline is in-process — `--from` composes
 the AN multisig `sendTransaction`, the tool broadcasts it, waits for the
-matching `WithdrawalInitiated` ExtOut event, enriches the witness against
-the running daemon's `prover_state.json`, produces a Circuit-4 SHPLONK
-proof, calls `dry_run_withdraw`, and (unless `--dry-run`) submits
-`withdrawByProof`. **Assumes** the bundle lane (Circuits 1A + 2 via
-`daemon-live`) is already running — that lane is covered in
+matching `WithdrawalInitiated` ExtOut event, **resurrects the prover's
+`BridgeState` mirror by reading the deployed `AckiNackiBridge` contract
+at `--bridge-address`** (no local `prover_state.json` needed), polls
+that contract until the covering L1/L2 bundle has landed, produces the
+Circuit-4 SHPLONK proof, calls `dry_run_withdraw`, and (unless
+`--dry-run`) submits `withdrawByProof`. **Assumes** the bundle lane
+(Circuits 1A + 2 via `daemon-live`) is running _somewhere_ — not
+necessarily on the same host as the CLI — feeding `verifyBlock`
+transactions to the bridge. That lane is covered in
 [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md).
 
 **Parallel with the pre-CLI flow.** The predecessor runbook
@@ -116,10 +120,19 @@ source multisig `--from`, owner keyfile `--from-keys`, destination
 4. **Capture** — wait for the matching `WithdrawalInitiated` ExtOut
    event using `replay_latest = true` (the youngest matching event is
    unambiguously ours because we fired the burn seconds ago).
-5. **Prove** — enrich the witness against the daemon's
-   `prover_state.json`, subprocess-out to `bridge-event-halo2-prover`
-   for the Circuit-4 SHPLONK aggregate.
-6. **Submit** — call `dry_run_withdraw` first; unless `--dry-run`,
+5. **Resurrect + wait for coverage** — read the deployed
+   `AckiNackiBridge` at `--bridge-address` via
+   `EthBridgeClient::read_full_state` and poll until
+   `storedLastSeenBlockSeqNo` has advanced past the covering bundle
+   boundary (`ceil(burn_seq / stride) * stride`, stride = 1024 for L1,
+   16 384 for L2). When it has, `BridgeState::from_contract` builds a
+   byte-for-byte mirror — no local `prover_state.json` needed. The
+   parallel bundle-lane daemon (running anywhere) is what advances the
+   contract; the CLI just waits.
+6. **Prove** — enrich the resurrected `BridgeState` (single-shot, no
+   retry), then produce the Circuit-4 SHPLONK aggregate in-process
+   (Poseidon C4 prover) + subprocess (`aggregate-proof`).
+7. **Submit** — call `dry_run_withdraw` first; unless `--dry-run`,
    broadcast `withdrawByProof` and wait for the receipt.
 
 Every stage transition is persisted to a per-withdrawal state file
@@ -202,12 +215,16 @@ section — the L1 fast-case ~17 min and L2 ~101 min figures still apply
 end-to-end because the same subprocess prover does the same C4 work.
 
 **One structural difference.** With the daemon subcommand, "wait for
-covering bundle" was a manual step between burn and prove. With the
-CLI, capture blocks *until* `WithdrawalInitiated` is observed AND the
-enricher can find the covering bundle in `prover_state.json`. Wait
-budget is the enricher's `ENRICH_TIMEOUT_S` (120 min post-2026-08-18)
-plus the 300 s ExtOut capture poll. If either budget is exceeded, the
-CLI exits 11 (capture timeout) without leaving the process hanging.
+covering bundle" was a manual step between burn and prove — and the
+enricher checked `prover_state.json` on disk. With the CLI, capture
+blocks until `WithdrawalInitiated` is observed, then the CLI polls
+`AckiNackiBridge.storedLastSeenBlockSeqNo()` every 30 s until it has
+advanced past the covering bundle boundary. Total budget: 300 s ExtOut
+capture + 120 min coverage-wait ceiling (matches the daemon-side
+enricher timeout so operator-facing patience is identical). Once
+coverage is observed, `read_full_state` + `BridgeState::from_contract`
+produce the enricher's input in one RPC round-trip, and enrich+prove
+run single-shot. Timeouts still map to exit 11.
 
 ---
 
@@ -288,11 +305,21 @@ done
 **Env sources (CLI-specific additions):**
 
 - Bundle-lane env (`shellnet.common` + `$BRIDGE_CONFIG_DIR/env`)
-  supplies everything the daemon uses — the CLI reuses those same vars.
+  supplies everything the daemon uses — the CLI reuses those same vars
+  (`RPC_URL`, `BRIDGE_ADDRESS`, `BRIDGE_GQL_ENDPOINT`, aggregator/verifier/params
+  dirs). `BRIDGE_ADDRESS` is the single load-bearing input: the CLI
+  reads `BridgeState` out of that contract, so a wrong value silently
+  waits against the wrong state.
 - `BRIDGE_WITHDRAW_STATE_DIR` (new; optional) — per-withdrawal
   idempotency state dir. Defaults to `$BRIDGE_CONFIG_DIR/withdraw-state/`.
-- `PROVER_STATE_PATH` (new) — path to the daemon's `prover_state.json`.
-  Defaults on the smoke scripts to `$BRIDGE_CONFIG_DIR/state/prover_state.json`.
+
+**Not needed by the CLI (removed vs. earlier revisions):**
+
+- `PROVER_STATE_PATH` — the CLI no longer reads any local
+  `prover_state.json`. It resurrects `BridgeState` from the contract at
+  every invocation.
+- `--window-size` — the on-chain window shape is fixed at 128
+  (`HISTORY_PROOF_WINDOW_SIZE`); no operator knob.
 
 **Per-invocation caller vars** (used by the smoke wrappers):
 
@@ -384,8 +411,6 @@ SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR
   --to-chain    "$WITHDRAW_TO_CHAIN" \
   --amount      "$WITHDRAW_AMOUNT" \
   --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
-  --prover-state-path "$BRIDGE_CONFIG_DIR/state/prover_state.json" \
-  --window-size 128 \
   --anchor-layer auto \
   --rpc-url           "$RPC_URL" \
   --bridge-address    "$BRIDGE_ADDRESS" \

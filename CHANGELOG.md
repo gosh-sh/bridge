@@ -51,11 +51,15 @@ assigns it when the release is tagged.
 
 - **New binary `bridge-withdraw-e2e-cli`** — end-user CLI for withdrawing
   USDC from an Acki Nacki multisig to an EVM recipient via the bridge.
-  Operator-facing counterpart to `daemon-live`: the daemon owns bundle
-  proving; this CLI owns per-withdrawal composition. Runs the six-stage
-  pipeline (preflight → idempotency reserve → burn → capture → Circuit-4
-  SHPLONK proof → `withdrawByProof`) against a running daemon's
-  `prover_state.json`.
+  Third-party-operator-facing counterpart to `daemon-live`: the daemon
+  owns bundle proving (running anywhere — not necessarily on the same
+  host); this CLI owns per-withdrawal composition. Runs the seven-stage
+  pipeline (preflight → idempotency reserve → burn → capture →
+  resurrect `BridgeState` from `AckiNackiBridge` at `--bridge-address`
+  and wait for the covering bundle to land → Circuit-4 SHPLONK proof →
+  `withdrawByProof`). **No local `prover_state.json` is read** — the
+  CLI's only view of prover state is the on-chain contract, so it works
+  against any deploy the operator has RPC + `--bridge-address` for.
 
   Subcommand surface:
   ```

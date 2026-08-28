@@ -512,11 +512,11 @@ per successful proof (lines 902–913).
 
 ### Step 2 — Seed the bridge treasury
 
-Identical to Case 1 Step 2 — level-agnostic.
+Identical to [Case 1 Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only) — level-agnostic.
 
 ### Step 3 — Fire the burn
 
-Same as Case 1 Step 4 (`test_deploy_and_withdraw_only.py`); the burn
+Same as [Case 1 Step 4](#step-4--fire-the-burn) (`test_deploy_and_withdraw_only.py`); the burn
 side is level-agnostic. Note the printed `seq_no` — it feeds the
 covering-bundle math below.
 
@@ -575,7 +575,7 @@ accidental L1 fallback happened. Under `Explicit(2)` this cannot occur
 by construction — the enricher passes the level through and the slot
 lookup indexes `layer_windows[1]` unconditionally.
 
-Then real submit — same as Case 1 Step 7.
+Then real submit — same as [Case 1 Step 7](#step-7--real-submit).
 
 **If the enricher timeout expires** (currently `ENRICH_TIMEOUT = 120 min`
 per `bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172`), the daemon

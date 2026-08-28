@@ -467,8 +467,7 @@ deploy — see [prover throughput analysis](../../an-bridge-prover/docs/prover_t
 
 **When to use.** Deploying the bridge with `BRIDGE_ANCHOR_LEVEL=2` to
 exercise L2-anchoring end-to-end. Everything from Case 1 applies with
-three level-swaps below; the differences below are the only L2-specific
-deviations.
+the level-swaps below; those are the only L2-specific deviations.
 
 **Level-swap summary.**
 
@@ -480,116 +479,46 @@ deviations.
 | `withdraw-e2e --anchor-layer auto` | `withdraw-e2e --anchor-layer 2 --i-know-the-wait` (strict L2) |
 | Fire burn within ~5 min of daemon start | Burn timing is irrelevant to floor wait (see L2 timing model) |
 
-### Step L0 — Emit L2 genesis anchors
+### Step 1 — Deploy and bootstrap `daemon-live` under L2
 
-L2 seed emission requires the daemon to have observed at least one T₂
-(W²-aligned) boundary. Chain reaches a T₂ every ~91 min, so if your
-freshness window is short, `compute_bridge_anchors --level 2` may return
-"no L2 boundary seen yet, retry after next T₂". Wait or re-run.
+Follow `live_relayer_bridge_verifyBlock_runbook.md` **Case 1** (unified
+L1/L2 first-time bootstrap) and **Case 7** (L2-anchored cold-start
+specifics) end-to-end, substituting `LEVEL=2` /
+`BRIDGE_CONFIG_DIR=./L2_config` / `BRIDGE_ANCHOR_LEVEL=2` throughout.
+Those cases cover `compute_bridge_anchors --level 2`, the T₂-boundary
+retry rule, `deploy_bridge_bundle.sh LEVEL=2`, and `daemon-live
+--anchor-level 2` startup with drift-refusal diagnostics.
 
-```bash
-cd crates/an-bridge-prover/bridge-prover-lib
-cargo run --release --bin compute_bridge_anchors -- \
-  --level 2 \
-  --at-head \
-  --gql-endpoint https://shellnet.ackinacki.org/graphql
-# Emits:
-#   GENESIS_ANCHOR_LEVEL=2
-#   GENESIS_LAST_SEEN_BLOCK_SEQ_NO=<W²-aligned seq_no>
-#   GENESIS_PREV_MAX_LEVEL_LAYER_HASH=<L2 T₂ root>
-#   GENESIS_BK_SET_COMMITMENT=<current BK-set Poseidon commitment>
-```
-
-**L2 freshness rule.** Chain moves W² every ~91 min. A staleness of
-10 min before `forge script` runs costs ~11% of one bundle vs L1's
-"10 min = one whole bundle" — so L2 is much more forgiving on the
-compute-anchors → deploy gap. Still keep it under ~10 min for cleanliness.
-
-As with L1, the emitted values do not need hand-copying —
-`deploy_bridge_bundle.sh` re-derives them for `--level 2` and rewrites
-`crates/an-bridge-prover/L2_config/env` (which sources
-`../shellnet.common` and only overrides the 4 L2-specific lines).
-
-### Step L1 — Deploy with L2 wiring
-
-Same wrapper as Case 1 Step 1 with `LEVEL=2` — the constructor is
-level-opaque (see change log below), so only the env values differ:
+**Two withdraw-side sanity checks worth doing inline:**
 
 ```bash
-cd crates/an-bridge-prover
-set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
-```
-
-**Post-deploy sanity — confirm W²-alignment on-chain:**
-
-```bash
+# 1. Confirm the deployed contract landed on a W²-aligned seed.
 export BRIDGE=<new_address>
 LAST=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
 python3 -c "print('L2-aligned:', $LAST % 16384 == 0, 'last_seen:', $LAST)"
+# 2. Confirm the daemon booted L2 (search logs within 30 s of start):
+#    INFO daemon-live: anchor_mode=L2, bundle_stride=16384
 ```
 
-If `L2-aligned == False`, the deploy consumed an L1 seed by mistake —
-**redeploy**. The daemon's startup stride-alignment check will refuse to
-run against a non-W²-aligned contract when `BRIDGE_ANCHOR_LEVEL=2`.
+Then wait for the first L2 bundle to land (~91 min chain + ~10 min
+prover ≈ 101 min worst-case, ~50 min typical depending on start
+alignment vs next T₂) — `storedLastSeenBlockSeqNo` bumps by exactly
+`16384`. Once it does, both `_layerWindows[1]` (L1) and
+`_layerWindows[2]` (L2) are populated in a single `verifyBlock` call —
+`AckiNackiBridge.sol:_appendLayerHashes` iterates all active layer slots
+per successful proof (lines 902–913).
 
-### Step L2 — Seed the bridge treasury
+### Step 2 — Seed the bridge treasury
 
 Identical to Case 1 Step 2 — level-agnostic.
 
-### Step L3 — Cold-start `daemon-live` under L2
-
-Provide `--anchor-level 2` (or `BRIDGE_ANCHOR_LEVEL=2` in env). Everything
-else per the verifyBlock runbook Case 1.
-
-```bash
-export BRIDGE_ANCHOR_LEVEL=2
-./target/release/relayer daemon-live \
-  --anchor-level 2 \
-  ... all other flags per verifyBlock runbook Case 1 ...
-```
-
-**Expected log signature (within 30s of start):**
-
-```
-INFO daemon-live: anchor_mode=L2, bundle_stride=16384
-INFO daemon-live: on-chain last_seen=<seed>, stride-aligned=OK
-INFO daemon-live: seed_policy=Explicit(<seed>), anchor_level=2
-```
-
-**Startup drift refusals.** If either of the following appears, stop
-and fix before proceeding:
-
-- `refuse: on-chain last_seen (=X) % 16384 != 0` — deploy consumed L1
-  seed but daemon is starting L2. Redeploy with L2 genesis values.
-- `refuse: anchor_level mismatch (state=1, cfg=2)` — stale L1
-  `L2_config/state/prover_state.json` re-used across the redeploy (or
-  the wrong `$BRIDGE_CONFIG_DIR` was sourced). Delete the file (or start with a fresh
-  `L2_config/state/`) and restart to force re-seed.
-
-### Step L4 — Wait for the first L2 bundle to land
-
-Under L1 this is ~5.7 min chain + ~10 min prover. Under **L2** it is
-~91 min chain + ~10 min prover ≈ **101 min worst-case, ~50 min typical**
-(depending on when start relative to next T₂).
-
-```bash
-watch -n 60 'cast call $BRIDGE storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC'
-# Wait until the value bumps by exactly 16384 (one L2 stride).
-```
-
-Once the value increments, both `_layerWindows[1]` (L1) and
-`_layerWindows[2]` (L2) are populated on-chain in a single
-`verifyBlock` call — `AckiNackiBridge.sol:_appendLayerHashes` iterates
-all active layer slots per successful proof (lines 902–913).
-
-### Step L5 — Fire the burn
+### Step 3 — Fire the burn
 
 Same as Case 1 Step 4 (`test_deploy_and_withdraw_only.py`); the burn
 side is level-agnostic. Note the printed `seq_no` — it feeds the
 covering-bundle math below.
 
-### Step L6 — Wait for covering L2 bundle
+### Step 4 — Wait for covering L2 bundle
 
 ```bash
 E=<event_seq_no from python output>
@@ -599,7 +528,7 @@ python3 -c "print(f'event={$E} last_seen={$L} covering_T2={$COVER}  wait≈{max(
 # Poll storedLastSeenBlockSeqNo until >= COVER
 ```
 
-### Step L7 — Run `withdraw-e2e` with **explicit** L2
+### Step 5 — Run `withdraw-e2e` with **explicit** L2
 
 **Do NOT use `--anchor-layer auto`** under L2 stress testing. Auto
 probes L1 first; whenever the event falls inside the L1 window that
@@ -672,17 +601,17 @@ cast logs --address $BRIDGE --rpc-url $RPC \
   'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
   --from-block -1000 | tail -5
 
-# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 2a Step L2)
+# 2. Confirm treasury still funded (seed 3–5 USDC once at Case 2a Step 2)
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC
 
 # 3. Fire fresh burn
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
-# 4. Wait for covering T₂ (Case 2a Step L6 math)
+# 4. Wait for covering T₂ (Case 2a Step 4 math)
 
 # 5. Run withdraw-e2e with a fresh --prover-seq-no
 ./target/release/relayer withdraw-e2e \
-  ... same flags as Case 2a Step L7 ... \
+  ... same flags as Case 2a Step 5 ... \
   --prover-seq-no $(date +%s)
 ```
 

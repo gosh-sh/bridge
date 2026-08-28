@@ -261,7 +261,7 @@ only useful for a freshness sanity-check before triggering the script.
 ### Step 1 — Deploy the bridge
 
 Delegate to the automated wrapper — it derives anchors against fresh
-chain head, deploys the 6-bridge contract bundle in Ethreum, extracts `BRIDGE_ADDRESS`,
+chain head, deploys the 6-bridge contract bundle in Ethereum, extracts `BRIDGE_ADDRESS`,
 and rewrites `L1_config/env`:
 
 ```bash
@@ -294,15 +294,25 @@ export AMOUNT=1000000                                          # 1.000000 USDC (
 cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
-# 2. Approve + deposit into the bridge (dummy AN destination is harmless
-#    on testnet — no AN listener will credit this phantom Deposit event)
+# The seeding uses TWO contracts, TWO methods:
+#   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
+#   * bridge.deposit(amount, …)      — the actual bridge call
+# Only step 3 touches the bridge. Step 2 is a plain ERC20 approve on USDC;
+# it authorizes the `usdc.transferFrom(msg.sender, ...)` that deposit()
+# runs internally (AckiNackiBridge.sol:585).
+
+# 2. USDC.approve(spender=$BRIDGE, value=$AMOUNT) — target contract is $USDC
 cast send $USDC 'approve(address,uint256)' $BRIDGE $AMOUNT \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
+
+# 3. bridge.deposit($AMOUNT, workchain=0, anAccount=0x11…11) — target contract is $BRIDGE
+#    (dummy AN destination is harmless on testnet — no AN listener will
+#    credit this phantom Deposit event)
 cast send $BRIDGE 'deposit(uint256,int8,bytes32)' \
   $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
-# 3. Verify
+# 4. Verify
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC   # -> 1000000
 ```
 
@@ -603,11 +613,18 @@ cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
 
 cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show AMOUNT
 
-# 2. Approve the bridge to pull USDC
+# TWO contracts, TWO methods — only step 3 touches the bridge:
+#   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
+#   * bridge.deposit(amount, …)      — the actual bridge call, which pulls
+#                                      via usdc.transferFrom(...) internally
+#                                      (AckiNackiBridge.sol:585)
+
+# 2. USDC.approve(spender=$BRIDGE_ADDRESS, value=$AMOUNT) — target is $USDC
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
 
-# 3. Deposit into the bridge (dummy AN destination — harmless on testnet)
+# 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
+#    (dummy AN destination — harmless on testnet)
 cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
   $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY

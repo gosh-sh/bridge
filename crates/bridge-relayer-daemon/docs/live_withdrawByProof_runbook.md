@@ -224,7 +224,7 @@ via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
 
 ## Case 1 — First-time E2E from a fresh deploy (optimal sequence)
 
-**When to use.** Contract just deployed. Bundle daemon just cold-started.
+**When to use.** Bridge Ethreum Contracts are just deployed. Bundle prover daemon just cold-started.
 You want to demonstrate the on-chain withdraw leg with minimum wall time.
 
 **The optimal sequence** — every step gates the next; do not interleave:
@@ -251,7 +251,7 @@ only useful for a freshness sanity-check before triggering the script.
 ### Step 1 — Deploy the bridge
 
 Delegate to the automated wrapper — it derives anchors against fresh
-chain head, deploys the 6-contract bundle, extracts `BRIDGE_ADDRESS`,
+chain head, deploys the 6-bridge contract bundle in Ethreum, extracts `BRIDGE_ADDRESS`,
 and rewrites `L1_config/env`:
 
 ```bash

@@ -76,9 +76,9 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 | Daemon | Event captured | Proof generated | Go to |
 |---|---|---|---|
-| running, current | no | no | fire the burn — [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) step 5 (L1 one-shot) or [Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop) (L2 follow-up) |
-| running, current | yes | no | run `withdraw-e2e` (proof + submit) |
-| running, behind | yes | no | [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) Step 5 note (L1 catch-up) |
+| running, current | no | no | start `withdraw-e2e --dry-run`, then fire the burn — [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) Steps 4–5 (L1 one-shot) or [Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop) (L2 follow-up) |
+| running, current | yes | no | run `withdraw-e2e --replay-latest` (event already captured; skip baseline) |
+| running, behind | yes | no | [Case 1 Step 6 note](#step-6--watch-dry-run-complete) (L1 catch-up) — enricher retry loop absorbs the wait |
 | running, current | yes | yes, revert | [Case 3b](#case-3b--on-chain-withdrawbyproof-revert) |
 | not running | any | any | Fix the bundle lane first — see verifyBlock runbook Case 3–6 |
 
@@ -323,76 +323,20 @@ Verify the log line `seed_policy=Explicit(<seed_seqno>)` appears within
 otherwise the covering bundle waits on daemon startup instead of on
 Circuit 4.
 
-### Step 4 — Fire the burn
+### Step 4 — Start `withdraw-e2e --dry-run` in one shell
 
-The AN-side burn is orchestrated by
-[`python/test_deploy_and_withdraw_only.py`](../python/test_deploy_and_withdraw_only.py)
-— the only external step in the withdraw E2E.
+Start the tool **before** firing the burn. It snapshots a baseline of
+existing `WithdrawalInitiated` msg_ids, then polls GQL every 2s for a
+NEW event. When the burn fires in Step 5, capture picks it up in <2s
+without any recovery flag. Baseline + wait is the tool's default and
+correct shape for a planned demo (`withdraw_e2e/capture.rs:54-117`).
 
-```bash
-cd crates/an-bridge-prover
-MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
-```
-
-The script deploys a fresh Multisig (two-shot GiverV3.sendCurrencyWithFlag
-17→1 on shellnet), mints USDC via `USDCBridge.mintAndSend`, calls
-`initiate_withdrawal`, and polls GQL for the `WithdrawalInitiated`
-ExtOut. It prints the captured `seq_no` + `block_hash` + `msg_id`.
-
-**Timing sanity.** If the printed `seq_no` is within one bundle stride
-(`< daemon_last_verified + 1024`), you'll land coverage in the next
-bundle (bundle 2 typically). Anything worse and the wait grows linearly
-— see the [timing model](#timing-model--why-fresh-deploy-demos-need-tight-lookahead).
-
-### Step 5 — Wait for the covering bundle
-
-```bash
-# Chain progress ($BRIDGE / $RPC come from the sourced $BRIDGE_CONFIG_DIR/env — see
-# Quick resume checklist; do NOT paste an address literal here, it rotates per deploy)
-watch -n 30 'cast call $BRIDGE storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC'
-
-# Wait until chain last_seen ≥ (event_seq_no rounded UP to next 1024 boundary)
-```
-
-> **Note — L1 only: what if the burn fired late and there are extra
-> bundles to wait?** This is not a separate case; it's the same optimal
-> sequence with a bigger wait budget. Because the L1 daemon is
-> subcritical, every minute you delay the burn past daemon startup adds
-> ~1.4 bundles of catch-up before coverage lands. Diagnose:
->
-> ```bash
-> E=<event_seq_no from python output>
-> L=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
-> COVER=$(( (E + 1023) / 1024 * 1024 ))    # next W·P boundary ≥ E
-> BUNDLES_TO_WAIT=$(( (COVER - L) / 1024 ))
-> WALL_MIN=$(( BUNDLES_TO_WAIT * 12 ))
-> echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
-> ```
->
-> - **`WALL_MIN < 60`** — just wait. The daemon is doing the right
->   thing; each successful bundle bumps `L` by 1024. Poll
->   `storedLastSeenBlockSeqNo` every ~12 min. Once `L ≥ COVER`, proceed
->   to Step 6. The event is durably captured in GQL/state — no risk of
->   losing it.
-> - **`WALL_MIN ≥ 60`** — the fresh-deploy timing budget was blown
->   (see the [timing model](#timing-model--why-fresh-deploy-demos-need-tight-lookahead)).
->   Two options: (a) wait it out — the proof still succeeds when
->   coverage lands, just slowly; (b) abandon and redeploy at fresh
->   chain head — follow the verifyBlock runbook's
->   [Case 6](./live_relayer_bridge_verifyBlock_runbook.md#case-6--state-loss--re-bootstrap-from-mid-chain)
->   to re-seed at a fresh W·P boundary near head, then re-run the burn.
->   This is what Deploy #7 → #8 did on 2026-08-17 (see change log).
->   Only worth the redeploy on a fresh testnet where the bridge has no
->   other users.
->
-> Do **not** try to short-circuit by manually advancing
-> `storedLastSeenBlockSeqNo` — there is no such path. The only way to
-> move `L` forward is via `verifyBlock`, and `verifyBlock` requires the
-> bundle-proof pipeline. For **regular repeated** withdrawals switch to
-> L2 (Case 2) — L2 is supercritical, so daemon lag is bounded by
-> construction.
-
-### Step 6 — Run `withdraw-e2e --dry-run`
+Once the event is captured, `run_once` enters an internal 30s-poll
+retry loop against `prover_state.json` for up to 2 h
+(`withdraw_e2e/driver.rs:156-212`, `ENRICH_TIMEOUT = 120 min`) —
+reloading the file each attempt as the daemon writes new bundles.
+That loop **is** the "wait for the covering bundle" — no manual poll
+of `storedLastSeenBlockSeqNo` needed.
 
 ```bash
 cd crates/an-bridge-prover
@@ -407,6 +351,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --bridge-account-id 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --bridge-dapp-id    1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --anchor-layer auto \
+  --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
   --an-bridge-prover-dir . \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
@@ -415,25 +360,90 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee logs/withdraw_dry_${BRIDGE_CONFIG_DIR##*/}_${TS}.log
 ```
 
-Expected log signature:
+`--event-wait-s 900` gives you 15 min to fire the burn in Step 5
+(default is 5 min). The log will show
+`waiting for WithdrawalInitiated ExtOut event` — that's the cue to
+proceed.
+
+### Step 5 — Fire the burn in another shell
+
+```bash
+cd crates/an-bridge-prover
+MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
+```
+
+The script deploys a fresh Multisig (two-shot GiverV3.sendCurrencyWithFlag
+17→1 on shellnet), mints USDC via `USDCBridge.mintAndSend`, calls
+`initiate_withdrawal`, and polls GQL for the `WithdrawalInitiated`
+ExtOut. It prints the captured `seq_no` + `block_hash` + `msg_id`.
+
+The Step 4 shell picks the event up within one poll interval and moves
+on to enrichment / prove.
+
+**Timing sanity.** If the printed `seq_no` is within one bundle stride
+(`< daemon_last_verified + 1024`), coverage lands in the next bundle
+(~12 min). Anything worse and the wait grows linearly — see the
+[timing model](#timing-model--why-fresh-deploy-demos-need-tight-lookahead).
+
+### Step 6 — Watch dry-run complete
+
+Expected log signature in the Step 4 shell:
 
 ```
 INFO capture_next_withdrawal_event: matched dst=:...:026a, seq_no=<N>
-INFO enrich_witness: anchor_layer_mode=Auto, chosen L=1, key_seq_no=<K>
+INFO enricher: filling ...  timeout_s=7200
+INFO enricher attempt        (repeats every 30s until covering bundle lands)
+INFO enricher: witness ready  layer_idx=0
 INFO subprocess_prover: bridge-event-halo2-prover start
 INFO subprocess_prover: aggregate SHPLONK ok, calldata_len=<bytes>
 INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
 ```
 
-Dry-run returning OK proves the proof is well-formed and the on-chain
-adapter accepts it. If dry-run reverts, jump to [Case 3b](#case-3b--on-chain-withdrawbyproof-revert)
-— **do not** submit for real.
+Dry-run OK proves the proof is well-formed and the on-chain adapter
+accepts it. If dry-run reverts, jump to
+[Case 3b](#case-3b--on-chain-withdrawbyproof-revert) — **do not**
+submit for real.
+
+> **Note — L1 only: what if the burn fired late and the enricher is
+> looping past ~60 min?** L1 is subcritical, so every minute you delay
+> the burn past daemon startup adds ~1.4 bundles of catch-up. Diagnose:
+>
+> ```bash
+> E=<event_seq_no from python output>
+> L=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
+> COVER=$(( (E + 1023) / 1024 * 1024 ))    # next W·P boundary ≥ E
+> BUNDLES_TO_WAIT=$(( (COVER - L) / 1024 ))
+> WALL_MIN=$(( BUNDLES_TO_WAIT * 12 ))
+> echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
+> ```
+>
+> - **`WALL_MIN < 60`** — let the enricher keep looping; it will succeed.
+> - **`WALL_MIN ≥ 120`** — the enricher will time out. Either
+>   (a) wait, kill after timeout, and rerun with `--replay-latest`
+>   once the covering bundle lands; or (b) redeploy at fresh chain head
+>   per verifyBlock runbook
+>   [Case 6](./live_relayer_bridge_verifyBlock_runbook.md#case-6--state-loss--re-bootstrap-from-mid-chain).
+>   For **regular repeated** withdrawals switch to L2 (Case 2) — L2 is
+>   supercritical, so daemon lag is bounded by construction.
 
 ### Step 7 — Real submit
 
-Re-run the same command **without** `--dry-run`. The prover PK cache is
-warm from step 6 so total wall time collapses to `submit + confirm`
-(~30–60s). Look for `withdrawByProof confirmed tx=0x...`.
+Re-run the same command **without** `--dry-run` (drop `--event-wait-s`
+too — a fresh `withdraw-e2e` invocation takes a new baseline snapshot
+that will INCLUDE the prior burn's msg_id, so default capture would
+never surface it. Add `--replay-latest` to skip baseline and pick the
+youngest matching event):
+
+```bash
+./target/release/relayer withdraw-e2e \
+  ... same flags as Step 4, minus --dry-run ... \
+  --replay-latest \
+  2>&1 | tee logs/withdraw_real_${BRIDGE_CONFIG_DIR##*/}_${TS}.log
+```
+
+The prover PK cache is warm from Step 6, so total wall time collapses
+to `submit + confirm` (~30–60s). Look for
+`withdrawByProof confirmed tx=0x...`.
 
 Verify:
 
@@ -514,28 +524,18 @@ per successful proof (lines 902–913).
 
 Identical to [Case 1 Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only) — level-agnostic.
 
-### Step 3 — Fire the burn
-
-Same as [Case 1 Step 4](#step-4--fire-the-burn) (`test_deploy_and_withdraw_only.py`); the burn
-side is level-agnostic. Note the printed `seq_no` — it feeds the
-covering-bundle math below.
-
-### Step 4 — Wait for covering L2 bundle
-
-```bash
-E=<event_seq_no from python output>
-COVER=$(( (E + 16383) / 16384 * 16384 ))    # next W²-boundary ≥ E
-L=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
-python3 -c "print(f'event={$E} last_seen={$L} covering_T2={$COVER}  wait≈{max(0,($COVER-$L))*0.5/60:.0f} min chain + ~10 min prover')"
-# Poll storedLastSeenBlockSeqNo until >= COVER
-```
-
-### Step 5 — Run `withdraw-e2e` with **explicit** L2
+### Step 3 — Start `withdraw-e2e --anchor-layer 2 --i-know-the-wait --dry-run` in one shell
 
 **Do NOT use `--anchor-layer auto`** under L2 stress testing. Auto
 probes L1 first; whenever the event falls inside the L1 window that
 follows the covering T₂ (the common case) it resolves to L1 and the
-run silently downgrades. Force strict L2:
+run silently downgrades. Force strict L2 with `--anchor-layer 2
+--i-know-the-wait` (the ack is required for explicit L(n≥2) modes;
+CLI enforces it — `bin/relayer.rs:483-486`).
+
+Same "start before burning" reasoning as [Case 1 Step 4](#step-4--start-withdraw-e2e---dry-run-in-one-shell):
+baseline + wait for a new event is the tool's default correct shape,
+and the internal 2 h enricher retry loop absorbs the L2 chain-wait.
 
 ```bash
 cd crates/an-bridge-prover
@@ -551,6 +551,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --bridge-dapp-id    1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a \
   --anchor-layer 2 \
   --i-know-the-wait \
+  --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
   --an-bridge-prover-dir . \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
@@ -559,29 +560,62 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee logs/withdraw_l2_dry_${TS}.log
 ```
 
-**Expected log signature (differences vs L1):**
+Wait for the log line `waiting for WithdrawalInitiated ExtOut event`
+before proceeding to Step 4.
+
+### Step 4 — Fire the burn in another shell
+
+```bash
+cd crates/an-bridge-prover
+MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
+```
+
+Same script as Case 1 — burn side is level-agnostic. Note the printed
+`seq_no` for the diagnostic in Step 5.
+
+### Step 5 — Watch dry-run complete
+
+Expected log signature in the Step 3 shell:
 
 ```
+INFO capture_next_withdrawal_event: matched dst=:...:026a, seq_no=<N>
 INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
-INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
+INFO enricher: filling ... timeout_s=7200                    # 2 h budget
+INFO enricher attempt        (repeats every 30s until covering L2 bundle lands)
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
 INFO chain built: anchor_layer=L2, active_links=1, ...
-INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2
+INFO enricher: witness ready  layer_idx=1                    # 0-indexed → L2
+INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
 ```
 
-The `layer_idx=1` line is the ground-truth confirmation that the
-witness is L2-anchored; anything else (`layer_idx=0`) means an
-accidental L1 fallback happened. Under `Explicit(2)` this cannot occur
-by construction — the enricher passes the level through and the slot
+`layer_idx=1` is the ground-truth confirmation that the witness is
+L2-anchored; anything else (`layer_idx=0`) means an accidental L1
+fallback happened. Under `Explicit(2)` this cannot occur by
+construction — the enricher passes the level through and the slot
 lookup indexes `layer_windows[1]` unconditionally.
 
-Then real submit — same as [Case 1 Step 7](#step-7--real-submit).
+**How long to expect.** Chain-side wait to next W²-boundary is bounded
+by ~91 min; add ~10 min prover ⇒ ~50 min typical, ~101 min
+worst-case. Diagnostic (optional):
 
-**If the enricher timeout expires** (currently `ENRICH_TIMEOUT = 120 min`
-per `bridge-relayer-daemon/src/withdraw_e2e/driver.rs:172`), the daemon
-never landed a covering L2 bundle inside 2 h. That is a bundle-lane
-issue, not a withdraw-lane issue — check `daemon-live` logs and the
-verifyBlock runbook.
+```bash
+E=<event_seq_no from python output>
+COVER=$(( (E + 16383) / 16384 * 16384 ))    # next W²-boundary ≥ E
+L=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
+python3 -c "print(f'event={$E} last_seen={$L} covering_T2={$COVER}  wait≈{max(0,($COVER-$L))*0.5/60:.0f} min chain + ~10 min prover')"
+```
+
+**If the enricher's 2 h budget expires** (`ENRICH_TIMEOUT = 120 min`,
+`withdraw_e2e/driver.rs:162`), the daemon never landed a covering L2
+bundle. That's a bundle-lane issue, not a withdraw-lane issue — check
+`daemon-live` logs and the verifyBlock runbook.
+
+### Step 6 — Real submit
+
+Same as [Case 1 Step 7](#step-7--real-submit): drop `--dry-run`, add
+`--replay-latest` (the burn is already in the baseline of any new
+`withdraw-e2e` run), keep everything else including `--anchor-layer 2
+--i-know-the-wait`.
 
 ---
 
@@ -606,15 +640,19 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 # 2. Confirm treasury still funded (seed 3–5 USDC once at Case 2a Step 2)
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC
 
-# 3. Fire fresh burn
+# 3. Start withdraw-e2e --dry-run in one shell (baseline snapshot,
+#    then internal 2 h enricher wait). Same flags as Case 2a Step 3,
+#    with a fresh --prover-seq-no.
+./target/release/relayer withdraw-e2e \
+  ... same flags as Case 2a Step 3 ... \
+  --prover-seq-no $(date +%s)
+
+# 4. Fire fresh burn in another shell
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
-# 4. Wait for covering T₂ (Case 2a Step 4 math)
+# 5. Wait for the Step 3 shell to complete dry-run OK (~50–101 min).
 
-# 5. Run withdraw-e2e with a fresh --prover-seq-no
-./target/release/relayer withdraw-e2e \
-  ... same flags as Case 2a Step 5 ... \
-  --prover-seq-no $(date +%s)
+# 6. Real submit — same as Case 2a Step 6 (drop --dry-run, add --replay-latest).
 ```
 
 **What to watch between cycles.**
@@ -679,7 +717,7 @@ ERROR subprocess_prover: timeout after 1800s
 
 ```bash
 ./target/release/relayer withdraw-e2e \
-  ...same flags as Case 1 step 6... \
+  ...same flags as Case 1 Step 4, plus --replay-latest... \
   --prover-timeout-s 3600
 ```
 

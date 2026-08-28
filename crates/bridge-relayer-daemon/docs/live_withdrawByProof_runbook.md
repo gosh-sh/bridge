@@ -29,7 +29,7 @@ this doc extends.
 
 - [Quick resume checklist (returning mid-flow)](#quick-resume-checklist-returning-mid-flow)
 - [Timing model — why fresh-deploy demos need tight lookahead](#timing-model--why-fresh-deploy-demos-need-tight-lookahead)
-- [Reference addresses (current deploy)](#reference-addresses-current-deploy)
+- [Reference values (chain-invariant on shellnet)](#reference-values-chain-invariant-on-shellnet)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
 - [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
@@ -87,10 +87,11 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 
 ## Timing model — why fresh-deploy demos need tight lookahead
 
-The Circuit 4 proof is anchored to `layer_hashes[1]` of the **covering bundle**
-— the first key block `k` where `event_seq_no ≤ k`. On-chain
-`withdrawByProof` will revert until `verifyBlock(covering_bundle)` has
-already landed. So end-to-end wall time =
+The Circuit 4 proof is anchored to `layer_hashes[L]` of the **covering
+bundle** at anchor layer `L` — the first bundle whose layer-`L` key
+seq_no is ≥ `event_seq_no` (stride = 1024 for L1, 16384 for L2).
+`withdrawByProof` reverts until `verifyBlock(covering_bundle)` has
+landed. End-to-end wall time =
 
 ```
 t_e2e = max(0, covering_bundle_seqno − daemon_last_verified) / bundle_stride
@@ -99,8 +100,11 @@ t_e2e = max(0, covering_bundle_seqno − daemon_last_verified) / bundle_stride
       + circuit_4_prove_time + submit_time         # withdraw leg
 ```
 
-With `W·P = 1024` stride, `~12 min` per bundle wall time (warm PK cache),
-and `~5 min` for C4+submit, the "how far behind daemon is" term dominates:
+Stride and per-bundle wall time depend on `L`: **L1** = `W·P = 1024`
+seq_nos (~5.7 min chain-time, ~12 min prover); **L2** = `W² = 16384`
+seq_nos (~91 min chain-time, ~101 min prover — see
+[L2 timing model](#l2-timing-model) for the level=2 table). L1 fast-case
+table (warm PK cache, ~5 min for C4+submit):
 
 | daemon lag at burn (bundles) | catch-up | +covering | +C4+submit | **total** |
 |---|---|---|---|---|
@@ -108,48 +112,43 @@ and `~5 min` for C4+submit, the "how far behind daemon is" term dominates:
 | 1 (burn during bundle 2 window) | 12 | 12 | 5 | **~29 min** |
 | 7 (Deploy #7 accident, see change log) | 84 | 12 | 5 | **~101 min** |
 
-**Consequence for fresh demos.** Genesis anchors baked into `L1_config/env`
-(or `L2_config/env`) by `compute_bridge_anchors --at-head` embed the chain-head lookahead at
-the time you run the tool. That lookahead **is** the daemon's starting
-lag. Two rules:
+**Consequence for fresh demos.** Genesis anchors baked into
+`L{1,2}_config/env` by `compute_bridge_anchors --level {1|2} --at-head`
+embed the chain-head lookahead at the time you run the tool. That
+lookahead **is** the daemon's starting lag. Two rules:
 
-1. **Deploy immediately after computing anchors.** Every minute of delay
-   drives chain forward at 3 b/s (~180 seq_nos/min) while your seed is
-   stuck. A 10 min gap costs one whole bundle of catch-up.
-2. **Fire the burn during the daemon's first bundle-processing window.**
-   The `withdraw-e2e` orchestrator will patiently wait through
-   `--event-wait-s`, then use covering bundle 1 or 2. If you fire before
-   the daemon even starts, the event lands too early and you wait for
-   the covering bundle regardless.
-
-The Deploy #7 → #8 rerun (2026-08-17, see change log) collapsed a
-projected 90 min wait to ~17 min by re-running `compute_bridge_anchors`
-right before deploy (75-block lookahead vs 262) and firing the burn
-inside bundle 1's window.
+1. **L1 only — run `deploy_bridge_bundle.sh` immediately after
+   `compute_bridge_anchors`.** Chain moves at 3 b/s (~180 seq_nos/min)
+   while your seed stays fixed; a 10 min gap costs a whole bundle of
+   L1 catch-up because the L1 daemon is subcritical (τ ≈ 13.5 min per
+   bundle vs 5.7 min chain-time, so accumulated gap never closes).
+   Under L2 this rule does not apply: L2 is supercritical and the wait
+   is bounded (~1 h avg, ~2 h ceiling) independent of anchor freshness
+   or daemon uptime by construction.
+2. **Fire the burn during the daemon's first bundle-processing window
+   (L1 only).** With `--anchor-layer auto`, `withdraw-e2e` waits through
+   `--event-wait-s` and uses covering bundle 1 or 2. L2 has no analogous
+   fast case — bundle 1 already costs ~101 min regardless of burn timing.
 
 ---
 
-## Reference addresses (current deploy)
+## Reference values (chain-invariant on shellnet)
 
-Deploy #8 (2026-08-17). Source of truth: latest `Deploy #N` section of
-[`../../../bridge-deployer.txt`](../../../bridge-deployer.txt) and the
-forge broadcast log at
-`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json`.
+Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
+`MockBlockHeaderOracle`, `BRIDGE_BOOTSTRAP_SEQNO`, genesis
+`prev_max_level_layer_hash`) rotate on every redeploy — read them from
+`crates/an-bridge-prover/L{1,2}_config/env` (rewritten by
+`scripts/deploy_bridge_bundle.sh` on each deploy), not from this doc.
+Deployer / relayer / owner wallet is the single shared shellnet burner
+`0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` documented in
+[`shellnet.common`](../../an-bridge-prover/shellnet.common).
+
+Two values are chain-invariant on shellnet and worth naming here:
 
 | Item | Value |
 |---|---|
-| Network | Sepolia (chain 11155111) |
-| `AckiNackiBridge` | `0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B` |
-| `PrimaryAggregatorVerifier` | `0x80089e338834826e54362e439d554f3e0facfbc9` |
-| `FallbackAggregatorVerifier` | `0xe6f3b60b24ee3750f455054a1320fcbf5a11784c` |
-| `LayerHashesAggregatorVerifier` | `0xcae03555a63c7a78a2c0554093cb98c2aa307aa7` |
-| `BridgeWithdrawalAggregatorVerifier` (C4) | `0xe0bd31797b3d64dec85a0957304ae5ccc29efd2e` |
-| `MockBlockHeaderOracle` | `0x312e2e8f159cae9d85cc0a0dfdf0cf1184a08f5a` |
-| Bootstrap seed seq_no | `8768512` (W·P=1024-aligned) |
 | Genesis `bk_set_commitment` | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
-| Genesis `prev_max_level_layer_hash` | `0x28df66280644ceb9c08e0a8a5ac924939521577006f00c1b1c6538e6c0474449` |
 | `WITHDRAW_ACC_FR` (USDCBridge account_id as Fr) | `0x1a1a…1a1a` (canonical, palindromic — see below) |
-| Deployer / relayer / owner wallet (single shared burner) | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
 
 **`WITHDRAW_ACC_FR` derivation** (verify once per deploy — should never
 change on shellnet):
@@ -174,8 +173,7 @@ If `expectedWithdrawAcc()` returns anything other than the palindromic
 value above, the deploy used a non-canonical `WITHDRAW_ACC_FR`. Every C4
 submit will revert on the equality check — **stop and redeploy** with the
 correct `WITHDRAW_ACC_FR` exported before invoking
-[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
-(see the deploy walkthrough in the verifyBlock runbook §3).
+[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh).
 
 ---
 
@@ -508,7 +506,7 @@ Sepolia revert. The log prints the selector.
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-addresses-current-deploy)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
+| `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
 | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` used twice | The `withdraw-e2e` command was re-run against the same captured event. Fire a fresh burn. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
 | `PausedError()` | Bridge is paused | `cast send $BRIDGE 'unpause()' --private-key $OWNER_PK`. |

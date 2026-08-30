@@ -82,17 +82,17 @@ deposit-relayer prove-one ... --deposit-id <ID> \
 
 ## Head-of-line blocking — `--skip-after-attempts`
 
-By default the daemon retries the same `depositId` forever (liveness for ordered finalization).
+**Policy (QC-OFF-01):** the official daemon is **strictly sequential**. `next_target = last_processed + 1`; it does not finalize a higher L1 `depositId` while a lower id is still open. That is HOL blocking, not lost USDC on L1. Authors keep this invariant and reject out-of-order finalize (see `docs/audit/qc-off-01-hol-policy.md`).
 
-To avoid one stuck deposit blocking the queue:
+CLI default is skip disabled (`--skip-after-attempts 0`) so tests stay strictly sequential. **Production systemd** (`scripts/ursus/deposit-relayer.service`) sets `SKIP_AFTER_ATTEMPTS=64` so one stuck id does not block the queue forever: after N consecutive failures the daemon parks the id in `state.json` → `parked_deposit_ids` and advances the cursor. L1 ids stay dense (`0, 1, 2, …`); a hole on AN is from park/skip, not from the chain skipping an id.
 
 ```bash
 --skip-after-attempts 64   # park after 64 consecutive failures, advance cursor
 ```
 
-Parked ids land in `state.json` → `parked_deposit_ids`. **Run `finalize-one` for each** before assuming the bridge is caught up.
+**Run `finalize-one` for each parked id** before assuming the bridge is caught up. That recovery is manual by design.
 
-Competing relayers: if another operator finalizes first, exit code **51** maps to `AlreadyFinalized` — cursor advances without error.
+Competing relayers: if another operator finalizes first, exit code **51** maps to `AlreadyFinalized` — cursor advances without error. Permissionless submitters may still mint any proven id; the daemon itself does not reorder.
 
 ---
 

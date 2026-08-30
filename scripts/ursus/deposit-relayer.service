@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bridge-e2e
+# QC-OFF-01 default; EnvironmentFile may override SKIP_AFTER_ATTEMPTS.
+Environment=SKIP_AFTER_ATTEMPTS=64
 EnvironmentFile=/home/ubuntu/bridge-e2e/config/deposit-relayer.env
 Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
 # NOTE: no --dry-run — this actually submits finalizeDeposit on AN.
@@ -25,7 +27,8 @@ ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
   --an-bridge-abi-path ${AN_BRIDGE_ABI_PATH} \
   --an-token-bridge ${AN_TOKEN_BRIDGE} \
   --an-sender ${AN_SENDER} \
-  --start-deposit-id ${START_DEPOSIT_ID}
+  --start-deposit-id ${START_DEPOSIT_ID} \
+  --skip-after-attempts ${SKIP_AFTER_ATTEMPTS}
 Restart=on-failure
 RestartSec=30
 # A single tick can legitimately take a minute (out-of-process halo2 prove);

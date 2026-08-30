@@ -51,7 +51,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
     bytes internal wdProof;
     IBridgeWithdrawalVerifier.WithdrawalPublicInputs internal wdPub;
 
-  constructor() MockERC20("X", "X", 6) {}
+    constructor() MockERC20("X", "X", 6) { }
 
     function wireBridge(AckiNackiBridge _bridge, address _pool) external {
         bridge = _bridge;

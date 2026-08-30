@@ -1,7 +1,7 @@
 # BRIDGE-ETH-04 — guardian pause vs #20
 
 **Class:** **OK** (product)  
-**Status:** **closed — keep #20; do not restore `pause()`**  
+**Status:** **closed — keep #20; incident plan recorded (re-review ETH-04 Medium, risk accepted)**  
 **Area:** `AckiNackiBridge` (no `pause` / `whenNotPaused` / `BridgePaused`)  
 **Source:** Stage II Q&A PDF ETH-4; #20 / TD-58
 
@@ -26,4 +26,4 @@ Existing: `audit/spec/ethereum/DepositPauseAsymmetry.t.sol` (`test_td58_deposit_
 
 ## Docs
 
-`docs/audit/eth-qc-hardening-runbook.md` A4-Q2 previously described a `pause()` that does not exist. Corrected to match #20.
+`docs/audit/eth-qc-hardening-runbook.md` A4-Q2 / ETH-04 incident plan (who, Circle channel, replacement deploy, unwithdrawn funds).

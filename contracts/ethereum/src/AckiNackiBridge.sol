@@ -726,6 +726,9 @@ contract AckiNackiBridge {
             _requireCanonicalFr(layerHashes[i]);
         }
         _requireCanonicalFr(prevMaxLevelLayerHash);
+        // ETH-02 remainder: `blockId` is only emitted, but Yul still reduces
+        // the instance mod f_q. Reject unreduced words so logs match AN.
+        _requireCanonicalFr(blockId);
 
         // ---- Anchor checks against stored state. ----
         if (bkSetCommitment != storedBkSetCommitment) {
@@ -870,6 +873,11 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
+        // ETH-02: stored commitment and attestation `blockId` must be canonical
+        // Fr. Unreduced `newCommitmentL3` would otherwise land in
+        // `storedBkSetCommitment` while adapters compare raw words.
+        _requireCanonicalFr(blockId);
+        _requireCanonicalFr(newCommitmentL3);
 
         bool attOk;
         if (finType == FinalizationType.Primary) {
@@ -1121,6 +1129,14 @@ contract AckiNackiBridge {
     ///         Cheap to call off-chain; mirrored inside `withdrawByProof`.
     function isKnownAnchor(uint256 anchor) external view returns (bool) {
         return _isKnownAnchor(anchor);
+    }
+
+    /// @notice Occupancy of layer `L`'s ring (`0..=HISTORY_PROOF_WINDOW`).
+    ///         Withdraw relayer SLA (ETH-03): alert when this approaches 128
+    ///         for the layer that still holds a pending `finalRoot`.
+    function layerWindowLen(uint8 layer) external view returns (uint16) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        return _layerWindows[layer].dataLen;
     }
 
     /// @notice View helper: is `anchor` present in layer `L`'s rolling window?
@@ -1424,9 +1440,18 @@ contract AckiNackiBridge {
     }
 
     /// @notice Complete a pending ownership transfer. Caller must be `pendingOwner`.
+    /// @dev ETH-14: if `yieldRecipient` still tracks the outgoing owner (the
+    ///      constructor default), move it with the role so a key-rotation
+    ///      harvest cannot pay the compromised address. An explicitly set
+    ///      recipient is left alone.
     function acceptOwnership() external {
         if (msg.sender != pendingOwner || msg.sender == address(0)) revert OwnershipNotPending();
-        emit OwnershipTransferred(owner, msg.sender);
+        address previous = owner;
+        emit OwnershipTransferred(previous, msg.sender);
+        if (yieldRecipient == previous) {
+            yieldRecipient = msg.sender;
+            emit YieldRecipientSet(msg.sender);
+        }
         owner = msg.sender;
         pendingOwner = address(0);
     }

@@ -38,9 +38,13 @@ if grep -E "$STUB_NEW" contracts/ethereum/script/ShplonkDeployLib.sol >/dev/null
   fail=1
 fi
 
-if ! grep -q 'FORBIDDEN for production' contracts/ethereum/src/BridgeWithdrawalVerifier.sol; then
-  echo "FAIL: BridgeWithdrawalVerifier.sol missing FORBIDDEN NatSpec banner" >&2
-  fail=1
+# Stub source was removed (#13). Missing file cannot be wired; if it reappears
+# it must keep the FORBIDDEN NatSpec banner.
+if [[ -f contracts/ethereum/src/BridgeWithdrawalVerifier.sol ]]; then
+  if ! grep -q 'FORBIDDEN for production' contracts/ethereum/src/BridgeWithdrawalVerifier.sol; then
+    echo "FAIL: BridgeWithdrawalVerifier.sol missing FORBIDDEN NatSpec banner" >&2
+    fail=1
+  fi
 fi
 
 if (( fail )); then

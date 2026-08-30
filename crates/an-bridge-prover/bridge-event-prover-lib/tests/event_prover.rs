@@ -177,3 +177,35 @@ fn dense_chain_wrong_length_errors() {
     let err = must_err(&w, "undersized dense_chain");
     assert!(format!("{err}").contains("MAX_CHAIN_LEN"));
 }
+
+/// ETH-03: re-proving the same withdrawal against a later in-window descendant
+/// changes `final_root` (slot 9) and keeps the nullifier (slot 8). Circuit 4
+/// publishes `anchor.layer_hash_hex` as `PUB_FINAL_ROOT`; the hop bound is
+/// `MAX_CHAIN_LEN = 11`. Constraint satisfaction of a real Poseidon chain is
+/// the circuits-crate MockProver; this pins the translation the daemon uses.
+#[test]
+fn reprove_against_later_layer_hash_keeps_nullifier() {
+    let original = populated_witness();
+    let mut later = populated_witness();
+    later.anchor.as_mut().unwrap().layer_hash_hex = hex::encode([0xDBu8; 32]);
+
+    let a = build_proof_inputs(&original, default_event_circuit_params()).unwrap();
+    let b = build_proof_inputs(&later, default_event_circuit_params()).unwrap();
+
+    let nullifier = TOTAL_PUBLIC_INPUTS - 2;
+    let final_root = TOTAL_PUBLIC_INPUTS - 1;
+    assert_eq!(
+        a.public_instances[nullifier], b.public_instances[nullifier],
+        "same event must keep the same nullifier across re-prove"
+    );
+    assert_ne!(
+        a.public_instances[final_root], b.public_instances[final_root],
+        "later descendant must publish a different final_root"
+    );
+    for slot in 0..nullifier {
+        assert_eq!(
+            a.public_instances[slot], b.public_instances[slot],
+            "event identity slots must be unchanged on re-prove (slot {slot})"
+        );
+    }
+}

@@ -10,7 +10,7 @@ contract MultiLogERC20 is MockERC20 {
     event AuxLog(uint256 indexed slot, bytes32 marker);
     event Transfer(address indexed from, address indexed to, uint256 value);
 
-    constructor() MockERC20("USDC", "USDC", 6) {}
+    constructor() MockERC20("USDC", "USDC", 6) { }
 
     function transferFrom(address from, address to, uint256 amount)
         public

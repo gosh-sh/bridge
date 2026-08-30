@@ -37,7 +37,8 @@ pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
     CHAIN_ID_SEPOLIA,
 ];
 
-/// Testnet-only chains (shellnet / fixtures). Must not appear on production deploy paths.
+/// Testnet-only chains (shellnet / fixtures). Must not appear on production
+/// deploy paths.
 pub const TESTNET_ONLY_DEPOSIT_CHAIN_IDS: &[u64] = &[CHAIN_ID_SEPOLIA];
 
 /// Production deposit sources (six L2 mainnets — no Sepolia).
@@ -94,8 +95,8 @@ pub fn validate_chain_for_deployment_profile(
         DepositDeploymentProfile::Production => {
             if is_testnet_only_deposit_chain(chain_id) {
                 return Err(format!(
-                    "chainId {chain_id} (testnet-only, e.g. Sepolia) is forbidden for \
-                     production deposit deployments — free testnet USDC mint risk"
+                    "chainId {chain_id} (testnet-only, e.g. Sepolia) is forbidden for production \
+                     deposit deployments — free testnet USDC mint risk"
                 ));
             }
             if !is_production_deposit_chain(chain_id) {
@@ -223,10 +224,7 @@ mod tests {
 
     #[test]
     fn td_16_prod_profile_accepts_base() {
-        validate_chain_for_deployment_profile(
-            CHAIN_ID_BASE,
-            DepositDeploymentProfile::Production,
-        )
-        .unwrap();
+        validate_chain_for_deployment_profile(CHAIN_ID_BASE, DepositDeploymentProfile::Production)
+            .unwrap();
     }
 }

@@ -9,7 +9,7 @@ contract BlacklistableERC20 is MockERC20 {
     bool public paused;
     mapping(address => bool) public isBlacklisted;
 
-    constructor() MockERC20("bUSDC", "bUSDC", 6) {}
+    constructor() MockERC20("bUSDC", "bUSDC", 6) { }
 
     function setPaused(bool value) external {
         paused = value;

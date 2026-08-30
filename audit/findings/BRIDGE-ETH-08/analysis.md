@@ -22,4 +22,6 @@ Gate: `cd contracts/ethereum && forge test --match-test test_transferOwnership_f
 
 Ownable2Step-style: `transferOwnership` sets `pendingOwner` and emits `OwnershipTransferStarted`. `acceptOwnership` requires `msg.sender == pendingOwner`, then sets `owner` and clears pending. Zero address still rejected on nominate.
 
+ETH-14: if `yieldRecipient` still equals the outgoing owner, it moves with the role. See `audit/findings/BRIDGE-ETH-14/`.
+
 Not an OZ import (contract already has a custom `onlyOwner`). Storage: `pendingOwner` is a new slot on a non-proxy deploy.

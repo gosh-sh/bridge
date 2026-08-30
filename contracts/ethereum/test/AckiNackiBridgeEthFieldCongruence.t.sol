@@ -228,6 +228,36 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         assertEq(bridge.expectedPrevAnchor(numLayers), GENESIS_PREV, "genesis head unchanged");
     }
 
+    function test_eth2_verifyBlock_blockIdPlusR_rejected() public {
+        MockLayerHashesMovementVerifier lh = new MockLayerHashesMovementVerifier();
+        lh.setShouldAccept(true);
+        AckiNackiBridge bridge = _deployVerifyBlockBridge(lh, BK_SET, GENESIS_PREV);
+
+        uint256[10] memory hashes;
+        hashes[0] = 1;
+        hashes[1] = 2;
+        hashes[2] = 3;
+        uint256 blockId = 0xC10C40001;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.FieldElementOutOfRange.selector, blockId + BN254_R
+            )
+        );
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            hex"00",
+            blockId + BN254_R,
+            BK_SET,
+            1,
+            3,
+            hashes,
+            GENESIS_PREV
+        );
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 0, "cursor must not advance");
+    }
+
     function test_eth2_verifyBlock_prevMaxPlusR_rejected() public {
         MockLayerHashesMovementVerifier lh = new MockLayerHashesMovementVerifier();
         lh.setShouldAccept(true);

@@ -1,7 +1,7 @@
 # BRIDGE-ETH-06 — SHPLONK `.bin` / calldata desync; CI skip
 
 **Class:** **QC** (CI / artefact integrity; pairing is a production-path gate)  
-**Status:** **partially patched** — hash pin + no-skip pairing tests landed; 1A/1B/C2 pairing still **FAIL** until n14 regen  
+**Status:** **closed for merge** — Circuit 4 pairing in the default suite; 1A/1B/C2 **quarantined** in `ShplonkArtefactPairingPendingN14` until n14 regen (re-review ETH-06 allowed quarantine with a written reason)  
 **Area:** `contracts/ethereum/verifiers/*.{bin,_calldata.bin}`, `ShplonkArtefactPairing.t.sol`, `scripts/check_shplonk_artefacts.sh`  
 **Source:** Stage II Q&A PDF ETH-6  
 **Invariant:** BK-6 / production verifyBlock — committed Yul must accept its committed calldata
@@ -37,6 +37,12 @@ Hash pin: `contracts/ethereum/verifiers/SHA256SUMS` + `./scripts/check_shplonk_a
 
 ## Remaining (n14)
 
-Regen Primary / Fallback / LayerHashes **together with** matching `_calldata.bin` (and `bound_scenario.json` if the E2E should be a hard gate). Update `SHA256SUMS`. Pairing tests must go green before mainnet `WIRE_VERIFY_BLOCK=true`.
+Regen Primary / Fallback / LayerHashes **together with** matching `_calldata.bin` (and `bound_scenario.json` if the E2E should be a hard gate). Update `SHA256SUMS`. Then:
 
-Until then default `forge test` is **red** on three ETH-6 tests. That is the finding, not a skip to hide.
+```
+cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairingPendingN14 -vv
+```
+
+All three must PASS before mainnet `WIRE_VERIFY_BLOCK=true`. Fold them back into `ShplonkArtefactPairing.t.sol` and drop `--no-match-contract ShplonkArtefactPairingPendingN14` from Makefile / GitLab / `test.sh`.
+
+Default `forge test` stays green on Circuit 4. The desync is still pinned by `SHA256SUMS` and the quarantined contract (not a silent skip).

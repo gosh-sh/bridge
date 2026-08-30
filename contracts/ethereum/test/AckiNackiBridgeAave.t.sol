@@ -31,6 +31,7 @@ contract AckiNackiBridgeAaveTest is Test {
     event AaveEnabledSet(bool enabled);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event YieldRecipientSet(address indexed recipient);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -313,15 +314,50 @@ contract AckiNackiBridgeAaveTest is Test {
 
         vm.expectEmit(true, true, false, true);
         emit OwnershipTransferred(address(this), user2);
+        vm.expectEmit(true, false, false, true);
+        emit YieldRecipientSet(user2);
         vm.prank(user2);
         bridge.acceptOwnership();
         assertEq(bridge.owner(), user2);
         assertEq(bridge.pendingOwner(), address(0));
+        assertEq(bridge.yieldRecipient(), user2, "ETH-14: default recipient follows owner");
 
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
         bridge.setAaveEnabled(false);
         vm.prank(user2);
         bridge.setAaveEnabled(false);
+    }
+
+    function test_acceptOwnership_movesDefaultYieldRecipient_harvestPaysNewOwner() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        aUSDC.accrueYield(address(bridge), 300_000);
+
+        address compromised = address(this);
+        bridge.transferOwnership(user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
+        assertEq(bridge.yieldRecipient(), user2);
+
+        uint256 newOwnerBefore = usdc.balanceOf(user2);
+        uint256 oldOwnerBefore = usdc.balanceOf(compromised);
+        vm.prank(user2);
+        bridge.harvestYield(300_000);
+        assertEq(
+            usdc.balanceOf(user2), newOwnerBefore + 300_000, "ETH-14: harvest follows new owner"
+        );
+        assertEq(
+            usdc.balanceOf(compromised), oldOwnerBefore, "ETH-14: old owner must not receive yield"
+        );
+    }
+
+    function test_acceptOwnership_keepsExplicitYieldRecipient() public {
+        bridge.setYieldRecipient(yieldSink);
+        bridge.transferOwnership(user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
+        assertEq(bridge.owner(), user2);
+        assertEq(bridge.yieldRecipient(), yieldSink, "ETH-14: explicit recipient stays");
     }
 
     // -----------------------------------------------------------------

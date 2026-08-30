@@ -1,7 +1,7 @@
 # BRIDGE-ETH-03 — 128-window eviction and seq_no jump
 
 **Class:** **QC** (liveness, not fund loss) — known A3-01 / WD-Q1  
-**Status:** **closed (documented + tests)** — no window resize, no on-chain seq_no cap  
+**Status:** **closed (documented + tests + occupancy view)** — no window resize, no on-chain seq_no cap  
 **Area:** `AckiNackiBridge` `_layerWindows`, `withdrawByProof` `UnknownAnchor`, `blockSeqNo`  
 **Source:** Stage II Q&A PDF ETH-3
 
@@ -22,9 +22,12 @@ Re-prove: the contract accepts any still-in-window `finalRoot`. Circuit 4 must p
 | `test_withdrawByProof_evictedAnchor_reverts` | Original A3-01: 129th append evicts the first L1 hash. |
 | `test_seqNoFastForward_doesNotEvictEarlierAnchor` | Jump `seq_no` to 1e6; first L1 still known. |
 | `test_reproveAgainstLaterInWindowAnchor_succeeds` | After eviction, payout against a later in-window L1 (mock Circuit 4). |
+| `layerWindowLen(layer)` | Occupancy `0..=128` for the withdraw-relayer alert. |
+| `reprove_against_later_layer_hash_keeps_nullifier` | Same event, later `layer_hash_hex` → new `final_root`, same nullifier (`bridge-event-prover-lib`). |
 
 ## Disposition
 
-- SLA in `docs/audit/eth-qc-hardening-runbook.md` § WD-Q1.
+- SLA + alert recipe in `docs/audit/eth-qc-hardening-runbook.md` § WD-Q1 (`layerWindowLen`).
 - NatSpec on `HISTORY_PROOF_WINDOW` and the `blockSeqNo` check.
 - No Solidity cap on seq_no delta. No window enlargement this sprint (would be a circuit/storage change).
+- Full Halo2 re-prove of a Poseidon-consistent descendant remains the partner circuits MockProver / n14 SHPLONK job; the translation layer and the contract path are pinned here.

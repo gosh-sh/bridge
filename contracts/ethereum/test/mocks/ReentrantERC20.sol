@@ -11,7 +11,7 @@ contract ReentrantERC20 is MockERC20 {
     bytes32 internal reenterAccount;
     bool internal entered;
 
-    constructor() MockERC20("R", "R", 6) {}
+    constructor() MockERC20("R", "R", 6) { }
 
     function wireReenter(AckiNackiBridge _bridge, bytes32 anAccount) external {
         bridge = _bridge;

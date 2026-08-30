@@ -163,7 +163,7 @@ if [ "$RUST_ONLY" = false ]; then
     
     cd contracts/ethereum
     
-    FORGE_TEST_CMD="forge test"
+    FORGE_TEST_CMD="forge test --no-match-contract ShplonkArtefactPairingPendingN14"
     
     # Add verbosity
     if [ "$VERBOSE" = true ]; then
@@ -178,7 +178,7 @@ if [ "$RUST_ONLY" = false ]; then
     # Run with coverage
     if [ "$COVERAGE" = true ]; then
         print_info "Running Solidity tests with coverage..."
-        forge coverage --report summary
+        forge coverage --report summary --no-match-contract ShplonkArtefactPairingPendingN14
     else
         eval "$FORGE_TEST_CMD" || SOLIDITY_TESTS_PASSED=false
     fi

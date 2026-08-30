@@ -1,9 +1,9 @@
-//! TD-41 / DEP-MAINNET-ID — Ethereum L1 mainnet (`chainId = 1`) is not a deposit source.
+//! TD-41 / DEP-MAINNET-ID — Ethereum L1 mainnet (`chainId = 1`) is not a
+//! deposit source.
 
 use deposit_chain_ids::{
+    is_production_deposit_chain, is_supported_deposit_chain, validate_chain_for_deployment_profile,
     DepositDeploymentProfile, PRODUCTION_DEPOSIT_CHAIN_IDS, SUPPORTED_DEPOSIT_CHAIN_IDS,
-    is_production_deposit_chain, is_supported_deposit_chain,
-    validate_chain_for_deployment_profile,
 };
 
 const ETHEREUM_MAINNET: u64 = 1;
@@ -34,8 +34,7 @@ fn td_41_prod_profile_rejects_mainnet_chain_id() {
     )
     .unwrap_err();
     assert!(
-        err.contains("not in PRODUCTION_DEPOSIT_CHAIN_IDS")
-            || err.contains("not supported"),
+        err.contains("not in PRODUCTION_DEPOSIT_CHAIN_IDS") || err.contains("not supported"),
         "TD-41: prod profile must reject chainId=1: {err}"
     );
 }

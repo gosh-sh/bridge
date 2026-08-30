@@ -108,6 +108,7 @@ contract WithdrawAnchorEvictionTest is Test {
 
         _submitBlock(WINDOW + 1);
         assertFalse(bridge.isKnownLayerAnchor(1, evictedL1), "post: oldest L1 evicted");
+        assertEq(bridge.layerWindowLen(1), WINDOW, "ring stays full after wrap");
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
             tokenId: 0,

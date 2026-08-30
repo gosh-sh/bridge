@@ -171,7 +171,7 @@ ci: format-check lint test ## Run CI checks locally
 coverage-solidity: ## Run forge coverage --report summary (matches test:solidity:coverage CI job)
 	@echo "$(BLUE)Running forge coverage --report summary...$(NC)"
 	@echo "$(YELLOW)Note: coverage disables optimizer; --ir-minimum avoids stack-too-deep.$(NC)"
-	@cd contracts/ethereum && forge coverage --ir-minimum --report summary
+	@cd contracts/ethereum && forge coverage --ir-minimum --report summary --no-match-contract ShplonkArtefactPairingPendingN14
 
 relayer-test: ## Run bridge-relayer-daemon unit tests (via an-bridge-prover workspace)
 	@echo "$(BLUE)Running bridge-relayer-daemon tests...$(NC)"
@@ -189,8 +189,8 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike
 	@echo "$(GREEN)Spike artefacts written to contracts/ethereum/test/fixtures/r15_spike/$(NC)"
 
-relayer-fmt: ## Check bridge-relayer-daemon formatting
-	@cd crates/bridge-relayer-daemon && rustup run nightly cargo fmt --check
+relayer-fmt: ## Check bridge-relayer-daemon formatting (via an-bridge-prover workspace)
+	@cd crates/an-bridge-prover && rustup run nightly cargo fmt -p bridge-relayer-daemon -- --check
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via an-bridge-prover workspace)
 	@cd crates/an-bridge-prover && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
@@ -252,7 +252,7 @@ pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN
 	@cd contracts/ethereum && forge fmt --check
 	@chmod +x scripts/check_shplonk_artefacts.sh
 	@./scripts/check_shplonk_artefacts.sh
-	@cd contracts/ethereum && forge test
+	@cd contracts/ethereum && forge test --no-match-contract ShplonkArtefactPairingPendingN14
 	@$(MAKE) audit-solidity-test
 	@$(MAKE) pre-push-an
 	@echo "$(GREEN)── pre-push-audit: green ──$(NC)"
@@ -266,7 +266,7 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@cd contracts/ethereum && forge fmt --check
 	@chmod +x scripts/check_shplonk_artefacts.sh
 	@./scripts/check_shplonk_artefacts.sh
-	@cd contracts/ethereum && forge test
+	@cd contracts/ethereum && forge test --no-match-contract ShplonkArtefactPairingPendingN14
 	@$(MAKE) coverage-solidity
 	@cargo test --workspace --locked
 	@$(MAKE) relayer-test

@@ -158,16 +158,25 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         assertEq(bridge.storedBkSetCommitment(), L3);
     }
 
-    /// @notice The mirror of the above: the raw root is what the fold literally
-    ///         produces, and it is still not a valid `blockId`. No circuit can
-    ///         have committed to it, so the attestation gate rejects it before
-    ///         the fold is even reached.
+    /// @notice ETH-02: unreduced `blockId` is rejected at the canonical-Fr
+    ///         gate, before attestation or the SHA fold.
     function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
 
-        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, rawRoot)
+        );
         _apply(rawRoot, SEQ, L2, L3);
+    }
+
+    function test_applyBkSetUpdate_rejectsUnreducedNewCommitment() public {
+        uint256 poisoned = L3 + R;
+        uint256 blockId = _merkleRoot(L2, poisoned);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, poisoned)
+        );
+        _apply(blockId, SEQ, L2, poisoned);
     }
 
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {

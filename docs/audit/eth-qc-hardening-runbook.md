@@ -51,22 +51,29 @@ A `blockSeqNo` jump (strictly greater than `storedLastSeenBlockSeqNo`) is **perm
 **SLA (withdraw relayer):**
 
 1. **Primary:** submit `withdrawByProof` against the original Circuit 4 `finalRoot` before that hash is evicted (128 subsequent `verifyBlock`s on that layer).
-2. **Fallback:** re-prove Circuit 4 against a **still-in-window** descendant (`test_reproveAgainstLaterInWindowAnchor_succeeds` pins the contract path). Partner dense chain is at most `MAX_CHAIN_LEN = 11` rungs (`gosh-dense-balanced-tree`); pick a remaining window entry within that hop bound. If no such root remains, that withdrawal event is stranded until/unless the circuit hop bound is raised — funds still sit in treasury.
+2. **Fallback:** re-prove Circuit 4 against a **still-in-window** descendant (`test_reproveAgainstLaterInWindowAnchor_succeeds` pins the contract path; `reprove_against_later_layer_hash_keeps_nullifier` pins the daemon translation). Partner dense chain is at most `MAX_CHAIN_LEN = 11` rungs (`gosh-dense-balanced-tree`); pick a remaining window entry within that hop bound. If no such root remains, that withdrawal event is stranded until/unless the circuit hop bound is raised — funds still sit in treasury.
+
+**Alert (ETH-03):** poll `layerWindowLen(L)` for each active layer. When occupancy ≥ 100 (of 128) and a pending withdrawal is still bound to an older hash in that ring, page the withdraw relayer. After wrap (`layerWindowLen == 128` and `isKnownLayerAnchor(L, finalRoot) == false`) only the re-prove path remains.
 
 Gate: `cd audit/spec/ethereum && forge test --match-contract WithdrawAnchorEviction -vv`
 
 ### WD-Q4 — withdraw anchor layer
 
-NB-Q1 (2026-08-04): the `WITHDRAW_ANCHOR_LAYER = 1` pin was removed. `withdrawByProof` now scans every layer window via `_isKnownAnchor`, so partner L≥2 witnesses are accepted without a contract upgrade. Every window entry was written by a verified `verifyBlock`, so the layer index adds specificity, not security. Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan of the specific window) remains the ultimate target once the Circuit 4 re-keygen lands.
+NB-Q1 (2026-08-04): the `WITHDRAW_ANCHOR_LAYER = 1` pin was removed. `withdrawByProof` now scans every layer window via `_isKnownAnchor`, so partner L≥2 witnesses are accepted without a contract upgrade. Every window entry was written by a verified `verifyBlock`. Layer *identity* is Circuit 4's dense-chain climb, written in `docs/audit/circuit4-anchor-binding.md` (ETH-15). Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan of the specific window) remains the ultimate target once the Circuit 4 re-keygen lands.
 
-### A4-Q2 / ETH-4 — pause (keep #20)
+### A4-Q2 / ETH-4 — pause (keep #20; incident plan)
 
-`AckiNackiBridge` has **no** `pause()` / `whenNotPaused` / `BridgePaused` (#20 / TD-58). Stage II PDF asked for a guardian pause so ETH-1 could be stopped; ETH-1/ETH-2 are now gated (`FieldElementOutOfRange`). Restoring pause would reverse #20 (deposit HOL / pause asymmetry). Incident controls that remain:
+`AckiNackiBridge` has **no** `pause()` / `whenNotPaused` / `BridgePaused` (#20 / TD-58). Stage II PDF asked for a guardian pause so ETH-1 could be stopped; ETH-1/ETH-2 are now gated (`FieldElementOutOfRange`). Restoring pause would reverse #20 (deposit HOL / pause asymmetry). A scoped pause (withdraw + `verifyBlock` only, deposits open) stays a future product question, not this change.
 
-- Do not wire / disable Circuit 4 (`bridgeWithdrawalVerifier = address(0)` at deploy, or a new deploy).
-- Circle USDC pause/blacklist on the bridge address (external, TD-24/56).
-- Owner AAVE paths (`emergencyWithdrawAll`, `harvestYield`) stay available.
-- Relayer can halt **off-chain** submission.
+**Incident plan (ETH-04, risk accepted):**
+
+| Step | Who | Action | Time box |
+|------|-----|--------|----------|
+| 1 | On-call relayer | Stop `verifyBlock` / `withdrawByProof` submission off-chain. Do **not** pause deposits on-chain. | minutes |
+| 2 | Bridge owner (prod multisig) | `emergencyWithdrawAll` + `setAaveEnabled(false)` if AAVE must be isolated. User principal stays in `treasuryBalance`. | minutes |
+| 3 | Owner / Circle liaison | Ask Circle to pause or blacklist the **bridge address** (USDC), per TD-24/56. Channel: Circle account team / issuer ops — not an on-chain switch. | hours (third party) |
+| 4 | Deploy | Replacement `AckiNackiBridge` with `bridgeWithdrawalVerifier = address(0)` (withdraws off) or a patched verifier. Migrate treasury by owner ops; old contract cannot be upgraded (no proxy). | hours–day |
+| 5 | Users | Unwithdrawn AN→ETH events stay claimable on the **new** contract only after a new Circuit 4 proof against its windows — communicate the cut-over. Funds on the old contract remain in its USDC/aUSDC until migrated. | announced |
 
 Do **not** restore an on-chain pause without an explicit product reversal of #20. See `audit/findings/BRIDGE-ETH-04/`.
 
@@ -101,10 +108,10 @@ Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inp
 
 1. `./scripts/check_withdrawal_verifier_not_stub.sh`
 2. `./scripts/check_shplonk_artefacts.sh` (SHA-256 pin + EIP-170)
-3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing` — all four pairing tests green (1A/1B/C2 currently fail until n14 regen; do not deploy verifyBlock until they pass)
+3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing` — Circuit 4 pairing green. 1A/1B/C2 live in `ShplonkArtefactPairingPendingN14` until n14 regen; do not deploy `WIRE_VERIFY_BLOCK` until that contract is green.
 4. Confirm `WIRE_VERIFY_BLOCK=true` and `USE_AXIOM_ORACLE=true` on mainnet (`DeployRealBridge` `envBool`; ETH-5)
 5. Confirm Circuit 4 is wired together with the verifyBlock triple (constructor `WithdrawRequiresVerifyBlock`)
 6. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path
 7. Relayer uses `expectedPrevAnchor(numLayers)` for verifyBlock
-8. Withdraw relayer monitors window age vs `HISTORY_PROOF_WINDOW`
+8. Withdraw relayer monitors `layerWindowLen(L)` vs `HISTORY_PROOF_WINDOW` (alert at occupancy ≥ 100)
 9. Production `deposit-relayer` runs with `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (QC-OFF-01; `scripts/ursus/deposit-relayer.service`)

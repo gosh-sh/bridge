@@ -456,9 +456,6 @@ echo "    set -a && source \"\$BRIDGE_CONFIG_DIR/env\" && set +a"
 echo "    ./target/release/relayer daemon-live"
 ```
 
-`AckiNackiBridge.sol` has no Pausable inheritance — user entrypoints are
-live the moment the deploy tx confirms. No post-deploy unpause step.
-
 **Why `--at-head` matters (danger).** The daemon's cold-start policy
 (`SeedPolicy::Explicit(N)`) does **no** chain-head comparison at
 startup — only the alignment check

@@ -102,7 +102,7 @@ export BRIDGE=$BRIDGE_ADDRESS                        # ergonomics; same value
 echo "chain last_seen = $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')"
 # In L2 mode this counter only jumps at 16384-block bundle boundaries
 # (~91 min of chain time at ~3 b/s). To confirm the daemon is alive
-# rather than merely paused between bundles, either (a) sample twice
+# rather than merely idle between bundles, either (a) sample twice
 # ~15 min apart and expect the same value only if the last bundle
 # landed recently, or (b) prefer the on-chain `verifyBlock` cadence:
 #
@@ -513,9 +513,45 @@ python3 -c "print('L2-aligned:', $LAST % 16384 == 0, 'last_seen:', $LAST)"
 # If False → redeploy (L1 seed consumed by mistake)
 ```
 
-### Step L2 — Unpause + treasury seed
+### Step L2 — Treasury seed
 
-Identical to [Case 8](#case-8--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only) Step 2 + [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty).
+Fresh deploy → `treasuryBalance() == 0`. The C4 submit reverts
+`WithdrawTreasuryShortfall(pub.amount, 0)` on any burn until the treasury
+holds at least the burn amount. Seed it once, up-front, scaled to cover
+every burn planned for the session (10 USDC is the demo default):
+
+```bash
+cd crates/bridge-withdraw-e2e-cli
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+set -a && source config/bridge_config && set +a
+
+export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
+export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
+export AMOUNT=10000000    # 10.000000 USDC — demo safety margin
+
+# 1. Mint test USDC
+cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 2. Approve bridge
+cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
+cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
+  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 4. Confirm
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
+# -> 10000000
+```
+
+**Why dummy AN destination is safe on shellnet:** no live AN-side
+listener consumes the phantom `Deposit` event. **Do NOT use** on a
+live bridge with an active AN-side indexer — you'll create a ghost
+credit.
 
 ### Step L3 — Cold-start daemon under L2
 
@@ -630,8 +666,8 @@ prove path).
 
 ## Case 2 — Follow-up withdrawal on an existing deploy
 
-**When to use:** Bridge already unpaused, treasury seeded, relayer
-running for hours/days. Applies equally to the pinned L2 team deploy
+**When to use:** Bridge treasury already seeded, relayer running for
+hours/days. Applies equally to the pinned L2 team deploy
 (default user) and to a self-deployed L1 or L2 instance (advanced).
 
 **Precheck — relayer current:**
@@ -657,7 +693,7 @@ If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-be
 - Advanced L1 self-deploy: [Case 8 Step 4](#step-4--preflight-the-cli-dry-run)
   → Step 5.
 
-No redeploy, no unpause, no treasury seed.
+No redeploy, no treasury seed.
 
 ---
 
@@ -724,7 +760,7 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
 
 **Root cause:** The burn AN tx never produced a `WithdrawalInitiated`
 ExtOut — most likely the USDCBridge rejected the call (invalid dst chain,
-paused USDCBridge, insufficient allowance, bounce came back).
+insufficient allowance, bounce came back).
 
 ```bash
 # Check AN-side status via GQL using an_tx_hash from the state file
@@ -735,7 +771,8 @@ AN_TX=$(jq -r '.an_tx_hash' "$STATE_FILE")
 
 **Remediation:** If the burn aborted, exit is 10, not 11. State file
 records `Failed` with `stage=burn`. Fix the underlying issue (drift →
-[Case 6](#case-6--multisig-key-drift--preflight-refusal); pause → [Case 5](#case-5--on-chain-withdrawbyproof-revert)), prune the failed state file, re-run.
+[Case 6](#case-6--multisig-key-drift--preflight-refusal)), prune the
+failed state file, re-run.
 
 ---
 
@@ -804,7 +841,6 @@ unchanged by the CLI)
 | implicit | `AttestationProofRejected()` | C4 proof public inputs mismatch. Usually `acc_fr` drift OR `layer_hashes[1]` not yet verified (covering bundle not on-chain yet). |
 | implicit | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` reused. Fire fresh burn. |
 | implicit | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain. → [Case 3](#case-3--event-captured-but-daemon-far-behind-head). |
-| implicit | `PausedError()` | Bridge paused. |
 | `0xbb651fce` | `WithdrawTreasuryShortfall(uint256,uint256)` | `pub.amount > treasuryBalance`. → [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Decode a revert:**
@@ -825,8 +861,8 @@ cast call $BRIDGE_ADDRESS \
 **Remediation:** Fix the on-chain condition; re-run the SAME CLI
 invocation with `--allow-retry`. The proof is deterministic for a
 given `(event, on-chain contract state)` — if the chain state changed
-(treasury seeded, unpaused, covering bundle landed), the proof will
-regenerate against the new state.
+(treasury seeded, covering bundle landed), the proof will regenerate
+against the new state.
 
 **Do not delete `work_dir/witness_event_*.json`** between attempts;
 regeneration is expensive.
@@ -895,47 +931,13 @@ Then prune the `Failed` state file and re-run.
 **Trigger:** Fresh deploy (treasury=0) OR prior deposit < current burn
 amount.
 
-**Seed the treasury:**
-
-```bash
-cd crates/bridge-withdraw-e2e-cli
-export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
-set -a && source config/bridge_config && set +a
-
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
-export AMOUNT=10000000    # 10.000000 USDC — demo safety margin
-
-# 1. Mint test USDC
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-
-# 2. Approve bridge
-cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
-  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-
-# 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
-cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
-  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-
-# 4. Confirm
-cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
-# -> 10000000
-```
-
-**Why dummy AN destination is safe on shellnet:** no live AN-side
-listener consumes the phantom `Deposit` event. **Do NOT use** on a
-live bridge with an active AN-side indexer — you'll create a ghost
-credit.
+**Seed the treasury:** follow
+[Case 1 Step L2](#step-l2--treasury-seed). Scale `AMOUNT` to cover
+every burn planned for the session (10 USDC is the demo default).
 
 **Remediation:** After deposit, re-run the CLI with `--allow-retry`.
 Proof regenerates against the new chain state (treasury balance
 component of the check).
-
-Scale the seed to cover all planned burns in the session — 10 USDC is
-the demo default.
 
 ---
 
@@ -975,20 +977,11 @@ set -a && source shellnet.common && set +a
 PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 ```
 
-### Step 2 — Unpause
+### Step 2 — Seed the bridge treasury
 
-```bash
-export BRIDGE=<new_address>
-cast send $BRIDGE 'unpause()' --rpc-url $RPC_URL --private-key $OWNER_PK
-cast call $BRIDGE 'paused()(bool)' --rpc-url $RPC_URL   # false
-```
-
-### Step 2.5 — Seed the bridge treasury
-
-See [Case 7](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
-for the seed-once procedure. Fresh deploy → treasury is 0; the C4
-submit will revert `WithdrawTreasuryShortfall` on any burn until
-seeded.
+Follow [Case 1 Step L2](#step-l2--treasury-seed). Fresh deploy →
+treasury is 0; the C4 submit will revert `WithdrawTreasuryShortfall`
+on any burn until seeded.
 
 ### Step 3 — Cold-start the bundle daemon
 

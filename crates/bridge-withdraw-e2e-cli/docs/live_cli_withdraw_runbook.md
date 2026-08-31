@@ -17,8 +17,12 @@ means invoking the CLI with `--anchor-layer 2 --i-know-the-wait` per
 L1-anchoring (stride `W·P = 1024` seq_nos ≈ 5.7 min) exists only as a
 development/testing convenience for advanced users deploying their own
 bridge + relayer from scratch. It is **not** the path a default user
-should take against the pinned deploy. Case 7 walks the L1 flow for
-that testing scenario.
+should take against the pinned deploy. If you need the L1 fast-lane,
+follow [Case 1b](#case-1b--l2-self-deploy-advanced) but pass
+`LEVEL=1` at deploy time and drop `--anchor-layer 2
+--i-know-the-wait` from the CLI invocation (leave `--anchor-layer
+auto`). This runbook does not walk L1 further — the L2 flow is what
+production users hit.
 
 **Two audiences.**
 
@@ -31,10 +35,11 @@ that testing scenario.
    ([Case 1a](#case-1a--l2-production-path-default-users)). **You
    never deploy anything.**
 2. **Advanced user.** Deploy your own `AckiNackiBridge` + run your own
-   bundle relayer to exercise the full ecosystem from scratch. L1 or L2
-   is your choice — Case 7 covers L1 (fast, testing only); Case 1b
-   covers L2 (production shape). Set `BRIDGE_ADDRESS` in
-   `config/bridge_config` to your deploy and follow
+   bundle relayer to exercise the full ecosystem from scratch.
+   [Case 1b](#case-1b--l2-self-deploy-advanced) covers L2 (production
+   shape); the same steps with `LEVEL=1` give you the L1 fast-lane for
+   smoke-testing. Set `BRIDGE_ADDRESS` in `config/bridge_config` to
+   your deploy and follow
    [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
    for the deploy + relayer setup.
 
@@ -74,13 +79,13 @@ feeding `verifyBlock` transactions to the bridge.
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1a — L2 production path (default users)](#case-1a--l2-production-path-default-users) **(default users start here)**
 - [Case 1b — L2 self-deploy (advanced)](#case-1b--l2-self-deploy-advanced)
-- [Case 2 — Event captured but daemon far behind head](#case-2--event-captured-but-daemon-far-behind-head)
-- [Case 3 — Prover subprocess timeout / OOM](#case-3--prover-subprocess-timeout--oom)
-- [Case 4 — On-chain `withdrawByProof` revert](#case-4--on-chain-withdrawbyproof-revert)
-- [Case 5 — Multisig key drift / preflight refusal](#case-5--multisig-key-drift--preflight-refusal)
-- [Case 6 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty)
-- [Case 7 — L1 first-time E2E from a fresh deploy (advanced / testing only)](#case-7--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only)
-- [Case 8 — Sequential L2 withdrawals (stress-test loop)](#case-8--sequential-l2-withdrawals-stress-test-loop)
+- [Case 2 — Sequential L2 withdrawals (stress-test loop)](#case-2--sequential-l2-withdrawals-stress-test-loop)
+- [Case 3 — Incidents & failure modes](#case-3--incidents--failure-modes)
+  - [Case 3a — Event captured but daemon far behind head](#case-3a--event-captured-but-daemon-far-behind-head)
+  - [Case 3b — Prover subprocess timeout / OOM](#case-3b--prover-subprocess-timeout--oom)
+  - [Case 3c — On-chain `withdrawByProof` revert](#case-3c--on-chain-withdrawbyproof-revert)
+  - [Case 3d — Multisig key drift / preflight refusal](#case-3d--multisig-key-drift--preflight-refusal)
+  - [Case 3e — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-3e--withdrawtreasuryshortfall--bridge-treasury-empty)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
@@ -185,12 +190,12 @@ matters for money.
 | Code | Meaning | Nothing broadcast? | Remediation entry point |
 |------|---------|-------------------|-------------------------|
 | 0    | Success (or `--dry-run` returned OK) | — | — |
-| 2    | Preflight refused — key perms, `--from` not an active MS, etc. | ✓ nothing | [Case 5](#case-5--multisig-key-drift--preflight-refusal) |
+| 2    | Preflight refused — key perms, `--from` not an active MS, etc. | ✓ nothing | [Case 3d](#case-3d--multisig-key-drift--preflight-refusal) |
 | 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing | [Idempotency semantics](#idempotency-semantics) |
-| 10   | AN burn broadcast, capture failed to observe outcome — reconcile via GQL | ✗ AN burn WAS broadcast | [Case 5](#case-5--multisig-key-drift--preflight-refusal) |
-| 11   | Burn confirmed, `WithdrawalInitiated` capture timed out (>300 s poll) | ✗ AN burn done | [Case 2](#case-2--event-captured-but-daemon-far-behind-head) |
-| 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | [Case 3](#case-3--prover-subprocess-timeout--oom) |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | [Case 4](#case-4--on-chain-withdrawbyproof-revert), [Case 6](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty) |
+| 10   | AN burn broadcast, capture failed to observe outcome — reconcile via GQL | ✗ AN burn WAS broadcast | [Case 3d](#case-3d--multisig-key-drift--preflight-refusal) |
+| 11   | Burn confirmed, `WithdrawalInitiated` capture timed out (>300 s poll) | ✗ AN burn done | [Case 3a](#case-3a--event-captured-but-daemon-far-behind-head) |
+| 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | [Case 3b](#case-3b--prover-subprocess-timeout--oom) |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | [Case 3c](#case-3c--on-chain-withdrawbyproof-revert), [Case 3e](#case-3e--withdrawtreasuryshortfall--bridge-treasury-empty) |
 
 **Rule.** Exit codes 10–13 all leave the AN burn broadcast. The USDC is
 gone from the source multisig regardless of exit code ≥10; the question
@@ -667,8 +672,9 @@ the `error:` line and non-zero `$?` instead.
 **When to use:** You're an advanced user standing up your own
 `AckiNackiBridge` + your own L2 bundle relayer end-to-end (production
 shape). Use this for L2 exercises against a bridge you deployed
-yourself. For the L1 smoke-test shape, see
-[Case 7](#case-7--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only).
+yourself. For the L1 fast-lane smoke-test, follow the same steps but
+pass `LEVEL=1` at Step L1 deploy time and drop `--anchor-layer 2
+--i-know-the-wait` from the Step L5 invocation.
 
 ### Step L0 — Emit L2 genesis anchors
 
@@ -899,7 +905,54 @@ will NOT print; look for the `error:` line and non-zero `$?` instead.
 
 ---
 
-## Case 2 — Event captured but daemon far behind head
+## Case 2 — Sequential L2 withdrawals (stress-test loop)
+
+**When to use:** After Case 1a (default) or Case 1b (advanced)
+succeeds, drive 2–3 more burns through the same L2 rails.
+
+**Session budget:** ~101 min/bundle + ~5 min per CLI run ≈ ~2 h between
+successful withdrawals; 3 cycles fit in ~6 h.
+
+**Per cycle (N = 2, 3, …):**
+
+```bash
+# 1. Confirm previous WithdrawalExecuted landed
+cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
+  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
+  --from-block -1000 | tail -5
+
+# 2. Confirm treasury still funded (seed once at Case 1b Step L2 for advanced;
+#    default users use the pinned deploy — treasury already seeded)
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
+
+# 3. Vary the amount by 1 micro-USDC so the dedup key differs from cycle N-1
+#    (otherwise the CLI refuses exit 3; --allow-retry works too but is blunter).
+export WITHDRAW_AMOUNT=1.00000$N
+
+# 4. Run the CLI (Case 1a / Case 1b Step L5 invocation), wait for its 101-min budget
+```
+
+**Watch between cycles:**
+
+- Fresh Circuit-2 bundle every ~91 min (daemon log).
+- `LayerAnchorAppended` fires **twice per bundle** (L1 + L2). Missing
+  L2 emissions → lost `verifyBlock` on bundle lane; pause and inspect.
+- `storedLastSeenBlockSeqNo` should be a 16384-multiple between cycles.
+- CLI state dir grows one file per cycle; each stays `Confirmed`.
+
+**Cycle N ≥ 2 revert is almost certainly a [Case 3c](#case-3c--on-chain-withdrawbyproof-revert) mode**, not L2-specific.
+Start with the Case 3c catalog.
+
+---
+
+## Case 3 — Incidents & failure modes
+
+The five sub-cases below cover the recoverable and non-recoverable
+failure paths encountered in production. Each maps 1:1 to an exit-code
+row in the [exit-code catalog](#exit-code-catalog) — start there when
+triaging.
+
+### Case 3a — Event captured but daemon far behind head
 
 **Scenario:** CLI exited 11 (capture timeout). Either the event was
 never observed (poll expired) or the enricher blocked waiting for the
@@ -912,11 +965,11 @@ covering bundle.
 grep -E 'capture: (matched|polling|timed out)' $LOG_PATH | tail -5
 
 # If "matched dst=…:026a" appears but no "enrich_witness: filling" →
-# event was captured; enricher blocked. Sub-case 2a.
-# If "polling" only, no "matched" → event never seen. Sub-case 2b.
+# event was captured; enricher blocked. Sub-case 3a-i.
+# If "polling" only, no "matched" → event never seen. Sub-case 3a-ii.
 ```
 
-### Sub-case 2a — Enricher blocked on covering bundle
+#### 3a-i — Enricher blocked on covering bundle
 
 **Root cause:** `event_seq_no=E`, `storedLastSeenBlockSeqNo()=L`,
 `E − L > W·P` (>1024 on L1, >16384 on L2). Covering bundle not yet
@@ -952,13 +1005,13 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
 
 - If `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
   only under the advanced (self-deploy) path — see
-  [Case 1b](#case-1b--l2-self-deploy-advanced) (L2) or
-  [Case 7](#case-7--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only)
-  (L1) for the deploy sequence. After redeploy, fire a NEW burn (the
-  old state-file's dedup tuple stays valid; use `--allow-retry` OR
-  change the amount by 1 micro-USDC to sidestep dedup).
+  [Case 1b](#case-1b--l2-self-deploy-advanced) for the deploy sequence
+  (L2 by default; pass `LEVEL=1` at Step L1 for the L1 fast-lane).
+  After redeploy, fire a NEW burn (the old state-file's dedup tuple
+  stays valid; use `--allow-retry` OR change the amount by 1 micro-USDC
+  to sidestep dedup).
 
-### Sub-case 2b — Event never observed
+#### 3a-ii — Event never observed
 
 **Root cause:** The burn AN tx never produced a `WithdrawalInitiated`
 ExtOut — most likely the USDCBridge rejected the call (invalid dst chain,
@@ -973,12 +1026,12 @@ AN_TX=$(jq -r '.an_tx_hash' "$STATE_FILE")
 
 **Remediation:** If the burn aborted, exit is 10, not 11. State file
 records `Failed` with `stage=burn`. Fix the underlying issue (drift →
-[Case 5](#case-5--multisig-key-drift--preflight-refusal)), prune the
+[Case 3d](#case-3d--multisig-key-drift--preflight-refusal)), prune the
 failed state file, re-run.
 
 ---
 
-## Case 3 — Prover subprocess timeout / OOM
+### Case 3b — Prover subprocess timeout / OOM
 
 **Symptom (CLI exit 12):** Failure in the CLI's only subprocess —
 `aggregate-proof` (SHPLONK aggregation over the in-process Poseidon C4
@@ -1021,7 +1074,7 @@ df $BRIDGE_PARAMS_DIR/
 
   ```bash
   ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
-    ...same flags as Case 7 Step 4... \
+    ...same flags as Case 1b Step L5... \
     --prover-timeout-s 3600
   ```
 - If the log shows swap thrash, the OOM is real — don't just extend
@@ -1029,7 +1082,7 @@ df $BRIDGE_PARAMS_DIR/
 
 ---
 
-## Case 4 — On-chain `withdrawByProof` revert
+### Case 3c — On-chain `withdrawByProof` revert
 
 **Symptom (CLI exit 13):** Dry-run or real submit fails with a Sepolia
 revert. State file records `Failed` with `stage=submit` and (when
@@ -1042,8 +1095,8 @@ unchanged by the CLI)
 |----------|-------|-----------|
 | implicit | `AttestationProofRejected()` | C4 proof public inputs mismatch. Usually `acc_fr` drift OR `layer_hashes[1]` not yet verified (covering bundle not on-chain yet). |
 | implicit | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` reused. Fire fresh burn. |
-| implicit | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain. → [Case 2](#case-2--event-captured-but-daemon-far-behind-head). |
-| `0xbb651fce` | `WithdrawTreasuryShortfall(uint256,uint256)` | `pub.amount > treasuryBalance`. → [Case 6](#case-6--withdrawtreasuryshortfall--bridge-treasury-empty). |
+| implicit | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain. → [Case 3a](#case-3a--event-captured-but-daemon-far-behind-head). |
+| `0xbb651fce` | `WithdrawTreasuryShortfall(uint256,uint256)` | `pub.amount > treasuryBalance`. → [Case 3e](#case-3e--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Decode a revert:**
 
@@ -1071,11 +1124,11 @@ regeneration is expensive.
 
 ---
 
-## Case 5 — Multisig key drift / preflight refusal
+### Case 3d — Multisig key drift / preflight refusal
 
 **Two flavors, distinguishable by exit code:**
 
-### 5a — Preflight refusal (exit 2)
+#### 3d-i — Preflight refusal (exit 2)
 
 CLI never broadcast anything. Common causes with the human message the
 CLI prints:
@@ -1091,7 +1144,7 @@ CLI prints:
 **Remediation:** Fix the specific issue. Preflight is side-effect free
 — no state file was written, no burn attempted.
 
-### 5b — Burn broadcast, outcome unknown (exit 10)
+#### 3d-ii — Burn broadcast, outcome unknown (exit 10)
 
 `sendTransaction` broadcast but the CLI could not observe the resulting
 message on GQL within its budget. Typical root cause: local
@@ -1125,7 +1178,7 @@ Then prune the `Failed` state file and re-run.
 
 ---
 
-## Case 6 — `WithdrawTreasuryShortfall` — bridge treasury empty
+### Case 3e — `WithdrawTreasuryShortfall` — bridge treasury empty
 
 **Symptom (CLI exit 13):** Dry-run or submit reverts with selector
 `0xbb651fce`: `WithdrawTreasuryShortfall(<pub.amount>, <treasuryBalance>)`.
@@ -1140,190 +1193,6 @@ every burn planned for the session (10 USDC is the demo default).
 **Remediation:** After deposit, re-run the CLI with `--allow-retry`.
 Proof regenerates against the new chain state (treasury balance
 component of the check).
-
----
-
-## Case 7 — L1 first-time E2E from a fresh deploy (advanced / testing only)
-
-> **L1 is testing-only.** The pinned team deploy is L2, and the
-> server-side relayer only runs the L2 lane. Default users MUST use
-> [Case 1a](#case-1a--l2-production-path-default-users). Case 7 is
-> the advanced (self-deploy) fast-lane for smoke-testing your own
-> bridge + relayer with the shorter L1 stride (5.7 min chain-time per
-> bundle vs L2's 91 min); it exists so you can shake out the pipeline
-> quickly before running the same flow against L2.
-
-**When to use:** You're an advanced user, you just deployed your own
-`AckiNackiBridge` with `LEVEL=1`, your own bundle relayer just
-cold-started, and you want the shortest possible smoke run before
-switching to the production L2 shape.
-
-**Trigger conditions:** Fresh L1 `AckiNackiBridge` deployed; your
-daemon cold-started with `LEVEL=1`; fresh chain head available.
-
-### Step 0 — Anchor freshness check
-
-```bash
-cd crates/an-bridge-prover/bridge-prover-lib
-cargo run --release --bin compute_bridge_anchors -- \
-  --at-head \
-  --gql-endpoint https://shellnet.ackinacki.org/graphql
-# Check: (chain_head - seed_seqno) < 200 blocks
-```
-
-### Step 1 — Deploy the bridge
-
-```bash
-cd crates/an-bridge-prover
-set -a && source shellnet.common && set +a
-PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
-```
-
-### Step 2 — Seed the bridge treasury
-
-Follow [Case 1b Step L2](#step-l2--treasury-seed). Fresh deploy →
-treasury is 0; the C4 submit will revert `WithdrawTreasuryShortfall`
-on any burn until seeded.
-
-### Step 3 — Cold-start the bundle daemon
-
-Follow
-[`live_relayer_bridge_verifyBlock_runbook.md` — Case 1](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#case-1)
-cold-start. The "daemon is healthy" signal is defined by the daemon
-runbook; the CLI is independent and only reads on-chain state.
-
-### Step 4 — Preflight the CLI (dry-run)
-
-```bash
-cd crates/bridge-withdraw-e2e-cli
-export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
-
-export WITHDRAW_FROM=<dapp_id>::<account_id>            # source multisig
-export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json      # owner keys, 0600
-export WITHDRAW_TO=0x742d35Cc6634C0532925a3b844Bc454e4438f44e
-export WITHDRAW_TO_CHAIN=11155111
-export WITHDRAW_AMOUNT=1.000000
-
-./scripts/local_smoke.sh
-```
-
-**Equivalent raw invocation:**
-
-```bash
-cd crates/bridge-withdraw-e2e-cli
-export BURNER_PRIVATE_KEY=0x…
-set -a && source config/bridge_config && set +a
-mkdir -p ./work_dir
-TS=$(date +%Y%m%d_%H%M%S)
-
-../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
-  --dry-run \
-  --yes \
-  --from        "$WITHDRAW_FROM" \
-  --from-keys   "$WITHDRAW_FROM_KEYS" \
-  --to          "$WITHDRAW_TO" \
-  --to-chain    "$WITHDRAW_TO_CHAIN" \
-  --amount      "$WITHDRAW_AMOUNT" \
-  --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
-  --anchor-layer auto \
-  --rpc-url           "$RPC_URL" \
-  --bridge-address    "$BRIDGE_ADDRESS" \
-  --eth-private-key   "$BURNER_PRIVATE_KEY" \
-  --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
-  --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
-  --params-dir        "$BRIDGE_PARAMS_DIR" \
-  --snark-dir         "./work_dir/shplonk-snark" \
-  --pk-cache-dir      "$BRIDGE_PARAMS_DIR/pk_cache" \
-  --work-dir          "./work_dir" \
-  2>&1 | tee "./work_dir/withdraw_dry_${TS}.log"
-```
-
-(`--state-dir` omitted → the CLI defaults to `$HOME/.bridge-withdraw-state/`.
-Override with `BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state` in
-`bridge_config` if you want per-checkout state.)
-
-**Expected log signature (dry-run OK):**
-
-```
-INFO stage 1/6: preflight
-INFO preflight ok multisig_ecc3=<amount> usdc_bridge=<dapp>::<acc>
-INFO stage 2/6: idempotency (skipped for --dry-run)
-INFO dry-run: skipping burn / capture / prove / submit
-```
-
-`--dry-run` is **preflight-only** — it validates flags, key file perms,
-multisig custodian shape, USDCBridge resolution, and the ECC[3] balance,
-then stops. It does **not** compose the burn message, wait for the
-`WithdrawalInitiated` event, produce the Circuit-4 proof, or call
-`dry_run_withdraw` on the EVM side. Extending the scope to "prove +
-`dry_run_withdraw`, skip only the real submit" is on the roadmap; for
-now, exit 0 here means "argument shape is sane" and nothing more.
-
-Exit 0 → preflight green; drop `--dry-run` when you are ready to
-commit money. Any non-zero → jump to the corresponding case per
-[exit-code catalog](#exit-code-catalog).
-
-### Step 5 — Real submit
-
-Same invocation, drop `--dry-run` (or use the wrapper):
-
-```bash
-crates/bridge-withdraw-e2e-cli/scripts/live_smoke.sh
-```
-
-**Success signal:**
-
-```
-INFO submit_withdraw: withdrawByProof confirmed tx=0x… block=<n>
-```
-
-**On-chain verification:**
-
-```bash
-cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
-  --from-block -100
-```
-
----
-
-## Case 8 — Sequential L2 withdrawals (stress-test loop)
-
-**When to use:** After Case 1a (default) or Case 1b (advanced)
-succeeds, drive 2–3 more burns through the same L2 rails.
-
-**Session budget:** ~101 min/bundle + ~5 min per CLI run ≈ ~2 h between
-successful withdrawals; 3 cycles fit in ~6 h.
-
-**Per cycle (N = 2, 3, …):**
-
-```bash
-# 1. Confirm previous WithdrawalExecuted landed
-cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
-  --from-block -1000 | tail -5
-
-# 2. Confirm treasury still funded (seed once at Case 1b Step L2 for advanced;
-#    default users use the pinned deploy — treasury already seeded)
-cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
-
-# 3. Vary the amount by 1 micro-USDC so the dedup key differs from cycle N-1
-#    (otherwise the CLI refuses exit 3; --allow-retry works too but is blunter).
-export WITHDRAW_AMOUNT=1.00000$N
-
-# 4. Run the CLI (Case 1a / Case 1b Step L5 invocation), wait for its 101-min budget
-```
-
-**Watch between cycles:**
-
-- Fresh Circuit-2 bundle every ~91 min (daemon log).
-- `LayerAnchorAppended` fires **twice per bundle** (L1 + L2). Missing
-  L2 emissions → lost `verifyBlock` on bundle lane; pause and inspect.
-- `storedLastSeenBlockSeqNo` should be a 16384-multiple between cycles.
-- CLI state dir grows one file per cycle; each stays `Confirmed`.
-
-**Cycle N ≥ 2 revert is almost certainly a [Case 4](#case-4--on-chain-withdrawbyproof-revert) mode**, not L2-specific.
-Start with the Case 4 catalog.
 
 ---
 

@@ -13,13 +13,16 @@
 #   succeeded" — for that, drop `--dry-run` and use `live_smoke.sh`.
 #
 # Coordination with the running daemon:
-#   The relayer daemon-live already owns bundle proving; this CLI just
-#   reads `prover_state.json`. UNLIKE the relayer's own
-#   `launch_withdraw_e2e_real.sh`, this script does NOT need
-#   baseline-before-burn ordering — dry-run never fires a burn, so the
-#   Case 2b (baseline excludes our own event) problem does not apply.
-#   The real-submit sibling script (`live_smoke.sh`) uses `replay_latest`
-#   inside the orchestrator to sidestep the same issue.
+#   The relayer daemon-live already owns bundle proving. The CLI itself
+#   does NOT read the daemon's `prover_state.json` — it resurrects
+#   BridgeState from the deployed contract via `--rpc-url` +
+#   `--bridge-address` every invocation. The only reason the daemon
+#   needs to be running is to keep the on-chain contract fed with fresh
+#   `verifyBlock` transactions; the CLI never opens any daemon-private
+#   file. UNLIKE the relayer's own `launch_withdraw_e2e_real.sh`, this
+#   script does NOT need baseline-before-burn ordering — dry-run never
+#   fires a burn, so the Case 2b (baseline excludes our own event)
+#   problem does not apply.
 #
 # Prerequisites:
 #   1. `daemon-live` running against the target deploy, caught up.
@@ -55,14 +58,6 @@ set -a && source "$ENV_FILE" && set +a
 : "${WITHDRAW_TO_CHAIN:?export WITHDRAW_TO_CHAIN=11155111}"
 : "${WITHDRAW_AMOUNT:?export WITHDRAW_AMOUNT=1.000000}"
 
-# --- Daemon-produced state path ----------------------------------------------
-PROVER_STATE_PATH="${PROVER_STATE_PATH:-$CONFIG_DIR/state/prover_state.json}"
-if [ ! -f "$PROVER_STATE_PATH" ]; then
-  echo "!!! prover_state.json not found at $PROVER_STATE_PATH."
-  echo "    Daemon must be running and have written at least one bundle."
-  exit 1
-fi
-
 # --- Per-withdrawal working dirs (dry-run still needs the aggregator cwd) ----
 WORK_DIR="${WORK_DIR:-$CONFIG_DIR/work_dir}"
 STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$CONFIG_DIR/withdraw-state}"
@@ -88,7 +83,6 @@ exec cargo run --release -p bridge-withdraw-e2e-cli --manifest-path crates/an-br
     --to-chain    "$WITHDRAW_TO_CHAIN" \
     --amount      "$WITHDRAW_AMOUNT" \
     --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
-    --prover-state-path "$PROVER_STATE_PATH" \
     --rpc-url           "$RPC_URL" \
     --bridge-address    "$BRIDGE_ADDRESS" \
     --eth-private-key   "$RELAYER_PRIVATE_KEY" \

@@ -453,13 +453,9 @@ done
 - `BRIDGE_WITHDRAW_STATE_DIR` — optional. Defaults to
   `$HOME/.bridge-withdraw-state/` (see `src/orchestrator.rs::default_state_dir`).
 
-**Not needed by the CLI (removed vs. earlier revisions):**
-
-- `PROVER_STATE_PATH` — the CLI no longer reads any local
-  `prover_state.json`. It resurrects `BridgeState` from the contract at
-  every invocation.
-- `--window-size` — the on-chain window shape is fixed at 128
-  (`HISTORY_PROOF_WINDOW_SIZE`); no operator knob.
+The CLI is an independent user-side tool: it reads on-chain state via
+`--rpc-url` and `--bridge-address` and needs no daemon-owned files on
+disk.
 
 **Per-invocation caller vars** (used by the smoke wrappers):
 
@@ -526,8 +522,8 @@ seeded.
 
 Follow
 [`live_relayer_bridge_verifyBlock_runbook.md` — Case 1](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#case-1)
-cold-start. Verify within 30 s: log line `seed_policy=Explicit(<seed>)`
-and `prover_state.json` mtime advances.
+cold-start. The "daemon is healthy" signal is defined by the daemon
+runbook; the CLI is independent and only reads on-chain state.
 
 ### Step 4 — Preflight the CLI (dry-run)
 
@@ -705,8 +701,8 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
   ```
 
   Because the AN burn is already done, the CLI will replay the capture
-  path (`replay_latest = true`) and pick up the same event. Proof is
-  deterministic per `(event, prover_state)`.
+  path (`replay_latest = true`) and pick up the same event. The proof
+  is deterministic for a given `(event, on-chain contract state)`.
 
 - If `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
   only under the advanced (self-deploy) path — see
@@ -818,8 +814,8 @@ cast call $BRIDGE_ADDRESS \
 ```
 
 **Remediation:** Fix the on-chain condition; re-run the SAME CLI
-invocation with `--allow-retry`. Proof is deterministic per
-`(event, prover_state, chain_state)` — if chain state changed
+invocation with `--allow-retry`. The proof is deterministic for a
+given `(event, on-chain contract state)` — if the chain state changed
 (treasury seeded, unpaused, covering bundle landed), the proof will
 regenerate against the new state.
 
@@ -997,11 +993,12 @@ INFO daemon-live: on-chain last_seen=<seed>, stride-aligned=OK
 INFO daemon-live: seed_policy=Explicit(<seed>), anchor_level=2
 ```
 
-**Startup drift refusals — STOP and fix:**
-
-- `refuse: on-chain last_seen (=X) % 16384 != 0` → redeploy with L2 genesis
-- `refuse: anchor_level mismatch (state=1, cfg=2)` → delete stale L1
-  `prover_state.json`, restart
+**Startup drift refusals — STOP and fix:** these belong to the daemon
+(the CLI never reads the daemon's state file). See the daemon runbook's
+[`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+for the up-to-date list; typical L2 signatures include stride
+misalignment (`last_seen % 16384 != 0`) and anchor-level drift between
+on-disk state and the config file.
 
 ### Step L4 — Wait for first L2 bundle
 
@@ -1245,43 +1242,3 @@ crates/bridge-evm-aggregator/              ← SHPLONK aggregator
 
 - `params/` and `params/pk_cache/` — cold cache costs ~20 min per
   proof; warm cache is ~5 min.
-- `state/prover_state.json` — daemon-owned; deleting it forces a full
-  cold restart of the bundle lane.
-
----
-
-## Change log / known incidents
-
-**2026-08-25 — CLI first commit** (`9319c9a`)
-`bridge-withdraw-e2e-cli` wired end-to-end: burn + idempotency +
-orchestrator + output.
-
-**2026-08-27 — Helper scripts** (`fe52aac`)
-`scripts/local_smoke.sh` (dry-run) and `scripts/live_smoke.sh` (real
-submit) added; CHANGELOG entry documents env vars, exit codes,
-idempotency semantics.
-
-**Chain-side / prover-side incidents that still shape CLI behavior:**
-
-- **2026-08-13 — fire-window gone (`7bb3da9`)** — horizontal-chain
-  event proving removed the fire-window constraint. `--anchor-layer
-  auto` picks L1 or L2. No coordination needed on burn timing.
-
-- **2026-08-06 — `WIRE_WITHDRAW_BY_PROOF` mandatory (`a43993b`)** —
-  Sepolia deploys MUST provide `WITHDRAW_ACC_FR` at construction; every
-  Deploy #4+ has C4 baked in.
-
-- **2026-08-18 — Level-parametric contracts (`bf0d41a`)** — bridge
-  constructor is level-opaque (stores only genesis scalar).
-  `_layerWindows` populated on first `verifyBlock` across active
-  layers. No Solidity change for L2 deploys.
-
-- **Deploy #7 vs #8 timing lesson (2026-08-17)** — fresh-deploy best
-  practice: run `compute_bridge_anchors --at-head` within 3 min of
-  `forge script`; fire burn within ~5 min of daemon startup. Miss
-  either and wait grows by ~12 min per additional bundle of catch-up.
-
-- **ENRICH_TIMEOUT bump 90 → 120 min (post-2026-08-18,
-  `driver.rs:172`)** — L2 worst-case is ~101 min chain + ~10 min
-  prover; the previous 90-min budget would timeout. Change applies to
-  the CLI too (same enricher code path).

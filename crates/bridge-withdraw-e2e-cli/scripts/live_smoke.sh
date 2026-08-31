@@ -5,8 +5,11 @@
 # shellnet or a testnet where the value is disposable.
 #
 # Differs from `local_smoke.sh` only in that `--dry-run` is dropped. All
-# other coordination applies: the daemon must be running, caught up, and
-# publishing `prover_state.json`.
+# other coordination applies: the daemon must be running and caught up
+# so the on-chain contract is being fed fresh `verifyBlock`
+# transactions. The CLI itself does not read the daemon's
+# `prover_state.json` — it resurrects BridgeState from the contract at
+# every invocation.
 #
 # The CLI orchestrator uses `replay_latest = true` for capture, so
 # baseline-before-burn ordering (as in the relayer's
@@ -35,12 +38,6 @@ set -a && source "$ENV_FILE" && set +a
 : "${WITHDRAW_TO_CHAIN:?export WITHDRAW_TO_CHAIN=11155111}"
 : "${WITHDRAW_AMOUNT:?export WITHDRAW_AMOUNT=1.000000}"
 
-PROVER_STATE_PATH="${PROVER_STATE_PATH:-$CONFIG_DIR/state/prover_state.json}"
-if [ ! -f "$PROVER_STATE_PATH" ]; then
-  echo "!!! prover_state.json not found at $PROVER_STATE_PATH."
-  exit 1
-fi
-
 WORK_DIR="${WORK_DIR:-$CONFIG_DIR/work_dir}"
 STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$CONFIG_DIR/withdraw-state}"
 mkdir -p "$WORK_DIR" "$STATE_DIR"
@@ -63,7 +60,6 @@ exec cargo run --release -p bridge-withdraw-e2e-cli --manifest-path crates/an-br
     --to-chain    "$WITHDRAW_TO_CHAIN" \
     --amount      "$WITHDRAW_AMOUNT" \
     --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
-    --prover-state-path "$PROVER_STATE_PATH" \
     --rpc-url           "$RPC_URL" \
     --bridge-address    "$BRIDGE_ADDRESS" \
     --eth-private-key   "$RELAYER_PRIVATE_KEY" \

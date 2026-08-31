@@ -277,44 +277,56 @@ written into `bridge_config` and never persisted by the CLI (see
 
 ### The `bridge_config` file
 
-`bridge_config` is a single per-CLI env file that accumulates everything
-the CLI needs to talk to a running bridge — the intersection of what
-today lives in [`shellnet.common`](../../shellnet.common) and
-[`L{1,2}_config/env`](../../L2_config/env), **minus** the burner private
-key. Sourced with `set -a && source bridge_config && set +a` before
-invoking the binary. Fields:
+`bridge_config` (checked in at
+[`crates/an-bridge-prover/bridge_config`](../../bridge_config)) is a
+single per-CLI env file that carries every parameter the CLI reads via
+clap `env` attrs (see `bridge-withdraw-e2e-cli/src/args.rs`), and
+nothing else. Source it with
+`set -a && source bridge_config && set +a` before invoking the binary.
+
+Unlike [`shellnet.common`](../../shellnet.common) +
+[`L{1,2}_config/env`](../../L2_config/env) — which target the bundle
+daemon and carry its deploy state — `bridge_config` targets **only** the
+CLI. It does not source `shellnet.common` and deliberately omits
+daemon-only settings (`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`,
+`BRIDGE_BK_SET_CONFIG`); those belong in `L{1,2}_config/env` on the
+host running `daemon-live`, which may be a different machine from the
+CLI operator.
+
+Fields the CLI reads:
 
 | Var | Provenance | Meaning |
 |-----|-----------|---------|
-| `RPC_URL` | you | Sepolia RPC endpoint |
-| `BRIDGE_GQL_ENDPOINT` | you | shellnet GraphQL endpoint |
-| `BRIDGE_BK_SET_CONFIG` | you | path to `bk_set.shellnet.json` |
-| `BRIDGE_PARAMS_DIR` | you | ~17 GB SRS + per-circuit vk/pk files |
-| `BRIDGE_AGGREGATOR_DIR` / `BRIDGE_VERIFIERS_DIR` | you | aggregator/verifier trees checked into the repo |
-| `BRIDGE_ADDRESS` | deploy-dependent | deployed `AckiNackiBridge` address on Sepolia |
-| `BRIDGE_BOOTSTRAP_SEQNO` | deploy-dependent | constructor-stamped seq_no on that bridge |
-| `BRIDGE_ANCHOR_LEVEL` | deploy-dependent | `1` for L1 anchor, `2` for L2 |
+| `RPC_URL` | shipped | Sepolia RPC endpoint |
+| `BRIDGE_GQL_ENDPOINT` | shipped | shellnet GraphQL endpoint |
+| `BRIDGE_PARAMS_DIR` | shipped | ~17 GB SRS + per-circuit vk/pk files |
+| `BRIDGE_AGGREGATOR_DIR` / `BRIDGE_VERIFIERS_DIR` | shipped | aggregator/verifier trees checked into the repo |
+| `BRIDGE_PK_CACHE_DIR` | shipped (commented) | optional; CLI defaults to `$BRIDGE_PARAMS_DIR/pk_cache` |
+| `BRIDGE_WITHDRAW_STATE_DIR` | shipped (commented) | optional; per-withdrawal idempotency state dir |
+| `BRIDGE_ADDRESS` | deploy-dependent, **you fill in** | deployed `AckiNackiBridge` on Sepolia — see below |
 
 `RELAYER_PRIVATE_KEY` is intentionally NOT part of `bridge_config` —
 every user supplies their own via shell env, as above.
 
-### Two ways to fill in `BRIDGE_ADDRESS` (and the anchor set)
+### Two ways to fill in `BRIDGE_ADDRESS`
 
 **a) Use the shared reference deploy (typical user path).** The
 shellnet team runs an `AckiNackiBridge` + verifier bundle + bundle
-daemon on Sepolia. Once the pinned values for that deploy land in the
-repo as the default `bridge_config`, `set -a && source bridge_config &&
-set +a` is all the CLI needs. Until then, obtain the current
-`BRIDGE_ADDRESS` / `BRIDGE_BOOTSTRAP_SEQNO` / `BRIDGE_ANCHOR_LEVEL` from
-the shellnet team and paste them into your local `bridge_config`.
+daemon on Sepolia. Once the pinned `BRIDGE_ADDRESS` for that deploy
+lands in the repo as the default `bridge_config`,
+`set -a && source bridge_config && set +a` is all the CLI needs. Until
+then, obtain the current `BRIDGE_ADDRESS` from the shellnet team and
+paste it into your local `bridge_config`.
 
 **b) Deploy your own bridge + run your own bundle daemon (advanced).**
 Follow [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
 end-to-end — wallet setup, `scripts/deploy_bridge_bundle.sh` (which
 writes `L{1,2}_config/env`), and starting `daemon-live`. Copy the
-emitted `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`, and
-`BRIDGE_ANCHOR_LEVEL` into your `bridge_config` and point the CLI at
-your own instance. All other cases in this runbook apply unchanged.
+emitted `BRIDGE_ADDRESS` from the generated `L{1,2}_config/env` into
+your `bridge_config` and point the CLI at your own instance. The
+`BRIDGE_BOOTSTRAP_SEQNO` and `BRIDGE_ANCHOR_LEVEL` also emitted there
+are consumed by your `daemon-live`, not by the CLI — leave them in
+`L{1,2}_config/env`. All other cases in this runbook apply unchanged.
 
 ### One chain-invariant sanity check
 

@@ -5,20 +5,38 @@ Operational guide for driving a full AN→ETH withdrawal E2E through the
 Sepolia. This CLI owns the per-withdrawal composition (burn → capture
 → Circuit-4 SHPLONK proof → `withdrawByProof`).
 
+**L2 is the production path; L1 is testing-only.**
+
+The team-run bundle relayer on our server is configured for **L2**
+(`anchor_level=2`, stride `W² = 16384` seq_nos ≈ 91 min chain-time), and
+the pinned `BRIDGE_ADDRESS` in [`config/bridge_config`](../config/bridge_config)
+is that L2 deploy. **All production withdrawals go through L2** — that
+means invoking the CLI with `--anchor-layer 2 --i-know-the-wait` per
+[Case 8 Step L5](#step-l5--run-the-cli-with-explicit-l2).
+
+L1-anchoring (stride `W·P = 1024` seq_nos ≈ 5.7 min) exists only as a
+development/testing convenience for advanced users deploying their own
+bridge + relayer from scratch. It is **not** the path a default user
+should take against the pinned deploy. Case 1 walks the L1 flow for
+that testing scenario.
+
 **Two audiences.**
 
-1. **Default user.** Point the CLI at the team-pinned `AckiNackiBridge`
+1. **Default user.** Point the CLI at the pinned L2 `AckiNackiBridge`
    already deployed on Sepolia (address ships in
-   [`config/bridge_config`](../config/bridge_config)); a bundle relayer
-   we run on our server keeps that contract advancing. You bring your
-   own Sepolia burner wallet + AN multisig, source `config/bridge_config`,
-   and invoke the CLI. **You never deploy anything.**
+   [`config/bridge_config`](../config/bridge_config)); our server-side
+   relayer keeps that contract advancing. You bring your own Sepolia
+   burner wallet + AN multisig, source `config/bridge_config`, and
+   invoke the CLI **with `--anchor-layer 2 --i-know-the-wait`**
+   ([Case 8 Step L5](#step-l5--run-the-cli-with-explicit-l2)). **You
+   never deploy anything.**
 2. **Advanced user.** Deploy your own `AckiNackiBridge` + run your own
-   bundle relayer to exercise the full ecosystem from scratch. Set
-   `BRIDGE_ADDRESS` in `config/bridge_config` to your deploy and follow
+   bundle relayer to exercise the full ecosystem from scratch. L1 or L2
+   is your choice — Case 1 covers L1 (fast, testing only); Case 8
+   covers L2 (production shape). Set `BRIDGE_ADDRESS` in
+   `config/bridge_config` to your deploy and follow
    [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
-   for the deploy + relayer setup. Steps 0–3 in Case 1 and Steps L0–L4
-   in Case 8 walk this path.
+   for the deploy + relayer setup.
 
 **Scope of this runbook.** The end-user withdrawal path, driven by the
 CLI. Every stage of the pipeline is in-process — `--from` composes the
@@ -52,14 +70,14 @@ feeding `verifyBlock` transactions to the bridge.
 - [Timing model](#timing-model)
 - [Wallet setup and bridge config](#wallet-setup-and-bridge-config)
 - [Binary + env prerequisites](#binary--env-prerequisites)
-- [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
+- [Case 1 — L1 first-time E2E from a fresh deploy (testing only)](#case-1--l1-first-time-e2e-from-a-fresh-deploy-testing-only)
 - [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
 - [Case 3 — Event captured but daemon far behind head](#case-3--event-captured-but-daemon-far-behind-head)
 - [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
 - [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
 - [Case 6 — Multisig key drift / preflight refusal](#case-6--multisig-key-drift--preflight-refusal)
 - [Case 7 — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-7--withdrawtreasuryshortfall--bridge-treasury-empty)
-- [Case 8 — Fresh L2 deploy: first E2E withdrawal](#case-8--fresh-l2-deploy-first-e2e-withdrawal)
+- [Case 8 — L2 production path: first E2E withdrawal](#case-8--l2-production-path-first-e2e-withdrawal)
 - [Case 9 — Sequential L2 withdrawals (stress-test loop)](#case-9--sequential-l2-withdrawals-stress-test-loop)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
@@ -313,23 +331,25 @@ every user supplies their own via shell env, as above.
 
 ### Two ways to fill in `BRIDGE_ADDRESS`
 
-**a) Use the shared reference deploy (typical user path).** The
-shellnet team runs an `AckiNackiBridge` + verifier bundle + bundle
-daemon on Sepolia. Once the pinned `BRIDGE_ADDRESS` for that deploy
-lands in the repo as the default `bridge_config`,
-`set -a && source bridge_config && set +a` is all the CLI needs. Until
-then, obtain the current `BRIDGE_ADDRESS` from the shellnet team and
-paste it into your local `bridge_config`.
+**a) Use the pinned L2 reference deploy (typical user path).** The
+shellnet team runs an `AckiNackiBridge` + verifier bundle + L2-anchored
+bundle relayer on Sepolia. The current pinned `BRIDGE_ADDRESS` for that
+deploy already ships in [`config/bridge_config`](../config/bridge_config),
+so `set -a && source config/bridge_config && set +a` is all the CLI
+needs. Because the server relayer is L2, you must invoke the CLI with
+`--anchor-layer 2 --i-know-the-wait` — see
+[Case 8 Step L5](#step-l5--run-the-cli-with-explicit-l2). L1 is not
+served by the pinned deploy.
 
-**b) Deploy your own bridge + run your own bundle daemon (advanced).**
+**b) Deploy your own bridge + run your own bundle relayer (advanced).**
 Follow [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
-end-to-end — wallet setup, `scripts/deploy_bridge_bundle.sh` (which
-writes `L{1,2}_config/env`), and starting `daemon-live`. Copy the
-emitted `BRIDGE_ADDRESS` from the generated `L{1,2}_config/env` into
-your `bridge_config` and point the CLI at your own instance. The
-`BRIDGE_BOOTSTRAP_SEQNO` and `BRIDGE_ANCHOR_LEVEL` also emitted there
-are consumed by your `daemon-live`, not by the CLI — leave them in
-`L{1,2}_config/env`. All other cases in this runbook apply unchanged.
+end-to-end — wallet setup, `scripts/deploy_bridge_bundle.sh`, and
+starting `daemon-live`. Choose L1 (`LEVEL=1`, faster, testing only) or
+L2 (`LEVEL=2`, production shape) at deploy time. Copy the emitted
+`BRIDGE_ADDRESS` into your `bridge_config` and point the CLI at your
+own instance. The `BRIDGE_BOOTSTRAP_SEQNO` and `BRIDGE_ANCHOR_LEVEL`
+also emitted at deploy are consumed by your `daemon-live`, not by the
+CLI. All other cases in this runbook apply unchanged.
 
 ### One chain-invariant sanity check
 
@@ -419,20 +439,23 @@ done
 
 ---
 
-## Case 1 — First-time E2E from a fresh deploy (optimal sequence)
+## Case 1 — L1 first-time E2E from a fresh deploy (testing only)
 
-**When to use:** Contract just deployed. Bundle daemon just cold-started.
-Minimum wall-time demo.
+> **L1 is testing-only.** The pinned team deploy is L2, and the
+> server-side relayer only runs the L2 lane. Default users MUST use
+> [Case 8](#case-8--l2-production-path-first-e2e-withdrawal). Case 1 is
+> the advanced (self-deploy) fast-lane for smoke-testing your own
+> bridge + relayer with the shorter L1 stride (5.7 min chain-time per
+> bundle vs L2's 91 min); it exists so you can shake out the pipeline
+> quickly before running the same flow against L2.
 
-**Trigger conditions:** Fresh `AckiNackiBridge` deployed; daemon
-cold-started; fresh chain head available.
+**When to use:** You're an advanced user, you just deployed your own
+`AckiNackiBridge` with `LEVEL=1`, your own bundle relayer just
+cold-started, and you want the shortest possible smoke run before
+switching to the production L2 shape.
 
-> **Who runs Steps 0–3?** Only the **advanced** path — you're deploying
-> your own bridge + relayer for full ecosystem testing (see
-> [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)).
-> If you're using the team-pinned deploy in `config/bridge_config` (the
-> default), **skip to [Step 4](#step-4--preflight-the-cli-dry-run)** —
-> the bridge and bundle relayer are already running on our server.
+**Trigger conditions:** Fresh L1 `AckiNackiBridge` deployed; your
+daemon cold-started with `LEVEL=1`; fresh chain head available.
 
 ### Step 0 — Anchor freshness check
 
@@ -566,10 +589,11 @@ cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
 
 ## Case 2 — Follow-up withdrawal on an existing deploy
 
-**When to use:** Bridge already unpaused, treasury seeded, daemon
-running for hours/days.
+**When to use:** Bridge already unpaused, treasury seeded, relayer
+running for hours/days. Applies equally to the pinned L2 team deploy
+(default user) and to a self-deployed L1 or L2 instance (advanced).
 
-**Precheck — daemon current:**
+**Precheck — relayer current:**
 
 ```bash
 LAST=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')
@@ -577,16 +601,22 @@ HEAD=$(curl -s -X POST https://shellnet.ackinacki.org/graphql \
   -H 'content-type: application/json' \
   -d '{"query":"{ blockchain { blocks(last: 1) { edges { node { seq_no } } } } }"}' \
   | jq -r '.data.blockchain.blocks.edges[0].node.seq_no')
-echo "lag = $((HEAD - LAST))  (want < 1024)"
+# Stride: L2 = 16384 (production), L1 = 1024 (testing only)
+echo "lag = $((HEAD - LAST))  (L2 want < 16384; L1 want < 1024)"
 ```
 
-If lag < 1024 → the covering bundle will land within one W·P stride.
-Run `live_smoke.sh` directly.
+If lag is under the applicable stride → the covering bundle will land
+within one bundle window. Fire the withdrawal.
 
-If lag > 1024 → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
+If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
 
-**Followed by:** Case 1 Step 4 (dry-run), then Step 5 (real submit). No
-redeploy, no unpause, no treasury seed.
+**Followed by:**
+- Default user / L2: [Case 8 Step L5](#step-l5--run-the-cli-with-explicit-l2)
+  (dry-run first, then real submit).
+- Advanced L1 self-deploy: [Case 1 Step 4](#step-4--preflight-the-cli-dry-run)
+  → Step 5.
+
+No redeploy, no unpause, no treasury seed.
 
 ---
 
@@ -859,19 +889,24 @@ the demo default.
 
 ---
 
-## Case 8 — Fresh L2 deploy: first E2E withdrawal
+## Case 8 — L2 production path: first E2E withdrawal
 
-**When to use:** `BRIDGE_ANCHOR_LEVEL=2` L2-anchoring end-to-end
-exercise. Bundle stride is `W² = 16384` seq_nos (~91 min chain-time)
-vs L1's 1024 (~5.7 min).
+**This is the production path** — the pinned team deploy in
+[`config/bridge_config`](../config/bridge_config) is L2-anchored and the
+server-side bundle relayer only runs the L2 lane. Every default user
+lands here.
 
-> **Advanced-path only.** This entire case walks the self-deploy flow
-> (fresh L2 deploy + your own relayer). Users pointing at the pinned
-> team deploy in `config/bridge_config` never touch Steps L0–L4 — they
-> select L2 per-invocation with `--anchor-layer 2` in
-> [Step L5](#step-l5--run-the-cli-with-explicit-l2). See
+**When to use:** Any withdrawal against the pinned team deploy, or any
+L2 exercise against your own self-deployed bridge.
+`BRIDGE_ANCHOR_LEVEL=2`; bundle stride is `W² = 16384` seq_nos (~91 min
+chain-time) vs L1's 1024 (~5.7 min).
+
+> **Steps L0–L4 are advanced-only** (fresh L2 deploy + your own
+> relayer). Default users pointing at the pinned team deploy **skip
+> straight to** [Step L5](#step-l5--run-the-cli-with-explicit-l2) —
+> the bridge and L2 relayer are already running on our server. See
 > [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
-> for the deploy prerequisites.
+> for the deploy prerequisites if you're on the advanced path.
 
 ### Step L0 — Emit L2 genesis anchors
 

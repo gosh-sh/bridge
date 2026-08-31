@@ -62,22 +62,19 @@ BRIDGE_PARAMS_DIR=../an-bridge-prover/params
 BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
-# --- Deploy-dependent — REPLACE BEFORE FIRST RUN ------------------------------
-# Path (a) — shared shellnet reference deploy:
-#   Paste the current `AckiNackiBridge` address shared by the shellnet
-#   team. Expected to stabilize once the team's Sepolia deploy is pinned;
-#   until then, ask.
+# --- Deploy target ------------------------------------------------------------
+# Currently pinned to the shellnet team's L2-anchored (anchor_level=2)
+# reference deploy on Sepolia. The server-side bundle relayer that
+# advances this contract runs L2 only, so the CLI must be invoked with
+# `--anchor-layer 2 --i-know-the-wait` against this address. See
+# `docs/live_cli_withdraw_runbook.md` Case 8 Step L5.
 #
-# Path (b) — you deployed your own bridge with
-#   `../an-bridge-prover/scripts/deploy_bridge_bundle.sh` (see
-#   `../an-bridge-prover/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`):
-#   copy the `BRIDGE_ADDRESS` line from the generated
-#   `../an-bridge-prover/L{1,2}_config/env`.
+# Advanced users who ran their own `deploy_bridge_bundle.sh` (see
+# `../an-bridge-prover/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`)
+# should overwrite this with the `BRIDGE_ADDRESS` from their own
+# `L{1,2}_config/env`. L1 is testing-only; L2 is the production shape.
 #
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-#
-# Currently pinned to the L2-anchor shellnet reference deploy on
-# Sepolia (source: `../an-bridge-prover/L2_config/env`).
 BRIDGE_ADDRESS=0x50bd1e3763d0d3dbc7c424656b5808558a5a86b1

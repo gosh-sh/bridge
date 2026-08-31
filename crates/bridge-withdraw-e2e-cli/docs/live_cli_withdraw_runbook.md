@@ -47,7 +47,7 @@ duplicating.
 - [Exit-code catalog](#exit-code-catalog)
 - [Idempotency semantics](#idempotency-semantics)
 - [Timing model — inherited from the daemon runbook](#timing-model--inherited-from-the-daemon-runbook)
-- [Reference addresses (current deploy)](#reference-addresses-current-deploy)
+- [Wallet setup and bridge config](#wallet-setup-and-bridge-config)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
 - [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
@@ -228,40 +228,107 @@ run single-shot. Timeouts still map to exit 11.
 
 ---
 
-## Reference addresses (current deploy)
+## Wallet setup and bridge config
 
-Snapshotted from the parent runbook — update both files together per
-deploy. Source of truth: `../../../bridge-deployer.txt` (latest
-Deploy #N section) and
-`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json`.
+To run the CLI you need two independent things:
 
-**Deploy #8 (2026-08-17)** — same values used by both runbooks:
+1. **A funded Sepolia wallet you own.** The CLI signs `withdrawByProof`
+   with the EVM key you provide. Every operator brings their own — the
+   CLI does not ship a shared burner and does not read a
+   `RELAYER_PRIVATE_KEY` from any tracked file.
+2. **A `bridge_config` file** that points the CLI at a deployed
+   `AckiNackiBridge` — either the shared shellnet reference deploy or
+   your own (see "Two ways to fill in `BRIDGE_ADDRESS`" below).
 
-| Item | Value |
-|------|-------|
-| Network | Sepolia (11155111) |
-| AckiNackiBridge | `0x59dE8848bD5B3F1BD02AF9D269ab313AFa1d900B` |
-| PrimaryAggregatorVerifier | `0x80089e338834826e54362e439d554f3e0facfbc9` |
-| FallbackAggregatorVerifier | `0xe6f3b60b24ee3750f455054a1320fcbf5a11784c` |
-| LayerHashesAggregatorVerifier | `0xcae03555a63c7a78a2c0554093cb98c2aa307aa7` |
-| BridgeWithdrawalAggregatorVerifier (C4) | `0xe0bd31797b3d64dec85a0957304ae5ccc29efd2e` |
-| MockBlockHeaderOracle | `0x312e2e8f159cae9d85cc0a0dfdf0cf1184a08f5a` |
-| Bootstrap seed seq_no | `8768512` (W·P=1024-aligned) |
-| Genesis bk_set_commitment | `0x08eb0a1892e4f75a8b5c8cff69322f95bf0437c371903998c9365fbe293ca71c` |
-| Genesis prev_max_level_layer_hash | `0x28df66280644ceb9c08e0a8a5ac924939521577006f00c1b1c6538e6c0474449` |
-| WITHDRAW_ACC_FR (USDCBridge account_id as Fr) | `0x1a1a…1a1a` (canonical, palindromic) |
-| Relayer wallet (EVM signer for `withdrawByProof`) | `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` |
+Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
+`MockBlockHeaderOracle`, `BRIDGE_BOOTSTRAP_SEQNO`, genesis
+`prev_max_level_layer_hash`) are **not** listed in this runbook by
+value — they rotate on every redeploy. Read them from your
+`bridge_config` (see below), or from `L{1,2}_config/env` if you deployed
+your own bridge with `scripts/deploy_bridge_bundle.sh`.
 
-**WITHDRAW_ACC_FR verification (once per deploy):**
+### Create and fund your wallet
+
+Follow the wallet-bootstrap procedure documented once in the verifyBlock
+runbook — do not duplicate it here:
+
+- [`live_relayer_bridge_verifyBlock_runbook.md` — §1 Create a fresh burner wallet](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#1-create-a-fresh-burner-wallet)
+- [`live_relayer_bridge_verifyBlock_runbook.md` — §2 Fund it with Sepolia ETH](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#2-fund-it-with-sepolia-eth)
+
+Short version: `cast wallet new`, keep the private key in a file
+**outside** the repo, and top it up from either
+[pk910 PoW faucet](https://sepolia-faucet.pk910.de/) (mine in-browser,
+5–15 min per top-up) or the
+[Google Cloud Web3 faucet](https://cloud.google.com/application/web3/faucet/ethereum/sepolia)
+(0.05 ETH/day, no PoW). The CLI never pays for a deploy, so ~0.05 ETH
+covers many withdrawals; refill from either faucet when the balance
+falls below ~0.02 ETH.
+
+Never reuse a wallet that holds real funds. Never commit the private
+key. Export it in your shell before invoking the CLI:
 
 ```bash
-cast call $BRIDGE 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL
+export RELAYER_PRIVATE_KEY=0x…              # your own key, from local storage
+```
+
+The CLI reads `RELAYER_PRIVATE_KEY` via clap `env` attr. It is **never**
+written into `bridge_config` and never persisted by the CLI (see
+[File & state reference](#file--state-reference)).
+
+### The `bridge_config` file
+
+`bridge_config` is a single per-CLI env file that accumulates everything
+the CLI needs to talk to a running bridge — the intersection of what
+today lives in [`shellnet.common`](../../shellnet.common) and
+[`L{1,2}_config/env`](../../L2_config/env), **minus** the burner private
+key. Sourced with `set -a && source bridge_config && set +a` before
+invoking the binary. Fields:
+
+| Var | Provenance | Meaning |
+|-----|-----------|---------|
+| `RPC_URL` | you | Sepolia RPC endpoint |
+| `BRIDGE_GQL_ENDPOINT` | you | shellnet GraphQL endpoint |
+| `BRIDGE_BK_SET_CONFIG` | you | path to `bk_set.shellnet.json` |
+| `BRIDGE_PARAMS_DIR` | you | ~17 GB SRS + per-circuit vk/pk files |
+| `BRIDGE_AGGREGATOR_DIR` / `BRIDGE_VERIFIERS_DIR` | you | aggregator/verifier trees checked into the repo |
+| `BRIDGE_ADDRESS` | deploy-dependent | deployed `AckiNackiBridge` address on Sepolia |
+| `BRIDGE_BOOTSTRAP_SEQNO` | deploy-dependent | constructor-stamped seq_no on that bridge |
+| `BRIDGE_ANCHOR_LEVEL` | deploy-dependent | `1` for L1 anchor, `2` for L2 |
+
+`RELAYER_PRIVATE_KEY` is intentionally NOT part of `bridge_config` —
+every user supplies their own via shell env, as above.
+
+### Two ways to fill in `BRIDGE_ADDRESS` (and the anchor set)
+
+**a) Use the shared reference deploy (typical user path).** The
+shellnet team runs an `AckiNackiBridge` + verifier bundle + bundle
+daemon on Sepolia. Once the pinned values for that deploy land in the
+repo as the default `bridge_config`, `set -a && source bridge_config &&
+set +a` is all the CLI needs. Until then, obtain the current
+`BRIDGE_ADDRESS` / `BRIDGE_BOOTSTRAP_SEQNO` / `BRIDGE_ANCHOR_LEVEL` from
+the shellnet team and paste them into your local `bridge_config`.
+
+**b) Deploy your own bridge + run your own bundle daemon (advanced).**
+Follow [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+end-to-end — wallet setup, `scripts/deploy_bridge_bundle.sh` (which
+writes `L{1,2}_config/env`), and starting `daemon-live`. Copy the
+emitted `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`, and
+`BRIDGE_ANCHOR_LEVEL` into your `bridge_config` and point the CLI at
+your own instance. All other cases in this runbook apply unchanged.
+
+### One chain-invariant sanity check
+
+Regardless of which deploy you point at, run once and confirm:
+
+```bash
+cast call $BRIDGE_ADDRESS 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL
 # Must print: 11806252235961651298089590628336806290921645495320214372650577192963691649562
 ```
 
-If this differs, every C4 submit will revert on the equality check —
-**STOP and redeploy** with the correct `WITHDRAW_ACC_FR` exported
-before `deploy_bridge_bundle.sh`.
+If this returns anything else, every C4 submit will revert on the
+`WITHDRAW_ACC_FR` equality check. Path (a): the shared deploy is
+misconfigured — report and STOP. Path (b): redeploy with the correct
+`WITHDRAW_ACC_FR` exported before `deploy_bridge_bundle.sh`.
 
 ---
 
@@ -977,7 +1044,7 @@ cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
 
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 
-cast balance 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307 --rpc-url $RPC_URL --ether
+cast balance "$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)" --rpc-url $RPC_URL --ether
 ```
 
 ---

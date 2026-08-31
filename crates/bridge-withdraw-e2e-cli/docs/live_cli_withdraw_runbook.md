@@ -474,13 +474,33 @@ disk.
 pinned team L2 deploy that ships in
 [`config/bridge_config`](../config/bridge_config). The server-side
 bundle relayer is already running L2 (`anchor_level=2`, stride
-`W² = 16384` seq_nos ≈ 91 min chain-time) — you deploy nothing, seed
-nothing, run no daemon.
+`W² = 16384` seq_nos ≈ 91 min chain-time) — you deploy nothing and run
+no daemon.
 
 **Do NOT use `--anchor-layer auto` on L2.** The enricher requires the
 operator to acknowledge the wait budget.
 
-### Run the CLI (dry-run, then real submit)
+### Step 1 — Confirm treasury covers your amount
+
+The C4 submit reverts `WithdrawTreasuryShortfall(pub.amount, 0)` if
+`treasuryBalance() < WITHDRAW_AMOUNT` — the on-chain USDC that pays the
+recipient is sourced from the bridge treasury. The pinned deploy is
+shared; prior withdrawals may have drained it.
+
+```bash
+cd crates/bridge-withdraw-e2e-cli
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+set -a && source config/bridge_config && set +a         # pinned L2 BRIDGE_ADDRESS
+
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
+# Compare against your planned WITHDRAW_AMOUNT (µUSDC, 6 decimals: 1 USDC = 1000000).
+```
+
+If the balance is short, seed it yourself — same procedure as
+[Case 1b Step L2](#step-l2--treasury-seed) (mint → approve → deposit →
+confirm). Scale `AMOUNT` to cover the withdrawal.
+
+### Step 2 — Run the CLI (dry-run, then real submit)
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
@@ -757,8 +777,9 @@ within one bundle window. Fire the withdrawal.
 If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
 
 **Followed by:**
-- Default user / L2: [Case 1a — Run the CLI](#run-the-cli-dry-run-then-real-submit)
-  (dry-run first, then real submit).
+- Default user / L2: [Case 1a Step 2 — Run the CLI](#step-2--run-the-cli-dry-run-then-real-submit)
+  (dry-run first, then real submit; treasury check from Step 1 still
+  applies).
 - Advanced L2 self-deploy: [Case 1b Step L5](#step-l5--run-the-cli-with-explicit-l2).
 - Advanced L1 self-deploy: [Case 8 Step 4](#step-4--preflight-the-cli-dry-run)
   → Step 5.

@@ -12,22 +12,13 @@ new CLI. Every stage of the pipeline is in-process — `--from` composes
 the AN multisig `sendTransaction`, the tool broadcasts it, waits for the
 matching `WithdrawalInitiated` ExtOut event, **resurrects the prover's
 `BridgeState` mirror by reading the deployed `AckiNackiBridge` contract
-at `--bridge-address`** (no local `prover_state.json` needed), polls
-that contract until the covering L1/L2 bundle has landed, produces the
+at `--bridge-address`** , polls that contract until the covering L1/L2 bundle has landed, produces the
 Circuit-4 SHPLONK proof, calls `dry_run_withdraw`, and (unless
 `--dry-run`) submits `withdrawByProof`. **Assumes** the bundle lane
 (Circuits 1A + 2 via `daemon-live`) is running _somewhere_ — not
 necessarily on the same host as the CLI — feeding `verifyBlock`
 transactions to the bridge. That lane is covered in
 [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md).
-
-**Parallel with the pre-CLI flow.** The predecessor runbook
-[`live_withdrawByProof_runbook.md`](../../bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md)
-documents the same six-stage pipeline behind the older `relayer
-withdraw-e2e` subcommand, driven by a separate Python burn script and
-manual coordination. Every case here has a counterpart there; where
-diagnostic signatures overlap, this doc cross-references rather than
-duplicating.
 
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
 > "Covering bundle" = the first bundle whose `key_seq_no ≥ event_seq_no`

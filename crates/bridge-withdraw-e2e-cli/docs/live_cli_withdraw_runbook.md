@@ -12,7 +12,7 @@ The team-run bundle relayer on our server is configured for **L2**
 the pinned `BRIDGE_ADDRESS` in [`config/bridge_config`](../config/bridge_config)
 is that L2 deploy. **All production withdrawals go through L2** — that
 means invoking the CLI with `--anchor-layer 2 --i-know-the-wait` per
-[Case 1 Step L5](#step-l5--run-the-cli-with-explicit-l2).
+[Case 1a](#case-1a--l2-production-path-default-users).
 
 L1-anchoring (stride `W·P = 1024` seq_nos ≈ 5.7 min) exists only as a
 development/testing convenience for advanced users deploying their own
@@ -28,11 +28,11 @@ that testing scenario.
    relayer keeps that contract advancing. You bring your own Sepolia
    burner wallet + AN multisig, source `config/bridge_config`, and
    invoke the CLI **with `--anchor-layer 2 --i-know-the-wait`**
-   ([Case 1 Step L5](#step-l5--run-the-cli-with-explicit-l2)). **You
+   ([Case 1a](#case-1a--l2-production-path-default-users)). **You
    never deploy anything.**
 2. **Advanced user.** Deploy your own `AckiNackiBridge` + run your own
    bundle relayer to exercise the full ecosystem from scratch. L1 or L2
-   is your choice — Case 8 covers L1 (fast, testing only); Case 1
+   is your choice — Case 8 covers L1 (fast, testing only); Case 1b
    covers L2 (production shape). Set `BRIDGE_ADDRESS` in
    `config/bridge_config` to your deploy and follow
    [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
@@ -58,7 +58,8 @@ feeding `verifyBlock` transactions to the bridge.
 > a `layer_hashes` root that `verifyBlock` has already committed).
 > With `W=128, P=8`, an **L1** bundle covers `W·P = 1024` seq_nos
 > (~5.7 min chain-time at 3 seq/s). An **L2** bundle covers
-> `W² = 16384` seq_nos (~91 min chain-time). Case 1 covers the L2 flow.
+> `W² = 16384` seq_nos (~91 min chain-time). Case 1a/1b cover the L2
+> flow.
 
 ---
 
@@ -71,7 +72,8 @@ feeding `verifyBlock` transactions to the bridge.
 - [Timing model](#timing-model)
 - [Wallet setup and bridge config](#wallet-setup-and-bridge-config)
 - [Binary + env prerequisites](#binary--env-prerequisites)
-- [Case 1 — L2 production path: first E2E withdrawal](#case-1--l2-production-path-first-e2e-withdrawal) **(default users start here)**
+- [Case 1a — L2 production path (default users)](#case-1a--l2-production-path-default-users) **(default users start here)**
+- [Case 1b — L2 self-deploy (advanced)](#case-1b--l2-self-deploy-advanced)
 - [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
 - [Case 3 — Event captured but daemon far behind head](#case-3--event-captured-but-daemon-far-behind-head)
 - [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
@@ -366,7 +368,7 @@ deploy already ships in [`config/bridge_config`](../config/bridge_config),
 so `set -a && source config/bridge_config && set +a` is all the CLI
 needs. Because the server relayer is L2, you must invoke the CLI with
 `--anchor-layer 2 --i-know-the-wait` — see
-[Case 1 Step L5](#step-l5--run-the-cli-with-explicit-l2). L1 is not
+[Case 1a](#case-1a--l2-production-path-default-users). L1 is not
 served by the pinned deploy.
 
 **b) Deploy your own bridge + run your own bundle relayer (advanced).**
@@ -466,24 +468,95 @@ disk.
 
 ---
 
-## Case 1 — L2 production path: first E2E withdrawal
+## Case 1a — L2 production path (default users)
 
-**This is the production path** — the pinned team deploy in
-[`config/bridge_config`](../config/bridge_config) is L2-anchored and the
-server-side bundle relayer only runs the L2 lane. Every default user
-lands here.
+**When to use:** You're a default user firing a withdrawal against the
+pinned team L2 deploy that ships in
+[`config/bridge_config`](../config/bridge_config). The server-side
+bundle relayer is already running L2 (`anchor_level=2`, stride
+`W² = 16384` seq_nos ≈ 91 min chain-time) — you deploy nothing, seed
+nothing, run no daemon.
 
-**When to use:** Any withdrawal against the pinned team deploy, or any
-L2 exercise against your own self-deployed bridge.
-`BRIDGE_ANCHOR_LEVEL=2`; bundle stride is `W² = 16384` seq_nos (~91 min
-chain-time) vs L1's 1024 (~5.7 min).
+**Do NOT use `--anchor-layer auto` on L2.** The enricher requires the
+operator to acknowledge the wait budget.
 
-> **Steps L0–L4 are advanced-only** (fresh L2 deploy + your own
-> relayer). Default users pointing at the pinned team deploy **skip
-> straight to** [Step L5](#step-l5--run-the-cli-with-explicit-l2) —
-> the bridge and L2 relayer are already running on our server. See
-> [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
-> for the deploy prerequisites if you're on the advanced path.
+### Run the CLI (dry-run, then real submit)
+
+```bash
+cd crates/bridge-withdraw-e2e-cli
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+set -a && source config/bridge_config && set +a         # pinned L2 BRIDGE_ADDRESS
+
+# Withdrawal identity vars (bring your own)
+export WITHDRAW_FROM=<dapp_id>::<account_id>
+export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json
+export WITHDRAW_TO=0x…
+export WITHDRAW_TO_CHAIN=11155111
+export WITHDRAW_AMOUNT=1.000000
+
+mkdir -p ./work_dir
+TS=$(date +%Y%m%d_%H%M%S)
+
+../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
+  --dry-run \
+  --yes \
+  --from        "$WITHDRAW_FROM" \
+  --from-keys   "$WITHDRAW_FROM_KEYS" \
+  --to          "$WITHDRAW_TO" \
+  --to-chain    "$WITHDRAW_TO_CHAIN" \
+  --amount      "$WITHDRAW_AMOUNT" \
+  --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
+  --anchor-layer 2 \
+  --i-know-the-wait \
+  --rpc-url           "$RPC_URL" \
+  --bridge-address    "$BRIDGE_ADDRESS" \
+  --eth-private-key   "$BURNER_PRIVATE_KEY" \
+  --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
+  --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
+  --params-dir        "$BRIDGE_PARAMS_DIR" \
+  --snark-dir         "./work_dir/shplonk-snark" \
+  --pk-cache-dir      "$BRIDGE_PARAMS_DIR/pk_cache" \
+  --work-dir          "./work_dir" \
+  2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
+```
+
+**Expected dry-run log:**
+
+```
+INFO stage 1/6: preflight
+INFO preflight ok multisig_ecc3=<amount> usdc_bridge=<dapp>::<acc>
+INFO stage 2/6: idempotency (skipped for --dry-run)
+INFO dry-run: skipping burn / capture / prove / submit
+```
+
+Then real submit — drop `--dry-run` and re-run the same invocation:
+
+```
+INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
+INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
+INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
+INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
+INFO chain built: anchor_layer=L2, active_links=1, ...
+INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER VALUE = L1 fallback bug
+```
+
+**Ground-truth:** `layer_idx=1` confirms L2-anchoring. Anything else =
+accidental L1 fallback; investigate before submitting.
+
+**If the enricher times out (120 min):** Server-side daemon never
+landed the covering L2 bundle in 2 h. Bundle-lane issue on our host.
+The CLI exits 12 (ProofFailed — covering-bundle wait is stage 4b of the
+prove path).
+
+---
+
+## Case 1b — L2 self-deploy (advanced)
+
+**When to use:** You're an advanced user standing up your own
+`AckiNackiBridge` + your own L2 bundle relayer end-to-end (production
+shape). Use this for L2 exercises against a bridge you deployed
+yourself. For the L1 smoke-test shape, see
+[Case 8](#case-8--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only).
 
 ### Step L0 — Emit L2 genesis anchors
 
@@ -588,14 +661,14 @@ typical.
 operator to acknowledge the wait budget.
 
 `bridge_config` is a single file — no L1/L2 split on the CLI side. Point
-`BRIDGE_ADDRESS` at the L2 deploy (path a: pinned team L2 deploy; path b:
-your own `BRIDGE_ADDRESS` from `../an-bridge-prover/L2_config/env`) and
-select the layer per-invocation with `--anchor-layer 2`.
+`BRIDGE_ADDRESS` at your own L2 deploy (from
+`../an-bridge-prover/L2_config/env`) and select the layer per-invocation
+with `--anchor-layer 2`.
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
-set -a && source config/bridge_config && set +a         # BRIDGE_ADDRESS must be the L2 deploy
+set -a && source config/bridge_config && set +a         # BRIDGE_ADDRESS = your L2 deploy
 
 # Withdrawal identity vars (bring your own)
 export WITHDRAW_FROM=<dapp_id>::<account_id>
@@ -630,7 +703,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
 ```
 
-**Expected log signature (dry-run, L2):**
+**Expected dry-run log:**
 
 ```
 INFO stage 1/6: preflight
@@ -639,11 +712,7 @@ INFO stage 2/6: idempotency (skipped for --dry-run)
 INFO dry-run: skipping burn / capture / prove / submit
 ```
 
-`--dry-run` at any anchor layer is preflight-only. The L2 enricher /
-covering-bundle wait / Circuit-4 prove log lines all belong to the real
-run below.
-
-Then real submit — drop `--dry-run`:
+Then real submit — drop `--dry-run` and re-run:
 
 ```
 INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
@@ -657,10 +726,10 @@ INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER V
 **Ground-truth:** `layer_idx=1` confirms L2-anchoring. Anything else =
 accidental L1 fallback; investigate before submitting.
 
-**If the enricher times out (120 min):** Daemon never landed the
-covering L2 bundle in 2 h. Bundle-lane issue → check `daemon-live` logs.
-The CLI exits 12 (ProofFailed — covering-bundle wait is stage 4b of the
-prove path).
+**If the enricher times out (120 min):** Your daemon never landed the
+covering L2 bundle in 2 h. Bundle-lane issue → check your
+`daemon-live` logs. The CLI exits 12 (ProofFailed — covering-bundle
+wait is stage 4b of the prove path).
 
 ---
 
@@ -688,8 +757,9 @@ within one bundle window. Fire the withdrawal.
 If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
 
 **Followed by:**
-- Default user / L2: [Case 1 Step L5](#step-l5--run-the-cli-with-explicit-l2)
+- Default user / L2: [Case 1a — Run the CLI](#run-the-cli-dry-run-then-real-submit)
   (dry-run first, then real submit).
+- Advanced L2 self-deploy: [Case 1b Step L5](#step-l5--run-the-cli-with-explicit-l2).
 - Advanced L1 self-deploy: [Case 8 Step 4](#step-4--preflight-the-cli-dry-run)
   → Step 5.
 
@@ -750,7 +820,7 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
 
 - If `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
   only under the advanced (self-deploy) path — see
-  [Case 1](#case-1--l2-production-path-first-e2e-withdrawal) (L2) or
+  [Case 1b](#case-1b--l2-self-deploy-advanced) (L2) or
   [Case 8](#case-8--l1-first-time-e2e-from-a-fresh-deploy-advanced--testing-only)
   (L1) for the deploy sequence. After redeploy, fire a NEW burn (the
   old state-file's dedup tuple stays valid; use `--allow-retry` OR
@@ -932,7 +1002,7 @@ Then prune the `Failed` state file and re-run.
 amount.
 
 **Seed the treasury:** follow
-[Case 1 Step L2](#step-l2--treasury-seed). Scale `AMOUNT` to cover
+[Case 1b Step L2](#step-l2--treasury-seed). Scale `AMOUNT` to cover
 every burn planned for the session (10 USDC is the demo default).
 
 **Remediation:** After deposit, re-run the CLI with `--allow-retry`.
@@ -945,7 +1015,7 @@ component of the check).
 
 > **L1 is testing-only.** The pinned team deploy is L2, and the
 > server-side relayer only runs the L2 lane. Default users MUST use
-> [Case 1](#case-1--l2-production-path-first-e2e-withdrawal). Case 8 is
+> [Case 1a](#case-1a--l2-production-path-default-users). Case 8 is
 > the advanced (self-deploy) fast-lane for smoke-testing your own
 > bridge + relayer with the shorter L1 stride (5.7 min chain-time per
 > bundle vs L2's 91 min); it exists so you can shake out the pipeline
@@ -979,7 +1049,7 @@ PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 
 ### Step 2 — Seed the bridge treasury
 
-Follow [Case 1 Step L2](#step-l2--treasury-seed). Fresh deploy →
+Follow [Case 1b Step L2](#step-l2--treasury-seed). Fresh deploy →
 treasury is 0; the C4 submit will revert `WithdrawTreasuryShortfall`
 on any burn until seeded.
 
@@ -1087,8 +1157,8 @@ cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
 
 ## Case 9 — Sequential L2 withdrawals (stress-test loop)
 
-**When to use:** After Case 1 succeeds, drive 2–3 more burns through
-the same L2 rails.
+**When to use:** After Case 1a (default) or Case 1b (advanced)
+succeeds, drive 2–3 more burns through the same L2 rails.
 
 **Session budget:** ~101 min/bundle + ~5 min per CLI run ≈ ~2 h between
 successful withdrawals; 3 cycles fit in ~6 h.
@@ -1101,14 +1171,15 @@ cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
   'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
   --from-block -1000 | tail -5
 
-# 2. Confirm treasury still funded (seed once at Case 1 Step L2)
+# 2. Confirm treasury still funded (seed once at Case 1b Step L2 for advanced;
+#    default users use the pinned deploy — treasury already seeded)
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 
 # 3. Vary the amount by 1 micro-USDC so the dedup key differs from cycle N-1
 #    (otherwise the CLI refuses exit 3; --allow-retry works too but is blunter).
 export WITHDRAW_AMOUNT=1.00000$N
 
-# 4. Run the CLI (Case 1 Step L5 invocation), wait for its 101-min budget
+# 4. Run the CLI (Case 1a / Case 1b Step L5 invocation), wait for its 101-min budget
 ```
 
 **Watch between cycles:**

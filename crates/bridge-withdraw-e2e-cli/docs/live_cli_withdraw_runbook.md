@@ -45,7 +45,8 @@ matching `WithdrawalInitiated` ExtOut event, **resurrects the prover's
 `BridgeState` mirror by reading the deployed `AckiNackiBridge` contract
 at `--bridge-address`**, polls that contract until the covering L1/L2
 bundle has landed, produces the Circuit-4 SHPLONK proof, calls
-`dry_run_withdraw`, and (unless `--dry-run`) submits `withdrawByProof`.
+`dry_run_withdraw`, and submits `withdrawByProof`. `--dry-run` stops
+after preflight — see [Step 4](#step-4--preflight-the-cli-dry-run).
 **Assumes** the bundle lane (Circuits 1A + 2) is running _somewhere_ —
 either on our server (default user) or on your own host (advanced) —
 feeding `verifyBlock` transactions to the bridge.
@@ -183,8 +184,9 @@ matters for money.
 
 **Rule.** Exit codes 10–13 all leave the AN burn broadcast. The USDC is
 gone from the source multisig regardless of exit code ≥10; the question
-is whether the EVM side saw the withdrawal. `--dry-run` fails at exit
-codes 2, 3, or 13 only — the burn is never broadcast in dry-run mode.
+is whether the EVM side saw the withdrawal. `--dry-run` stops after
+preflight — it can only produce exit codes 0, 2, or 3 (preflight OK,
+preflight refused, or duplicate refused).
 
 ---
 
@@ -200,18 +202,35 @@ collide; anything different (recipient, amount, or chain) does not.
 |--------|----------|-----------------|
 | `Reserved` | idempotency reserve succeeds | dedup tuple, timestamp |
 | `Burned` | multisig `sendTransaction` broadcast | + `an_tx_hash` |
-| `Proved` | Circuit-4 proof produced | + `withdrawal_msg_id`, `block_seq_no`, `block_id` |
-| `Submitted` | EVM `withdrawByProof` sent | + `eth_tx_hash` |
-| `Confirmed` | EVM receipt observed | + `eth_block_number` |
-| `Failed` | any stage errors out | + `stage`, `reason` (no secrets) |
+| `Captured` | `WithdrawalInitiated` event observed | + `withdrawal_msg_id`, `block_seq_no` |
+| `Proved` | Circuit-4 proof produced | (same as Captured) |
+| `Submitted` | EVM `withdrawByProof` returned a tx hash | + `eth_tx_hash` |
+| `Confirmed` | EVM receipt observed | + `eth_tx_hash` |
+| `Failed` | any stage errors out | fields preserved from last successful stage |
 
-**Duplicate refusal (exit 3).** A file exists with status ≠ `Confirmed`
-and ≠ `Failed`. The CLI prints the file path and the recorded stage.
+**Duplicate refusal (exit 3).** A file exists with status other than
+`Failed`. The CLI prints the file path, the recorded stage, and the
+prior AN/ETH tx hashes so an operator can reconcile before retrying.
 
-**`--allow-retry`.** v1 blunt override — deletes the state file and
-proceeds. Use only after manually confirming the earlier attempt is
-terminated (e.g. AN tx reverted; GQL shows no `WithdrawalInitiated`
-message id).
+**`--allow-retry`.** Resume-in-place: the CLI keeps the prior record
+verbatim (preserving `an_tx_hash`, `withdrawal_msg_id`, `block_seq_no`,
+`eth_tx_hash`) and skips any stage that already completed. Concretely:
+- Prior `Burned` / `Captured` / `Proved` → skip burn, resume from
+  capture. The prior AN tx hash is reused, so **the burn is never
+  broadcast twice** (this was a v1 bug — resume used to overwrite the
+  record with a fresh `Reserved`, dropping `an_tx_hash`, and the
+  orchestrator would then unconditionally re-fire `burn::fire`).
+- Prior `Failed` → clean-slate restart. Failed means "we don't know how
+  far we got"; the state file is overwritten and every stage runs from
+  scratch. No flag needed for this case.
+- Prior `Submitted` → **refused even with `--allow-retry`**. There is a
+  broadcast EVM tx whose receipt we never observed; re-broadcasting
+  risks a double payout. Reconcile the `eth_tx_hash` on-chain first,
+  then either wait for confirmation (and rerun; it will become
+  `Confirmed`) or edit the state file to `Failed` manually.
+- Prior `Confirmed` → **refused always**. The withdrawal already paid
+  out. To move funds again, generate a new identity (different amount
+  or recipient).
 
 **Never persisted:** `--from-keys` file contents, `--eth-private-key`,
 any signed messages, any raw witness. State files hold only
@@ -563,19 +582,23 @@ Override with `BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state` in
 **Expected log signature (dry-run OK):**
 
 ```
-INFO preflight: --from-keys mode=0600, owner pubkey resolves via GQL, ECC[3]≥amount
-INFO idempotency: reserved sha256=<hex> at $STATE_DIR/<sha256>.json (dry-run: skipped)
-INFO burn: (dry-run) would broadcast sendTransaction dest=<usdc_bridge>
-INFO capture: (dry-run) would wait for WithdrawalInitiated
-INFO enrich_witness: anchor_layer_mode=Auto, chosen L=1, key_seq_no=<K>
-INFO invoking Circuit4ShplonkPipeline (in-process Poseidon C4 prove → aggregate)
-INFO aggregate-proof subprocess (BridgeWithdrawalAggregatorVerifier) took <N> ms, calldata=<bytes> bytes
-INFO pipeline produced PartnerWithdrawalProof (SHPLONK aggregator calldata)
-INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
+INFO stage 1/6: preflight
+INFO preflight ok multisig_ecc3=<amount> usdc_bridge=<dapp>::<acc>
+INFO stage 2/6: idempotency (skipped for --dry-run)
+INFO dry-run: skipping burn / capture / prove / submit
 ```
 
-Exit 0 → the pipeline is green end-to-end. Any non-zero → jump to the
-corresponding case per [exit-code catalog](#exit-code-catalog).
+`--dry-run` is **preflight-only** — it validates flags, key file perms,
+multisig custodian shape, USDCBridge resolution, and the ECC[3] balance,
+then stops. It does **not** compose the burn message, wait for the
+`WithdrawalInitiated` event, produce the Circuit-4 proof, or call
+`dry_run_withdraw` on the EVM side. Extending the scope to "prove +
+`dry_run_withdraw`, skip only the real submit" is on the roadmap; for
+now, exit 0 here means "argument shape is sane" and nothing more.
+
+Exit 0 → preflight green; drop `--dry-run` when you are ready to
+commit money. Any non-zero → jump to the corresponding case per
+[exit-code catalog](#exit-code-catalog).
 
 ### Step 5 — Real submit
 
@@ -1038,9 +1061,23 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
 ```
 
-**Expected log signature (L2 differences):**
+**Expected log signature (dry-run, L2):**
 
 ```
+INFO stage 1/6: preflight
+INFO preflight ok multisig_ecc3=<amount> usdc_bridge=<dapp>::<acc>
+INFO stage 2/6: idempotency (skipped for --dry-run)
+INFO dry-run: skipping burn / capture / prove / submit
+```
+
+`--dry-run` at any anchor layer is preflight-only. The L2 enricher /
+covering-bundle wait / Circuit-4 prove log lines all belong to the real
+run below.
+
+Then real submit — drop `--dry-run`:
+
+```
+INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
 INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
 INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
@@ -1053,9 +1090,8 @@ accidental L1 fallback; investigate before submitting.
 
 **If the enricher times out (120 min):** Daemon never landed the
 covering L2 bundle in 2 h. Bundle-lane issue → check `daemon-live` logs.
-The CLI exits 11.
-
-Then real submit — drop `--dry-run`.
+The CLI exits 12 (ProofFailed — covering-bundle wait is stage 4b of the
+prove path).
 
 ---
 

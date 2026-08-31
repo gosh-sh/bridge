@@ -129,6 +129,63 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`bridge-withdraw-e2e-cli --allow-retry` now resumes in place
+  instead of overwriting the state file.** v1 used to rewrite the prior
+  record with a fresh `Reserved` on `--allow-retry`, dropping the
+  stored `an_tx_hash`; the orchestrator then unconditionally re-fired
+  `burn::fire`, causing a second multisig `sendTransaction` for the
+  same withdrawal (a double-spend on the AN side, since the multisig
+  has no EVM-style nonce guard). Post-fix, `--allow-retry` keeps the
+  prior record verbatim and the orchestrator skips any stage whose
+  outputs are already on file — burn is never re-broadcast once
+  `an_tx_hash` is set. `Confirmed` and `Submitted` are terminal states
+  that refuse `--allow-retry` outright (`Confirmed` already paid out;
+  `Submitted` has an unresolved in-flight EVM tx that must be
+  reconciled on-chain before any retry). `Failed` still triggers a
+  clean-slate restart. See runbook §Idempotency semantics for the full
+  state transition table.
+
+- **`bridge-withdraw-e2e-cli` idempotency state file only transitions
+  to `Submitted` after `withdrawByProof` returns a tx hash.**
+  Previously the record was flipped to `Submitted` immediately before
+  the `submit_withdraw` call, so an RPC error, wallet reject, or gas
+  estimation failure would leave the on-disk record falsely claiming
+  a tx was broadcast — subsequent runs would refuse-duplicate on
+  `Submitted` even though nothing ever hit Sepolia. Post-fix,
+  `Submitted → Confirmed` are both written only inside the `Paid`
+  branch after the tx hash is in hand.
+
+- **`bridge-withdraw-e2e-cli` prompts before the AN burn unless
+  `--yes` is passed.** The `--yes` and `--non-interactive` flags,
+  previously accepted by clap but never consulted, now gate a live
+  stdin confirmation immediately before `burn::fire`. The prompt
+  prints the source multisig, recipient + chain, USDC amount, target
+  bridge, and anchor-mode wait estimate, then reads y/yes from stdin.
+  Non-interactive stdin (no TTY) without `--yes` refuses with exit 2.
+  `--non-interactive` without `--yes` continues to refuse upstream in
+  `main::dispatch`.
+
+- **`bridge-withdraw-e2e-cli` capture-stage errors now map to exit
+  code 11 (`CaptureTimeout`) instead of 12 (`ProofFailed`).**
+  `capture_targeted_withdrawal_event` failures — GQL unreachable,
+  event never emitted, poll ceiling exceeded — are a
+  reconcile-and-resume situation, not a Circuit-4 prover problem. The
+  prior catch-all `ProofFailed` mapping misled operators into
+  debugging the aggregator subprocess when the burn was in fact
+  bounced or the AN GQL was down. The `wait_for_coverage` step (stage
+  4b) still maps to `ProofFailed` because "waiting for the covering
+  bundle" is a prove-path prerequisite.
+
+- **`bridge-withdraw-e2e-cli --dry-run` docs corrected to
+  preflight-only scope.** The README, runbook Step 4, runbook Case 8,
+  and `scripts/local_smoke.sh` header previously claimed `--dry-run`
+  ran the full pipeline up to and including `dry_run_withdraw`. The
+  code (since the CLI landed) has always stopped after preflight,
+  returning a stub `WithdrawSuccess`. Docs now match the code:
+  argument shape, key perms, single-custodian check, USDCBridge
+  resolution, ECC[3] balance — then stop. Exit codes 10–13 are
+  unreachable under `--dry-run`.
+
 - **`bridge-withdraw-e2e-cli` capture is now multi-user safe.**
   The CLI no longer youngest-picks a shared `USDCBridge → ExtOut` queue
   after firing its burn. Instead it chain-follows the multisig transaction

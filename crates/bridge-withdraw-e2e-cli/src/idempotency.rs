@@ -83,14 +83,27 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
     hex::encode(h.finalize())
 }
 
-/// Try to reserve the record. Returns `Err(DuplicateInFlight)` if a prior
-/// record exists AND its status is not `Failed`. On `Ok`, the returned
-/// [`Record`] is already persisted to disk with `Status::Reserved` — the
-/// caller advances it as stages complete.
-///
-/// `--allow-retry` overrides refuse-duplicate regardless of prior status.
-/// This is the blunt v1 escape hatch; v2's `--resume` will read the prior
-/// record and pick up where it left off.
+/// Try to reserve the record. Behavior:
+/// - No prior record → fresh `Status::Reserved` written and returned.
+/// - Prior `Status::Failed` → treated as a clean slate: overwrite with a
+///   fresh `Reserved`. Failed means "we don't know how far we got"; the
+///   prior stored fields (`an_tx_hash`, `withdrawal_msg_id`, …) may be
+///   stale or absent, so preserving them would risk skipping stages that
+///   never completed.
+/// - Prior `Status::Confirmed` → always refused. The withdrawal already
+///   paid out; retrying it would either be a no-op or a double-broadcast.
+///   To move funds again, use a new identity (different amount/recipient).
+/// - Prior `Status::Submitted` → always refused, even with `--allow-retry`.
+///   The tx was broadcast but we did not observe the receipt; blindly
+///   re-broadcasting is a double-spend risk. Reconcile the prior
+///   `eth_tx_hash` on-chain, then either wait or mark the record `Failed`
+///   manually.
+/// - Any other active status (`Reserved`, `Burned`, `Captured`, `Proved`) →
+///   refused unless `--allow-retry` is set. With the flag, the **prior
+///   record is returned as-is** — `an_tx_hash`, `withdrawal_msg_id`,
+///   `block_seq_no`, `proof_json_path` are all preserved so the
+///   orchestrator can skip stages that already completed. This is v1's
+///   resume path (a `--resume` alias may be added later).
 pub fn reserve(
     state_dir: &Path,
     from: &FromAddress,
@@ -123,18 +136,42 @@ pub fn reserve(
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let prior = read_record(&path)?;
-            if allow_retry || prior.status == Status::Failed {
-                // Overwrite with a fresh Reserved. Keep the same key
-                // (deterministic) so a subsequent lookup still finds us.
-                let record = fresh_reserved_record(&key, from, to, amount);
-                write_record_atomic(state_dir, &path, &record)?;
-                Ok(record)
-            } else {
-                Err(CliError::DuplicateInFlight {
-                    prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-                    prior_tx: prior.an_tx_hash,
-                    prior_msg_id: prior.withdrawal_msg_id,
-                })
+            match prior.status {
+                // Terminal states — refuse regardless of --allow-retry.
+                // Confirmed already paid out; Submitted has an unresolved
+                // in-flight tx and re-broadcasting is a double-spend risk.
+                Status::Confirmed | Status::Submitted => {
+                    Err(CliError::DuplicateInFlight {
+                        prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                        prior_tx: prior.an_tx_hash,
+                        prior_msg_id: prior.withdrawal_msg_id,
+                    })
+                }
+                // Failed → wipe and start fresh (partial state may be
+                // stale; safest is a clean restart).
+                Status::Failed => {
+                    let record = fresh_reserved_record(&key, from, to, amount);
+                    write_record_atomic(state_dir, &path, &record)?;
+                    Ok(record)
+                }
+                // Active resumable states.
+                Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
+                    if allow_retry {
+                        // Resume: return the prior record verbatim so the
+                        // orchestrator can skip stages by inspecting fields
+                        // like `an_tx_hash` / `withdrawal_msg_id`. Do NOT
+                        // overwrite with a fresh Reserved — that would drop
+                        // the stored AN tx hash and cause an unconditional
+                        // re-burn (double-spend on the AN side).
+                        Ok(prior)
+                    } else {
+                        Err(CliError::DuplicateInFlight {
+                            prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                            prior_tx: prior.an_tx_hash,
+                            prior_msg_id: prior.withdrawal_msg_id,
+                        })
+                    }
+                }
             }
         }
         Err(e) => Err(CliError::Preflight {
@@ -350,7 +387,66 @@ mod tests {
             .unwrap();
         let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
             .expect("--allow-retry should override refuse-duplicate");
+        // Prior was Reserved with no downstream fields → status stays Reserved.
         assert_eq!(second.status, Status::Reserved);
+    }
+
+    #[test]
+    fn reserve_with_retry_preserves_prior_fields_for_resume() {
+        // Regression: v1 --allow-retry used to overwrite the prior record
+        // with a fresh Reserved, dropping `an_tx_hash`. That caused the
+        // orchestrator to re-fire burn on a withdrawal that had already
+        // broadcast — a double-spend on the AN side. Resume semantics must
+        // hand the caller back the prior record verbatim.
+        let dir = TempDir::new().unwrap();
+        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        first.status = Status::Burned;
+        first.an_tx_hash = Some("0xdeadbeef".into());
+        update(dir.path(), &first).unwrap();
+
+        let resumed = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
+            .expect("--allow-retry over Burned should resume");
+        assert_eq!(resumed.status, Status::Burned, "prior status preserved");
+        assert_eq!(
+            resumed.an_tx_hash.as_deref(),
+            Some("0xdeadbeef"),
+            "prior an_tx_hash must survive so orchestrator can skip re-burn"
+        );
+    }
+
+    #[test]
+    fn reserve_refuses_confirmed_even_with_retry() {
+        let dir = TempDir::new().unwrap();
+        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        first.status = Status::Confirmed;
+        first.eth_tx_hash = Some("0xabc".into());
+        update(dir.path(), &first).unwrap();
+
+        let attempt = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
+        assert!(
+            matches!(attempt, Err(CliError::DuplicateInFlight { .. })),
+            "Confirmed is terminal — --allow-retry must not resurrect it, got {attempt:?}"
+        );
+    }
+
+    #[test]
+    fn reserve_refuses_submitted_even_with_retry() {
+        // Submitted = we broadcast an EVM tx but never observed the receipt.
+        // Re-broadcasting without reconciling risks paying twice.
+        let dir = TempDir::new().unwrap();
+        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        first.status = Status::Submitted;
+        first.eth_tx_hash = Some("0xpending".into());
+        update(dir.path(), &first).unwrap();
+
+        let attempt = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
+        assert!(
+            matches!(attempt, Err(CliError::DuplicateInFlight { .. })),
+            "Submitted must refuse until reconciled, got {attempt:?}"
+        );
     }
 
     #[test]

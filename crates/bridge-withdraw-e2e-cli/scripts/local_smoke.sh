@@ -3,11 +3,14 @@
 #
 # What it does:
 #   Runs `bridge-withdraw-e2e-cli withdraw --dry-run` against a running
-#   `daemon-live` on the shellnet. The full pipeline executes — preflight,
-#   idempotency reserve (in-memory only for dry-run), burn *composition*,
-#   capture waits, Circuit-4 proof, `dry_run_withdraw` — but neither the
-#   AN burn nor the EVM submit is broadcast. Exit code 0 means every
-#   stage would have succeeded on a real run.
+#   `daemon-live` on the shellnet. `--dry-run` is preflight-only: it
+#   validates flags, key file perms, single-custodian check, USDCBridge
+#   resolution, and the ECC[3] balance, then stops. It does NOT compose
+#   the burn message, wait for the WithdrawalInitiated event, produce the
+#   Circuit-4 proof, or call `dry_run_withdraw` on the EVM side. Exit
+#   code 0 means "argument shape is sane and the source multisig is in a
+#   burnable state", not "every stage of a real run would have
+#   succeeded" — for that, drop `--dry-run` and use `live_smoke.sh`.
 #
 # Coordination with the running daemon:
 #   The relayer daemon-live already owns bundle proving; this CLI just

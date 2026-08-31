@@ -117,7 +117,15 @@ pub enum SubmitStatus {
 
 /// Full pipeline. `main` handles arg parsing, tracing setup, exit-code
 /// mapping, and JSON vs. human output — this fn just runs the ballet.
-pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess> {
+///
+/// `skip_prompt` — bypass the pre-burn confirmation prompt (`--yes`).
+/// `--non-interactive` without `--yes` is rejected upstream in `main`, so
+/// the orchestrator only needs the "may I skip the prompt?" bit here.
+pub async fn run(
+    args: WithdrawArgs,
+    dry_run: bool,
+    skip_prompt: bool,
+) -> CliResult<WithdrawSuccess> {
     // ---- Arg validation (parses raw strings into typed forms) ----
     let from = args::parse_from(&args.from)?;
     let to = args::parse_to(&args.to, args.to_chain)?;
@@ -187,25 +195,54 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
     }
 
     // ---- 3. Burn ----
-    info!("stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)");
-    let context = build_tvm_client(&args.gql_endpoint)?;
-    let bounce = true; // spec default; see burn.rs header comment
-    let burn_receipt = burn::fire(
-        &context,
-        &preflight,
-        &from,
-        &args.from_keys,
-        &to,
-        &amount,
-        bounce,
-    )
-    .await?;
-    info!(an_tx = %burn_receipt.an_tx_hash, "burn broadcast");
-    if let Some(r) = record.as_mut() {
-        r.status = Status::Burned;
-        r.an_tx_hash = Some(burn_receipt.an_tx_hash.clone());
-        idempotency::update(&state_dir, r)?;
-    }
+    // Resume: if the prior record already carries an `an_tx_hash`, the AN
+    // burn has been broadcast at least once. Firing again would be a
+    // double-spend on the source side (the multisig has no "same nonce"
+    // guard the way EVM does — sendTransaction happily authorises a
+    // second transfer). Reuse the prior hash and skip straight to capture.
+    let prior_an_tx = record.as_ref().and_then(|r| r.an_tx_hash.clone());
+    let (an_tx_hash, bounce) = if let Some(existing) = prior_an_tx {
+        info!(
+            an_tx = %existing,
+            prior_status = ?record.as_ref().map(|r| r.status),
+            "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
+        );
+        // `bounce` is not persisted; the true value only matters inside
+        // burn::fire (multisig bounce flag on the composed message).
+        // Downstream, it lands in the summary as informational output;
+        // the default matches spec.
+        (existing, true)
+    } else {
+        // Fresh burn — prompt the operator first. This is the last
+        // reversible moment: after burn::fire returns, the multisig has
+        // authorised the outgoing transfer. `--yes` skips the prompt for
+        // scripts; `--non-interactive` without `--yes` is already refused
+        // in `main::dispatch`, so a live prompt here is safe to block on.
+        if !skip_prompt {
+            confirm_before_burn(&from, &to, &amount, &args, anchor_mode)?;
+        }
+
+        info!("stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)");
+        let context = build_tvm_client(&args.gql_endpoint)?;
+        let bounce = true; // spec default; see burn.rs header comment
+        let burn_receipt = burn::fire(
+            &context,
+            &preflight,
+            &from,
+            &args.from_keys,
+            &to,
+            &amount,
+            bounce,
+        )
+        .await?;
+        info!(an_tx = %burn_receipt.an_tx_hash, "burn broadcast");
+        if let Some(r) = record.as_mut() {
+            r.status = Status::Burned;
+            r.an_tx_hash = Some(burn_receipt.an_tx_hash.clone());
+            idempotency::update(&state_dir, r)?;
+        }
+        (burn_receipt.an_tx_hash, burn_receipt.bounce)
+    };
 
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
@@ -235,7 +272,7 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
     // which by construction is only satisfied by our own broadcast.
     let captured = bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event(
         &gql,
-        &burn_receipt.an_tx_hash,
+        &an_tx_hash,
         &preflight.usdc_bridge_legacy,
         DEFAULT_EVENT_DST,
         &bridge_account_id_hex,
@@ -244,9 +281,13 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         EVENT_POLL_INTERVAL,
     )
     .await
-    .map_err(|e| CliError::ProofFailed {
-        reason: format!("capture_targeted_withdrawal_event: {e}"),
-        source: Some(e),
+    // Capture failures are their own stage (exit 11) — a timeout here
+    // means "AN burn broadcast, event never observed", which is a
+    // reconcile-and-resume situation, not a prover crash. The prior
+    // catch-all `ProofFailed` mapping (exit 12) misled operators into
+    // treating this as a Circuit-4 problem.
+    .map_err(|e| CliError::CaptureTimeout {
+        an_tx: format!("{an_tx_hash} ({e})"),
     })?;
     info!(
         msg_id = %captured.message_id,
@@ -419,11 +460,13 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         })?);
     let bridge = EthBridgeClient::new(args.bridge_address, provider);
 
-    if let Some(r) = record.as_mut() {
-        r.status = Status::Submitted;
-        idempotency::update(&state_dir, r)?;
-    }
-
+    // NB: `Status::Submitted` is written only AFTER `submit_withdraw`
+    // returns with an actual `tx_hash`. Writing it beforehand (as v1
+    // originally did) was misleading — if `submit_withdraw` errored out
+    // before broadcast (RPC unreachable, wallet reject, gas estimation
+    // failure), the on-disk record would falsely claim a tx was in
+    // flight, and the next run would refuse-duplicate on Submitted
+    // instead of allowing a retry.
     let submit = match bridge
         .submit_withdraw(&proof_bytes, &pub_inputs)
         .await
@@ -434,12 +477,26 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
         WithdrawSubmitOutcome::Paid { tx_hash } => {
             let tx = format!("{tx_hash:?}");
             info!(tx = %tx, "withdrawByProof paid out");
+            // Preserve the two-step trail (Submitted → Confirmed) so debug
+            // tools and crash recovery can distinguish "we broadcast" from
+            // "we saw the receipt". Both writes happen post-broadcast, so
+            // the state file never over-claims.
+            if let Some(r) = record.as_mut() {
+                r.status = Status::Submitted;
+                r.eth_tx_hash = Some(tx.clone());
+                idempotency::update(&state_dir, r)?;
+            }
             SubmitSummary {
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
             }
         }
         WithdrawSubmitOutcome::Reverted { reason } => {
+            // Preserve the proof so a follow-up run can re-submit without
+            // re-proving. `proof_json_path` is populated by the aggregator
+            // subprocess if the operator passed `--prover-out-dir`; when
+            // absent (default), the proof lives only in memory and a
+            // retry will re-prove — still deterministic.
             if let Some(r) = record.as_mut() {
                 r.status = Status::Failed;
                 let _ = idempotency::update(&state_dir, r);
@@ -459,8 +516,8 @@ pub async fn run(args: WithdrawArgs, dry_run: bool) -> CliResult<WithdrawSuccess
 
     Ok(WithdrawSuccess {
         burn: BurnSummary {
-            an_tx: burn_receipt.an_tx_hash,
-            bounce: burn_receipt.bounce,
+            an_tx: an_tx_hash,
+            bounce,
             amount: amount.display(),
         },
         capture: CaptureSummary {
@@ -532,6 +589,102 @@ fn default_state_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join(".bridge-withdraw-state")
+}
+
+/// Terminal confirmation before the AN burn. Prints the money-moving
+/// details to stderr, reads a line from stdin, and refuses (Preflight
+/// error, exit 2) unless the user types "y" or "yes" (case-insensitive).
+///
+/// Skipped when `--yes` is set. When stdin is closed / not a TTY, we
+/// treat it as an implicit refusal — the operator should have passed
+/// `--yes` (allowed) or `--non-interactive` (already refused upstream).
+fn confirm_before_burn(
+    from: &args::FromAddress,
+    to: &args::ToAddress,
+    amount: &args::UsdcAmount,
+    args: &WithdrawArgs,
+    anchor_mode: AnchorLayerMode,
+) -> CliResult<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let chain_name = args::SUPPORTED_CHAINS
+        .iter()
+        .find_map(|(id, name)| (*id == to.chain_id).then_some(*name))
+        .unwrap_or("unknown");
+    let wait_hint = match anchor_mode {
+        AnchorLayerMode::Auto => "auto (~6-15 min on L1)",
+        AnchorLayerMode::Explicit(1) => "~6-15 min (L1 stride)",
+        AnchorLayerMode::Explicit(2) => "~91 min chain-time + prover (L2 stride)",
+        AnchorLayerMode::Explicit(n) => {
+            // For L≥3, no shipped relayer advances the anchor — user is on
+            // their own. Say so out loud.
+            let _ = n;
+            "unbounded (no shipped relayer for L≥3)"
+        }
+    };
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr);
+    let _ = writeln!(stderr, "About to withdraw USDC:");
+    let _ = writeln!(stderr, "  from      : {}", from.extended());
+    let _ = writeln!(
+        stderr,
+        "  to        : 0x{} on {} (chain {})",
+        hex::encode(to.address.as_slice()),
+        chain_name,
+        to.chain_id,
+    );
+    let _ = writeln!(stderr, "  amount    : {} USDC", amount.display());
+    let _ = writeln!(stderr, "  bridge    : {}", args.bridge_address);
+    let _ = writeln!(stderr, "  anchor    : {:?} (wait {})", anchor_mode, wait_hint);
+    let _ = writeln!(stderr);
+    let _ = writeln!(stderr, "This will:");
+    let _ = writeln!(
+        stderr,
+        "  1. broadcast a multisig sendTransaction burning {} USDC on Acki Nacki",
+        amount.display(),
+    );
+    let _ = writeln!(stderr, "  2. wait for the covering anchor bundle to land on Sepolia");
+    let _ = writeln!(stderr, "  3. produce a Circuit-4 SHPLONK proof");
+    let _ = writeln!(stderr, "  4. submit withdrawByProof (spends ETH gas)");
+    let _ = writeln!(stderr);
+    let _ = writeln!(
+        stderr,
+        "The AN burn is irreversible once broadcast. Pass --yes to skip this prompt."
+    );
+    let _ = write!(stderr, "Proceed? [y/N]: ");
+    let _ = stderr.flush();
+    drop(stderr);
+
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::Preflight {
+            reason: "stdin is not a TTY — pass --yes to skip confirmation, or run in a terminal"
+                .to_string(),
+            source: None,
+        });
+    }
+
+    let mut line = String::new();
+    let stdin = std::io::stdin();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| CliError::Preflight {
+            reason: format!("failed to read confirmation from stdin: {e}"),
+            source: None,
+        })?;
+    let answer = line.trim().to_ascii_lowercase();
+    if answer == "y" || answer == "yes" {
+        Ok(())
+    } else {
+        Err(CliError::Preflight {
+            reason: format!(
+                "confirmation declined (answered {:?}) — nothing broadcast",
+                answer
+            ),
+            source: None,
+        })
+    }
 }
 
 #[cfg(test)]

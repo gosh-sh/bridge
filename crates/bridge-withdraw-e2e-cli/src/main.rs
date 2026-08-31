@@ -67,6 +67,7 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
     // The prompt itself is orchestrator-owned (it's the last thing before
     // spending money), but the policy check we can front-load here.
     let non_interactive_needs_prompt = cli.non_interactive && !cli.yes;
+    let skip_prompt = cli.yes;
 
     match cli.cmd {
         Command::Withdraw(args) => {
@@ -79,7 +80,7 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
                 });
             }
             let dry_run = args.dry_run;
-            orchestrator::run(args, dry_run).await
+            orchestrator::run(args, dry_run, skip_prompt).await
         }
     }
 }

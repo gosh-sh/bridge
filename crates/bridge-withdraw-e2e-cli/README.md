@@ -90,9 +90,13 @@ bridge-withdraw-e2e-cli withdraw \
 Add `--json` for machine-readable output on stdout (human logs still go
 to stderr).
 
-Add `--dry-run` for a full end-to-end preview: everything up to and
-including `dry_run_withdraw` runs, but neither the AN burn nor the EVM
-submit is broadcast.
+Add `--dry-run` for a preflight-only preview: argument validation, key
+file perms, single-custodian check, USDCBridge resolution, balance
+check, and the idempotency-key digest all run. Nothing else — no burn,
+no capture, no Circuit-4 prove, no `dry_run_withdraw` eth_call. Useful
+for sanity-checking flags and config before an operator-witnessed run;
+extending it to a full "prove but do not submit" preview is on the
+roadmap.
 
 Add `--yes` to skip the confirmation prompt (or `--non-interactive` to
 refuse if a prompt would be needed).

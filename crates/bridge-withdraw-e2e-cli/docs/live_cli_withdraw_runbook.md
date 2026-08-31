@@ -2,23 +2,35 @@
 
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 `bridge-withdraw-e2e-cli` binary against a deployed `AckiNackiBridge` on
-Sepolia. This is the operator-facing counterpart to the daemon: the
-daemon owns the continuous bundle-proving stream; this CLI owns the
-per-withdrawal composition (burn → capture → Circuit-4 SHPLONK proof →
-`withdrawByProof`).
+Sepolia. This CLI owns the per-withdrawal composition (burn → capture
+→ Circuit-4 SHPLONK proof → `withdrawByProof`).
+
+**Two audiences.**
+
+1. **Default user.** Point the CLI at the team-pinned `AckiNackiBridge`
+   already deployed on Sepolia (address ships in
+   [`config/bridge_config`](../config/bridge_config)); a bundle relayer
+   we run on our server keeps that contract advancing. You bring your
+   own Sepolia burner wallet + AN multisig, source `config/bridge_config`,
+   and invoke the CLI. **You never deploy anything.**
+2. **Advanced user.** Deploy your own `AckiNackiBridge` + run your own
+   bundle relayer to exercise the full ecosystem from scratch. Set
+   `BRIDGE_ADDRESS` in `config/bridge_config` to your deploy and follow
+   [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+   for the deploy + relayer setup. Steps 0–3 in Case 1 and Steps L0–L4
+   in Case 8 walk this path.
 
 **Scope of this runbook.** The end-user withdrawal path, driven by the
-new CLI. Every stage of the pipeline is in-process — `--from` composes
-the AN multisig `sendTransaction`, the tool broadcasts it, waits for the
+CLI. Every stage of the pipeline is in-process — `--from` composes the
+AN multisig `sendTransaction`, the tool broadcasts it, waits for the
 matching `WithdrawalInitiated` ExtOut event, **resurrects the prover's
 `BridgeState` mirror by reading the deployed `AckiNackiBridge` contract
-at `--bridge-address`** , polls that contract until the covering L1/L2 bundle has landed, produces the
-Circuit-4 SHPLONK proof, calls `dry_run_withdraw`, and (unless
-`--dry-run`) submits `withdrawByProof`. **Assumes** the bundle lane
-(Circuits 1A + 2 via `daemon-live`) is running _somewhere_ — not
-necessarily on the same host as the CLI — feeding `verifyBlock`
-transactions to the bridge. That lane is covered in
-[`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md).
+at `--bridge-address`**, polls that contract until the covering L1/L2
+bundle has landed, produces the Circuit-4 SHPLONK proof, calls
+`dry_run_withdraw`, and (unless `--dry-run`) submits `withdrawByProof`.
+**Assumes** the bundle lane (Circuits 1A + 2) is running _somewhere_ —
+either on our server (default user) or on your own host (advanced) —
+feeding `verifyBlock` transactions to the bridge.
 
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
 > "Covering bundle" = the first bundle whose `key_seq_no ≥ event_seq_no`
@@ -34,10 +46,10 @@ transactions to the bridge. That lane is covered in
 ## Table of Contents
 
 - [Quick resume checklist (returning mid-flow)](#quick-resume-checklist-returning-mid-flow)
-- [What the CLI does differently from `relayer withdraw-e2e`](#what-the-cli-does-differently-from-relayer-withdraw-e2e)
+- [How the CLI works](#how-the-cli-works)
 - [Exit-code catalog](#exit-code-catalog)
 - [Idempotency semantics](#idempotency-semantics)
-- [Timing model — inherited from the daemon runbook](#timing-model--inherited-from-the-daemon-runbook)
+- [Timing model](#timing-model)
 - [Wallet setup and bridge config](#wallet-setup-and-bridge-config)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1 — First-time E2E from a fresh deploy (optimal sequence)](#case-1--first-time-e2e-from-a-fresh-deploy-optimal-sequence)
@@ -87,18 +99,12 @@ ls -lt ./work_dir/withdraw_smoke_*.log 2>/dev/null | head -3
 
 ---
 
-## What the CLI does differently from `relayer withdraw-e2e`
+## How the CLI works
 
-The predecessor was a daemon subcommand that **captured** a
-`WithdrawalInitiated` event fired independently by
-`python/test_deploy_and_withdraw_only.py`. Coordination was manual
-(baseline-before-burn ordering enforced by
-`launch_withdraw_e2e_real.sh`) to avoid the "baseline excludes our own
-event" trap (Case 2b in the daemon runbook).
-
-The new CLI **fires the burn itself**. The full user input surface —
-source multisig `--from`, owner keyfile `--from-keys`, destination
-`--to --to-chain`, `--amount` — feeds a single in-process pipeline:
+The CLI **fires the burn itself** and drives the withdrawal end-to-end
+in one process. The full user input surface — source multisig `--from`,
+owner keyfile `--from-keys`, destination `--to --to-chain`, `--amount`
+— feeds a single in-process pipeline:
 
 1. **Preflight** — key-file 0600, `--from` is an active
    single-custodian multisig, owner pubkey matches `--from-keys`,
@@ -110,8 +116,7 @@ source multisig `--from`, owner keyfile `--from-keys`, destination
    `USDCBridge.initiateWithdrawal(dstChainId, recipient)` using
    `tvm_client` (no `tvm-cli` shell-out); broadcast; record AN tx hash.
    **Bounce defaults to `true`** so USDC returns to the multisig on any
-   bridge revert (the Python driver used `bounce=false`; the CLI's
-   default is the safer of the two).
+   bridge revert.
 4. **Capture** — wait for the matching `WithdrawalInitiated` ExtOut
    event using `replay_latest = true` (the youngest matching event is
    unambiguously ours because we fired the burn seconds ago).
@@ -121,9 +126,9 @@ source multisig `--from`, owner keyfile `--from-keys`, destination
    `storedLastSeenBlockSeqNo` has advanced past the covering bundle
    boundary (`ceil(burn_seq / stride) * stride`, stride = 1024 for L1,
    16 384 for L2). When it has, `BridgeState::from_contract` builds a
-   byte-for-byte mirror — no local `prover_state.json` needed. The
-   parallel bundle-lane daemon (running anywhere) is what advances the
-   contract; the CLI just waits.
+   byte-for-byte mirror. The bundle-lane relayer (running somewhere,
+   possibly on a different host) is what advances the contract; the
+   CLI just waits.
 6. **Prove** — enrich the resurrected `BridgeState` (single-shot, no
    retry), then produce the Circuit-4 SHPLONK aggregate in-process
    (Poseidon C4 prover) + subprocess (`aggregate-proof`).
@@ -135,10 +140,9 @@ Every stage transition is persisted to a per-withdrawal state file
 leaves a resumable trace (v2: `--resume`). See
 [Idempotency semantics](#idempotency-semantics).
 
-**No baseline-before-burn wrapper needed.** `local_smoke.sh` /
-`live_smoke.sh` under `crates/bridge-withdraw-e2e-cli/scripts/` are
-straight wrappers: source the per-mode env file, export five identity
-vars, invoke the binary.
+`local_smoke.sh` / `live_smoke.sh` under
+`crates/bridge-withdraw-e2e-cli/scripts/` are straight wrappers: source
+`config/bridge_config`, export five identity vars, invoke the binary.
 
 ---
 
@@ -202,24 +206,30 @@ old with no `an_tx_hash` are safe to prune — the burn never happened.
 
 ---
 
-## Timing model — inherited from the daemon runbook
+## Timing model
 
-The CLI does not change the timing math. See the parent runbook's
-[Timing model](../../bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md#timing-model--why-fresh-deploy-demos-need-tight-lookahead)
-section — the L1 fast-case ~17 min and L2 ~101 min figures still apply
-end-to-end because the same subprocess prover does the same C4 work.
+End-to-end wall-time depends on the bundle-lane relayer's cadence
+(which the CLI does not control) and the C4 prover step (which it
+does).
 
-**One structural difference.** With the daemon subcommand, "wait for
-covering bundle" was a manual step between burn and prove — and the
-enricher checked `prover_state.json` on disk. With the CLI, capture
-blocks until `WithdrawalInitiated` is observed, then the CLI polls
-`AckiNackiBridge.storedLastSeenBlockSeqNo()` every 30 s until it has
-advanced past the covering bundle boundary. Total budget: 300 s ExtOut
-capture + 120 min coverage-wait ceiling (matches the daemon-side
-enricher timeout so operator-facing patience is identical). Once
-coverage is observed, `read_full_state` + `BridgeState::from_contract`
-produce the enricher's input in one RPC round-trip, and enrich+prove
-run single-shot. Timeouts still map to exit 11.
+**L1-anchored (stride = 1024 seq_nos ≈ 5.7 min chain-time at 3 seq/s):**
+fast-case ~17 min end-to-end from burn to `withdrawByProof` receipt.
+
+**L2-anchored (stride = 16 384 seq_nos ≈ 91 min chain-time):** ~101 min
+end-to-end (worst case), ~50 min typical.
+
+**Per-stage budgets inside the CLI:**
+
+- Capture (`WithdrawalInitiated` ExtOut): 300 s poll ceiling.
+- Coverage-wait
+  (`AckiNackiBridge.storedLastSeenBlockSeqNo` advances past the
+  covering bundle boundary): 120 min ceiling, polled every 30 s.
+- Enrich + Circuit-4 SHPLONK proof: ~5 min warm PK cache, ~20 min cold.
+
+Once coverage is observed, `read_full_state` +
+`BridgeState::from_contract` produce the enricher's input in one RPC
+round-trip, and enrich+prove run single-shot (no retry). Timeouts map
+to exit 11.
 
 ---
 
@@ -417,6 +427,13 @@ Minimum wall-time demo.
 **Trigger conditions:** Fresh `AckiNackiBridge` deployed; daemon
 cold-started; fresh chain head available.
 
+> **Who runs Steps 0–3?** Only the **advanced** path — you're deploying
+> your own bridge + relayer for full ecosystem testing (see
+> [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)).
+> If you're using the team-pinned deploy in `config/bridge_config` (the
+> default), **skip to [Step 4](#step-4--preflight-the-cli-dry-run)** —
+> the bridge and bundle relayer are already running on our server.
+
 ### Step 0 — Anchor freshness check
 
 ```bash
@@ -452,8 +469,8 @@ seeded.
 
 ### Step 3 — Cold-start the bundle daemon
 
-Follow the parent runbook's
-[Case 1](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#case-1)
+Follow
+[`live_relayer_bridge_verifyBlock_runbook.md` — Case 1](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md#case-1)
 cold-start. Verify within 30 s: log line `seed_policy=Explicit(<seed>)`
 and `prover_state.json` mtime advances.
 
@@ -624,11 +641,12 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
   path (`replay_latest = true`) and pick up the same event. Proof is
   deterministic per `(event, prover_state)`.
 
-- If `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet.
-  Follow the parent runbook's Case 3 remediation — redeploy at a fresh
-  W·P boundary, re-seed daemon, then fire a NEW burn (the old
-  state-file's dedup tuple stays valid; use `--allow-retry` OR change
-  the amount by 1 micro-USDC to sidestep dedup).
+- If `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
+  only under the advanced (self-deploy) path — see
+  [Case 8](#case-8--fresh-l2-deploy-first-e2e-withdrawal) for the deploy
+  sequence. After redeploy, fire a NEW burn (the old state-file's dedup
+  tuple stays valid; use `--allow-retry` OR change the amount by 1
+  micro-USDC to sidestep dedup).
 
 ### Sub-case 3b — Event never observed
 
@@ -698,8 +716,8 @@ df $BRIDGE_PARAMS_DIR/
 revert. State file records `Failed` with `stage=submit` and (when
 available) the decoded revert reason.
 
-**Selector → error mapping:** (same as parent runbook; C4 verifier
-errors are unchanged by the CLI)
+**Selector → error mapping:** (C4 verifier errors are chain-side and
+unchanged by the CLI)
 
 | Selector | Error | Root cause |
 |----------|-------|-----------|
@@ -847,6 +865,14 @@ the demo default.
 exercise. Bundle stride is `W² = 16384` seq_nos (~91 min chain-time)
 vs L1's 1024 (~5.7 min).
 
+> **Advanced-path only.** This entire case walks the self-deploy flow
+> (fresh L2 deploy + your own relayer). Users pointing at the pinned
+> team deploy in `config/bridge_config` never touch Steps L0–L4 — they
+> select L2 per-invocation with `--anchor-layer 2` in
+> [Step L5](#step-l5--run-the-cli-with-explicit-l2). See
+> [`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+> for the deploy prerequisites.
+
 ### Step L0 — Emit L2 genesis anchors
 
 ```bash
@@ -881,7 +907,9 @@ Identical to Case 1 Step 2 + [Case 7](#case-7--withdrawtreasuryshortfall--bridge
 
 ### Step L3 — Cold-start daemon under L2
 
-Follow the parent runbook's Case 8 Step L3; expected log signature:
+Follow the daemon-startup steps in
+[`live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+under the L2 (`anchor_level=2`) configuration; expected log signature:
 
 ```
 INFO daemon-live: anchor_mode=L2, bundle_stride=16384
@@ -1015,9 +1043,7 @@ Start with the Case 5 catalog.
 
 ## L2 timing model
 
-See parent runbook's
-[L2 timing model](../../bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md#l2-timing-model)
-— unchanged by the CLI. Key scalars:
+Key scalars:
 
 - W (layer 1 window size): 128
 - P (bundles per L1 layer): 8
@@ -1025,7 +1051,7 @@ See parent runbook's
 - W² (L2 stride): 16384 seq_nos (~91 min chain-time)
 - Prover wall-time per bundle: ~12 min (warm PK cache)
 - Circuit-4 event proof: ~5 min warm PK, ~20 min cold
-- ENRICH_TIMEOUT: 120 min (post-2026-08-18)
+- Enrich timeout: 120 min
 
 **Consequence for demos:** L2 stress testing is NOT a "quick demo".
 Plan half-day per 3-cycle run.
@@ -1051,7 +1077,7 @@ ls -lt ./work_dir/proof_event_*.json   2>/dev/null | head -3
 ls -lh "$BRIDGE_PARAMS_DIR/pk_cache/" 2>/dev/null
 ```
 
-**Sepolia snapshot:** (same commands as parent runbook)
+**Sepolia snapshot:**
 
 ```bash
 cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
@@ -1131,16 +1157,14 @@ crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with 
 
 **2026-08-25 — CLI first commit** (`9319c9a`)
 `bridge-withdraw-e2e-cli` wired end-to-end: burn + idempotency +
-orchestrator + output. Supersedes the `relayer withdraw-e2e`
-subcommand for end-user withdrawals (the daemon still exposes it for
-smoke testing).
+orchestrator + output.
 
 **2026-08-27 — Helper scripts** (`fe52aac`)
 `scripts/local_smoke.sh` (dry-run) and `scripts/live_smoke.sh` (real
 submit) added; CHANGELOG entry documents env vars, exit codes,
 idempotency semantics.
 
-**Inherited from the parent runbook** (still apply):
+**Chain-side / prover-side incidents that still shape CLI behavior:**
 
 - **2026-08-13 — fire-window gone (`7bb3da9`)** — horizontal-chain
   event proving removed the fire-window constraint. `--anchor-layer

@@ -423,16 +423,6 @@ cargo build --release --bin aggregate-proof
 #   -> ./target/release/aggregate-proof
 ```
 
-> The `bridge-event-halo2-prover` binary is **not** used by the CLI.
-> It is a daemon-only subprocess prover spawned by
-> `SubprocessWithdrawalProver` at
-> `crates/bridge-relayer-daemon/src/withdraw_prover.rs:216-226`, and
-> the only caller is the daemon binary at
-> `crates/bridge-relayer-daemon/src/bin/relayer.rs:1287-1292`. The
-> CLI's `run_once_with_state` path
-> (`crates/bridge-relayer-daemon/src/withdraw_e2e/driver.rs:324` →
-> `Circuit4ShplonkPipeline`) never touches it.
-
 **Env sanity** (run cwd = the CLI crate):
 
 ```bash
@@ -1219,10 +1209,7 @@ crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with 
 ├── params/                                ← BRIDGE_PARAMS_DIR (SRS + pk/vk)
 │   └── pk_cache/                          ← Circuit-4 PK cache
 ├── target/release/
-│   ├── bridge-withdraw-e2e-cli            ← this CLI (built into the sub-workspace)
-│   ├── bridge-event-halo2-prover          ← daemon-only Circuit 4 subprocess (CLI does NOT use it)
-│   └── relayer                            ← daemon-live (owner of L{1,2}_config/)
-├── L1_config/, L2_config/                 ← daemon-only; CLI does NOT read these
+│   └── bridge-withdraw-e2e-cli            ← this CLI (built into the sub-workspace)
 └── bridge-withdraw-e2e-cli/               ← symlink → ../bridge-withdraw-e2e-cli
 
 crates/bridge-evm-aggregator/              ← SHPLONK aggregator
@@ -1244,6 +1231,29 @@ crates/bridge-evm-aggregator/              ← SHPLONK aggregator
 - `work_dir/`, `proofs/` — regeneration is deterministic; ~5 min per
   proof with warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
+  for audit; `Failed` — safe to prune once reconciled; `Reserved` >24 h
+  old with no `an_tx_hash` — safe to prune.
+
+**Do NOT touch between demos:**
+
+- `params/` and `params/pk_cache/` — cold cache costs ~20 min per
+  proof; warm cache is ~5 min.
+ hold no key
+  material)
+
+**Safe to prune between demos:**
+
+- `work_dir/`, `proofs/` — regeneration is deterministic; ~5 min per
+  proof with warm PK cache.
+- `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
+  for audit; `Failed` — safe to prune once reconciled; `Reserved` >24 h
+  old with no `an_tx_hash` — safe to prune.
+
+**Do NOT touch between demos:**
+
+- `params/` and `params/pk_cache/` — cold cache costs ~20 min per
+  proof; warm cache is ~5 min.
+ files with status `Confirmed` — keep
   for audit; `Failed` — safe to prune once reconciled; `Reserved` >24 h
   old with no `an_tx_hash` — safe to prune.
 

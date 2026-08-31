@@ -2,36 +2,44 @@
 
 Part of **PR #36**. `finalizeDeposit` already reads
 `USDCBridge._acceptedBlockHash`. The light client **pushes** proven checkpoint
-hashes into that map (`acceptBlockHashFromLightClient`). These owner calls
-grant that writer and drop the attester/owner path.
+hashes into that map (`acceptBlockHashFromLightClient`).
 
-tvm-sdk#284 (KZG accumulator decider, `accumulator_limbs=12`) **co-deploys
-with this contract** — every AN node in the rollout must already be on that
-opcode. Do this after:
+The **relayer** issues the one-way owner calls. Relayer keys (`AN_KEYS_PATH`)
+must be the contract owner pubkey. tvm-sdk#284 co-deploys with this contract.
 
-1. `EthBeaconLightClient` is deployed (`EthBeaconLightClient_rotate_decider.patch` on `acki-nacki`).
-2. `USDCBridge.setLightClient` points at that address.
-3. `eth-lc-relayer daemon` (built `--features live-submit`, **no** `--mock-prove` / `--dry-run` / `--no-rotate`) has landed at least one real `submitUpdate` (`getHead` moved).
+1. Deploy `EthBeaconLightClient` (`EthBeaconLightClient_rotate_decider.patch`).
+2. Apply `USDCBridge_disable_owner_allows_light_client.patch` so
+   `disableOwnerAnchors` accepts a configured light client (not only an attester
+   quorum).
+3. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
+   `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`).
+4. Run `eth-lc-relayer daemon` (`--features live-submit`, no `--dry-run` /
+   `--mock-prove` / `--no-rotate` / `--no-flip-owner`). After the first accepted
+   `submitUpdate` it calls, in order:
 
 ```text
 USDCBridge.setLightClient(lightClient)
-# confirm: getLightClient() != 0
-# confirm: a checkpoint hash from getHead is isAcceptedBlockHash(l1ChainId, hash)
-
 USDCBridge.disableOwnerAnchors()                 # one-way
-EthBeaconLightClient.disableOwnerRotation()      # one-way; submitRotate is then the only committee writer
+EthBeaconLightClient.disableOwnerRotation()      # one-way
 ```
 
-Both disables are the intended production trust reduction for this deploy, not a
-later milestone.
+State file records `owner_flip_done` so a restart does not resend. One-shot
+without waiting for a tick:
+
+```bash
+eth-lc-relayer flip-owner \
+  --an-usdc-bridge "$AN_USDC_BRIDGE" \
+  --an-usdc-abi-path crates/eth-light-client-relayer/abi/USDCBridge.abi.json \
+  --an-light-client "$AN_LIGHT_CLIENT" …
+```
+
+`--no-flip-owner` is the shadow/laptop opt-out.
 
 Non-checkpoint deposits: after `submitUpdate`, run
-`eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
-(`EthBeaconLightClient.submitAncestry`). That keccak-binds the execution
-parent-hash chain (≤ 31 parents) and writes those hashes into
-`_acceptedBlockHash`. Then `deposit-relayer` can `finalizeDeposit` for a receipt
-in any of those 32 blocks.
+`eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`.
+Then `deposit-relayer` can `finalizeDeposit` for a receipt in any of those 32
+blocks.
 
-Period jumps: the daemon rotates by default. `--no-rotate` is the laptop/shadow
-opt-out. After `disableOwnerRotation()`, a lag past one sync-committee period
-(~27 h) is `reAnchorCommittee`, not `setCommitteeCommitment`.
+Period jumps: the daemon rotates by default. After `disableOwnerRotation()`, a
+lag past one sync-committee period (~27 h) is `reAnchorCommittee`, not
+`setCommitteeCommitment`.

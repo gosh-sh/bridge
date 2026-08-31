@@ -23,6 +23,11 @@ pub struct RelayerConfig {
     /// / `enable_rotate = false` returns [`TickOutcome::RotateRequired`]
     /// instead. Rotate prove is still a ~40 GB n14 job.
     pub enable_rotate: bool,
+    /// After the first accepted `submitUpdate`, call `setLightClient` +
+    /// `disableOwnerAnchors` + `disableOwnerRotation` with the relayer keys
+    /// (must be the owner pubkey). Default **true**. `--no-flip-owner` opts
+    /// out.
+    pub flip_owner: bool,
 }
 
 impl RelayerConfig {
@@ -31,6 +36,7 @@ impl RelayerConfig {
             state_path,
             poll_interval: Duration::from_secs(64),
             enable_rotate: true,
+            flip_owner: true,
         }
     }
 }
@@ -202,6 +208,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 );
                 self.persist()?;
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
+                self.maybe_flip_owner().await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -230,6 +237,41 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 reason,
             }),
         }
+    }
+
+    async fn maybe_flip_owner(&mut self) -> Result<(), RelayerError> {
+        if !self.config.flip_owner || self.state.owner_flip_done {
+            return Ok(());
+        }
+        match self.submitter.flip_owner().await? {
+            SubmitOutcome::Accepted {
+                tx_hash,
+            } => {
+                self.state.owner_flip_done = true;
+                self.persist()?;
+                info!(tx = ?tx_hash.map(hex::encode), "owner flip accepted (disableOwnerAnchors + disableOwnerRotation)");
+            },
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                warn!(
+                    reason,
+                    "owner flip rejected; will retry next accepted update"
+                );
+            },
+            SubmitOutcome::Pending {
+                reason,
+            } => {
+                warn!(
+                    reason,
+                    "owner flip pending; will retry next accepted update"
+                );
+            },
+            other => {
+                warn!(?other, "owner flip unexpected outcome");
+            },
+        }
+        Ok(())
     }
 
     fn ws_lag(&self, update: &FinalityUpdate) -> Option<u64> {
@@ -320,6 +362,49 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(r.state().last_finalized_slot, Some(96));
+        assert!(r.state().owner_flip_done);
+    }
+
+    #[tokio::test]
+    async fn first_tick_flips_owner_on_chain_writers() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        assert!(r.state().owner_flip_done);
+        assert!(mock.light_client_set());
+        assert!(!mock.owner_anchors_enabled());
+        assert!(!mock.owner_rotation_enabled());
+    }
+
+    #[tokio::test]
+    async fn no_flip_owner_leaves_owner_path() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.flip_owner = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        assert!(!r.state().owner_flip_done);
+        assert!(mock.owner_anchors_enabled());
+        assert!(mock.owner_rotation_enabled());
     }
 
     #[tokio::test]

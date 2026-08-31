@@ -31,6 +31,11 @@ pub trait AnSubmitter: Send + Sync {
 
     async fn submit_ancestry(&self, header_rlps: &[Vec<u8>])
         -> Result<SubmitOutcome, RelayerError>;
+
+    /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors`
+    /// (USDCBridge) and `disableOwnerRotation` (EthBeaconLightClient).
+    /// Idempotent.
+    async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
 }
 
 pub struct MockAnSubmitter {
@@ -42,6 +47,9 @@ struct MockInner {
     proven: HashSet<[u8; 32]>,
     period: Option<u64>,
     reject: bool,
+    light_client_set: bool,
+    owner_anchors_enabled: bool,
+    owner_rotation_enabled: bool,
 }
 
 impl MockAnSubmitter {
@@ -52,6 +60,9 @@ impl MockAnSubmitter {
                 proven: HashSet::new(),
                 period: None,
                 reject: false,
+                light_client_set: false,
+                owner_anchors_enabled: true,
+                owner_rotation_enabled: true,
             }),
         }
     }
@@ -76,6 +87,18 @@ impl MockAnSubmitter {
 
     pub fn is_proven(&self, h: &[u8; 32]) -> bool {
         self.inner.lock().unwrap().proven.contains(h)
+    }
+
+    pub fn owner_rotation_enabled(&self) -> bool {
+        self.inner.lock().unwrap().owner_rotation_enabled
+    }
+
+    pub fn owner_anchors_enabled(&self) -> bool {
+        self.inner.lock().unwrap().owner_anchors_enabled
+    }
+
+    pub fn light_client_set(&self) -> bool {
+        self.inner.lock().unwrap().light_client_set
     }
 }
 
@@ -154,6 +177,21 @@ impl AnSubmitter for MockAnSubmitter {
             tx_hash: None,
         })
     }
+
+    async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "flip-owner rejected".into(),
+            });
+        }
+        inner.light_client_set = true;
+        inner.owner_anchors_enabled = false;
+        inner.owner_rotation_enabled = false;
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +239,23 @@ mod ancestry_submit_tests {
             other => panic!("{other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn mock_flip_owner_drops_owner_writers() {
+        let mock = MockAnSubmitter::accepting();
+        assert!(mock.owner_rotation_enabled());
+        match mock.flip_owner().await.unwrap() {
+            SubmitOutcome::Accepted {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert!(mock.light_client_set());
+        assert!(!mock.owner_anchors_enabled());
+        assert!(!mock.owner_rotation_enabled());
+        mock.flip_owner().await.unwrap();
+        assert!(!mock.owner_rotation_enabled());
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +263,7 @@ pub struct AnSubmitConfig {
     pub from: String,
     pub light_client: String,
     pub confirm_timeout_secs: u64,
+    pub usdc_bridge: Option<String>,
 }
 
 pub fn build_submit_params(proof: &[u8], public_inputs: &[u8]) -> serde_json::Value {
@@ -219,6 +275,7 @@ pub fn build_submit_params(proof: &[u8], public_inputs: &[u8]) -> serde_json::Va
 
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: std::sync::Arc<C>,
+    usdc: Option<(String, std::sync::Arc<C>)>,
     config: AnSubmitConfig,
 }
 
@@ -226,8 +283,14 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
     pub fn new(client: std::sync::Arc<C>, config: AnSubmitConfig) -> Self {
         Self {
             client,
+            usdc: None,
             config,
         }
+    }
+
+    pub fn with_usdc(mut self, address: String, client: std::sync::Arc<C>) -> Self {
+        self.usdc = Some((address, client));
+        self
     }
 
     async fn call(
@@ -235,20 +298,30 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         function: &str,
         params: serde_json::Value,
     ) -> Result<SubmitOutcome, RelayerError> {
+        self.call_on(&self.client, &self.config.light_client, function, params)
+            .await
+    }
+
+    async fn call_on(
+        &self,
+        client: &C,
+        to: &str,
+        function: &str,
+        params: serde_json::Value,
+    ) -> Result<SubmitOutcome, RelayerError> {
         let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
-        let to = ExtendedAddress::parse(&self.config.light_client).map_err(RelayerError::from)?;
+        let to = ExtendedAddress::parse(to).map_err(RelayerError::from)?;
         let call = ContractCallRequest {
             from,
             to,
             function: function.to_string(),
             params,
         };
-        let sent = match self.client.call_contract(call).await {
+        let sent = match client.call_contract(call).await {
             Ok(hash) => hash,
             Err(e) => return Ok(classify_call_error(function, &e.to_string())),
         };
-        let receipt = self
-            .client
+        let receipt = client
             .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
             .await?;
         match receipt.status {
@@ -301,6 +374,43 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         let header_rlps: Vec<String> = header_rlps.iter().map(hex::encode).collect();
         self.call("submitAncestry", json!({ "headerRlps": header_rlps }))
             .await
+    }
+
+    async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
+        if let Some((usdc_addr, usdc_client)) = &self.usdc {
+            let lc = ExtendedAddress::parse(&self.config.light_client)
+                .map_err(RelayerError::from)?
+                .workchain_address();
+            match self
+                .call_on(
+                    usdc_client.as_ref(),
+                    usdc_addr,
+                    "setLightClient",
+                    json!({ "lightClient": lc }),
+                )
+                .await?
+            {
+                SubmitOutcome::Accepted {
+                    ..
+                } => {},
+                other => return Ok(other),
+            }
+            match self
+                .call_on(
+                    usdc_client.as_ref(),
+                    usdc_addr,
+                    "disableOwnerAnchors",
+                    json!({}),
+                )
+                .await?
+            {
+                SubmitOutcome::Accepted {
+                    ..
+                } => {},
+                other => return Ok(other),
+            }
+        }
+        self.call("disableOwnerRotation", json!({})).await
     }
 }
 

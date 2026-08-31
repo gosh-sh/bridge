@@ -4,22 +4,23 @@
 //! - `beacon-watch` — fetch `finality_update`, print slots (no prove/submit)
 //! - `prove-one` — subprocess `export_step_vk_blob` (needs Hermez SRS + n14
 //!   RAM)
-//! - `submit-one` / `submit-rotate` — send an existing bundle to AN
+//! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
-//! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2
+//! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
+//!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(feature = "live-submit")]
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use clap::{Parser, Subcommand};
-#[cfg(feature = "live-submit")]
-use eth_light_client_relayer::AnInterfaceSubmitter;
 use eth_light_client_relayer::{
     AnConfig, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter,
     MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock,
     SubprocessProofGenerator, SubprocessProverConfig,
 };
+#[cfg(feature = "live-submit")]
+use eth_light_client_relayer::{AnInterfaceSubmitter, AnSubmitter};
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
@@ -117,6 +118,24 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors` +
+    /// `disableOwnerRotation`. Relayer keys must be the owner pubkey.
+    FlipOwner {
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
+        #[arg(long, env = "AN_USDC_BRIDGE")]
+        an_usdc_bridge: String,
+        #[arg(long, env = "AN_USDC_ABI_PATH")]
+        an_usdc_abi_path: String,
+    },
     /// Long-running fetch → prove → submit loop.
     Daemon {
         #[arg(long, env = "BEACON_URL")]
@@ -136,6 +155,9 @@ enum Cmd {
         /// (tvm-sdk#284 co-deploys with this contract).
         #[arg(long, default_value_t = false)]
         no_rotate: bool,
+        /// Skip the one-way owner flip after the first accepted `submitUpdate`.
+        #[arg(long, default_value_t = false)]
+        no_flip_owner: bool,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -146,6 +168,10 @@ enum Cmd {
         an_light_client: Option<String>,
         #[arg(long, env = "AN_SENDER")]
         an_sender: Option<String>,
+        #[arg(long, env = "AN_USDC_BRIDGE")]
+        an_usdc_bridge: Option<String>,
+        #[arg(long, env = "AN_USDC_ABI_PATH")]
+        an_usdc_abi_path: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_insecure_graphql: bool,
         #[arg(long, default_value_t = 8)]
@@ -253,6 +279,26 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         },
+        Cmd::FlipOwner {
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+            an_usdc_bridge,
+            an_usdc_abi_path,
+        } => {
+            flip_owner_cmd(
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
+                an_usdc_bridge,
+                an_usdc_abi_path,
+            )
+            .await
+        },
         Cmd::Daemon {
             beacon_url,
             state,
@@ -261,11 +307,14 @@ async fn main() -> anyhow::Result<()> {
             mock_prove,
             dry_run,
             no_rotate,
+            no_flip_owner,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
             an_light_client,
             an_sender,
+            an_usdc_bridge,
+            an_usdc_abi_path,
             allow_insecure_graphql,
             backoff_initial_secs,
             backoff_max_secs,
@@ -289,6 +338,12 @@ async fn main() -> anyhow::Result<()> {
             if let Some(v) = an_sender {
                 an.sender = v;
             }
+            if let Some(v) = an_usdc_bridge {
+                an.usdc_bridge = v;
+            }
+            if let Some(v) = an_usdc_abi_path {
+                an.usdc_abi_path = v;
+            }
             run_daemon(
                 beacon_url,
                 state,
@@ -297,6 +352,7 @@ async fn main() -> anyhow::Result<()> {
                 mock_prove,
                 dry_run,
                 !no_rotate,
+                !no_flip_owner,
                 an,
                 allow_insecure_graphql,
                 BackoffConfig {
@@ -441,6 +497,7 @@ async fn submit_one(
             from: an_sender,
             light_client: an_light_client,
             confirm_timeout_secs: 120,
+            usdc_bridge: None,
         });
     match submitter.submit_update(&bundle).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
@@ -489,6 +546,7 @@ async fn submit_rotate(
             from: an_sender,
             light_client: an_light_client,
             confirm_timeout_secs: 120,
+            usdc_bridge: None,
         });
     match submitter.submit_rotate(&bundle).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
@@ -561,6 +619,7 @@ async fn submit_ancestry_cmd(
             from: an_sender,
             light_client: an_light_client,
             confirm_timeout_secs: 120,
+            usdc_bridge: None,
         });
     match submitter.submit_ancestry(&headers).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
@@ -569,6 +628,67 @@ async fn submit_ancestry_cmd(
             info!(n = headers.len(), tx = ?tx_hash.map(hex::encode), "submitAncestry accepted");
         },
         other => anyhow::bail!("submitAncestry: {other:?}"),
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+#[allow(clippy::too_many_arguments)]
+async fn flip_owner_cmd(
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+    _an_usdc_bridge: String,
+    _an_usdc_abi_path: String,
+) -> anyhow::Result<()> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+#[allow(clippy::too_many_arguments)]
+async fn flip_owner_cmd(
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+    an_usdc_bridge: String,
+    an_usdc_abi_path: String,
+) -> anyhow::Result<()> {
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let lc_abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load LC ABI: {e}"))?;
+    let usdc_abi = TvmAckiNacki::load_abi(&an_usdc_abi_path)
+        .map_err(|e| anyhow::anyhow!("load USDC ABI: {e}"))?;
+    let tvm_lc = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url.clone()],
+        keys: keys.clone(),
+        bridge_abi: lc_abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect LC: {e}"))?;
+    let tvm_usdc = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: usdc_abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect USDC: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm_lc), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+            usdc_bridge: Some(an_usdc_bridge.clone()),
+        })
+        .with_usdc(an_usdc_bridge, Arc::new(tvm_usdc));
+    match submitter.flip_owner().await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(tx = ?tx_hash.map(hex::encode), "flip-owner accepted");
+        },
+        other => anyhow::bail!("flip-owner: {other:?}"),
     }
     Ok(())
 }
@@ -582,6 +702,7 @@ async fn run_daemon(
     mock_prove: bool,
     dry_run: bool,
     enable_rotate: bool,
+    flip_owner: bool,
     an: AnConfig,
     allow_insecure: bool,
     backoff: BackoffConfig,
@@ -594,6 +715,7 @@ async fn run_daemon(
     let mut cfg = RelayerConfig::new(state_path.clone());
     cfg.poll_interval = Duration::from_secs(poll_secs);
     cfg.enable_rotate = enable_rotate;
+    cfg.flip_owner = flip_owner;
 
     if dry_run {
         info!("dry-run: MockAnSubmitter (no AN tx)");
@@ -651,14 +773,23 @@ async fn run_daemon(
             .map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
         let tvm = TvmAckiNacki::connect(TvmClientConfig {
             graphql_endpoints: vec![an.graphql_url.clone()],
-            keys,
+            keys: keys.clone(),
             bridge_abi: abi,
         })
         .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
-        let submitter = Arc::new(AnInterfaceSubmitter::new(
-            Arc::new(tvm),
-            an.to_submit_config(),
-        ));
+        let mut submitter = AnInterfaceSubmitter::new(Arc::new(tvm), an.to_submit_config());
+        if an.is_usdc_ready() {
+            let usdc_abi = TvmAckiNacki::load_abi(&an.usdc_abi_path)
+                .map_err(|e| anyhow::anyhow!("load USDC ABI: {e}"))?;
+            let tvm_usdc = TvmAckiNacki::connect(TvmClientConfig {
+                graphql_endpoints: vec![an.graphql_url.clone()],
+                keys,
+                bridge_abi: usdc_abi,
+            })
+            .map_err(|e| anyhow::anyhow!("tvm connect USDC: {e}"))?;
+            submitter = submitter.with_usdc(an.usdc_bridge.clone(), Arc::new(tvm_usdc));
+        }
+        let submitter = Arc::new(submitter);
 
         if mock_prove {
             let relayer =

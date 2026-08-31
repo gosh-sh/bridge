@@ -18,11 +18,13 @@ here and how versions are assigned.
   `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
   not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
-  `submit-ancestry`, `daemon`. Live AN submit is `--features live-submit`. systemd
+  `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
   unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
-  default, `--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
-  Flip (`disableOwnerAnchors` + `disableOwnerRotation`):
-  `scripts/ursus/flip_deposit_to_light_client.md`.
+  default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
+  daemon issues `setLightClient` + `disableOwnerAnchors` +
+  `disableOwnerRotation` (`--no-flip-owner` opts out; one-shot:
+  `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
+  `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into
@@ -36,10 +38,13 @@ here and how versions are assigned.
 
 ### Changed
 
-- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`).
-  `--no-rotate` is the shadow/laptop opt-out. tvm-sdk#284 co-deploys with
-  `EthBeaconLightClient`; the deposit flip calls `USDCBridge.disableOwnerAnchors`
-  and `EthBeaconLightClient.disableOwnerRotation` in the same rollout.
+- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
+  and, after the first accepted `submitUpdate`, issues the one-way owner flip
+  (`USDCBridge.setLightClient` + `disableOwnerAnchors`,
+  `EthBeaconLightClient.disableOwnerRotation`). `--no-rotate` / `--no-flip-owner`
+  are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
+  `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
+  attester quorum exists).
 - `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic

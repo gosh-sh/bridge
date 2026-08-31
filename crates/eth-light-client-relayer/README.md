@@ -31,7 +31,7 @@ eth-lc-relayer beacon-watch --beacon-url https://lodestar-mainnet.chainsafe.io
 
 # 2. Shadow loop (tests / laptop): mock prove + mock AN, no rotate prove
 eth-lc-relayer daemon --beacon-url https://lodestar-mainnet.chainsafe.io \
-  --mock-prove --dry-run --no-rotate --state ./eth-lc-relayer-state.json
+  --mock-prove --dry-run --no-rotate --no-flip-owner --state ./eth-lc-relayer-state.json
 
 # 3. Live systemd: scripts/ursus/eth-light-client-relayer.service
 #    build: cargo build --release --features live-submit
@@ -55,10 +55,16 @@ eth-lc-relayer ancestry-one --beacon-url … \
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
+
+# 8. One-shot owner flip (also done by daemon after the first submitUpdate)
+eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
+  --an-usdc-abi-path ./abi/USDCBridge.abi.json …
 ```
 
-`--no-rotate` opts out of auto `submitRotate`. Rotate is **on** by default;
-tvm-sdk#284 co-deploys with this contract (n14 for the ~40 GB prove).
+`--no-rotate` opts out of auto `submitRotate`. `--no-flip-owner` opts out of the
+one-way owner flip. Both are **on** by default; tvm-sdk#284 co-deploys with this
+contract (n14 for the ~40 GB rotate prove). Relayer keys must be the owner
+pubkey (`AN_USDC_BRIDGE` / `flip-owner`).
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

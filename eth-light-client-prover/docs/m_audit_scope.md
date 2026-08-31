@@ -12,7 +12,7 @@ this list**. It is not a later milestone.
 | AN contract | `contracts/an/EthBeaconLightClient.sol` + `EthKeccak.sol` (patch: `EthBeaconLightClient_rotate_decider.patch`) | committee gate, monotonic head, `acceptBlockHashFromLightClient`, `submitAncestry` |
 | Relayer | `crates/eth-light-client-relayer` | real committee fetch, no silent mock in systemd |
 | Ancestry | `submitAncestry` + `src/header_rlp.rs` + `contracts/an/EthKeccak.sol` | keccak256(header RLP) + parentHash chain, ≤ 31, writes `_acceptedBlockHash` |
-| Deposit flip | `scripts/ursus/flip_deposit_to_light_client.md` | `setLightClient` + `disableOwnerAnchors` + `disableOwnerRotation` are one-way |
+| Deposit flip | `eth-lc-relayer` `flip-owner` / daemon after first `submitUpdate` | `setLightClient` + `disableOwnerAnchors` + `disableOwnerRotation` (one-way; relayer keys = owner) |
 
 Scripts already pinning the rotate blob: `scripts/check_rotate_vkblob_accumulator.sh`.
 Opcode fixture: `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`.

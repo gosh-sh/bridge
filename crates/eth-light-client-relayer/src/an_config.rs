@@ -21,6 +21,10 @@ pub struct AnConfig {
     pub light_client: String,
     #[serde(default)]
     pub sender: String,
+    #[serde(default)]
+    pub usdc_bridge: String,
+    #[serde(default)]
+    pub usdc_abi_path: String,
     #[serde(default = "default_confirm_timeout_secs")]
     pub confirm_timeout_secs: u64,
 }
@@ -33,6 +37,8 @@ impl Default for AnConfig {
             light_client_abi_path: String::new(),
             light_client: String::new(),
             sender: String::new(),
+            usdc_bridge: String::new(),
+            usdc_abi_path: String::new(),
             confirm_timeout_secs: default_confirm_timeout_secs(),
         }
     }
@@ -47,11 +53,20 @@ impl AnConfig {
             && !self.sender.is_empty()
     }
 
+    pub fn is_usdc_ready(&self) -> bool {
+        !self.usdc_bridge.is_empty() && !self.usdc_abi_path.is_empty()
+    }
+
     pub fn to_submit_config(&self) -> AnSubmitConfig {
         AnSubmitConfig {
             from: self.sender.clone(),
             light_client: self.light_client.clone(),
             confirm_timeout_secs: self.confirm_timeout_secs,
+            usdc_bridge: if self.usdc_bridge.is_empty() {
+                None
+            } else {
+                Some(self.usdc_bridge.clone())
+            },
         }
     }
 

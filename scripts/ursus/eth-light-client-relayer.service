@@ -8,7 +8,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/bridge-e2e
 EnvironmentFile=/home/ubuntu/bridge-e2e/config/eth-light-client-relayer.env
 Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
-# Live loop (no --dry-run / --mock-prove / --no-rotate). Binary must be
+# Live loop (no --dry-run / --mock-prove / --no-rotate / --no-flip-owner). Binary must be
 # built with `--features live-submit`. Shadow: add those flags here.
 # Rotate is on by default (tvm-sdk#284 co-deploys); n14 for the prove.
 ExecStart=/home/ubuntu/bridge-e2e/bin/eth-lc-relayer daemon \

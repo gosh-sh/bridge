@@ -21,6 +21,9 @@ pub struct RelayerState {
     pub updates_applied: u64,
     /// Period the daemon refused to cross without a rotate proof.
     pub rotate_pending_period: Option<u64>,
+    /// Relayer already issued the one-way owner flip.
+    #[serde(default)]
+    pub owner_flip_done: bool,
 }
 
 impl RelayerState {

@@ -6,7 +6,9 @@
 //! default (`--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
 //! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
-//! `finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
+//! `finalizeDeposit` flip: the daemon issues `setLightClient` +
+//! `disableOwnerAnchors` + `disableOwnerRotation` after the first accepted
+//! update (`--no-flip-owner` opts out).
 
 pub mod an_config;
 pub mod ancestry;

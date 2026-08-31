@@ -1,0 +1,19 @@
+diff --git a/contracts/exchange/USDCBridge.sol b/contracts/exchange/USDCBridge.sol
+--- a/contracts/exchange/USDCBridge.sol
++++ b/contracts/exchange/USDCBridge.sol
+@@
+-    /// @notice Permanently gives up the owner's ability to admit anchors
+-    ///         directly, leaving `attestBlockHash` as the only writer. This is
+-    ///         the call that turns the trust assumption from "the owner key" into
+-    ///         "M of N attester keys" — until it is made, the attester set is
+-    ///         decoration, because the owner can still admit any hash alone.
+-    /// @dev One-way, with no re-enable: a switch back would leave the owner key
+-    ///      on the path regardless of its position. Requires a usable attester
+-    ///      set first, so this cannot brick the only working writer.
+     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
+         require(
+-            _attesterThreshold != 0 && _attesterThreshold <= _attesterCount,
++            _lightClient != address(0)
++                || (_attesterThreshold != 0 && _attesterThreshold <= _attesterCount),
+             ERR_BAD_ATTESTER_CONFIG
+         );

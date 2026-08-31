@@ -121,6 +121,80 @@ impl HttpBeaconSource {
     }
 }
 
+/// Execution-layer JSON-RPC (`eth_getBlockByHash`) for header RLP.
+pub struct EthExecutionRpc {
+    client: Client,
+    url: String,
+}
+
+impl EthExecutionRpc {
+    pub fn new(url: impl Into<String>) -> Result<Self, RelayerError> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| RelayerError::beacon(e.to_string()))?;
+        Ok(Self {
+            client,
+            url: url.into(),
+        })
+    }
+
+    pub async fn header_rlp(&self, block_hash: [u8; 32]) -> Result<Vec<u8>, RelayerError> {
+        let hx = format!("0x{}", hex::encode(block_hash));
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByHash",
+            "params": [hx, false]
+        });
+        let resp = self
+            .client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("eth_getBlockByHash: {e}")))?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("eth_getBlockByHash json: {e}")))?;
+        let result = v
+            .get("result")
+            .ok_or_else(|| RelayerError::beacon("eth_getBlockByHash missing result"))?;
+        if result.is_null() {
+            return Err(RelayerError::beacon(format!("unknown block {hx}")));
+        }
+        crate::header_rlp::encode_header_rlp(result)
+    }
+
+    /// Checkpoint header first, then parents, ≤ `max` (≤ 32).
+    pub async fn ancestry_headers(
+        &self,
+        checkpoint: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        let max = max.clamp(2, 32);
+        let mut headers = Vec::new();
+        let mut h = checkpoint;
+        for _ in 0..max {
+            let rlp = self.header_rlp(h).await?;
+            let got = crate::header_rlp::keccak256(&rlp);
+            if got != h {
+                return Err(RelayerError::other(
+                    "eth_getBlockByHash RLP does not keccak to the requested hash",
+                ));
+            }
+            let parent = crate::header_rlp::rlp_parent_hash(&rlp)?;
+            headers.push(rlp);
+            if headers.len() >= max {
+                break;
+            }
+            h = parent;
+        }
+        Ok(headers)
+    }
+}
+
 fn hex32_exec(s: &str) -> Result<[u8; 32], RelayerError> {
     let raw = hex::decode(s.trim_start_matches("0x"))
         .map_err(|e| RelayerError::beacon(format!("hex: {e}")))?;

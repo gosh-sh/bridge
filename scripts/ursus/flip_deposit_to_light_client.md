@@ -20,12 +20,12 @@ USDCBridge.setLightClient(lightClient)
 USDCBridge.disableOwnerAnchors()   # one-way
 ```
 
-Non-checkpoint deposits: `eth-lc-relayer ancestry-one` must pass for that
-execution hash (parent chain of the proven checkpoint epoch) before
-`deposit-relayer` submits `finalizeDeposit`. After the flip, only hashes the
-light client pushed are accepted — checkpoint coverage is 1/32 until
-`submitAncestry` is compiled into `EthBeaconLightClient` (parent-hash chain
-is already implemented off-chain in this crate).
+Non-checkpoint deposits: after `submitUpdate`, run
+`eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
+(`EthBeaconLightClient.submitAncestry`). That keccak-binds the execution
+parent-hash chain (≤ 31 parents) and writes those hashes into
+`_acceptedBlockHash`. Then `deposit-relayer` can `finalizeDeposit` for a receipt
+in any of those 32 blocks.
 
 `--enable-rotate` / `submit-rotate` stay off until #284 is everywhere. Period
 jumps without rotate: owner `setCommitteeCommitment` or `reAnchorCommittee`

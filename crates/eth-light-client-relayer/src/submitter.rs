@@ -1,4 +1,5 @@
-//! AN `EthBeaconLightClient` submit (`submitUpdate` / `submitRotate`).
+//! AN `EthBeaconLightClient` submit (`submitUpdate` / `submitRotate` /
+//! `submitAncestry`).
 
 use std::{collections::HashSet, sync::Mutex};
 
@@ -27,6 +28,9 @@ pub trait AnSubmitter: Send + Sync {
         &self,
         bundle: &RotateProofBundle,
     ) -> Result<SubmitOutcome, RelayerError>;
+
+    async fn submit_ancestry(&self, header_rlps: &[Vec<u8>])
+        -> Result<SubmitOutcome, RelayerError>;
 }
 
 pub struct MockAnSubmitter {
@@ -64,6 +68,14 @@ impl MockAnSubmitter {
 
     pub fn proven_count(&self) -> usize {
         self.inner.lock().unwrap().proven.len()
+    }
+
+    pub fn mark_proven(&self, h: [u8; 32]) {
+        self.inner.lock().unwrap().proven.insert(h);
+    }
+
+    pub fn is_proven(&self, h: &[u8; 32]) -> bool {
+        self.inner.lock().unwrap().proven.contains(h)
     }
 }
 
@@ -117,6 +129,77 @@ impl AnSubmitter for MockAnSubmitter {
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
+    }
+
+    async fn submit_ancestry(
+        &self,
+        header_rlps: &[Vec<u8>],
+    ) -> Result<SubmitOutcome, RelayerError> {
+        let checkpoint = crate::header_rlp::link_headers(header_rlps)?;
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "submitAncestry rejected".into(),
+            });
+        }
+        if !inner.proven.contains(&checkpoint) {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "ERR_UNKNOWN_CHECKPOINT".into(),
+            });
+        }
+        for rlp in &header_rlps[1..] {
+            inner.proven.insert(crate::header_rlp::keccak256(rlp));
+        }
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod ancestry_submit_tests {
+    use super::*;
+    use crate::header_rlp::{keccak256, link_headers};
+
+    fn two_headers() -> (Vec<u8>, Vec<u8>) {
+        let mut p = vec![0xf8, 33, 0xa0];
+        p.extend(std::iter::repeat_n(0x01, 32));
+        let p_hash = keccak256(&p);
+        let mut c = vec![0xf8, 33, 0xa0];
+        c.extend_from_slice(&p_hash);
+        (c, p)
+    }
+
+    #[tokio::test]
+    async fn mock_submit_ancestry_admits_parents() {
+        let (c, p) = two_headers();
+        let ckpt = keccak256(&c);
+        let parent = keccak256(&p);
+        let mock = MockAnSubmitter::accepting();
+        mock.mark_proven(ckpt);
+        match mock.submit_ancestry(&[c.clone(), p.clone()]).await.unwrap() {
+            SubmitOutcome::Accepted {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert!(mock.is_proven(&parent));
+        assert_eq!(link_headers(&[c, p]).unwrap(), ckpt);
+    }
+
+    #[tokio::test]
+    async fn mock_submit_ancestry_unknown_checkpoint() {
+        let (c, p) = two_headers();
+        let mock = MockAnSubmitter::accepting();
+        let out = mock.submit_ancestry(&[c, p]).await.unwrap();
+        match out {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains("UNKNOWN_CHECKPOINT"), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }
 
@@ -208,6 +291,16 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             build_submit_params(&bundle.proof, &bundle.public_inputs),
         )
         .await
+    }
+
+    async fn submit_ancestry(
+        &self,
+        header_rlps: &[Vec<u8>],
+    ) -> Result<SubmitOutcome, RelayerError> {
+        crate::header_rlp::link_headers(header_rlps)?;
+        let header_rlps: Vec<String> = header_rlps.iter().map(hex::encode).collect();
+        self.call("submitAncestry", json!({ "headerRlps": header_rlps }))
+            .await
     }
 }
 

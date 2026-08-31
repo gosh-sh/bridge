@@ -26,9 +26,8 @@ follow-up ticket.
 5. Sepolia (or local) `deposit` whose receipt is **in that checkpoint block**
    → `deposit-relayer prove-one` → `finalizeDeposit` ACCEPTED.
 6. For a deposit in a non-checkpoint block of the same epoch:
-   `eth-lc-relayer ancestry-one --checkpoint-slot S --deposit-hash 0x…`
-   must exit 0. Until `submitAncestry` is on-chain, only the checkpoint hash
-   itself is in `_acceptedBlockHash`.
+   `eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
+   then `finalizeDeposit`. `ancestry-one` is the read-only check.
 7. Period boundary (optional, needs tvm-sdk#284 on every node):
    `eth-lc-relayer daemon --enable-rotate` **or** `submit-rotate` from
    `rotate_tree_n8` `EMIT_VKBLOB=1` (~40 GB n14).

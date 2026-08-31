@@ -16,9 +16,9 @@ use clap::{Parser, Subcommand};
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::AnInterfaceSubmitter;
 use eth_light_client_relayer::{
-    AnConfig, BackoffConfig, BeaconSource, HttpBeaconSource, MockAnSubmitter, MockProofGenerator,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock, SubprocessProofGenerator,
-    SubprocessProverConfig,
+    AnConfig, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter,
+    MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock,
+    SubprocessProofGenerator, SubprocessProverConfig,
 };
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
@@ -97,6 +97,25 @@ enum Cmd {
         checkpoint_slot: u64,
         #[arg(long)]
         deposit_hash: String,
+    },
+    /// Fetch execution header RLPs and call `submitAncestry`.
+    SubmitAncestry {
+        #[arg(long, env = "ETH_RPC_URL")]
+        eth_rpc_url: String,
+        #[arg(long)]
+        checkpoint_hash: String,
+        #[arg(long, default_value_t = 32)]
+        max_headers: usize,
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
     },
     /// Long-running fetch → prove → submit loop.
     Daemon {
@@ -211,6 +230,28 @@ async fn main() -> anyhow::Result<()> {
             checkpoint_slot,
             deposit_hash,
         } => ancestry_one(beacon_url, checkpoint_slot, deposit_hash).await,
+        Cmd::SubmitAncestry {
+            eth_rpc_url,
+            checkpoint_hash,
+            max_headers,
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+        } => {
+            submit_ancestry_cmd(
+                eth_rpc_url,
+                checkpoint_hash,
+                max_headers,
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
+            )
+            .await
+        },
         Cmd::Daemon {
             beacon_url,
             state,
@@ -455,6 +496,78 @@ async fn submit_rotate(
             info!(period = bundle.period, tx = ?tx_hash.map(hex::encode), "submitRotate accepted");
         },
         other => anyhow::bail!("submitRotate: {other:?}"),
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+#[allow(clippy::too_many_arguments)]
+async fn submit_ancestry_cmd(
+    eth_rpc_url: String,
+    checkpoint_hash: String,
+    max_headers: usize,
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+) -> anyhow::Result<()> {
+    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
+    let checkpoint: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let headers = EthExecutionRpc::new(eth_rpc_url)?
+        .ancestry_headers(checkpoint, max_headers)
+        .await?;
+    info!(
+        n = headers.len(),
+        "fetched ancestry headers (rebuild with --features live-submit to submit)"
+    );
+    let _ = headers;
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+#[allow(clippy::too_many_arguments)]
+async fn submit_ancestry_cmd(
+    eth_rpc_url: String,
+    checkpoint_hash: String,
+    max_headers: usize,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
+    let checkpoint: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let headers = EthExecutionRpc::new(eth_rpc_url)?
+        .ancestry_headers(checkpoint, max_headers)
+        .await?;
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+        });
+    match submitter.submit_ancestry(&headers).await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(n = headers.len(), tx = ?tx_hash.map(hex::encode), "submitAncestry accepted");
+        },
+        other => anyhow::bail!("submitAncestry: {other:?}"),
     }
     Ok(())
 }

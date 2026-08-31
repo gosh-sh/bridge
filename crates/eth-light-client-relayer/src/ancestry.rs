@@ -3,8 +3,10 @@
 //! A light-client `submitUpdate` anchors one execution `block_hash` (the
 //! checkpoint). Every other block in that epoch is covered iff it sits on the
 //! execution **parent-hash chain** ending at that checkpoint (at most 31
-//! parents). The Halo2 step circuit does not prove this; the relayer (and
-//! later `submitAncestry` on `EthBeaconLightClient`) does.
+//! parents). The Halo2 step circuit does not prove this;
+//! `EthBeaconLightClient.submitAncestry` keccak-binds the header RLPs on-chain.
+//! This module is the off-chain check (`ancestry-one`); `header_rlp` builds
+//! the payload `submit-ancestry` sends.
 
 /// Execution payload parent link (`eth/v2/beacon/blocks` body).
 #[derive(Clone, Debug, PartialEq, Eq)]

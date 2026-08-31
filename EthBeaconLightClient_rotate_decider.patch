@@ -1,12 +1,14 @@
 diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
 new file mode 100644
-index 000000000..019682c5e
+index 000000000..5ae655699
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,937 @@
+@@ -0,0 +1,920 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
++
++import "./EthKeccak.sol";
 +
 +/// @notice Sink for the canonicality anchor the light client proves. The
 +///         `USDCBridge` implements this so a proven finalized execution block
@@ -42,21 +44,10 @@ index 000000000..019682c5e
 +///             checkpoint; advanced by the rotate proof (future writer, see
 +///             `setCommitteeCommitment`).
 +///
-+///         Known scope limit (M5): the proof anchors the *finalized checkpoint*
-+///         block's execution hash (one execution hash per 32-slot epoch). A
-+///         deposit sitting in a non-checkpoint block is covered only once an
-+///         ancestry/receipts proof ties it to an anchored head — a later
-+///         milestone. Until then this is an accepted coverage regression vs the
-+///         attester MVP: the relayer submits deposits whose block the light
-+///         client has anchored (checkpoint blocks only).
-+///
-+///         Head is skip-forward: a later checkpoint may be submitted without
-+///         the skipped ones. A skipped checkpoint *of the current committee*
-+///         can still be late-registered (`submitUpdate` records the exec hash
-+///         without moving the head back). After `submitRotate` the previous
-+///         committee is no longer accepted, so a gap that spans a rotation
-+///         waits for the ancestry milestone. Continuous every-checkpoint
-+///         anchoring is required for 1/32 coverage, not for head liveness.
++///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
++///         hash (1/32). `submitAncestry` walks that block's execution parent-hash
++///         chain (keccak256(header RLP) + RLP `parentHash`, ≤ 31 parents) and
++///         pushes those hashes into the same `_acceptedBlockHash` sink.
 +contract EthBeaconLightClient {
 +    string constant version = "0.1.0";
 +
@@ -67,7 +58,7 @@ index 000000000..019682c5e
 +    uint constant bitCntAddress = 256;
 +    uint128 constant HeadUpdatedEmit = 701;
 +    uint128 constant CommitteeRotatedEmit = 702;
-+    uint128 constant CommitteeReAnchoredEmit = 703;
++    uint128 constant AncestryAcceptedEmit = 704;
 +
 +    // Error codes (kept clear of the shared USDCBridgeErrors range 204..229).
 +    uint16 constant ERR_NOT_OWNER          = 209;
@@ -80,8 +71,9 @@ index 000000000..019682c5e
 +    uint16 constant ERR_STALE_UPDATE       = 244;
 +    uint16 constant ERR_STALE_PERIOD       = 245;
 +    uint16 constant ERR_OWNER_ROTATION_DISABLED = 246;
-+    uint16 constant ERR_REANCHOR_NOT_ARMED = 247;
-+    uint16 constant ERR_REANCHOR_NOOP      = 248;
++    uint16 constant ERR_UNKNOWN_CHECKPOINT = 249;
++    uint16 constant ERR_BAD_ANCESTRY       = 250;
++    uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
 +
 +    event HeadUpdated(
 +        uint64  finalizedSlot,
@@ -94,10 +86,9 @@ index 000000000..019682c5e
 +        uint256 fromCommitteeCommitment,
 +        uint256 toCommitteeCommitment
 +    );
-+    event CommitteeReAnchored(
-+        uint64  period,
-+        uint256 fromCommitteeCommitment,
-+        uint256 toCommitteeCommitment
++    event AncestryAccepted(
++        uint256 checkpointHash,
++        uint64  hashesAdded
 +    );
 +
 +    /// @notice Deposit-style struct of the 10 proven public inputs
@@ -178,15 +169,15 @@ index 000000000..019682c5e
 +    // the weak-subjectivity checkpoint's period.
 +    uint64 _committeePeriod;
 +
-+    // Whether the owner may still advance the committee via the *routine*
-+    // `setCommitteeCommitment` path. True while bootstrapping; `disableOwnerRotation()`
-+    // clears it permanently. After that the permissionless writer is `submitRotate`,
-+    // and the only owner committee writer left is the exceptional WS `reAnchorCommittee`.
-+    // One-way on purpose (mirrors USDCBridge's `_ownerAnchorsEnabled`).
++    // Whether the owner may still advance the committee directly via
++    // `setCommitteeCommitment`, bypassing the rotate proof. True while
++    // bootstrapping (before the rotate VkBlob is emitted / while syncing from the
++    // checkpoint); `disableOwnerRotation()` clears it permanently, which is the
++    // step that reduces the committee-chain trust assumption from "owner key" to
++    // "the rotate proof". One-way on purpose (mirrors USDCBridge's
++    // `_ownerAnchorsEnabled`): a re-enable switch would leave the owner key on
++    // the path regardless.
 +    bool _ownerRotationEnabled = true;
-+
-+    // How many times `reAnchorCommittee` has fired (telemetry / alerting).
-+    uint64 _reAnchorsApplied;
 +
 +    // Canonicality registry: proven finalized execution block hashes.
 +    mapping(uint256 => bool) _provenExecutionBlockHash;
@@ -230,12 +221,10 @@ index 000000000..019682c5e
 +    // Light-client update (consumer side of opcode 0xC7 0x4A)
 +    // ========================================================
 +
-+    /// @notice Verifies a beacon sync-step proof and registers the finalized
-+    ///         execution block hash as canonical. If `finalizedSlot` is newer
-+    ///         than the head, the head advances; if it is older and the hash is
-+    ///         unseen, the hash is late-registered without moving the head
-+    ///         (recovery for a skipped checkpoint in the current committee).
-+    ///         Fully permissionless: the proof is the authorization.
++    /// @notice Verifies a beacon sync-step proof and, if it advances the head,
++    ///         registers the finalized execution block hash as canonical. Fully
++    ///         permissionless: the proof is the authorization, a bad proof only
++    ///         wastes the light client's own gas.
 +    /// @param proof        — SHPLONK proof bytes (no header), the `proof_cell`
 +    ///                        operand of ZKHALO2VERIFYWITHVK.
 +    /// @param publicInputs — the circuit instance column: 10 × 32-byte LE Fr in
@@ -251,13 +240,8 @@ index 000000000..019682c5e
 +        // committee (rotate ↔ step join).
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-+        // Skip-forward head; late-register a skipped checkpoint of the *current*
-+        // committee (slot < head, hash unseen). Same-slot replay and already-
-+        // proven hashes revert. After rotate, previous-committee proofs fail
-+        // ERR_WRONG_COMMITTEE — that gap waits for ancestry.
-+        bool advance = pi.finalizedSlot > _finalizedSlot;
-+        bool unseen = !_provenExecutionBlockHash[pi.executionBlockHash];
-+        require(advance || (unseen && pi.finalizedSlot < _finalizedSlot), ERR_STALE_UPDATE);
++        // Monotonic head — reject stale / replayed updates.
++        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
 +
 +        // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
 +        // multi-second WASM extern that vastly exceeds the external-message
@@ -270,30 +254,17 @@ index 000000000..019682c5e
 +
 +        ensureBalance();
 +
-+        // Register the exec hash on both the advance and late-register paths.
-+        _provenExecutionBlockHash[pi.executionBlockHash] = true;
++        // Advance head + register the canonical execution block hash.
++        _finalizedSlot = pi.finalizedSlot;
++        _finalizedBeaconRoot = pi.finalizedBeaconRoot;
++        _finalizedExecutionBlockHash = pi.executionBlockHash;
 +        _updatesApplied += 1;
++        _pushExecHash(pi.executionBlockHash);
 +
-+        // Push the anchor into the deposit path so `finalizeDeposit` can consult
-+        // it synchronously from its own storage (TVM messaging is async, so the
-+        // registry has to live on the consumer side).
-+        if (_usdcBridge != address(0)) {
-+            IAcceptedBlockHashSink(_usdcBridge).acceptBlockHashFromLightClient{
-+                value: 1 vmshell,
-+                bounce: false,
-+                flag: 1
-+            }(_l1ChainId, pi.executionBlockHash);
-+        }
-+
-+        if (advance) {
-+            _finalizedSlot = pi.finalizedSlot;
-+            _finalizedBeaconRoot = pi.finalizedBeaconRoot;
-+            _finalizedExecutionBlockHash = pi.executionBlockHash;
-+            address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
-+            emit HeadUpdated{dest: addrExtern}(
-+                pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
-+            );
-+        }
++        address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
++        emit HeadUpdated{dest: addrExtern}(
++            pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
++        );
 +    }
 +
 +    // ========================================================
@@ -304,8 +275,7 @@ index 000000000..019682c5e
 +    ///         proof. This is what makes the committee chain trustless from the
 +    ///         weak-subjectivity checkpoint: `submitUpdate` only trusts a
 +    ///         committee equal to `_currentCommittee`, and this is the only
-+    ///         permissionless way that value moves (owner `reAnchorCommittee` is
-+    ///         the exceptional WS hatch after `disableOwnerRotation`).
++    ///         permissionless way that value moves.
 +    ///
 +    ///         The rotate proof (`eth-light-client-prover` recursive rotate, M6)
 +    ///         establishes, all bound in-circuit, that (a) the committee whose
@@ -362,6 +332,56 @@ index 000000000..019682c5e
 +    }
 +
 +    // ========================================================
++    // Epoch ancestry (31/32 non-checkpoint execution hashes)
++    // ========================================================
++
++    /// @notice Pushes the execution parent-hash chain of an already-proven
++    ///         checkpoint into `_provenExecutionBlockHash` / `USDCBridge`.
++    ///         `headerRlps[0]` must keccak256 to a proven checkpoint; each next
++    ///         header's keccak256 must equal the previous header's RLP
++    ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
++    ///         Permissionless: the keccak + parent links are the authorization.
++    function submitAncestry(bytes[] headerRlps) public {
++        require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
++        require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
++        tvm.accept();
++        uint256 checkpoint = EthKeccak.hash(headerRlps[0]);
++        require(_provenExecutionBlockHash[checkpoint], ERR_UNKNOWN_CHECKPOINT);
++        uint256 want = EthKeccak.rlpParentHash(headerRlps[0]);
++        uint64 added = 0;
++        uint i;
++        for (i = 1; i < headerRlps.length; i++) {
++            uint256 h = EthKeccak.hash(headerRlps[i]);
++            require(h == want, ERR_BAD_ANCESTRY);
++            if (!_provenExecutionBlockHash[h]) {
++                _pushExecHash(h);
++                added += 1;
++            }
++            want = EthKeccak.rlpParentHash(headerRlps[i]);
++        }
++        ensureBalance();
++        address addrExtern = address.makeAddrExtern(AncestryAcceptedEmit, bitCntAddress);
++        emit AncestryAccepted{dest: addrExtern}(checkpoint, added);
++    }
++
++    function _pushExecHash(uint256 h) private {
++        // Duplicate writes are no-ops so `submitAncestry` can re-walk a chain.
++        if (_provenExecutionBlockHash[h]) {
++            return;
++        }
++        _provenExecutionBlockHash[h] = true;
++        // Push into the deposit path so `finalizeDeposit` can consult the
++        // hash synchronously from its own storage (TVM messaging is async).
++        if (_usdcBridge != address(0)) {
++            IAcceptedBlockHashSink(_usdcBridge).acceptBlockHashFromLightClient{
++                value: 1 vmshell,
++                bounce: false,
++                flag: 1
++            }(_l1ChainId, h);
++        }
++    }
++
++    // ========================================================
 +    // Admin
 +    // ========================================================
 +
@@ -379,9 +399,11 @@ index 000000000..019682c5e
 +    }
 +
 +    /// @notice Bootstraps / owner-advances the trusted sync-committee commitment.
-+    ///         Routine path, gated by `_ownerRotationEnabled`. After
-+    ///         `disableOwnerRotation()` use `reAnchorCommittee` for WS recovery
-+    ///         — this function reverts `ERR_OWNER_ROTATION_DISABLED`.
++    ///         This is the trust seam that `submitRotate` replaces: while
++    ///         `_ownerRotationEnabled` the owner may set the committee directly
++    ///         (weak-subjectivity checkpoint, or syncing before the rotate VkBlob
++    ///         is emitted). `disableOwnerRotation()` turns this off permanently,
++    ///         leaving the rotate proof as the only committee-advance path.
 +    /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
 +    /// @param period             — the period it belongs to (rotate monotonicity baseline).
 +    function setCommitteeCommitment(uint256 committeeCommitment, uint64 period)
@@ -393,53 +415,17 @@ index 000000000..019682c5e
 +        _committeePeriod = period;
 +    }
 +
-+    /// @notice Permanently drops the *routine* owner committee path
-+    ///         (`setCommitteeCommitment`). After this, `submitRotate` is the only
-+    ///         permissionless writer; the owner retains `reAnchorCommittee` as the
-+    ///         exceptional weak-subjectivity recovery hop (logged, does not write
-+    ///         exec hashes). This is the call that turns everyday committee
-+    ///         advance from "trusted by the owner key" into "the rotate proof".
-+    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors).
-+    ///      Requires the committee to be bootstrapped first. Do not call until
-+    ///      the opcode decider is on every node; the relayer SLA still matters
-+    ///      because re-anchor is a trust hop, not a substitute for liveness.
++    /// @notice Permanently gives up the owner's ability to advance the committee
++    ///         directly, leaving `submitRotate` (the rotate proof) as the only
++    ///         writer. This is the call that turns the committee chain from
++    ///         "trusted by the owner key" into "trustless from the checkpoint".
++    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors):
++    ///      a switch back would leave the owner key on the path. Requires the
++    ///      committee to be bootstrapped first, so this cannot brick rotation.
 +    function disableOwnerRotation() public onlyOwnerPubkey accept {
 +        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
 +        ensureBalance();
 +        _ownerRotationEnabled = false;
-+    }
-+
-+    /// @notice Weak-subjectivity recovery: owner sets a fresh committee after
-+    ///         `disableOwnerRotation()`, when `submitRotate` cannot trustlessly
-+    ///         bridge a gap of more than one period. Not the routine bootstrap
-+    ///         path (`setCommitteeCommitment`); an exceptional, logged hop that
-+    ///         reintroduces owner trust for one checkpoint. Does NOT write
-+    ///         execution-block hashes — those still require a step proof.
-+    ///         Source the new commitment from ≥ 2 independent checkpoint-sync
-+    ///         providers (M0 §7).
-+    /// @dev Armed only after disable (`ERR_REANCHOR_NOT_ARMED` otherwise).
-+    ///      `period` must not go backwards. Same committee+period reverts
-+    ///      `ERR_REANCHOR_NOOP`.
-+    /// @param committeeCommitment — Poseidon commitment of the new WS committee.
-+    /// @param period             — period it belongs to (must be ≥ current).
-+    function reAnchorCommittee(uint256 committeeCommitment, uint64 period)
-+        public onlyOwnerPubkey accept
-+    {
-+        require(!_ownerRotationEnabled, ERR_REANCHOR_NOT_ARMED);
-+        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
-+        require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
-+        require(period >= _committeePeriod, ERR_STALE_PERIOD);
-+        require(
-+            committeeCommitment != _currentCommittee || period != _committeePeriod,
-+            ERR_REANCHOR_NOOP
-+        );
-+        ensureBalance();
-+        uint256 from = _currentCommittee;
-+        _currentCommittee = committeeCommitment;
-+        _committeePeriod = period;
-+        _reAnchorsApplied += 1;
-+        address addrExtern = address.makeAddrExtern(CommitteeReAnchoredEmit, bitCntAddress);
-+        emit CommitteeReAnchored{dest: addrExtern}(period, from, committeeCommitment);
 +    }
 +
 +    // ========================================================
@@ -478,17 +464,15 @@ index 000000000..019682c5e
 +        return (_l1ChainId, _usdcBridge, _ownerPubkey);
 +    }
 +
-+    /// @notice The committee-chain trust state. While `ownerRotationEnabled` the
-+    ///         effective trust root is the owner key. After disable, everyday
-+    ///         advance is the rotate proof; `reAnchorsApplied` counts exceptional
-+    ///         WS hops (should stay 0 under a live relayer SLA).
++    /// @notice The committee-chain trust state. `ownerRotationEnabled` is the one
++    ///         that matters: while true the effective trust root for the committee
++    ///         is the owner key regardless of the rotate proof.
 +    function getCommitteeState() external view returns (
 +        uint256 currentCommittee,
 +        uint64  committeePeriod,
-+        bool    ownerRotationEnabled,
-+        uint64  reAnchorsApplied
++        bool    ownerRotationEnabled
 +    ) {
-+        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled, _reAnchorsApplied);
++        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled);
 +    }
 +
 +    function getVersion() external pure returns (string, string) {
@@ -874,8 +858,7 @@ index 000000000..019682c5e
 +    //   yet trustless (see `submitRotate`). Keep the owner bootstrap path
 +    //   (`setCommitteeCommitment`) as the committee trust root and do NOT call
 +    //   `disableOwnerRotation()` until every validating node ships the opcode
-+    //   decider extension (tvm-sdk#284). Header byte 11 is `accumulator_limbs
-+    //   = 12`; `scripts/check_rotate_vkblob_accumulator.sh` refuses a 0.
++    //   decider extension (tvm-sdk#284).
 +    //
 +    // To rotate: regenerate the fixture in acki-nacki-bridge on a big-RAM host
 +    //   (cd eth-light-client-prover &&
@@ -940,4 +923,232 @@ index 000000000..019682c5e
 +        hex"6aea68296f4a0897b605822a0eeed71ff792f33743087061161b1a05d935c910d6d1dc4324f5d9f620651e1b69a741c809039ad952c9087ccc2c80e3"
 +        hex"f777139301f8f8d9815f643f8cb700170d8df1ad05c6c97d5ee676103eece5e0c843d3e7a7d067be1db4780f96d9ff24ce910e6c79c0bf0bdd3cf950"
 +        hex"629e30320eb8d8f8dde915c7e4e14d55a1ec3501592f317e1d8a6e69fc0134bfd416636e694d680917cf3ee2bf8523f10a22090c";
++}
+
+diff --git a/contracts/exchange/EthKeccak.sol b/contracts/exchange/EthKeccak.sol
+new file mode 100644
+index 000000000..c040bca56
+--- /dev/null
++++ b/contracts/exchange/EthKeccak.sol
+@@ -0,0 +1,221 @@
++pragma gosh-solidity >=0.76.1;
++
++/// @notice Keccak-256 over a byte string (Ethereum `keccak256`) and the
++///         parentHash extractor for an execution block-header RLP list.
++///         TVM has no keccak builtin (`tvm.hash` is SHA-256 of a cell).
++///         Vectors: keccak256("") = c5d24601…d85a470, keccak256("abc") =
++///         4e03657a…2d6c45 (same as the relayer's tiny-keccak tests).
++library EthKeccak {
++    function hash(bytes data) internal pure returns (uint256) {
++        uint64[] st;
++        uint i;
++        for (i = 0; i < 25; i++) {
++            st.push(0);
++        }
++        TvmSlice s = data.toSlice();
++        uint8[] buf;
++        while (true) {
++            if (s.bits() < 8) {
++                if (s.refs() == 0) {
++                    break;
++                }
++                s = s.loadRef().toSlice();
++                continue;
++            }
++            buf.push(uint8(s.loadUint(8)));
++            if (buf.length == 136) {
++                st = _absorb(st, buf);
++                st = _keccakf(st);
++                buf = emptyBuf();
++            }
++        }
++        buf.push(0x01);
++        while (buf.length < 136) {
++            buf.push(0);
++        }
++        buf[buf.length - 1] = uint8(buf[buf.length - 1] | 0x80);
++        st = _absorb(st, buf);
++        st = _keccakf(st);
++        return _squeeze32(st);
++    }
++
++    /// @dev First RLP item of an Ethereum block header is `parentHash` (32 bytes).
++    function rlpParentHash(bytes header) internal pure returns (uint256) {
++        TvmSlice s = header.toSlice();
++        require(s.bits() >= 8, 250);
++        uint8 p = uint8(s.loadUint(8));
++        uint skip;
++        if (p <= 0xf7) {
++            skip = 0;
++        } else {
++            skip = uint(p - 0xf7);
++        }
++        uint k;
++        for (k = 0; k < skip; k++) {
++            require(s.bits() >= 8, 250);
++            s.loadUint(8);
++        }
++        require(s.bits() >= 8, 250);
++        require(uint8(s.loadUint(8)) == 0xa0, 250);
++        uint256 out = 0;
++        for (k = 0; k < 32; k++) {
++            require(s.bits() >= 8, 250);
++            out = (out << 8) | uint256(uint8(s.loadUint(8)));
++        }
++        return out;
++    }
++
++    function emptyBuf() private pure returns (uint8[]) {
++        uint8[] b;
++        return b;
++    }
++
++    // TVM copies dynamic arrays on call; return the mutated state.
++    function _absorb(uint64[] st, uint8[] buf) private pure returns (uint64[]) {
++        uint i;
++        uint j;
++        for (i = 0; i < 17; i++) {
++            uint64 lane = 0;
++            for (j = 0; j < 8; j++) {
++                lane |= uint64(buf[i * 8 + j]) << uint64(8 * j);
++            }
++            st[i] = st[i] ^ lane;
++        }
++        return st;
++    }
++
++    function _squeeze32(uint64[] st) private pure returns (uint256 out) {
++        uint i;
++        uint j;
++        for (i = 0; i < 4; i++) {
++            uint64 lane = st[i];
++            for (j = 0; j < 8; j++) {
++                // Lane is little-endian; hash byte 0 is the uint256 MSB.
++                out = (out << 8) | uint256(uint8(lane >> uint64(8 * j)));
++            }
++        }
++    }
++
++    function _rotl(uint64 x, uint8 n) private pure returns (uint64) {
++        if (n == 0) {
++            return x;
++        }
++        return (x << n) | (x >> (64 - n));
++    }
++
++    function _rc(uint r) private pure returns (uint64) {
++        if (r == 0) { return 0x0000000000000001; }
++        if (r == 1) { return 0x0000000000008082; }
++        if (r == 2) { return 0x800000000000808a; }
++        if (r == 3) { return 0x8000000080008000; }
++        if (r == 4) { return 0x000000000000808b; }
++        if (r == 5) { return 0x0000000080000001; }
++        if (r == 6) { return 0x8000000080008081; }
++        if (r == 7) { return 0x8000000000008009; }
++        if (r == 8) { return 0x000000000000008a; }
++        if (r == 9) { return 0x0000000000000088; }
++        if (r == 10) { return 0x0000000080008009; }
++        if (r == 11) { return 0x000000008000000a; }
++        if (r == 12) { return 0x000000008000808b; }
++        if (r == 13) { return 0x800000000000008b; }
++        if (r == 14) { return 0x8000000000008089; }
++        if (r == 15) { return 0x8000000000008003; }
++        if (r == 16) { return 0x8000000000008002; }
++        if (r == 17) { return 0x8000000000000080; }
++        if (r == 18) { return 0x000000000000800a; }
++        if (r == 19) { return 0x800000008000000a; }
++        if (r == 20) { return 0x8000000080008081; }
++        if (r == 21) { return 0x8000000000008080; }
++        if (r == 22) { return 0x0000000080000001; }
++        return 0x8000000080008008;
++    }
++
++    function _piln(uint i) private pure returns (uint) {
++        if (i == 0) { return 10; }
++        if (i == 1) { return 7; }
++        if (i == 2) { return 11; }
++        if (i == 3) { return 17; }
++        if (i == 4) { return 18; }
++        if (i == 5) { return 3; }
++        if (i == 6) { return 5; }
++        if (i == 7) { return 16; }
++        if (i == 8) { return 8; }
++        if (i == 9) { return 21; }
++        if (i == 10) { return 24; }
++        if (i == 11) { return 4; }
++        if (i == 12) { return 15; }
++        if (i == 13) { return 23; }
++        if (i == 14) { return 19; }
++        if (i == 15) { return 13; }
++        if (i == 16) { return 12; }
++        if (i == 17) { return 2; }
++        if (i == 18) { return 20; }
++        if (i == 19) { return 14; }
++        if (i == 20) { return 22; }
++        if (i == 21) { return 9; }
++        if (i == 22) { return 6; }
++        return 1;
++    }
++
++    function _rotc(uint i) private pure returns (uint8) {
++        if (i == 0) { return 1; }
++        if (i == 1) { return 3; }
++        if (i == 2) { return 6; }
++        if (i == 3) { return 10; }
++        if (i == 4) { return 15; }
++        if (i == 5) { return 21; }
++        if (i == 6) { return 28; }
++        if (i == 7) { return 36; }
++        if (i == 8) { return 45; }
++        if (i == 9) { return 55; }
++        if (i == 10) { return 2; }
++        if (i == 11) { return 14; }
++        if (i == 12) { return 27; }
++        if (i == 13) { return 41; }
++        if (i == 14) { return 56; }
++        if (i == 15) { return 8; }
++        if (i == 16) { return 25; }
++        if (i == 17) { return 43; }
++        if (i == 18) { return 62; }
++        if (i == 19) { return 18; }
++        if (i == 20) { return 39; }
++        if (i == 21) { return 61; }
++        if (i == 22) { return 20; }
++        return 44;
++    }
++
++    function _keccakf(uint64[] st) private pure returns (uint64[]) {
++        uint round;
++        uint i;
++        uint j;
++        for (round = 0; round < 24; round++) {
++            uint64[5] bc;
++            for (i = 0; i < 5; i++) {
++                bc[i] = st[i] ^ st[i + 5] ^ st[i + 10] ^ st[i + 15] ^ st[i + 20];
++            }
++            for (i = 0; i < 5; i++) {
++                uint64 tt = bc[(i + 4) % 5] ^ _rotl(bc[(i + 1) % 5], 1);
++                for (j = 0; j < 25; j += 5) {
++                    st[j + i] = st[j + i] ^ tt;
++                }
++            }
++            uint64 t = st[1];
++            for (i = 0; i < 24; i++) {
++                j = _piln(i);
++                uint64 tmp = st[j];
++                st[j] = _rotl(t, _rotc(i));
++                t = tmp;
++            }
++            for (j = 0; j < 25; j += 5) {
++                for (i = 0; i < 5; i++) {
++                    bc[i] = st[j + i];
++                }
++                for (i = 0; i < 5; i++) {
++                    st[j + i] = st[j + i] ^ ((~bc[(i + 1) % 5]) & bc[(i + 2) % 5]);
++                }
++            }
++            st[0] = st[0] ^ _rc(round);
++        }
++        return st;
++    }
 +}

@@ -18,11 +18,18 @@ here and how versions are assigned.
   `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
   not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
-  `daemon`. Live AN submit is `--features live-submit`. systemd unit is the
-  live loop (no hardcoded `--dry-run --mock-prove`). `--enable-rotate` /
-  `submit-rotate` need n14 + tvm-sdk#284. `finalizeDeposit` flip:
-  `scripts/ursus/flip_deposit_to_light_client.md`. Epoch ancestry:
-  `ancestry-one` (execution parent-hash chain). Shellnet E2E:
+  `submit-ancestry`, `daemon`. Live AN submit is `--features live-submit`. systemd
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`).
+  `--enable-rotate` / `submit-rotate` need n14 + tvm-sdk#284.
+  `finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
+  Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
+  headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
+  proven checkpoint (≤ 31 parents), then pushes those hashes into
+  `USDCBridge._acceptedBlockHash`. Operator: `eth-lc-relayer submit-ancestry
+  --eth-rpc-url … --checkpoint-hash 0x…` (`ETH_RPC_URL`). Contracts:
+  `contracts/an/EthKeccak.sol`, `contracts/an/EthBeaconLightClient.sol`
+  (`EthBeaconLightClient_rotate_decider.patch` for the acki-nacki tree).
+  Shellnet E2E:
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 

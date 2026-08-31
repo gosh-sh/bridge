@@ -23,6 +23,8 @@ reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "charset",
 ] }
+rlp = "0.5"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 acki-nacki-interface = { path = "../acki-nacki-interface" }
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
     "std",

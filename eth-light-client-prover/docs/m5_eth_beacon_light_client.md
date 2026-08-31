@@ -150,10 +150,10 @@ check, E2E runbook, audit scope, and the `finalizeDeposit` flip procedure are
 
 **Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
 `finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
-A deposit whose receipt sits in any of the other 31 blocks of that epoch
-is covered off-chain by `eth-lc-relayer ancestry-one` (execution parent-hash
-chain, ≤ 31 parents). On-chain `_acceptedBlockHash` still holds only the
-checkpoint until `submitAncestry` is compiled into `EthBeaconLightClient`.
+`submitAncestry(bytes[] headerRlps)` walks that checkpoint's execution
+parent-hash chain (`keccak256(header RLP)` + RLP `parentHash`, ≤ 31 parents)
+and pushes each hash into `USDCBridge._acceptedBlockHash`. Operator:
+`eth-lc-relayer submit-ancestry`.
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
 be submitted without the skipped ones. A skipped checkpoint **of the current
@@ -205,6 +205,4 @@ path in `examples/rotate_tree_n8.rs`, and by `embed_rotate_vk_blob.py` /
 
 - **rotate ↔ step**: `submitRotate` is wired; emission-sound only after
   tvm-sdk#284 on every node (`disableOwnerRotation`).
-- **Ancestry on-chain**: `ancestry-one` is the off-chain parent-hash check;
-  `submitAncestry` on `EthBeaconLightClient` still has to push the 31 hashes.
 - **Testnet E2E**: follow `scripts/ursus/eth_lc_shellnet_e2e.md`.

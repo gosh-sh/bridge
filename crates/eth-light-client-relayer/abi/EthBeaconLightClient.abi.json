@@ -21,11 +21,18 @@
 			],
 			"outputs": []
 		},
-		{
+        {
 			"name": "submitRotate",
 			"inputs": [
 				{"name":"proof","type":"bytes"},
 				{"name":"publicInputs","type":"bytes"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "submitAncestry",
+			"inputs": [
+				{"name":"headerRlps","type":"bytes[]"}
 			],
 			"outputs": []
 		},
@@ -50,6 +57,14 @@
 			]
 		}
 	],
-	"events": [],
+	"events": [
+		{
+			"name": "AncestryAccepted",
+			"inputs": [
+				{"name":"checkpointHash","type":"uint256"},
+				{"name":"hashesAdded","type":"uint64"}
+			]
+		}
+	],
 	"fields": []
 }

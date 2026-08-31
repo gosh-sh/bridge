@@ -6,8 +6,9 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 `EthBeaconLightClient.submitUpdate` on Acki Nacki.
 
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
-Epoch ancestry (31/32): `eth-lc-relayer ancestry-one`. Committee rotate:
-`submit-rotate` / `--enable-rotate` (n14 + tvm-sdk#284 on every node).
+Epoch ancestry (31/32 on-chain): `eth-lc-relayer submit-ancestry` →
+`EthBeaconLightClient.submitAncestry`. Read-only check: `ancestry-one`.
+Committee rotate: `submit-rotate` / `--enable-rotate` (n14 + tvm-sdk#284).
 
 ## How it runs
 
@@ -48,6 +49,11 @@ eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree …
 # 6. Is this deposit's execution hash on the checkpoint parent chain?
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
+
+# 7. Write the 31 parent hashes on-chain (needs ETH_RPC_URL + live-submit)
+eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
+  --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
+  --an-light-client 'dapp::account' --an-sender 'dapp::account'
 ```
 
 `--enable-rotate` is **off** by default until tvm-sdk#284 is on every node.

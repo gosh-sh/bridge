@@ -496,11 +496,42 @@ cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 # Compare against your planned WITHDRAW_AMOUNT (µUSDC, 6 decimals: 1 USDC = 1000000).
 ```
 
-If the balance is short, seed it yourself — same procedure as
-[Case 1b Step L2](#step-l2--treasury-seed) (mint → approve → deposit →
-confirm). Scale `AMOUNT` to cover the withdrawal.
+If the balance already covers `WITHDRAW_AMOUNT`, skip to Step 2.
 
-### Step 2 — Run the CLI (dry-run, then real submit)
+### Step 2 — Seed the treasury (only if Step 1 came up short)
+
+Scale `AMOUNT` to cover your planned withdrawal (10 USDC is the demo
+default and comfortably covers a 1 USDC burn):
+
+```bash
+export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
+export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
+export AMOUNT=10000000    # 10.000000 USDC
+
+# 1. Mint test USDC
+cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 2. Approve bridge
+cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
+cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
+  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
+
+# 4. Confirm
+cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
+```
+
+**Why dummy AN destination is safe on shellnet:** no live AN-side
+listener consumes the phantom `Deposit` event. **Do NOT use** on a
+live bridge with an active AN-side indexer — you'll create a ghost
+credit.
+
+### Step 3 — Run the CLI (dry-run, then real submit)
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
@@ -777,9 +808,9 @@ within one bundle window. Fire the withdrawal.
 If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
 
 **Followed by:**
-- Default user / L2: [Case 1a Step 2 — Run the CLI](#step-2--run-the-cli-dry-run-then-real-submit)
-  (dry-run first, then real submit; treasury check from Step 1 still
-  applies).
+- Default user / L2: [Case 1a Step 3 — Run the CLI](#step-3--run-the-cli-dry-run-then-real-submit)
+  (dry-run first, then real submit; treasury precheck from Step 1
+  still applies).
 - Advanced L2 self-deploy: [Case 1b Step L5](#step-l5--run-the-cli-with-explicit-l2).
 - Advanced L1 self-deploy: [Case 8 Step 4](#step-4--preflight-the-cli-dry-run)
   → Step 5.

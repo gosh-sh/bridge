@@ -3,16 +3,14 @@
 # WHAT IT IS
 # ----------
 # Consolidated env file for the withdraw-e2e CLI. Carries every parameter
-# the CLI itself reads via clap `env` attrs (see
-# `bridge-withdraw-e2e-cli/src/args.rs`), and nothing else.
+# the CLI itself reads via clap `env` attrs (see `src/args.rs`), and
+# nothing else. Single file; no per-mode split.
 #
-# Unlike `shellnet.common` + `L{1,2}_config/env` (which target the bundle
-# daemon and its deploy state), `bridge_config` targets ONLY the CLI. It
-# does not source `shellnet.common` and deliberately omits daemon-only
-# settings — no `BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`, or
-# `BRIDGE_BK_SET_CONFIG`. Those belong in `L{1,2}_config/env` on the
-# host running `daemon-live` (which may be a different machine from the
-# CLI operator).
+# The CLI is a standalone user-facing tool. It does not need — and this
+# file deliberately does not carry — daemon-only settings
+# (`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_BK_SET_CONFIG`).
+# Those live in `../an-bridge-prover/L{1,2}_config/env` on whichever host
+# runs `daemon-live`, which may be a different machine altogether.
 #
 # WHAT IT DELIBERATELY OMITS
 # --------------------------
@@ -23,20 +21,19 @@
 #   export RELAYER_PRIVATE_KEY=0x…
 #
 # See §"Wallet setup and bridge config" in
-#   bridge-withdraw-e2e-cli/docs/live_cli_withdraw_runbook.md
-# for wallet creation + Sepolia funding via the pk910 PoW or Google
-# Cloud Web3 faucets. Never reuse a wallet that holds real funds; never
-# commit the private key.
+# `docs/live_cli_withdraw_runbook.md` for wallet creation + Sepolia
+# funding via the pk910 PoW or Google Cloud Web3 faucets. Never reuse a
+# wallet that holds real funds; never commit the private key.
 #
 # HOW TO CONSUME
 # --------------
-#   cd crates/an-bridge-prover
+#   cd crates/bridge-withdraw-e2e-cli
 #   export RELAYER_PRIVATE_KEY=0x…            # your own key
-#   set -a && source bridge_config && set +a
-#   ./target/release/bridge-withdraw-e2e-cli withdraw ...
+#   set -a && source config/bridge_config && set +a
+#   ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw ...
 #
 # Relative paths below are anchored to the working directory
-# `crates/an-bridge-prover/` (same convention as `shellnet.common`).
+# `crates/bridge-withdraw-e2e-cli/`.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
@@ -45,16 +42,18 @@ RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 
 # --- local dirs ---------------------------------------------------------------
-# `params/` holds ~17 GB of SRS + per-circuit vk/pk files. Do NOT wipe —
-# keygen would re-burn ~7 min per circuit.
-BRIDGE_PARAMS_DIR=./params
+# `params/` holds ~17 GB of SRS + per-circuit vk/pk files, shared with
+# the bundle daemon. Do NOT wipe — keygen would re-burn ~7 min per
+# circuit.
+BRIDGE_PARAMS_DIR=../an-bridge-prover/params
 
 # Optional — pk cache dir passed through to the C4 aggregator subprocess.
 # The CLI defaults it to `$BRIDGE_PARAMS_DIR/pk_cache` if unset.
-# BRIDGE_PK_CACHE_DIR=./params/pk_cache
+# BRIDGE_PK_CACHE_DIR=../an-bridge-prover/params/pk_cache
 
 # Optional — where per-withdrawal idempotency state files live. Defaults
-# to `./withdraw-state` (relative to cwd) when unset.
+# to `$HOME/.bridge-withdraw-state/` when unset (per-user, survives
+# tree moves; see `src/orchestrator.rs::default_state_dir`).
 # BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
 
 # --- SHPLONK aggregation (mandatory) ------------------------------------------
@@ -70,9 +69,10 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 #   until then, ask.
 #
 # Path (b) — you deployed your own bridge with
-#   `scripts/deploy_bridge_bundle.sh` (see
-#   ../bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md):
-#   copy the `BRIDGE_ADDRESS` line from the generated `L{1,2}_config/env`.
+#   `../an-bridge-prover/scripts/deploy_bridge_bundle.sh` (see
+#   `../an-bridge-prover/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`):
+#   copy the `BRIDGE_ADDRESS` line from the generated
+#   `../an-bridge-prover/L{1,2}_config/env`.
 #
 # Leave commented out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong

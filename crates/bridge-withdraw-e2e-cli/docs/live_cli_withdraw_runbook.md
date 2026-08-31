@@ -58,27 +58,31 @@ transactions to the bridge. That lane is covered in
 
 ## Quick resume checklist (returning mid-flow)
 
-```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/an-bridge-prover
-export BRIDGE_CONFIG_DIR=./L1_config
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
-export BRIDGE=$BRIDGE_ADDRESS   # ergonomics; same value
+All paths below are relative to the repo root. The CLI is a standalone
+tool with its own single config; there is no L1/L2 split.
 
-# 1. Is the bundle daemon alive and current?
-pgrep -af 'relayer daemon-live' || echo "DAEMON NOT RUNNING"
-echo "chain last_seen   = $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')"
-echo "prover_state mtime: $(stat -f '%Sm' "$BRIDGE_CONFIG_DIR/state/prover_state.json" 2>/dev/null || echo MISSING)"
+```bash
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…                       # your own Sepolia burner
+set -a && source config/bridge_config && set +a
+export BRIDGE=$BRIDGE_ADDRESS                        # ergonomics; same value
+
+# 1. Is the bridge reachable and advancing?
+echo "chain last_seen = $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')"
+# Run twice ~1 min apart — the number must increase. If it does not, the
+# bundle daemon (owned by whoever operates the deploy — team, or you) has
+# stalled; no withdrawal will land until it resumes.
 
 # 2. Any in-flight CLI withdrawal state?
-STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$BRIDGE_CONFIG_DIR/withdraw-state}"
+STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$HOME/.bridge-withdraw-state}"
 ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 # Each file's `status` field: Reserved | Burned | Proved | Submitted | Confirmed | Failed
 # `Confirmed` = safe to fire a new (distinct) withdrawal.
 # Anything else + same (from,to,to_chain,amount) = duplicate refusal (exit 3)
 # unless you pass --allow-retry.
 
-# 3. Latest CLI smoke logs
-ls -lt "$BRIDGE_CONFIG_DIR/work_dir"/withdraw_smoke_*.log 2>/dev/null | head -3
+# 3. Latest CLI smoke logs (produced by scripts/{local,live}_smoke.sh)
+ls -lt ./work_dir/withdraw_smoke_*.log 2>/dev/null | head -3
 ```
 
 ---
@@ -269,20 +273,18 @@ written into `bridge_config` and never persisted by the CLI (see
 ### The `bridge_config` file
 
 `bridge_config` (checked in at
-[`crates/an-bridge-prover/bridge_config`](../../bridge_config)) is a
-single per-CLI env file that carries every parameter the CLI reads via
-clap `env` attrs (see `bridge-withdraw-e2e-cli/src/args.rs`), and
-nothing else. Source it with
-`set -a && source bridge_config && set +a` before invoking the binary.
+[`config/bridge_config`](../config/bridge_config)) is a single per-CLI
+env file that carries every parameter the CLI reads via clap `env`
+attrs (see `src/args.rs`), and nothing else. From the CLI crate root
+(`crates/bridge-withdraw-e2e-cli/`), source it with
+`set -a && source config/bridge_config && set +a` before invoking the
+binary.
 
-Unlike [`shellnet.common`](../../shellnet.common) +
-[`L{1,2}_config/env`](../../L2_config/env) — which target the bundle
-daemon and carry its deploy state — `bridge_config` targets **only** the
-CLI. It does not source `shellnet.common` and deliberately omits
+`bridge_config` targets **only** the CLI. It deliberately omits
 daemon-only settings (`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`,
-`BRIDGE_BK_SET_CONFIG`); those belong in `L{1,2}_config/env` on the
-host running `daemon-live`, which may be a different machine from the
-CLI operator.
+`BRIDGE_BK_SET_CONFIG`); those belong in the bundle-daemon's own env
+file on whichever host runs `daemon-live`, which may be a different
+machine from the CLI operator.
 
 Fields the CLI reads:
 
@@ -337,13 +339,16 @@ misconfigured — report and STOP. Path (b): redeploy with the correct
 
 ## Binary + env prerequisites
 
-**Working directory:** `crates/an-bridge-prover/` (same as the daemon —
-the CLI is symlinked in here so it can pull halo2-heavy prover deps).
+**Working directory:** `crates/bridge-withdraw-e2e-cli/` (the standalone
+CLI crate — all commands below cd here first). The crate source lives
+here; a symlink from `../an-bridge-prover/bridge-withdraw-e2e-cli` pulls
+it into the halo2 sub-workspace so it can share the prover deps and the
+built binary lands under `../an-bridge-prover/target/release/`.
 
 **One-time build:**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/an-bridge-prover     # build cwd (halo2 sub-workspace)
 
 # 1. CLI binary
 cargo build --release -p bridge-withdraw-e2e-cli
@@ -354,15 +359,15 @@ cargo build --release -p bridge-event-halo2-prover
 #   -> ./target/release/bridge-event-halo2-prover
 
 # 3. Aggregator subprocess (used by C4 aggregate stage)
-cd ../bridge-evm-aggregator && cargo build --release && cd ../an-bridge-prover
+cd ../bridge-evm-aggregator && cargo build --release
 ```
 
-**Env sanity** (in addition to bundle-lane vars from the parent runbook):
+**Env sanity** (run cwd = the CLI crate):
 
 ```bash
-cd crates/an-bridge-prover
-export BRIDGE_CONFIG_DIR=./L1_config     # or ./L2_config
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…                   # your own Sepolia burner
+set -a && source config/bridge_config && set +a
 
 for v in \
   RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
@@ -372,16 +377,19 @@ do
 done
 ```
 
-**Env sources (CLI-specific additions):**
+**Env sources:**
 
-- Bundle-lane env (`shellnet.common` + `$BRIDGE_CONFIG_DIR/env`)
-  supplies everything the daemon uses — the CLI reuses those same vars
-  (`RPC_URL`, `BRIDGE_ADDRESS`, `BRIDGE_GQL_ENDPOINT`, aggregator/verifier/params
-  dirs). `BRIDGE_ADDRESS` is the single load-bearing input: the CLI
-  reads `BridgeState` out of that contract, so a wrong value silently
-  waits against the wrong state.
-- `BRIDGE_WITHDRAW_STATE_DIR` (new; optional) — per-withdrawal
-  idempotency state dir. Defaults to `$BRIDGE_CONFIG_DIR/withdraw-state/`.
+- [`config/bridge_config`](../config/bridge_config) — the CLI's single
+  env file. Carries `RPC_URL`, `BRIDGE_GQL_ENDPOINT`, `BRIDGE_ADDRESS`,
+  `BRIDGE_PARAMS_DIR`, `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR`,
+  and optional `BRIDGE_PK_CACHE_DIR` / `BRIDGE_WITHDRAW_STATE_DIR`.
+  `BRIDGE_ADDRESS` is the single load-bearing input: the CLI reads
+  `BridgeState` out of that contract, so a wrong value silently waits
+  against the wrong state.
+- `RELAYER_PRIVATE_KEY` — export in your shell (never in
+  `bridge_config`, never committed).
+- `BRIDGE_WITHDRAW_STATE_DIR` — optional. Defaults to
+  `$HOME/.bridge-withdraw-state/` (see `src/orchestrator.rs::default_state_dir`).
 
 **Not needed by the CLI (removed vs. earlier revisions):**
 
@@ -452,27 +460,28 @@ and `prover_state.json` mtime advances.
 ### Step 4 — Preflight the CLI (dry-run)
 
 ```bash
-cd bridge/   # repo root
-export BRIDGE_CONFIG_DIR=crates/an-bridge-prover/L1_config
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 
-export WITHDRAW_FROM=<dapp_id>::<account_id>    # source multisig
-export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json
+export WITHDRAW_FROM=<dapp_id>::<account_id>            # source multisig
+export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json      # owner keys, 0600
 export WITHDRAW_TO=0x742d35Cc6634C0532925a3b844Bc454e4438f44e
 export WITHDRAW_TO_CHAIN=11155111
 export WITHDRAW_AMOUNT=1.000000
 
-crates/bridge-withdraw-e2e-cli/scripts/local_smoke.sh
+./scripts/local_smoke.sh
 ```
 
 **Equivalent raw invocation:**
 
 ```bash
-cd crates/an-bridge-prover
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…
+set -a && source config/bridge_config && set +a
+mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
-SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR/work_dir/shplonk-snark'))")
 
-./target/release/bridge-withdraw-e2e-cli withdraw \
+../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -488,12 +497,15 @@ SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR
   --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
   --params-dir        "$BRIDGE_PARAMS_DIR" \
-  --snark-dir         "$SNARK_DIR_ABS" \
+  --snark-dir         "./work_dir/shplonk-snark" \
   --pk-cache-dir      "$BRIDGE_PARAMS_DIR/pk_cache" \
-  --work-dir          "$BRIDGE_CONFIG_DIR/work_dir" \
-  --state-dir         "$BRIDGE_CONFIG_DIR/withdraw-state" \
-  2>&1 | tee "$BRIDGE_CONFIG_DIR/work_dir/withdraw_dry_${TS}.log"
+  --work-dir          "./work_dir" \
+  2>&1 | tee "./work_dir/withdraw_dry_${TS}.log"
 ```
+
+(`--state-dir` omitted → the CLI defaults to `$HOME/.bridge-withdraw-state/`.
+Override with `BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state` in
+`bridge_config` if you want per-checkout state.)
 
 **Expected log signature (dry-run OK):**
 
@@ -666,12 +678,12 @@ df $BRIDGE_PARAMS_DIR/
 
 - Free resources; re-run with the same tuple — `--allow-retry` if the
   first attempt left a `Reserved` state file. The witness under
-  `$BRIDGE_CONFIG_DIR/work_dir/witness_event_<seq>.json` is
+  `./work_dir/witness_event_<seq>.json` (relative to the CLI cwd) is
   deterministic and reusable; do NOT delete it between attempts.
 - If cold-cache slowness is the real issue (not OOM), bump the timeout:
 
   ```bash
-  ./target/release/bridge-withdraw-e2e-cli withdraw \
+  ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
     ...same flags as Case 1 Step 4... \
     --prover-timeout-s 3600
   ```
@@ -703,9 +715,9 @@ errors are unchanged by the CLI)
 # CLI logs the selector + decoded params where possible; if not:
 cast 4byte <selector>
 
-# Full trace against the deployed verifier
-CALLDATA=$(jq -r '.calldata_hex' "$BRIDGE_CONFIG_DIR/proofs/proof_event_<seq>.json")
-PI=$(jq -c '.public_inputs' "$BRIDGE_CONFIG_DIR/proofs/proof_event_<seq>.json")
+# Full trace against the deployed verifier (paths relative to CLI cwd)
+CALLDATA=$(jq -r '.calldata_hex' "./work_dir/proof_event_<seq>.json")
+PI=$(jq -c '.public_inputs' "./work_dir/proof_event_<seq>.json")
 cast call $BRIDGE_ADDRESS \
   'withdrawByProof(bytes,uint256[13])' \
   "$CALLDATA" "$PI" \
@@ -788,8 +800,9 @@ amount.
 **Seed the treasury:**
 
 ```bash
-cd crates/an-bridge-prover
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+set -a && source config/bridge_config && set +a
 
 export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
 export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
@@ -897,9 +910,15 @@ typical.
 **Do NOT use `--anchor-layer auto` on L2.** The enricher requires the
 operator to acknowledge the wait budget.
 
+`bridge_config` is a single file — no L1/L2 split on the CLI side. Point
+`BRIDGE_ADDRESS` at the L2 deploy (path a: pinned team L2 deploy; path b:
+your own `BRIDGE_ADDRESS` from `../an-bridge-prover/L2_config/env`) and
+select the layer per-invocation with `--anchor-layer 2`.
+
 ```bash
-cd bridge/
-export BRIDGE_CONFIG_DIR=crates/an-bridge-prover/L2_config
+cd crates/bridge-withdraw-e2e-cli
+export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+set -a && source config/bridge_config && set +a         # BRIDGE_ADDRESS must be the L2 deploy
 
 # Same identity vars as Case 1 Step 4
 export WITHDRAW_FROM=<dapp_id>::<account_id>
@@ -908,13 +927,10 @@ export WITHDRAW_TO=0x…
 export WITHDRAW_TO_CHAIN=11155111
 export WITHDRAW_AMOUNT=1.000000
 
-# For now the smoke wrappers hardcode L1 auto; the L2 raw invocation:
-cd crates/an-bridge-prover
-set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
-SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR/work_dir/shplonk-snark'))")
 
-./target/release/bridge-withdraw-e2e-cli withdraw \
+../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -923,8 +939,6 @@ SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR
   --to-chain    "$WITHDRAW_TO_CHAIN" \
   --amount      "$WITHDRAW_AMOUNT" \
   --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
-  --prover-state-path "$BRIDGE_CONFIG_DIR/state/prover_state.json" \
-  --window-size 128 \
   --anchor-layer 2 \
   --i-know-the-wait \
   --rpc-url           "$RPC_URL" \
@@ -933,11 +947,10 @@ SNARK_DIR_ABS=$(python3 -c "import os; print(os.path.abspath('$BRIDGE_CONFIG_DIR
   --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
   --params-dir        "$BRIDGE_PARAMS_DIR" \
-  --snark-dir         "$SNARK_DIR_ABS" \
+  --snark-dir         "./work_dir/shplonk-snark" \
   --pk-cache-dir      "$BRIDGE_PARAMS_DIR/pk_cache" \
-  --work-dir          "$BRIDGE_CONFIG_DIR/work_dir" \
-  --state-dir         "$BRIDGE_CONFIG_DIR/withdraw-state" \
-  2>&1 | tee "$BRIDGE_CONFIG_DIR/work_dir/withdraw_l2_dry_${TS}.log"
+  --work-dir          "./work_dir" \
+  2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
 ```
 
 **Expected log signature (L2 differences):**
@@ -1021,22 +1034,21 @@ Plan half-day per 3-cycle run.
 
 ## Health checks
 
-**CLI-lane snapshot:**
+**CLI-lane snapshot** (cwd = `crates/bridge-withdraw-e2e-cli`):
 
 ```bash
 # Latest CLI state files (one per unique (from,to,chain,amount) tuple)
-ls -lt $BRIDGE_CONFIG_DIR/withdraw-state/*.json 2>/dev/null | head -3
+STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$HOME/.bridge-withdraw-state}"
+ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 # Peek at the newest
-jq . "$(ls -t $BRIDGE_CONFIG_DIR/withdraw-state/*.json | head -1)" 2>/dev/null
+jq . "$(ls -t "$STATE_DIR"/*.json | head -1)" 2>/dev/null
 
-# Latest captured witness
-ls -lt $BRIDGE_CONFIG_DIR/work_dir/witness_event_*.json 2>/dev/null | head -3
-
-# Latest generated proof
-ls -lt $BRIDGE_CONFIG_DIR/proofs/proof_event_*.json 2>/dev/null | head -3
+# Latest captured witness + generated proof (written into --work-dir)
+ls -lt ./work_dir/witness_event_*.json 2>/dev/null | head -3
+ls -lt ./work_dir/proof_event_*.json   2>/dev/null | head -3
 
 # Circuit 4 PK cache (should exist after first successful run)
-ls -lh $BRIDGE_PARAMS_DIR/pk_cache/ 2>/dev/null
+ls -lh "$BRIDGE_PARAMS_DIR/pk_cache/" 2>/dev/null
 ```
 
 **Sepolia snapshot:** (same commands as parent runbook)
@@ -1054,26 +1066,39 @@ cast balance "$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)" --rpc-u
 
 ## File & state reference
 
-**Root:** `crates/an-bridge-prover/` (build cwd; matches the daemon).
+**Run cwd for the CLI:** `crates/bridge-withdraw-e2e-cli/` (the
+standalone CLI crate). Binaries are built out of the halo2 sub-workspace
+at `../an-bridge-prover/target/release/`.
 
 ```
-crates/an-bridge-prover/
-├── L1_config/                       ← BRIDGE_CONFIG_DIR for L1 mode
-│   ├── env                          ← sources shellnet.common + layers deploy-specific vars
-│   ├── state/prover_state.json      ← WRITTEN by daemon-live; READ by CLI
-│   ├── work_dir/
-│   │   ├── witness_event_<seq>.json ← enriched witness (input to Circuit 4)
-│   │   ├── shplonk-snark/           ← intermediate SHPLONK artifacts
-│   │   └── withdraw_smoke_*.log     ← CLI stdout+stderr (via scripts)
-│   ├── proofs/proof_event_<seq>.json← aggregated SHPLONK calldata + PI
-│   └── withdraw-state/              ← per-withdrawal idempotency state (NEW to CLI)
-│       └── <sha256>.json            ← one per unique (from,to,chain,amount)
-├── L2_config/                       ← parallel layout for L2 mode
+crates/bridge-withdraw-e2e-cli/            ← run cwd
+├── config/
+│   └── bridge_config                      ← single per-CLI env file (see runbook)
+├── docs/
+│   └── live_cli_withdraw_runbook.md       ← this doc
+├── scripts/
+│   ├── local_smoke.sh                     ← --dry-run wrapper
+│   └── live_smoke.sh                      ← real-submit wrapper
+├── src/                                   ← Rust crate source
+└── work_dir/                              ← created on first run
+    ├── witness_event_<seq>.json           ← enriched witness (input to Circuit 4)
+    ├── proof_event_<seq>.json             ← aggregated SHPLONK calldata + PI
+    ├── shplonk-snark/                     ← intermediate SHPLONK artifacts
+    └── withdraw_{smoke,dry}_*.log         ← CLI stdout+stderr (via scripts)
+
+$HOME/.bridge-withdraw-state/              ← default idempotency state dir
+└── <sha256>.json                          ← one per unique (from,to,chain,amount)
+                                          # override with BRIDGE_WITHDRAW_STATE_DIR
+
+crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with daemon)
+├── params/                                ← BRIDGE_PARAMS_DIR (SRS + pk/vk)
+│   └── pk_cache/                          ← Circuit-4 PK cache
 ├── target/release/
-│   ├── bridge-withdraw-e2e-cli      ← this CLI
-│   ├── bridge-event-halo2-prover    ← Circuit 4 subprocess
-│   └── relayer                      ← daemon-live (parent runbook)
-└── bridge-withdraw-e2e-cli/         ← symlink → ../bridge-withdraw-e2e-cli
+│   ├── bridge-withdraw-e2e-cli            ← this CLI (built into the sub-workspace)
+│   ├── bridge-event-halo2-prover          ← Circuit 4 subprocess
+│   └── relayer                            ← daemon-live (owner of L{1,2}_config/)
+├── L1_config/, L2_config/                 ← daemon-only; CLI does NOT read these
+└── bridge-withdraw-e2e-cli/               ← symlink → ../bridge-withdraw-e2e-cli
 ```
 
 **Never persisted anywhere the CLI writes:**

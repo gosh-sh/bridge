@@ -378,19 +378,32 @@ built binary lands under `../an-bridge-prover/target/release/`.
 **One-time build:**
 
 ```bash
-cd crates/an-bridge-prover     # build cwd (halo2 sub-workspace)
-
-# 1. CLI binary
+# 1. CLI binary — built out of the halo2 sub-workspace so it shares
+#    the prover deps.
+cd crates/an-bridge-prover
 cargo build --release -p bridge-withdraw-e2e-cli
 #   -> ./target/release/bridge-withdraw-e2e-cli
 
-# 2. Circuit-4 subprocess prover (the CLI shells out to this)
-cargo build --release -p bridge-event-halo2-prover
-#   -> ./target/release/bridge-event-halo2-prover
-
-# 3. Aggregator subprocess (used by C4 aggregate stage)
-cd ../bridge-evm-aggregator && cargo build --release
+# 2. SHPLONK aggregator (the CLI's ONLY subprocess).
+#    Circuit-4 SNARK proving itself is in-process
+#    (`InProcessCircuit4SnarkProver`); only the outer aggregate stage
+#    shells out. Spawn site:
+#    crates/bridge-relayer-daemon/src/aggregator.rs:422-432, binary
+#    name `aggregate-proof` (constant at aggregator.rs:57).
+cd ../../bridge-evm-aggregator
+cargo build --release --bin aggregate-proof
+#   -> ./target/release/aggregate-proof
 ```
+
+> The `bridge-event-halo2-prover` binary is **not** used by the CLI.
+> It is a daemon-only subprocess prover spawned by
+> `SubprocessWithdrawalProver` at
+> `crates/bridge-relayer-daemon/src/withdraw_prover.rs:216-226`, and
+> the only caller is the daemon binary at
+> `crates/bridge-relayer-daemon/src/bin/relayer.rs:1287-1292`. The
+> CLI's `run_once_with_state` path
+> (`crates/bridge-relayer-daemon/src/withdraw_e2e/driver.rs:324` →
+> `Circuit4ShplonkPipeline`) never touches it.
 
 **Env sanity** (run cwd = the CLI crate):
 
@@ -555,8 +568,9 @@ INFO idempotency: reserved sha256=<hex> at $STATE_DIR/<sha256>.json (dry-run: sk
 INFO burn: (dry-run) would broadcast sendTransaction dest=<usdc_bridge>
 INFO capture: (dry-run) would wait for WithdrawalInitiated
 INFO enrich_witness: anchor_layer_mode=Auto, chosen L=1, key_seq_no=<K>
-INFO subprocess_prover: bridge-event-halo2-prover start
-INFO subprocess_prover: aggregate SHPLONK ok, calldata_len=<bytes>
+INFO invoking Circuit4ShplonkPipeline (in-process Poseidon C4 prove → aggregate)
+INFO aggregate-proof subprocess (BridgeWithdrawalAggregatorVerifier) took <N> ms, calldata=<bytes> bytes
+INFO pipeline produced PartnerWithdrawalProof (SHPLONK aggregator calldata)
 INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
 ```
 
@@ -699,13 +713,21 @@ records `Failed` with `stage=burn`. Fix the underlying issue (drift →
 
 ## Case 4 — Prover subprocess timeout / OOM
 
-**Symptom (CLI exit 12):**
+**Symptom (CLI exit 12):** Failure in the CLI's only subprocess —
+`aggregate-proof` (SHPLONK aggregation over the in-process Poseidon C4
+SNARK). Failures surface via `SubprocessAggregator`
+(`crates/bridge-relayer-daemon/src/aggregator.rs:438-455`):
 
 ```
-ERROR prove: bridge-event-halo2-prover exited status=<code>
+ERROR aggregate-proof timed out after <duration>
    OR
-ERROR prove: timeout after 1800s
+ERROR aggregate-proof exited with <status>: <stderr>
+   OR
+ERROR failed to spawn aggregate-proof: <err>
 ```
+
+In-process Circuit-4 failures surface a level up as
+`Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
 
 **Trigger conditions:** Out of disk, OOM, RAM swap-thrash, params
 missing, PK cache corrupt.
@@ -1156,10 +1178,14 @@ crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with 
 │   └── pk_cache/                          ← Circuit-4 PK cache
 ├── target/release/
 │   ├── bridge-withdraw-e2e-cli            ← this CLI (built into the sub-workspace)
-│   ├── bridge-event-halo2-prover          ← Circuit 4 subprocess
+│   ├── bridge-event-halo2-prover          ← daemon-only Circuit 4 subprocess (CLI does NOT use it)
 │   └── relayer                            ← daemon-live (owner of L{1,2}_config/)
 ├── L1_config/, L2_config/                 ← daemon-only; CLI does NOT read these
 └── bridge-withdraw-e2e-cli/               ← symlink → ../bridge-withdraw-e2e-cli
+
+crates/bridge-evm-aggregator/              ← SHPLONK aggregator
+└── target/release/
+    └── aggregate-proof                    ← the CLI's only subprocess (spawned by SubprocessAggregator)
 ```
 
 **Never persisted anywhere the CLI writes:**

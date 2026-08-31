@@ -74,7 +74,10 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 #   copy the `BRIDGE_ADDRESS` line from the generated
 #   `../an-bridge-prover/L{1,2}_config/env`.
 #
-# Leave commented out to force the CLI to fail loudly ("missing required
+# Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-# BRIDGE_ADDRESS=0x…
+#
+# Currently pinned to the L2-anchor shellnet reference deploy on
+# Sepolia (source: `../an-bridge-prover/L2_config/env`).
+BRIDGE_ADDRESS=0x50bd1e3763d0d3dbc7c424656b5808558a5a86b1

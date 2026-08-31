@@ -344,9 +344,6 @@ async fn prove_and_finalize(
     //      --name BridgeWithdrawalAggregatorVerifier`, producing the
     //      22-instance SHPLONK calldata (`instances ‖ proof`) that
     //      matches the deployed Yul verifier byte-for-byte.
-    // The old subprocess path via `bridge-event-halo2-prover` returned
-    // a raw Blake2 halo2 proof — self-verified locally but rejected
-    // on-chain as `WithdrawalProofRejected()`.
     std::fs::create_dir_all(&cfg.snark_dir)
         .with_context(|| format!("mkdir snark_dir {}", cfg.snark_dir.display()))?;
     let pk_cache_dir = cfg

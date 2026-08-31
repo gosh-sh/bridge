@@ -40,7 +40,6 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 10;
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
 
 /// Parsed `proof_event_*.json` from
-/// `acki-nacki-to-eth-bridge-halo2-prover`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PartnerWithdrawalProof {
     #[serde(default)]

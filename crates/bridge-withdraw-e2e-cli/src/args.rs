@@ -171,7 +171,7 @@ pub struct WithdrawArgs {
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
-    #[arg(long, env = "RELAYER_PRIVATE_KEY", value_name = "0x…")]
+    #[arg(long, env = "BURNER_PRIVATE_KEY", value_name = "0x…")]
     pub eth_private_key: String,
 
     // -- Prover subprocess plumbing (passed through to run_once) --

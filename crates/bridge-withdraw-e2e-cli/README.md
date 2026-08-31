@@ -69,7 +69,7 @@ one-off runs.
 | `--i-know-the-wait`     | —                           | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
 | `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
-| `--eth-private-key`     | `RELAYER_PRIVATE_KEY`       | Signer for `withdrawByProof` (distinct from `--from-keys`) |
+| `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG SRS params |

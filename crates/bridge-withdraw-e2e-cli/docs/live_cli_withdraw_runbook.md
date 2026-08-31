@@ -94,7 +94,7 @@ tool with its own single config; there is no L1/L2 split.
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…                       # your own Sepolia burner
+export BURNER_PRIVATE_KEY=0x…                       # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 export BRIDGE=$BRIDGE_ADDRESS                        # ergonomics; same value
 
@@ -277,7 +277,7 @@ To run the CLI you need two independent things:
 1. **A funded Sepolia wallet you own.** The CLI signs `withdrawByProof`
    with the EVM key you provide. Every operator brings their own — the
    CLI does not ship a shared burner and does not read a
-   `RELAYER_PRIVATE_KEY` from any tracked file.
+   `BURNER_PRIVATE_KEY` from any tracked file.
 2. **A `bridge_config` file** that points the CLI at a deployed
    `AckiNackiBridge` — either the shared shellnet reference deploy or
    your own (see "Two ways to fill in `BRIDGE_ADDRESS`" below).
@@ -310,10 +310,10 @@ Never reuse a wallet that holds real funds. Never commit the private
 key. Export it in your shell before invoking the CLI:
 
 ```bash
-export RELAYER_PRIVATE_KEY=0x…              # your own key, from local storage
+export BURNER_PRIVATE_KEY=0x…              # your own key, from local storage
 ```
 
-The CLI reads `RELAYER_PRIVATE_KEY` via clap `env` attr. It is **never**
+The CLI reads `BURNER_PRIVATE_KEY` via clap `env` attr. It is **never**
 written into `bridge_config` and never persisted by the CLI (see
 [File & state reference](#file--state-reference)).
 
@@ -345,7 +345,7 @@ Fields the CLI reads:
 | `BRIDGE_WITHDRAW_STATE_DIR` | shipped (commented) | optional; per-withdrawal idempotency state dir |
 | `BRIDGE_ADDRESS` | deploy-dependent, **you fill in** | deployed `AckiNackiBridge` on Sepolia — see below |
 
-`RELAYER_PRIVATE_KEY` is intentionally NOT part of `bridge_config` —
+`BURNER_PRIVATE_KEY` is intentionally NOT part of `bridge_config` —
 every user supplies their own via shell env, as above.
 
 ### Two ways to fill in `BRIDGE_ADDRESS`
@@ -428,11 +428,11 @@ cargo build --release --bin aggregate-proof
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…                   # your own Sepolia burner
+export BURNER_PRIVATE_KEY=0x…                   # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 
 for v in \
-  RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
+  RPC_URL BRIDGE_ADDRESS BURNER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
   BRIDGE_AGGREGATOR_DIR BRIDGE_VERIFIERS_DIR BRIDGE_PARAMS_DIR
 do
   [ -n "${!v}" ] && echo "  ok  $v" || echo "  FAIL $v"
@@ -448,7 +448,7 @@ done
   `BRIDGE_ADDRESS` is the single load-bearing input: the CLI reads
   `BridgeState` out of that contract, so a wrong value silently waits
   against the wrong state.
-- `RELAYER_PRIVATE_KEY` — export in your shell (never in
+- `BURNER_PRIVATE_KEY` — export in your shell (never in
   `bridge_config`, never committed).
 - `BRIDGE_WITHDRAW_STATE_DIR` — optional. Defaults to
   `$HOME/.bridge-withdraw-state/` (see `src/orchestrator.rs::default_state_dir`).
@@ -500,7 +500,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```bash
 cd crates/an-bridge-prover
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
+PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 ```
 
 ### Step 2 — Unpause
@@ -529,7 +529,7 @@ runbook; the CLI is independent and only reads on-chain state.
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 
 export WITHDRAW_FROM=<dapp_id>::<account_id>            # source multisig
 export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json      # owner keys, 0600
@@ -544,7 +544,7 @@ export WITHDRAW_AMOUNT=1.000000
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…
+export BURNER_PRIVATE_KEY=0x…
 set -a && source config/bridge_config && set +a
 mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
@@ -561,7 +561,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --anchor-layer auto \
   --rpc-url           "$RPC_URL" \
   --bridge-address    "$BRIDGE_ADDRESS" \
-  --eth-private-key   "$RELAYER_PRIVATE_KEY" \
+  --eth-private-key   "$BURNER_PRIVATE_KEY" \
   --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
   --params-dir        "$BRIDGE_PARAMS_DIR" \
@@ -890,26 +890,26 @@ amount.
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 
 export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
 export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
+export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
 export AMOUNT=10000000    # 10.000000 USDC — demo safety margin
 
 # 1. Mint test USDC
 cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
 # 2. Approve bridge
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
 # 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
 cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
   $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
+  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
 # 4. Confirm
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
@@ -965,7 +965,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```bash
 cd crates/an-bridge-prover
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
+PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
 ```
 
 **Post-deploy sanity — verify W²-alignment:**
@@ -1022,7 +1022,7 @@ select the layer per-invocation with `--anchor-layer 2`.
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
-export RELAYER_PRIVATE_KEY=0x…                          # your own Sepolia burner
+export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a         # BRIDGE_ADDRESS must be the L2 deploy
 
 # Same identity vars as Case 1 Step 4
@@ -1048,7 +1048,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --i-know-the-wait \
   --rpc-url           "$RPC_URL" \
   --bridge-address    "$BRIDGE_ADDRESS" \
-  --eth-private-key   "$RELAYER_PRIVATE_KEY" \
+  --eth-private-key   "$BURNER_PRIVATE_KEY" \
   --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
   --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
   --params-dir        "$BRIDGE_PARAMS_DIR" \
@@ -1175,7 +1175,7 @@ cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
 
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 
-cast balance "$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)" --rpc-url $RPC_URL --ether
+cast balance "$(cast wallet address --private-key $BURNER_PRIVATE_KEY)" --rpc-url $RPC_URL --ether
 ```
 
 ---

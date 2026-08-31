@@ -62,7 +62,7 @@ exec cargo run --release -p bridge-withdraw-e2e-cli --manifest-path crates/an-br
     --gql-endpoint      "$BRIDGE_GQL_ENDPOINT" \
     --rpc-url           "$RPC_URL" \
     --bridge-address    "$BRIDGE_ADDRESS" \
-    --eth-private-key   "$RELAYER_PRIVATE_KEY" \
+    --eth-private-key   "$BURNER_PRIVATE_KEY" \
     --aggregator-dir    "$BRIDGE_AGGREGATOR_DIR" \
     --verifiers-dir     "$BRIDGE_VERIFIERS_DIR" \
     --params-dir        "$BRIDGE_PARAMS_DIR" \

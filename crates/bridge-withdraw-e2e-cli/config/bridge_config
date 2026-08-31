@@ -14,11 +14,11 @@
 #
 # WHAT IT DELIBERATELY OMITS
 # --------------------------
-# `RELAYER_PRIVATE_KEY` is NOT set here. Every operator brings their own
+# `BURNER_PRIVATE_KEY` is NOT set here. Every operator brings their own
 # Sepolia EVM key. Export it in your shell (or a personal, git-ignored
 # env file) before invoking the CLI:
 #
-#   export RELAYER_PRIVATE_KEY=0x…
+#   export BURNER_PRIVATE_KEY=0x…
 #
 # See §"Wallet setup and bridge config" in
 # `docs/live_cli_withdraw_runbook.md` for wallet creation + Sepolia
@@ -28,7 +28,7 @@
 # HOW TO CONSUME
 # --------------
 #   cd crates/bridge-withdraw-e2e-cli
-#   export RELAYER_PRIVATE_KEY=0x…            # your own key
+#   export BURNER_PRIVATE_KEY=0x…             # your own key
 #   set -a && source config/bridge_config && set +a
 #   ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw ...
 #

@@ -71,20 +71,18 @@ system viable:
 Operational impact on `withdrawByProof` is detailed in
 [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
 
-> **Per-mode config layout.** All runtime state, IPC proofs, and env
-> vars live under `crates/an-bridge-prover/{L1,L2}_config/` — pick one
-> directory per launch by exporting `BRIDGE_CONFIG_DIR=./L{1,2}_config`
-> before sourcing. `bridge-prover-lib::paths` resolves state and proofs
-> from `BRIDGE_CONFIG_DIR`. The two config trees are independent: an L1
-> run cannot touch L2 state and vice versa. Shared, secret-bearing bits
-> live in `crates/an-bridge-prover/shellnet.common` (RPC URL, relayer
-> key, GQL endpoint, aggregator/verifier paths); the per-mode `env`
-> files source it and layer `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
-> `BRIDGE_ANCHOR_LEVEL` on top.
+> **Runtime layout.** For a long-running L2 server, use the production
+> [Docker Compose kit](../deploy/shellnet-l2/README.md): runtime state and
+> heavyweight proving data stay in bind mounts, while the filled runtime env
+> (including the signing key) stays outside Git. The direct-CLI sections below
+> remain useful for development and recovery. Their in-repo `shellnet.common`
+> and `L{1,2}_config/env` files are reproducible test fixtures, not a production
+> secret/config store.
 
 ## Table of Contents
 
 - [Quick resume checklist (returning to a running system)](#quick-resume-checklist-returning-to-a-running-system)
+- [Production L2 server (Docker Compose)](#production-l2-server-docker-compose)
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch)
 - [Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
@@ -109,18 +107,19 @@ exactly which case (below) applies.
 ```bash
 cd crates/an-bridge-prover
 export BRIDGE_CONFIG_DIR=./L1_config      # or ./L2_config — the mode this daemon runs in
+export RELAYER_STATE_PATH="$BRIDGE_CONFIG_DIR/relayer-state.json"
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 export BRIDGE=$BRIDGE_ADDRESS
 export RPC=$RPC_URL
 
 # 1. Is the daemon alive?
-pgrep -af 'relayer daemon-live' || echo "DAEMON NOT RUNNING"
+pgrep -af 'relayer .*daemon-live' || echo "DAEMON NOT RUNNING"
 
 # 2. Where is local state?
-echo "local  last_processed = $(jq -r '.last_processed_seqno'                   relayer-state.json)"
-echo "local  attempts       = $(jq -r '.attempts_since_progress'                relayer-state.json)"
-echo "local  observed_chain = $(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)"
-echo "$BRIDGE_CONFIG_DIR/state/prover_state mtime: $(stat -f '%Sm' $BRIDGE_CONFIG_DIR/state/prover_state.json 2>/dev/null || echo MISSING)"
+echo "local  last_processed = $(jq -r '.last_processed_seqno' "$RELAYER_STATE_PATH")"
+echo "local  attempts       = $(jq -r '.attempts_since_progress' "$RELAYER_STATE_PATH")"
+echo "local  observed_chain = $(jq -r '.last_observed_on_chain.last_seen_block_seq_no' "$RELAYER_STATE_PATH")"
+echo "$BRIDGE_CONFIG_DIR/state/prover_state mtime: $(stat -c '%y' "$BRIDGE_CONFIG_DIR/state/prover_state.json" 2>/dev/null || echo MISSING)"
 
 # 3. Where is on-chain?
 echo "chain  last_seen       = $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')"
@@ -136,11 +135,42 @@ tail -20 "$LOG" 2>/dev/null | grep -E '(ERROR|WARN|verifyBlock|seed policy|stuck
 | pgrep | local == chain | attempts | Go to |
 |---|---|---|---|
 | running | yes | 0 | Nothing — [Case 2](#case-2--steady-state-operation) (steady-state) |
-| running | yes | >0 | Watch — mid-cycle retry; only intervene if hard-aborts |
+| running | yes | >0 | Usually healthy `NotYetAvailable` before the next boundary; confirm in logs |
 | not running | yes | 0 | [Case 3](#case-3--clean-restart-no-state-loss) (clean restart) |
-| not running | yes | >0 | [Case 4](#case-4--restart-after-rpc-induced-hard-abort) (RPC hard-abort) — reset counter first |
+| not running | yes | >0 | Classify the final log/receipt first; [Case 4](#case-4--restart-after-rpc-induced-hard-abort) only for a real hard-abort |
 | not running | **no** | any | [Case 5](#case-5--restart-after-on-chain-revert) or [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain) — do not restart blindly |
 | running/not | `$BRIDGE_CONFIG_DIR/state/` missing | — | [Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon) (auto-resurrect from chain) |
+
+For a Compose deployment, use `sudo deploy/shellnet-l2/scripts/status.sh`
+instead. It performs the same reconciliation and also reports container exit,
+OOM/restart state, EOA nonce/balance, shellnet head and recent significant
+logs without printing the private key.
+
+## Production L2 server (Docker Compose)
+
+The supported long-running server wrapper is
+[`deploy/shellnet-l2/`](../deploy/shellnet-l2/README.md). It provides an
+immutable non-root image, read-only preflight, bounded Docker logs, explicit
+bind mounts, status tooling and example env files containing placeholders
+only. The operator flow is:
+
+1. deploy a fresh L2 bridge near shellnet head and retain its broadcast record;
+2. provision and seal SRS/inner keys for K=17,19,20,21,22;
+3. build target-host release binaries and the image from one pinned commit;
+4. install the filled runtime env outside the repository with mode `0640`;
+5. run `docker compose run --rm preflight`, then
+   `docker compose up -d relayer`;
+6. after the first confirmation, require local/on-chain cursor equality and
+   perform one controlled stop/start to prove the `WarmResume` path.
+
+`restart: unless-stopped` restores the service after an unexpected exit or a
+Docker/host restart. The container reruns the full fail-closed preflight on
+every start; a pending nonce, artifact drift or state/on-chain mismatch blocks
+the daemon before it can send a transaction. Alert on repeated restarts and
+stop the service for reconciliation after a persistent logical rejection.
+Never start two daemons with the same bridge/EOA/state tuple. The remaining
+sections document contract deployment, direct execution and recovery details
+used by that wrapper.
 
 ## Binary + env prerequisites
 
@@ -158,6 +188,7 @@ cd crates/an-bridge-prover
 export BRIDGE_CONFIG_DIR=./L2_config   # production on a server (W² = 16384 stride)
 # — OR —
 export BRIDGE_CONFIG_DIR=./L1_config   # one-off withdraw test  (W·P = 1024 stride)
+export RELAYER_STATE_PATH="$BRIDGE_CONFIG_DIR/relayer-state.json"
 ```
 
 Everything downstream (`state/`, `proofs/`, `work_dir/`, log names)
@@ -167,37 +198,46 @@ resolves against this one variable via `bridge-prover-lib::paths`.
 
 ```bash
 # 2a. Relayer daemon binary
-cargo build --release -p bridge-relayer-daemon --bin relayer
+cargo build --release --locked -p bridge-relayer-daemon --bin relayer
 #     -> ./target/release/relayer
 
 # 2b. Aggregator subprocess (mandatory for daemon-live)
-( cd ../bridge-evm-aggregator && cargo build --release )
+( cd ../bridge-evm-aggregator && cargo build --release --locked --bin aggregate-proof )
 ```
 
-### Step 3 — Provision the Hermez KZG SRS (one-time, ~10 min network + ~20 min CPU)
+### Step 3 — Provision the Hermez KZG SRS (one-time, large download + CPU)
 
 `daemon-live` does **not** auto-download SRS on first launch — if
-`params/kzg_bn254_21.srs` is missing it panics with
-`no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params`.
+any required SRS is missing, proving or outer aggregation will fail. The full
+live bundle path needs K=17,19,20,21,22; K=22 is specifically required by the
+layer outer aggregator.
 
 The `bootstrap_hermez_srs` binary lives in this same repo
 (`gosh-sh/bridge`) under `crates/an-bridge-prover/bridge-prover-lib/src/bin/`.
 Run both commands from `crates/an-bridge-prover/`:
 
 ```bash
-# 3a. Manually fetch the K=21 ptau (~2.4 GB). Not auto-downloaded —
-#     the shared K=20 trust anchor cannot vouch for K=21, so the
-#     binary refuses to fetch an unverifiable blob.
+# 3a. Manually fetch K=21 (~2.4 GB) and K=22 (~4.8 GB). They are not
+#     auto-downloaded because the shared K=20 trust anchor cannot vouch for
+#     either blob.
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
   https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
+curl -L --fail --progress-bar \
+  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \
+  -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_22.ptau
 
 # 3b. Build + run. Auto-fetches the K=20 ptau (~1.2 GB) on cache miss,
-#     then materializes params/kzg_bn254_{17,19,20,21}.srs (~464 MB total).
+#     then materializes all five SRS files (~960 MiB total).
 cargo build --release -p bridge-prover-lib --bin bootstrap_hermez_srs
-./target/release/bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs \
+  --k 17 --k 19 --k 20 --k 21 --k 22
 ```
+
+Passing any `--k` replaces the program's default set, so list all five values;
+`--k 22` alone would provision only K=22. Pin and verify the resulting artifact
+manifest before starting a production container.
 
 ### Step 4 — Source the mode env file
 
@@ -205,11 +245,15 @@ cargo build --release -p bridge-prover-lib --bin bootstrap_hermez_srs
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 ```
 
-The env file first sources `../shellnet.common` for the shared
-secret-bearing bits (RPC URL, relayer key, GQL endpoint,
-aggregator/verifier paths) and then sets the three mode-specific vars
+The development env file first sources `../shellnet.common` for shared test
+settings and then sets the three mode-specific vars
 (`BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`).
 `BRIDGE_CONFIG_DIR` stays as you exported it in Step 1.
+
+For a server, do not edit either tracked file. Install a dedicated runtime env
+outside the clone from
+[`deploy/shellnet-l2/runtime.env.example`](../deploy/shellnet-l2/runtime.env.example)
+and let Compose mount it read-only.
 
 ### Step 5 — Sanity-check the resulting environment
 
@@ -229,30 +273,30 @@ the contract's `storedLastSeenBlockSeqNo` at construction — verify with
 ### Step 6 — Launch the daemon
 
 ```bash
-./target/release/relayer daemon-live
+./target/release/relayer --state "$RELAYER_STATE_PATH" daemon-live
 ```
 
 All `daemon-live` CLI flags are exposed as `BRIDGE_*` env vars, so no
-CLI arguments are needed. For a long-running server launch, see
-[Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy) (uses
-`nohup … > logs/… &`).
+subcommand arguments are needed. The global `--state` is explicit so L1 and
+L2 never share a relayer cursor. For a long-running server, use the Compose
+section above rather than `nohup`.
 
 ---
 
 
 ## Deploy your own bridge bundle from scratch
 
-**You may not need this section.** The repo ships pre-populated
+**You may not need this section.** The repo ships pre-populated development
 `shellnet.common`, `L1_config/env`, and `L2_config/env` pointing at a
 live Sepolia deploy — each `L{1,2}_config/env` carries the on-chain
 `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`, and `BRIDGE_ANCHOR_LEVEL`;
 `shellnet.common` carries the RPC + GQL endpoints and the in-repo paths
 for the aggregator crate and Solidity verifier sources
 (`BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR` — same relative paths
-in every clone, not deploy-specific). If those addresses suit you, drop
-your own `RELAYER_PRIVATE_KEY` into `shellnet.common` and skip to
-[Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy) — the
-daemon will `Resurrect` off the on-chain state (see
+in every clone, not deploy-specific). They may be used for disposable local
+tests. A server operator must instead use a dedicated EOA and an external
+runtime env, then skip to [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy) — the
+daemon can `Resurrect` off the on-chain state (see
 [Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon))
 regardless of who deployed it.
 
@@ -264,9 +308,9 @@ proof and a funded burner can submit against any deployed bridge; the
 daemon reads its signer from `RELAYER_PRIVATE_KEY`
 (`bridge-relayer-daemon/src/bin/relayer.rs:86`), no default.
 
-**Network.** Target is Sepolia (chain 11155111). Point `RPC_URL`
-at a Sepolia RPC endpoint (the shipped default is
-`https://ethereum-sepolia-rpc.publicnode.com`). The daemon does not
+**Network.** Target is Sepolia (chain 11155111). Point `RPC_URL` at a stable,
+authenticated Sepolia RPC endpoint; public endpoints are suitable for smoke
+tests but not unattended operation. The daemon does not
 read a chain-id from env — the ethers provider fetches it via
 `eth_chainId` on connect and every signed tx pins it there.
 
@@ -296,9 +340,10 @@ Faucets that require depositing ≥0.001 ETH on mainnet first (Alchemy /
 Infura / QuickNode) are usable once you're funded; they hand out
 0.05–0.5 ETH/day and are the practical top-up path after bootstrap.
 
-**Budget.** The one-shot deploy of the 6-contract bundle
-(`DeployShellnetE2EBridge.s.sol`: `AckiNackiBridge` + 4 SHPLONK verifiers +
-`MockBlockHeaderOracle`) cost **0.063 ETH** on 2026-08-13 (30M gas @
+**Budget.** The one-shot deploy creates six logical components
+(`AckiNackiBridge`, four verifier lanes and `MockBlockHeaderOracle`) through
+14 physical `CREATE` transactions (the four lanes each include adapter,
+wrapper and Yul verifier). It cost **0.063 ETH** on 2026-08-13 (30M gas @
 2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
 submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
 **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
@@ -331,25 +376,39 @@ wallet-balance line — refill from either faucet when it drops below
 > bricks the deploy. The script below aliases them explicitly. Do not
 > skip that line.
 
-The script below ships in-repo at
+The development helper below ships in-repo at
 [`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
-and deploys the 6-contract bundle from scratch AND re-deploys
-idempotently — running it a second time regenerates anchors against
-fresh chain head, redeploys, rewrites `L${LEVEL}_config/env`, and wipes
-stale prover state. Run:
+and deploys a new bundle from scratch. This is an irreversible broadcast, not
+an idempotent operation: every invocation spends a new nonce and deploys new
+addresses. It also rewrites the selected development env and clears its local
+state. Never blindly retry after a timeout or partial broadcast; first inspect
+the Foundry broadcast JSON, account `latest`/`pending` nonces and receipts.
+Archive any existing state and broadcast record before running it.
+
+Load `PRIVATE_KEY`, `SEPOLIA_RPC_URL` and the withdrawal identity from a
+root/operator-owned env outside the clone, then run:
 
 ```bash
 cd crates/an-bridge-prover
-LEVEL=1 PRIVATE_KEY=<sepolia burner from §1> ./scripts/deploy_bridge_bundle.sh
+CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
+  LEVEL=1 PRIVATE_KEY=<sepolia burner from §1> ./scripts/deploy_bridge_bundle.sh
 # or LEVEL=2 for L2 anchoring
 ```
 
-Full script body (kept inline for review — the on-disk copy is
-authoritative if the two ever drift):
+`WITHDRAW_ACC_FR` identifies the expected Acki Nacki bridge account in
+Circuit 4. The helper requires it explicitly. A deliberate dummy value is
+acceptable only for a `verifyBlock`-only smoke deployment; it permanently
+prevents meaningful withdrawal proofs. Use the authoritative account field
+value for any bridge that will serve withdrawals and record all constructor
+values in the private deployment handoff.
+
+The essential script mechanics are shown below for review; the linked on-disk
+copy is authoritative. Re-read the warning above before any rerun.
 
 ```bash
 #!/usr/bin/env bash
 # Deploy or redeploy the shellnet E2E bridge bundle end-to-end.
+# NOT IDEMPOTENT: every run broadcasts new contracts and spends new nonces.
 #
 # Usage:
 #   LEVEL=1 ./scripts/deploy_bridge_bundle.sh           # L1 anchor (stride  1024)
@@ -362,9 +421,20 @@ authoritative if the two ever drift):
 #   BRIDGE_BK_SET_CONFIG       default: ./bk_set.shellnet.json (relative to
 #                              crates/an-bridge-prover)
 set -euo pipefail
+set +x
+umask 077
 
 : "${LEVEL:?set LEVEL=1 or LEVEL=2}"
 : "${PRIVATE_KEY:?set PRIVATE_KEY=<sepolia burner>}"
+: "${WITHDRAW_ACC_FR:?set authoritative WITHDRAW_ACC_FR (or an explicit dummy for verifyBlock-only smoke)}"
+[[ "${CONFIRM_NEW_BRIDGE_DEPLOY:-}" == DEPLOY_NEW_CONTRACTS ]] || {
+  echo "Refusing broadcast: set CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS" >&2
+  exit 2
+}
+[[ "$LEVEL" == 1 || "$LEVEL" == 2 ]] || {
+  echo "LEVEL must be 1 or 2" >&2
+  exit 2
+}
 SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 BRIDGE_GQL_ENDPOINT="${BRIDGE_GQL_ENDPOINT:-https://shellnet.ackinacki.org/graphql}"
 BRIDGE_BK_SET_CONFIG="${BRIDGE_BK_SET_CONFIG:-./bk_set.shellnet.json}"
@@ -394,12 +464,12 @@ set -a && source "$GENESIS_ENV" && set +a
 # vm.envOr(..., 0). Without this alias the constructor silently pins 0.
 export GENESIS_LAST_SEEN_BLOCK_SEQNO="$GENESIS_SEED_SEQNO"
 
-# ─── 2. Deploy the 6-contract bundle ──────────────────────────────────────────
+# ─── 2. Deploy the bundle (14 CREATEs across 6 logical components) ────────────
 cd "$CONTRACTS_DIR"
 export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
-# Placeholder acc-Fr — OK for verifyBlock-only smoke; replace before real withdraws.
-export WITHDRAW_ACC_FR="${WITHDRAW_ACC_FR:-0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a}"
+# Caller supplied this explicitly; use a dummy only for verifyBlock-only smoke.
+export WITHDRAW_ACC_FR
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
@@ -415,23 +485,9 @@ BRIDGE_ADDRESS="$(jq -r '
 : "${BRIDGE_ADDRESS:?failed to extract AckiNackiBridge address from $BROADCAST}"
 echo ">>> Deployed BRIDGE_ADDRESS = $BRIDGE_ADDRESS"
 
-# ─── 4. Rewrite L${LEVEL}_config/env atomically ───────────────────────────────
+# ─── 4. Rewrite non-secret L${LEVEL}_config/env ───────────────────────────────
 CFG_DIR="$PROVER_DIR/L${LEVEL}_config"
 mkdir -p "$CFG_DIR/state" "$CFG_DIR/proofs" "$CFG_DIR/work_dir"
-
-# Ensure shellnet.common exists (written once; re-runs preserve operator edits).
-if [ ! -f "$PROVER_DIR/shellnet.common" ]; then
-  cat > "$PROVER_DIR/shellnet.common" <<EOF
-RPC_URL=$SEPOLIA_RPC_URL
-RELAYER_PRIVATE_KEY=$PRIVATE_KEY
-BRIDGE_GQL_ENDPOINT=$BRIDGE_GQL_ENDPOINT
-BRIDGE_BK_SET_CONFIG=$BRIDGE_BK_SET_CONFIG
-BRIDGE_PARAMS_DIR=./params
-BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
-BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
-EOF
-  echo ">>> Wrote fresh $PROVER_DIR/shellnet.common"
-fi
 
 cat > "$CFG_DIR/env" <<EOF
 # Generated by scripts/deploy_bridge_bundle.sh — do not hand-edit
@@ -444,16 +500,22 @@ BRIDGE_ANCHOR_LEVEL=$LEVEL
 EOF
 echo ">>> Wrote $CFG_DIR/env"
 
-# ─── 5. Wipe stale prover state so daemon cold-starts on the new anchor ───────
-rm -f "$CFG_DIR/state"/*.json
-echo ">>> Cleared $CFG_DIR/state/*.json (fresh cold-start)"
+# ─── 5. Archive stale state so the new bridge cold-start remains recoverable ─
+STATE_ARCHIVE="$CFG_DIR/state.pre_deploy_$(date -u +%Y%m%dT%H%M%SZ)"
+if compgen -G "$CFG_DIR/state/*.json" >/dev/null; then
+  mkdir -p "$STATE_ARCHIVE"
+  mv -- "$CFG_DIR/state"/*.json "$STATE_ARCHIVE/"
+  echo ">>> Archived prior state in $STATE_ARCHIVE"
+else
+  echo ">>> No prior state JSON to archive"
+fi
 
 echo
 echo ">>> Done. Next:"
 echo "    cd $PROVER_DIR"
 echo "    export BRIDGE_CONFIG_DIR=./L${LEVEL}_config"
 echo "    set -a && source \"\$BRIDGE_CONFIG_DIR/env\" && set +a"
-echo "    ./target/release/relayer daemon-live"
+echo "    ./target/release/relayer --state \"\$BRIDGE_CONFIG_DIR/relayer-state.json\" daemon-live"
 ```
 
 `AckiNackiBridge.sol` has no Pausable inheritance — user entrypoints are
@@ -509,34 +571,38 @@ If any of these don't match your deploy's genesis values (from the
 `compute_bridge_anchors` output you pinned at deploy time), **stop** —
 the deploy is broken. Do not launch the daemon.
 
-**Wipe stale artifacts (cold-start hygiene).** `deploy_bridge_bundle.sh` and
-the launch snippet below only clear `state/*.json` — the minimum the
-file-first guard requires. Older leftovers (event proofs, SHPLONK
-work_dir, `verifyBlock_*.json` submissions, `state.pre_deploy*_*/` and
-`proofs.pre_deploy*_*/` backup dirs from prior deploys) are harmless to
-the daemon but confuse operators inspecting the config dir after a fresh
-cold start — they look like "this run wrote them" when they did not. If
-you don't need the backup dirs as forensic evidence, blow them away
-before launch:
+**Archive stale artifacts (cold-start hygiene).** The development helper moves
+existing `state/*.json` into a timestamped `state.pre_deploy_*` directory;
+still archive the complete prior config before deploying against a new bridge.
+Older event proofs, aggregation
+scratch and submission dumps are harmless to the daemon but valuable for
+nonce/receipt forensics. Prefer a timestamped move over deletion:
 
 ```bash
-rm -rf "$BRIDGE_CONFIG_DIR"/state.pre_deploy*_*/ \
-       "$BRIDGE_CONFIG_DIR"/proofs.pre_deploy*_*/ \
-       "$BRIDGE_CONFIG_DIR"/work_dir/* \
-       submissions/*
+TS=$(date +%Y%m%d_%H%M%S)
+mkdir -p "runtime-archive/$TS"
+for path in "$BRIDGE_CONFIG_DIR"/state.pre_deploy*_* \
+            "$BRIDGE_CONFIG_DIR"/proofs.pre_deploy*_* \
+            "$BRIDGE_CONFIG_DIR"/work_dir submissions; do
+  [ -e "$path" ] && mv -- "$path" "runtime-archive/$TS/"
+done
 ```
 
-Skip this if you're mid-incident (Cases 4/5/6b) and might need to
-inspect an older `prover_state.json` — the backups are your only copy.
+Skip all cleanup while handling Cases 4/5/6b. Never remove the only copy of a
+state file or broadcast record during an incident.
 
 **Cold-start launch:**
 
 ```bash
 mkdir -p "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/proofs" "$BRIDGE_CONFIG_DIR/work_dir" logs
-rm -f "$BRIDGE_CONFIG_DIR"/state/*.json    # ensure clean bootstrap (file-first guard sees no state → seeds from env)
+if compgen -G "$BRIDGE_CONFIG_DIR/state/*.json" >/dev/null; then
+  echo "Refusing cold start: archive existing state JSON first" >&2
+  exit 1
+fi
 
 TS=$(date +%Y%m%d_%H%M%S)
-nohup ./target/release/relayer daemon-live > logs/live_cold_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
+nohup ./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+  > logs/live_cold_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
 echo "PID=$!"
 ```
 
@@ -640,10 +706,10 @@ mv "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/state.pre_L${OLD_LEVEL}_$(date
 mkdir -p "$BRIDGE_CONFIG_DIR/state"
 ```
 
-Similarly, if `relayer-state.json` in cwd carries a stale
+Similarly, if `$BRIDGE_CONFIG_DIR/relayer-state.json` carries a stale
 `last_observed_on_chain` from a prior deploy, the daemon aborts with
 `startup on-chain drift vs last_observed_on_chain`. Snapshot the file
-(`mv relayer-state.json relayer-state.pre_deploy<N>_<ts>.json`) and
+(`mv "$BRIDGE_CONFIG_DIR/relayer-state.json" "$BRIDGE_CONFIG_DIR/relayer-state.pre_deploy<N>_<ts>.json"`) and
 restart — the daemon writes a fresh one on first observation cycle.
 
 ---
@@ -665,7 +731,7 @@ on anchor mode:
 | Path | Written by | Trigger |
 |---|---|---|
 | `submissions/verifyBlock_seq<N>_fin<T>_<ts>.json` | `bridge.rs:679-724` (env-gated by `BRIDGE_DUMP_SUBMISSIONS_DIR`) | Every submit attempt (before tx send) |
-| `relayer-state.json` | `relayer.rs:149` | Every on-chain observation cycle (~every block) |
+| `$BRIDGE_CONFIG_DIR/relayer-state.json` | `relayer.rs` | Every on-chain observation cycle (~every block) |
 | `$BRIDGE_CONFIG_DIR/state/prover_state.json` + `$BRIDGE_CONFIG_DIR/state/prover_bk_set.json` | `live_source.rs:141-157` (`persist_driver`) | Every successful `ack_last_bundle` after on-chain confirmation |
 
 **Steady-state watch commands:**
@@ -704,7 +770,7 @@ transport / receipt lag — go to [Case 4](#case-4--restart-after-rpc-induced-ha
 cd crates/an-bridge-prover
 
 # 1. Send SIGTERM, wait for graceful exit
-kill $(pgrep -f 'relayer daemon-live')
+kill $(pgrep -f 'relayer .*daemon-live')
 sleep 5
 pkill -9 -f 'aggregate-proof' 2>/dev/null   # clean up any orphan child
 
@@ -715,7 +781,8 @@ cargo build --release -p bridge-relayer-daemon --bin relayer
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 TS=$(date +%Y%m%d_%H%M%S)
-nohup ./target/release/relayer daemon-live > logs/live_restart_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
+nohup ./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+  > logs/live_restart_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
 ```
 
 **Verify Resume:** log must contain `LiveProverDriver seed policy
@@ -763,9 +830,11 @@ for pending to clear before restart (otherwise nonce collision).
 ```bash
 cd crates/an-bridge-prover
 
-L_SEQ=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)
-L_BK=0x$(python3 -c "print(f'{int(\"$(jq -r '.last_observed_on_chain.bk_set_commitment' relayer-state.json)\", 16):064x}')")
-L_PREV=0x$(python3 -c "print(f'{int(\"$(jq -r '.last_observed_on_chain.prev_max_level_layer_hash' relayer-state.json)\", 16):064x}')")
+L_SEQ=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' "$BRIDGE_CONFIG_DIR/relayer-state.json")
+L_BK=$(python3 -c 'import sys; print(f"0x{int(sys.argv[1], 0):064x}")' \
+  "$(jq -r '.last_observed_on_chain.bk_set_commitment' "$BRIDGE_CONFIG_DIR/relayer-state.json")")
+L_PREV=$(python3 -c 'import sys; print(f"0x{int(sys.argv[1], 0):064x}")' \
+  "$(jq -r '.last_observed_on_chain.prev_max_level_layer_hash' "$BRIDGE_CONFIG_DIR/relayer-state.json")")
 
 C_SEQ=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
 C_BK=0x$(python3 -c "print(f'{$(cast call $BRIDGE storedBkSetCommitment\(\)\(uint256\) --rpc-url $RPC --json | jq -r '.[0]'):064x}')")
@@ -787,9 +856,10 @@ C_PREV=0x$(python3 -c "print(f'{$(cast call $BRIDGE storedPrevMaxLevelLayerHash\
 ```bash
 jq '.last_attempt_seqno = .last_processed_seqno
   | .attempts_since_progress = 0
-  | .bk_update_attempts_since_progress = 0' relayer-state.json > relayer-state.json.tmp \
-  && mv relayer-state.json.tmp relayer-state.json
-jq . relayer-state.json
+  | .bk_update_attempts_since_progress = 0' \
+  "$BRIDGE_CONFIG_DIR/relayer-state.json" > "$BRIDGE_CONFIG_DIR/relayer-state.json.tmp" \
+  && mv "$BRIDGE_CONFIG_DIR/relayer-state.json.tmp" "$BRIDGE_CONFIG_DIR/relayer-state.json"
+jq . "$BRIDGE_CONFIG_DIR/relayer-state.json"
 ```
 
 Without this, the daemon inherits `attempts_since_progress=3` from disk and
@@ -801,9 +871,10 @@ Same as [Case 3](#case-3--clean-restart-no-state-loss). Expect
 `seed_policy=Resume`. First cycle regenerates the proof from scratch
 (prior proof was in RAM, lost on exit) — ~13 min to next submit.
 
-**If it dies again from RPC:** consider swapping `RPC_URL` in
-`shellnet.common` to an Alchemy / Infura / Ankr endpoint. Public-node RPCs are
-rate-limited and drop long-lived receipt polls.
+**If it dies again from RPC:** switch `RPC_URL` in the external runtime env to
+a stable authenticated endpoint and repeat the nonce/cursor/state checks.
+Public-node RPCs are rate-limited and can drop long-lived receipt polls. For a
+Compose instance, rerun the one-shot preflight before starting the container.
 
 ---
 
@@ -883,7 +954,8 @@ cd crates/an-bridge-prover
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a       # RPC, BRIDGE, private key
 TS=$(date +%Y%m%d_%H%M%S)
-nohup ./target/release/relayer daemon-live > logs/live_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
+nohup ./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+  > logs/live_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
 ```
 
 That's it. No env edits, no `mv $BRIDGE_CONFIG_DIR/state $BRIDGE_CONFIG_DIR/state.stale_*`, no
@@ -949,7 +1021,8 @@ grep '^BRIDGE_BOOTSTRAP_SEQNO=' "$BRIDGE_CONFIG_DIR/env"
 # 3. Archive any existing state
 TS=$(date +%Y%m%d_%H%M%S)
 [ -d "$BRIDGE_CONFIG_DIR/state" ] && mv "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/state.stale_${TS}"
-[ -f relayer-state.json ] && mv relayer-state.json relayer-state.json.stale_${TS}
+[ -f "$BRIDGE_CONFIG_DIR/relayer-state.json" ] && \
+  mv "$BRIDGE_CONFIG_DIR/relayer-state.json" "$BRIDGE_CONFIG_DIR/relayer-state.json.stale_${TS}"
 mkdir -p "$BRIDGE_CONFIG_DIR/state"
 
 # 4. Regenerate genesis anchors from the seed block (sanity)
@@ -965,7 +1038,8 @@ cd ../an-bridge-prover
 
 # 5. Cold-start launch (identical to Case 1)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
-nohup ./target/release/relayer daemon-live > logs/live_rebootstrap_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
+nohup ./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+  > logs/live_rebootstrap_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
 ```
 
 **Expect `seed_policy=Explicit($CURRENT)`** in the log. Not `Resume`.
@@ -1019,7 +1093,7 @@ echo "storedPrev(genesis): $(cast call $BRIDGE 'storedPrevMaxLevelLayerHash()(ui
 **Daemon liveness:**
 
 ```bash
-pgrep -a -f 'relayer daemon-live'                  # parent PID + cmdline
+pgrep -a -f 'relayer .*daemon-live'                # parent PID + cmdline
 pgrep -a -f 'aggregate-proof'                      # active aggregator subprocess (should exist mid-cycle)
 ```
 
@@ -1060,9 +1134,10 @@ directory). The sibling `crates/bridge-relayer-daemon/` directory is
 
 ```
 crates/an-bridge-prover/
-├── shellnet.common                  ← 7 shared env lines (RPC/key/GQL/params/…), tracked in git
+├── shellnet.common                  ← tracked development fixture; not a server secret store
 ├── L1_config/                       ← L1-anchor mode config dir (BRIDGE_CONFIG_DIR=./L1_config)
 │   ├── env                          ← sources ../shellnet.common + 4 L1 overrides
+│   ├── relayer-state.json           ← verifier cursor + on-chain observation cache
 │   ├── state/
 │   │   ├── prover_state.json        ← LiveProverDriver snapshot (~574 KB) — auth. resume point
 │   │   └── prover_bk_set.json       ← active BK-set snapshot (updated only via applyBkSetUpdate)
@@ -1070,11 +1145,11 @@ crates/an-bridge-prover/
 │   └── work_dir/                    ← per-mode enriched witnesses + shplonk-snark scratch
 ├── L2_config/                       ← same layout as L1_config; BRIDGE_CONFIG_DIR=./L2_config (W²-stride mode)
 │   ├── env
+│   ├── relayer-state.json
 │   ├── state/
 │   ├── proofs/
 │   └── work_dir/
 ├── bk_set.shellnet.json             ← bootstrap BK-set (5 signers) — shared across L1/L2
-├── relayer-state.json               ← verifier-side cursor + on-chain observation cache (cwd, mode-agnostic)
 ├── submissions/                     ← calldata dumps (env-gated by BRIDGE_DUMP_SUBMISSIONS_DIR)
 ├── logs/                            ← daemon stdout+stderr
 ├── params/                          ← SRS + circuit VKs/PKs (~17 GB, DO NOT WIPE)
@@ -1096,16 +1171,16 @@ overrides if set explicitly.
   written together by `persist_driver` on every successful
   `ack_last_bundle` / `ack_bk_update`. Not on every submit — only on
   confirmed ACK.
-- `relayer-state.json` is written on every on-chain observation refresh
+- `$BRIDGE_CONFIG_DIR/relayer-state.json` is written on every on-chain observation refresh
   (~every block).
 
 **Cleanup rules:**
 
 - `submissions/` — safe to prune anytime; purely diagnostic.
 - `logs/` — safe to prune, but keep the most recent for post-mortem.
-- `$BRIDGE_CONFIG_DIR/state/`, `relayer-state.json` — **NEVER** delete a running
+- `$BRIDGE_CONFIG_DIR/state/`, `$BRIDGE_CONFIG_DIR/relayer-state.json` — **NEVER** delete a running
   daemon's active state. To reset, archive to `$BRIDGE_CONFIG_DIR/state.stale_<ts>/`
-  + `relayer-state.json.stale_<ts>` first (see [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain)).
+  + `$BRIDGE_CONFIG_DIR/relayer-state.json.stale_<ts>` first (see [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain)).
 - `$BRIDGE_CONFIG_DIR/work_dir/` — safe to prune between events; each `withdraw-e2e`
   run repopulates its own subdir.
 - `params/` — never delete; keygen takes ~7 min per circuit.
@@ -1114,42 +1189,58 @@ overrides if set explicitly.
 
 ## Onboarding wrap-up — new operator on a fresh L2 server
 
-Written for a colleague picking up this runbook cold on a new
-n14-class machine. Concrete task: **deploy the bundle, cold-start the
-daemon at chain head, leave it running long-term, collect
-`logs/live_cold_L2_config_*.log` + periodic
-`L2_config/state/prover_state.json` snapshots for review.**
+Written for a colleague picking up this runbook cold on a new n14-class
+machine. Concrete task: **deploy a fresh bundle near chain head, run the L2
+daemon through Docker Compose, and leave a reproducible private deployment
+record plus observable persistent state.**
 
 Scope of *this* deployment (dismisses several open questions upfront):
 
 - **Single relayer instance** — no parallel provers, no catch-up workers.
 - **L2 anchor mode only** — `BRIDGE_CONFIG_DIR=./L2_config`, stride `W² = 16384`.
-- **Shellnet → Sepolia only** — mainnet is not in scope on this branch.
+- **Shellnet → Sepolia only** — mainnet is not in scope for this instance.
 - **BK-set fixed from shellnet genesis** — no rotation, no replay.
 
 ### Do this, in order
 
-1. **Build + SRS** (~30 min one-time) — [Prereqs Step 2](#step-2--build-binaries-one-time-per-fresh-clone) + [Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-10-min-network--20-min-cpu). K=21 ptau is a manual ~2.4 GB curl; everything else is automatic.
-2. **Wallet** — either reuse the shared shellnet burner already in [`shellnet.common`](../../an-bridge-prover/shellnet.common) (address `0xb586…2307`, single key for both deployer + relayer roles) or generate your own via [§1–2](#1-create-a-fresh-burner-wallet). If you use your own, drop the key into `shellnet.common:RELAYER_PRIVATE_KEY` and also export `PRIVATE_KEY=<same>` for the deploy step.
-3. **Deploy the bundle** — one command, from `crates/an-bridge-prover/`:
+1. **Pin + build** — check out one reviewed commit and build both release
+   binaries with `--locked`. Record the commit and binary SHA-256 values.
+2. **Wallet + secrets** — generate a dedicated Sepolia EOA, fund it and keep
+   its key/RPC credentials only in root-owned env files outside the clone.
+   Never reuse the tracked development burner for a server.
+3. **SRS + toolchain** — provision K=17,19,20,21,22, generate the inner
+   PK/VK/config set, install `solc 0.8.19`, then seal and hash the static
+   artifact manifest. Keep the outer `pk_cache` writable on a bind mount.
+4. **Deploy the bundle** — load deployment values from the external env and
+   run the helper once from `crates/an-bridge-prover/`:
    ```bash
-   LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh
+   CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
+     LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh
    ```
-   Derives anchors against live chain head, deploys the 6 contracts, extracts `BRIDGE_ADDRESS`, rewrites `L2_config/env`, wipes stale state. Detail: [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch).
-4. **Cold-start the daemon** — [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy). Expect first `verifyBlock confirmed` in **~56 min average, up to ~101 min worst case**. Why the wait: `compute_bridge_anchors --at-head` floors the seed to the previous `W²`-aligned boundary (`seed = (head / W²) * W²`), and the seed itself is **not proven** — it is written into the contract as the genesis anchor (`GENESIS_LAST_SEEN_BLOCK_SEQNO`) and trusted as-is. The daemon's first ZK-proven bundle is the *next* boundary above the seed (`(k+1)·W²`), which by construction sits above chain head; time-to-first-verify = (chain time to reach `(k+1)·W²`, uniform in `[0, W²/rate)` ≈ 0–91 min at ~3 b/s) + ~10 min prover.
-5. **Long-run watch** — L2 steady state lands one bundle per `W² = 16384` seq_nos, i.e. **~91 min chain-time between bundles** (prover is idle-waiting most of that window; see [Case 2](#case-2--steady-state-operation)). Tail the log, snapshot `L2_config/state/prover_state.json` on a schedule.
-6. **Failure playbook (only when it fires):** RPC hard-abort → [Case 4](#case-4--restart-after-rpc-induced-hard-abort); on-chain revert → [Case 5](#case-5--restart-after-on-chain-revert); process crash → relaunch is automatic-resurrect from chain ([Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon), no operator action needed).
+   Retain the full Foundry broadcast record and all constructor/anchor values.
+   A retry deploys new addresses; audit nonce and receipts first. Detail:
+   [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch).
+5. **Preflight + cold start** — fill the external runtime env, then follow the
+   [Compose kit](../deploy/shellnet-l2/README.md). Expect the first confirmation
+   after the next W² boundary plus proof time: roughly 0–91 min chain wait plus
+   about 10 min proving on the measured host.
+6. **Acceptance** — require a Sepolia receipt with `status=1`, equal local and
+   on-chain cursors, no pending nonce, and matching verifier bytecode. Perform
+   one controlled stop/start and require `WarmResume` without a duplicate tx.
+7. **Long-run watch** — run `scripts/status.sh` and retain submission JSONs.
+   L2 normally advances once per 16,384 seq_nos (~91 min at the observed
+   shellnet rate); `NotYetAvailable` between boundaries is healthy.
 
 ### Answers to the PR #31 review questions
 
 | Question | Verdict | Where |
 |---|---|---|
 | Shellnet backlog — new bridge near head, or catch-up / parallel provers? | **New bridge near head.** No catch-up model exists on this branch; `compute_bridge_anchors --at-head` pins the newest stride-aligned boundary ≤ chain head at deploy time. | [§3 "The one thing to know"](#deploy-your-own-bridge-bundle-from-scratch) |
-| Mainnet destination chain + production RPC | **N/A** on this branch. Sepolia (chain 11155111) only. | intro |
-| Bridge address / deploy tx / bootstrap height / initial cursors | Not hand-off items. `deploy_bridge_bundle.sh` derives all four (`BRIDGE_ADDRESS` from the broadcast JSON; the three genesis constants from `compute_bridge_anchors --at-head`) and writes them into `L2_config/env`. | [§3](#deploy-your-own-bridge-bundle-from-scratch) |
-| "Exact verifier stack version" | **Auto-consistent on a fresh deploy from this branch.** The deploy script builds the four SHPLONK verifiers from `contracts/ethereum/verifiers/*.bin`; the daemon proves against `params/*_vk.bin` regenerated on first launch from the same source tree. Nothing to coordinate — a mainnet concern only. | [DeployShellnetE2EBridge.s.sol](../../../contracts/ethereum/script/DeployShellnetE2EBridge.s.sol) |
+| Mainnet destination chain + production RPC | **N/A for this instance.** Sepolia (chain 11155111) only; use an authenticated runtime RPC. | intro |
+| Bridge address / deploy tx / bootstrap height / initial cursors | **Mandatory private handoff data.** Record the bridge address, every deployment tx/receipt, genesis seed/height/anchor/BK commitment and initial local/on-chain cursor. | [§3](#deploy-your-own-bridge-bundle-from-scratch) |
+| "Exact verifier stack version" | Pin source/binaries/params by hash. Preflight walks each adapter → wrapper → Yul verifier and byte-compares deployed runtime code with the packaged `.bin`. | [Compose kit](../deploy/shellnet-l2/README.md) |
 | Authoritative genesis BK set + checksum | `bk_set.shellnet.json` in-repo. Poseidon commitment `0x08eb0a…ca71c`, SHA-256 `c77e3d…898f`. Fixed on shellnet from genesis; no rotation. | intro (top of doc) |
 | Who fixes BK-cursor init / replays rotations from genesis? | **N/A on shellnet** (rotation off — confirmed with Sehor 2026-07-08). Mainnet concern only. | intro |
-| Proof artifacts from Alina with block ranges / params / checksums | **Not required.** Bootstrap-near-head means the daemon generates its own bundle proofs forward from the fresh anchor. `params/` (SRS + per-circuit PK/VK, ~17 GB) is regenerated locally per-machine, not shipped. | [Prereqs Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-10-min-network--20-min-cpu) |
-| Funded relayer EOA / secrets transfer / monitoring owner | Colleague-owned burner in `shellnet.common`. Monitoring = his own `tail -f logs/` + the [Health checks](#health-checks-run-any-time) block. Single instance ⇒ single owner. | [Prereqs §1](#1-create-a-fresh-burner-wallet), [Health checks](#health-checks-run-any-time) |
-| n14 sizing / core scaling read | **Correct.** Prover is single-threaded ~10 min/bundle; extra cores don't compound. L2 chain-stride (~91 min) gives ample slack, so n14 is fine for the long-run test. | [daemon_live_performance.md](daemon_live_performance.md) |
+| Proof artifacts from Alina with block ranges / params / checksums | Historical proofs are not required for a fresh near-head bridge. SRS/PK/VK artifacts are required and must be locally verified against a retained checksum manifest. | [Prereqs Step 3](#step-3--provision-the-hermez-kzg-srs-one-time-large-download--cpu) |
+| Funded relayer EOA / secrets transfer / monitoring owner | Dedicated EOA and external root-owned secret env. One named operator owns restart/nonce reconciliation; Compose status/logs provide the checks. | [Compose kit](../deploy/shellnet-l2/README.md) |
+| n14 sizing / core scaling read | n14 is adequate for the measured L2 cadence. Stages run sequentially, but individual Halo2 stages are multi-core; extra cores improve those stages rather than multiplying independent bundles. Live acceptance peaked near 23 GiB RAM and produced an outer cache around 17 GiB. | [daemon_live_performance.md](daemon_live_performance.md) |

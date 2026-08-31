@@ -1,7 +1,8 @@
 # `daemon-live` performance
 
-Per-bundle numbers on a single M-series Mac, dev laptop-class hardware.
-One bundle = one key-block, 512 seq_nos, ~5 min chain cadence.
+The baseline table below was collected on a single M-series Mac. A bundle is
+one relayer submission, not every key block: current L1 stride is 1,024
+seq_nos, while L2 stride is 16,384 seq_nos.
 
 ## Per-bundle wall time
 
@@ -35,9 +36,20 @@ or `BRIDGE_PK_CACHE_DIR=<path>` in the env. The daemon forwards it to the
 
 ## Operational notes
 
-- **Cache footprint at K=21**: Primary PK 7.65 GB + Layer PK 9.55 GB =
-  ~17 GB in `<params_dir>/pk_cache/`, on top of `params/`'s ~17 GB of SRS +
-  inner PKs. Steady-state disk requirement ~34 GB.
+- **Concurrency model:** the daemon runs one bundle pipeline. Attestation and
+  layer proving/aggregation stages are sequential, so it does not process
+  independent historical bundles concurrently. Individual Halo2 stages do
+  use many cores, however; the ~10 minute warm time is not invariant to CPU
+  count. More cores can shorten a stage but do not multiply the number of
+  in-flight bundles.
+- **n14-class live acceptance (2026-08-27):** individual Halo2 stages showed
+  multi-core CPU use, peak memory was about 23 GiB, and five consecutive L2
+  cycles confirmed successfully. L2's roughly 91-minute chain cadence left
+  ample idle time after each proof on that host class.
+- **Cache footprint at K=22:** the Primary + Layer outer cache occupies about
+  17 GiB in `<params_dir>/pk_cache/`, on top of roughly 17 GiB of SRS + inner
+  PKs. Keep at least 80 GiB free before a cold first cycle for generation,
+  temporary files and recovery headroom.
 - **First-bundle write is fragile**: needs ≥20 GB free at bundle start.
   ENOSPC mid-write leaves a truncated `.pk` without a `.meta.json`
   companion; every subsequent bundle then panics with
@@ -54,7 +66,8 @@ or `BRIDGE_PK_CACHE_DIR=<path>` in the env. The daemon forwards it to the
 cd bridge/crates/an-bridge-prover
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
-./target/release/relayer daemon-live 2>&1 | tee logs/perf_baseline_${BRIDGE_CONFIG_DIR##*/}.log
+./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+  2>&1 | tee logs/perf_baseline_${BRIDGE_CONFIG_DIR##*/}.log
 ```
 
 Timing lines to grep:

@@ -34,9 +34,8 @@ contracts/ethereum/lib/
 .secrets
 
 # Personal editor backups of shellnet env files
-# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored — the shared
-# shellnet deployer burner + genesis anchors live in
-# crates/an-bridge-prover/shellnet.common (tracked).
+# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored. The tracked
+# shellnet config is a development fixture; production secrets stay external.
 .env.shellnet.*.bak
 .env.shellnet.*.bak.*
 
@@ -199,10 +198,9 @@ deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
 
-# R15 / M2 bridge-evm-aggregator spike (standalone workspace, lock + target +
-# regenerated KZG SRS + generated Yul/.bin artefacts; only the source tree
-# under src/ + tests/ is committed).
-crates/bridge-evm-aggregator/Cargo.lock
+# R15 / M2 bridge-evm-aggregator standalone workspace. Its Cargo.lock is
+# committed because `aggregate-proof` is a deployed binary; only generated
+# target/SRS/output artefacts remain local.
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/
@@ -242,14 +240,15 @@ crates/an-bridge-prover/diag/
 
 # Per-mode config dirs (L1_config/, L2_config/) — the runtime subdirs
 # hold live prover state, proofs, and scratch witnesses, never commit.
-# The `env` files carry the current shared shellnet deploy addresses
-# (BRIDGE_ADDRESS, BRIDGE_BOOTSTRAP_SEQNO, BRIDGE_ANCHOR_LEVEL) and are
-# tracked; `shellnet.common` is tracked with a placeholder
-# RELAYER_PRIVATE_KEY — each operator drops their own key in locally
-# and keeps that edit out of any commit.
+# The `env` files and `shellnet.common` are tracked development fixtures.
+# Production runtime envs and keys live outside the repository.
+crates/an-bridge-prover/L1_config/relayer-state.json*
 crates/an-bridge-prover/L1_config/state/
+crates/an-bridge-prover/L1_config/state.pre_deploy_*/
 crates/an-bridge-prover/L1_config/proofs/
 crates/an-bridge-prover/L1_config/work_dir/
+crates/an-bridge-prover/L2_config/relayer-state.json*
 crates/an-bridge-prover/L2_config/state/
+crates/an-bridge-prover/L2_config/state.pre_deploy_*/
 crates/an-bridge-prover/L2_config/proofs/
 crates/an-bridge-prover/L2_config/work_dir/

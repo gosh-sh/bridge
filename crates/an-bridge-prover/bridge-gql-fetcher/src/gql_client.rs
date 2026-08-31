@@ -9,6 +9,10 @@ use crate::types::{AccountRouting, ThreadIdentifier};
 /// circuit witness layout — no local `= 16` literal to drift out of sync.
 pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
 
+/// Largest height accepted by the live GraphQL schema. Although Rust-side
+/// block heights are `u64`, GraphQL exposes `height_end` as a signed `Int`.
+pub const GRAPHQL_SIGNED_INT_MAX: u64 = i64::MAX as u64;
+
 /// Lightweight GraphQL client for the acki-nacki node.
 pub struct GqlClient {
     http: reqwest::Client,
@@ -301,6 +305,9 @@ impl GqlClient {
         first: u32,
         after: Option<&str>,
     ) -> anyhow::Result<(Vec<BkSetUpdateWithAttestations>, Option<String>)> {
+        let height_end = i64::try_from(height_end).context(
+            "bkSetUpdates height_end exceeds the live GraphQL signed Int range",
+        )?;
         let after_arg = match after {
             Some(cur) => format!(r#", after: "{}""#, cur.replace('"', "\\\"")),
             None => String::new(),
@@ -976,4 +983,19 @@ fn decode_hash32(s: &str) -> anyhow::Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+#[cfg(test)]
+mod height_end_tests {
+    use super::*;
+
+    #[test]
+    fn unbounded_height_fits_live_graphql_signed_int() {
+        assert_eq!(i64::try_from(GRAPHQL_SIGNED_INT_MAX).unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn u64_max_does_not_fit_live_graphql_signed_int() {
+        assert!(i64::try_from(u64::MAX).is_err());
+    }
 }

@@ -87,4 +87,27 @@ mod tests {
         c[1].block_hash = h(8);
         assert!(covers_deposit(h(3), h(1), &c).is_err());
     }
+
+    #[test]
+    fn empty_chain_rejected() {
+        assert!(covers_deposit(h(3), h(3), &[]).is_err());
+    }
+
+    #[test]
+    fn wrong_checkpoint_start_rejected() {
+        assert!(covers_deposit(h(9), h(3), &chain()).is_err());
+    }
+
+    #[test]
+    fn longer_than_epoch_rejected() {
+        let links: Vec<ExecLink> = (0u8..=32)
+            .rev()
+            .map(|i| ExecLink {
+                block_hash: h(i),
+                parent_hash: h(i.saturating_sub(1)),
+            })
+            .collect();
+        assert_eq!(links.len(), 33);
+        assert!(covers_deposit(h(32), h(0), &links).is_err());
+    }
 }

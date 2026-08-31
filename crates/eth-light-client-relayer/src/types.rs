@@ -283,4 +283,47 @@ mod tests {
         assert_eq!(parsed.finalized_slot, 4);
         assert_eq!(&bytes[..8], &5u64.to_le_bytes());
     }
+
+    #[test]
+    fn parse_leaves_committee_json_empty() {
+        let u = parse_finality_update(&sample_json(1, 1)).unwrap();
+        assert!(u.committee_json.is_empty());
+    }
+
+    #[test]
+    fn step_bundle_from_dir_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pi = vec![0u8; PUBLIC_INPUT_BYTES];
+        pi[..8].copy_from_slice(&7u64.to_le_bytes());
+        pi[32..40].copy_from_slice(&6u64.to_le_bytes());
+        pi[5 * 32..6 * 32].copy_from_slice(&[0xC0; 32]);
+        std::fs::write(dir.path().join("step_public_inputs.bin"), &pi).unwrap();
+        std::fs::write(dir.path().join("step_proof_blake2b.bin"), [0xABu8; 8]).unwrap();
+        let b = StepProofBundle::from_dir(dir.path()).unwrap();
+        assert_eq!(b.parsed.attested_slot, 7);
+        assert_eq!(b.parsed.finalized_slot, 6);
+        assert_eq!(b.parsed.committee_commitment, [0xC0; 32]);
+        assert_eq!(b.proof, vec![0xAB; 8]);
+    }
+
+    #[test]
+    fn rotate_bundle_from_dir_reads_period_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
+        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        pi[off..off + 8].copy_from_slice(&42u64.to_le_bytes());
+        std::fs::write(dir.path().join("rotate_public_inputs.bin"), &pi).unwrap();
+        std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0xCDu8; 4]).unwrap();
+        let b = RotateProofBundle::from_dir(dir.path()).unwrap();
+        assert_eq!(b.period, 42);
+        assert_eq!(b.proof, vec![0xCD; 4]);
+    }
+
+    #[test]
+    fn rotate_bundle_rejects_short_pi() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rotate_public_inputs.bin"), [0u8; 8]).unwrap();
+        std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0u8; 1]).unwrap();
+        assert!(RotateProofBundle::from_dir(dir.path()).is_err());
+    }
 }

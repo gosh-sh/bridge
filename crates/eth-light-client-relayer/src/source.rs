@@ -178,3 +178,26 @@ impl BeaconSource for InMemoryBeaconSource {
         Ok(q.remove(0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_exec_link_reads_payload_hashes() {
+        let json = r#"{
+          "data":{"message":{"body":{"execution_payload":{
+            "block_hash":"0x1111111111111111111111111111111111111111111111111111111111111111",
+            "parent_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"
+          }}}}
+        }"#;
+        let link = parse_exec_link(json).unwrap();
+        assert_eq!(link.block_hash, [0x11; 32]);
+        assert_eq!(link.parent_hash, [0x22; 32]);
+    }
+
+    #[test]
+    fn parse_exec_link_rejects_missing_payload() {
+        assert!(parse_exec_link(r#"{"data":{}}"#).is_err());
+    }
+}

@@ -264,6 +264,16 @@ pub fn step_witness_from_beacon(
 mod tests {
     use super::*;
 
+    fn dummy_committee_json(n: usize) -> String {
+        let pk = format!("0x{}", "ab".repeat(48));
+        let agg = format!("0x{}", "cd".repeat(48));
+        let pks: Vec<String> = (0..n).map(|_| format!("\"{pk}\"")).collect();
+        format!(
+            r#"{{"data":{{"next_sync_committee":{{"pubkeys":[{}],"aggregate_pubkey":"{agg}"}}}}}}"#,
+            pks.join(",")
+        )
+    }
+
     #[test]
     fn committed_finality_update_has_supermajority_bits() {
         let raw = include_str!("../fixtures/mainnet/finality_update.json");
@@ -278,5 +288,29 @@ mod tests {
         header(data, "attested_header").unwrap();
         header(data, "finalized_header").unwrap();
         execution(data, "finalized_header").unwrap();
+    }
+
+    #[test]
+    fn parse_sync_committee_reads_512_next_keys() {
+        let (pks, agg) = parse_sync_committee(&dummy_committee_json(512)).unwrap();
+        assert_eq!(pks.len(), SYNC_COMMITTEE_SIZE);
+        assert_eq!(agg, [0xcd; 48]);
+        assert_eq!(pks[0], [0xab; 48]);
+    }
+
+    #[test]
+    fn parse_sync_committee_rejects_short_set() {
+        assert!(parse_sync_committee(&dummy_committee_json(511)).is_err());
+    }
+
+    #[test]
+    fn parse_sync_committee_rejects_unrelated_json() {
+        assert!(parse_sync_committee(r#"{"data":{}}"#).is_err());
+    }
+
+    #[test]
+    fn step_witness_rejects_json_without_committee() {
+        let finality = include_str!("../fixtures/mainnet/finality_update.json");
+        assert!(step_witness_from_beacon(finality, r#"{"data":{}}"#).is_err());
     }
 }

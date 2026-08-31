@@ -207,3 +207,37 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_rotate(to_period).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::parse_finality_update;
+
+    fn sample_update() -> FinalityUpdate {
+        let json = r#"{"data":{
+          "attested_header":{"beacon":{"slot":"5","state_root":"0x1111111111111111111111111111111111111111111111111111111111111111"}},
+          "finalized_header":{
+            "beacon":{"slot":"4","state_root":"0x1111111111111111111111111111111111111111111111111111111111111111"},
+            "execution":{"block_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"}
+          },
+          "sync_aggregate":{"sync_committee_bits":"0x01"}
+        }}"#;
+        parse_finality_update(json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn subprocess_step_rejects_empty_committee() {
+        let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
+            prover_dir: ".".into(),
+            srs_path: ".".into(),
+            timeout: Duration::from_secs(1),
+        });
+        let err = gen.generate_step(&sample_update()).await.unwrap_err();
+        match err {
+            RelayerError::ProofGeneration(m) => {
+                assert!(m.contains("committee_json empty"), "{m}");
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+}

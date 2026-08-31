@@ -2,8 +2,9 @@
 //!
 //! Polls `finality_update` + `light_client/updates`, proves a step (real
 //! 512-committee via `COMMITTEE_JSON_PATH`), and calls
-//! `EthBeaconLightClient.submitUpdate`. Period jump → `submit-rotate` /
-//! `--enable-rotate` (n14 + tvm-sdk#284). Epoch ancestry: [`ancestry`]
+//! `EthBeaconLightClient.submitUpdate`. Period jump → `submitRotate` by
+//! default (`--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
+//! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
 //! `finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
 

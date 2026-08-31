@@ -132,9 +132,10 @@ enum Cmd {
         /// Do not send to AN (in-memory submitter).
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-        /// Attempt `submitRotate` on a period jump (needs n14 + sound opcode).
+        /// Skip `submitRotate` on a period jump. Rotate is **on** by default
+        /// (tvm-sdk#284 co-deploys with this contract).
         #[arg(long, default_value_t = false)]
-        enable_rotate: bool,
+        no_rotate: bool,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -259,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
             srs_path,
             mock_prove,
             dry_run,
-            enable_rotate,
+            no_rotate,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -295,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
                 srs_path,
                 mock_prove,
                 dry_run,
-                enable_rotate,
+                !no_rotate,
                 an,
                 allow_insecure_graphql,
                 BackoffConfig {

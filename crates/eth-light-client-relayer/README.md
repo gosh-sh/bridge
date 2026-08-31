@@ -8,7 +8,8 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
 Epoch ancestry (31/32 on-chain): `eth-lc-relayer submit-ancestry` →
 `EthBeaconLightClient.submitAncestry`. Read-only check: `ancestry-one`.
-Committee rotate: `submit-rotate` / `--enable-rotate` (n14 + tvm-sdk#284).
+Committee rotate: on by default (`submitRotate` on a period jump; `--no-rotate`
+opts out). tvm-sdk#284 co-deploys with this contract.
 
 ## How it runs
 
@@ -28,9 +29,9 @@ CLI (`cargo run --bin eth-lc-relayer -- …`; `--features live-submit` for AN):
 # 1. See the beacon head (no prove, no AN)
 eth-lc-relayer beacon-watch --beacon-url https://lodestar-mainnet.chainsafe.io
 
-# 2. Shadow loop (tests / laptop): mock prove + mock AN
+# 2. Shadow loop (tests / laptop): mock prove + mock AN, no rotate prove
 eth-lc-relayer daemon --beacon-url https://lodestar-mainnet.chainsafe.io \
-  --mock-prove --dry-run --state ./eth-lc-relayer-state.json
+  --mock-prove --dry-run --no-rotate --state ./eth-lc-relayer-state.json
 
 # 3. Live systemd: scripts/ursus/eth-light-client-relayer.service
 #    build: cargo build --release --features live-submit
@@ -56,7 +57,8 @@ eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 ```
 
-`--enable-rotate` is **off** by default until tvm-sdk#284 is on every node.
+`--no-rotate` opts out of auto `submitRotate`. Rotate is **on** by default;
+tvm-sdk#284 co-deploys with this contract (n14 for the ~40 GB prove).
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

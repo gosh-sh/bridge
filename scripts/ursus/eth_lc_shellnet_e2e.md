@@ -3,6 +3,8 @@
 Operator procedure on n14 + shellnet. This is the M6 E2E for this PR, not a
 follow-up ticket.
 
+tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
+
 ## Preconditions
 
 - Docker / live AN cluster GraphQL on n14 (`http://localhost/graphql`) **or**
@@ -11,7 +13,7 @@ follow-up ticket.
 - `eth-light-client-prover` + `crates/eth-light-client-relayer` synced to this
   branch.
 - `EthBeaconLightClient` deployed; `USDCBridge.setLightClient` set (do **not**
-  `disableOwnerAnchors` until step 6 is green).
+  `disableOwnerAnchors` / `disableOwnerRotation` until step 7 is green).
 - Binary: `cargo build --release --features live-submit` in the relayer crate.
 
 ## Steps
@@ -28,10 +30,10 @@ follow-up ticket.
 6. For a deposit in a non-checkpoint block of the same epoch:
    `eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
    then `finalizeDeposit`. `ancestry-one` is the read-only check.
-7. Period boundary (optional, needs tvm-sdk#284 on every node):
-   `eth-lc-relayer daemon --enable-rotate` **or** `submit-rotate` from
-   `rotate_tree_n8` `EMIT_VKBLOB=1` (~40 GB n14).
-8. Then `scripts/ursus/flip_deposit_to_light_client.md`.
+7. Period boundary: `eth-lc-relayer daemon` (rotate **on** by default) **or**
+   `submit-rotate` from `rotate_tree_n8` `EMIT_VKBLOB=1` (~40 GB n14).
+8. Then `scripts/ursus/flip_deposit_to_light_client.md`
+   (`disableOwnerAnchors` + `disableOwnerRotation`).
 
 Negative: a privately mined `Deposit` whose `blockHash` is not on the parent
 chain of a proven checkpoint must still revert `finalizeDeposit`.

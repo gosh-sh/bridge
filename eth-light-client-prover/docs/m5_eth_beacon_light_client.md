@@ -92,9 +92,9 @@ scripts/embed_step_vk_blob.py --check ../acki-nacki/contracts/exchange/EthBeacon
 the decider, sha256 `037cd274…4c57b81e`). Rotate with
 `EMIT_VKBLOB=1 cargo run --release --features aggregation --example rotate_tree_n8`
 (big-RAM host), then `scripts/embed_rotate_vk_blob.py` +
-`scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`. **⚠ Not emission-sound until
-the opcode decider extension** (opcode does plain SHPLONK verify, does not pair
-the accumulator) — keep `_ownerRotationEnabled`, do NOT `disableOwnerRotation()`.
+`scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`. tvm-sdk#284 **co-deploys
+with this contract**; an accepted rotate enforces the folded shard/step proofs.
+Call `disableOwnerRotation()` at the deposit flip.
 
 ## Compile (operator Mac) + acceptance
 
@@ -176,9 +176,9 @@ only `submitRotate` (unbroken period chain). Catch-up by replaying rotations is
 safe for **at most one sync-committee period (~27 h)**. Past that lag the owner
 calls `reAnchorCommittee(commitment, period)` — a logged WS hop
 (`CommitteeReAnchored`, `reAnchorsApplied++`) that does **not** write exec
-hashes. `setCommitteeCommitment` stays disabled. `disableOwnerRotation()` still
-waits for the opcode decider on every node; the relayer SLA is what keeps
-`reAnchorsApplied` at 0.
+hashes. `setCommitteeCommitment` stays disabled. tvm-sdk#284 co-deploys with
+this contract, so `disableOwnerRotation()` is part of the deposit flip; the
+relayer SLA is what keeps `reAnchorsApplied` at 0.
 
 **Anchor retention.** `_provenExecutionBlockHash` / `_acceptedBlockHash` are
 permanent; there is no TTL. At checkpoint cadence that is ~225 entries/day,
@@ -189,9 +189,11 @@ then, not now.
 
 **Relayer / audit.** Relayer crate: `crates/eth-light-client-relayer`
 (`eth-lc-relayer` CLI). systemd is the **live** loop (no hardcoded
-`--dry-run --mock-prove`). Auto `submitRotate` stays off (`--enable-rotate`)
-until tvm-sdk#284 is on every node. Audit scope: [`m_audit_scope.md`](m_audit_scope.md).
-`finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
+`--dry-run --mock-prove --no-rotate`). Auto `submitRotate` is **on** by
+default; `--no-rotate` is the shadow opt-out. tvm-sdk#284 co-deploys with
+this contract. Audit scope: [`m_audit_scope.md`](m_audit_scope.md).
+`finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`
+(`disableOwnerAnchors` + `disableOwnerRotation`).
 E2E: `scripts/ursus/eth_lc_shellnet_e2e.md`.
 
 **`accumulator_limbs = 12`.** Enforced by
@@ -203,6 +205,4 @@ path in `examples/rotate_tree_n8.rs`, and by `embed_rotate_vk_blob.py` /
 
 ## Next seams
 
-- **rotate ↔ step**: `submitRotate` is wired; emission-sound only after
-  tvm-sdk#284 on every node (`disableOwnerRotation`).
 - **Testnet E2E**: follow `scripts/ursus/eth_lc_shellnet_e2e.md`.

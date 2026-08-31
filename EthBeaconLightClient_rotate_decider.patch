@@ -1,9 +1,9 @@
 diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
 new file mode 100644
-index 000000000..5ae655699
+index 000000000..001261ec4
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,920 @@
+@@ -0,0 +1,919 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
@@ -297,11 +297,11 @@ index 000000000..5ae655699
 +    ///         (tvm-sdk#284: VkBlob byte 11 `accumulator_limbs = 12` ⇒ pairs
 +    ///         PI[0..12] vs the embedded Hermez `[s]·G2`; reference
 +    ///         `eth-light-client-prover/examples/rotate_decider_check.rs`) closes
-+    ///         this. The embedded `ROTATE_VK_BLOB` already sets that flag, so on a
-+    ///         node running tvm-sdk#284+ an accepted rotate DOES enforce the folded
-+    ///         shard/step proofs. Until every validating node ships that opcode,
-+    ///         treat this path as a mechanism only: keep `_ownerRotationEnabled`
-+    ///         and do NOT call `disableOwnerRotation()`.
++    ///         this. The embedded `ROTATE_VK_BLOB` already sets that flag.
++    ///         tvm-sdk#284 co-deploys with this contract, so an accepted rotate
++    ///         enforces the folded shard/step proofs. Call
++    ///         `disableOwnerRotation()` at the deposit flip
++    ///         (`scripts/ursus/flip_deposit_to_light_client.md`).
 +    ///
 +    ///         Permissionless: the proof is the authorization.
 +    /// @param proof        — SHPLONK proof bytes, the `proof_cell` operand.
@@ -854,11 +854,10 @@ index 000000000..5ae655699
 +    //   acki-nacki-bridge/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin
 +    //
 +    // ⚠ SOUNDNESS: the opcode does a plain SHPLONK verify and does NOT pair the
-+    //   12 accumulator limbs against the SRS [s]·G2, so an accepted rotate is NOT
-+    //   yet trustless (see `submitRotate`). Keep the owner bootstrap path
-+    //   (`setCommitteeCommitment`) as the committee trust root and do NOT call
-+    //   `disableOwnerRotation()` until every validating node ships the opcode
-+    //   decider extension (tvm-sdk#284).
++    //   12 accumulator limbs against the SRS [s]·G2 unless the decider
++    //   extension is present (tvm-sdk#284). That opcode co-deploys with this
++    //   contract; `disableOwnerRotation()` is the intended flip once the
++    //   committee is bootstrapped (see `scripts/ursus/flip_deposit_to_light_client.md`).
 +    //
 +    // To rotate: regenerate the fixture in acki-nacki-bridge on a big-RAM host
 +    //   (cd eth-light-client-prover &&

@@ -19,9 +19,10 @@ here and how versions are assigned.
   not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
   `submit-ancestry`, `daemon`. Live AN submit is `--features live-submit`. systemd
-  unit is the live loop (no hardcoded `--dry-run --mock-prove`).
-  `--enable-rotate` / `submit-rotate` need n14 + tvm-sdk#284.
-  `finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
+  default, `--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
+  Flip (`disableOwnerAnchors` + `disableOwnerRotation`):
+  `scripts/ursus/flip_deposit_to_light_client.md`.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into
@@ -35,6 +36,10 @@ here and how versions are assigned.
 
 ### Changed
 
+- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`).
+  `--no-rotate` is the shadow/laptop opt-out. tvm-sdk#284 co-deploys with
+  `EthBeaconLightClient`; the deposit flip calls `USDCBridge.disableOwnerAnchors`
+  and `EthBeaconLightClient.disableOwnerRotation` in the same rollout.
 - `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic

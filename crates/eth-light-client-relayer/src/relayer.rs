@@ -18,9 +18,10 @@ pub struct RelayerConfig {
     pub state_path: PathBuf,
     pub poll_interval: Duration,
     /// When the beacon period is ahead of `last_committee_period`, attempt
-    /// `generate_rotate` + `submitRotate`. Default **false**: rotate prove is
-    /// a ~40 GB n14 job and is not emission-sound until tvm-sdk#284 is on every
-    /// node. The tick returns [`TickOutcome::RotateRequired`] instead.
+    /// `generate_rotate` + `submitRotate`. Default **true**: tvm-sdk#284
+    /// (KZG accumulator decider) co-deploys with this contract. `--no-rotate`
+    /// / `enable_rotate = false` returns [`TickOutcome::RotateRequired`]
+    /// instead. Rotate prove is still a ~40 GB n14 job.
     pub enable_rotate: bool,
 }
 
@@ -29,7 +30,7 @@ impl RelayerConfig {
         Self {
             state_path,
             poll_interval: Duration::from_secs(64),
-            enable_rotate: false,
+            enable_rotate: true,
         }
     }
 }
@@ -364,6 +365,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
         cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
         let mut r = Relayer::new(
             cfg,
             Arc::new(src),

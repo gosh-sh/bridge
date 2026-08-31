@@ -912,11 +912,11 @@ covering bundle.
 grep -E 'capture: (matched|polling|timed out)' $LOG_PATH | tail -5
 
 # If "matched dst=…:026a" appears but no "enrich_witness: filling" →
-# event was captured; enricher blocked. Sub-case 3a.
-# If "polling" only, no "matched" → event never seen. Sub-case 3b.
+# event was captured; enricher blocked. Sub-case 2a.
+# If "polling" only, no "matched" → event never seen. Sub-case 2b.
 ```
 
-### Sub-case 3a — Enricher blocked on covering bundle
+### Sub-case 2a — Enricher blocked on covering bundle
 
 **Root cause:** `event_seq_no=E`, `storedLastSeenBlockSeqNo()=L`,
 `E − L > W·P` (>1024 on L1, >16384 on L2). Covering bundle not yet
@@ -958,7 +958,7 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
   old state-file's dedup tuple stays valid; use `--allow-retry` OR
   change the amount by 1 micro-USDC to sidestep dedup).
 
-### Sub-case 3b — Event never observed
+### Sub-case 2b — Event never observed
 
 **Root cause:** The burn AN tx never produced a `WithdrawalInitiated`
 ExtOut — most likely the USDCBridge rejected the call (invalid dst chain,
@@ -1075,7 +1075,7 @@ regeneration is expensive.
 
 **Two flavors, distinguishable by exit code:**
 
-### 6a — Preflight refusal (exit 2)
+### 5a — Preflight refusal (exit 2)
 
 CLI never broadcast anything. Common causes with the human message the
 CLI prints:
@@ -1091,7 +1091,7 @@ CLI prints:
 **Remediation:** Fix the specific issue. Preflight is side-effect free
 — no state file was written, no burn attempted.
 
-### 6b — Burn broadcast, outcome unknown (exit 10)
+### 5b — Burn broadcast, outcome unknown (exit 10)
 
 `sendTransaction` broadcast but the CLI could not observe the resulting
 message on GQL within its budget. Typical root cause: local

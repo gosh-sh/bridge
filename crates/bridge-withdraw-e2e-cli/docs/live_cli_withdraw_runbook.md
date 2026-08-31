@@ -74,7 +74,6 @@ feeding `verifyBlock` transactions to the bridge.
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Case 1a — L2 production path (default users)](#case-1a--l2-production-path-default-users) **(default users start here)**
 - [Case 1b — L2 self-deploy (advanced)](#case-1b--l2-self-deploy-advanced)
-- [Case 2 — Follow-up withdrawal on an existing deploy](#case-2--follow-up-withdrawal-on-an-existing-deploy)
 - [Case 3 — Event captured but daemon far behind head](#case-3--event-captured-but-daemon-far-behind-head)
 - [Case 4 — Prover subprocess timeout / OOM](#case-4--prover-subprocess-timeout--oom)
 - [Case 5 — On-chain `withdrawByProof` revert](#case-5--on-chain-withdrawbyproof-revert)
@@ -897,41 +896,6 @@ covering L2 bundle in 2 h. Bundle-lane issue → check your
 `daemon-live` logs. The CLI exits 12 (ProofFailed — covering-bundle
 wait is stage 4b of the prove path). The `withdraw complete:` block
 will NOT print; look for the `error:` line and non-zero `$?` instead.
-
----
-
-## Case 2 — Follow-up withdrawal on an existing deploy
-
-**When to use:** Bridge treasury already seeded, relayer running for
-hours/days. Applies equally to the pinned L2 team deploy
-(default user) and to a self-deployed L1 or L2 instance (advanced).
-
-**Precheck — relayer current:**
-
-```bash
-LAST=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')
-HEAD=$(curl -s -X POST https://shellnet.ackinacki.org/graphql \
-  -H 'content-type: application/json' \
-  -d '{"query":"{ blockchain { blocks(last: 1) { edges { node { seq_no } } } } }"}' \
-  | jq -r '.data.blockchain.blocks.edges[0].node.seq_no')
-# Stride: L2 = 16384 (production), L1 = 1024 (testing only)
-echo "lag = $((HEAD - LAST))  (L2 want < 16384; L1 want < 1024)"
-```
-
-If lag is under the applicable stride → the covering bundle will land
-within one bundle window. Fire the withdrawal.
-
-If lag exceeds the stride → [Case 3](#case-3--event-captured-but-daemon-far-behind-head).
-
-**Followed by:**
-- Default user / L2: [Case 1a Step 3 — Run the CLI](#step-3--run-the-cli-dry-run-then-real-submit)
-  (dry-run first, then real submit; treasury precheck from Step 1
-  still applies).
-- Advanced L2 self-deploy: [Case 1b Step L5](#step-l5--run-the-cli-with-explicit-l2).
-- Advanced L1 self-deploy: [Case 8 Step 4](#step-4--preflight-the-cli-dry-run)
-  → Step 5.
-
-No redeploy, no treasury seed.
 
 ---
 

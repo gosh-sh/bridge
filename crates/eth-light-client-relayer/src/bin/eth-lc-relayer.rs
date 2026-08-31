@@ -4,7 +4,8 @@
 //! - `beacon-watch` — fetch `finality_update`, print slots (no prove/submit)
 //! - `prove-one` — subprocess `export_step_vk_blob` (needs Hermez SRS + n14
 //!   RAM)
-//! - `submit-one` — send an existing bundle to AN
+//! - `submit-one` / `submit-rotate` — send an existing bundle to AN
+//! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -14,13 +15,13 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use clap::{Parser, Subcommand};
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::AnInterfaceSubmitter;
-#[cfg(feature = "live-submit")]
-use eth_light_client_relayer::StepProofBundle;
 use eth_light_client_relayer::{
     AnConfig, BackoffConfig, BeaconSource, HttpBeaconSource, MockAnSubmitter, MockProofGenerator,
     ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock, SubprocessProofGenerator,
     SubprocessProverConfig,
 };
+#[cfg(feature = "live-submit")]
+use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
 #[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
@@ -72,6 +73,30 @@ enum Cmd {
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
+    },
+    /// Submit `submitRotate` from a `rotate_tree_n8` EMIT_VKBLOB directory.
+    SubmitRotate {
+        #[arg(long)]
+        bundle_dir: PathBuf,
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
+    },
+    /// Walk the execution parent-hash chain of a checkpoint epoch.
+    AncestryOne {
+        #[arg(long, env = "BEACON_URL")]
+        beacon_url: String,
+        #[arg(long)]
+        checkpoint_slot: u64,
+        #[arg(long)]
+        deposit_hash: String,
     },
     /// Long-running fetch → prove → submit loop.
     Daemon {
@@ -163,6 +188,29 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         },
+        Cmd::SubmitRotate {
+            bundle_dir,
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+        } => {
+            submit_rotate(
+                bundle_dir,
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
+            )
+            .await
+        },
+        Cmd::AncestryOne {
+            beacon_url,
+            checkpoint_slot,
+            deposit_hash,
+        } => ancestry_one(beacon_url, checkpoint_slot, deposit_hash).await,
         Cmd::Daemon {
             beacon_url,
             state,
@@ -244,15 +292,21 @@ async fn prove_one(
     out_dir: PathBuf,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    let json = if let Some(p) = finality_json {
-        std::fs::read_to_string(p)?
+    let mut update = if let Some(p) = finality_json {
+        eth_light_client_relayer::parse_finality_update(&std::fs::read_to_string(p)?)?
     } else {
-        let url =
-            beacon_url.ok_or_else(|| anyhow::anyhow!("need --beacon-url or --finality-json"))?;
-        let src = HttpBeaconSource::new(url)?;
-        src.fetch_finality().await?.raw_json
+        let url = beacon_url
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("need --beacon-url or --finality-json"))?;
+        HttpBeaconSource::new(url.clone())?.fetch_finality().await?
     };
-    let update = eth_light_client_relayer::parse_finality_update(&json)?;
+    if update.committee_json.is_empty() {
+        if let Some(url) = &beacon_url {
+            let src = HttpBeaconSource::new(url.clone())?;
+            let prev = update.period().saturating_sub(1);
+            update.committee_json = src.fetch_period_update(prev).await?;
+        }
+    }
     let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
         prover_dir,
         srs_path,
@@ -270,6 +324,37 @@ async fn prove_one(
         proof_len = bundle.proof.len(),
         out = %out_dir.display(),
         "wrote step bundle"
+    );
+    Ok(())
+}
+
+async fn ancestry_one(
+    beacon_url: String,
+    checkpoint_slot: u64,
+    deposit_hash: String,
+) -> anyhow::Result<()> {
+    let raw = hex::decode(deposit_hash.trim_start_matches("0x"))?;
+    let deposit: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--deposit-hash must be 32 bytes"))?;
+    let src = HttpBeaconSource::new(beacon_url)?;
+    let checkpoint = src.fetch_exec_link_at_slot(checkpoint_slot).await?;
+    let mut links = vec![checkpoint.clone()];
+    let start = checkpoint_slot.saturating_sub(31);
+    for slot in (start..checkpoint_slot).rev() {
+        let want = links.last().unwrap().parent_hash;
+        match src.fetch_exec_link_at_slot(slot).await {
+            Ok(link) if link.block_hash == want => links.push(link),
+            Ok(_) => tracing::debug!(slot, "slot hash is not the next parent"),
+            Err(e) => tracing::debug!(slot, %e, "skip slot"),
+        }
+    }
+    eth_light_client_relayer::covers_deposit(checkpoint.block_hash, deposit, &links)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    info!(
+        checkpoint = %hex::encode(links[0].block_hash),
+        links = links.len(),
+        "deposit is on the checkpoint parent-hash chain"
     );
     Ok(())
 }
@@ -322,6 +407,54 @@ async fn submit_one(
             info!(tx = ?tx_hash.map(hex::encode), "submitUpdate accepted");
         },
         other => anyhow::bail!("submitUpdate: {other:?}"),
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+async fn submit_rotate(
+    _bundle_dir: PathBuf,
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+) -> anyhow::Result<()> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+async fn submit_rotate(
+    bundle_dir: PathBuf,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    let bundle = RotateProofBundle::from_dir(&bundle_dir)?;
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+        });
+    match submitter.submit_rotate(&bundle).await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(period = bundle.period, tx = ?tx_hash.map(hex::encode), "submitRotate accepted");
+        },
+        other => anyhow::bail!("submitRotate: {other:?}"),
     }
     Ok(())
 }

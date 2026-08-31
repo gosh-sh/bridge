@@ -1,14 +1,13 @@
 //! Relayer for the Ethereum beacon **light-client** oracle on Acki Nacki.
 //!
-//! Polls `GET /eth/v1/beacon/light_client/finality_update`, proves a step
-//! (subprocess into `eth-light-client-prover`, or a mock), and calls
-//! `EthBeaconLightClient.submitUpdate`. Committee rotation is detected as a
-//! period jump; auto-rotate is **off** by default (n14 + tvm-sdk#284).
-//!
-//! Does **not** flip `USDCBridge.finalizeDeposit` onto this oracle — attesters
-//! stay the canonicality writer until ancestry + live E2E.
+//! Polls `finality_update` + `light_client/updates`, proves a step (real
+//! 512-committee via `COMMITTEE_JSON_PATH`), and calls
+//! `EthBeaconLightClient.submitUpdate`. Period jump → `submit-rotate` /
+//! `--enable-rotate` (n14 + tvm-sdk#284). Epoch ancestry: [`ancestry`].
+//! `finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
 
 pub mod an_config;
+pub mod ancestry;
 pub mod daemon;
 pub mod error;
 pub mod prover;
@@ -19,6 +18,7 @@ pub mod submitter;
 pub mod types;
 
 pub use an_config::AnConfig;
+pub use ancestry::{covers_deposit, ExecLink};
 pub use daemon::{BackoffConfig, RelayerMetrics};
 pub use error::RelayerError;
 pub use prover::{

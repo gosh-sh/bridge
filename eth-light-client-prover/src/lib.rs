@@ -12,6 +12,7 @@ pub mod bls_core;
 pub mod committee;
 pub mod decode;
 pub mod execution;
+pub mod live_witness;
 pub mod mainnet;
 pub mod poseidon_transcript;
 pub mod rotate;

@@ -60,6 +60,7 @@ use eth_light_client_prover::signing::{
     native_sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
 };
 use eth_light_client_prover::bls_core::{signing_root_to_g2, verify_native};
+use eth_light_client_prover::live_witness::step_witness_from_beacon;
 use eth_light_client_prover::step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN};
 
 use gosh_sha256_chip::Sha256Chip;
@@ -165,7 +166,16 @@ fn fixture_json() -> anyhow::Result<String> {
 }
 
 fn build_witness() -> anyhow::Result<StepWitness> {
-    let v: Value = serde_json::from_str(&fixture_json()?)?;
+    let finality = fixture_json()?;
+    if let Ok(p) = std::env::var("COMMITTEE_JSON_PATH").or_else(|_| std::env::var("BOOTSTRAP_PATH"))
+    {
+        let committee = std::fs::read_to_string(&p)?;
+        return step_witness_from_beacon(&finality, &committee);
+    }
+    eprintln!(
+        "WARN: COMMITTEE_JSON_PATH/BOOTSTRAP_PATH unset — synthetic 512-committee (VK emit only, not chain-valid)"
+    );
+    let v: Value = serde_json::from_str(&finality)?;
     let attested = header(&v, "attested_header");
     let finalized = header(&v, "finalized_header");
     let finality_branch: Vec<[u8; 32]> = v["data"]["finality_branch"]

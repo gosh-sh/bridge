@@ -27,6 +27,9 @@ pub struct FinalityUpdate {
     pub participation: u64,
     /// Original JSON, written to disk for the subprocess prover.
     pub raw_json: String,
+    /// Bootstrap or `updates?start_period=P-1` JSON (512 pubkeys). Empty in
+    /// unit tests.
+    pub committee_json: String,
 }
 
 impl FinalityUpdate {
@@ -100,6 +103,29 @@ pub struct RotateProofBundle {
     pub period: u64,
 }
 
+impl RotateProofBundle {
+    pub fn from_dir(dir: &std::path::Path) -> Result<Self, RelayerError> {
+        let public_inputs = std::fs::read(dir.join("rotate_public_inputs.bin"))
+            .map_err(|e| RelayerError::other(format!("read rotate_public_inputs.bin: {e}")))?;
+        let proof = std::fs::read(dir.join("rotate_proof_blake2b.bin"))
+            .map_err(|e| RelayerError::other(format!("read rotate_proof_blake2b.bin: {e}")))?;
+        let want = ROTATE_INSTANCE_LEN * 32;
+        if public_inputs.len() < want {
+            return Err(RelayerError::other(format!(
+                "rotate PI len {} < {want}",
+                public_inputs.len()
+            )));
+        }
+        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        let period = u64::from_le_bytes(public_inputs[off..off + 8].try_into().unwrap());
+        Ok(Self {
+            public_inputs,
+            proof,
+            period,
+        })
+    }
+}
+
 pub fn parse_finality_update(json: &str) -> Result<FinalityUpdate, RelayerError> {
     let v: Value = serde_json::from_str(json)
         .map_err(|e| RelayerError::beacon(format!("finality_update JSON: {e}")))?;
@@ -126,6 +152,7 @@ pub fn parse_finality_update(json: &str) -> Result<FinalityUpdate, RelayerError>
         execution_block_hash: exec_hash,
         participation: popcount_bits(bits)?,
         raw_json: json.to_string(),
+        committee_json: String::new(),
     })
 }
 

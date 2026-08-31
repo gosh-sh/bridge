@@ -144,19 +144,16 @@ same VkBlob bytes, same opcode handler.
 ## Operational constraints (go / no-go)
 
 These are the rollout limits of the M5 contract + M6 rotate, written so a
-reviewer does not have to reconstruct them from comments. They are **accepted
-for this PR**; ancestry / relayer / audit are later milestones, not silent
-omissions.
+reviewer does not have to reconstruct them from comments. Relayer, ancestry
+check, E2E runbook, audit scope, and the `finalizeDeposit` flip procedure are
+**in this PR**.
 
 **Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
 `finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
 A deposit whose receipt sits in any of the other 31 blocks of that epoch
-cannot pass `finalizeDeposit` until the ancestry/receipts milestone ties it
-to an anchored head. That is an accepted coverage regression vs the attester
-MVP (which could mark *any* block). Gate-flip of `finalizeDeposit` onto this
-oracle waits for ancestry **or** an explicit product decision to live with
-checkpoint-only coverage (relayer only submits deposits in anchored
-checkpoint blocks).
+is covered off-chain by `eth-lc-relayer ancestry-one` (execution parent-hash
+chain, ≤ 31 parents). On-chain `_acceptedBlockHash` still holds only the
+checkpoint until `submitAncestry` is compiled into `EthBeaconLightClient`.
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
 be submitted without the skipped ones. A skipped checkpoint **of the current
@@ -191,12 +188,11 @@ product trade (older deposits stop being claimable) and will be designed
 then, not now.
 
 **Relayer / audit.** Relayer crate: `crates/eth-light-client-relayer`
-(`eth-lc-relayer` CLI). Shadow mode (`--dry-run --mock-prove`) is the default
-operator loop until the AN contract is deployed and n14 prove is wired. Auto
-`submitRotate` stays off (`--enable-rotate`) until tvm-sdk#284 is on every node.
-M-audit is not started. Attesters stay the canonicality writer until this
-relayer is live with monitoring **and** `finalizeDeposit` is explicitly flipped.
-External audit of this stack must include the opcode-side decider in tvm-sdk#284.
+(`eth-lc-relayer` CLI). systemd is the **live** loop (no hardcoded
+`--dry-run --mock-prove`). Auto `submitRotate` stays off (`--enable-rotate`)
+until tvm-sdk#284 is on every node. Audit scope: [`m_audit_scope.md`](m_audit_scope.md).
+`finalizeDeposit` flip: `scripts/ursus/flip_deposit_to_light_client.md`.
+E2E: `scripts/ursus/eth_lc_shellnet_e2e.md`.
 
 **`accumulator_limbs = 12`.** Enforced by
 `scripts/check_rotate_vkblob_accumulator.sh` (fixture header + sha256 pin +
@@ -207,13 +203,8 @@ path in `examples/rotate_tree_n8.rs`, and by `embed_rotate_vk_blob.py` /
 
 ## Next seams
 
-- **rotate ↔ step**: `submitRotate(proof, publicInputs)` is now **wired to the
-  real recursive `ROTATE_VK_BLOB`** (15 PI, parses `[current, next, period]`
-  after the 12 accumulator limbs; step re-embedded at 10 PI). It advances
-  `_currentCommittee` permissionlessly, but is **not yet emission-sound**: the
-  opcode does not pair the accumulator, so `disableOwnerRotation()` must wait for
-  the partner opcode decider extension (`opcode-ext`). Until then the owner
-  bootstrap path stays the committee trust root.
-- **Ancestry**: cover deposits in non-checkpoint blocks.
-- **Testnet E2E**: prove over the live mainnet/testnet committee and drive
-  `submitUpdate` → `finalizeDeposit` on shellnet.
+- **rotate ↔ step**: `submitRotate` is wired; emission-sound only after
+  tvm-sdk#284 on every node (`disableOwnerRotation`).
+- **Ancestry on-chain**: `ancestry-one` is the off-chain parent-hash check;
+  `submitAncestry` on `EthBeaconLightClient` still has to push the 31 hashes.
+- **Testnet E2E**: follow `scripts/ursus/eth_lc_shellnet_e2e.md`.

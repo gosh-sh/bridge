@@ -97,15 +97,25 @@ impl SubprocessProofGenerator {
             .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
         let json_path = work.path().join("finality_update.json");
         std::fs::write(&json_path, &update.raw_json)?;
+        if update.committee_json.is_empty() {
+            return Err(RelayerError::ProofGeneration(
+                "committee_json empty — need light_client/updates (not a synthetic committee)"
+                    .into(),
+            ));
+        }
+        let committee_path = work.path().join("committee.json");
+        std::fs::write(&committee_path, &update.committee_json)?;
         let out_dir = work.path().join("out");
         std::fs::create_dir_all(&out_dir)?;
 
-        let status = Command::new("cargo")
-            .current_dir(&self.cfg.prover_dir)
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&self.cfg.prover_dir)
             .args(["run", "--release", "--example", "export_step_vk_blob"])
             .env("FINALITY_UPDATE_PATH", &json_path)
             .env("STEP_OUT_DIR", &out_dir)
             .env("STEP_SRS_PATH", &self.cfg.srs_path)
+            .env("COMMITTEE_JSON_PATH", &committee_path);
+        let status = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -146,6 +156,42 @@ impl SubprocessProofGenerator {
             parsed,
         })
     }
+
+    async fn run_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+        let work = tempfile::tempdir()
+            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
+        let tree_out = work.path().join("rotate_tree");
+        std::fs::create_dir_all(&tree_out)?;
+        let status = Command::new("cargo")
+            .current_dir(&self.cfg.prover_dir)
+            .args([
+                "run",
+                "--release",
+                "--features",
+                "aggregation",
+                "--example",
+                "rotate_tree_n8",
+            ])
+            .env("EMIT_VKBLOB", "1")
+            .env("TREE_OUT", &tree_out)
+            .env("STEP_SRS", &self.cfg.srs_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .status();
+        let child = tokio::time::timeout(self.cfg.timeout, status)
+            .await
+            .map_err(|_| RelayerError::ProofGeneration("rotate prove timed out".into()))?
+            .map_err(|e| RelayerError::ProofGeneration(format!("spawn cargo: {e}")))?;
+        if !child.success() {
+            return Err(RelayerError::ProofGeneration(format!(
+                "rotate_tree_n8 exited {child}"
+            )));
+        }
+        let mut bundle = RotateProofBundle::from_dir(&tree_out)?;
+        bundle.period = to_period;
+        Ok(bundle)
+    }
 }
 
 #[async_trait]
@@ -157,12 +203,7 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_step(update).await
     }
 
-    async fn generate_rotate(&self, _to_period: u64) -> Result<RotateProofBundle, RelayerError> {
-        Err(RelayerError::ProofGeneration(
-            "rotate subprocess is not auto-run (k=21 tree, ~40 GB). Prove with `cargo run \
-             --release --features aggregation --example rotate_tree_n8` then `eth-lc-relayer \
-             submit-rotate --bundle-dir …`"
-                .into(),
-        ))
+    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+        self.run_rotate(to_period).await
     }
 }

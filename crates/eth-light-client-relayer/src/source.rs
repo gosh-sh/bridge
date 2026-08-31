@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::{
+    ancestry::ExecLink,
     error::RelayerError,
     types::{parse_finality_update, FinalityUpdate},
 };
@@ -58,8 +59,93 @@ impl BeaconSource for HttpBeaconSource {
                 body.chars().take(200).collect::<String>()
             )));
         }
-        parse_finality_update(&body)
+        let mut update = parse_finality_update(&body)?;
+        let prev = update.period().saturating_sub(1);
+        update.committee_json = self.fetch_period_update(prev).await?;
+        Ok(update)
     }
+}
+
+impl HttpBeaconSource {
+    /// `GET /eth/v1/beacon/light_client/updates?start_period=P&count=1`
+    /// (`next_sync_committee` of period P is the **current** committee of P+1).
+    pub async fn fetch_period_update(&self, period: u64) -> Result<String, RelayerError> {
+        let url = format!(
+            "{}/eth/v1/beacon/light_client/updates?start_period={period}&count=1",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("GET {url}: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("read {url}: {e}")))?;
+        if !status.is_success() {
+            return Err(RelayerError::beacon(format!(
+                "GET {url} -> {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(body)
+    }
+
+    /// `GET /eth/v2/beacon/blocks/{slot}` → execution `block_hash` /
+    /// `parent_hash`.
+    pub async fn fetch_exec_link_at_slot(&self, slot: u64) -> Result<ExecLink, RelayerError> {
+        let url = format!("{}/eth/v2/beacon/blocks/{slot}", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("GET {url}: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| RelayerError::beacon(format!("read {url}: {e}")))?;
+        if !status.is_success() {
+            return Err(RelayerError::beacon(format!(
+                "GET {url} -> {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        parse_exec_link(&body)
+    }
+}
+
+fn hex32_exec(s: &str) -> Result<[u8; 32], RelayerError> {
+    let raw = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| RelayerError::beacon(format!("hex: {e}")))?;
+    raw.try_into()
+        .map_err(|_| RelayerError::beacon("expected 32-byte hash"))
+}
+
+fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
+    let payload = &v["data"]["message"]["body"]["execution_payload"];
+    let block_hash = hex32_exec(
+        payload["block_hash"]
+            .as_str()
+            .ok_or_else(|| RelayerError::beacon("missing execution_payload.block_hash"))?,
+    )?;
+    let parent_hash = hex32_exec(
+        payload["parent_hash"]
+            .as_str()
+            .ok_or_else(|| RelayerError::beacon("missing execution_payload.parent_hash"))?,
+    )?;
+    Ok(ExecLink {
+        block_hash,
+        parent_hash,
+    })
 }
 
 /// Test source: pop from a queue of updates.

@@ -13,20 +13,25 @@ here and how versions are assigned.
 ### Added
 
 - `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
-  Ethereum beacon light-client oracle. Polls `GET /eth/v1/beacon/light_client/finality_update`,
-  proves a step (subprocess `export_step_vk_blob` or `--mock-prove`), and calls
-  `EthBeaconLightClient.submitUpdate`. CLI: `beacon-watch`, `prove-one`,
-  `submit-one`, `daemon`. Live AN GraphQL submit is `--features live-submit`;
-  default binary is shadow-capable (`--dry-run --mock-prove`). `--enable-rotate`
-  stays off until tvm-sdk#284 is on every node. Does **not** flip
-  `USDCBridge.finalizeDeposit` onto the oracle. systemd unit:
-  `scripts/ursus/eth-light-client-relayer.service` (shadow flags in `ExecStart`).
+  Ethereum beacon light-client oracle. Polls `finality_update` **and**
+  `light_client/updates` (current 512-committee), proves a step via
+  `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
+  not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
+  `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
+  `daemon`. Live AN submit is `--features live-submit`. systemd unit is the
+  live loop (no hardcoded `--dry-run --mock-prove`). `--enable-rotate` /
+  `submit-rotate` need n14 + tvm-sdk#284. `finalizeDeposit` flip:
+  `scripts/ursus/flip_deposit_to_light_client.md`. Epoch ancestry:
+  `ancestry-one` (execution parent-hash chain). Shellnet E2E:
+  `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
+  `eth-light-client-prover/docs/m_audit_scope.md`.
 
 ### Changed
 
-- `eth-light-client-prover` example `export_step_vk_blob` reads
-  `FINALITY_UPDATE_PATH` when set (live beacon JSON from the relayer); otherwise
-  it still uses the baked fixture.
+- `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
+  `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
+  witness (real sync committee). Unset committee path still emits a synthetic
+  committee for VkBlob-only keygen.
 
 ## [0.1.0] – 2026-06-11
 

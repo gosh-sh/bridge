@@ -100,9 +100,18 @@ export BRIDGE=$BRIDGE_ADDRESS                        # ergonomics; same value
 
 # 1. Is the bridge reachable and advancing?
 echo "chain last_seen = $(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')"
-# Run twice ~1 min apart — the number must increase. If it does not, the
-# bundle daemon (owned by whoever operates the deploy — team, or you) has
-# stalled; no withdrawal will land until it resumes.
+# In L2 mode this counter only jumps at 16384-block bundle boundaries
+# (~91 min of chain time at ~3 b/s). To confirm the daemon is alive
+# rather than merely paused between bundles, either (a) sample twice
+# ~15 min apart and expect the same value only if the last bundle
+# landed recently, or (b) prefer the on-chain `verifyBlock` cadence:
+#
+#   cast logs --address $BRIDGE --from-block latest-2000 \
+#     'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
+#     | grep -c BlockVerified
+#
+# Zero events over the last ~2000 Sepolia blocks (~7 h) is a stalled
+# bundle daemon; anything ≥1 means it is submitting normally.
 
 # 2. Any in-flight CLI withdrawal state?
 STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-$HOME/.bridge-withdraw-state}"

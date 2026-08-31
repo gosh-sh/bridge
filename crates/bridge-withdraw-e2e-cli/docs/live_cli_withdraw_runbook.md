@@ -571,7 +571,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
 ```
 
-**Expected dry-run log:**
+**Expected dry-run log — success markers:**
 
 ```
 INFO stage 1/6: preflight
@@ -580,15 +580,76 @@ INFO stage 2/6: idempotency (skipped for --dry-run)
 INFO dry-run: skipping burn / capture / prove / submit
 ```
 
-Then real submit — drop `--dry-run` and re-run the same invocation:
+Followed by the canonical human summary block on stderr (defined at
+`src/output.rs::print_success`; **its presence + `$? == 0` is the
+success contract**):
 
 ```
+withdraw complete:
+  amount:       1.000000 USDC
+  AN tx:        (dry-run)
+  msg id:       (dry-run)
+  block:        seq=0 id=(dry-run)
+  proof:        0 bytes, 0 public inputs, self_verified=false
+  ETH tx:       (none) (dry-run-ok)
+```
+
+`ETH tx: (none) (dry-run-ok)` = preflight passed and the CLI did not
+touch the burn / capture / prove / submit path.
+
+Then real submit — drop `--dry-run` and re-run the same invocation.
+Expect all six stages, then the summary block:
+
+```
+INFO stage 1/6: preflight
+INFO stage 2/6: idempotency reserve
+INFO stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)
+INFO stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)
 INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
 INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
 INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
 INFO chain built: anchor_layer=L2, active_links=1, ...
 INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER VALUE = L1 fallback bug
+INFO stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)
+INFO stage 6/6: submit withdrawByProof
+INFO withdrawByProof paid out tx=0x…                # ← definitive on-chain payout marker
+```
+
+Followed by the summary block — `ETH tx:` non-empty, `(confirmed)`:
+
+```
+withdraw complete:
+  amount:       1.000000 USDC
+  AN tx:        0x…
+  msg id:       0x…
+  block:        seq=<N> id=0x…
+  proof:        <NNNN> bytes, 10 public inputs, self_verified=true
+  ETH tx:       0x… (confirmed)
+```
+
+**Success contract (three independent checks):**
+
+1. Shell exit code: `echo $?` → `0`.
+2. Stderr ends with a `withdraw complete:` block whose last line is
+   `ETH tx: 0x… (confirmed)` (real run) or `ETH tx: (none) (dry-run-ok)`
+   (dry-run).
+3. The log contains **all six stage lines** and the
+   `withdrawByProof paid out tx=0x…` line (real run only).
+
+**Grep the saved log:**
+
+```bash
+LOG=./work_dir/withdraw_l2_dry_${TS}.log
+
+# One-shot verdict (real run):
+grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
+
+# Anchor-mode ground-truth (must print `layer_idx=1`):
+grep 'layer_idx=' "$LOG"
+
+# Failure clues (any hit ⇒ the summary block will NOT appear):
+grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 ```
 
 **Ground-truth:** `layer_idx=1` confirms L2-anchoring. Anything else =
@@ -597,7 +658,8 @@ accidental L1 fallback; investigate before submitting.
 **If the enricher times out (120 min):** Server-side daemon never
 landed the covering L2 bundle in 2 h. Bundle-lane issue on our host.
 The CLI exits 12 (ProofFailed — covering-bundle wait is stage 4b of the
-prove path).
+prove path). The `withdraw complete:` block will NOT print; look for
+the `error:` line and non-zero `$?` instead.
 
 ---
 
@@ -754,7 +816,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   2>&1 | tee "./work_dir/withdraw_l2_dry_${TS}.log"
 ```
 
-**Expected dry-run log:**
+**Expected dry-run log — success markers:**
 
 ```
 INFO stage 1/6: preflight
@@ -763,15 +825,68 @@ INFO stage 2/6: idempotency (skipped for --dry-run)
 INFO dry-run: skipping burn / capture / prove / submit
 ```
 
-Then real submit — drop `--dry-run` and re-run:
+Followed by the canonical human summary block on stderr (defined at
+`src/output.rs::print_success`; **its presence + `$? == 0` is the
+success contract**):
 
 ```
+withdraw complete:
+  amount:       1.000000 USDC
+  AN tx:        (dry-run)
+  msg id:       (dry-run)
+  block:        seq=0 id=(dry-run)
+  proof:        0 bytes, 0 public inputs, self_verified=false
+  ETH tx:       (none) (dry-run-ok)
+```
+
+Then real submit — drop `--dry-run` and re-run. Expect all six stages,
+then the summary block:
+
+```
+INFO stage 1/6: preflight
+INFO stage 2/6: idempotency reserve
+INFO stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)
+INFO stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)
 INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
 INFO enrich_witness: anchor_layer_mode=Explicit(2), i_know_the_wait=true
 INFO enricher: filling ... timeout_s=7200        # 2 h (post-2026-08-18)
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
 INFO chain built: anchor_layer=L2, active_links=1, ...
 INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER VALUE = L1 fallback bug
+INFO stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)
+INFO stage 6/6: submit withdrawByProof
+INFO withdrawByProof paid out tx=0x…                # ← definitive on-chain payout marker
+```
+
+Followed by the summary block — `ETH tx:` non-empty, `(confirmed)`:
+
+```
+withdraw complete:
+  amount:       1.000000 USDC
+  AN tx:        0x…
+  msg id:       0x…
+  block:        seq=<N> id=0x…
+  proof:        <NNNN> bytes, 10 public inputs, self_verified=true
+  ETH tx:       0x… (confirmed)
+```
+
+**Success contract (three independent checks):**
+
+1. Shell exit code: `echo $?` → `0`.
+2. Stderr ends with a `withdraw complete:` block whose last line is
+   `ETH tx: 0x… (confirmed)` (real run) or `ETH tx: (none) (dry-run-ok)`
+   (dry-run).
+3. The log contains **all six stage lines** and the
+   `withdrawByProof paid out tx=0x…` line (real run only).
+
+**Grep the saved log:**
+
+```bash
+LOG=./work_dir/withdraw_l2_dry_${TS}.log
+
+grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
+grep 'layer_idx=' "$LOG"    # must show layer_idx=1
+grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 ```
 
 **Ground-truth:** `layer_idx=1` confirms L2-anchoring. Anything else =
@@ -780,7 +895,8 @@ accidental L1 fallback; investigate before submitting.
 **If the enricher times out (120 min):** Your daemon never landed the
 covering L2 bundle in 2 h. Bundle-lane issue → check your
 `daemon-live` logs. The CLI exits 12 (ProofFailed — covering-bundle
-wait is stage 4b of the prove path).
+wait is stage 4b of the prove path). The `withdraw complete:` block
+will NOT print; look for the `error:` line and non-zero `$?` instead.
 
 ---
 

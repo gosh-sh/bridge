@@ -1,0 +1,55 @@
+{
+	"ABI version": 2,
+	"version": "2.4",
+	"header": ["pubkey", "time", "expire"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+				{"name":"pubkey","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"committeePeriod","type":"uint64"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "submitUpdate",
+			"inputs": [
+				{"name":"proof","type":"bytes"},
+				{"name":"publicInputs","type":"bytes"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "submitRotate",
+			"inputs": [
+				{"name":"proof","type":"bytes"},
+				{"name":"publicInputs","type":"bytes"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "getHead",
+			"inputs": [],
+			"outputs": [
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"finalizedBeaconRoot","type":"uint256"},
+				{"name":"executionBlockHash","type":"uint256"},
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"updatesApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "isProvenExecutionBlockHash",
+			"inputs": [
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		}
+	],
+	"events": [],
+	"fields": []
+}

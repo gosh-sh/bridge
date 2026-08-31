@@ -190,11 +190,13 @@ extends coverage to every block (~2.6 M/year) a retention window becomes a
 product trade (older deposits stop being claimable) and will be designed
 then, not now.
 
-**Relayer / audit.** M5 relayer is not started; M-audit is not started. The
-attester path stays the canonicality writer until the relayer exists with
-monitoring. External audit of this stack must include the opcode-side
-decider in tvm-sdk#284 — it is the only check that the recursive rotate's
-inner proofs were actually verified.
+**Relayer / audit.** Relayer crate: `crates/eth-light-client-relayer`
+(`eth-lc-relayer` CLI). Shadow mode (`--dry-run --mock-prove`) is the default
+operator loop until the AN contract is deployed and n14 prove is wired. Auto
+`submitRotate` stays off (`--enable-rotate`) until tvm-sdk#284 is on every node.
+M-audit is not started. Attesters stay the canonicality writer until this
+relayer is live with monitoring **and** `finalizeDeposit` is explicitly flipped.
+External audit of this stack must include the opcode-side decider in tvm-sdk#284.
 
 **`accumulator_limbs = 12`.** Enforced by
 `scripts/check_rotate_vkblob_accumulator.sh` (fixture header + sha256 pin +

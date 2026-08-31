@@ -157,8 +157,15 @@ fn execution_branch(v: &Value, which: &str) -> Vec<[u8; 32]> {
         .collect()
 }
 
-fn build_witness() -> StepWitness {
-    let v: Value = serde_json::from_str(FIXTURE).unwrap();
+fn fixture_json() -> anyhow::Result<String> {
+    match std::env::var("FINALITY_UPDATE_PATH") {
+        Ok(p) => Ok(std::fs::read_to_string(&p)?),
+        Err(_) => Ok(FIXTURE.to_string()),
+    }
+}
+
+fn build_witness() -> anyhow::Result<StepWitness> {
+    let v: Value = serde_json::from_str(&fixture_json()?)?;
     let attested = header(&v, "attested_header");
     let finalized = header(&v, "finalized_header");
     let finality_branch: Vec<[u8; 32]> = v["data"]["finality_branch"]
@@ -198,7 +205,7 @@ fn build_witness() -> StepWitness {
     let pubkeys_compressed: Vec<[u8; 48]> = pubkeys.iter().map(|p| p.to_compressed_be()).collect();
     let aggregate_pubkey = agg.to_affine().to_compressed_be();
 
-    StepWitness {
+    Ok(StepWitness {
         attested,
         finalized,
         finality_branch,
@@ -211,7 +218,7 @@ fn build_witness() -> StepWitness {
         signature,
         finalized_execution: execution(&v, "finalized_header"),
         execution_branch: execution_branch(&v, "finalized_header"),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +311,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!("  OK: Hermez ceremony (opcode-aligned KZG_S_G2_BYTES)\n");
 
-    let w = build_witness();
+    let w = build_witness()?;
 
     // ---- Keygen circuit -----------------------------------------------------
     let mut kb = BaseCircuitBuilder::<Fr>::from_stage(CircuitBuilderStage::Keygen)

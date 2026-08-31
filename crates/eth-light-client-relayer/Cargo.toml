@@ -1,0 +1,44 @@
+[package]
+name = "eth-light-client-relayer"
+version = "0.1.0"
+edition = "2021"
+description = "Beacon light-client relayer: poll Ethereum finality_update, prove step/rotate via eth-light-client-prover, submit to EthBeaconLightClient on Acki Nacki."
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+fs2 = "0.4"
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+    "http2",
+    "charset",
+] }
+acki-nacki-interface = { path = "../acki-nacki-interface" }
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+    "std",
+    "rustls-tls-webpki-roots",
+], optional = true }
+
+[features]
+# Live AN submit pulls tvm-sdk (heavy halo2). Unit tests stay mock-only.
+live-submit = ["acki-nacki-interface/tvm-sdk", "dep:tvm_client"]
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3"
+
+[[bin]]
+name = "eth-lc-relayer"
+path = "src/bin/eth-lc-relayer.rs"
+# Default binary is shadow-capable (beacon-watch / daemon --dry-run).
+# Live AN GraphQL submit needs `--features live-submit` (tvm-sdk).

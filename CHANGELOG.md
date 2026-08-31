@@ -10,17 +10,23 @@ here and how versions are assigned.
 
 ## [Unreleased]
 
-<!--
-Add entries here, grouped under the headings below, most disruptive first.
-Drop a heading if it has no entries. Do not add a version number — a human
-assigns it when the release is tagged.
-
-### Breaking Changes
 ### Added
+
+- `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
+  Ethereum beacon light-client oracle. Polls `GET /eth/v1/beacon/light_client/finality_update`,
+  proves a step (subprocess `export_step_vk_blob` or `--mock-prove`), and calls
+  `EthBeaconLightClient.submitUpdate`. CLI: `beacon-watch`, `prove-one`,
+  `submit-one`, `daemon`. Live AN GraphQL submit is `--features live-submit`;
+  default binary is shadow-capable (`--dry-run --mock-prove`). `--enable-rotate`
+  stays off until tvm-sdk#284 is on every node. Does **not** flip
+  `USDCBridge.finalizeDeposit` onto the oracle. systemd unit:
+  `scripts/ursus/eth-light-client-relayer.service` (shadow flags in `ExecStart`).
+
 ### Changed
-### Fixed
-### Removed
--->
+
+- `eth-light-client-prover` example `export_step_vk_blob` reads
+  `FINALITY_UPDATE_PATH` when set (live beacon JSON from the relayer); otherwise
+  it still uses the baked fixture.
 
 ## [0.1.0] – 2026-06-11
 

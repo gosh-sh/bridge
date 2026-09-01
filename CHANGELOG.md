@@ -154,6 +154,25 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`bridge-withdraw-e2e-cli/config/bridge_config` pinned `BRIDGE_ADDRESS`
+  rotated to the newly team-deployed L2 shellnet bridge
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`** (was
+  `0x8D9190666128ab897C5ABd8C107239A197e08467`). The new deploy's
+  `usdc()` points at a **real Circle FiatToken**
+  (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`), not the previous
+  bridge's mint-anyone test token (`0x94a9D9…5e4C8`) — so Case 1a
+  Step 2 (treasury seeding) can no longer use the
+  `0xC959…3f42D` faucet's `mint(address,address,uint256)`. Confirm
+  the correct token with `cast call $BRIDGE_ADDRESS 'usdc()(address)'`
+  and use whatever balance the burner already holds on that token, or
+  ask a Circle-token minter for more. First successful E2E withdraw
+  against the new deploy: AN burn
+  `0xf2c407d2476803970f0ef68c4d3f8e888f9d0b34e23e532210d9b2426f498769`
+  → ETH tx
+  `0x7ccefdae4cca5812d339c969e69ab4242f7c4d6cf6c503265b658201fe30bf1b`
+  (0.9 USDC, ~25 min wall time — the 23 min tail was remote-relayer
+  latency waiting for the covering L2 boundary at seq 12,812,288).
+
 - **`bridge-withdraw-e2e-cli/scripts/local_smoke.sh` and `live_smoke.sh`
   now source the standalone `config/bridge_config` by default** instead
   of the relayer's `L1_config/env`. Aligns the scripts with the

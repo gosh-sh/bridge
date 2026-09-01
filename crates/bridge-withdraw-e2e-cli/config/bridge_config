@@ -77,4 +77,4 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-BRIDGE_ADDRESS=0x8D9190666128ab897C5ABd8C107239A197e08467
+BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7

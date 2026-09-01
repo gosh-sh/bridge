@@ -757,6 +757,8 @@ impl GqlClient {
         &self,
         tx_hash: &str,
     ) -> anyhow::Result<Option<Vec<GqlOutMessageStub>>> {
+        // shellnet GQL rejects `0x`-prefixed hashes on `transaction(hash:)`.
+        let tx_hash = tx_hash.trim_start_matches("0x");
         let q = format!(
             r#"{{ blockchain {{ transaction(hash: "{tx_hash}") {{ out_messages {{ id dst }} }} }} }}"#
         );
@@ -790,10 +792,15 @@ impl GqlClient {
         &self,
         msg_id: &str,
     ) -> anyhow::Result<Option<Vec<GqlOutMessageStub>>> {
-        let q = format!(
-            r#"{{ blockchain {{ message(hash: "{msg_id}") {{ dst_transaction {{ out_messages {{ id dst }} }} }} }} }}"#
+        let msg_id = msg_id.trim_start_matches("0x");
+        // Two-step: shellnet's schema returns `null` for the nested
+        // `dst_transaction.out_messages` even when it fully populates the
+        // outer `transaction(hash: …) { out_messages }`. Fetch the tx id
+        // first, then re-query the tx directly.
+        let q1 = format!(
+            r#"{{ blockchain {{ message(hash: "{msg_id}") {{ dst_transaction {{ id }} }} }} }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self.query(&q1).await?;
         let msg = data.pointer("/blockchain/message").unwrap_or(&Value::Null);
         if msg.is_null() {
             return Ok(None);
@@ -802,20 +809,13 @@ impl GqlClient {
         if dst_tx.is_null() {
             return Ok(None);
         }
-        let arr = dst_tx
-            .get("out_messages")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let out: Vec<GqlOutMessageStub> = arr
-            .iter()
-            .filter_map(|m| {
-                let id = m.get("id").and_then(|v| v.as_str())?.to_string();
-                let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                Some(GqlOutMessageStub { id, dst })
-            })
-            .collect();
-        Ok(Some(out))
+        let tx_id = match dst_tx.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return Ok(None),
+        };
+        // Reuse `query_tx_out_messages` — same field access, correct
+        // fallback semantics, and it handles the `0x` prefix trim.
+        self.query_tx_out_messages(&tx_id).await
     }
 
     /// Fetch a single ExtOut message by id in the same shape as
@@ -826,6 +826,7 @@ impl GqlClient {
         &self,
         msg_id: &str,
     ) -> anyhow::Result<Option<BridgeExtOutMessage>> {
+        let msg_id = msg_id.trim_start_matches("0x");
         let q = format!(
             r#"{{ blockchain {{ message(hash: "{msg_id}") {{ id boc dst created_at block_id src_dapp_id src_transaction {{ block_id }} }} }} }}"#
         );

@@ -281,6 +281,27 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`aggregate-proof` subprocess now receives an absolute
+  `--inner-snark` path.** `SubprocessAggregator::aggregate` spawns the
+  aggregator with `current_dir = aggregator_dir`; a relative snark path
+  (the `bridge-withdraw-e2e-cli` default `--snark-dir=./shplonk-snark`
+  hits this) resolved against the wrong CWD and the subprocess exited
+  with `No such file or directory (os error 2)`. Canonicalized in
+  `aggregator.rs::SubprocessAggregator::aggregate` before argv
+  construction; the snark file always exists at that point (the inner
+  prover just wrote it), so the canonicalize is safe. First observed
+  running `bridge-withdraw-e2e-cli withdraw` against shellnet from the
+  crate root without an explicit `--snark-dir` override.
+
+- **`bridge-withdraw-e2e-cli` error output now walks the anyhow
+  `#[source]` chain.** `output.rs::print_error` used to print only the
+  top-level `Display`, so any wrapped `CliError::ProofFailed { source }`
+  (and any nested `anyhow::Context`) was invisible — the user saw
+  `Circuit4ShplonkPipeline::prove failed` with no hint that the real
+  cause was, e.g., the aggregator subprocess stderr. Human-mode errors
+  now emit indented `caused by [N]:` lines beneath the top-level
+  message. `--json` mode is unchanged.
+
 - **`bridge-withdraw-e2e-cli withdraw` preflight USDCBridge liveness
   check no longer misreports an Active bridge as `acc_type is Unknown`.**
   The GraphQL query at `preflight.rs::query_usdc_bridge_state` asked

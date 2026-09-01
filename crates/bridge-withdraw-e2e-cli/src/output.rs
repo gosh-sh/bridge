@@ -80,4 +80,17 @@ pub fn print_error(err: &CliError, json_mode: bool) {
         return;
     }
     eprintln!("error: {err}");
+    // Walk the `#[source]` chain so the underlying anyhow context (e.g.
+    // aggregator stderr, RelayerError::other messages) is visible without
+    // needing a debug build. `CliError` variants carry
+    // `#[source] Option<anyhow::Error>`, and the anyhow chain itself may
+    // nest further. Each hop indented for readability.
+    let mut cause: Option<&(dyn std::error::Error + 'static)> =
+        std::error::Error::source(err);
+    let mut depth = 0usize;
+    while let Some(c) = cause {
+        eprintln!("  caused by [{depth}]: {c}");
+        cause = c.source();
+        depth += 1;
+    }
 }

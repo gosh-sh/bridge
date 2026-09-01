@@ -86,6 +86,7 @@ Operational impact on `withdrawByProof` is detailed in
 - [Binary + env prerequisites](#binary--env-prerequisites)
 - [Deploy your own bridge bundle from scratch](#deploy-your-own-bridge-bundle-from-scratch)
 - [Case 1 — First-time bootstrap from a fresh deploy](#case-1--first-time-bootstrap-from-a-fresh-deploy)
+  - [Recovery: `startup on-chain drift vs last_observed_on_chain` (first launch after redeploy)](#recovery-if-you-see-startup-on-chain-drift-vs-last_observed_on_chain-first-launch-after-redeploy)
 - [Case 2 — Steady-state operation](#case-2--steady-state-operation)
 - [Case 3 — Clean restart (no state loss)](#case-3--clean-restart-no-state-loss)
 - [Case 4 — Restart after RPC-induced hard-abort](#case-4--restart-after-rpc-induced-hard-abort)
@@ -568,25 +569,55 @@ If any of these don't match your deploy's genesis values (from the
 `compute_bridge_anchors` output you pinned at deploy time), **stop** —
 the deploy is broken. Do not launch the daemon.
 
-**Archive stale artifacts (cold-start hygiene).** The development helper moves
-existing `state/*.json` into a timestamped `state.pre_deploy_*` directory;
-still archive the complete prior config before deploying against a new bridge.
-Older event proofs, aggregation
-scratch and submission dumps are harmless to the daemon but valuable for
-nonce/receipt forensics. Prefer a timestamped move over deletion:
+**Handle stale artifacts before cold-start.** Two classes of stale state
+must be dealt with before a fresh-deploy launch, or the daemon
+hard-aborts:
 
-```bash
-TS=$(date +%Y%m%d_%H%M%S)
-mkdir -p "runtime-archive/$TS"
-for path in "$BRIDGE_CONFIG_DIR"/state.pre_deploy*_* \
-            "$BRIDGE_CONFIG_DIR"/proofs.pre_deploy*_* \
-            "$BRIDGE_CONFIG_DIR"/work_dir submissions; do
-  [ -e "$path" ] && mv -- "$path" "runtime-archive/$TS/"
-done
-```
+1. **`relayer-state.json` in cwd (`crates/an-bridge-prover/`) — MANDATORY
+   snapshot after every redeploy.** This file is the *daemon-level*
+   observation cache (independent of `$BRIDGE_CONFIG_DIR/state/`, which is
+   the *prover-lib-level* state). It carries `last_observed_on_chain`
+   from the previous contract; on relaunch the daemon compares it against
+   the live contract state and refuses to boot if they disagree —
+   `startup on-chain drift vs last_observed_on_chain` (see the
+   [Recovery](#recovery-if-you-see-startup-on-chain-drift-vs-last_observed_on_chain-first-launch-after-redeploy)
+   subsection below for the exact error shape). `deploy_bridge_bundle.sh`
+   does not touch this file — it lives outside `$BRIDGE_CONFIG_DIR`, so a
+   fresh deploy leaves it stale. Snapshot it unconditionally before the
+   first launch against a new `BRIDGE_ADDRESS`:
 
-Skip all cleanup while handling Cases 4/5/6b. Never remove the only copy of a
-state file or broadcast record during an incident.
+   ```bash
+   # Snapshot only if it exists AND records a different bridge/seq than
+   # the deploy you're about to boot against. Naming convention embeds
+   # the last 4 hex chars of the SUPERSEDED bridge address for forensics.
+   if [ -f relayer-state.json ]; then
+     LOCAL_SEEN=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)
+     if [ "$LOCAL_SEEN" != "$BRIDGE_BOOTSTRAP_SEQNO" ]; then
+       mv relayer-state.json "relayer-state.pre_deploy_${BRIDGE_ADDRESS: -4}_$(date +%s).json"
+     fi
+   fi
+   ```
+
+2. **Prior-deploy artifacts under `$BRIDGE_CONFIG_DIR/` — archive, don't
+   delete.** The development helper moves existing `state/*.json` into a
+   timestamped `state.pre_deploy_*` directory; still archive the
+   complete prior config before deploying against a new bridge. Older
+   event proofs, aggregation scratch and submission dumps are harmless
+   to the daemon but valuable for nonce/receipt forensics. Prefer a
+   timestamped move over deletion:
+
+   ```bash
+   TS=$(date +%Y%m%d_%H%M%S)
+   mkdir -p "runtime-archive/$TS"
+   for path in "$BRIDGE_CONFIG_DIR"/state.pre_deploy*_* \
+               "$BRIDGE_CONFIG_DIR"/proofs.pre_deploy*_* \
+               "$BRIDGE_CONFIG_DIR"/work_dir submissions; do
+     [ -e "$path" ] && mv -- "$path" "runtime-archive/$TS/"
+   done
+   ```
+
+   Skip all cleanup while handling Cases 4/5/6b. Never remove the only
+   copy of a state file or broadcast record during an incident.
 
 **Cold-start launch:**
 
@@ -595,6 +626,14 @@ mkdir -p "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/proofs" "$BRIDGE_CONFIG_
 if compgen -G "$BRIDGE_CONFIG_DIR/state/*.json" >/dev/null; then
   echo "Refusing cold start: archive existing state JSON first" >&2
   exit 1
+fi
+
+# Daemon-side: snapshot stale relayer-state.json from the prior deploy
+# so the daemon writes a fresh observation on first cycle. Silent no-op
+# if the file matches the current BRIDGE_BOOTSTRAP_SEQNO or is missing.
+if [ -f relayer-state.json ] && \
+   [ "$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)" != "$BRIDGE_BOOTSTRAP_SEQNO" ]; then
+  mv relayer-state.json "relayer-state.pre_deploy_${BRIDGE_ADDRESS: -4}_$(date +%s).json"
 fi
 
 TS=$(date +%Y%m%d_%H%M%S)
@@ -703,11 +742,96 @@ mv "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/state.pre_L${OLD_LEVEL}_$(date
 mkdir -p "$BRIDGE_CONFIG_DIR/state"
 ```
 
-Similarly, if `$BRIDGE_CONFIG_DIR/relayer-state.json` carries a stale
-`last_observed_on_chain` from a prior deploy, the daemon aborts with
-`startup on-chain drift vs last_observed_on_chain`. Snapshot the file
-(`mv "$BRIDGE_CONFIG_DIR/relayer-state.json" "$BRIDGE_CONFIG_DIR/relayer-state.pre_deploy<N>_<ts>.json"`) and
-restart — the daemon writes a fresh one on first observation cycle.
+For the separate `startup on-chain drift vs last_observed_on_chain`
+refusal (stale `relayer-state.json` after a redeploy) see the dedicated
+[Recovery](#recovery-if-you-see-startup-on-chain-drift-vs-last_observed_on_chain-first-launch-after-redeploy)
+subsection above.
+
+### Recovery: if you see `startup on-chain drift vs last_observed_on_chain` (first launch after redeploy)
+
+**When it hits.** First `daemon-live` launch against a fresh
+`BRIDGE_ADDRESS` (or any time the on-chain contract's `storedLastSeen…`
+does not match the local `relayer-state.json.last_observed_on_chain`).
+Common trigger: you re-ran `deploy_bridge_bundle.sh`, which rewrites
+`$BRIDGE_CONFIG_DIR/env` + wipes `$BRIDGE_CONFIG_DIR/state/*.json` but
+does **not** touch `relayer-state.json` in cwd.
+
+**Error signature (exit code non-zero, daemon does not stay up):**
+
+```
+ERROR relayer: daemon-live failed
+   e=startup on-chain drift vs last_observed_on_chain:
+     startup_on_chain_drift:
+       expected=BridgeOnChainState { last_seen_block_seq_no: <OLD>, ... }
+       actual  =BridgeOnChainState { last_seen_block_seq_no: <NEW>, ... }
+     — operator must reconcile
+Error: startup on-chain drift vs last_observed_on_chain: ...
+```
+
+`expected` = what `relayer-state.json` remembers from the prior deploy.
+`actual` = what the live contract at `$BRIDGE_ADDRESS` returns right now.
+
+**Fix — snapshot stale local file, then relaunch.** The local
+`last_observed_on_chain` field is refreshed by the daemon on its first
+observation cycle after start — you do not need to hand-craft a
+replacement. Just move the stale file aside so the daemon rewrites it
+fresh:
+
+```bash
+cd crates/an-bridge-prover
+
+# 1. Confirm the drift is exactly what the error reports (paranoia check).
+LOCAL=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)
+CHAIN=$(cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' \
+        --rpc-url $RPC_URL --json | jq -r '.[0]')
+echo "local=$LOCAL  chain=$CHAIN  (drift = $([ "$LOCAL" = "$CHAIN" ] && echo NO || echo YES))"
+
+# 2. Snapshot the stale file — naming embeds the SUPERSEDED bridge tail
+#    for forensics. Never delete — `.pre_deploy_*` is the only record of
+#    what state you had before the redeploy.
+mv relayer-state.json "relayer-state.pre_deploy_${BRIDGE_ADDRESS: -4}_$(date +%s).json"
+
+# 3. Relaunch — the daemon writes a fresh relayer-state.json on its
+#    first observation cycle (~within seconds of startup).
+TS=$(date +%Y%m%d_%H%M%S)
+nohup ./target/release/relayer daemon-live \
+  > logs/live_cold_${BRIDGE_CONFIG_DIR##*/}_${TS}.log 2>&1 &
+echo "PID=$!"
+```
+
+**Verify the fix landed — check three things in the new log:**
+
+```bash
+LOG=$(ls -t logs/live_cold_*.log | head -1)
+
+# a. Startup arm — for a fresh deploy with wiped $BRIDGE_CONFIG_DIR/state/
+#    you expect `Cold` + `Explicit(<BOOTSTRAP>)`. If prover_state.json
+#    was NOT wiped (e.g. you only had the daemon-side drift), `Resurrect`
+#    + `Resume` is also fine — the daemon rebuilt BridgeState from the
+#    on-chain snapshot after the refuse.
+grep -E 'startup: (Cold|Resurrect|WarmResume)|seed_policy=' "$LOG"
+
+# b. Chain last_seen the daemon actually observed must equal the
+#    contract's storedLastSeenBlockSeqNo (= your BRIDGE_BOOTSTRAP_SEQNO
+#    on first boot of a fresh deploy).
+grep 'startup: read on-chain state for routing' "$LOG"
+#    → chain_last_seen=<BRIDGE_BOOTSTRAP_SEQNO>
+
+# c. Fresh relayer-state.json got written within the first minute.
+ls -la relayer-state.json                        # mtime should be brand new
+jq '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json
+#    → equals the chain value from step (b)
+```
+
+If step (c) shows the file was **not** re-created, the daemon exited
+again — re-tail the log for a different abort (SRS missing, drift on
+`bk_set_commitment`, aggregator dir wrong, etc.). Don't just rerun
+blindly.
+
+**Do not** hand-edit `relayer-state.json` to make the drift go away.
+That silences the guard but leaves attempt counters / bk-update
+bookkeeping from the previous deploy in place; the next transport blip
+will hard-abort under Case 4.
 
 ---
 

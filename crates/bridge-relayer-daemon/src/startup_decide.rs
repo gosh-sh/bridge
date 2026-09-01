@@ -80,27 +80,37 @@ pub struct DecideInputs<'a> {
 /// reverses each `uint256` slot at construction time, so this comparator
 /// does not need to reverse anything.
 ///
-/// **Layer-1 genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
+/// **Genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
 /// documented at `bootstrap.rs:17-18` as a Phase 1 fix ensuring verifier
-/// daemon does not lag prover) calls `append_bundle` with the seed's
-/// `history_proofs`, which pushes the genesis `prev_max_level_layer_hash`
-/// into `layer_windows[0].data[0]` (layer 1 slot 0). The contract holds
-/// the same value in `storedPrevMaxLevelLayerHash` as an immutable field
-/// and does **not** copy it into `_layerWindows[1]`. So chronologically:
+/// daemon does not lag prover) calls `append_bundle` with every seed
+/// `history_proofs` entry. This prepends one genesis entry to each active
+/// local layer window. The contract does **not** copy those entries into
+/// `_layerWindows`; it exposes only the configured anchor layer's seed root
+/// in immutable `storedPrevMaxLevelLayerHash`. So chronologically:
 ///
-/// - **Pre-wrap** (local data_len ≤ W): local layer-1 window is
-///   `[genesis_anchor, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
-///   Local has exactly one extra leading entry that must equal
+/// - **Pre-wrap** (local data_len ≤ W): each bootstrapped local layer window
+///   is `[genesis_layer_root, vb_1, vb_2, …, vb_N]`; chain is
+///   `[vb_1, …, vb_N]`. Local has exactly one extra leading entry. On the
+///   configured anchor layer it must equal
 ///   `chain.genesis_prev_max_level_layer_hash` (both LE — see comparator
-///   endianness note at the top of this rustdoc).
+///   endianness note at the top of this rustdoc). Other active layers have no
+///   immutable on-chain genesis surface, so only their post-genesis suffix can
+///   be compared.
 /// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
 ///   overwrites local's genesis slot): local and chain chronological
 ///   sequences are identical.
-///
-/// Layers 2..MAX_LAYERS have no genesis prepend (shellnet's max_level=1
-/// seed block only stamps layer 1); their chronologies must match exactly.
-fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
+fn windows_match(
+    local: &BridgeState,
+    chain: &EthBridgeContractState,
+    anchor_level: u8,
+) -> bool {
     let w = local.window_size;
+    let Some(anchor_index) = anchor_level.checked_sub(1).map(usize::from) else {
+        return false;
+    };
+    if anchor_index >= MAX_LAYERS {
+        return false;
+    }
     for i in 0..MAX_LAYERS {
         let lw = &local.layer_windows[i];
         let cw = &chain.layer_windows[i];
@@ -150,21 +160,21 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
         // per-layer `history_proofs`. Chain does not copy those seed
         // entries into `_layerWindows`.
         //
-        // For layer 1 (i == 0), the seed's layer-1 hash is exposed on
-        // chain as `storedPrevMaxLevelLayerHash` (empirically verified
-        // for shellnet Deploy #6: env `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`
-        // equals the seed's layer-1 anchor, not its deepest-layer anchor
-        // — despite the "max_level" in the name), so we equality-check it.
-        // For layers 2..MAX_LAYERS, chain has no per-layer genesis anchor
-        // surface; we accept the presence of a genesis prepend but do
-        // not equality-check that first slot against chain. Runtime
+        // The configured anchor layer's seed root is exposed on chain as
+        // `storedPrevMaxLevelLayerHash`, so equality-check the prepend at
+        // index `anchor_level - 1`. This matters for L2: the immutable is the
+        // layer-2 seed root, not the layer-1 root. For other layers, chain has
+        // no per-layer genesis anchor surface; accept the presence of a
+        // genesis prepend but do not equality-check that first slot. Runtime
         // ack-time consistency (via `EthBridgeClient::submit_block`'s
         // `expectedPrevAnchor(numLayers)` cross-check, per
         // `history_consistency.rs:38-47`) is the authoritative gate for
         // deeper layers — startup routing only ensures we do not
         // silently resurrect on a mismatched cursor.
         if local_chrono.len() == chain_chrono.len() + 1 {
-            if i == 0 && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
+            if i == anchor_index
+                && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash
+            {
                 return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
@@ -388,7 +398,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
             ),
         };
     }
-    if !windows_match(local, chain) {
+    if !windows_match(local, chain, anchor_level) {
         return StartupDecision::Stop {
             reason: format!(
                 "cursor match (last_seen={}) but per-layer windows diverge byte-for-byte — \
@@ -497,6 +507,75 @@ mod tests {
         }) {
             StartupDecision::WarmResume => {}
             d => panic!("expected WarmResume, got {d:?}"),
+        }
+    }
+
+    fn l2_prepend_state() -> (BridgeState, EthBridgeContractState) {
+        let seed_seqno = 100;
+        let verified_seqno = 200;
+        let seed_l1 = [0x11; 32];
+        let seed_l2 = [0x22; 32];
+        let verified_l1 = [0x33; 32];
+        let verified_l2 = [0x44; 32];
+
+        let mut local = BridgeState::new(W);
+        local.initialize_bk_set_commitment([7u8; 32]).unwrap();
+        local
+            .append_bundle(&[(seed_l1, 1), (seed_l2, 2)], seed_seqno, seed_seqno)
+            .unwrap();
+        local.anchor_level = 2;
+        local
+            .append_bundle(
+                &[(verified_l1, 1), (verified_l2, 2)],
+                verified_seqno,
+                verified_seqno,
+            )
+            .unwrap();
+
+        // The contract stores only verifyBlock results in per-layer windows;
+        // bootstrap seed entries exist only in local state. Its one immutable
+        // genesis anchor is the configured layer-2 seed root.
+        let mut chain = snapshot_as_chain(&local);
+        chain.genesis_prev_max_level_layer_hash = seed_l2;
+        chain.layer_windows[0] = empty_lw();
+        chain.layer_windows[0].append(verified_l1, verified_seqno);
+        chain.layer_windows[1] = empty_lw();
+        chain.layer_windows[1].append(verified_l2, verified_seqno);
+        (local, chain)
+    }
+
+    #[test]
+    fn warm_resume_l2_checks_genesis_prepend_at_anchor_layer() {
+        let (local, chain) = l2_prepend_state();
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::WarmResume => {}
+            d => panic!("expected L2 WarmResume, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_when_l2_genesis_prepend_diverges_at_anchor_layer() {
+        let (local, mut chain) = l2_prepend_state();
+        // Matching the layer-1 seed is insufficient for an L2 daemon: the
+        // immutable must bind the configured layer-2 seed root.
+        chain.genesis_prev_max_level_layer_hash = [0x11; 32];
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop { reason } => {
+                assert!(reason.contains("per-layer windows diverge"), "reason: {reason}");
+            }
+            d => panic!("expected L2 Stop, got {d:?}"),
         }
     }
 

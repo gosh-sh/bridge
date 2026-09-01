@@ -129,6 +129,14 @@ assigns it when the release is tagged.
   deployed by hand. Env overrides: `MODE`, `NETWORK`, `GRAPHQL_URL`,
   `WORK_DIR`, `USDC_BRIDGE_KEY_PATH`.
 
+- Production-oriented Docker Compose kit for the shellnet → Sepolia L2
+  relayer under `crates/bridge-relayer-daemon/deploy/shellnet-l2/`. It includes
+  a non-root read-only runtime image, external secret env template, bind-mount
+  layout, full artifact/on-chain preflight, parameter finalization and an
+  operator status command. The service uses `restart: unless-stopped` for
+  host/Docker recovery and reruns the fail-closed preflight on every start.
+- The `bridge-evm-aggregator` lockfile is now tracked so target-host and image
+  builds can use `cargo build --locked` reproducibly.
 - New environment variables consumed by `bridge_prover_lib::paths`:
   `BRIDGE_CONFIG_DIR` (broad selector — resolves both state and proofs
   under `$BRIDGE_CONFIG_DIR/`), `BRIDGE_STATE_DIR` and `BRIDGE_PROOFS_DIR`
@@ -370,6 +378,22 @@ assigns it when the release is tagged.
   `scripts/ursus/` retained.
 - Fossil `.tvc` files under `python/contracts/`
   (`USDCBridge.tvc`, `DepositVoucher.tvc`); nothing loaded them.
+### Fixed
+
+- GraphQL BK-update range queries now cap their open-ended upper bound at the
+  schema's signed 64-bit `Int` maximum instead of serializing `u64::MAX`, which
+  live GraphQL servers reject during integer coercion.
+- L2 warm-resume startup now compares the immutable genesis anchor at
+  `anchor_level - 1`; a valid level-2 state no longer fails drift validation
+  after a clean restart.
+- The live relayer runbook now provisions the required K=22 SRS, documents
+  runtime `solc 0.8.19`, isolates the relayer cursor per mode, treats deploys
+  as irreversible broadcasts, keeps production secrets outside Git and
+  reflects the prover's sequential-stage but multi-core execution model. The
+  deployment helper no longer writes a private key into tracked config and
+  archives previous prover state instead of deleting it; an explicit
+  `CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS` gate is now required before
+  any broadcast.
 
 ## [0.1.0] – 2026-06-11
 

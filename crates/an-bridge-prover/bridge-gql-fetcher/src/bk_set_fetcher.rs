@@ -6,7 +6,9 @@ use anyhow::{bail, Context};
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 use tracing::{debug, info};
 
-use crate::gql_client::{BkSetUpdateWithAttestations, GqlClient};
+use crate::gql_client::{
+    BkSetUpdateWithAttestations, GqlClient, GRAPHQL_SIGNED_INT_MAX,
+};
 
 /// Page size for `next_update_after` cursor walk. Sized to match
 /// `BK_SET_AT_HEIGHT_PAGE_SIZE`: near-head callers (prover caught up to
@@ -58,7 +60,7 @@ pub async fn next_update_after(
     loop {
         let (page, next) = client
             .query_bk_set_updates_paged(
-                u64::MAX,
+                GRAPHQL_SIGNED_INT_MAX,
                 NEXT_UPDATE_PAGE_SIZE,
                 after.as_deref(),
             )

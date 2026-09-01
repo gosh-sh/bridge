@@ -38,7 +38,9 @@
 use std::collections::VecDeque;
 
 use anyhow::{bail, Context};
-use bridge_gql_fetcher::gql_client::{create_client, BkSetUpdateWithAttestations};
+use bridge_gql_fetcher::gql_client::{
+    create_client, BkSetUpdateWithAttestations, GRAPHQL_SIGNED_INT_MAX,
+};
 use serde::Serialize;
 
 const PAGE_SIZE: u32 = 500;
@@ -133,7 +135,11 @@ async fn main() -> anyhow::Result<()> {
     let mut pages = 0usize;
     loop {
         let (page, next) = client
-            .query_bk_set_updates_paged(u64::MAX, PAGE_SIZE, cursor.as_deref())
+            .query_bk_set_updates_paged(
+                GRAPHQL_SIGNED_INT_MAX,
+                PAGE_SIZE,
+                cursor.as_deref(),
+            )
             .await
             .with_context(|| format!("page {} (cursor={:?})", pages, cursor))?;
         pages += 1;

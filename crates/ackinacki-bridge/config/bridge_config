@@ -21,10 +21,9 @@
 #
 #   export BURNER_PRIVATE_KEY=0x…
 #
-# See §"Wallet setup and bridge config" in
-# `docs/live_cli_withdraw_runbook.md` for wallet creation + Sepolia
-# funding via the pk910 PoW or Google Cloud Web3 faucets. Never reuse a
-# wallet that holds real funds; never commit the private key.
+# See the "Quick start" section in `README.md` for wallet creation +
+# Sepolia funding via the pk910 PoW or Google Cloud Web3 faucets. Never
+# reuse a wallet that holds real funds; never commit the private key.
 #
 # HOW TO CONSUME
 # --------------
@@ -68,12 +67,12 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # reference deploy on Sepolia. The server-side bundle relayer that
 # advances this contract runs L2 only, so the CLI must be invoked with
 # `--anchor-layer 2 --i-know-the-wait` against this address. See
-# `docs/live_cli_withdraw_runbook.md` Case 8 Step L5.
+# `README.md` Quick start for the default-user flow.
 #
-# Advanced users who ran their own `deploy_bridge_bundle.sh` (see
-# `../bridge-prover-libraries/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`)
-# should overwrite this with the `BRIDGE_ADDRESS` from their own
-# `L{1,2}_config/env`. L1 is testing-only; L2 is the production shape.
+# Advanced users who ran their own `deploy_bridge_bundle.sh` should
+# overwrite this with the `BRIDGE_ADDRESS` from their own
+# `L{1,2}_config/env` — see `docs/advanced_user_withdraw_runbook.md`
+# Step L1. L1 is testing-only; L2 is the production shape.
 #
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong

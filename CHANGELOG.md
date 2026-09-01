@@ -22,6 +22,39 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+### Changed
+
+- **`ackinacki-bridge` docs split into a default-user runbook (README)
+  and an advanced self-deploy runbook.**
+  The previous single `docs/live_cli_withdraw_runbook.md` was one long
+  file covering both audiences (default users hitting the pinned
+  shellnet deploy AND advanced users deploying their own bridge +
+  relayer). It is now split so each audience gets a doc scoped to
+  their path:
+    - `crates/ackinacki-bridge/README.md` — default-user runbook.
+      Wallet setup → `scripts/deploy_msig_and_mint.sh` (fresh
+      single-custodian AN multisig + 1 USDC seed) → treasury check
+      → dry-run → real submit, with the full exemplary `cargo run`
+      command inlining every real value (RPC/GQL URLs, pinned
+      `BRIDGE_ADDRESS 0x0F4F…fc7`, relative paths for
+      `--params-dir`, `--aggregator-dir`, `--verifiers-dir`).
+      Includes simplified timing model (L2 only), exit codes,
+      per-scenario error summaries, idempotency semantics, safety,
+      file layout.
+    - `crates/ackinacki-bridge/docs/live_cli_withdraw_runbook.md` →
+      renamed to `docs/advanced_user_withdraw_runbook.md`. Scope
+      narrowed to what advanced users need beyond the README: full
+      L1 vs L2 timing model, self-deploy sequence
+      (Steps L0–L5: `compute_bridge_anchors` →
+      `deploy_bridge_bundle.sh` → treasury seed → cold-start
+      daemon → wait for first bundle → CLI), stress-test loop,
+      and the deep failure-mode catalog (revert-selector table,
+      cast-trace decoding, USDCBridge keypair-drift diagnostic).
+      Cross-references the README for the CLI invocation shape
+      instead of duplicating it.
+    - Internal references in `crates/ackinacki-bridge/config/bridge_config`
+      updated to point at the new file names.
+
 ### Breaking Changes
 
 - **Sub-workspace directory renamed `crates/an-bridge-prover/` → `crates/bridge-prover-libraries/`.**

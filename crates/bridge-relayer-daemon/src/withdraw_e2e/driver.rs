@@ -222,7 +222,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
 ///      [`capture::capture_next_withdrawal_event`], and
 ///   2. ensured `bridge_state` covers the captured burn's key block
 ///      (typically via the third-party
-///      `bridge-withdraw-e2e-cli::resurrect::wait_for_coverage`, which
+///      `ackinacki-bridge` CLI's `resurrect::wait_for_coverage`, which
 ///      polls `AckiNackiBridge.storedLastSeenBlockSeqNo` and calls
 ///      [`BridgeState::from_contract`] once the covering bundle lands).
 ///

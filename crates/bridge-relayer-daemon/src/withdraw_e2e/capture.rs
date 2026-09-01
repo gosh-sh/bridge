@@ -201,7 +201,7 @@ pub async fn capture_next_withdrawal_event(
 /// ExtOut (bridge rejected the call)" from "GQL propagation stuck".
 ///
 /// This function is the multi-user-safe alternative used by
-/// `bridge-withdraw-e2e-cli`; the daemon's `run_once` still uses the
+/// `ackinacki-bridge withdraw`; the daemon's `run_once` still uses the
 /// baseline-snapshot path via [`capture_next_withdrawal_event`].
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_targeted_withdrawal_event(

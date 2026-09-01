@@ -1,10 +1,11 @@
-# bridge_config — single per-CLI env file for `bridge-withdraw-e2e-cli`.
+# bridge_config — single per-CLI env file for `ackinacki-bridge`.
 #
 # WHAT IT IS
 # ----------
-# Consolidated env file for the withdraw-e2e CLI. Carries every parameter
-# the CLI itself reads via clap `env` attrs (see `src/args.rs`), and
-# nothing else. Single file; no per-mode split.
+# Consolidated env file for the `ackinacki-bridge` CLI (currently only
+# the `withdraw` subcommand consumes it). Carries every parameter the CLI
+# reads via clap `env` attrs (see `src/args.rs`), and nothing else. Single
+# file; no per-mode split.
 #
 # The CLI is a standalone user-facing tool. It does not need — and this
 # file deliberately does not carry — daemon-only settings
@@ -27,13 +28,13 @@
 #
 # HOW TO CONSUME
 # --------------
-#   cd crates/bridge-withdraw-e2e-cli
+#   cd crates/ackinacki-bridge
 #   export BURNER_PRIVATE_KEY=0x…             # your own key
 #   set -a && source config/bridge_config && set +a
-#   ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw ...
+#   ../an-bridge-prover/target/release/ackinacki-bridge withdraw ...
 #
 # Relative paths below are anchored to the working directory
-# `crates/bridge-withdraw-e2e-cli/`.
+# `crates/ackinacki-bridge/`.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com

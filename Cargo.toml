@@ -11,7 +11,7 @@ exclude = [
     "frontend",
     "crates/bridge-snark-utils",
     "crates/bridge-relayer-daemon",
-    "crates/bridge-withdraw-e2e-cli",
+    "crates/ackinacki-bridge",
     "crates/deposit-relayer-daemon",
     "crates/an-bridge-prover",
 ]

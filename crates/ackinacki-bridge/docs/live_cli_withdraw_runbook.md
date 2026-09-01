@@ -1,7 +1,7 @@
 # Live CLI Withdraw E2E Runbook — shellnet → Sepolia (Circuit 4)
 
 Operational guide for driving a full AN→ETH withdrawal E2E through the
-`bridge-withdraw-e2e-cli` binary against a deployed `AckiNackiBridge` on
+`ackinacki-bridge` binary against a deployed `AckiNackiBridge` on
 Sepolia. This CLI owns the per-withdrawal composition (burn → capture
 → Circuit-4 SHPLONK proof → `withdrawByProof`).
 
@@ -99,7 +99,7 @@ All paths below are relative to the repo root. The CLI is a standalone
 tool with its own single config; there is no L1/L2 split.
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                       # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 export BRIDGE=$BRIDGE_ADDRESS                        # ergonomics; same value
@@ -175,7 +175,7 @@ leaves a resumable trace (v2: `--resume`). See
 [Idempotency semantics](#idempotency-semantics).
 
 `local_smoke.sh` / `live_smoke.sh` under
-`crates/bridge-withdraw-e2e-cli/scripts/` are straight wrappers: source
+`crates/ackinacki-bridge/scripts/` are straight wrappers: source
 `config/bridge_config`, export five identity vars, invoke the binary.
 
 ---
@@ -338,7 +338,7 @@ written into `bridge_config` and never persisted by the CLI (see
 [`config/bridge_config`](../config/bridge_config)) is a single per-CLI
 env file that carries every parameter the CLI reads via clap `env`
 attrs (see `src/args.rs`), and nothing else. From the CLI crate root
-(`crates/bridge-withdraw-e2e-cli/`), source it with
+(`crates/ackinacki-bridge/`), source it with
 `set -a && source config/bridge_config && set +a` before invoking the
 binary.
 
@@ -403,9 +403,9 @@ misconfigured — report and STOP. Path (b): redeploy with the correct
 
 ## Binary + env prerequisites
 
-**Working directory:** `crates/bridge-withdraw-e2e-cli/` (the standalone
+**Working directory:** `crates/ackinacki-bridge/` (the standalone
 CLI crate — all commands below cd here first). The crate source lives
-here; a symlink from `../an-bridge-prover/bridge-withdraw-e2e-cli` pulls
+here; a symlink from `../an-bridge-prover/ackinacki-bridge` pulls
 it into the halo2 sub-workspace so it can share the prover deps and the
 built binary lands under `../an-bridge-prover/target/release/`.
 
@@ -415,8 +415,8 @@ built binary lands under `../an-bridge-prover/target/release/`.
 # 1. CLI binary — built out of the halo2 sub-workspace so it shares
 #    the prover deps.
 cd crates/an-bridge-prover
-cargo build --release -p bridge-withdraw-e2e-cli
-#   -> ./target/release/bridge-withdraw-e2e-cli
+cargo build --release -p ackinacki-bridge
+#   -> ./target/release/ackinacki-bridge
 
 # 2. SHPLONK aggregator (the CLI's ONLY subprocess).
 #    Circuit-4 SNARK proving itself is in-process
@@ -432,7 +432,7 @@ cargo build --release --bin aggregate-proof
 **Env sanity** (run cwd = the CLI crate):
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                   # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 
@@ -492,7 +492,7 @@ recipient is sourced from the bridge treasury. The pinned deploy is
 shared; prior withdrawals may have drained it.
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a         # pinned L2 BRIDGE_ADDRESS
 
@@ -568,7 +568,7 @@ address that returns.
 ### Step 3 — Run the CLI (dry-run, then real submit)
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a         # pinned L2 BRIDGE_ADDRESS
 
@@ -582,7 +582,7 @@ export WITHDRAW_AMOUNT=1.000000
 mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
 
-../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
+../an-bridge-prover/target/release/ackinacki-bridge withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -770,7 +770,7 @@ cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
 **Then approve + deposit into the bridge:**
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 
@@ -843,7 +843,7 @@ operator to acknowledge the wait budget.
 with `--anchor-layer 2`.
 
 ```bash
-cd crates/bridge-withdraw-e2e-cli
+cd crates/ackinacki-bridge
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a         # BRIDGE_ADDRESS = your L2 deploy
 
@@ -857,7 +857,7 @@ export WITHDRAW_AMOUNT=1.000000
 mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
 
-../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
+../an-bridge-prover/target/release/ackinacki-bridge withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -1054,7 +1054,7 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
   ```bash
   watch -n 720 'cast call $BRIDGE_ADDRESS storedLastSeenBlockSeqNo\(\)\(uint64\) --rpc-url $RPC_URL'
   # Once L ≥ COVER, re-run:
-  crates/bridge-withdraw-e2e-cli/scripts/live_smoke.sh --allow-retry
+  crates/ackinacki-bridge/scripts/live_smoke.sh --allow-retry
   # (v1 blunt override; v2 will be --resume)
   ```
 
@@ -1132,7 +1132,7 @@ df $BRIDGE_PARAMS_DIR/
 - If cold-cache slowness is the real issue (not OOM), bump the timeout:
 
   ```bash
-  ../an-bridge-prover/target/release/bridge-withdraw-e2e-cli withdraw \
+  ../an-bridge-prover/target/release/ackinacki-bridge withdraw \
     ...same flags as Case 1b Step L5... \
     --prover-timeout-s 3600
   ```
@@ -1285,7 +1285,7 @@ Plan half-day per 3-cycle run.
 
 ## Health checks
 
-**CLI-lane snapshot** (cwd = `crates/bridge-withdraw-e2e-cli`):
+**CLI-lane snapshot** (cwd = `crates/ackinacki-bridge`):
 
 ```bash
 # Latest CLI state files (one per unique (from,to,chain,amount) tuple)
@@ -1317,12 +1317,12 @@ cast balance "$(cast wallet address --private-key $BURNER_PRIVATE_KEY)" --rpc-ur
 
 ## File & state reference
 
-**Run cwd for the CLI:** `crates/bridge-withdraw-e2e-cli/` (the
+**Run cwd for the CLI:** `crates/ackinacki-bridge/` (the
 standalone CLI crate). Binaries are built out of the halo2 sub-workspace
 at `../an-bridge-prover/target/release/`.
 
 ```
-crates/bridge-withdraw-e2e-cli/            ← run cwd
+crates/ackinacki-bridge/            ← run cwd
 ├── config/
 │   └── bridge_config                      ← single per-CLI env file (see runbook)
 ├── docs/
@@ -1345,8 +1345,8 @@ crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with 
 ├── params/                                ← BRIDGE_PARAMS_DIR (SRS + pk/vk)
 │   └── pk_cache/                          ← Circuit-4 PK cache
 ├── target/release/
-│   └── bridge-withdraw-e2e-cli            ← this CLI (built into the sub-workspace)
-└── bridge-withdraw-e2e-cli/               ← symlink → ../bridge-withdraw-e2e-cli
+│   └── ackinacki-bridge            ← this CLI (built into the sub-workspace)
+└── ackinacki-bridge/               ← symlink → ../ackinacki-bridge
 
 crates/bridge-evm-aggregator/              ← SHPLONK aggregator
 └── target/release/

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live shellnet smoke test for `bridge-withdraw-e2e-cli` — REAL submit.
+# Live shellnet smoke test for `ackinacki-bridge withdraw` — REAL submit.
 #
 # Broadcasts the AN burn AND the EVM `withdrawByProof`. Only use on
 # shellnet or a testnet where the value is disposable.
@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."   # crates/bridge-withdraw-e2e-cli/
+cd "$(dirname "$0")/.."   # crates/ackinacki-bridge/
 
 # --- Locate + source the env file ---------------------------------------------
 if [ -n "${BRIDGE_CONFIG_DIR:-}" ]; then
@@ -87,7 +87,7 @@ echo "    bridge=$BRIDGE_ADDRESS  rpc=$RPC_URL"
 echo "    log=$LOG"
 echo "    (this WILL broadcast an AN burn and an EVM withdrawByProof tx)"
 
-exec cargo run --release -p bridge-withdraw-e2e-cli \
+exec cargo run --release -p ackinacki-bridge \
   --manifest-path ../an-bridge-prover/Cargo.toml -- \
   withdraw \
     --yes \

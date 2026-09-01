@@ -264,5 +264,5 @@ crates/an-bridge-prover/L2_config/work_dir/
 # scripts/live_smoke.sh, scripts/deploy_msig_and_mint.{sh,py} when
 # invoked from the CLI crate root). Contain multisig keys.json,
 # per-withdrawal idempotency state, aggregate-proof scratch, and logs.
-crates/bridge-withdraw-e2e-cli/work_dir/
-crates/bridge-withdraw-e2e-cli/withdraw-state/
+crates/ackinacki-bridge/work_dir/
+crates/ackinacki-bridge/withdraw-state/

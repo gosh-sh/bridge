@@ -24,6 +24,24 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **CLI crate + binary renamed `bridge-withdraw-e2e-cli` → `ackinacki-bridge`.**
+  Cargo package name, `cargo -p …` selector, `[[bin]]` name, on-disk
+  crate directory (`crates/bridge-withdraw-e2e-cli/` → `crates/ackinacki-bridge/`),
+  and the `an-bridge-prover` sub-workspace symlink all move together.
+  All existing functionality is now nested under the `withdraw`
+  subcommand (already the case in earlier `[Unreleased]` entries — the
+  rename is purely cosmetic, made ahead of adding sibling subcommands
+  like `deposit`). Concrete migrations:
+    - Build: `cargo build -p ackinacki-bridge` (was `-p bridge-withdraw-e2e-cli`),
+      run from `crates/an-bridge-prover/`.
+    - Invoke: `./target/release/ackinacki-bridge withdraw --from … --to …`
+      (was `./target/release/bridge-withdraw-e2e-cli withdraw …`).
+    - Log filter: `RUST_LOG=ackinacki_bridge=info` (was `bridge_withdraw_e2e_cli=info`).
+    - Config: `config/bridge_config` moved with the crate to
+      `crates/ackinacki-bridge/config/bridge_config`; contents unchanged.
+    - Smoke scripts (`scripts/local_smoke.sh`, `live_smoke.sh`,
+      `deploy_msig_and_mint.{sh,py}`) moved with the crate; behaviour unchanged.
+
 - **`contracts/ethereum/.env.shellnet` and `.env.shellnet.l2` deleted.**
   The single shared shellnet burner (`0xb586…2307`) now lives once, in
   `crates/an-bridge-prover/shellnet.common` under `RELAYER_PRIVATE_KEY`,
@@ -49,7 +67,7 @@ assigns it when the release is tagged.
 
 ### Added
 
-- **New binary `bridge-withdraw-e2e-cli`** — end-user CLI for withdrawing
+- **New binary `ackinacki-bridge`** — end-user CLI for withdrawing
   USDC from an Acki Nacki multisig to an EVM recipient via the bridge.
   Third-party-operator-facing counterpart to `daemon-live`: the daemon
   owns bundle proving (running anywhere — not necessarily on the same
@@ -62,7 +80,7 @@ assigns it when the release is tagged.
 
   Subcommand surface:
   ```
-  bridge-withdraw-e2e-cli withdraw \
+  ackinacki-bridge withdraw \
     --from <dapp_id>::<account_id> --from-keys /path/to/owner.keys.json \
     --to 0xRecipient --to-chain 11155111 --amount 1.000000
   ```
@@ -101,7 +119,7 @@ assigns it when the release is tagged.
   multisig on any bridge revert (the historical Python driver used
   `bounce = false`; the Rust CLI's default is the safer of the two).
 
-- **Helper scripts under `crates/bridge-withdraw-e2e-cli/scripts/`**:
+- **Helper scripts under `crates/ackinacki-bridge/scripts/`**:
   `local_smoke.sh` (dry-run wrapper: full pipeline including
   `dry_run_withdraw`, no broadcast) and `live_smoke.sh` (real submit).
   Both source `$BRIDGE_CONFIG_DIR/env` (default `L1_config/env`) for
@@ -114,7 +132,7 @@ assigns it when the release is tagged.
   vendored Python driver and `cast` remain the source of truth for
   those one-time setup steps.
 
-- **`crates/bridge-withdraw-e2e-cli/scripts/deploy_msig_and_mint.{sh,py}`**
+- **`crates/ackinacki-bridge/scripts/deploy_msig_and_mint.{sh,py}`**
   — one-shot helper that deploys a fresh single-custodian
   `UpdateCustodianMultisigWallet` on the target AN cluster (default
   MODE=shellnet) and seeds it with 1 USDC on ECC[3] via
@@ -154,7 +172,7 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **`bridge-withdraw-e2e-cli/config/bridge_config` pinned `BRIDGE_ADDRESS`
+- **`ackinacki-bridge/config/bridge_config` pinned `BRIDGE_ADDRESS`
   rotated to the newly team-deployed L2 shellnet bridge
   `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`** (was
   `0x8D9190666128ab897C5ABd8C107239A197e08467`). The new deploy's
@@ -173,7 +191,7 @@ assigns it when the release is tagged.
   (0.9 USDC, ~25 min wall time — the 23 min tail was remote-relayer
   latency waiting for the covering L2 boundary at seq 12,812,288).
 
-- **`bridge-withdraw-e2e-cli/scripts/local_smoke.sh` and `live_smoke.sh`
+- **`ackinacki-bridge/scripts/local_smoke.sh` and `live_smoke.sh`
   now source the standalone `config/bridge_config` by default** instead
   of the relayer's `L1_config/env`. Aligns the scripts with the
   runbook (§"Quick resume checklist") — the CLI is a standalone tool
@@ -181,7 +199,7 @@ assigns it when the release is tagged.
   on a co-located relayer deploy. Escape hatch: set
   `BRIDGE_CONFIG_DIR=/path/to/L{1,2}_config` to fall back to the
   relayer-style env. Both scripts now `cd` to
-  `crates/bridge-withdraw-e2e-cli/` (was `bridge/`), so relative
+  `crates/ackinacki-bridge/` (was `bridge/`), so relative
   `BRIDGE_PARAMS_DIR=../an-bridge-prover/params` in `bridge_config`
   resolves correctly. Both scripts also now require
   `BURNER_PRIVATE_KEY` in caller env (mirrors the deliberate omission
@@ -191,7 +209,7 @@ assigns it when the release is tagged.
   (`0x3fB082…8638`); override with `ANCHOR_LAYER=1` in caller env for
   advanced-user L1 deploys.
 
-- **`bridge-withdraw-e2e-cli --allow-retry` now resumes in place
+- **`ackinacki-bridge --allow-retry` now resumes in place
   instead of overwriting the state file.** v1 used to rewrite the prior
   record with a fresh `Reserved` on `--allow-retry`, dropping the
   stored `an_tx_hash`; the orchestrator then unconditionally re-fired
@@ -212,7 +230,7 @@ assigns it when the release is tagged.
   clean-slate restart. See runbook §Idempotency semantics for the
   full state transition table.
 
-- **`bridge-withdraw-e2e-cli` idempotency state file only transitions
+- **`ackinacki-bridge` idempotency state file only transitions
   to `Submitted` after `withdrawByProof` returns a tx hash.**
   Previously the record was flipped to `Submitted` immediately before
   the `submit_withdraw` call, so an RPC error, wallet reject, or gas
@@ -222,7 +240,7 @@ assigns it when the release is tagged.
   `Submitted → Confirmed` are both written only inside the `Paid`
   branch after the tx hash is in hand.
 
-- **`bridge-withdraw-e2e-cli` prompts before the AN burn unless
+- **`ackinacki-bridge` prompts before the AN burn unless
   `--yes` is passed.** The `--yes` and `--non-interactive` flags,
   previously accepted by clap but never consulted, now gate a live
   stdin confirmation immediately before `burn::fire`. The prompt
@@ -232,7 +250,7 @@ assigns it when the release is tagged.
   `--non-interactive` without `--yes` continues to refuse upstream in
   `main::dispatch`.
 
-- **`bridge-withdraw-e2e-cli` capture-stage errors now map to exit
+- **`ackinacki-bridge` capture-stage errors now map to exit
   code 11 (`CaptureTimeout`) instead of 12 (`ProofFailed`).**
   `capture_targeted_withdrawal_event` failures — GQL unreachable,
   event never emitted, poll ceiling exceeded — are a
@@ -243,7 +261,7 @@ assigns it when the release is tagged.
   4b) still maps to `ProofFailed` because "waiting for the covering
   bundle" is a prove-path prerequisite.
 
-- **`bridge-withdraw-e2e-cli --dry-run` docs corrected to
+- **`ackinacki-bridge --dry-run` docs corrected to
   preflight-only scope.** The README, runbook Step 4, runbook Case 8,
   and `scripts/local_smoke.sh` header previously claimed `--dry-run`
   ran the full pipeline up to and including `dry_run_withdraw`. The
@@ -253,7 +271,7 @@ assigns it when the release is tagged.
   resolution, ECC[3] balance — then stop. Exit codes 10–13 are
   unreachable under `--dry-run`.
 
-- **`bridge-withdraw-e2e-cli` capture is now multi-user safe.**
+- **`ackinacki-bridge` capture is now multi-user safe.**
   The CLI no longer youngest-picks a shared `USDCBridge → ExtOut` queue
   after firing its burn. Instead it chain-follows the multisig transaction
   hash (`an_tx_hash` returned by `sendTransaction`) through the two GraphQL
@@ -303,16 +321,16 @@ assigns it when the release is tagged.
 - **`aggregate-proof` subprocess now receives an absolute
   `--inner-snark` path.** `SubprocessAggregator::aggregate` spawns the
   aggregator with `current_dir = aggregator_dir`; a relative snark path
-  (the `bridge-withdraw-e2e-cli` default `--snark-dir=./shplonk-snark`
+  (the `ackinacki-bridge` default `--snark-dir=./shplonk-snark`
   hits this) resolved against the wrong CWD and the subprocess exited
   with `No such file or directory (os error 2)`. Canonicalized in
   `aggregator.rs::SubprocessAggregator::aggregate` before argv
   construction; the snark file always exists at that point (the inner
   prover just wrote it), so the canonicalize is safe. First observed
-  running `bridge-withdraw-e2e-cli withdraw` against shellnet from the
+  running `ackinacki-bridge withdraw` against shellnet from the
   crate root without an explicit `--snark-dir` override.
 
-- **`bridge-withdraw-e2e-cli` error output now walks the anyhow
+- **`ackinacki-bridge` error output now walks the anyhow
   `#[source]` chain.** `output.rs::print_error` used to print only the
   top-level `Display`, so any wrapped `CliError::ProofFailed { source }`
   (and any nested `anyhow::Context`) was invisible — the user saw
@@ -321,7 +339,7 @@ assigns it when the release is tagged.
   now emit indented `caused by [N]:` lines beneath the top-level
   message. `--json` mode is unchanged.
 
-- **`bridge-withdraw-e2e-cli withdraw` preflight USDCBridge liveness
+- **`ackinacki-bridge withdraw` preflight USDCBridge liveness
   check no longer misreports an Active bridge as `acc_type is Unknown`.**
   The GraphQL query at `preflight.rs::query_usdc_bridge_state` asked
   for `info.acc_type` (a numeric enum: `1 = Active`) and then tried to
@@ -333,7 +351,7 @@ assigns it when the release is tagged.
   (`0000…::1a1a…`), which is Active per tvm-cli but was reported
   Unknown by the CLI.
 
-- **`bridge-withdraw-e2e-cli withdraw` preflight `getCustodians` call
+- **`ackinacki-bridge withdraw` preflight `getCustodians` call
   no longer rejects the very `--from` form the CLI itself mandates.**
   Args validation requires `--from dapp_id::account_id` (the tvm-cli v3
   extended form) and rejects the legacy `0:<acc>` shape, but
@@ -348,7 +366,7 @@ assigns it when the release is tagged.
   every dry-run and every live withdraw would fail at preflight step 3
   regardless of on-chain state.
 
-- **`bridge-withdraw-e2e-cli` no longer double-burns ECC[3] when
+- **`ackinacki-bridge` no longer double-burns ECC[3] when
   retrying after a `withdrawByProof` revert.** The `Failed` arm of
   `idempotency::reserve` used to wipe the prior record with a fresh
   `Reserved`, dropping the recorded `an_tx_hash`. Because `Status::Failed`
@@ -365,14 +383,14 @@ assigns it when the release is tagged.
   `burn::fire()`); only `Failed` without `an_tx_hash` (defensive
   branch for manual state edits) still wipes. Regression test:
   `idempotency::tests::reserve_over_failed_with_an_tx_hash_preserves_prior_record`.
-- **`bridge-withdraw-e2e-cli` now refuses `--to
+- **`ackinacki-bridge` now refuses `--to
   0x0000000000000000000000000000000000000000` at preflight** (Sergey
   review R7). The USDCBridge ERC-20 leg could otherwise succeed against
   a token whose `transfer` treats the zero address as a burn sink,
   permanently consuming an ECC[3] draw against an unrecoverable
   recipient. Refusal path: `parse_to` in `args.rs`, `ArgInvalid { flag:
   "to", .. }`, exit 2. Test: `args::tests::to_rejects_zero_address`.
-- **`bridge-withdraw-e2e-cli` now caps `--amount` at `u64::MAX`
+- **`ackinacki-bridge` now caps `--amount` at `u64::MAX`
   micro-USDC at preflight** (Sergey review R8). The multisig ECC[3]
   balance and the AN-side `initiateWithdrawal(amount)` argument are u64
   on the wire; letting a larger value through caused a silent downstream
@@ -386,7 +404,7 @@ assigns it when the release is tagged.
   Dropped stale `anWorkchain int8` from `confirmDeposit` inputs and the
   `DepositFinalized` event in both runtime copies
   (`crates/an-bridge-prover/python/contracts/USDCBridge.abi.json` and
-  `crates/bridge-withdraw-e2e-cli/abi/USDCBridge.abi.json`); rewrote
+  `crates/ackinacki-bridge/abi/USDCBridge.abi.json`); rewrote
   `DepositVoucher.abi.json` constructor to the 5-arg
   `(depositId, contractAddr, dappId, amount, anAccount)` schema.
   Withdraw runtime paths (`initiateWithdrawal`, `mintAndSend`,

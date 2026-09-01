@@ -14,7 +14,7 @@ Scope:
   proving path against the on-AN `USDCBridge`. It does NOT drive the
   Ethereum side (no `withdrawByProof` submission to the L1 EVM bridge)
   and it does NOT exercise the L2 (multi-chain / thinned) path.
-  Sepolia submission is covered by `bridge-withdraw-e2e-cli`.
+  Sepolia submission is covered by `ackinacki-bridge withdraw`.
   TODO: extend / add a parallel driver for the L2 path (currently only
   the L1 topology is embedded here).
 

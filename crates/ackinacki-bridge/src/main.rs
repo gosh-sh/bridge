@@ -1,4 +1,4 @@
-//! `bridge-withdraw-e2e-cli` entrypoint.
+//! `ackinacki-bridge` entrypoint.
 //!
 //! This file owns three things and nothing else:
 //! 1. Wire the module tree together.
@@ -90,7 +90,7 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
 /// the pipeline story. ANSI colors only when stderr is a TTY.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,bridge_withdraw_e2e_cli=info,bridge_relayer_daemon=info")
+        EnvFilter::new("warn,ackinacki_bridge=info,bridge_relayer_daemon=info")
     });
     let is_tty = std::io::stderr().is_terminal();
     let _ = tracing_subscriber::fmt()

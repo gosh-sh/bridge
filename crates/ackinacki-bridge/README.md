@@ -1,9 +1,11 @@
-# bridge-withdraw-e2e-cli
+# ackinacki-bridge
 
-End-user CLI for withdrawing USDC from an Acki Nacki multisig to an EVM
-recipient via the bridge. This is the operator-facing counterpart to the
-relayer daemon: the daemon owns the continuous bundle-proving stream
-(`verifyBlock`); this CLI owns per-withdrawal composition
+End-user CLI for the Acki Nacki ↔ EVM bridge. Currently ships a single
+subcommand — `withdraw` — for withdrawing USDC from an Acki Nacki
+multisig to an EVM recipient. Additional subcommands (e.g. `deposit`) are
+planned. This is the operator-facing counterpart to the relayer daemon:
+the daemon owns the continuous bundle-proving stream (`verifyBlock`);
+this CLI owns per-withdrawal composition
 (multisig burn → capture → Circuit-4 SHPLONK proof → `withdrawByProof`).
 
 ## What it does
@@ -83,7 +85,7 @@ one-off runs.
 ## Usage
 
 ```
-bridge-withdraw-e2e-cli withdraw \
+ackinacki-bridge withdraw \
   --from    <dapp_id>::<account_id> \
   --from-keys /path/to/owner.keys.json \
   --to      0xRecipient \
@@ -135,15 +137,15 @@ matters for money.
 
 ## Layout
 
-Physical crate at `crates/bridge-withdraw-e2e-cli/`. Symlinked into the
+Physical crate at `crates/ackinacki-bridge/`. Symlinked into the
 `an-bridge-prover` sub-workspace at
-`crates/an-bridge-prover/bridge-withdraw-e2e-cli/` so it can depend on
+`crates/an-bridge-prover/ackinacki-bridge/` so it can depend on
 the halo2-heavy prover crates while remaining excluded from the root
 workspace. Build via:
 
 ```
 cd crates/an-bridge-prover
-cargo build -p bridge-withdraw-e2e-cli
+cargo build -p ackinacki-bridge
 ```
 
 Vendored ABIs live under `abi/`:

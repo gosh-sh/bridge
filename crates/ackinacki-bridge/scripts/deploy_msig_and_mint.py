@@ -2,7 +2,7 @@
 Minimal driver that deploys a fresh `UpdateCustodianMultisigWallet` on
 the target AN cluster and seeds it with `WITHDRAWAL_AMOUNT` USDC
 (ECC[3]) via `USDCBridge.mintAndSend`, then prints two eval-able env
-lines on stdout for `bridge-withdraw-e2e-cli` to consume:
+lines on stdout for `ackinacki-bridge withdraw` to consume:
 
     export WITHDRAW_FROM=<dapp_id>::<account_id>
     export WITHDRAW_FROM_KEYS=<absolute path to owner keys.json>
@@ -40,7 +40,7 @@ import time
 # Locate the sibling `python/` tree (helper.msig + helper.bridge_e2e
 # + helper.common all live there, and bin/tvm-cli is symlinked below it).
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_CLI_ROOT = os.path.dirname(_HERE)                          # crates/bridge-withdraw-e2e-cli
+_CLI_ROOT = os.path.dirname(_HERE)                          # crates/ackinacki-bridge
 _PY_ROOT = os.path.abspath(os.path.join(
     _CLI_ROOT, "..", "an-bridge-prover", "python"))         # crates/an-bridge-prover/python
 if not os.path.isdir(_PY_ROOT):
@@ -74,7 +74,7 @@ def main():
         default_network = "shellnet.ackinacki.org"
         default_graphql = "https://shellnet.ackinacki.org/graphql"
         default_bridge_key = USDC_BRIDGE_KEYS_SHELLNET
-        gql_kwargs = {"user_agent": "bridge-withdraw-e2e-cli-deploy-msig/1.0",
+        gql_kwargs = {"user_agent": "ackinacki-bridge-deploy-msig/1.0",
                       "timeout": 30}
     else:
         default_network = "http://127.0.0.1:80"

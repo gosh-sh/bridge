@@ -24,6 +24,6 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."   # crates/bridge-withdraw-e2e-cli/
+cd "$(dirname "$0")/.."   # crates/ackinacki-bridge/
 
 exec python3 scripts/deploy_msig_and_mint.py

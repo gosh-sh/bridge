@@ -16,6 +16,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ackinacki-bridge"
+version = "0.1.0"
+dependencies = [
+ "acki-nacki-interface",
+ "alloy",
+ "alloy-primitives",
+ "anyhow",
+ "async-trait",
+ "bridge-event-witness",
+ "bridge-gql-fetcher",
+ "bridge-prover-lib",
+ "bridge-relayer-daemon",
+ "clap",
+ "hex",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "tvm_block 3.0.5 (git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.5.an)",
+ "tvm_client",
+]
+
+[[package]]
 name = "addchain"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2010,34 +2038,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
-]
-
-[[package]]
-name = "bridge-withdraw-e2e-cli"
-version = "0.1.0"
-dependencies = [
- "acki-nacki-interface",
- "alloy",
- "alloy-primitives",
- "anyhow",
- "async-trait",
- "bridge-event-witness",
- "bridge-gql-fetcher",
- "bridge-prover-lib",
- "bridge-relayer-daemon",
- "clap",
- "hex",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber 0.3.23",
- "tvm_block 3.0.5 (git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.5.an)",
- "tvm_client",
 ]
 
 [[package]]

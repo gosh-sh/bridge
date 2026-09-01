@@ -1,14 +1,14 @@
 [package]
-name = "bridge-withdraw-e2e-cli"
+name = "ackinacki-bridge"
 version = "0.1.0"
 edition = "2021"
-description = "End-user CLI: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side."
+description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Currently ships the `withdraw` subcommand: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
 
 # Build via the an-bridge-prover workspace (member symlink
-# crates/an-bridge-prover/bridge-withdraw-e2e-cli → ../bridge-withdraw-e2e-cli):
-#   cd crates/an-bridge-prover && cargo build -p bridge-withdraw-e2e-cli
+# crates/an-bridge-prover/ackinacki-bridge → ../ackinacki-bridge):
+#   cd crates/an-bridge-prover && cargo build -p ackinacki-bridge
 # Path deps below are relative to that member path — i.e.
-# crates/an-bridge-prover/bridge-withdraw-e2e-cli/. Since cargo preserves the
+# crates/an-bridge-prover/ackinacki-bridge/. Since cargo preserves the
 # symlink path (does not canonicalize) for relative resolution, `../foo` and
 # `../../foo` walk from that directory, matching how bridge-relayer-daemon
 # resolves the same layout.
@@ -52,7 +52,7 @@ tvm_client = { workspace = true }
 tvm_block  = { workspace = true }
 
 # Path deps — resolved from the member symlink at
-# crates/an-bridge-prover/bridge-withdraw-e2e-cli/.
+# crates/an-bridge-prover/ackinacki-bridge/.
 bridge-relayer-daemon = { path = "../bridge-relayer-daemon" }
 bridge-event-witness  = { path = "../bridge-event-witness" }
 bridge-prover-lib     = { path = "../bridge-prover-lib" }
@@ -64,5 +64,5 @@ tempfile = "3"
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [[bin]]
-name = "bridge-withdraw-e2e-cli"
+name = "ackinacki-bridge"
 path = "src/main.rs"

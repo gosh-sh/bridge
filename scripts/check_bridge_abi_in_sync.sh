@@ -2,7 +2,7 @@
 # Guard: the on-AN USDCBridge ABI ships in two runtime copies.
 #
 #   crates/an-bridge-prover/python/contracts/USDCBridge.abi.json   (tvm-cli)
-#   crates/bridge-withdraw-e2e-cli/abi/USDCBridge.abi.json         (include_str!)
+#   crates/ackinacki-bridge/abi/USDCBridge.abi.json         (include_str!)
 #
 # Both must stay byte-identical and in sync with the deployed shellnet
 # contract (acki-nacki @ cf664666b). This script only checks the two
@@ -11,7 +11,7 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$REPO/crates/an-bridge-prover/python/contracts/USDCBridge.abi.json"
-RUST="$REPO/crates/bridge-withdraw-e2e-cli/abi/USDCBridge.abi.json"
+RUST="$REPO/crates/ackinacki-bridge/abi/USDCBridge.abi.json"
 cmp -s "$PY" "$RUST" || {
   echo "USDCBridge.abi.json drift between:"
   echo "  $PY"

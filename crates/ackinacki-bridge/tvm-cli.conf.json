@@ -40,5 +40,5 @@
     ]
   },
   "aliases": {},
-  "path": "/Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/bridge-withdraw-e2e-cli/tvm-cli.conf.json"
+  "path": "/Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/ackinacki-bridge/tvm-cli.conf.json"
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Dry-run smoke test for `bridge-withdraw-e2e-cli`.
+# Dry-run smoke test for `ackinacki-bridge withdraw`.
 #
 # What it does:
-#   Runs `bridge-withdraw-e2e-cli withdraw --dry-run` against the
+#   Runs `ackinacki-bridge withdraw --dry-run` against the
 #   pre-deployed shellnet bridge (or whatever `BRIDGE_ADDRESS` you set in
 #   `config/bridge_config`). `--dry-run` is preflight-only: it validates
 #   flags, key file perms, single-custodian check, USDCBridge resolution,
@@ -51,7 +51,7 @@ set -euo pipefail
 
 # Anchor at the CLI crate root so `config/bridge_config`'s relative paths
 # (BRIDGE_PARAMS_DIR=../an-bridge-prover/params, etc.) resolve correctly.
-cd "$(dirname "$0")/.."   # crates/bridge-withdraw-e2e-cli/
+cd "$(dirname "$0")/.."   # crates/ackinacki-bridge/
 
 # --- Locate + source the env file ---------------------------------------------
 if [ -n "${BRIDGE_CONFIG_DIR:-}" ]; then
@@ -103,7 +103,7 @@ echo "    bridge=$BRIDGE_ADDRESS  rpc=$RPC_URL"
 echo "    log=$LOG"
 
 # Manifest lives in the CLI crate's sub-workspace parent.
-exec cargo run --release -p bridge-withdraw-e2e-cli \
+exec cargo run --release -p ackinacki-bridge \
   --manifest-path ../an-bridge-prover/Cargo.toml -- \
   withdraw \
     --dry-run \

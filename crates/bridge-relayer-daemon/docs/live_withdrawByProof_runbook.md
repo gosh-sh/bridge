@@ -52,9 +52,9 @@ this doc extends.
 > **not** enough for concurrent-operator or production use of the
 > `relayer withdraw-e2e` binary.
 >
-> **`bridge-withdraw-e2e-cli` is different.** The third-party
+> **`ackinacki-bridge withdraw` is different.** The third-party
 > end-user CLI at
-> `crates/an-bridge-prover/bridge-withdraw-e2e-cli/` fires its burn
+> `crates/an-bridge-prover/ackinacki-bridge/` fires its burn
 > inline and then targets the resulting `WithdrawalInitiated` ExtOut
 > by chain-following the multisig transaction hash — `transaction(hash:
 > an_tx_hash).out_messages → dst == USDCBridge →

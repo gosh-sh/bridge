@@ -46,9 +46,9 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "bridge-withdraw-e2e-cli",
+    name = "ackinacki-bridge",
     version,
-    about = "Withdraw USDC from an Acki Nacki multisig to an EVM address via the bridge.",
+    about = "Acki Nacki ↔ EVM bridge CLI. Currently ships the `withdraw` subcommand.",
     long_about = "Composes a single-custodian multisig sendTransaction that calls \
                   USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
                   resurrects the prover's mirror of `AckiNackiBridge` state from the \

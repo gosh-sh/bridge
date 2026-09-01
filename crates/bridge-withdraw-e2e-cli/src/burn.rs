@@ -122,7 +122,11 @@ pub async fn fire(
     let msig_abi = Abi::Json(MULTISIG_ABI_JSON.to_string());
     let encode = ParamsOfEncodeMessage {
         abi: msig_abi,
-        address: Some(from.extended()),
+        // tvm-sdk `encode_message` wants legacy `0:<acc>` here; the extended
+        // `dapp::acc` form is only understood by the tvm-cli `--addr` flag.
+        // Routing dapp is passed separately via `ParamsOfProcessMessage.dapp_id`
+        // below.
+        address: Some(from.legacy()),
         call_set: CallSet::some_with_function_and_input("sendTransaction", params),
         signer: Signer::Keys { keys },
         deploy_set: None,

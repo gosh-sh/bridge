@@ -240,6 +240,13 @@ crates/an-bridge-prover/state.stale_*/
 crates/an-bridge-prover/submissions/
 crates/an-bridge-prover/diag/
 
+# Prover SRS / vk / pk artefacts — ~40 GB total, regenerated on demand
+# by keygen (~7 min per circuit). Shared between the bundle daemon and
+# the withdraw-e2e CLI (`BRIDGE_PARAMS_DIR` / `--params-dir`). Mirrors
+# `crates/bridge-snark-utils/params/*.srs` and
+# `crates/bridge-evm-aggregator/params/`.
+crates/an-bridge-prover/params/
+
 # Per-mode config dirs (L1_config/, L2_config/) — the runtime subdirs
 # hold live prover state, proofs, and scratch witnesses, never commit.
 # The `env` files carry the current shared shellnet deploy addresses

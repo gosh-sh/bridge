@@ -505,28 +505,51 @@ If the balance already covers `WITHDRAW_AMOUNT`, skip to Step 2.
 ### Step 2 — Seed the treasury (only if Step 1 came up short)
 
 Scale `AMOUNT` to cover your planned withdrawal (10 USDC is the demo
-default and comfortably covers a 1 USDC burn):
+default and comfortably covers a 1 USDC burn).
+
+The pinned deploy is wired to **Circle canonical Sepolia USDC**
+(`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`), the same contract
+Circle's own public faucet at <https://faucet.circle.com> dispenses.
+It is a real `FiatToken` with a minter allowlist — third parties
+cannot self-mint via `cast send`. Fund the burner from Circle's
+faucet first, then approve + deposit into the bridge.
+
+**Sanity-check which token the bridge expects** (defends against
+future USDC rotations — the address below assumes the current pin):
 
 ```bash
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
+# expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+```
+
+**Fund the burner from Circle's faucet:**
+
+1. Open <https://faucet.circle.com> in a browser.
+2. Select network: **Ethereum Sepolia**.
+3. Paste `$WALLET` (your burner address from
+   `cast wallet address --private-key $BURNER_PRIVATE_KEY`).
+4. Request USDC — the faucet dispenses 10 USDC per call, throttled
+   per address / IP.
+5. Confirm the credit landed:
+   `cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL`.
+
+**Then approve + deposit into the bridge:**
+
+```bash
+export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238   # Circle canonical Sepolia USDC
 export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
 export AMOUNT=10000000    # 10.000000 USDC
 
-# 1. Mint test USDC
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-
-# 2. Approve bridge
+# 1. Approve bridge to pull AMOUNT
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
-# 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
+# 2. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
 cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
   $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
-# 4. Confirm
+# 3. Confirm
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 ```
 
@@ -534,6 +557,13 @@ cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 listener consumes the phantom `Deposit` event. **Do NOT use** on a
 live bridge with an active AN-side indexer — you'll create a ghost
 credit.
+
+**If `cast send $USDC 'approve(…)'` reverts `FiatToken: caller is not
+a minter` or the deposit reverts `ERC20: transfer amount exceeds
+allowance` despite a successful `approve`,** you are almost certainly
+holding balance of the *wrong* USDC contract (e.g. an older mock like
+`0x94a9D9…5e4C8`). Re-run the `usdc()` check above and use whatever
+address that returns.
 
 ### Step 3 — Run the CLI (dry-run, then real submit)
 
@@ -709,32 +739,55 @@ python3 -c "print('L2-aligned:', $LAST % 16384 == 0, 'last_seen:', $LAST)"
 Fresh deploy → `treasuryBalance() == 0`. The C4 submit reverts
 `WithdrawTreasuryShortfall(pub.amount, 0)` on any burn until the treasury
 holds at least the burn amount. Seed it once, up-front, scaled to cover
-every burn planned for the session (10 USDC is the demo default):
+every burn planned for the session (10 USDC is the demo default).
+
+`DeployShellnetE2EBridge.s.sol` wires the bridge against **Circle
+canonical Sepolia USDC** (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`,
+see `contracts/ethereum/script/DeployShellnetE2EBridge.s.sol:27-32`),
+which is a real `FiatToken` with a minter allowlist — third parties
+cannot self-mint via `cast send`. Fund the burner from Circle's public
+faucet <https://faucet.circle.com> first, then approve + deposit.
+
+**Sanity-check what the fresh deploy wired** (defends against future
+USDC rotations):
+
+```bash
+cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
+# expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+```
+
+**Fund the burner from Circle's faucet:**
+
+1. Open <https://faucet.circle.com>.
+2. Select network: **Ethereum Sepolia**.
+3. Paste `$WALLET` (`cast wallet address --private-key
+   $BURNER_PRIVATE_KEY`).
+4. Request USDC — dispensed as 10 USDC per call, throttled per
+   address / IP. Repeat for larger session budgets.
+5. Confirm: `cast call $USDC 'balanceOf(address)(uint256)' $WALLET
+   --rpc-url $RPC_URL`.
+
+**Then approve + deposit into the bridge:**
 
 ```bash
 cd crates/bridge-withdraw-e2e-cli
 export BURNER_PRIVATE_KEY=0x…                          # your own Sepolia burner
 set -a && source config/bridge_config && set +a
 
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238   # Circle canonical Sepolia USDC
 export WALLET=$(cast wallet address --private-key $BURNER_PRIVATE_KEY)
 export AMOUNT=10000000    # 10.000000 USDC — demo safety margin
 
-# 1. Mint test USDC
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-
-# 2. Approve bridge
+# 1. Approve bridge to pull AMOUNT
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
-# 3. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
+# 2. Deposit (dummy AN destination; no live AN-side indexer on shellnet)
 cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
   $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 
-# 4. Confirm
+# 3. Confirm
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 # -> 10000000
 ```
@@ -743,6 +796,12 @@ cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 listener consumes the phantom `Deposit` event. **Do NOT use** on a
 live bridge with an active AN-side indexer — you'll create a ghost
 credit.
+
+**If `deposit()` reverts `ERC20: transfer amount exceeds allowance`
+despite a successful `approve`,** you are almost certainly holding
+balance of the *wrong* USDC contract (e.g. the retired Pruvendo mock
+`0x94a9D9…5e4C8`). Re-run the `usdc()` check above and use whatever
+address that returns.
 
 ### Step L3 — Cold-start daemon under L2
 

@@ -336,6 +336,21 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         })?
     };
 
+    // Refuse the zero address unconditionally. `withdrawByProof` on the
+    // deployed `AckiNackiBridge` transfers USDC to `pub.recipient`; a
+    // successful submit against `0x0` would burn the treasury draw to
+    // an unrecoverable address. The on-chain contract does not guard
+    // this (the ERC-20 transfer may or may not, depending on the token
+    // implementation) — belt-and-suspenders refusal at the CLI boundary
+    // is the safer default.
+    if address == Address::ZERO {
+        return Err(CliError::ArgInvalid {
+            flag: "to",
+            expected: "non-zero EVM address (refuse burning to 0x0)".into(),
+            got: format!("{address:?}"),
+        });
+    }
+
     Ok(ToAddress { address, chain_id })
 }
 
@@ -375,6 +390,22 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         expected: "value fits in u128 micro-USDC".into(),
         got: raw.into(),
     })?;
+    // Cap at u64::MAX micro-USDC. The multisig ECC[3] balance and the
+    // AN-side `initiateWithdrawal(amount)` argument are u64 on the wire;
+    // anything above 2^64 - 1 micro-USDC (~1.8e13 USDC) cannot be
+    // burned even with an over-funded multisig, and letting it through
+    // would trip a downstream cast in `burn::fire` at broadcast time
+    // rather than a clean preflight refusal.
+    if micros > u64::MAX as u128 {
+        return Err(CliError::ArgInvalid {
+            flag: "amount",
+            expected: format!(
+                "must fit in u64 micro-USDC (max {} USDC)",
+                u64::MAX / 1_000_000
+            ),
+            got: raw.into(),
+        });
+    }
     Ok(UsdcAmount(micros))
 }
 
@@ -534,6 +565,45 @@ mod tests {
             parse_to(raw, Some(999)),
             Err(CliError::ArgInvalid { flag: "to-chain", .. })
         ));
+    }
+
+    #[test]
+    fn to_rejects_zero_address() {
+        // Sergey review R7 (2026-09-01): refuse burns to 0x0 at the CLI
+        // boundary. The on-chain contract's ERC-20 transfer to 0x0 could
+        // succeed depending on the token implementation, permanently
+        // consuming a treasury draw for an unrecoverable recipient.
+        let raw = "0x0000000000000000000000000000000000000000";
+        let res = parse_to(raw, Some(11155111));
+        assert!(
+            matches!(res, Err(CliError::ArgInvalid { flag: "to", .. })),
+            "0x0 recipient must be refused, got {res:?}",
+        );
+    }
+
+    #[test]
+    fn amount_rejects_above_u64_max_micro() {
+        // Sergey review R8 (2026-09-01): the multisig ECC[3] balance and
+        // AN-side initiateWithdrawal(amount) argument are u64 on the
+        // wire. Refuse anything > u64::MAX micro-USDC (~1.8e13 USDC)
+        // at preflight rather than tripping a downstream cast.
+        // `--amount` is USDC (not micros): u64::MAX micros ==
+        // 18446744073709.551615 USDC, so ".551616" is one micro over.
+        let over = "18446744073709.551616";
+        let res = parse_amount(over);
+        assert!(
+            matches!(res, Err(CliError::ArgInvalid { flag: "amount", .. })),
+            "one micro above u64::MAX must be refused, got {res:?}",
+        );
+    }
+
+    #[test]
+    fn amount_accepts_u64_max_micro_exact() {
+        // Boundary: exactly u64::MAX micro-USDC must be accepted.
+        // 18446744073709.551615 USDC == u64::MAX micro-USDC.
+        let exact = "18446744073709.551615";
+        let m = parse_amount(exact).expect("u64::MAX micro-USDC must be accepted");
+        assert_eq!(m.0, u64::MAX as u128);
     }
 
     #[test]

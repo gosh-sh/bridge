@@ -1190,9 +1190,20 @@ amount.
 [Case 1b Step L2](#step-l2--treasury-seed). Scale `AMOUNT` to cover
 every burn planned for the session (10 USDC is the demo default).
 
-**Remediation:** After deposit, re-run the CLI with `--allow-retry`.
-Proof regenerates against the new chain state (treasury balance
-component of the check).
+**Remediation:** After deposit, re-run the SAME CLI invocation — no
+`--allow-retry` needed. The prior state file records `Failed` with the
+original `an_tx_hash` still on disk; `reserve()` recognises that as a
+post-burn revert and resumes verbatim (returns the prior record,
+skipping `burn::fire()` in the orchestrator's stage 3 resume branch).
+The AN burn is NOT re-fired — this is what prevents the double-spend
+on the AN side. Capture replays the same event by `an_tx_hash`, proof
+regenerates deterministically against the new chain state (treasury
+balance is a component of the check), and `withdrawByProof` submits
+against the topped-up treasury.
+
+**Do not delete the state file** between attempts — deletion would
+strip the `an_tx_hash` and cause the next run to fire a second
+`initiateWithdrawal` (double-burn on AN side).
 
 ---
 

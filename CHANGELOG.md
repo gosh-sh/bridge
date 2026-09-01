@@ -53,10 +53,9 @@ assigns it when the release is tagged.
   USDC from an Acki Nacki multisig to an EVM recipient via the bridge.
   Third-party-operator-facing counterpart to `daemon-live`: the daemon
   owns bundle proving (running anywhere — not necessarily on the same
-  host); this CLI owns per-withdrawal composition. Runs the seven-stage
-  pipeline (preflight → idempotency reserve → burn → capture →
-  resurrect `BridgeState` from `AckiNackiBridge` at `--bridge-address`
-  and wait for the covering bundle to land → Circuit-4 SHPLONK proof →
+  host); this CLI owns per-withdrawal composition. Runs the six-stage
+  pipeline (preflight → idempotency reserve → burn → capture (with
+  resurrect + coverage-wait as stage 4b) → Circuit-4 SHPLONK proof →
   `withdrawByProof`). **No local `prover_state.json` is read** — the
   CLI's only view of prover state is the on-chain contract, so it works
   against any deploy the operator has RPC + `--bridge-address` for.
@@ -69,14 +68,17 @@ assigns it when the release is tagged.
   ```
   Global flags: `--json` (one-line JSON on stdout, human logs on stderr),
   `--yes` (skip prompt), `--non-interactive` (refuse instead of
-  prompting), `--dry-run` (compose + prove but broadcast nothing on
-  either side), `--allow-retry` (blunt override of the duplicate-
-  in-flight refusal; will be replaced by `--resume` in v2).
+  prompting), `--dry-run` (**preflight-only** — validates flags, key
+  file perms, single-custodian check, USDCBridge resolution, and the
+  ECC[3] balance, then stops; does NOT compose the burn, produce the
+  Circuit-4 proof, or run `dry_run_withdraw` on the EVM side),
+  `--allow-retry` (blunt override of the duplicate-in-flight refusal;
+  will be replaced by `--resume` in v2).
 
   Env vars consumed (each has a matching `--flag`): `BRIDGE_GQL_ENDPOINT`,
   `USDC_BRIDGE_ACCOUNT_ID` (shellnet default `1a1a…1a1a`),
-  `PROVER_STATE_PATH`, `RPC_URL`, `BRIDGE_ADDRESS`,
-  `RELAYER_PRIVATE_KEY` (signer for `withdrawByProof`; distinct from
+  `RPC_URL`, `BRIDGE_ADDRESS`,
+  `BURNER_PRIVATE_KEY` (signer for `withdrawByProof`; distinct from
   the AN multisig owner key), `BRIDGE_AGGREGATOR_DIR`,
   `BRIDGE_VERIFIERS_DIR`, `BRIDGE_PARAMS_DIR`, `BRIDGE_PK_CACHE_DIR`,
   and `BRIDGE_WITHDRAW_STATE_DIR` (new — per-withdrawal idempotency
@@ -141,9 +143,14 @@ assigns it when the release is tagged.
   `an_tx_hash` is set. `Confirmed` and `Submitted` are terminal states
   that refuse `--allow-retry` outright (`Confirmed` already paid out;
   `Submitted` has an unresolved in-flight EVM tx that must be
-  reconciled on-chain before any retry). `Failed` still triggers a
-  clean-slate restart. See runbook §Idempotency semantics for the full
-  state transition table.
+  reconciled on-chain before any retry). `Failed` with an
+  `an_tx_hash` on file resumes verbatim without `--allow-retry` (the
+  only production writer of `Failed` is the post-burn
+  `withdrawByProof` revert path, so the AN burn is already done —
+  wiping would double-burn on retry). `Failed` without `an_tx_hash`
+  (defensive branch for manual state edits) still triggers a
+  clean-slate restart. See runbook §Idempotency semantics for the
+  full state transition table.
 
 - **`bridge-withdraw-e2e-cli` idempotency state file only transitions
   to `Submitted` after `withdrawByProof` returns a tx hash.**
@@ -233,6 +240,40 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`bridge-withdraw-e2e-cli` no longer double-burns ECC[3] when
+  retrying after a `withdrawByProof` revert.** The `Failed` arm of
+  `idempotency::reserve` used to wipe the prior record with a fresh
+  `Reserved`, dropping the recorded `an_tx_hash`. Because `Status::Failed`
+  is only written by the post-burn `withdrawByProof` revert path
+  (`orchestrator.rs::WithdrawSubmitOutcome::Reverted`), the burn had
+  already broadcast — but the orchestrator's stage-3 resume branch
+  reads `record.an_tx_hash.is_some()`, so wiping caused it to fall into
+  the else branch and call `burn::fire()` a second time. Concrete
+  failure mode: operator hits a `WithdrawTreasuryShortfall` (Case 3e /
+  exit 13), tops up treasury, re-runs the same command → second
+  `initiateWithdrawal` on the AN side, second ECC[3] debit for the
+  same withdrawal. Post-fix, `Failed` with `an_tx_hash` present
+  returns the prior record verbatim (resume path skips
+  `burn::fire()`); only `Failed` without `an_tx_hash` (defensive
+  branch for manual state edits) still wipes. Regression test:
+  `idempotency::tests::reserve_over_failed_with_an_tx_hash_preserves_prior_record`.
+- **`bridge-withdraw-e2e-cli` now refuses `--to
+  0x0000000000000000000000000000000000000000` at preflight** (Sergey
+  review R7). The USDCBridge ERC-20 leg could otherwise succeed against
+  a token whose `transfer` treats the zero address as a burn sink,
+  permanently consuming an ECC[3] draw against an unrecoverable
+  recipient. Refusal path: `parse_to` in `args.rs`, `ArgInvalid { flag:
+  "to", .. }`, exit 2. Test: `args::tests::to_rejects_zero_address`.
+- **`bridge-withdraw-e2e-cli` now caps `--amount` at `u64::MAX`
+  micro-USDC at preflight** (Sergey review R8). The multisig ECC[3]
+  balance and the AN-side `initiateWithdrawal(amount)` argument are u64
+  on the wire; letting a larger value through caused a silent downstream
+  cast in `burn::fire` at broadcast time rather than a clean preflight
+  refusal. Boundary: exactly `u64::MAX` micros (== `18446744073709.551615`
+  USDC) is still accepted. Refusal path: `parse_amount` in `args.rs`,
+  `ArgInvalid { flag: "amount", .. }`, exit 2. Tests:
+  `args::tests::amount_rejects_above_u64_max_micro`,
+  `args::tests::amount_accepts_u64_max_micro_exact`.
 - **On-AN ABI artifacts realigned to shellnet (`acki-nacki@cf664666b`).**
   Dropped stale `anWorkchain int8` from `confirmDeposit` inputs and the
   `DepositFinalized` event in both runtime copies

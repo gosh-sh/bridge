@@ -85,11 +85,16 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 
 /// Try to reserve the record. Behavior:
 /// - No prior record → fresh `Status::Reserved` written and returned.
-/// - Prior `Status::Failed` → treated as a clean slate: overwrite with a
-///   fresh `Reserved`. Failed means "we don't know how far we got"; the
-///   prior stored fields (`an_tx_hash`, `withdrawal_msg_id`, …) may be
-///   stale or absent, so preserving them would risk skipping stages that
-///   never completed.
+/// - Prior `Status::Failed` with `an_tx_hash` present → resume: return
+///   the prior record verbatim so the orchestrator sees the recorded AN
+///   tx hash and skips `burn::fire()`. Wiping here would drop the hash
+///   and cause a second `initiateWithdrawal` broadcast — a double-spend
+///   on the AN side. The only writer of `Status::Failed` in production
+///   is the `withdrawByProof` revert path, which by construction only
+///   runs after a successful burn, so a `Failed` record without an
+///   `an_tx_hash` is a manual-edit or future-writer edge case.
+/// - Prior `Status::Failed` without `an_tx_hash` → no burn happened yet
+///   (defensive branch): safe to wipe and start fresh.
 /// - Prior `Status::Confirmed` → always refused. The withdrawal already
 ///   paid out; retrying it would either be a no-op or a double-broadcast.
 ///   To move funds again, use a new identity (different amount/recipient).
@@ -147,12 +152,24 @@ pub fn reserve(
                         prior_msg_id: prior.withdrawal_msg_id,
                     })
                 }
-                // Failed → wipe and start fresh (partial state may be
-                // stale; safest is a clean restart).
+                // Failed → the only production writer sets this after
+                // `withdrawByProof` reverts on an already-broadcast burn,
+                // so a stored `an_tx_hash` means "AN burn is already
+                // done". Return the prior record verbatim in that case
+                // so the orchestrator's resume branch (`prior_an_tx =
+                // record.an_tx_hash.clone()`) skips `burn::fire()`
+                // instead of firing a second `initiateWithdrawal`.
+                // Only wipe when there is no recorded AN tx (defensive:
+                // manual-edited state file, hypothetical future writer
+                // that marks Failed pre-burn).
                 Status::Failed => {
-                    let record = fresh_reserved_record(&key, from, to, amount);
-                    write_record_atomic(state_dir, &path, &record)?;
-                    Ok(record)
+                    if prior.an_tx_hash.is_some() {
+                        Ok(prior)
+                    } else {
+                        let record = fresh_reserved_record(&key, from, to, amount);
+                        write_record_atomic(state_dir, &path, &record)?;
+                        Ok(record)
+                    }
                 }
                 // Active resumable states.
                 Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
@@ -450,16 +467,54 @@ mod tests {
     }
 
     #[test]
-    fn reserve_allows_retry_over_failed_without_flag() {
+    fn reserve_over_failed_without_an_tx_hash_wipes_to_reserved() {
+        // Defensive branch: a `Failed` record with no `an_tx_hash` means
+        // no burn happened (only reachable via manual edit or a future
+        // writer that marks Failed pre-burn). Safe to wipe and start
+        // fresh without `--allow-retry`.
         let dir = TempDir::new().unwrap();
         let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         first.status = Status::Failed;
+        // an_tx_hash intentionally left None
         update(dir.path(), &first).unwrap();
 
         let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
-            .expect("Failed status is retryable without --allow-retry");
+            .expect("Failed without an_tx_hash is retryable without --allow-retry");
         assert_eq!(second.status, Status::Reserved);
+        assert!(second.an_tx_hash.is_none());
+    }
+
+    #[test]
+    fn reserve_over_failed_with_an_tx_hash_preserves_prior_record() {
+        // Regression (Sergey review 2026-09-01, «Failed всё ещё жжёт ECC
+        // второй раз»): the sole production writer of Status::Failed is
+        // the withdrawByProof-revert arm of the orchestrator, which only
+        // fires after a successful AN burn. If reserve() wiped the
+        // record on Failed, the stored `an_tx_hash` would be dropped and
+        // the orchestrator's Some(existing) resume branch would miss —
+        // firing a SECOND `initiateWithdrawal` on retry (double-burn of
+        // ECC[3] on the AN side). Retry after Case 3e (top-up-treasury,
+        // re-run) must resume without --allow-retry.
+        let dir = TempDir::new().unwrap();
+        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .unwrap();
+        first.status = Status::Failed;
+        first.an_tx_hash = Some("0xdeadbeef".into());
+        first.withdrawal_msg_id = Some("0xmsg".into());
+        first.block_seq_no = Some(12345);
+        update(dir.path(), &first).unwrap();
+
+        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .expect("Failed with an_tx_hash must resume without --allow-retry");
+        assert_eq!(second.status, Status::Failed, "prior status preserved for resume");
+        assert_eq!(
+            second.an_tx_hash.as_deref(),
+            Some("0xdeadbeef"),
+            "an_tx_hash must survive so orchestrator skips re-burn",
+        );
+        assert_eq!(second.withdrawal_msg_id.as_deref(), Some("0xmsg"));
+        assert_eq!(second.block_seq_no, Some(12345));
     }
 
     #[test]

@@ -18,24 +18,30 @@ Given the four user inputs (`--from`, `--from-keys`, `--to`, `--to-chain`,
    `(from, to, to_chain, amount)`; refuse a duplicate in-flight unless
    `--allow-retry` is passed.
 3. **Burn** — compose the multisig `sendTransaction` payload calling
-   `USDCBridge.initiateWithdrawal(dstChainId, recipient)` (via `tvm-cli`),
-   broadcast it, record the AN tx hash. Bounce defaults to `true` so USDC
-   returns to the multisig on any bridge revert.
-4. **Capture** — wait for the corresponding `WithdrawalInitiated` ExtOut
-   event using [`bridge_relayer_daemon::withdraw_e2e::capture_next_withdrawal_event`].
-5. **Resurrect + wait for coverage** — read the deployed `AckiNackiBridge`
-   contract at `--bridge-address` via `EthBridgeClient::read_full_state`
-   and poll until `storedLastSeenBlockSeqNo` has advanced past the
-   covering L1 (`W·P = 1024`) or L2 (`W² = 16 384`) bundle boundary for
-   the burn's block seq_no. Once the covering bundle has landed
-   on-chain (fed by a relayer running on some other host),
-   `BridgeState::from_contract` builds a byte-for-byte mirror of the
-   contract state — no local `prover_state.json` needed.
-6. **Prove** — export the private witness, enrich against the resurrected
-   `BridgeState` (single-shot, no retry), produce a Circuit-4 SHPLONK
-   proof via the in-process aggregator + Circuit-4 prover (reuses
+   `USDCBridge.initiateWithdrawal(dstChainId, recipient)` using
+   `tvm_client` in-process (no `tvm-cli` shell-out), broadcast it,
+   record the AN tx hash. Bounce defaults to `true` so USDC returns to
+   the multisig on any bridge revert.
+4. **Capture** — chain-walk from the multisig `an_tx_hash` through
+   `USDCBridge.dst_transaction` to the `WithdrawalInitiated` ExtOut via
+   [`bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event`].
+   Multi-user safe: filtering by the specific broadcast tx hash instead
+   of youngest-picking a shared queue means concurrent burns from other
+   operators cannot be mis-selected as ours.
+   *Stage 4b (resurrect + wait for coverage):* read the deployed
+   `AckiNackiBridge` contract at `--bridge-address` via
+   `EthBridgeClient::read_full_state` and poll until
+   `storedLastSeenBlockSeqNo` has advanced past the covering L1
+   (`W·P = 1024`) or L2 (`W² = 16 384`) bundle boundary for the burn's
+   block seq_no. Once the covering bundle has landed on-chain (fed by a
+   relayer running on some other host), `BridgeState::from_contract`
+   builds a byte-for-byte mirror of the contract state — no local
+   `prover_state.json` needed.
+5. **Prove** — enrich against the resurrected `BridgeState` (single-shot,
+   no retry), produce a Circuit-4 SHPLONK proof via the in-process
+   Circuit-4 prover + `aggregate-proof` subprocess (reuses
    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`]).
-7. **Submit** — always call `dry_run_withdraw` first; unless `--dry-run`
+6. **Submit** — always call `dry_run_withdraw` first; unless `--dry-run`
    is set, submit `withdrawByProof` and wait for the receipt.
 
 Every stage transition is persisted to a per-withdrawal state file so a
@@ -48,8 +54,6 @@ mid-flight crash leaves a resumable trace (v2: `--resume`).
   `verifyBlock` submissions are what advance the on-chain state the CLI
   polls in stage 5. No shared filesystem or daemon-produced JSON is
   needed: everything the CLI needs lives in contract storage.
-- `tvm-cli` is on `PATH` (used to encode the initiateWithdrawal body and
-  fire the multisig `sendTransaction`).
 - USDCBridge is deployed and unpaused; treasury is seeded on the EVM
   side (separate scripts under `scripts/`).
 - The `--from` multisig is deployed, single-custodian, and holds ≥

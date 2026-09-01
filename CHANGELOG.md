@@ -273,6 +273,33 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`bridge-withdraw-e2e-cli withdraw` preflight USDCBridge liveness
+  check no longer misreports an Active bridge as `acc_type is Unknown`.**
+  The GraphQL query at `preflight.rs::query_usdc_bridge_state` asked
+  for `info.acc_type` (a numeric enum: `1 = Active`) and then tried to
+  match it as a string, silently falling back to `"Unknown"` and
+  failing the `== "Active"` check on every well-deployed shellnet
+  bridge. Fixed by requesting the string-typed `info.acc_type_name`
+  alias instead (`"Active"`/`"Uninit"`/…) and matching that. First
+  observed on shellnet's canonical zerostate USDCBridge
+  (`0000…::1a1a…`), which is Active per tvm-cli but was reported
+  Unknown by the CLI.
+
+- **`bridge-withdraw-e2e-cli withdraw` preflight `getCustodians` call
+  no longer rejects the very `--from` form the CLI itself mandates.**
+  Args validation requires `--from dapp_id::account_id` (the tvm-cli v3
+  extended form) and rejects the legacy `0:<acc>` shape, but
+  `preflight.rs` was threading that same extended string into
+  `tvm_sdk::abi::encode_message`'s `address` field, which the ABI
+  encoder does not accept and which failed with `Invalid address
+  [Invalid argument: 0]`. The encoder path now uses `from.legacy()`
+  (`0:<acc>`); `.extended()` is still used for the `get_account` BOC
+  fetch (which does accept it) and for user-facing log lines. First
+  observed running `scripts/local_smoke.sh --dry-run` on shellnet
+  against a freshly-deployed single-custodian multisig; before the fix,
+  every dry-run and every live withdraw would fail at preflight step 3
+  regardless of on-chain state.
+
 - **`bridge-withdraw-e2e-cli` no longer double-burns ECC[3] when
   retrying after a `withdrawByProof` revert.** The `Failed` arm of
   `idempotency::reserve` used to wipe the prior record with a fresh

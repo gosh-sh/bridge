@@ -108,7 +108,12 @@ pub async fn run(
     }
 
     // 3+4+5. run_tvm(getCustodians) → parse → count == 1 → pubkey match.
-    let custodians = call_get_custodians(&context, &from.extended(), &account_boc).await?;
+    // Encode+run_tvm needs the legacy `0:<acc>` form — tvm-sdk v3.0.5.an's
+    // ABI message encoder rejects the v3 `dapp_id::acc_id` shape here (works
+    // for `get_account` above and for tvm-cli `--addr`, but not for the
+    // `address` field on `ParamsOfEncodeMessage`). See memory
+    // `tvm_cli_v3_address_forms.md`.
+    let custodians = call_get_custodians(&context, &from.legacy(), &account_boc).await?;
     if custodians.len() != 1 {
         return Err(CliError::Preflight {
             reason: format!(
@@ -380,8 +385,11 @@ async fn query_usdc_bridge_state(
     account_id_hex: &str,
 ) -> CliResult<(String, String)> {
     let zero64 = "0".repeat(64);
+    // Ask for `acc_type_name` (string: "Active"/"Uninit"/…) — the raw
+    // `acc_type` field is the underlying integer enum (1 = Active), which
+    // the older string-typed match below rejected as "Unknown".
     let q = format!(
-        r#"{{ blockchain {{ account(account_id: "{account_id_hex}", dapp_id: "{zero64}") {{ info {{ dapp_id acc_type }} }} }} }}"#
+        r#"{{ blockchain {{ account(account_id: "{account_id_hex}", dapp_id: "{zero64}") {{ info {{ dapp_id acc_type_name }} }} }} }}"#
     );
     let data = gql.query(&q).await.map_err(|e| CliError::Preflight {
         reason: format!("query USDCBridge {account_id_hex} via GraphQL: {e}"),
@@ -407,7 +415,7 @@ async fn query_usdc_bridge_state(
         });
     }
     let acc_type = info
-        .get("acc_type")
+        .get("acc_type_name")
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown")
         .to_string();

@@ -253,3 +253,10 @@ crates/an-bridge-prover/L1_config/work_dir/
 crates/an-bridge-prover/L2_config/state/
 crates/an-bridge-prover/L2_config/proofs/
 crates/an-bridge-prover/L2_config/work_dir/
+
+# CLI smoke-test runtime dirs (created by scripts/local_smoke.sh,
+# scripts/live_smoke.sh, scripts/deploy_msig_and_mint.{sh,py} when
+# invoked from the CLI crate root). Contain multisig keys.json,
+# per-withdrawal idempotency state, aggregate-proof scratch, and logs.
+crates/bridge-withdraw-e2e-cli/work_dir/
+crates/bridge-withdraw-e2e-cli/withdraw-state/

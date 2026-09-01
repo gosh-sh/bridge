@@ -114,6 +114,21 @@ assigns it when the release is tagged.
   vendored Python driver and `cast` remain the source of truth for
   those one-time setup steps.
 
+- **`crates/bridge-withdraw-e2e-cli/scripts/deploy_msig_and_mint.{sh,py}`**
+  — one-shot helper that deploys a fresh single-custodian
+  `UpdateCustodianMultisigWallet` on the target AN cluster (default
+  MODE=shellnet) and seeds it with 1 USDC on ECC[3] via
+  `USDCBridge.mintAndSend`. Reuses `python/helper/msig.py::deploy_multisig`
+  (same code path the full-orchestrator drivers use); stops at the
+  ECC[3] mint — does NOT fire `initiateWithdrawal`, does NOT run any
+  Rust binary. Emits eval-able `export WITHDRAW_FROM=…` and `export
+  WITHDRAW_FROM_KEYS=…` lines on stdout (everything else on stderr),
+  so the caller can `eval "$(scripts/deploy_msig_and_mint.sh)"` and
+  proceed directly to `scripts/local_smoke.sh`. Fills the previous
+  gap where the CLI's scripts dir assumed the multisig was already
+  deployed by hand. Env overrides: `MODE`, `NETWORK`, `GRAPHQL_URL`,
+  `WORK_DIR`, `USDC_BRIDGE_KEY_PATH`.
+
 - New environment variables consumed by `bridge_prover_lib::paths`:
   `BRIDGE_CONFIG_DIR` (broad selector — resolves both state and proofs
   under `$BRIDGE_CONFIG_DIR/`), `BRIDGE_STATE_DIR` and `BRIDGE_PROOFS_DIR`
@@ -130,6 +145,24 @@ assigns it when the release is tagged.
   finds the intermediate `.snark` file.
 
 ### Changed
+
+- **`bridge-withdraw-e2e-cli/scripts/local_smoke.sh` and `live_smoke.sh`
+  now source the standalone `config/bridge_config` by default** instead
+  of the relayer's `L1_config/env`. Aligns the scripts with the
+  runbook (§"Quick resume checklist") — the CLI is a standalone tool
+  with its own single config, so its smoke wrappers should not depend
+  on a co-located relayer deploy. Escape hatch: set
+  `BRIDGE_CONFIG_DIR=/path/to/L{1,2}_config` to fall back to the
+  relayer-style env. Both scripts now `cd` to
+  `crates/bridge-withdraw-e2e-cli/` (was `bridge/`), so relative
+  `BRIDGE_PARAMS_DIR=../an-bridge-prover/params` in `bridge_config`
+  resolves correctly. Both scripts also now require
+  `BURNER_PRIVATE_KEY` in caller env (mirrors the deliberate omission
+  in `bridge_config` — see runbook §"Wallet setup"). `live_smoke.sh`
+  additionally passes `--anchor-layer 2 --i-know-the-wait` by default
+  to match the L2-anchored reference deploy pinned in `bridge_config`
+  (`0x3fB082…8638`); override with `ANCHOR_LAYER=1` in caller env for
+  advanced-user L1 deploys.
 
 - **`bridge-withdraw-e2e-cli --allow-retry` now resumes in place
   instead of overwriting the state file.** v1 used to rewrite the prior

@@ -330,19 +330,26 @@ is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
 Seed it once, then reuse across demos on the same deploy.
 
 Full recipe in [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty).
-Quick version — mint 1 USDC from the Aave Sepolia faucet, deposit into
-the bridge:
+Quick version — fund the wallet from Circle's Sepolia faucet, then
+approve + deposit into the bridge:
 
 ```bash
 export BRIDGE=<new_address>
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
-export WALLET=0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307      # relayer/deployer (single shared burner)
+# Confirm which USDC the fresh deploy wired (DeployShellnetE2EBridge.s.sol
+# pins Circle canonical Sepolia USDC; the older Pruvendo mock
+# 0x94a9D9…5e4C8 is retired):
+cast call $BRIDGE 'usdc()(address)' --rpc-url $RPC
+# expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+
+export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238         # Circle canonical Sepolia USDC
+export WALLET=0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307       # relayer/deployer (single shared burner)
 export AMOUNT=1000000                                          # 1.000000 USDC (6 decimals)
 
-# 1. Mint test USDC to the wallet (permissionless faucet)
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
+# 1. Fund $WALLET from Circle's public faucet.
+#    Open https://faucet.circle.com, pick "Ethereum Sepolia",
+#    paste $WALLET, request USDC (10 per call, throttled per addr/IP).
+#    Confirm balance landed:
+cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC
 
 # The seeding uses TWO contracts, TWO methods:
 #   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
@@ -365,6 +372,11 @@ cast send $BRIDGE 'deposit(uint256,int8,bytes32)' \
 # 4. Verify
 cast call $BRIDGE 'treasuryBalance()(uint256)' --rpc-url $RPC   # -> 1000000
 ```
+
+**Note on self-minting.** Circle's FiatToken has a minter allowlist, so
+`cast send $USDC 'mint(…)'` from a random burner reverts with
+`FiatToken: caller is not a minter`. Always fund the wallet via
+Circle's faucet, never via direct `mint`.
 
 ### Step 3 — Cold-start the bundle daemon
 
@@ -859,26 +871,34 @@ prior ETH→AN deposit — so the treasury never funds itself organically.
 revert; there is no admin bypass and no auto-supply from AAVE (the AAVE
 integration is a yield sink for surplus, not a payout source).
 
-**Fix — mint from Aave faucet + deposit.** Testnet USDC lives at the
-Aave Sepolia market address; the same faucet the fork tests use
-(`test/AckiNackiBridgeAaveFork.t.sol:68-73`) has a permissionless
-`mint(address token, address to, uint256 amount)`:
+**Fix — fund the wallet from Circle's Sepolia faucet, then deposit.**
+`DeployShellnetE2EBridge.s.sol` wires the bridge against Circle
+canonical Sepolia USDC (`0x1c7D…7238`) — the same contract Circle's
+public faucet at <https://faucet.circle.com> dispenses. The retired
+Pruvendo mock (`0x94a9D9…5e4C8`) with permissionless `mint(…)` no
+longer applies. Circle's FiatToken has a minter allowlist, so
+self-`mint` via `cast send` reverts with `FiatToken: caller is not a
+minter`.
 
 ```bash
 cd crates/an-bridge-prover
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 
-export USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
-export FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D
+# Confirm which USDC the fresh deploy wired (defends against future
+# USDC rotations — the address below assumes the current pin):
+cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
+# expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+
+export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238   # Circle canonical Sepolia USDC
 export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
 export AMOUNT=1000000    # cover at least one burn (1.000000 USDC)
 
-# 1. Mint test USDC into the relayer wallet
-cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET $AMOUNT \
-  --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
-
-cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show AMOUNT
+# 1. Fund $WALLET from Circle's faucet.
+#    Open https://faucet.circle.com, pick "Ethereum Sepolia",
+#    paste $WALLET, request USDC (10 per call, throttled per addr/IP;
+#    repeat for larger AMOUNT budgets).
+cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # should show ≥ $AMOUNT
 
 # TWO contracts, TWO methods — only step 3 touches the bridge:
 #   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
@@ -899,6 +919,11 @@ cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
 # 4. Confirm
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL   # -> AMOUNT
 ```
+
+**If `deposit()` reverts `ERC20: transfer amount exceeds allowance`
+despite a successful `approve`,** the wallet is holding balance of the
+*wrong* USDC contract (e.g. the retired Pruvendo mock). Re-run the
+`usdc()` check above and fund the correct token via Circle's faucet.
 
 **Why the dummy AN destination is safe on testnet.** `deposit()` emits a
 `Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event

@@ -11,7 +11,7 @@ BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \
   cargo run --release --example capture_bk_update_fixture -- \
     --height <bk-update block seqno> \
     --genesis-bk-set path/to/bk_set.shellnet.json \
-    --out crates/an-bridge-prover/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
+    --out crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
 ```
 
 `--height` must be the seq_no of a block that emits a `bkSetUpdates` event

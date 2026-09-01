@@ -18,7 +18,7 @@ time we come back to the runbook.
 - **Genesis anchors.** `compute_bridge_anchors --level 2 --at-head` picks
   a `W²`-aligned seed and folds `layer_hashes[0..2]` into
   `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`. See
-  `crates/an-bridge-prover/bridge-prover-lib/src/bin/compute_bridge_anchors.rs`.
+  `crates/bridge-prover-libraries/bridge-prover-lib/src/bin/compute_bridge_anchors.rs`.
 - **First live L2 deploy.** Deploy #12 (2026-08-18) —
   `AckiNackiBridge` at `0xf31E316C7E3FD4aDDBd86d6d63a1444947BFFEEE`,
   seed `9175040` (W²-boundary). See

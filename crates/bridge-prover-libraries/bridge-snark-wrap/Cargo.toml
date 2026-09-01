@@ -7,7 +7,7 @@ description = "In-process wrap of a Poseidon-transcript Halo2 SHPLONK proof + pa
 # Extracted from bridge-snark-utils/src/halo2_snark.rs (2026-08-03) so
 # bridge-relayer-daemon can call the wrap in-process instead of via subprocess.
 # Must live as a WORKSPACE MEMBER (not a standalone workspace) so it inherits
-# the halo2-base [patch] rewrites in an-bridge-prover/Cargo.toml — those rewrites
+# the halo2-base [patch] rewrites in bridge-prover-libraries/Cargo.toml — those rewrites
 # are what make `snark-verifier`'s transitive halo2-base resolve to the gosh
 # fork instead of axiom's, matching the VK serde format the daemon produces.
 

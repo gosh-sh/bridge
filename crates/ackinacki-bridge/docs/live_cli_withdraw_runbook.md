@@ -405,16 +405,16 @@ misconfigured — report and STOP. Path (b): redeploy with the correct
 
 **Working directory:** `crates/ackinacki-bridge/` (the standalone
 CLI crate — all commands below cd here first). The crate source lives
-here; a symlink from `../an-bridge-prover/ackinacki-bridge` pulls
+here; a symlink from `../bridge-prover-libraries/ackinacki-bridge` pulls
 it into the halo2 sub-workspace so it can share the prover deps and the
-built binary lands under `../an-bridge-prover/target/release/`.
+built binary lands under `../bridge-prover-libraries/target/release/`.
 
 **One-time build:**
 
 ```bash
 # 1. CLI binary — built out of the halo2 sub-workspace so it shares
 #    the prover deps.
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 cargo build --release -p ackinacki-bridge
 #   -> ./target/release/ackinacki-bridge
 
@@ -582,7 +582,7 @@ export WITHDRAW_AMOUNT=1.000000
 mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
 
-../an-bridge-prover/target/release/ackinacki-bridge withdraw \
+../bridge-prover-libraries/target/release/ackinacki-bridge withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -709,7 +709,7 @@ pass `LEVEL=1` at Step L1 deploy time and drop `--anchor-layer 2
 ### Step L0 — Emit L2 genesis anchors
 
 ```bash
-cd crates/an-bridge-prover/bridge-prover-lib
+cd crates/bridge-prover-libraries/bridge-prover-lib
 cargo run --release --bin compute_bridge_anchors -- \
   --level 2 \
   --at-head \
@@ -720,7 +720,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 ### Step L1 — Deploy with L2 wiring
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
 PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
 ```
@@ -839,7 +839,7 @@ operator to acknowledge the wait budget.
 
 `bridge_config` is a single file — no L1/L2 split on the CLI side. Point
 `BRIDGE_ADDRESS` at your own L2 deploy (from
-`../an-bridge-prover/L2_config/env`) and select the layer per-invocation
+`../bridge-prover-libraries/L2_config/env`) and select the layer per-invocation
 with `--anchor-layer 2`.
 
 ```bash
@@ -857,7 +857,7 @@ export WITHDRAW_AMOUNT=1.000000
 mkdir -p ./work_dir
 TS=$(date +%Y%m%d_%H%M%S)
 
-../an-bridge-prover/target/release/ackinacki-bridge withdraw \
+../bridge-prover-libraries/target/release/ackinacki-bridge withdraw \
   --dry-run \
   --yes \
   --from        "$WITHDRAW_FROM" \
@@ -1132,7 +1132,7 @@ df $BRIDGE_PARAMS_DIR/
 - If cold-cache slowness is the real issue (not OOM), bump the timeout:
 
   ```bash
-  ../an-bridge-prover/target/release/ackinacki-bridge withdraw \
+  ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw \
     ...same flags as Case 1b Step L5... \
     --prover-timeout-s 3600
   ```
@@ -1214,7 +1214,7 @@ message on GQL within its budget. Typical root cause: local
 **Diagnostic:**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 LOCAL_PUB=$(jq -r '.public' python/contracts/USDCBridge.shellnet.keys.json)
 python3 -c "
 from python.helper.tonos_helper import get_owner_pubkey
@@ -1319,7 +1319,7 @@ cast balance "$(cast wallet address --private-key $BURNER_PRIVATE_KEY)" --rpc-ur
 
 **Run cwd for the CLI:** `crates/ackinacki-bridge/` (the
 standalone CLI crate). Binaries are built out of the halo2 sub-workspace
-at `../an-bridge-prover/target/release/`.
+at `../bridge-prover-libraries/target/release/`.
 
 ```
 crates/ackinacki-bridge/            ← run cwd
@@ -1341,7 +1341,7 @@ $HOME/.bridge-withdraw-state/              ← default idempotency state dir
 └── <sha256>.json                          ← one per unique (from,to,chain,amount)
                                           # override with BRIDGE_WITHDRAW_STATE_DIR
 
-crates/an-bridge-prover/                   ← halo2 sub-workspace (shared with daemon)
+crates/bridge-prover-libraries/                   ← halo2 sub-workspace (shared with daemon)
 ├── params/                                ← BRIDGE_PARAMS_DIR (SRS + pk/vk)
 │   └── pk_cache/                          ← Circuit-4 PK cache
 ├── target/release/

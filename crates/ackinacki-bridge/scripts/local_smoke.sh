@@ -34,7 +34,7 @@
 #
 # Escape hatch (advanced):
 #   If you already have a relayer-style `L{1,2}_config/env` populated
-#   (via `../an-bridge-prover/scripts/deploy_bridge_bundle.sh`) and want
+#   (via `../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`) and want
 #   to reuse its `BRIDGE_ADDRESS` / `RPC_URL` / etc., export
 #   `BRIDGE_CONFIG_DIR=/absolute/path/to/L1_config` (or `L2_config`)
 #   before running. The script will source `$BRIDGE_CONFIG_DIR/env`
@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # Anchor at the CLI crate root so `config/bridge_config`'s relative paths
-# (BRIDGE_PARAMS_DIR=../an-bridge-prover/params, etc.) resolve correctly.
+# (BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params, etc.) resolve correctly.
 cd "$(dirname "$0")/.."   # crates/ackinacki-bridge/
 
 # --- Locate + source the env file ---------------------------------------------
@@ -64,7 +64,7 @@ fi
 if [ ! -f "$ENV_FILE" ]; then
   echo "!!! $ENV_FILE not found."
   if [ -n "${BRIDGE_CONFIG_DIR:-}" ]; then
-    echo "    Run crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh first,"
+    echo "    Run crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh first,"
     echo "    or unset BRIDGE_CONFIG_DIR to use the standalone config/bridge_config."
   else
     echo "    Restore it from git, or point BRIDGE_CONFIG_DIR at a"
@@ -104,7 +104,7 @@ echo "    log=$LOG"
 
 # Manifest lives in the CLI crate's sub-workspace parent.
 exec cargo run --release -p ackinacki-bridge \
-  --manifest-path ../an-bridge-prover/Cargo.toml -- \
+  --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
   withdraw \
     --dry-run \
     --yes \

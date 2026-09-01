@@ -618,7 +618,7 @@ impl GqlClient {
     // withdraw-E2E orchestrator helpers
     //
     // These three queries mirror the Python driver in
-    // `crates/an-bridge-prover/python/helper/bridge_e2e.py` (`GqlClient`).
+    // `crates/bridge-prover-libraries/python/helper/bridge_e2e.py` (`GqlClient`).
     // The withdraw-E2E orchestrator in `bridge-relayer-daemon` calls them
     // to discover a newly-emitted `WithdrawalInitiated` ExtOut event and
     // resolve the block context the Circuit-4 witness exporter needs.

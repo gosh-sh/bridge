@@ -1,12 +1,12 @@
 # `probe_bk_updates` — quickstart
 
 Read-only cadence probe for the AN `bkSetUpdates` stream.
-Source: `src/bin/probe_bk_updates.rs`. Spec: `an-bridge-prover/docs/bk_set_update_no_circuit3_plan.md` §Phase 2.
+Source: `src/bin/probe_bk_updates.rs`. Spec: `bridge-prover-libraries/docs/bk_set_update_no_circuit3_plan.md` §Phase 2.
 
 ## Build
 
 ```sh
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 cargo build --release --bin probe_bk_updates
 ```
 

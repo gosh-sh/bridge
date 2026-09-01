@@ -36,7 +36,7 @@ runtime image unstartable.
 From the repository root:
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 cargo build --release --locked -p bridge-relayer-daemon --bin relayer
 
 cd ../bridge-evm-aggregator

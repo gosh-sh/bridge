@@ -4,7 +4,7 @@
 # script to regenerate everything below atomically.
 #
 # CONSUMED BY:
-#   cd crates/an-bridge-prover
+#   cd crates/bridge-prover-libraries
 #   export BRIDGE_CONFIG_DIR=./L1_config
 #   set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 #   ./target/release/relayer daemon-live

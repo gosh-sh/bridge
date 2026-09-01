@@ -26,10 +26,10 @@
 //! that dep to the AN-side `bridge-prover-daemon` (which produces Blake2b
 //! bytes for IPC and never needs the wrap).
 //!
-//! It must live as a member of the `an-bridge-prover` cargo workspace (not a
+//! It must live as a member of the `bridge-prover-libraries` cargo workspace (not a
 //! standalone `[workspace]` root like `bridge-evm-aggregator`) so the workspace-
 //! root `[patch]` rewrites for `halo2-base` / `halo2-ecc` in
-//! `an-bridge-prover/Cargo.toml` apply. Without those patches, `snark-verifier`
+//! `bridge-prover-libraries/Cargo.toml` apply. Without those patches, `snark-verifier`
 //! would resolve halo2-base to axiom's crate, which cannot read the partner
 //! `*_vk.bin` VK bytes emitted by `bridge-prover-lib` (`SerdeFormat::RawBytesUnchecked`
 //! against `BaseCircuitBuilder<Fr>` from the gosh fork). Same reason

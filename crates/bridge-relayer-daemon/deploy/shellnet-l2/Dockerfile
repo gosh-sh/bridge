@@ -42,7 +42,7 @@ COPY --from=verifier_bins /BridgeWithdrawalAggregatorVerifier.bin \
 COPY --from=foundry_bin /cast /opt/gosh-relayer/bin/cast
 COPY --from=solc_bin /solc-0.8.19 /opt/gosh-relayer/bin/solc
 
-COPY crates/an-bridge-prover/bk_set.shellnet.json \
+COPY crates/bridge-prover-libraries/bk_set.shellnet.json \
   /opt/gosh-relayer/config/bk_set.shellnet.json
 COPY crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/container-entrypoint.sh \
   /opt/gosh-relayer/bin/container-entrypoint.sh

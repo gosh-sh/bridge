@@ -277,7 +277,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// Smallest Hermez ceremony actually kept under
-    /// `crates/an-bridge-prover/params/` (see repo layout). Larger than
+    /// `crates/bridge-prover-libraries/params/` (see repo layout). Larger than
     /// strictly necessary for these tests, but avoids committing a
     /// dedicated fixture ceremony just for the unit suite.
     const FIXTURE_SRC_K: u32 = 17;
@@ -286,8 +286,8 @@ mod tests {
 
     fn fixture_srs(k: u32) -> PathBuf {
         // Repo layout: workspace member lives at
-        // `crates/an-bridge-prover/bridge-prover-lib`; the params/ dir
-        // lives at `crates/an-bridge-prover/params`. Cover that first, then
+        // `crates/bridge-prover-libraries/bridge-prover-lib`; the params/ dir
+        // lives at `crates/bridge-prover-libraries/params`. Cover that first, then
         // fall back to legacy repo-root / CWD paths.
         let candidates = [
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../params"),

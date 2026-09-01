@@ -40,7 +40,7 @@ this doc extends.
 >   operator, a stray test run), you prove the wrong one.
 >
 > The Python driver
-> [`generate_withdrawals_with_live_event_proving.py`](../../an-bridge-prover/python/generate_withdrawals_with_live_event_proving.py)
+> [`generate_withdrawals_with_live_event_proving.py`](../../bridge-prover-libraries/python/generate_withdrawals_with_live_event_proving.py)
 > that fires the burn uses the same baseline+wait pattern and logs the
 > captured event's `block_seq_no` / `msg_id`, but that identity is
 > **not plumbed into `withdraw-e2e`**. The two tools coordinate only by
@@ -54,7 +54,7 @@ this doc extends.
 >
 > **`ackinacki-bridge withdraw` is different.** The third-party
 > end-user CLI at
-> `crates/an-bridge-prover/ackinacki-bridge/` fires its burn
+> `crates/bridge-prover-libraries/ackinacki-bridge/` fires its burn
 > inline and then targets the resulting `WithdrawalInitiated` ExtOut
 > by chain-following the multisig transaction hash — `transaction(hash:
 > an_tx_hash).out_messages → dst == USDCBridge →
@@ -100,7 +100,7 @@ this doc extends.
 ## Quick resume checklist (returning mid-flow)
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/an-bridge-prover
+cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/bridge-prover-libraries
 
 # Source the per-mode env — pick L1_config or L2_config depending on the
 # lane you were running. 
@@ -187,11 +187,11 @@ lookahead **is** the daemon's starting lag. Two rules:
 Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
 `MockBlockHeaderOracle`, `BRIDGE_BOOTSTRAP_SEQNO`, genesis
 `prev_max_level_layer_hash`) rotate on every redeploy — read them from
-`crates/an-bridge-prover/L{1,2}_config/env` (rewritten by
+`crates/bridge-prover-libraries/L{1,2}_config/env` (rewritten by
 `scripts/deploy_bridge_bundle.sh` on each deploy), not from this doc.
 Deployer / relayer / owner wallet is the single shared shellnet burner
 `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` documented in
-[`shellnet.common`](../../an-bridge-prover/shellnet.common) or smth that you deployed yourself (see instruction how to deploy and fund your wallet here [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md)).
+[`shellnet.common`](../../bridge-prover-libraries/shellnet.common) or smth that you deployed yourself (see instruction how to deploy and fund your wallet here [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md)).
 
 Two values are chain-invariant on shellnet and worth naming here:
 
@@ -223,24 +223,24 @@ If `expectedWithdrawAcc()` returns anything other than the palindromic
 value above, the deploy used a non-canonical `WITHDRAW_ACC_FR`. Every C4
 submit will revert on the equality check — **stop and redeploy** with the
 correct `WITHDRAW_ACC_FR` exported before invoking
-[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh).
+[`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`](../../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh).
 
 ---
 
 ## Binary + env prerequisites
 
-Working directory: `crates/an-bridge-prover/`.
+Working directory: `crates/bridge-prover-libraries/`.
 
 **One-time setup (per fresh clone):**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 # 1. Build the relayer (same binary as daemon-live)
 cargo build --release -p bridge-relayer-daemon --bin relayer
 
 # 2. Build the aggregator subprocess (mandatory for both lanes)
-cd ../bridge-evm-aggregator && cargo build --release && cd ../an-bridge-prover
+cd ../bridge-evm-aggregator && cargo build --release && cd ../bridge-prover-libraries
 
 # 3. Build the Circuit 4 event prover
 cargo build --release -p bridge-event-halo2-prover
@@ -250,7 +250,7 @@ cargo build --release -p bridge-event-halo2-prover
 **Env sanity (in addition to bundle-lane vars from parent runbook):**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT; do
@@ -295,7 +295,7 @@ Anchors staler than ~3 min lose bundles of catch-up time. Confirm the
 lookahead is tight before running forge.
 
 ```bash
-cd crates/an-bridge-prover/bridge-prover-lib
+cd crates/bridge-prover-libraries/bridge-prover-lib
 cargo run --release --bin compute_bridge_anchors -- \
   --at-head \
   --gql-endpoint https://shellnet.ackinacki.org/graphql
@@ -303,7 +303,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```
 
 The printed anchors do not need to be pasted anywhere by hand —
-[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
+[`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`](../../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh)
 re-derives them internally and writes the corresponding
 `L{1,2}_config/env`. The manual `compute_bridge_anchors` call above is
 only useful for a freshness sanity-check before triggering the script.
@@ -315,7 +315,7 @@ chain head, deploys the 6-bridge contract bundle in Ethereum, extracts `BRIDGE_A
 and rewrites `L1_config/env`:
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
 PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 ```
@@ -402,7 +402,7 @@ That loop **is** the "wait for the covering bundle" — no manual poll
 of `storedLastSeenBlockSeqNo` needed.
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 TS=$(date +%Y%m%d_%H%M%S)
@@ -416,7 +416,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --anchor-layer auto \
   --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
-  --an-bridge-prover-dir . \
+  --bridge-prover-libraries-dir . \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \
@@ -431,7 +431,7 @@ proceed.
 ### Step 5 — Fire the burn in another shell
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 ```
 
@@ -525,7 +525,7 @@ against a single deploy. Chain moves `W² = 16384` seq_no every ~91 min;
 prover finishes each bundle in ~10 min (SHPLONK-wrapped), giving
 `ρ = 0.15` — supercritical. Daemon lag is bounded independent of uptime.
 L1 (Case 1) is subcritical and can only support a one-shot demo per
-deploy — see [prover throughput analysis](../../an-bridge-prover/docs/prover_throughput_analysis.md).
+deploy — see [prover throughput analysis](../../bridge-prover-libraries/docs/prover_throughput_analysis.md).
 
 - **[Case 2a](#case-2a--fresh-l2-deploy-first-e2e-withdrawal)** — first
   E2E withdrawal on a fresh L2 deploy (baseline sequence, ~106 min).
@@ -601,7 +601,7 @@ baseline + wait for a new event is the tool's default correct shape,
 and the internal 2 h enricher retry loop absorbs the L2 chain-wait.
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 BRIDGE_CONFIG_DIR=./L2_config
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 TS=$(date +%Y%m%d_%H%M%S)
@@ -616,7 +616,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --i-know-the-wait \
   --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
-  --an-bridge-prover-dir . \
+  --bridge-prover-libraries-dir . \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \
@@ -629,7 +629,7 @@ before proceeding to Step 4.
 ### Step 4 — Fire the burn in another shell
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 ```
 
@@ -833,7 +833,7 @@ public key ≠ on-chain `getOwnerPubkey`.
 **Check + fix.**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 # 1. Compare local key vs on-chain
 LOCAL_PUB=$(jq -r '.public' python/contracts/USDCBridge.shellnet.keys.json)
@@ -881,7 +881,7 @@ self-`mint` via `cast send` reverts with `FiatToken: caller is not a
 minter`.
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 
@@ -1007,11 +1007,11 @@ cast balance 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307 --rpc-url $RPC --ether
 
 ## File & state reference
 
-Everything lives under `crates/an-bridge-prover/`. Withdrawal E2E adds
+Everything lives under `crates/bridge-prover-libraries/`. Withdrawal E2E adds
 three directories on top of the bundle-lane layout in the parent runbook:
 
 ```
-crates/an-bridge-prover/
+crates/bridge-prover-libraries/
 ├── work_dir/
 │   └── witness_event_<seq>.json     ← enriched witness (input to Circuit 4 prover)
 ├── proofs/

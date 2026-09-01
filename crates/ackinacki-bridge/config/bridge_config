@@ -10,7 +10,7 @@
 # The CLI is a standalone user-facing tool. It does not need — and this
 # file deliberately does not carry — daemon-only settings
 # (`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_BK_SET_CONFIG`).
-# Those live in `../an-bridge-prover/L{1,2}_config/env` on whichever host
+# Those live in `../bridge-prover-libraries/L{1,2}_config/env` on whichever host
 # runs `daemon-live`, which may be a different machine altogether.
 #
 # WHAT IT DELIBERATELY OMITS
@@ -31,7 +31,7 @@
 #   cd crates/ackinacki-bridge
 #   export BURNER_PRIVATE_KEY=0x…             # your own key
 #   set -a && source config/bridge_config && set +a
-#   ../an-bridge-prover/target/release/ackinacki-bridge withdraw ...
+#   ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw ...
 #
 # Relative paths below are anchored to the working directory
 # `crates/ackinacki-bridge/`.
@@ -46,11 +46,11 @@ BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 # `params/` holds ~17 GB of SRS + per-circuit vk/pk files, shared with
 # the bundle daemon. Do NOT wipe — keygen would re-burn ~7 min per
 # circuit.
-BRIDGE_PARAMS_DIR=../an-bridge-prover/params
+BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params
 
 # Optional — pk cache dir passed through to the C4 aggregator subprocess.
 # The CLI defaults it to `$BRIDGE_PARAMS_DIR/pk_cache` if unset.
-# BRIDGE_PK_CACHE_DIR=../an-bridge-prover/params/pk_cache
+# BRIDGE_PK_CACHE_DIR=../bridge-prover-libraries/params/pk_cache
 
 # Optional — where per-withdrawal idempotency state files live. Defaults
 # to `$HOME/.bridge-withdraw-state/` when unset (per-user, survives
@@ -71,7 +71,7 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # `docs/live_cli_withdraw_runbook.md` Case 8 Step L5.
 #
 # Advanced users who ran their own `deploy_bridge_bundle.sh` (see
-# `../an-bridge-prover/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`)
+# `../bridge-prover-libraries/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`)
 # should overwrite this with the `BRIDGE_ADDRESS` from their own
 # `L{1,2}_config/env`. L1 is testing-only; L2 is the production shape.
 #

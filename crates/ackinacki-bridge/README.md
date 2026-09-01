@@ -138,13 +138,13 @@ matters for money.
 ## Layout
 
 Physical crate at `crates/ackinacki-bridge/`. Symlinked into the
-`an-bridge-prover` sub-workspace at
-`crates/an-bridge-prover/ackinacki-bridge/` so it can depend on
+`bridge-prover-libraries` sub-workspace at
+`crates/bridge-prover-libraries/ackinacki-bridge/` so it can depend on
 the halo2-heavy prover crates while remaining excluded from the root
 workspace. Build via:
 
 ```
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 cargo build -p ackinacki-bridge
 ```
 

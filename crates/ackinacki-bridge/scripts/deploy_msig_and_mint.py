@@ -42,7 +42,7 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CLI_ROOT = os.path.dirname(_HERE)                          # crates/ackinacki-bridge
 _PY_ROOT = os.path.abspath(os.path.join(
-    _CLI_ROOT, "..", "an-bridge-prover", "python"))         # crates/an-bridge-prover/python
+    _CLI_ROOT, "..", "bridge-prover-libraries", "python"))         # crates/bridge-prover-libraries/python
 if not os.path.isdir(_PY_ROOT):
     print(f"[deploy_msig_and_mint] cannot find {_PY_ROOT}", file=sys.stderr)
     sys.exit(2)
@@ -116,7 +116,7 @@ def main():
     # partner-provided file.
     if not is_shellnet and key_override is None:
         tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
-        prover_dir = os.path.dirname(_PY_ROOT)   # crates/an-bridge-prover
+        prover_dir = os.path.dirname(_PY_ROOT)   # crates/bridge-prover-libraries
         materialize_usdc_bridge_key_from_node_config(tracer, prover_dir, usdc_bridge_key)
 
     tracer.log_phase("Validating USDCBridge owner key against on-chain getOwnerPubkey")

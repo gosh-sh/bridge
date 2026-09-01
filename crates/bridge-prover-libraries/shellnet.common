@@ -4,7 +4,7 @@
 # `BRIDGE_CONFIG_DIR`, which drives `bridge-prover-lib::paths`.
 #
 # NOT sourced directly by tools. Consumed via:
-#   cd crates/an-bridge-prover
+#   cd crates/bridge-prover-libraries
 #   set -a && source L1_config/env && set +a    # or L2_config/env
 #   cargo run --release -p bridge-relayer-daemon --bin relayer -- daemon-live
 #

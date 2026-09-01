@@ -78,7 +78,7 @@ While working on a branch:
   above the newest released version; create that section if it is missing
 - do not invent a version heading, and do not bump `version` in any
   `Cargo.toml` — neither `workspace.package.version` nor the excluded
-  sub-workspaces (`deposit-prover`, `crates/an-bridge-prover`,
+  sub-workspaces (`deposit-prover`, `crates/bridge-prover-libraries`,
   `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`,
   `crates/bridge-snark-utils`, `frontend`)
 - add to the existing groups under `## [Unreleased]` rather than starting a
@@ -413,9 +413,9 @@ cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHas
 
 # Relayer skeleton (Phase 5.1, standalone)
 # NOT standalone: bridge-relayer-daemon reaches bridge-prover-lib / bridge-gql-fetcher
-# through the crates/an-bridge-prover workspace (symlink members), so a bare
+# through the crates/bridge-prover-libraries workspace (symlink members), so a bare
 # `cd crates/bridge-relayer-daemon && cargo test` fails to resolve them. Same as CI:
-cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
+cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
 # AN→ETH is fully daemonized. Since 2026-07-04 BOTH ETH legs run in ONE systemd service

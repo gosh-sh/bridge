@@ -88,7 +88,7 @@ echo "    log=$LOG"
 echo "    (this WILL broadcast an AN burn and an EVM withdrawByProof tx)"
 
 exec cargo run --release -p ackinacki-bridge \
-  --manifest-path ../an-bridge-prover/Cargo.toml -- \
+  --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
   withdraw \
     --yes \
     "${ANCHOR_FLAGS[@]}" \

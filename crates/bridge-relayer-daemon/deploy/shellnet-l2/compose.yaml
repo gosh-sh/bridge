@@ -4,7 +4,7 @@ x-relayer-build: &relayer-build
   context: ${BRIDGE_SOURCE_DIR:-../../../..}
   dockerfile: crates/bridge-relayer-daemon/deploy/shellnet-l2/Dockerfile
   additional_contexts:
-    relayer_release: ${RELAYER_RELEASE_DIR:-../../../an-bridge-prover/target/release}
+    relayer_release: ${RELAYER_RELEASE_DIR:-../../../bridge-prover-libraries/target/release}
     aggregator_release: ${AGGREGATOR_RELEASE_DIR:-../../../bridge-evm-aggregator/target/release}
     verifier_bins: ${VERIFIER_BINS_DIR:-../../../../contracts/ethereum/verifiers}
     foundry_bin: ${FOUNDRY_BIN_DIR:-/usr/local/bin}

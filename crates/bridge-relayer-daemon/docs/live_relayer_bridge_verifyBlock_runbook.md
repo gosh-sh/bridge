@@ -21,7 +21,7 @@ genesis.
 Recall that **Shellnet was restarted at this commit cf664666badf2f12bf0ecc20846ac14b8bcb4e9d**.
 
 Live BK set (5 signers, fixed from genesis) is committed at
-[`crates/an-bridge-prover/bk_set.shellnet.json`](../../an-bridge-prover/bk_set.shellnet.json).
+[`crates/bridge-prover-libraries/bk_set.shellnet.json`](../../bridge-prover-libraries/bk_set.shellnet.json).
 
 - Poseidon commitment (matches on-chain `storedBkSetCommitment()` on any live
   shellnet bridge deploy, and the `GENESIS_BK_SET_COMMITMENT` line emitted by
@@ -106,7 +106,7 @@ Run this **before touching anything** — it takes 30 seconds and tells you
 exactly which case (below) applies.
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 export BRIDGE_CONFIG_DIR=./L1_config      # or ./L2_config — the mode this daemon runs in
 export RELAYER_STATE_PATH="$BRIDGE_CONFIG_DIR/relayer-state.json"
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
@@ -175,7 +175,7 @@ used by that wrapper.
 
 ## Binary + env prerequisites
 
-Working directory: `crates/an-bridge-prover/`.
+Working directory: `crates/bridge-prover-libraries/`.
 
 ### Step 1 — Choose the anchor mode
 
@@ -184,7 +184,7 @@ two lines below and export it in the shell you will use for all
 subsequent commands:
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 export BRIDGE_CONFIG_DIR=./L2_config   # production on a server (W² = 16384 stride)
 # — OR —
@@ -214,8 +214,8 @@ live bundle path needs K=17,19,20,21,22; K=22 is specifically required by the
 layer outer aggregator.
 
 The `bootstrap_hermez_srs` binary lives in this same repo
-(`gosh-sh/bridge`) under `crates/an-bridge-prover/bridge-prover-lib/src/bin/`.
-Run both commands from `crates/an-bridge-prover/`:
+(`gosh-sh/bridge`) under `crates/bridge-prover-libraries/bridge-prover-lib/src/bin/`.
+Run both commands from `crates/bridge-prover-libraries/`:
 
 ```bash
 # 3a. Manually fetch K=21 (~2.4 GB) and K=22 (~4.8 GB). They are not
@@ -356,7 +356,7 @@ wallet-balance line — refill from either faucet when it drops below
 
 > **The one thing to know.** `GENESIS_LAST_SEEN_BLOCK_SEQNO` is **not** a
 > value you pick by hand. It is derived by
-> **[`compute_bridge_anchors --at-head`](../../an-bridge-prover/bridge-prover-lib/src/bin/compute_bridge_anchors.rs)**,
+> **[`compute_bridge_anchors --at-head`](../../bridge-prover-libraries/bridge-prover-lib/src/bin/compute_bridge_anchors.rs)**,
 > a Rust binary that:
 >
 > 1. Queries shellnet chain head over GraphQL (`query_latest_blocks(1)`,
@@ -378,7 +378,7 @@ wallet-balance line — refill from either faucet when it drops below
 > skip that line.
 
 The development helper below ships in-repo at
-[`crates/an-bridge-prover/scripts/deploy_bridge_bundle.sh`](../../an-bridge-prover/scripts/deploy_bridge_bundle.sh)
+[`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`](../../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh)
 and deploys a new bundle from scratch. This is an irreversible broadcast, not
 an idempotent operation: every invocation spends a new nonce and deploys new
 addresses. It also rewrites the selected development env and clears its local
@@ -390,7 +390,7 @@ Load `PRIVATE_KEY`, `SEPOLIA_RPC_URL` and the withdrawal identity from a
 root/operator-owned env outside the clone, then run:
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
   LEVEL=1 PRIVATE_KEY=<sepolia burner from §1> ./scripts/deploy_bridge_bundle.sh
 # or LEVEL=2 for L2 anchoring
@@ -420,7 +420,7 @@ copy is authoritative. Re-read the warning above before any rerun.
 #   SEPOLIA_RPC_URL            default: https://ethereum-sepolia-rpc.publicnode.com
 #   BRIDGE_GQL_ENDPOINT        default: https://shellnet.ackinacki.org/graphql
 #   BRIDGE_BK_SET_CONFIG       default: ./bk_set.shellnet.json (relative to
-#                              crates/an-bridge-prover)
+#                              crates/bridge-prover-libraries)
 set -euo pipefail
 set +x
 umask 077
@@ -442,7 +442,7 @@ BRIDGE_BK_SET_CONFIG="${BRIDGE_BK_SET_CONFIG:-./bk_set.shellnet.json}"
 
 # Resolve repo-root regardless of where the script sits.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PROVER_DIR="$REPO_ROOT/crates/an-bridge-prover"
+PROVER_DIR="$REPO_ROOT/crates/bridge-prover-libraries"
 CONTRACTS_DIR="$REPO_ROOT/contracts/ethereum"
 GENESIS_ENV="$(mktemp -t genesis.XXXXXX.env)"
 trap 'rm -f "$GENESIS_ENV"' EXIT
@@ -573,7 +573,7 @@ the deploy is broken. Do not launch the daemon.
 must be dealt with before a fresh-deploy launch, or the daemon
 hard-aborts:
 
-1. **`relayer-state.json` in cwd (`crates/an-bridge-prover/`) — MANDATORY
+1. **`relayer-state.json` in cwd (`crates/bridge-prover-libraries/`) — MANDATORY
    snapshot after every redeploy.** This file is the *daemon-level*
    observation cache (independent of `$BRIDGE_CONFIG_DIR/state/`, which is
    the *prover-lib-level* state). It carries `last_observed_on_chain`
@@ -778,7 +778,7 @@ replacement. Just move the stale file aside so the daemon rewrites it
 fresh:
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 # 1. Confirm the drift is exactly what the error reports (paranoia check).
 LOCAL=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' relayer-state.json)
@@ -859,10 +859,10 @@ on anchor mode:
 
 ```bash
 # Live daemon log
-tail -f crates/an-bridge-prover/logs/live_*.log
+tail -f crates/bridge-prover-libraries/logs/live_*.log
 
 # Latest submissions (cadence check)
-watch -n 30 'ls -lt crates/an-bridge-prover/submissions/ | head -6'
+watch -n 30 'ls -lt crates/bridge-prover-libraries/submissions/ | head -6'
 
 # On-chain progress
 watch -n 60 "cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL"
@@ -888,7 +888,7 @@ transport / receipt lag — go to [Case 4](#case-4--restart-after-rpc-induced-ha
 (e.g. after `git pull` + rebuild).
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 # 1. Send SIGTERM, wait for graceful exit
 kill $(pgrep -f 'relayer .*daemon-live')
@@ -949,7 +949,7 @@ for pending to clear before restart (otherwise nonce collision).
 ### 4b. Drift check — local state vs on-chain
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 
 L_SEQ=$(jq -r '.last_observed_on_chain.last_seen_block_seq_no' "$BRIDGE_CONFIG_DIR/relayer-state.json")
 L_BK=$(python3 -c 'import sys; print(f"0x{int(sys.argv[1], 0):064x}")' \
@@ -1023,7 +1023,7 @@ Decode via `cast 4byte $SELECTOR` or use `cast call ...` to dry-run the
 failing submission and get a decoded revert reason:
 
 ```bash
-LATEST=$(ls -t crates/an-bridge-prover/submissions/verifyBlock_seq*.json | head -1)
+LATEST=$(ls -t crates/bridge-prover-libraries/submissions/verifyBlock_seq*.json | head -1)
 cast call $BRIDGE \
   "verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)" \
   $(jq -r '.fin_type'                        "$LATEST") \
@@ -1071,7 +1071,7 @@ startup:
 **What the operator does.**
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a       # RPC, BRIDGE, private key
 TS=$(date +%Y%m%d_%H%M%S)
@@ -1125,7 +1125,7 @@ accept.
 a known seed and no in-flight state is worth preserving.
 
 ```bash
-cd crates/an-bridge-prover
+cd crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 
 # 1. Read the contract's CURRENT last_seen from chain
@@ -1155,7 +1155,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 # Compare its output to `expectedPrevAnchor($BRIDGE_ANCHOR_LEVEL)` and
 # `storedBkSetCommitment()` on-chain. All three must match. If not:
 # env / contract are out of sync — fix the contract deploy before proceeding.
-cd ../an-bridge-prover
+cd ../bridge-prover-libraries
 
 # 5. Cold-start launch (identical to Case 1)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
@@ -1224,14 +1224,14 @@ pgrep -a -f 'aggregate-proof'                      # active aggregator subproces
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 
 # Last successful ack (mtime of $BRIDGE_CONFIG_DIR/state/prover_state.json)
-stat -f "%Sm  %N" "crates/an-bridge-prover/$BRIDGE_CONFIG_DIR/state/prover_state.json"
+stat -f "%Sm  %N" "crates/bridge-prover-libraries/$BRIDGE_CONFIG_DIR/state/prover_state.json"
 
 # Last submitted block
-ls -t crates/an-bridge-prover/submissions/verifyBlock_seq*.json | head -1 \
+ls -t crates/bridge-prover-libraries/submissions/verifyBlock_seq*.json | head -1 \
   | xargs -I {} sh -c 'jq -r "\"submitted seq_no=\" + (.block_seq_no|tostring)" {}'
 
 # Cadence — deltas between latest 5 submissions
-ls -lt crates/an-bridge-prover/submissions/verifyBlock_seq*.json | head -5
+ls -lt crates/bridge-prover-libraries/submissions/verifyBlock_seq*.json | head -5
 ```
 
 **Wallet balance:**
@@ -1249,12 +1249,12 @@ cast balance $RELAYER_ADDR --rpc-url $RPC --ether
 
 ## File & state reference
 
-Everything lives under `crates/an-bridge-prover/` (the daemon's working
+Everything lives under `crates/bridge-prover-libraries/` (the daemon's working
 directory). The sibling `crates/bridge-relayer-daemon/` directory is
 **source code only** — no runtime data lands there.
 
 ```
-crates/an-bridge-prover/
+crates/bridge-prover-libraries/
 ├── shellnet.common                  ← tracked development fixture; not a server secret store
 ├── L1_config/                       ← L1-anchor mode config dir (BRIDGE_CONFIG_DIR=./L1_config)
 │   ├── env                          ← sources ../shellnet.common + 4 L1 overrides
@@ -1333,7 +1333,7 @@ Scope of *this* deployment (dismisses several open questions upfront):
    PK/VK/config set, install `solc 0.8.19`, then seal and hash the static
    artifact manifest. Keep the outer `pk_cache` writable on a bind mount.
 4. **Deploy the bundle** — load deployment values from the external env and
-   run the helper once from `crates/an-bridge-prover/`:
+   run the helper once from `crates/bridge-prover-libraries/`:
    ```bash
    CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
      LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh

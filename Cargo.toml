@@ -13,7 +13,7 @@ exclude = [
     "crates/bridge-relayer-daemon",
     "crates/ackinacki-bridge",
     "crates/deposit-relayer-daemon",
-    "crates/an-bridge-prover",
+    "crates/bridge-prover-libraries",
 ]
 
 [workspace.package]

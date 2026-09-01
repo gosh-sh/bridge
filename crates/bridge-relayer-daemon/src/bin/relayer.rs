@@ -196,16 +196,16 @@ enum Cmd {
     },
     /// Generate one Circuit 4 withdrawal proof from a `PrivateWitness` by
     /// driving the partner `bridge-event-halo2-prover` (in
-    /// `crates/an-bridge-prover`). Writes a `proof_event` JSON that
+    /// `crates/bridge-prover-libraries`). Writes a `proof_event` JSON that
     /// `submit-withdraw` can consume.
     ProveWithdraw {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/an-bridge-prover` workspace root (holds
+        /// `crates/bridge-prover-libraries` workspace root (holds
         /// `target/release/bridge-event-halo2-prover`).
-        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
-        an_bridge_prover_dir: PathBuf,
+        #[arg(long, env = "BRIDGE_PROVER_LIBRARIES_DIR")]
+        bridge_prover_libraries_dir: PathBuf,
         /// Working dir holding `./params` (SRS + Circuit 4 PK/VK). Defaults to
         /// the prover dir.
         #[arg(long)]
@@ -353,7 +353,7 @@ enum Cmd {
         #[arg(
             long,
             env = "BRIDGE_BK_SET_CONFIG",
-            default_value = "../an-bridge-prover/bk_set.shellnet.json"
+            default_value = "../bridge-prover-libraries/bk_set.shellnet.json"
         )]
         bk_set_config: PathBuf,
         /// Optional explicit bootstrap seqno (`SeedPolicy::Explicit`).
@@ -648,11 +648,11 @@ async fn main() -> anyhow::Result<()> {
         }),
         Cmd::ProveWithdraw {
             witness,
-            an_bridge_prover_dir,
+            bridge_prover_libraries_dir,
             work_dir,
             out,
             seq_no,
-        } => prove_withdraw(witness, an_bridge_prover_dir, work_dir, out, seq_no)
+        } => prove_withdraw(witness, bridge_prover_libraries_dir, work_dir, out, seq_no)
             .await
             .map_err(|e| {
                 error!(?e, "prove-withdraw failed");
@@ -1279,12 +1279,12 @@ async fn verify_prover_proof(
 
 async fn prove_withdraw(
     witness: PathBuf,
-    an_bridge_prover_dir: PathBuf,
+    bridge_prover_libraries_dir: PathBuf,
     work_dir: Option<PathBuf>,
     out: PathBuf,
     seq_no: u32,
 ) -> anyhow::Result<()> {
-    let mut cfg = SubprocessWithdrawalProverConfig::new(an_bridge_prover_dir);
+    let mut cfg = SubprocessWithdrawalProverConfig::new(bridge_prover_libraries_dir);
     if let Some(wd) = work_dir {
         cfg.work_dir = wd;
     }

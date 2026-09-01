@@ -14,7 +14,7 @@
 //!     cargo run --release --example capture_bk_update_fixture -- \
 //!         --height 2584711 \
 //!         --genesis-bk-set path/to/bk_set.shellnet.json \
-//!         --out crates/an-bridge-prover/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
+//!         --out crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
 //! ```
 //!
 //! `--height` must be the seq_no of the block that emits the rotation event
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let mut target_height: Option<u64> = None;
     let mut genesis_path: Option<String> = None;
     let mut out_path: String =
-        "crates/an-bridge-prover/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json"
+        "crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json"
             .to_string();
     let mut source_label: String = "shellnet".to_string();
     let mut args = std::env::args().skip(1);

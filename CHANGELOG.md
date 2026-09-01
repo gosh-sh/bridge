@@ -24,16 +24,42 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Sub-workspace directory renamed `crates/an-bridge-prover/` → `crates/bridge-prover-libraries/`.**
+  The prover-side sub-workspace root (the one that holds
+  `bridge-prover-lib`, `bridge-prover-daemon`, `bridge-verifier-daemon`,
+  `bridge-event-witness`, `bridge-event-prover-lib`,
+  `bridge-event-halo2-prover`, `bridge-gql-fetcher`, `bridge-snark-wrap`
+  and the `bridge-relayer-daemon` / `ackinacki-bridge` symlinks) moves
+  under a self-describing name. The workspace exclude in the root
+  `Cargo.toml`, every path-dep resolving through the sub-workspace,
+  every runbook + script + env file + CI reference has been repointed.
+  All Cargo package names inside the sub-workspace are unchanged (only
+  the parent directory moved), so `cargo -p bridge-prover-lib` etc. work
+  unchanged. Concrete migrations:
+    - `cd crates/an-bridge-prover` → `cd crates/bridge-prover-libraries`
+      everywhere (docs, scripts, systemd unit files, personal shell
+      history).
+    - `relayer prove-withdraw --an-bridge-prover-dir …` →
+      `--bridge-prover-libraries-dir …`; env var
+      `AN_BRIDGE_PROVER_DIR` → `BRIDGE_PROVER_LIBRARIES_DIR`.
+    - `BRIDGE_PARAMS_DIR=../an-bridge-prover/params` (in the standalone
+      CLI `bridge_config`) → `../bridge-prover-libraries/params`.
+    - Compose / systemd bind-mounts pointing at
+      `crates/an-bridge-prover/…` need the same path swap.
+    - Any personal `.env.local` or shell profile setting
+      `AN_BRIDGE_PROVER_DIR=…` needs renaming to
+      `BRIDGE_PROVER_LIBRARIES_DIR=…`.
+
 - **CLI crate + binary renamed `bridge-withdraw-e2e-cli` → `ackinacki-bridge`.**
   Cargo package name, `cargo -p …` selector, `[[bin]]` name, on-disk
   crate directory (`crates/bridge-withdraw-e2e-cli/` → `crates/ackinacki-bridge/`),
-  and the `an-bridge-prover` sub-workspace symlink all move together.
+  and the `bridge-prover-libraries` sub-workspace symlink all move together.
   All existing functionality is now nested under the `withdraw`
   subcommand (already the case in earlier `[Unreleased]` entries — the
   rename is purely cosmetic, made ahead of adding sibling subcommands
   like `deposit`). Concrete migrations:
     - Build: `cargo build -p ackinacki-bridge` (was `-p bridge-withdraw-e2e-cli`),
-      run from `crates/an-bridge-prover/`.
+      run from `crates/bridge-prover-libraries/`.
     - Invoke: `./target/release/ackinacki-bridge withdraw --from … --to …`
       (was `./target/release/bridge-withdraw-e2e-cli withdraw …`).
     - Log filter: `RUST_LOG=ackinacki_bridge=info` (was `bridge_withdraw_e2e_cli=info`).
@@ -44,17 +70,17 @@ assigns it when the release is tagged.
 
 - **`contracts/ethereum/.env.shellnet` and `.env.shellnet.l2` deleted.**
   The single shared shellnet burner (`0xb586…2307`) now lives once, in
-  `crates/an-bridge-prover/shellnet.common` under `RELAYER_PRIVATE_KEY`,
+  `crates/bridge-prover-libraries/shellnet.common` under `RELAYER_PRIVATE_KEY`,
   and covers both the deployer and the relayer role. Manual deploy
   paths that used to `set -a && source contracts/ethereum/.env.shellnet
   && forge script …` are retired — use
   `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL={1,2}
-  ./scripts/deploy_bridge_bundle.sh` from `crates/an-bridge-prover/`
+  ./scripts/deploy_bridge_bundle.sh` from `crates/bridge-prover-libraries/`
   instead (the wrapper re-derives genesis anchors from live chain head
   and writes `L{1,2}_config/env` atomically). Per-deploy provenance
   (Deploy #8 / #12 anchors) remains in git history.
 
-- **Per-mode config directory layout in `crates/an-bridge-prover/`.**
+- **Per-mode config directory layout in `crates/bridge-prover-libraries/`.**
   The parallel `state/` + `state_l2/` + `proofs/` + `proofs_l2/` +
   `.env.shellnet` + `.env.shellnet.l2` layout is retired. Runtime data
   now lives under `L1_config/{env,state,proofs,work_dir}` and
@@ -162,7 +188,7 @@ assigns it when the release is tagged.
   Operators must `export BRIDGE_CONFIG_DIR=./L1_config` (or
   `./L2_config`) **before** sourcing the per-mode env file; the env
   files no longer set `BRIDGE_CONFIG_DIR` themselves.
-- New launch scripts under `crates/an-bridge-prover/scripts/` that
+- New launch scripts under `crates/bridge-prover-libraries/scripts/` that
   source the per-mode env file: `launch_withdraw_e2e.sh` (dry-run L1),
   `launch_withdraw_e2e_real.sh` (real submit L1),
   `launch_withdraw_e2e_l2.sh` (dry-run L2), `replay_withdraw_shplonk.sh`
@@ -200,7 +226,7 @@ assigns it when the release is tagged.
   `BRIDGE_CONFIG_DIR=/path/to/L{1,2}_config` to fall back to the
   relayer-style env. Both scripts now `cd` to
   `crates/ackinacki-bridge/` (was `bridge/`), so relative
-  `BRIDGE_PARAMS_DIR=../an-bridge-prover/params` in `bridge_config`
+  `BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params` in `bridge_config`
   resolves correctly. Both scripts also now require
   `BURNER_PRIVATE_KEY` in caller env (mirrors the deliberate omission
   in `bridge_config` — see runbook §"Wallet setup"). `live_smoke.sh`
@@ -305,7 +331,7 @@ assigns it when the release is tagged.
   `BRIDGE_CONFIG_DIR` see no behavioral change.
 
 - Python E2E drivers deduplicated. `deploy_multisig` / `mint_usdc`
-  moved to new `crates/an-bridge-prover/python/helper/msig.py`;
+  moved to new `crates/bridge-prover-libraries/python/helper/msig.py`;
   `materialize_usdc_bridge_key_from_node_config` /
   `validate_usdc_bridge_key` moved to `helper/bridge_e2e.py`. Both
   `test_deploy_and_withdraw_only.py` and
@@ -403,14 +429,14 @@ assigns it when the release is tagged.
 - **On-AN ABI artifacts realigned to shellnet (`acki-nacki@cf664666b`).**
   Dropped stale `anWorkchain int8` from `confirmDeposit` inputs and the
   `DepositFinalized` event in both runtime copies
-  (`crates/an-bridge-prover/python/contracts/USDCBridge.abi.json` and
+  (`crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json` and
   `crates/ackinacki-bridge/abi/USDCBridge.abi.json`); rewrote
   `DepositVoucher.abi.json` constructor to the 5-arg
   `(depositId, contractAddr, dappId, amount, anAccount)` schema.
   Withdraw runtime paths (`initiateWithdrawal`, `mintAndSend`,
   `finalizeDeposit`) were already correct — no calldata change.
 - `scripts/check_voucher_abi_consistency.py` default `--compiled` now
-  points at `crates/an-bridge-prover/python/contracts/` (was a
+  points at `crates/bridge-prover-libraries/python/contracts/` (was a
   nonexistent path).
 
 ### Added
@@ -431,7 +457,7 @@ assigns it when the release is tagged.
   verifyBlock leg can still use `submit-verify-block` (one-shot) or
   `daemon-bridge` (long-running).
 - `scripts/ursus/USDCBridge.abi.json` and
-  `crates/an-bridge-prover/python/contracts/README.md` — unreferenced
+  `crates/bridge-prover-libraries/python/contracts/README.md` — unreferenced
   ABI mirror and its documentation. Systemd/env templates under
   `scripts/ursus/` retained.
 - Fossil `.tvc` files under `python/contracts/`

@@ -23,7 +23,7 @@
 #   SEPOLIA_RPC_URL            default: https://ethereum-sepolia-rpc.publicnode.com
 #   BRIDGE_GQL_ENDPOINT        default: https://shellnet.ackinacki.org/graphql
 #   BRIDGE_BK_SET_CONFIG       default: ./bk_set.shellnet.json
-#                              (relative to crates/an-bridge-prover)
+#                              (relative to crates/bridge-prover-libraries)
 #   WITHDRAW_ACC_FR            authoritative AN bridge account field element;
 #                              required and immutable after deployment
 set -euo pipefail
@@ -46,7 +46,7 @@ BRIDGE_GQL_ENDPOINT="${BRIDGE_GQL_ENDPOINT:-https://shellnet.ackinacki.org/graph
 BRIDGE_BK_SET_CONFIG="${BRIDGE_BK_SET_CONFIG:-./bk_set.shellnet.json}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PROVER_DIR="$REPO_ROOT/crates/an-bridge-prover"
+PROVER_DIR="$REPO_ROOT/crates/bridge-prover-libraries"
 CONTRACTS_DIR="$REPO_ROOT/contracts/ethereum"
 GENESIS_ENV="$(mktemp -t genesis.XXXXXX.env)"
 trap 'rm -f "$GENESIS_ENV"' EXIT

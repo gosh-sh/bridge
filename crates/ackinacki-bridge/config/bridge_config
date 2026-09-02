@@ -6,13 +6,6 @@
 # the `withdraw` subcommand consumes it). Carries every parameter the CLI
 # reads via clap `env` attrs (see `src/args.rs`), and nothing else. Single
 # file; no per-mode split.
-#
-# The CLI is a standalone user-facing tool. It does not need — and this
-# file deliberately does not carry — daemon-only settings
-# (`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_BK_SET_CONFIG`).
-# Those live in `../bridge-prover-libraries/L{1,2}_config/env` on whichever host
-# runs `daemon-live`, which may be a different machine altogether.
-#
 # WHAT IT DELIBERATELY OMITS
 # --------------------------
 # `BURNER_PRIVATE_KEY` is NOT set here. Every operator brings their own
@@ -20,10 +13,6 @@
 # env file) before invoking the CLI:
 #
 #   export BURNER_PRIVATE_KEY=0x…
-#
-# See the "Quick start" section in `README.md` for wallet creation +
-# Sepolia funding via the pk910 PoW or Google Cloud Web3 faucets. Never
-# reuse a wallet that holds real funds; never commit the private key.
 #
 # HOW TO CONSUME
 # --------------
@@ -64,10 +53,7 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
 # --- Deploy target ------------------------------------------------------------
 # Currently pinned to the shellnet team's L2-anchored (anchor_level=2)
-# reference deploy on Sepolia. The server-side bundle relayer that
-# advances this contract runs L2 only, so the CLI must be invoked with
-# `--anchor-layer 2 --i-know-the-wait` against this address. See
-# `README.md` Quick start for the default-user flow.
+# reference deploy on Sepolia.
 #
 # Advanced users who ran their own `deploy_bridge_bundle.sh` should
 # overwrite this with the `BRIDGE_ADDRESS` from their own

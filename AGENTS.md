@@ -78,7 +78,7 @@ While working on a branch:
   above the newest released version; create that section if it is missing
 - do not invent a version heading, and do not bump `version` in any
   `Cargo.toml` — neither `workspace.package.version` nor the excluded
-  sub-workspaces (`deposit-prover`, `crates/an-bridge-prover`,
+  sub-workspaces (`deposit-prover`, `crates/bridge-prover-libraries`,
   `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`,
   `crates/bridge-snark-utils`, `frontend`)
 - add to the existing groups under `## [Unreleased]` rather than starting a
@@ -413,16 +413,18 @@ cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHas
 
 # Relayer skeleton (Phase 5.1, standalone)
 # NOT standalone: bridge-relayer-daemon reaches bridge-prover-lib / bridge-gql-fetcher
-# through the crates/an-bridge-prover workspace (symlink members), so a bare
+# through the crates/bridge-prover-libraries workspace (symlink members), so a bare
 # `cd crates/bridge-relayer-daemon && cargo test` fails to resolve them. Same as CI:
-cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
+cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
 # AN→ETH is fully daemonized. Since 2026-07-04 BOTH ETH legs run in ONE systemd service
 # (bridge-relayer.service = `relayer daemon-bridge`) on a SINGLE relayer EOA, interleaved
 # sequentially so there is never more than one in-flight tx (nonces can't race). This unified
 # `daemon-bridge` replaces the earlier two-service split (bridge-relayer=daemon-prover +
-# bridge-withdraw=daemon-withdraw); the two standalone subcommands remain for manual/one-off use.
+# bridge-withdraw=daemon-withdraw); the `daemon-withdraw` standalone subcommand remains for
+# manual/one-off use. `daemon-prover` was removed on 2026-08-28 — its verifyBlock leg is
+# covered either by `daemon-bridge` (file-based) or `daemon-live` (in-process).
 #  • leg 1 (was daemon-prover)   → verifyBlock (anchor registration). The block source FALLS
 #    FORWARD to the next available proof_<N>.json (N >= last_seen+1), so it advances a fresh bridge
 #    across the 512-spaced AN key-block stream on its own (each proof bakes the previous key block
@@ -435,8 +437,6 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --tic
 #   See docs/an_eth_daemon_withdraw_e2e_2026-07-03.md.
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # unified AN→ETH (verifyBlock + withdrawByProof)
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-prover \
-    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # standalone verifyBlock leg (fall-forward)
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \

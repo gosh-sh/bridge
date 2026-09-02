@@ -68,7 +68,7 @@ RECEIPT_PF_MAX_DEPTH: 10   // :32 — max MPT proof depth
 
 There is **no on-chain ETH-side ZK consumer** for this proof — the Ethereum contract only emits the
 event and keeps custody. The proof is consumed on the Acki Nacki side by `USDCBridge`, whose ABI is
-bundled in this repo at `crates/an-bridge-prover/python/contracts/USDCBridge.abi.json`:
+bundled in this repo at `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`:
 
 ```
 finalizeDeposit(bytes proof, bytes publicInputs)

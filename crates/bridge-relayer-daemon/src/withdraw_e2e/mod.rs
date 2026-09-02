@@ -32,6 +32,7 @@ pub mod capture;
 pub mod driver;
 
 pub use capture::{
-    capture_next_withdrawal_event, snapshot_baseline_msg_ids, CapturedEvent,
+    capture_next_withdrawal_event, capture_targeted_withdrawal_event,
+    snapshot_baseline_msg_ids, CapturedEvent,
 };
-pub use driver::{run_once, WithdrawE2EConfig, WithdrawE2ESummary};
+pub use driver::{run_once, run_once_with_state, WithdrawE2EConfig, WithdrawE2ESummary};

@@ -60,7 +60,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
                                                     (ZKHALO2VERIFYWITHVK opcode)
 
                  Acki Nacki → Ethereum (state + payout)
-  AN node ──GraphQL──▶ an-bridge-prover ──Circuits 1A/1B, 2, 4──▶ bridge-relayer-daemon
+  AN node ──GraphQL──▶ bridge-prover-libraries ──Circuits 1A/1B, 2, 4──▶ bridge-relayer-daemon
                                                                           │
                                               verifyBlock / applyBkSetUpdate / withdrawByProof
                                                                           ▼
@@ -83,7 +83,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
 | `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
 | `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by prover and relayer. |
-| `crates/an-bridge-prover/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
+| `crates/bridge-prover-libraries/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
 | `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
 | `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 aggregator spike. |
 | `frontend/` | WASM deposit UI (Yew). |
@@ -91,7 +91,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 
 **Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
 and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
-forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/an-bridge-prover/`
+forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/bridge-prover-libraries/`
 (gosh-fork halo2-base), `crates/bridge-snark-utils/`, both relayer daemons, and `frontend/`.
 
 ---
@@ -122,7 +122,7 @@ bridge sits close to the EIP-170 size limit, and several functions are otherwise
 Standalone crates build from their own directories:
 
 ```bash
-cd crates/an-bridge-prover && cargo build --release
+cd crates/bridge-prover-libraries && cargo build --release
 cd crates/bridge-relayer-daemon && cargo test
 ```
 
@@ -137,7 +137,7 @@ constraint bites early — the genesis seed must sit on a key-block boundary, cu
 Operating procedures (bootstrapping the prover daemons, the two live proving lanes, deploy timing,
 recovery from the failure modes actually hit in production) are being rewritten; `DOCS.md` tracks
 progress. Until they land, the daemons' own `--help` output and the crate READMEs under
-`crates/an-bridge-prover/` are the working reference.
+`crates/bridge-prover-libraries/` are the working reference.
 
 ---
 

@@ -317,7 +317,7 @@ return _layerLatest(pick)                  // head of window `pick`
 ```
 
 This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
-(`crates/an-bridge-prover/bridge-prover-lib/src/bridge_state.rs`). A flat
+(`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`). A flat
 `layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between consecutive
 key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
 `expectedPrevAnchor(numLayers)` (`:1004`) rather than reconstructing the anchor themselves.

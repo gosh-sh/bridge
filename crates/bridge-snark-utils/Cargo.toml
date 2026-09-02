@@ -25,15 +25,15 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # Partner prover-lib (provides KeyManager, compute_bk_set_poseidon, etc.).
 # Migrated 2026-06-18 from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover into
-# the sibling `crates/an-bridge-prover/` sub-workspace.
-bridge-prover-lib = { path = "../an-bridge-prover/bridge-prover-lib" }
+# the sibling `crates/bridge-prover-libraries/` sub-workspace.
+bridge-prover-lib = { path = "../bridge-prover-libraries/bridge-prover-lib" }
 # GraphQL fetchers (attestation, bk_set, gql_client) live here — split out of
 # bridge-prover-lib during the same 2026-06-18 migration.
-bridge-gql-fetcher = { path = "../an-bridge-prover/bridge-gql-fetcher" }
+bridge-gql-fetcher = { path = "../bridge-prover-libraries/bridge-gql-fetcher" }
 # Circuit 4 (bridge event / withdrawal) prover surface — source of the inner
 # Poseidon SHPLONK snark that `export-c4-poseidon-snark` wraps for the R15
 # `BridgeWithdrawalAggregatorVerifier` Yul.
-bridge-event-prover-lib = { path = "../an-bridge-prover/bridge-event-prover-lib" }
+bridge-event-prover-lib = { path = "../bridge-prover-libraries/bridge-event-prover-lib" }
 
 # Halo2 backend — must match the partner's fork; pinned to the `bump-halo2-lib-v0.4.1` branch.
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }

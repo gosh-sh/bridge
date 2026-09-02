@@ -1,0 +1,31 @@
+[package]
+name = "bridge-snark-wrap"
+version = "0.1.0"
+edition = "2021"
+description = "In-process wrap of a Poseidon-transcript Halo2 SHPLONK proof + partner VK into a snark-verifier `Snark` bincode file, so `bridge-relayer-daemon` can produce aggregator input without shelling out to `export-1a1b2-poseidon-snark` (which itself re-fetches + re-proves)."
+
+# Extracted from bridge-snark-utils/src/halo2_snark.rs (2026-08-03) so
+# bridge-relayer-daemon can call the wrap in-process instead of via subprocess.
+# Must live as a WORKSPACE MEMBER (not a standalone workspace) so it inherits
+# the halo2-base [patch] rewrites in bridge-prover-libraries/Cargo.toml — those rewrites
+# are what make `snark-verifier`'s transitive halo2-base resolve to the gosh
+# fork instead of axiom's, matching the VK serde format the daemon produces.
+
+[dependencies]
+halo2-base = { workspace = true }
+bridge-prover-lib = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+
+# snark-verifier for gosh-VK → PlonkProtocol → bincode Snark (R15 aggregator input).
+# Same pin / features as bridge-snark-utils so the emitted `.snark` is
+# byte-identical to what `export_1a1b2_poseidon_snark.rs` produces today.
+snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }
+snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
+    "loader_halo2",
+    "halo2-axiom",
+] }

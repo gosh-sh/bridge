@@ -163,26 +163,6 @@ enum Cmd {
         #[arg(long)]
         no_simulate: bool,
     },
-    /// Long-running daemon reading partner `proof_<seqno>.json` bundles
-    /// from `bridge-prover-daemon` and submitting `verifyBlock` on Ethereum.
-    DaemonProver {
-        /// Directory containing `proof_*.json` + `result_*.json` (partner
-        /// prover daemon `proofs/` folder).
-        #[arg(long, env = "PROVER_PROOFS_DIR")]
-        proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
-        rpc_url: String,
-        #[arg(long, env = "BRIDGE_ADDRESS")]
-        bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
-        private_key: String,
-        #[arg(long, default_value_t = 2)]
-        backoff_initial_secs: u64,
-        #[arg(long, default_value_t = 60)]
-        backoff_max_secs: u64,
-        #[arg(long, default_value_t = 2)]
-        backoff_multiplier: u32,
-    },
     /// Submit one `verifyBlock` for a specific partner proof bundle.
     SubmitVerifyBlock {
         #[arg(long)]
@@ -216,16 +196,16 @@ enum Cmd {
     },
     /// Generate one Circuit 4 withdrawal proof from a `PrivateWitness` by
     /// driving the partner `bridge-event-halo2-prover` (in
-    /// `crates/an-bridge-prover`). Writes a `proof_event` JSON that
+    /// `crates/bridge-prover-libraries`). Writes a `proof_event` JSON that
     /// `submit-withdraw` can consume.
     ProveWithdraw {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/an-bridge-prover` workspace root (holds
+        /// `crates/bridge-prover-libraries` workspace root (holds
         /// `target/release/bridge-event-halo2-prover`).
-        #[arg(long, env = "AN_BRIDGE_PROVER_DIR")]
-        an_bridge_prover_dir: PathBuf,
+        #[arg(long, env = "BRIDGE_PROVER_LIBRARIES_DIR")]
+        bridge_prover_libraries_dir: PathBuf,
         /// Working dir holding `./params` (SRS + Circuit 4 PK/VK). Defaults to
         /// the prover dir.
         #[arg(long)]
@@ -373,7 +353,7 @@ enum Cmd {
         #[arg(
             long,
             env = "BRIDGE_BK_SET_CONFIG",
-            default_value = "../an-bridge-prover/bk_set.shellnet.json"
+            default_value = "../bridge-prover-libraries/bk_set.shellnet.json"
         )]
         bk_set_config: PathBuf,
         /// Optional explicit bootstrap seqno (`SeedPolicy::Explicit`).
@@ -626,34 +606,6 @@ async fn main() -> anyhow::Result<()> {
                 e
             })
         },
-        Cmd::DaemonProver {
-            proofs_dir,
-            rpc_url,
-            bridge_address,
-            private_key,
-            backoff_initial_secs,
-            backoff_max_secs,
-            backoff_multiplier,
-        } => {
-            let backoff = BackoffConfig {
-                initial: Duration::from_secs(backoff_initial_secs),
-                max: Duration::from_secs(backoff_max_secs),
-                multiplier: backoff_multiplier,
-            };
-            run_prover_daemon(
-                args.state,
-                proofs_dir,
-                rpc_url,
-                bridge_address,
-                private_key,
-                backoff,
-            )
-            .await
-            .map_err(|e| {
-                error!(?e, "daemon-prover failed");
-                e
-            })
-        },
         Cmd::SubmitVerifyBlock {
             proofs_dir,
             block_seq_no,
@@ -696,11 +648,11 @@ async fn main() -> anyhow::Result<()> {
         }),
         Cmd::ProveWithdraw {
             witness,
-            an_bridge_prover_dir,
+            bridge_prover_libraries_dir,
             work_dir,
             out,
             seq_no,
-        } => prove_withdraw(witness, an_bridge_prover_dir, work_dir, out, seq_no)
+        } => prove_withdraw(witness, bridge_prover_libraries_dir, work_dir, out, seq_no)
             .await
             .map_err(|e| {
                 error!(?e, "prove-withdraw failed");
@@ -1214,41 +1166,6 @@ async fn verify_fixture(
     }
 }
 
-async fn run_prover_daemon(
-    state_path: PathBuf,
-    proofs_dir: PathBuf,
-    rpc_url: String,
-    bridge_address: Address,
-    private_key: String,
-    backoff: BackoffConfig,
-) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
-
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
-    let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
-    let cfg = RelayerConfig::new(state_path);
-    let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
-    let metrics = RelayerMetrics::new();
-
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("shutdown signal received");
-    };
-
-    info!(?backoff, proofs_dir = %proofs_dir.display(), "daemon-prover starting");
-    let summary = relayer
-        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
-        .await?;
-    info!(?summary, snapshot = ?metrics.snapshot(), "daemon-prover stopped");
-    Ok(())
-}
-
 async fn submit_verify_block(
     proofs_dir: PathBuf,
     block_seq_no: u64,
@@ -1362,12 +1279,12 @@ async fn verify_prover_proof(
 
 async fn prove_withdraw(
     witness: PathBuf,
-    an_bridge_prover_dir: PathBuf,
+    bridge_prover_libraries_dir: PathBuf,
     work_dir: Option<PathBuf>,
     out: PathBuf,
     seq_no: u32,
 ) -> anyhow::Result<()> {
-    let mut cfg = SubprocessWithdrawalProverConfig::new(an_bridge_prover_dir);
+    let mut cfg = SubprocessWithdrawalProverConfig::new(bridge_prover_libraries_dir);
     if let Some(wd) = work_dir {
         cfg.work_dir = wd;
     }

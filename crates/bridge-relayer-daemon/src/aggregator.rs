@@ -417,7 +417,17 @@ impl ProofAggregator for SubprocessAggregator {
             "agg_calldata_{verifier_name}_{}.bin",
             std::process::id()
         ));
-        let args = self.args(inner_snark, verifier_name, &out_path);
+        // The subprocess is spawned with `current_dir = aggregator_dir`, so a
+        // relative `inner_snark` (e.g. the CLI's `--snark-dir=./shplonk-snark`
+        // default) would resolve against the wrong CWD and fail with ENOENT.
+        // Canonicalize here — the snark was just written by
+        // `Circuit4SnarkProver::prove`, so it always exists. If canonicalize
+        // ever fails (e.g. permissions), fall through with the original path
+        // and let the subprocess surface the real error.
+        let inner_snark_abs = inner_snark
+            .canonicalize()
+            .unwrap_or_else(|_| inner_snark.to_path_buf());
+        let args = self.args(&inner_snark_abs, verifier_name, &out_path);
 
         let mut cmd = if let Some(bin) = self.release_bin() {
             let mut c = Command::new(bin);

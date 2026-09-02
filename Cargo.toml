@@ -3,23 +3,17 @@ resolver = "2"
 members = [
     "crates/eth-frontend",
     "crates/acki-nacki-interface",
-    # Dependency-free leaf shared with the two excluded deposit crates; a member
-    # so CI's `cargo test --workspace` covers it.
     "crates/deposit-chain-ids",
 ]
-# Exclude deposit-prover because it uses axiom-crypto's halo2-lib (incompatible with scroll-tech)
-# Exclude frontend because it's a separate WASM project with different dependencies
+
 exclude = [
     "deposit-prover",
     "frontend",
     "crates/bridge-snark-utils",
     "crates/bridge-relayer-daemon",
+    "crates/ackinacki-bridge",
     "crates/deposit-relayer-daemon",
-    # Sub-workspace migrated from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover
-    # 2026-06-18. Uses gosh-fork halo2-base (bump-halo2-lib-v0.4.1); cannot
-    # coexist with the root workspace's halo2 backend. Build standalone via
-    # `cd crates/an-bridge-prover && cargo build`.
-    "crates/an-bridge-prover",
+    "crates/bridge-prover-libraries",
 ]
 
 [workspace.package]
@@ -34,10 +28,7 @@ repository = "https://vcs.modus-ponens.com/ton/acki-nacki-bridge"
 tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
 
-# Ethereum (alloy-rs, migrated 2026-05-17 from ethers-rs 2.0.14 — the latter
-# is unmaintained and pulls rustls-webpki 0.101.7 carrying RUSTSEC-2026-0098,
-# RUSTSEC-2026-0099, RUSTSEC-2026-0104 via transitive deps. `alloy = "2.0"`
-# uses rustls 0.23 + rustls-webpki 0.103, eliminating all three CVEs.
+# Ethereum
 alloy = { version = "2.0", features = [
     "providers",
     "provider-http",
@@ -82,7 +73,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 hex = "0.4"
 bytes = "1.9"
 
-# Acki Nacki / TVM (SDK 3.0.5.an — supersedes the retired `full_dex_and_bridge_test_with_final_halo2_circuit` branch)
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",

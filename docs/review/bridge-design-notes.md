@@ -58,10 +58,10 @@ because it also closes the "anchor layer is not asserted" gap the current spec f
 
 ## 3. Cross-repo invariant: BridgeState mirror is the reference
 
-The AN-side prover crate (`crates/an-bridge-prover/bridge-prover-lib/src/bridge_state.rs`)
+The AN-side prover crate (`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`)
 maintains an off-chain `BridgeState` whose `HistoryWindow` **must** stay byte-for-byte
 equivalent to the on-chain `_layerWindows`. The verifier daemon
-(`crates/an-bridge-prover/bridge-verifier-daemon/src/main.rs`) checks anchor membership
+(`crates/bridge-prover-libraries/bridge-verifier-daemon/src/main.rs`) checks anchor membership
 against `state.flatten_layer_hashes()` — this is the reference implementation for
 `_isKnownAnchor` in Solidity.
 

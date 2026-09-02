@@ -47,8 +47,7 @@ pipeline:
    `storedLastSeenBlockSeqNo` has advanced past the covering L2 bundle
    boundary (`W² = 16 384` seq_nos) for the burn's block. Once the
    covering bundle has landed on-chain (fed by the server-side bundle
-   relayer), `BridgeState::from_contract` builds a byte-for-byte mirror
-   — no local `prover_state.json` needed.
+   relayer), `BridgeState::from_contract` builds a byte-for-byte mirror.
 6. **Prove + submit** — enrich the resurrected `BridgeState`
    (single-shot, no retry), produce a Circuit-4 SHPLONK proof via the
    in-process Circuit-4 prover + `aggregate-proof` subprocess, always

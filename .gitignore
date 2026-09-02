@@ -266,3 +266,15 @@ crates/bridge-prover-libraries/L2_config/work_dir/
 # per-withdrawal idempotency state, aggregate-proof scratch, and logs.
 crates/ackinacki-bridge/work_dir/
 crates/ackinacki-bridge/withdraw-state/
+
+# Per-user output artifacts from scripts/deploy_msig_and_mint.{sh,py}
+# — the eval-able env line + stdout/stderr captures. Contain absolute
+# local paths and per-run multisig addresses; not source-of-truth.
+crates/ackinacki-bridge/deploy_msig*.env
+crates/ackinacki-bridge/deploy_msig*.log
+
+# Aggregator scratch dir if a user runs the CLI without setting
+# BRIDGE_SNARK_DIR (falls back to args.rs default `./shplonk-snark`).
+# The profile files point at ./work_dir/shplonk-snark instead, but this
+# catches the direct-invocation case.
+crates/ackinacki-bridge/shplonk-snark/

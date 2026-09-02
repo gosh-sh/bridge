@@ -95,28 +95,42 @@ seq_nos ≈ 5.7 min chain-time) — see the advanced runbook.
 
 ## Environment / flags
 
-Every environment variable has a corresponding `--flag` override. The
-env-var form is intended for scripted use (all pinned to the shipped
-shellnet values in `config/bridge_config`); the flag form for one-off
-overrides.
+The CLI auto-sources the file pointed to by `$BRIDGE_CONFIG` at
+startup (default: `config/bridge_config`, a symlink to
+`bridge_config.shellnet`) before clap reads any `env=` attr, so the
+env-var form is the normal path — a `withdraw` invocation carries only
+the five per-request intent flags (`--from` / `--from-keys` / `--to` /
+`--to-chain` / `--amount`) unless you want to override a plumbing
+value one-off. Precedence: **explicit `--flag` > shell env > profile
+file > compiled default.**
 
-| Flag                    | Env var                     | Purpose |
+Switch networks by pointing at a sibling profile file:
+```bash
+export BRIDGE_CONFIG=./config/bridge_config.local     # local devnet
+export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
+```
+
+| Flag                    | Env var / profile key       | Purpose |
 |-------------------------|-----------------------------|---------|
 | `--gql-endpoint`        | `BRIDGE_GQL_ENDPOINT`       | AN GraphQL for account queries + event capture |
-| `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id; default is shellnet canonical |
-| `--anchor-layer`        | —                           | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
-| `--i-know-the-wait`     | —                           | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
+| `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
+| `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
+| `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
 | `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG SRS params (~17 GB) |
+| `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
+| `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
 | `--pk-cache-dir`        | `BRIDGE_PK_CACHE_DIR`       | Warm-start pk cache (optional; defaults to `$BRIDGE_PARAMS_DIR/pk_cache`) |
 | `--state-dir`           | `BRIDGE_WITHDRAW_STATE_DIR` | Per-withdrawal idempotency state dir (optional; defaults to `$HOME/.bridge-withdraw-state`) |
 
-`BURNER_PRIVATE_KEY` is intentionally **not** shipped in
-`config/bridge_config` — every operator brings their own; see Step 1.
+`BURNER_PRIVATE_KEY` is intentionally **not** shipped in any profile —
+every operator brings their own; see Step 1. `NETWORK` (tvm-cli
+`--url` target) is also in the profile and consumed by
+`scripts/deploy_msig_and_mint.py`.
 
 ## Quick start
 
@@ -125,7 +139,10 @@ paths in the CLI invocation are relative to that directory.
 
 ```bash
 cd crates/ackinacki-bridge
-set -a && source config/bridge_config && set +a          # RPC, GQL, dirs, BRIDGE_ADDRESS
+export BRIDGE_CONFIG=./config/bridge_config              # symlink → bridge_config.shellnet
+# The CLI auto-sources this. We ALSO source it into the current shell
+# so the `cast call $BRIDGE_ADDRESS …` steps below can reach it.
+set -a && source "$BRIDGE_CONFIG" && set +a
 ```
 
 ### Step 1 — Create + fund a Sepolia burner wallet
@@ -222,41 +239,32 @@ idempotency-key digest all run. Nothing else — no burn, no capture,
 no prove, no `dry_run_withdraw` eth_call. Useful for sanity-checking
 flags and config before the real submit.
 
-The exemplary command below is exactly what `scripts/local_smoke.sh`
-runs, expanded so you can see every flag and its (real) value.
-All `../…` paths are relative to `crates/ackinacki-bridge/`:
+Every network endpoint, bridge address, prover-plumbing dir, and the
+L2 anchor selection is resolved from `$BRIDGE_CONFIG`. The invocation
+therefore carries only the five per-request intent flags:
 
 ```bash
-mkdir -p ./work_dir ./withdraw-state
-
 cargo run --release -p ackinacki-bridge \
   --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
   withdraw \
     --dry-run --yes \
-    --anchor-layer 2 --i-know-the-wait \
-    --from            "$WITHDRAW_FROM" \
-    --from-keys       "$WITHDRAW_FROM_KEYS" \
-    --to              "$WITHDRAW_TO" \
-    --to-chain        11155111 \
-    --amount          "$WITHDRAW_AMOUNT" \
-    --gql-endpoint    https://shellnet.ackinacki.org/graphql \
-    --rpc-url         https://ethereum-sepolia-rpc.publicnode.com \
-    --bridge-address  0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7 \
-    --eth-private-key "$BURNER_PRIVATE_KEY" \
-    --aggregator-dir  ../bridge-evm-aggregator \
-    --verifiers-dir   ../../contracts/ethereum/verifiers \
-    --params-dir      ../bridge-prover-libraries/params \
-    --snark-dir       ./work_dir/shplonk-snark \
-    --pk-cache-dir    ../bridge-prover-libraries/params/pk_cache \
-    --work-dir        ./work_dir \
-    --state-dir       ./withdraw-state
+    --from       "$WITHDRAW_FROM" \
+    --from-keys  "$WITHDRAW_FROM_KEYS" \
+    --to         "$WITHDRAW_TO" \
+    --to-chain   "$WITHDRAW_TO_CHAIN" \
+    --amount     "$WITHDRAW_AMOUNT"
 ```
 
-Equivalent, shorter form once you've confirmed the invocation shape:
+Equivalent, shorter form:
 
 ```bash
-scripts/local_smoke.sh          # same command; reads paths from config/bridge_config
+scripts/local_smoke.sh          # same command; canonicalizes $BRIDGE_SNARK_DIR to absolute
 ```
+
+Any of the plumbing values (`--rpc-url`, `--bridge-address`, etc.)
+can still be passed as explicit flags to override the profile for a
+single invocation — clap resolves in precedence order **explicit
+`--flag` > shell env > profile file > compiled default**.
 
 **Expected dry-run log — success markers on stderr:**
 
@@ -502,21 +510,27 @@ Located under `scripts/`:
 | Script                     | Purpose |
 |----------------------------|---------|
 | `deploy_msig_and_mint.sh`  | Deploy a fresh single-custodian AN multisig + mint 1 USDC on ECC[3]. Emits eval-able `export WITHDRAW_FROM=…` / `WITHDRAW_FROM_KEYS=…` lines on stdout. See Step 2. |
-| `deploy_msig_and_mint.py`  | Python driver behind the `.sh`. Override defaults via `MODE=`, `NETWORK=`, `GRAPHQL_URL=`, `WORK_DIR=`, `USDC_BRIDGE_KEY_PATH=` env vars. |
-| `local_smoke.sh`           | `--dry-run` wrapper — same command as Step 4, reads paths from `config/bridge_config`. |
-| `live_smoke.sh`            | Real-submit wrapper — same command as Step 5. |
+| `deploy_msig_and_mint.py`  | Python driver behind the `.sh`. Consumes the same `$BRIDGE_CONFIG` profile as the Rust CLI — `NETWORK`, `BRIDGE_GQL_ENDPOINT`, `USDC_BRIDGE_KEY_PATH` all come from there. `BRIDGE_WORK_DIR` optional override. |
+| `local_smoke.sh`           | `--dry-run` wrapper — same command as Step 4; reads all plumbing from `$BRIDGE_CONFIG` (default: `config/bridge_config`). |
+| `live_smoke.sh`            | Real-submit wrapper — same command as Step 5. Same profile handshake. |
 
-Both smoke wrappers source `config/bridge_config` and expect the five
-identity vars (`WITHDRAW_FROM`, `WITHDRAW_FROM_KEYS`, `WITHDRAW_TO`,
-`WITHDRAW_TO_CHAIN`, `WITHDRAW_AMOUNT`) plus `BURNER_PRIVATE_KEY` to
-be exported in the shell.
+All three wrappers pick up the network profile via `$BRIDGE_CONFIG`
+(default: `config/bridge_config`, a symlink to `bridge_config.shellnet`)
+and expect the five per-withdrawal identity vars (`WITHDRAW_FROM`,
+`WITHDRAW_FROM_KEYS`, `WITHDRAW_TO`, `WITHDRAW_TO_CHAIN`,
+`WITHDRAW_AMOUNT`) plus `BURNER_PRIVATE_KEY` to be exported in the
+shell. Switch networks by re-exporting `$BRIDGE_CONFIG` — no other
+change.
 
 ## File layout
 
 ```
 crates/ackinacki-bridge/                       ← run cwd
 ├── config/
-│   └── bridge_config                          ← single per-CLI env file (RPC, GQL, dirs, BRIDGE_ADDRESS)
+│   ├── bridge_config                          ← default profile symlink → bridge_config.shellnet
+│   ├── bridge_config.shellnet                 ← pinned shellnet L2 reference deploy
+│   ├── bridge_config.local                    ← local devnet
+│   └── bridge_config.mainnet                  ← placeholder
 ├── docs/
 │   └── advanced_user_withdraw_runbook.md      ← self-deploy + deep failure diagnostics
 ├── scripts/                                   ← see § Scripts

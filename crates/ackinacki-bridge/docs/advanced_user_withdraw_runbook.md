@@ -102,17 +102,42 @@ the right choice for iterating on the deploy pipeline itself.
 
 ## Wallet + bridge_config for a self-deploy
 
-The CLI's `bridge_config` file has one deploy-dependent field
-(`BRIDGE_ADDRESS`) — everything else (`RPC_URL`, `BRIDGE_GQL_ENDPOINT`,
-`BRIDGE_PARAMS_DIR`, `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR`)
-is deploy-independent. When you stand up your own bridge with
-`scripts/deploy_bridge_bundle.sh`, the wrapper writes the new
-address (plus daemon-only settings like `BRIDGE_BOOTSTRAP_SEQNO`,
-`BRIDGE_ANCHOR_LEVEL`) into `../bridge-prover-libraries/L{1,2}_config/env`.
-Copy the emitted `BRIDGE_ADDRESS` into `config/bridge_config`
-(overwriting the pinned shellnet value) and the CLI is pointed at
-your instance. The daemon-only settings stay in `L{1,2}_config/env`
-where `daemon-live` picks them up — the CLI does not read them.
+The CLI resolves all network config from the profile pointed to by
+`$BRIDGE_CONFIG` (default: `config/bridge_config`, a symlink to
+`bridge_config.shellnet`). Only `BRIDGE_ADDRESS` is deploy-dependent
+— every other key (`RPC_URL`, `BRIDGE_GQL_ENDPOINT`,
+`BRIDGE_PARAMS_DIR`, `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR`,
+`BRIDGE_ANCHOR_LAYER`, `BRIDGE_I_KNOW_THE_WAIT`,
+`USDC_BRIDGE_ACCOUNT_ID`) is deploy-independent.
+
+**Three ways to point the CLI at your self-deployed bridge, cheapest first:**
+
+1. **Shadow-env for a single shell**  — the shortest path:
+   ```bash
+   export BRIDGE_CONFIG=./config/bridge_config           # shellnet defaults
+   export BRIDGE_ADDRESS=0xYourDeploy                    # shell env wins
+   ```
+2. **Edit the local profile**  — persistent across shells, one-line sed:
+   ```bash
+   export BRIDGE_CONFIG=./config/bridge_config.local
+   sed -i.bak "s/^# *BRIDGE_ADDRESS=.*/BRIDGE_ADDRESS=0xYourDeploy/" "$BRIDGE_CONFIG"
+   ```
+3. **Add a named profile** — for a real ongoing environment (staging,
+   private testnet, mainnet):
+   ```bash
+   cp config/bridge_config.shellnet config/bridge_config.staging
+   $EDITOR config/bridge_config.staging                  # replace URLs + BRIDGE_ADDRESS
+   export BRIDGE_CONFIG=./config/bridge_config.staging
+   ```
+   No rebuild required — `$BRIDGE_CONFIG` is honored at every CLI
+   startup.
+
+When you stand up your own bridge with `scripts/deploy_bridge_bundle.sh`,
+the wrapper writes the new address (plus daemon-only settings like
+`BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`) into
+`../bridge-prover-libraries/L{1,2}_config/env`. Those daemon-only
+settings stay there — the CLI does not read them. Only
+`BRIDGE_ADDRESS` needs to migrate into your CLI-side profile.
 
 For wallet creation + Sepolia funding follow the same steps as the
 default README (`cast wallet new`, pk910 or Google Cloud faucet); the
@@ -171,12 +196,16 @@ saves the ~2 s cargo-startup on each call.
 
 ```bash
 cd crates/ackinacki-bridge
-export BURNER_PRIVATE_KEY=0x…                   # your own Sepolia burner
-set -a && source config/bridge_config && set +a
+export BURNER_PRIVATE_KEY=0x…                                # your own Sepolia burner
+export BRIDGE_CONFIG=./config/bridge_config                  # symlink → bridge_config.shellnet
+# CLI auto-sources this; we ALSO source into the current shell so the
+# sanity loop below can see the values.
+set -a && source "$BRIDGE_CONFIG" && set +a
 
 for v in \
   RPC_URL BRIDGE_ADDRESS BURNER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
-  BRIDGE_AGGREGATOR_DIR BRIDGE_VERIFIERS_DIR BRIDGE_PARAMS_DIR
+  BRIDGE_AGGREGATOR_DIR BRIDGE_VERIFIERS_DIR BRIDGE_PARAMS_DIR \
+  USDC_BRIDGE_ACCOUNT_ID BRIDGE_ANCHOR_LAYER
 do
   [ -n "${!v}" ] && echo "  ok  $v" || echo "  FAIL $v"
 done
@@ -232,11 +261,18 @@ python3 -c "print('L2-aligned:', $LAST % 16384 == 0, 'last_seen:', $LAST)"
 # If False → redeploy (L1 seed consumed by mistake)
 ```
 
-Then update the CLI-side `crates/ackinacki-bridge/config/bridge_config`:
+Then either **(a) point BRIDGE_CONFIG at your local profile** and paste
+the address into it — cleanest for repeated self-deploy work:
 
 ```bash
-sed -i.bak "s/^BRIDGE_ADDRESS=.*/BRIDGE_ADDRESS=$BRIDGE/" \
-  ../ackinacki-bridge/config/bridge_config
+export BRIDGE_CONFIG=../ackinacki-bridge/config/bridge_config.local
+sed -i.bak "s/^# *BRIDGE_ADDRESS=.*/BRIDGE_ADDRESS=$BRIDGE/" "$BRIDGE_CONFIG"
+```
+
+**or (b) shadow the shellnet-profile default for a single invocation**:
+
+```bash
+export BRIDGE_ADDRESS=$BRIDGE   # shell env wins over profile-file value
 ```
 
 ### Step L2 — Treasury seed
@@ -514,10 +550,17 @@ df   ../bridge-prover-libraries/params/      # free disk (need ≥20 GB headroom
   timeout:
 
   ```bash
+  # Same 5 intent flags as README Step 5 — everything else comes from
+  # $BRIDGE_CONFIG. Only new arg is the timeout override.
   cargo run --release -p ackinacki-bridge \
     --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
-    withdraw ...same flags as README Step 5... \
-    --prover-timeout-s 3600
+    withdraw \
+      --from       "$WITHDRAW_FROM" \
+      --from-keys  "$WITHDRAW_FROM_KEYS" \
+      --to         "$WITHDRAW_TO" \
+      --to-chain   "$WITHDRAW_TO_CHAIN" \
+      --amount     "$WITHDRAW_AMOUNT" \
+      --prover-timeout-s 3600
   ```
 
 - If the log shows swap thrash, the OOM is real — don't just extend
@@ -709,7 +752,10 @@ just the CLI-side files see the README's file layout section.
 ```
 crates/ackinacki-bridge/                       ← CLI run cwd
 ├── config/
-│   └── bridge_config                          ← per-CLI env file (RPC, GQL, dirs, BRIDGE_ADDRESS)
+│   ├── bridge_config                          ← default profile symlink → bridge_config.shellnet
+│   ├── bridge_config.shellnet                 ← pinned shellnet L2 reference deploy
+│   ├── bridge_config.local                    ← local docker-compose devnet
+│   └── bridge_config.mainnet                  ← placeholder (uncomment + fill when mainnet lives)
 ├── docs/
 │   └── advanced_user_withdraw_runbook.md      ← this doc
 ├── scripts/                                   ← see README § Scripts

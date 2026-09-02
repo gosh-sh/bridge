@@ -1,0 +1,102 @@
+# bridge_config.shellnet — per-network profile for `ackinacki-bridge`.
+#
+# WHAT IT IS
+# ----------
+# One-of-N profile files consumed by the `ackinacki-bridge` CLI. The CLI
+# auto-sources the file pointed to by the `BRIDGE_CONFIG` env var at
+# startup (before clap resolves --flag / env= defaults). Precedence:
+#     explicit --flag > shell env > profile file > compiled default.
+#
+# Ships alongside `bridge_config.local` (devnet) and
+# `bridge_config.mainnet` (placeholder). `bridge_config` (no suffix) is
+# a symlink to this file — that's the pinned default for third-party
+# users of the shellnet reference deploy.
+#
+# HOW TO CONSUME
+# --------------
+#   cd crates/ackinacki-bridge
+#   export BURNER_PRIVATE_KEY=0x…                        # your own key
+#   export BRIDGE_CONFIG=./config/bridge_config          # symlink → .shellnet
+#   ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw \
+#       --from … --from-keys … --to … --to-chain 11155111 --amount 1.000000
+#
+# Switching networks is a one-liner:
+#   export BRIDGE_CONFIG=./config/bridge_config.local
+#
+# BURNER_PRIVATE_KEY is deliberately NOT in this file — it is per-operator,
+# not per-network. Export it in your shell (or a personal, git-ignored env
+# file) before invoking the CLI. See README.md "Quick start" for wallet
+# creation + Sepolia funding via the pk910 PoW or Google Cloud Web3
+# faucets. Never reuse a wallet that holds real funds; never commit the
+# private key.
+#
+# Relative paths below are anchored to the working directory
+# `crates/ackinacki-bridge/`.
+
+# --- Ethereum side (Sepolia) --------------------------------------------------
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+
+# --- Acki Nacki side (shellnet) -----------------------------------------------
+NETWORK=shellnet.ackinacki.org
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+
+# On-chain USDCBridge account id (64 hex, no `0x`). Shellnet canonical
+# palindromic `1a1a…1a1a`. The dapp_id is resolved live via GraphQL, so
+# only the account id is needed here.
+USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
+
+# Partner-provided bridge-owner key for `USDCBridge.mintAndSend`. Used
+# only by `scripts/deploy_msig_and_mint.py` to seed a fresh multisig
+# with 1 USDC on ECC[3]. The Rust CLI does not read this.
+USDC_BRIDGE_KEY_PATH=../bridge-prover-libraries/python/contracts/USDCBridge.shellnet.keys.json
+
+# --- L2 anchor selection ------------------------------------------------------
+# The pinned shellnet deploy is L2-anchored (anchor_level=2); the CLI
+# refuses to talk to it without the anchor flag, and --i-know-the-wait
+# acknowledges the ~91 min per-bundle L2 cadence that stage 4b
+# (wait-for-coverage) may block on.
+BRIDGE_ANCHOR_LAYER=2
+BRIDGE_I_KNOW_THE_WAIT=true
+
+# --- local dirs ---------------------------------------------------------------
+# `params/` holds ~17 GB of SRS + per-circuit vk/pk files, shared with
+# the bundle daemon. Do NOT wipe — keygen would re-burn ~7 min per
+# circuit.
+BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params
+
+# pk cache dir passed through to the C4 aggregator subprocess.
+BRIDGE_PK_CACHE_DIR=../bridge-prover-libraries/params/pk_cache
+
+# Per-withdrawal working directory (bundle_out, per-run logs).
+BRIDGE_WORK_DIR=./work_dir
+
+# Aggregator scratch dir. Must be an absolute path resolvable from the
+# aggregate-proof subprocess CWD — the shell wrappers turn this into an
+# absolute path before invoking cargo run.
+BRIDGE_SNARK_DIR=./work_dir/shplonk-snark
+
+# Where per-withdrawal idempotency state files live. Defaults to
+# `$HOME/.bridge-withdraw-state/` if unset; kept per-user, survives
+# tree moves (see `src/orchestrator.rs::default_state_dir`).
+BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
+
+# --- SHPLONK aggregation (mandatory) ------------------------------------------
+# The on-chain AckiNackiBridge verifier only accepts aggregated calldata.
+# The CLI refuses to submit without both dirs resolving.
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+
+# --- Deploy target ------------------------------------------------------------
+# Currently pinned to the shellnet team's L2-anchored reference deploy
+# on Sepolia. The server-side bundle relayer that advances this contract
+# runs L2 only. See README.md Quick start for the default-user flow.
+#
+# Advanced users who ran their own `deploy_bridge_bundle.sh` should
+# overwrite this with the `BRIDGE_ADDRESS` from their own
+# `L{1,2}_config/env` — see `docs/advanced_user_withdraw_runbook.md`
+# Step L1. L1 is testing-only; L2 is the production shape.
+#
+# Comment out to force the CLI to fail loudly ("missing required
+# argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
+# bridge.
+BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7

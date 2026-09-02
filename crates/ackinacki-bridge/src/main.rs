@@ -30,6 +30,17 @@ use tracing_subscriber::EnvFilter;
 use crate::args::{Cli, Command};
 
 fn main() -> ProcExitCode {
+    // Auto-source $BRIDGE_CONFIG profile file into process env BEFORE
+    // clap reads any env= attr. dotenvy::from_path does NOT overwrite
+    // vars already set in the shell — so precedence is preserved:
+    //     explicit --flag > shell env > profile file > compiled default.
+    // BRIDGE_CONFIG unset = no-op (env-only invocations still work).
+    if let Ok(path) = std::env::var("BRIDGE_CONFIG") {
+        if let Err(e) = dotenvy::from_path(&path) {
+            eprintln!("fatal: BRIDGE_CONFIG={path} could not be loaded: {e}");
+            return ProcExitCode::from(1);
+        }
+    }
     let cli = Cli::parse();
     init_tracing();
 

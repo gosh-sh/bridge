@@ -24,6 +24,58 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`ackinacki-bridge withdraw` invocation reduced to five per-request
+  flags; all network endpoints/plumbing resolved from `$BRIDGE_CONFIG`
+  profile file.**
+  The withdraw call is now:
+  ```
+  ackinacki-bridge withdraw \
+      --from <dapp_id::account_id> --from-keys <path> \
+      --to <0x…> --to-chain <chain-id> --amount <usdc> \
+      [--dry-run] [--yes] [--json]
+  ```
+  Everything else (`--rpc-url`, `--bridge-address`, `--gql-endpoint`,
+  `--anchor-layer`, `--i-know-the-wait`, `--params-dir`,
+  `--aggregator-dir`, `--verifiers-dir`, `--work-dir`, `--snark-dir`,
+  `--pk-cache-dir`, `--state-dir`, `--usdc-bridge-account`) is picked
+  up from the profile file pointed to by `$BRIDGE_CONFIG` — the CLI
+  auto-sources it at startup via `dotenvy` before clap reads any
+  `env=` attr. Precedence: **explicit `--flag` > shell env > profile
+  file > compiled default**. Existing `--flag`-heavy invocations
+  continue to work.
+    - `config/bridge_config` is now a **symlink** to the new
+      `config/bridge_config.shellnet` (identical content to the
+      pre-split file). Two sibling profiles ship alongside:
+      `bridge_config.local` (local docker-compose devnet) and
+      `bridge_config.mainnet` (commented-out placeholder for the
+      future mainnet deploy). Switching network is a one-liner:
+      `export BRIDGE_CONFIG=./config/bridge_config.local`.
+    - Four flags gained `env=` attrs so they can live in the profile
+      file instead of the CLI invocation: `BRIDGE_ANCHOR_LAYER`,
+      `BRIDGE_I_KNOW_THE_WAIT` (accepts `true`/`false`/`1`/`0`),
+      `BRIDGE_WORK_DIR`, `BRIDGE_SNARK_DIR`.
+    - The hardcoded shellnet default on `--usdc-bridge-account`
+      (`1a1a…1a1a`) is removed from `src/args.rs`; the value now
+      comes from `USDC_BRIDGE_ACCOUNT_ID` in each profile (so a
+      wrong-network profile fails loudly with a clap "missing
+      required argument" instead of silently talking to the shellnet
+      canonical account).
+    - `scripts/local_smoke.sh` and `scripts/live_smoke.sh` drop
+      ~90 lines each — they now just export `$BRIDGE_CONFIG`,
+      canonicalize `$BRIDGE_SNARK_DIR` to absolute (the aggregator
+      subprocess CWD-changes), and pass only the 5 intent flags.
+      The old `BRIDGE_CONFIG_DIR` env-var fallback for relayer-style
+      `L{1,2}_config/env` sourcing is removed — self-deploy users
+      should either point `$BRIDGE_CONFIG` at their local profile or
+      shadow `BRIDGE_ADDRESS` in the shell.
+    - `scripts/deploy_msig_and_mint.py` drops its `MODE=shellnet|local`
+      branch and reads `NETWORK` / `BRIDGE_GQL_ENDPOINT` /
+      `USDC_BRIDGE_KEY_PATH` from the same profile file. Local
+      detection is now derived from the resolved `NETWORK` URL
+      (`127.*` / `localhost`), not a mode flag. Adding a new network
+      is a single new profile file — no Python edit.
+    - New dep: `dotenvy = "0.15"` in `crates/ackinacki-bridge/Cargo.toml`.
+
 - **`ackinacki-bridge` docs split into a default-user runbook (README)
   and an advanced self-deploy runbook.**
   The previous single `docs/live_cli_withdraw_runbook.md` was one long

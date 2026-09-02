@@ -139,24 +139,23 @@ pub struct WithdrawArgs {
     #[arg(long, env = "BRIDGE_GQL_ENDPOINT", value_name = "URL")]
     pub gql_endpoint: String,
 
-    /// On-chain USDCBridge account id (64 hex, no `0x`). Default is the
-    /// shellnet canonical palindromic `1a1a…1a1a`. The dapp_id is
-    /// resolved live via GraphQL, so only the account id is needed here.
-    #[arg(
-        long,
-        env = "USDC_BRIDGE_ACCOUNT_ID",
-        default_value = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
-    )]
+    /// On-chain USDCBridge account id (64 hex, no `0x`). No compiled
+    /// default — supplied per network via `USDC_BRIDGE_ACCOUNT_ID` in
+    /// the profile file (see `config/bridge_config.shellnet` for the
+    /// shellnet palindromic `1a1a…1a1a`). The dapp_id is resolved live
+    /// via GraphQL, so only the account id is needed here.
+    #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID")]
     pub usdc_bridge_account: String,
 
     /// Anchor layer selection passed through to the enricher. Use `auto`
     /// (default) on L1 deploys; `2` with `--i-know-the-wait` on L2.
-    #[arg(long, default_value = "auto", value_name = "auto|1|2")]
+    #[arg(long, env = "BRIDGE_ANCHOR_LAYER", default_value = "auto", value_name = "auto|1|2")]
     pub anchor_layer: String,
 
     /// Acknowledge the L≥2 wait budget (up to ~101 min chain-time for L2).
     /// Required by the enricher when `--anchor-layer` is explicit ≥2.
-    #[arg(long)]
+    /// Env: `BRIDGE_I_KNOW_THE_WAIT=true|false`.
+    #[arg(long, env = "BRIDGE_I_KNOW_THE_WAIT")]
     pub i_know_the_wait: bool,
 
     // -- ETH side (submit) --
@@ -181,7 +180,7 @@ pub struct WithdrawArgs {
     pub verifiers_dir: PathBuf,
     #[arg(long, env = "BRIDGE_PARAMS_DIR")]
     pub params_dir: PathBuf,
-    #[arg(long, default_value = "./shplonk-snark")]
+    #[arg(long, env = "BRIDGE_SNARK_DIR", default_value = "./shplonk-snark")]
     pub snark_dir: PathBuf,
     #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
     pub pk_cache_dir: Option<PathBuf>,
@@ -189,13 +188,13 @@ pub struct WithdrawArgs {
     pub prover_out_dir: Option<PathBuf>,
     #[arg(long, default_value_t = 1800)]
     pub prover_timeout_s: u64,
-    #[arg(long)]
+    #[arg(long, env = "BRIDGE_WORK_DIR")]
     pub work_dir: PathBuf,
 
     // -- Idempotency --
     /// Directory holding per-withdrawal state files. Defaults to
-    /// `$BRIDGE_CONFIG_DIR/withdraw-state/` (matches the deploy config
-    /// scope so a fresh deploy gets a fresh table).
+    /// `$HOME/.bridge-withdraw-state/` — per-user, survives tree moves.
+    /// Profile files typically override this to a per-deploy path.
     #[arg(long, env = "BRIDGE_WITHDRAW_STATE_DIR")]
     pub state_dir: Option<PathBuf>,
 }

@@ -9,7 +9,8 @@
 //!   already present in the relayer driver.
 //!
 //! Storage layout: one JSON file per key under
-//! `$BRIDGE_CONFIG_DIR/withdraw-state/<hex-digest>.json`. Written on
+//! `$BRIDGE_WITHDRAW_STATE_DIR/<hex-digest>.json` (default:
+//! `$HOME/.bridge-withdraw-state/`). Written on
 //! every stage transition so a crash leaves a resumable trail. Files
 //! never contain key material, key paths, or ETH private keys — only
 //! chain-observable identifiers.

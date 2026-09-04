@@ -102,7 +102,10 @@ update, proves it (keygen + prove, ~7 min at k=19 on 48 threads) and calls
 ## Verifying against Sepolia
 
 `status.sh` prints `getHead` (finalized slot, execution block hash) next to
-the live `finality_update`. Independently, for any recorded hash:
+the live `finality_update`. The getter returns roots in the contract's
+encoding, `(hi << 128) | lo` over little-endian 16-byte halves (the same
+convention `USDCBridge._parseBlockHash` uses); `status.sh` also prints the
+Ethereum form (each half byte-reversed). Independently, for any recorded hash:
 
 ```bash
 curl -s https://ethereum-sepolia-rpc.publicnode.com -H 'content-type: application/json' \

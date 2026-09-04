@@ -409,7 +409,11 @@ contract EthBeaconLightClient {
     }
 
     function _notifySink(uint256 h) private {
-        if (_usdcBridge != address(0)) {
+        // An unset `_usdcBridge` is `addr_none` (never written), which is not
+        // `address(0)`: comparing only against `address(0)` sent the message
+        // to `addr_none`, the action phase aborted with result code 34 and
+        // the whole `submitUpdate` rolled back on a standalone deployment.
+        if (!_usdcBridge.isNone() && _usdcBridge != address(0)) {
             // bounce: true so a rejected sink returns the 1 vmshell and
             // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
             // is the retry (submitUpdate would hit ERR_STALE_UPDATE).

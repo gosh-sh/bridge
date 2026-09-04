@@ -61,6 +61,17 @@ here and how versions are assigned.
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
+### Fixed
+
+- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
+  message to `addr_none` when no `USDCBridge` was configured: the unset
+  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
+  action phase aborted with result code 34 and the whole `submitUpdate` was
+  rolled back although the proof had verified. Guard is now
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)`. Observed on the first
+  shellnet shadow deploy (2026-09-04); `EthBeaconLightClient_rotate_decider.patch`
+  still carries the old guard.
+
 ### Changed
 
 - **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded

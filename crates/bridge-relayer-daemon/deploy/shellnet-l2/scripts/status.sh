@@ -52,17 +52,34 @@ printf 'chain_id=%s bridge=%s cursor=%s EOA=%s nonce=%s/%s balance_wei=%s\n' \
 
 printf '\n=== Shellnet ===\n'
 payload='{"query":"{ blockchain { blocks(last: 1) { edges { node { seq_no thread_id } } } } }"}'
-response=$(curl --fail-with-body --silent --show-error --max-time 20 \
-  -H 'content-type: application/json' --data-binary "$payload" "$BRIDGE_GQL_ENDPOINT")
-head=$(jq -er '.data.blockchain.blocks.edges[-1].node.seq_no' <<<"$response")
-thread=$(jq -er '.data.blockchain.blocks.edges[-1].node.thread_id' <<<"$response")
-next=$((cursor + 16384))
-remaining=$((next - head))
-if (( remaining < 0 )); then
-  remaining=0
+# Same order the daemon uses: primary first, then the failover list.
+IFS=',' read -r -a gql_endpoints <<<"${BRIDGE_GQL_ENDPOINT},${BRIDGE_GQL_FAILOVER_ENDPOINTS:-}"
+response=''
+for endpoint in "${gql_endpoints[@]}"; do
+  endpoint=${endpoint//[[:space:]]/}
+  [[ -n "$endpoint" ]] || continue
+  if response=$(curl --fail-with-body --silent --show-error --max-time 20 \
+    -H 'content-type: application/json' --data-binary "$payload" "$endpoint" 2>&1) &&
+    jq -e '.data.blockchain.blocks.edges | length > 0' >/dev/null <<<"$response"; then
+    printf 'answered_by=%s\n' "$endpoint"
+    break
+  fi
+  printf 'endpoint %s unavailable: %s\n' "$endpoint" "$(head -c 200 <<<"$response")"
+  response=''
+done
+if [[ -n "$response" ]]; then
+  head=$(jq -er '.data.blockchain.blocks.edges[-1].node.seq_no' <<<"$response")
+  thread=$(jq -er '.data.blockchain.blocks.edges[-1].node.thread_id' <<<"$response")
+  next=$((cursor + 16384))
+  remaining=$((next - head))
+  if (( remaining < 0 )); then
+    remaining=0
+  fi
+  printf 'head=%s thread=%s next_l2_boundary=%s blocks_remaining=%s\n' \
+    "$head" "$thread" "$next" "$remaining"
+else
+  printf 'shellnet GQL unavailable on every configured endpoint\n'
 fi
-printf 'head=%s thread=%s next_l2_boundary=%s blocks_remaining=%s\n' \
-  "$head" "$thread" "$next" "$remaining"
 
 printf '\n=== Persistent state ===\n'
 relayer_state=$runtime_root/L2_config/relayer-state.json
@@ -108,6 +125,15 @@ du -sh \
   "$runtime_root/params/pk_cache" \
   "$runtime_root/submissions" \
   "$runtime_root/tmp"
+
+printf '\n=== GraphQL metrics ===\n'
+metrics_listen=${RELAYER_METRICS_LISTEN:-127.0.0.1:9464}
+if metrics=$(curl --silent --show-error --max-time 5 "http://$metrics_listen/metrics" 2>&1); then
+  grep -E '^relayer_gql_(requests|errors|failovers|full_rounds)_total' <<<"$metrics" ||
+    printf 'no relayer_gql_* samples yet\n'
+else
+  printf 'metrics endpoint http://%s/metrics unavailable: %s\n' "$metrics_listen" "$metrics"
+fi
 
 printf '\n=== Recent significant logs ===\n'
 docker compose logs --no-color --since 6h relayer 2>&1 |

@@ -54,6 +54,7 @@ bridge-event-witness = { path = "../bridge-event-witness" }
 # SRS downsize + serialize in `ensure_srs_for_event`. Workspace = ensures the
 # same halo2-axiom rev as bridge-prover-lib / bridge-snark-wrap resolve to.
 halo2-base = { workspace = true }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }

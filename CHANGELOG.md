@@ -178,6 +178,44 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`relayer daemon-live` GraphQL failover + retry.** The daemon now takes a
+  primary Acki Nacki GraphQL endpoint (`--gql-endpoint` /
+  `BRIDGE_GQL_ENDPOINT`, unchanged) plus an optional ordered failover list
+  `--gql-failover-endpoints` / `BRIDGE_GQL_FAILOVER_ENDPOINTS` (comma-separated,
+  e.g. `http://bm1:8080/graphql,http://bm2:8080/graphql`). Every GraphQL
+  request starts at the primary, retries it 3 times 1 s apart, then moves to
+  the next endpoint, and cycles through the whole list until one attempt
+  succeeds — there is no stickiness and no give-up: a request that never
+  succeeds blocks the daemon tick, which is what the new metrics and the
+  error-rate alert are for. Any failure counts: transport error, timeout,
+  non-2xx status, undecodable body, a GraphQL `errors` array, and a `null`
+  block for the block/attestation/bk-set-update queries the daemon depends on.
+  Tuning (all optional): `BRIDGE_GQL_RETRIES_PER_ENDPOINT` (3),
+  `BRIDGE_GQL_RETRY_DELAY_MS` (1000), `BRIDGE_GQL_REQUEST_TIMEOUT_SECS` (30),
+  `BRIDGE_GQL_CONNECT_TIMEOUT_SECS` (10, new — a black-holed endpoint no longer
+  costs the full request timeout per attempt), `BRIDGE_GQL_MAX_ROUNDS` (unset =
+  loop forever). Other `bridge-gql-fetcher` users (`bridge-prover-daemon`,
+  `bridge-verifier-daemon`, `compute_bridge_anchors`, `ackinacki-bridge`,
+  `relayer withdraw-e2e`) keep the previous single-attempt behaviour.
+- **`relayer daemon-live --metrics-addr` / `RELAYER_METRICS_ADDR`** (e.g.
+  `0.0.0.0:9464`) starts a Prometheus text exporter at `GET /metrics`. Unset =
+  no listener. First metrics, all labelled by GraphQL `endpoint` and `op`:
+  `relayer_gql_requests_total` (attempts), `relayer_gql_errors_total{kind}`
+  (`transport|timeout|http_status|decode|graphql_error|null_data`),
+  `relayer_gql_failovers_total{from,to}`, `relayer_gql_full_rounds_total` (a
+  request went through every endpoint without success) and the histogram
+  `relayer_gql_request_duration_seconds{outcome}`. Alert example:
+  `sum(rate(relayer_gql_errors_total[1m])) * 60 > 10`.
+- Compose kit (`crates/bridge-relayer-daemon/deploy/shellnet-l2/`): the
+  `relayer` service now sets `RELAYER_METRICS_ADDR=0.0.0.0:9464` and publishes
+  it on `${RELAYER_METRICS_LISTEN:-127.0.0.1:9464}` (set the scrape-network
+  address in `.env`); `runtime.env.example` gained
+  `BRIDGE_GQL_FAILOVER_ENDPOINTS`; `preflight.sh` (run by the container
+  entrypoint on every start) now fails only when neither the primary nor any
+  failover endpoint answers, so one dead Block Manager no longer keeps the
+  container in a restart loop; `status.sh` queries the endpoints in the same
+  order and prints the `relayer_gql_*` counters.
+
 - **New binary `ackinacki-bridge`** — end-user CLI for withdrawing
   USDC from an Acki Nacki multisig to an EVM recipient via the bridge.
   Third-party-operator-facing counterpart to `daemon-live`: the daemon

@@ -342,6 +342,20 @@ enum Cmd {
         /// Acki Nacki GraphQL endpoint (same as partner `BRIDGE_GQL_ENDPOINT`).
         #[arg(long, env = "BRIDGE_GQL_ENDPOINT")]
         gql_endpoint: String,
+        /// Comma-separated failover GraphQL endpoints, tried in order after
+        /// `--gql-endpoint` exhausts its retries. Every request starts from
+        /// `--gql-endpoint` and cycles through the whole list until one
+        /// attempt succeeds. Retry policy: `BRIDGE_GQL_RETRIES_PER_ENDPOINT`
+        /// (3), `BRIDGE_GQL_RETRY_DELAY_MS` (1000),
+        /// `BRIDGE_GQL_REQUEST_TIMEOUT_SECS` (30),
+        /// `BRIDGE_GQL_CONNECT_TIMEOUT_SECS` (10), `BRIDGE_GQL_MAX_ROUNDS`
+        /// (unset = loop forever).
+        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS")]
+        gql_failover_endpoints: Option<String>,
+        /// Bind address for the Prometheus text exporter (`GET /metrics`),
+        /// e.g. `0.0.0.0:9464`. Unset = no exporter.
+        #[arg(long, env = "RELAYER_METRICS_ADDR")]
+        metrics_addr: Option<std::net::SocketAddr>,
         /// Directory with SRS + circuit PKs (`KeyManager`).
         #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
         params_dir: PathBuf,
@@ -764,6 +778,8 @@ async fn main() -> anyhow::Result<()> {
             verifiers_dir,
             pk_cache_dir,
             anchor_level,
+            gql_failover_endpoints,
+            metrics_addr,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -780,12 +796,23 @@ async fn main() -> anyhow::Result<()> {
             };
             let anchor_mode = bridge_prover_lib::AnchorMode::from_level(anchor_level)
                 .map_err(|e| anyhow::anyhow!("--anchor-level: {e}"))?;
+            // The exporter must exist before any `metrics::describe_*`
+            // call, i.e. before the GraphQL client is built inside
+            // `run_daemon_live`.
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr)?;
+            }
+            let gql_failover_endpoints = gql_failover_endpoints
+                .as_deref()
+                .map(bridge_gql_fetcher::gql_client::parse_endpoint_list)
+                .unwrap_or_default();
             run_daemon_live(
                 args.state,
                 rpc_url,
                 bridge_address,
                 private_key,
                 gql_endpoint,
+                gql_failover_endpoints,
                 params_dir,
                 prover_state_dir,
                 bk_set_config,
@@ -1959,6 +1986,7 @@ async fn run_daemon_live(
     bridge_address: Address,
     private_key: String,
     gql_endpoint: String,
+    gql_failover_endpoints: Vec<String>,
     params_dir: PathBuf,
     prover_state_dir: PathBuf,
     bk_set_config: PathBuf,
@@ -1967,7 +1995,7 @@ async fn run_daemon_live(
     aggregation: C12AggregationCfg,
     anchor_mode: bridge_prover_lib::AnchorMode,
 ) -> anyhow::Result<()> {
-    use bridge_gql_fetcher::gql_client::create_client;
+    use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
         bk_set_bootstrap,
         bridge_state::BridgeState,
@@ -1983,8 +2011,23 @@ async fn run_daemon_live(
     let prover_state_path = state_paths.prover_state_json.clone();
     let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
 
-    let gql = create_client(&gql_endpoint)
+    // Primary + failover endpoints with the daemon's retry policy: any
+    // failed attempt (transport, HTTP status, GraphQL `errors`, missing
+    // block) is retried on the same endpoint, then on the next one, cycling
+    // until an attempt succeeds. Counted in `relayer_gql_*` metrics.
+    let gql_cfg = GqlClientConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("GraphQL client configuration: {e}"))?;
+    let gql = create_client_with_failover(&gql_endpoint, &gql_failover_endpoints, gql_cfg)
         .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+    info!(
+        endpoints = ?gql.endpoints(),
+        retries_per_endpoint = gql.config().retries_per_endpoint,
+        retry_delay_ms = gql.config().retry_delay.as_millis() as u64,
+        request_timeout_secs = gql.config().request_timeout.as_secs(),
+        connect_timeout_secs = gql.config().connect_timeout.as_secs(),
+        max_rounds = ?gql.config().max_rounds,
+        "daemon-live: GraphQL endpoints",
+    );
 
     // Load BK set via the shared bootstrap helper (aligned with
     // `bridge-prover-daemon/src/main.rs`). Mode is selected by
@@ -2311,6 +2354,27 @@ where
         .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon-live stopped");
+    Ok(())
+}
+
+/// Serve the Prometheus text format at `http://<addr>/metrics` for the
+/// lifetime of the process. Every `metrics::*` macro in this binary and in
+/// its library crates (e.g. `relayer_gql_*` in `bridge-gql-fetcher`) records
+/// into this exporter. Histogram buckets cover sub-second RPC round-trips up
+/// to ten-minute proving stages.
+fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    const BUCKETS: &[f64] = &[
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    ];
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(BUCKETS)
+        .map_err(|e| anyhow::anyhow!("metrics exporter buckets: {e}"))?
+        .install()
+        .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
+    info!(%addr, "metrics exporter listening (GET /metrics)");
     Ok(())
 }
 

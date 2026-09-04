@@ -45,6 +45,8 @@ import json, sys
 full = {f["name"]: f for f in json.load(open(sys.argv[1]))["functions"]}
 slim = json.load(open(sys.argv[2]))["functions"]
 for f in slim:
+    if f["name"] == "constructor":
+        continue  # deploy goes through tvm-cli with the compiled ABI, the relayer never constructs
     g = full.get(f["name"])
     assert g, f"relayer ABI function {f['name']} missing from compiled ABI"
     assert [(i["name"], i["type"]) for i in f["inputs"]] == [(i["name"], i["type"]) for i in g["inputs"]], f["name"]

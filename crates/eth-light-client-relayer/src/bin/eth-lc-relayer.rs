@@ -597,6 +597,7 @@ async fn ancestry_one(
     Ok(())
 }
 
+#[cfg(not(feature = "live-submit"))]
 fn live_submit_needs_feature() -> anyhow::Error {
     anyhow::anyhow!("rebuild with `--features live-submit` to submit to AN (or pass --dry-run)")
 }
@@ -946,7 +947,7 @@ async fn run_daemon(
             timeout: Duration::from_secs(prove_timeout_secs),
         });
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
-        return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+        run(attach_execution(relayer, eth_rpc_url)?, backoff).await
     }
 }
 

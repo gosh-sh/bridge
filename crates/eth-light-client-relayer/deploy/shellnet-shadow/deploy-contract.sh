@@ -50,9 +50,19 @@ if account_json "$DAPP_ADDR" | grep -q '"acc_type": *"Active"'; then
 else
     "$(dirname "$0")/fund-account.sh" "$ADDR_RAW" "$FUND"
     wait_account "$DAPP_ADDR" "Uninit" 24 || die "account did not appear after funding"
-    log "deployx (l1ChainId=$L1_CHAIN_ID, committee unset)"
-    tvm deployx --abi "$ABI" --keys "$KEYS" "$TVC" \
-        "{\"pubkey\":\"0x$PUB\",\"l1ChainId\":$L1_CHAIN_ID,\"committeeCommitment\":0,\"committeePeriod\":0}"
+    # Constructor parameter names come from the compiled ABI (positional:
+    # owner pubkey, L1 chain id, bootstrap commitment, bootstrap period).
+    CTOR_PARAMS="$(python3 - "$ABI" "$PUB" "$L1_CHAIN_ID" <<'PY'
+import json, sys
+abi, pub, chain = sys.argv[1:4]
+ctor = next(f for f in json.load(open(abi))["functions"] if f["name"] == "constructor")
+names = [i["name"] for i in ctor["inputs"]]
+assert len(names) == 4, names
+print(json.dumps({names[0]: "0x" + pub, names[1]: int(chain), names[2]: 0, names[3]: 0}))
+PY
+)"
+    log "deployx $CTOR_PARAMS"
+    tvm deployx --abi "$ABI" --keys "$KEYS" "$TVC" "$CTOR_PARAMS"
     wait_account "$DAPP_ADDR" "Active" 24 || die "contract did not become Active"
 fi
 

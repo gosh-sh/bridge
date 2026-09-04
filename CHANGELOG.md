@@ -12,6 +12,24 @@ here and how versions are assigned.
 
 ### Added
 
+- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
+  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
+  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
+  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
+  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
+  mainnet preset) now proves without code changes; the prover still defaults
+  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
+  The state file is pinned to the first `genesis_validators_root` it sees and
+  refuses a source on another network.
+- `eth-lc-relayer set-committee --bundle-dir …`: owner
+  `setCommitteeCommitment(commitment, period)` from a proven step bundle
+  (public-input word 5), recording the period in the state file. Bootstraps a
+  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
+  while `--no-rotate`.
+- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
+  a shadow instance on shellnet against Sepolia (build, SRS install, contract
+  compile with the Linux `sold` release, giver funding, deploy, status,
+  systemd unit, README).
 - `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
   Ethereum beacon light-client oracle. Polls `finality_update` **and**
   `light_client/updates` (current 512-committee), proves a step via
@@ -45,6 +63,29 @@ here and how versions are assigned.
 
 ### Changed
 
+- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
+  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
+  carried `32 - len` extra constant-equality cells and the VK depended on the
+  finalized block's `extra_data` length. The fixture VK was emitted over a
+  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
+  VkBlob and would have been rejected by the deployed contract. The chunk is
+  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
+  bound to the signed state by `execution_branch`). Regression test
+  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
+  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
+  `contracts/an/EthBeaconLightClient.sol` re-emitted; the tvm-sdk opcode
+  fixtures and `EthBeaconLightClient_rotate_decider.patch` still carry the old
+  blob and need the same rotation. Verified on Sepolia: the same blob comes
+  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
+  18 B of `extra_data`.
+- `crates/eth-light-client-relayer` builds with `--features live-submit`
+  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
+  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
+  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
+  compile.
+- `prove-one` and the daemon keep the prover transcript
+  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
+  stderr tail on failure instead of a bare exit status.
 - `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
   and, after the first accepted `submitUpdate`, issues the one-way owner flip
   (`USDCBridge.setLightClient` + `disableOwnerAnchors`,

@@ -549,6 +549,7 @@ async fn prove_one(
         prover_dir,
         srs_path,
         timeout: Duration::from_secs(timeout_secs),
+        log_dir: Some(out_dir.clone()),
     });
     let bundle = gen.generate_step(&update).await?;
     std::fs::create_dir_all(&out_dir)?;
@@ -876,6 +877,7 @@ async fn run_daemon(
             prover_dir,
             srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
             timeout: Duration::from_secs(prove_timeout_secs),
+            log_dir: Some(prover_log_dir(&state_path)),
         });
         let relayer = Relayer::new(
             cfg,
@@ -945,6 +947,7 @@ async fn run_daemon(
             prover_dir,
             srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
             timeout: Duration::from_secs(prove_timeout_secs),
+            log_dir: Some(prover_log_dir(&state_path)),
         });
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
         run(attach_execution(relayer, eth_rpc_url)?, backoff).await
@@ -973,6 +976,15 @@ where
             Ok(relayer)
         },
     }
+}
+
+/// `<state file dir>/prover-logs`: prover transcripts of the daemon's proves.
+fn prover_log_dir(state: &std::path::Path) -> PathBuf {
+    state
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("prover-logs")
 }
 
 async fn run<S, P, A>(mut relayer: Relayer<S, P, A>, backoff: BackoffConfig) -> anyhow::Result<()>

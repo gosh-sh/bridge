@@ -79,6 +79,11 @@ pub struct SubprocessProverConfig {
     pub prover_dir: PathBuf,
     pub srs_path: PathBuf,
     pub timeout: Duration,
+    /// Where to keep the prover transcript
+    /// (`prover-<attested_slot>-{stdout,stderr}.log`). `None` leaves it in
+    /// the per-run temp dir (lost after the run); the error message still
+    /// carries the stderr tail.
+    pub log_dir: Option<PathBuf>,
 }
 
 pub struct SubprocessProofGenerator {
@@ -141,8 +146,16 @@ impl SubprocessProofGenerator {
         // Keep the prover transcript next to the bundle: `prove-one` copies the
         // bundle out, the daemon's tempdir is dropped, so the error also
         // carries the stderr tail.
-        let _ = std::fs::write(out_dir.join("prover-stdout.log"), &output.stdout);
-        let _ = std::fs::write(out_dir.join("prover-stderr.log"), &output.stderr);
+        let log_dir = match &self.cfg.log_dir {
+            Some(d) => {
+                let _ = std::fs::create_dir_all(d);
+                d.clone()
+            },
+            None => out_dir.clone(),
+        };
+        let stem = format!("prover-{}", update.attested_slot);
+        let _ = std::fs::write(log_dir.join(format!("{stem}-stdout.log")), &output.stdout);
+        let _ = std::fs::write(log_dir.join(format!("{stem}-stderr.log")), &output.stderr);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: String = stderr
@@ -260,6 +273,7 @@ mod tests {
             prover_dir: ".".into(),
             srs_path: ".".into(),
             timeout: Duration::from_secs(1),
+            log_dir: None,
         });
         let err = gen.generate_step(&sample_update()).await.unwrap_err();
         match err {

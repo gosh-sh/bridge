@@ -40,7 +40,16 @@ chmod 600 "$KEYS"
 PUB="$(pubkey_of_keys "$KEYS")"
 log "owner pubkey 0x$PUB"
 
-ADDR_RAW="$(tvm_json genaddr "$TVC" --abi "$ABI" --setkey "$KEYS" | json_get raw_address)"
+# The address `deployx` uses is hash(code, initial data without the pubkey):
+# the contract keeps its owner in constructor storage, and tvm-cli 3.0.6
+# does not write the key into the data. `genaddr --setkey` predicts a
+# different (key-dependent) address, so derive it with an offline
+# `deploy_message` instead, and verify against what `deployx` reports.
+ADDR_RAW="$(tvm deploy_message --abi "$ABI" --keys "$KEYS" --raw --output "$CFG/.deploy-probe.boc" "$TVC" \
+    "{\"pubkey\":\"0x0\",\"l1ChainId\":1,\"bootstrapCommittee\":0,\"bootstrapPeriod\":0}" 2>/dev/null \
+    | sed -n "s/^Contract's address: //p" | tr -d '[:space:]')"
+rm -f "$CFG/.deploy-probe.boc"
+[[ "$ADDR_RAW" =~ ^0:[0-9a-f]{64}$ ]] || die "could not derive the contract address (got '$ADDR_RAW')"
 ACC="$(acc_id_of "$ADDR_RAW")"
 DAPP_ADDR="$(dapp_addr_self "$ACC")"
 log "contract address $ADDR_RAW  (cli form $DAPP_ADDR)"
@@ -62,7 +71,11 @@ print(json.dumps({names[0]: "0x" + pub, names[1]: int(chain), names[2]: 0, names
 PY
 )"
     log "deployx $CTOR_PARAMS"
-    tvm deployx --abi "$ABI" --keys "$KEYS" "$TVC" "$CTOR_PARAMS"
+    DEPLOY_OUT="$(tvm_json deployx --abi "$ABI" --keys "$KEYS" "$TVC" "$CTOR_PARAMS")"
+    printf '%s\n' "$DEPLOY_OUT" | grep -E '"(tx_hash|exit_code|aborted|account_id)"' >&2 || true
+    DEPLOYED="$(printf '%s' "$DEPLOY_OUT" | json_get account_id 2>/dev/null || true)"
+    [[ -z "$DEPLOYED" || "$DEPLOYED" == "$ACC" ]] \
+        || die "deployx reported account $DEPLOYED, expected $ACC (fund that address and rerun)"
     wait_account "$DAPP_ADDR" "Active" 24 || die "contract did not become Active"
 fi
 

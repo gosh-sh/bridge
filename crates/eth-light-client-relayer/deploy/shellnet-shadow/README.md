@@ -118,9 +118,17 @@ returns the same hash).
 
 ## Period hop (every ~27 h) while rotate is off
 
-The daemon logs `committee period advanced; rotate prove is off` and returns
-`RotateRequired` on every tick until the committee is advanced. Prove one
-update of the new period and hop with the owner key:
+With `--owner-hop` (the unit passes it) the daemon handles the jump itself:
+it proves a step of the new period, writes that proof's committee
+commitment for the signing period with the owner key
+(`setCommitteeCommitment`) and submits the same bundle as the first update
+of the period. The journal shows `owner hop: setCommitteeCommitment
+accepted`; `getCommitteeState` shows the new period.
+
+Without `--owner-hop` the daemon logs `committee period advanced; rotate
+prove is off` and returns `RotateRequired` on every tick until the committee
+is advanced by hand. Prove one update of the new period and hop with the
+owner key:
 
 ```bash
 systemctl stop eth-lc-relayer-shadow

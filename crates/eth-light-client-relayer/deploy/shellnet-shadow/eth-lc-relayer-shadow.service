@@ -17,7 +17,7 @@ Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 # no one-way owner flip, no USDCBridge wiring.
 ExecStart=/mnt/data/gosh-eth-lc-relayer/bin/eth-lc-relayer daemon \
     --state /mnt/data/gosh-eth-lc-relayer/state/eth-lc-relayer-state.json \
-    --no-rotate --no-flip-owner \
+    --no-rotate --no-flip-owner --owner-hop \
     --poll-secs 64 --prove-timeout-secs 7200
 Restart=on-failure
 RestartSec=60

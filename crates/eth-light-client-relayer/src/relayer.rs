@@ -28,6 +28,12 @@ pub struct RelayerConfig {
     /// (must be the owner pubkey). Default **true**. `--no-flip-owner` opts
     /// out.
     pub flip_owner: bool,
+    /// With `enable_rotate = false`: on a period jump, prove a step of the
+    /// new period and advance the committee with the owner key
+    /// (`setCommitteeCommitment`) instead of stopping at
+    /// [`TickOutcome::RotateRequired`]. A shadow-only convenience; the
+    /// contract refuses it after `disableOwnerRotation`. Default **false**.
+    pub owner_hop: bool,
 }
 
 impl RelayerConfig {
@@ -37,6 +43,7 @@ impl RelayerConfig {
             poll_interval: Duration::from_secs(64),
             enable_rotate: true,
             flip_owner: true,
+            owner_hop: false,
         }
     }
 }
@@ -129,7 +136,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let period = update.period();
         if let Some(last_p) = self.state.last_committee_period {
             if period > last_p {
-                return self.handle_period_jump(last_p, period).await;
+                return self.handle_period_jump(update, last_p, period).await;
             }
         }
 
@@ -144,10 +151,14 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     async fn handle_period_jump(
         &mut self,
+        update: FinalityUpdate,
         from_period: u64,
         to_period: u64,
     ) -> Result<TickOutcome, RelayerError> {
         if !self.config.enable_rotate {
+            if self.config.owner_hop {
+                return self.owner_hop(update, from_period, to_period).await;
+            }
             self.state.record_rotate_pending(to_period);
             self.persist()?;
             warn!(
@@ -197,6 +208,60 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         }
     }
 
+    /// Shadow period hop: the step proof of the new period already carries the
+    /// commitment of the committee that signed it (public input 5), so the
+    /// owner writes that commitment for the signing period and the same
+    /// bundle is submitted as the first update of the period.
+    async fn owner_hop(
+        &mut self,
+        update: FinalityUpdate,
+        from_period: u64,
+        to_period: u64,
+    ) -> Result<TickOutcome, RelayerError> {
+        let bundle = match self.prover.generate_step(&update).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(TickOutcome::ProofFailed {
+                    reason: e.to_string(),
+                });
+            },
+        };
+        let period = update.signing_period();
+        match self
+            .submitter
+            .set_committee_commitment(bundle.parsed.committee_commitment, period)
+            .await?
+        {
+            SubmitOutcome::Accepted {
+                tx_hash,
+            } => {
+                self.state.record_rotate(period);
+                self.persist()?;
+                info!(
+                    from_period,
+                    to_period,
+                    period,
+                    tx = ?tx_hash.map(hex::encode),
+                    "owner hop: setCommitteeCommitment accepted (shadow, no rotate proof)"
+                );
+            },
+            other => {
+                warn!(
+                    from_period,
+                    to_period,
+                    ?other,
+                    "owner hop refused; leaving period pending"
+                );
+                self.state.record_rotate_pending(to_period);
+                self.persist()?;
+                return Ok(TickOutcome::AnRejected {
+                    reason: format!("owner hop setCommitteeCommitment: {other:?}"),
+                });
+            },
+        }
+        self.submit_step_bundle(update, bundle).await
+    }
+
     async fn submit_step(&mut self, update: FinalityUpdate) -> Result<TickOutcome, RelayerError> {
         let bundle = match self.prover.generate_step(&update).await {
             Ok(b) => b,
@@ -206,6 +271,14 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 });
             },
         };
+        self.submit_step_bundle(update, bundle).await
+    }
+
+    async fn submit_step_bundle(
+        &mut self,
+        update: FinalityUpdate,
+        bundle: crate::types::StepProofBundle,
+    ) -> Result<TickOutcome, RelayerError> {
         match self.submitter.submit_update(&bundle).await? {
             SubmitOutcome::Accepted {
                 tx_hash,
@@ -454,6 +527,80 @@ mod tests {
         assert!(err.contains("network mismatch"), "{err}");
         // State was not advanced by the foreign update.
         assert_eq!(r.state().last_finalized_slot, Some(10));
+    }
+
+    #[tokio::test]
+    async fn owner_hop_advances_committee_and_submits_first_update() {
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.owner_hop = true;
+        cfg.flip_owner = false;
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update(10, 8),
+                update(p + 40, p + 8),
+                update(p + 72, p + 40),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(r.state().last_committee_period, Some(0));
+        // Period jump: committee advanced by the owner, then the same bundle lands.
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { finalized_slot, .. } if finalized_slot == p + 8),
+            "{out:?}"
+        );
+        assert_eq!(r.state().last_committee_period, Some(1));
+        assert_eq!(r.state().rotate_pending_period, None);
+        assert_eq!(submitter.head_slot(), Some(p + 8));
+        // Next update in the same period is a plain step.
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_hop_refused_after_flip_leaves_period_pending() {
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.owner_hop = true;
+        cfg.flip_owner = true;
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update(10, 8),
+                update(p + 40, p + 8),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        // First accepted update flips the owner off (disableOwnerRotation).
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert!(!submitter.owner_rotation_enabled());
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
+        assert_eq!(r.state().rotate_pending_period, Some(1));
+        assert_eq!(r.state().last_committee_period, Some(0));
     }
 
     fn make_relayer(

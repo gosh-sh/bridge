@@ -190,6 +190,12 @@ enum Cmd {
         /// followed by `rePushAnchor` + `submitAncestry` (31/32 coverage).
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
+        /// With `--no-rotate`: on a period jump, prove a step of the new
+        /// period and advance the committee with the owner key
+        /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
+        /// Shadow only; refused by the contract after `disableOwnerRotation`.
+        #[arg(long, default_value_t = false, requires = "no_rotate")]
+        owner_hop: bool,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -363,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
             no_rotate,
             no_flip_owner,
             eth_rpc_url,
+            owner_hop,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -409,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
                 !no_rotate,
                 !no_flip_owner,
                 eth_rpc_url,
+                owner_hop,
                 an,
                 allow_insecure_graphql,
                 BackoffConfig {
@@ -846,6 +854,7 @@ async fn run_daemon(
     enable_rotate: bool,
     flip_owner: bool,
     eth_rpc_url: Option<String>,
+    owner_hop: bool,
     an: AnConfig,
     allow_insecure: bool,
     backoff: BackoffConfig,
@@ -859,6 +868,7 @@ async fn run_daemon(
     cfg.poll_interval = Duration::from_secs(poll_secs);
     cfg.enable_rotate = enable_rotate;
     cfg.flip_owner = flip_owner;
+    cfg.owner_hop = owner_hop;
 
     if dry_run {
         info!("dry-run: MockAnSubmitter (no AN tx)");

@@ -21,6 +21,11 @@ here and how versions are assigned.
   to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
   The state file is pinned to the first `genesis_validators_root` it sees and
   refuses a source on another network.
+- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
+  daemon proves a step of the new period, advances the committee with the
+  owner key from that proof's commitment (`setCommitteeCommitment`) and
+  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
+  only (refused after `disableOwnerRotation`).
 - `eth-lc-relayer set-committee --bundle-dir …`: owner
   `setCommitteeCommitment(commitment, period)` from a proven step bundle
   (public-input word 5), recording the period in the state file. Bootstraps a

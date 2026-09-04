@@ -116,6 +116,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         let update = self.source.fetch_finality().await?;
+        self.guard_network(&update)?;
         if let Some(lag) = self.ws_lag(&update) {
             warn!(
                 lag_slots = lag,
@@ -333,6 +334,33 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         }
     }
 
+    /// Pin the state file to one beacon network. The first update with a
+    /// resolved signing domain records its `genesis_validators_root`; any
+    /// later update from a different network is an error, not a silent
+    /// head advance with proofs the contract will reject.
+    fn guard_network(&mut self, update: &FinalityUpdate) -> Result<(), RelayerError> {
+        let Some(chain) = &update.chain else {
+            return Ok(());
+        };
+        let seen = chain.genesis_validators_root_hex();
+        match &self.state.genesis_validators_root {
+            Some(known) if *known != seen => Err(RelayerError::other(format!(
+                "beacon network mismatch: state file was built on genesis_validators_root \
+                 {known}, source reports {seen}; refusing to mix networks"
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                info!(
+                    genesis_validators_root = %seen,
+                    fork_version = %chain.fork_version_hex(),
+                    "pinning state file to beacon network"
+                );
+                self.state.genesis_validators_root = Some(seen);
+                self.persist()
+            },
+        }
+    }
+
     fn ws_lag(&self, update: &FinalityUpdate) -> Option<u64> {
         let last = self.state.last_finalized_slot?;
         let lag = update.attested_slot.saturating_sub(last);
@@ -390,6 +418,42 @@ mod tests {
             }}}}"#
         );
         parse_finality_update(&json).unwrap()
+    }
+
+    fn with_chain(mut u: FinalityUpdate, gvr_byte: u8) -> FinalityUpdate {
+        u.chain = Some(crate::types::BeaconChainParams {
+            fork_version: [0x90, 0, 0, 0x75],
+            genesis_validators_root: [gvr_byte; 32],
+        });
+        u
+    }
+
+    #[tokio::test]
+    async fn network_guard_pins_then_refuses_other_network() {
+        let mut r = make_relayer(
+            vec![
+                with_chain(update(10, 8), 0xd8),
+                with_chain(update(12, 10), 0xd8),
+                with_chain(update(14, 12), 0x4b),
+            ],
+            true,
+        );
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(
+            r.state().genesis_validators_root.as_deref(),
+            Some(format!("0x{}", "d8".repeat(32)).as_str())
+        );
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        let err = r.tick().await.unwrap_err().to_string();
+        assert!(err.contains("network mismatch"), "{err}");
+        // State was not advanced by the foreign update.
+        assert_eq!(r.state().last_finalized_slot, Some(10));
     }
 
     fn make_relayer(

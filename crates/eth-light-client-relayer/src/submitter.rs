@@ -39,6 +39,25 @@ pub trait AnSubmitter: Send + Sync {
     /// (USDCBridge) and `disableOwnerRotation` (EthBeaconLightClient).
     /// Idempotent.
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
+
+    /// Owner `setCommitteeCommitment(commitment, period)`: the
+    /// weak-subjectivity bootstrap of a fresh contract and the manual
+    /// committee hop while `submitRotate` is off (`--no-rotate`). Only works
+    /// before `disableOwnerRotation`. `commitment` is the 32-byte LE field
+    /// element exactly as it appears in the step public inputs (word 5).
+    async fn set_committee_commitment(
+        &self,
+        commitment: [u8; 32],
+        period: u64,
+    ) -> Result<SubmitOutcome, RelayerError>;
+}
+
+/// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
+/// (`0x`-prefixed big-endian hex), the encoding tvm ABI accepts.
+pub fn le_word_to_uint256_hex(word: &[u8; 32]) -> String {
+    let mut be = *word;
+    be.reverse();
+    format!("0x{}", hex::encode(be))
 }
 
 pub struct MockAnSubmitter {
@@ -225,6 +244,57 @@ impl AnSubmitter for MockAnSubmitter {
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
+    }
+
+    async fn set_committee_commitment(
+        &self,
+        _commitment: [u8; 32],
+        period: u64,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "setCommitteeCommitment rejected".into(),
+            });
+        }
+        if !inner.owner_rotation_enabled {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "ERR_OWNER_ROTATION_DISABLED".into(),
+            });
+        }
+        inner.period = Some(period);
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod set_committee_tests {
+    use super::*;
+
+    #[test]
+    fn le_word_becomes_big_endian_uint256() {
+        let mut w = [0u8; 32];
+        w[0] = 0x2a; // 42 as LE field element
+        assert_eq!(
+            le_word_to_uint256_hex(&w),
+            format!("0x{}2a", "00".repeat(31))
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_set_committee_refused_after_flip() {
+        let mock = MockAnSubmitter::accepting();
+        assert!(matches!(
+            mock.set_committee_commitment([1; 32], 7).await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        mock.flip_owner().await.unwrap();
+        assert!(matches!(
+            mock.set_committee_commitment([1; 32], 8).await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 }
 
@@ -528,6 +598,21 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             }
         }
         self.call("disableOwnerRotation", json!({})).await
+    }
+
+    async fn set_committee_commitment(
+        &self,
+        commitment: [u8; 32],
+        period: u64,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        self.call(
+            "setCommitteeCommitment",
+            json!({
+                "committeeCommitment": le_word_to_uint256_hex(&commitment),
+                "period": period,
+            }),
+        )
+        .await
     }
 }
 

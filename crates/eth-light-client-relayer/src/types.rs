@@ -16,11 +16,43 @@ pub const PUBLIC_INPUT_BYTES: usize = STEP_INSTANCE_LEN * 32;
 pub const ROTATE_ACCUMULATOR_LIMBS: usize = 12;
 pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
 
+/// Signing-domain inputs the beacon source resolved for one update: the
+/// `fork_version` active at `signature_slot` (fork schedule from
+/// `/eth/v1/config/spec`) and the network `genesis_validators_root`
+/// (`/eth/v1/beacon/genesis`).
+///
+/// Handed to the prover subprocess as `BEACON_FORK_VERSION` /
+/// `BEACON_GENESIS_VALIDATORS_ROOT` (both are circuit witnesses, the VK does
+/// not change). `None` leaves the prover on its own environment, whose default
+/// is mainnet Fulu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BeaconChainParams {
+    pub fork_version: [u8; 4],
+    pub genesis_validators_root: [u8; 32],
+}
+
+impl BeaconChainParams {
+    pub const ENV_FORK_VERSION: &'static str = "BEACON_FORK_VERSION";
+    pub const ENV_GENESIS_VALIDATORS_ROOT: &'static str = "BEACON_GENESIS_VALIDATORS_ROOT";
+
+    pub fn fork_version_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.fork_version))
+    }
+
+    pub fn genesis_validators_root_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.genesis_validators_root))
+    }
+}
+
 /// Parsed Altair light-client finality update (beacon REST shape).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinalityUpdate {
     pub attested_slot: u64,
     pub finalized_slot: u64,
+    /// Slot the sync aggregate was signed in (`signature_slot`); the fork
+    /// version of the signing domain is the one active at this slot. Falls
+    /// back to `attested_slot + 1` when the JSON omits it.
+    pub signature_slot: u64,
     pub attested_state_root: [u8; 32],
     pub finalized_beacon_root: [u8; 32],
     pub execution_block_hash: [u8; 32],
@@ -30,11 +62,19 @@ pub struct FinalityUpdate {
     /// Bootstrap or `updates?start_period=P-1` JSON (512 pubkeys). Empty in
     /// unit tests.
     pub committee_json: String,
+    /// Signing domain for the prover; filled by [`crate::HttpBeaconSource`].
+    pub chain: Option<BeaconChainParams>,
 }
 
 impl FinalityUpdate {
     pub fn period(&self) -> u64 {
         self.finalized_slot / SLOTS_PER_SYNC_PERIOD
+    }
+
+    /// Period of the committee that signed the attested header (the one whose
+    /// commitment the step proof exposes as public input 5).
+    pub fn signing_period(&self) -> u64 {
+        self.attested_slot / SLOTS_PER_SYNC_PERIOD
     }
 }
 
@@ -144,15 +184,22 @@ pub fn parse_finality_update(json: &str) -> Result<FinalityUpdate, RelayerError>
     let bits = data["sync_aggregate"]["sync_committee_bits"]
         .as_str()
         .ok_or_else(|| RelayerError::beacon("missing sync_committee_bits"))?;
+    let signature_slot = if data.get("signature_slot").is_some() {
+        parse_u64_field(&data["signature_slot"], "signature_slot")?
+    } else {
+        attested.0 + 1
+    };
     Ok(FinalityUpdate {
         attested_slot: attested.0,
         finalized_slot: finalized.0,
+        signature_slot,
         attested_state_root: attested.1,
         finalized_beacon_root: finalized.1,
         execution_block_hash: exec_hash,
         participation: popcount_bits(bits)?,
         raw_json: json.to_string(),
         committee_json: String::new(),
+        chain: None,
     })
 }
 
@@ -288,6 +335,34 @@ mod tests {
     fn parse_leaves_committee_json_empty() {
         let u = parse_finality_update(&sample_json(1, 1)).unwrap();
         assert!(u.committee_json.is_empty());
+        assert!(u.chain.is_none());
+    }
+
+    #[test]
+    fn signature_slot_defaults_to_attested_plus_one() {
+        let u = parse_finality_update(&sample_json(8, 7)).unwrap();
+        assert_eq!(u.signature_slot, 9);
+        let with = sample_json(8, 7).replacen(
+            "\"sync_aggregate\"",
+            "\"signature_slot\":\"11\",\"sync_aggregate\"",
+            1,
+        );
+        let u = parse_finality_update(&with).unwrap();
+        assert_eq!(u.signature_slot, 11);
+        assert_eq!(u.signing_period(), 0);
+    }
+
+    #[test]
+    fn chain_params_hex_round_trip() {
+        let c = BeaconChainParams {
+            fork_version: [0x90, 0, 0, 0x75],
+            genesis_validators_root: [0xd8; 32],
+        };
+        assert_eq!(c.fork_version_hex(), "0x90000075");
+        assert_eq!(
+            c.genesis_validators_root_hex(),
+            format!("0x{}", "d8".repeat(32))
+        );
     }
 
     #[test]

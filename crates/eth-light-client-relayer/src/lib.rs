@@ -33,15 +33,15 @@ pub use prover::{
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{
-    BeaconSource, EthExecutionRpc, ExecutionSource, HttpBeaconSource, InMemoryBeaconSource,
-    InMemoryExecution,
+    BeaconSource, ChainSpec, EthExecutionRpc, ExecutionSource, HttpBeaconSource,
+    InMemoryBeaconSource, InMemoryExecution,
 };
 pub use state::{RelayerState, StateLock};
 pub use submitter::{
-    build_submit_params, AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter,
-    SubmitOutcome,
+    build_submit_params, le_word_to_uint256_hex, AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter,
+    MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
-    pack_step_public_inputs, parse_finality_update, FinalityUpdate, RotateProofBundle,
-    StepProofBundle, SLOTS_PER_SYNC_PERIOD, STEP_INSTANCE_LEN,
+    pack_step_public_inputs, parse_finality_update, BeaconChainParams, FinalityUpdate,
+    RotateProofBundle, StepProofBundle, SLOTS_PER_SYNC_PERIOD, STEP_INSTANCE_LEN,
 };

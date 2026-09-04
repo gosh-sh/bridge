@@ -31,6 +31,24 @@ tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an"
     "rustls-tls-webpki-roots",
 ], optional = true }
 
+# `tvm_client` → `tvm_vm` links the gosh halo2 forks. Inside the tvm-sdk
+# workspace that is arranged by its root `[patch]` tables, which do not travel
+# with a git dependency; without them cargo also pulls crates.io `halo2-axiom`
+# and upstream `axiom-crypto/halo2-lib`, and `tvm_vm` fails with
+# "EthCircuitImpl: Circuit<Fr> is not satisfied (multiple versions of
+# halo2_axiom)". Mirror of tvm-sdk `v3.0.5.an` root `Cargo.toml`.
+[patch.crates-io]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+
+[patch."https://github.com/axiom-crypto/axiom-eth"]
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", rev = "1d61be00a63ec73b3f709d74eb9e6b09b754b911" }
+
 [features]
 # Live AN submit pulls tvm-sdk (heavy halo2). Unit tests stay mock-only.
 live-submit = ["acki-nacki-interface/tvm-sdk", "dep:tvm_client"]

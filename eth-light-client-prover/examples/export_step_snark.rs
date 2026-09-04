@@ -3,7 +3,8 @@
 //! input to the recursive rotate aggregation (`RotateAggregationCircuit`).
 //!
 //! The step circuit ([`eth_light_client_prover::step::verify_step`]) proves the
-//! sync-committee **signed** the attested header (BLS aggregate + 2/3 supermajority
+//! sync-committee **signed** the attested header (BLS aggregate + 2/3
+//! supermajority
 //! + finality branch) and exposes, at public-input index 5, the Poseidon
 //! `committee_commitment` of the **signing** committee. The rotate aggregation
 //! folds this proof and binds its rotate PI `current_commit` to that verified
@@ -11,8 +12,9 @@
 //!
 //! Same transcript/ceremony discipline as `export_shard_snark.rs`: **Poseidon**
 //! transcript (byte-identical to snark-verifier-sdk's) + **Hermez** SRS so the
-//! outer decider's `[s]G2` matches. Step keygens at Hermez **k=21** (deliberately
-//! high so the proof has few advice columns → cheap for the rotate root to fold).
+//! outer decider's `[s]G2` matches. Step keygens at Hermez **k=21**
+//! (deliberately high so the proof has few advice columns → cheap for the
+//! rotate root to fold).
 //!
 //! ## Emits (`out/step_snark/`)
 //! - `step_vk.bin`        — `VerifyingKey::write(RawBytesUnchecked)`
@@ -28,54 +30,66 @@
 //! Env: `STEP_SRS_PATH` (default `data/kzg_params_21.srs`), `STEP_OUT_DIR`
 //! (default `out/step_snark`).
 
-use std::fs;
-use std::path::Path;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 
-use eth_light_client_prover::bls_core::{signing_root_to_g2, verify_native};
-use eth_light_client_prover::execution::ExecutionPayloadVals;
-use eth_light_client_prover::mainnet::find_update_fixture;
-use eth_light_client_prover::poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite};
-use eth_light_client_prover::signing::{
-    native_sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
+use eth_light_client_prover::{
+    bls_core::{signing_root_to_g2, verify_native},
+    execution::ExecutionPayloadVals,
+    live_witness::ChainParams,
+    mainnet::find_update_fixture,
+    poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite},
+    signing::native_sync_committee_signing_root,
+    step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN},
 };
-use eth_light_client_prover::step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN};
-
 use gosh_sha256_chip::Sha256Chip;
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::CircuitBuilderStage;
-use halo2_base::gates::RangeChip;
-use halo2_base::halo2_proofs::halo2curves::bls12_381::{
-    G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
+use halo2_base::{
+    gates::{
+        circuit::{builder::BaseCircuitBuilder, CircuitBuilderStage},
+        RangeChip,
+    },
+    halo2_proofs::{
+        halo2curves::{
+            bls12_381::{
+                G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
+            },
+            bn256::{Bn256, Fr, G1Affine},
+            ff::Field,
+            group::{Curve, Group},
+            serde::SerdeObject,
+        },
+        plonk::{create_proof, keygen_pk, keygen_vk, verify_proof, VerifyingKey},
+        poly::{
+            commitment::{Params, ParamsProver},
+            kzg::{
+                commitment::{KZGCommitmentScheme, ParamsKZG},
+                multiopen::{ProverSHPLONK, VerifierSHPLONK},
+                strategy::SingleStrategy,
+            },
+        },
+        SerdeFormat,
+    },
 };
-use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
-use halo2_base::halo2_proofs::halo2curves::ff::Field;
-use halo2_base::halo2_proofs::halo2curves::group::{Curve, Group};
-use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
-use halo2_base::halo2_proofs::plonk::{
-    create_proof, keygen_pk, keygen_vk, verify_proof, VerifyingKey,
-};
-use halo2_base::halo2_proofs::poly::commitment::{Params, ParamsProver};
-use halo2_base::halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
-use halo2_base::halo2_proofs::poly::kzg::multiopen::{ProverSHPLONK, VerifierSHPLONK};
-use halo2_base::halo2_proofs::poly::kzg::strategy::SingleStrategy;
-use halo2_base::halo2_proofs::SerdeFormat;
 use rand::rngs::OsRng;
 use serde_json::Value;
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
 /// Keygen the step at **k=21** (not the k=19 used for the standalone opcode
-/// VkBlob): the in-circuit verifier cost the rotate root pays to fold this snark
-/// is proportional to the proof's commitment count ≈ `num_advice`, which scales
-/// as `1/2^k`. At k=19 the step has ~132 advice columns; at k=21 it drops to ~33
-/// — comparable to one L2 node, so the 3-input root (2×L2 + step) fits k=21.
+/// VkBlob): the in-circuit verifier cost the rotate root pays to fold this
+/// snark is proportional to the proof's commitment count ≈ `num_advice`, which
+/// scales as `1/2^k`. At k=19 the step has ~132 advice columns; at k=21 it
+/// drops to ~33 — comparable to one L2 node, so the 3-input root (2×L2 + step)
+/// fits k=21.
 const K: u32 = 21;
 const LOOKUP_BITS: usize = 18;
-/// Hermez `[s]·G2` raw-bytes head — the ceremony snark-verifier's decider needs.
+/// Hermez `[s]·G2` raw-bytes head — the ceremony snark-verifier's decider
+/// needs.
 const HERMEZ_SG2_HEAD: [u8; 4] = [0x92, 0x8f, 0xaf, 0xb3];
 
 fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s.trim_start_matches("0x")).unwrap().try_into().unwrap()
+    hex::decode(s.trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap()
 }
 fn hexv(s: &str) -> Vec<u8> {
     hex::decode(s.trim_start_matches("0x")).unwrap()
@@ -103,7 +117,9 @@ fn execution(data: &Value, which: &str) -> ExecutionPayloadVals {
     let e = &data[which]["execution"];
     ExecutionPayloadVals {
         parent_hash: h32(e["parent_hash"].as_str().unwrap()),
-        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap()).try_into().unwrap(),
+        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap())
+            .try_into()
+            .unwrap(),
         state_root: h32(e["state_root"].as_str().unwrap()),
         receipts_root: h32(e["receipts_root"].as_str().unwrap()),
         logs_bloom: hexv(e["logs_bloom"].as_str().unwrap()),
@@ -132,24 +148,32 @@ fn execution_branch(data: &Value, which: &str) -> Vec<[u8; 32]> {
 
 /// Build the step witness with a synthetic (self-consistent) signing committee.
 ///
-/// The attested/finalized headers, finality branch and execution payload are the
-/// **real** ones from the SAME update fixture the rotate driver consumes
-/// (`mainnet::find_update_fixture()` → `update_period_*.json`, falling back to the
-/// embedded `finality_update.json`). Driving both from one update makes the step's
-/// exposed attested `state_root` == the rotate branch anchor, so `bls-state-root`
-/// binds. The VK is witness-independent, so the synthetic committee still yields the
-/// production VK; only the exposed `committee_commitment` sample depends on it.
+/// The attested/finalized headers, finality branch and execution payload are
+/// the **real** ones from the SAME update fixture the rotate driver consumes
+/// (`mainnet::find_update_fixture()` → `update_period_*.json`, falling back to
+/// the embedded `finality_update.json`). Driving both from one update makes the
+/// step's exposed attested `state_root` == the rotate branch anchor, so
+/// `bls-state-root` binds. The VK is witness-independent, so the synthetic
+/// committee still yields the production VK; only the exposed
+/// `committee_commitment` sample depends on it.
 fn build_witness() -> (StepWitness, [u8; 32], String) {
     let (raw, label) = match find_update_fixture() {
         Some(path) => (
             std::fs::read_to_string(&path).unwrap(),
             path.file_name().unwrap().to_string_lossy().into_owned(),
         ),
-        None => (FIXTURE.to_string(), "finality_update.json (embedded)".to_string()),
+        None => (
+            FIXTURE.to_string(),
+            "finality_update.json (embedded)".to_string(),
+        ),
     };
     let v: Value = serde_json::from_str(&raw).unwrap();
     // Fixtures are either `{"data": {...}}` or `[{"data": {...}}]`.
-    let data = if v.is_array() { v[0]["data"].clone() } else { v["data"].clone() };
+    let data = if v.is_array() {
+        v[0]["data"].clone()
+    } else {
+        v["data"].clone()
+    };
 
     let attested = header(&data, "attested_header");
     let finalized = header(&data, "finalized_header");
@@ -161,14 +185,18 @@ fn build_witness() -> (StepWitness, [u8; 32], String) {
         .map(|e| h32(e.as_str().unwrap()))
         .collect();
 
+    // Synthetic committee: the domain only has to be self-consistent, but keep
+    // it in step with the fixture's network (env override, default mainnet).
+    let params =
+        ChainParams::from_env().expect("BEACON_FORK_VERSION / BEACON_GENESIS_VALIDATORS_ROOT");
     let signing_root = native_sync_committee_signing_root(
         attested.slot,
         attested.proposer_index,
         &attested.parent_root,
         &attested.state_root,
         &attested.body_root,
-        &FORK_VERSION_FULU,
-        &MAINNET_GENESIS_VALIDATORS_ROOT,
+        &params.fork_version,
+        &params.genesis_validators_root,
     );
     let msg_hash = signing_root_to_g2(&signing_root);
     let hm = BlsG2::from(msg_hash);
@@ -183,7 +211,10 @@ fn build_witness() -> (StepWitness, [u8; 32], String) {
         sig += hm * sk;
     }
     let signature: BlsG2Affine = sig.to_affine();
-    assert!(verify_native(&signature, &agg.to_affine(), &msg_hash), "synthetic committee must verify");
+    assert!(
+        verify_native(&signature, &agg.to_affine(), &msg_hash),
+        "synthetic committee must verify"
+    );
 
     let pubkeys_compressed: Vec<[u8; 48]> = pubkeys.iter().map(|p| p.to_compressed_be()).collect();
     let aggregate_pubkey = agg.to_affine().to_compressed_be();
@@ -192,8 +223,8 @@ fn build_witness() -> (StepWitness, [u8; 32], String) {
         attested,
         finalized,
         finality_branch,
-        fork_version: FORK_VERSION_FULU,
-        genesis_validators_root: MAINNET_GENESIS_VALIDATORS_ROOT,
+        fork_version: params.fork_version,
+        genesis_validators_root: params.genesis_validators_root,
         pubkeys,
         pubkeys_compressed,
         aggregate_pubkey,
@@ -210,16 +241,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Build one step circuit; `prover` carries (config, break_points) for the prover
-/// stage, `None` for keygen.
+/// Build one step circuit; `prover` carries (config, break_points) for the
+/// prover stage, `None` for keygen.
 fn build_step(
     w: &StepWitness,
-    prover: Option<(halo2_base::gates::circuit::BaseCircuitParams, Vec<Vec<usize>>)>,
+    prover: Option<(
+        halo2_base::gates::circuit::BaseCircuitParams,
+        Vec<Vec<usize>>,
+    )>,
 ) -> (BaseCircuitBuilder<Fr>, Vec<Fr>) {
     let mut b = match &prover {
         Some((config, bp)) => {
             BaseCircuitBuilder::<Fr>::prover(config.clone(), bp.clone()).use_instance_columns(1)
-        }
+        },
         None => BaseCircuitBuilder::<Fr>::from_stage(CircuitBuilderStage::Keygen)
             .use_k(K as usize)
             .use_lookup_bits(LOOKUP_BITS)
@@ -244,7 +278,10 @@ fn main() -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
 
     // ---- Load Hermez SRS ----------------------------------------------------
-    anyhow::ensure!(Path::new(&srs_path).exists(), "Hermez SRS not found at {srs_path}");
+    anyhow::ensure!(
+        Path::new(&srs_path).exists(),
+        "Hermez SRS not found at {srs_path}"
+    );
     println!("Loading SRS {srs_path} ...");
     let mut f = fs::File::open(&srs_path)?;
     let mut params = ParamsKZG::<Bn256>::read(&mut f)?;
@@ -264,7 +301,8 @@ fn main() -> anyhow::Result<()> {
 
     let (w, attested_state_root, fixture_label) = build_witness();
     println!(
-        "step update fixture: {fixture_label}\n  attested state_root = 0x{} (rotate branch anchor)\n",
+        "step update fixture: {fixture_label}\n  attested state_root = 0x{} (rotate branch \
+         anchor)\n",
         hex::encode(attested_state_root)
     );
 
@@ -300,7 +338,11 @@ fn main() -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("create_proof (Poseidon): {e:?}"))?;
     let proof = transcript.finalize();
-    println!("prove (Poseidon transcript) {:?} -> {} B", t.elapsed(), proof.len());
+    println!(
+        "prove (Poseidon transcript) {:?} -> {} B",
+        t.elapsed(),
+        proof.len()
+    );
 
     // ---- Self-verify (Poseidon transcript) ---------------------------------
     println!("\nSelf-check (VerifierSHPLONK + Poseidon transcript)...");
@@ -312,7 +354,13 @@ fn main() -> anyhow::Result<()> {
         PoseidonChallenge,
         PoseidonRead<&[u8]>,
         SingleStrategy<'_, Bn256>,
-    >(params.verifier_params(), pk.get_vk(), strategy, &[instances], &mut vt)
+    >(
+        params.verifier_params(),
+        pk.get_vk(),
+        strategy,
+        &[instances],
+        &mut vt,
+    )
     .is_ok();
     anyhow::ensure!(ok, "Poseidon SHPLONK verify_proof REJECTED the step proof");
     println!("  OK: step Poseidon proof verifies\n");
@@ -336,13 +384,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     fs::write(format!("{out_dir}/step_vk.bin"), &vk_bytes)?;
-    fs::write(format!("{out_dir}/step_config.json"), serde_json::to_vec_pretty(&config)?)?;
+    fs::write(
+        format!("{out_dir}/step_config.json"),
+        serde_json::to_vec_pretty(&config)?,
+    )?;
     fs::write(format!("{out_dir}/step_proof.bin"), &proof)?;
     fs::write(format!("{out_dir}/step_instances.bin"), &pi_bytes)?;
 
     println!("=== RESULT: PASS — step Poseidon snark artifacts written to {out_dir} ===");
-    println!("  step_vk.bin ({} B, sha256 {})", vk_bytes.len(), sha256_hex(&vk_bytes));
-    println!("  step_proof.bin ({} B, sha256 {})", proof.len(), sha256_hex(&proof));
+    println!(
+        "  step_vk.bin ({} B, sha256 {})",
+        vk_bytes.len(),
+        sha256_hex(&vk_bytes)
+    );
+    println!(
+        "  step_proof.bin ({} B, sha256 {})",
+        proof.len(),
+        sha256_hex(&proof)
+    );
     let hexbe = |f: &Fr| hex::encode(f.to_bytes().iter().rev().copied().collect::<Vec<u8>>());
     println!(
         "  step_instances.bin ({} B = {} × 32 Fr)\n    committee_commitment (inst[5])  = 0x{}\n    attested_state_root  (inst[8|9]) = hi 0x{} lo 0x{}",

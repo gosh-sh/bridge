@@ -196,15 +196,20 @@ test:light-client:vkblob-header:
   script:
     - apk add --no-cache bash
     - chmod +x scripts/check_rotate_vkblob_accumulator.sh
+    - chmod +x scripts/check_eth_beacon_lc_sources.sh
     - ./scripts/check_rotate_vkblob_accumulator.sh
+    - ./scripts/check_eth_beacon_lc_sources.sh
   rules:
     - changes:
         - eth-light-client-prover/fixtures/rotate_vkblob/**/*
         - eth-light-client-prover/fixtures/step_vkblob/**/*
         - scripts/check_rotate_vkblob_accumulator.sh
+        - scripts/check_eth_beacon_lc_sources.sh
         - scripts/embed_rotate_vk_blob.py
         - scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh
         - EthBeaconLightClient_rotate_decider.patch
+        - contracts/an/EthBeaconLightClient.sol
+        - contracts/an/EthKeccak.sol
         - eth-light-client-prover/examples/rotate_tree_n8.rs
 
 # Test stage

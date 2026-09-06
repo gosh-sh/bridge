@@ -28,11 +28,18 @@ here and how versions are assigned.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into
-  `USDCBridge._acceptedBlockHash`. Operator: `eth-lc-relayer submit-ancestry
-  --eth-rpc-url … --checkpoint-hash 0x…` (`ETH_RPC_URL`). Contracts:
-  `contracts/an/EthKeccak.sol`, `contracts/an/EthBeaconLightClient.sol`
-  (`EthBeaconLightClient_rotate_decider.patch` for the acki-nacki tree).
-  Shellnet E2E:
+  `USDCBridge._acceptedBlockHash`. The daemon walks that chain after every
+  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`); it also
+  calls `rePushAnchor` so a bounce before `setLightClient` is retried. Operator
+  one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  0x…`. Contracts: `contracts/an/EthKeccak.sol`,
+  `contracts/an/EthBeaconLightClient.sol` (`EthBeaconLightClient_rotate_decider.patch`
+  for the acki-nacki tree; `scripts/check_eth_beacon_lc_sources.sh` keeps them
+  in lockstep). `updateCode` / `onCodeUpgrade` persist the committee, head,
+  proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
+  `reAnchorCommittee` is the logged weak-subjectivity hatch after
+  `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
+  exposes `reAnchorsApplied`). Shellnet E2E:
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
@@ -44,7 +51,12 @@ here and how versions are assigned.
   `EthBeaconLightClient.disableOwnerRotation`). `--no-rotate` / `--no-flip-owner`
   are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
   `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
-  attester quorum exists).
+  attester quorum exists). With `ETH_RPC_URL` the same tick then `rePushAnchor`s
+  the checkpoint and `submitAncestry`s the epoch parent chain. `submitUpdate`
+  late-registers a skipped checkpoint of the current committee (`CheckpointBackfilled`,
+  head not rewound). Sink notify uses `bounce: true`; a drop emits
+  `AnchorPushBounced` and is retried via `rePushAnchor`. `encode_header_rlp`
+  fails closed when `keccak256(rlp)` does not match the node's `block.hash`.
 - `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic

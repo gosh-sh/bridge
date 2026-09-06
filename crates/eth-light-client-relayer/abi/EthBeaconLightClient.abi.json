@@ -37,8 +37,31 @@
 			"outputs": []
 		},
 		{
+			"name": "rePushAnchor",
+			"inputs": [
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": []
+		},
+		{
 			"name": "disableOwnerRotation",
 			"inputs": [],
+			"outputs": []
+		},
+		{
+			"name": "reAnchorCommittee",
+			"inputs": [
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"period","type":"uint64"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "updateCode",
+			"inputs": [
+				{"name":"newcode","type":"cell"},
+				{"name":"userCell","type":"cell"}
+			],
 			"outputs": []
 		},
 		{
@@ -60,15 +83,52 @@
 			"outputs": [
 				{"name":"value0","type":"bool"}
 			]
+		},
+		{
+			"name": "getCommitteeState",
+			"inputs": [],
+			"outputs": [
+				{"name":"currentCommittee","type":"uint256"},
+				{"name":"committeePeriod","type":"uint64"},
+				{"name":"ownerRotationEnabled","type":"bool"},
+				{"name":"reAnchorsApplied","type":"uint64"}
+			]
 		}
 	],
 	"events": [
+		{
+			"name": "CommitteeRotated",
+			"inputs": [
+				{"name":"period","type":"uint64"},
+				{"name":"fromCommitteeCommitment","type":"uint256"},
+				{"name":"toCommitteeCommitment","type":"uint256"}
+			]
+		},
+		{
+			"name": "CommitteeReAnchored",
+			"inputs": [
+				{"name":"period","type":"uint64"},
+				{"name":"fromCommitteeCommitment","type":"uint256"},
+				{"name":"toCommitteeCommitment","type":"uint256"}
+			]
+		},
 		{
 			"name": "AncestryAccepted",
 			"inputs": [
 				{"name":"checkpointHash","type":"uint256"},
 				{"name":"hashesAdded","type":"uint64"}
 			]
+		},
+		{
+			"name": "CheckpointBackfilled",
+			"inputs": [
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"executionBlockHash","type":"uint256"}
+			]
+		},
+		{
+			"name": "AnchorPushBounced",
+			"inputs": []
 		}
 	],
 	"fields": []

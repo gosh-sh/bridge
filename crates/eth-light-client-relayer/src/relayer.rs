@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::{
     error::RelayerError,
     prover::ProofGenerator,
-    source::BeaconSource,
+    source::{BeaconSource, ExecutionSource},
     state::RelayerState,
     submitter::{AnSubmitter, SubmitOutcome},
     types::{FinalityUpdate, SLOTS_PER_SYNC_PERIOD},
@@ -82,6 +82,9 @@ pub struct Relayer<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> {
     prover: Arc<P>,
     submitter: Arc<A>,
     state: RelayerState,
+    /// When set, each accepted `submitUpdate` walks the epoch parent-hash
+    /// chain and calls `submitAncestry` (31/32 coverage). CLI-only without it.
+    execution: Option<Arc<dyn ExecutionSource>>,
 }
 
 impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
@@ -98,7 +101,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             prover,
             submitter,
             state,
+            execution: None,
         })
+    }
+
+    pub fn with_execution(mut self, rpc: Arc<dyn ExecutionSource>) -> Self {
+        self.execution = Some(rpc);
+        self
     }
 
     pub fn state(&self) -> &RelayerState {
@@ -209,6 +218,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 self.persist()?;
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
                 self.maybe_flip_owner().await?;
+                self.maybe_cover_epoch(update.execution_block_hash).await;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -272,6 +282,55 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             },
         }
         Ok(())
+    }
+
+    /// After a proven checkpoint: re-push the hash to USDCBridge (the first
+    /// push often bounced because `setLightClient` had not run yet), then
+    /// walk the epoch parent chain when an execution RPC is configured.
+    async fn maybe_cover_epoch(&mut self, checkpoint: [u8; 32]) {
+        match self.submitter.re_push_anchor(checkpoint).await {
+            Ok(SubmitOutcome::Accepted {
+                ..
+            }) => {
+                info!(
+                    hash = %hex::encode(checkpoint),
+                    "rePushAnchor accepted"
+                );
+            },
+            Ok(other) => {
+                warn!(?other, "rePushAnchor did not accept");
+            },
+            Err(e) => {
+                warn!(error = %e, "rePushAnchor failed");
+            },
+        }
+        let Some(rpc) = &self.execution else {
+            return;
+        };
+        let headers = match rpc.ancestry_headers(checkpoint, 32).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(error = %e, "epoch ancestry fetch failed");
+                return;
+            },
+        };
+        if headers.len() < 2 {
+            warn!(n = headers.len(), "epoch ancestry shorter than 2 headers");
+            return;
+        }
+        match self.submitter.submit_ancestry(&headers).await {
+            Ok(SubmitOutcome::Accepted {
+                ..
+            }) => {
+                info!(n = headers.len(), "submitAncestry accepted");
+            },
+            Ok(other) => {
+                warn!(?other, "submitAncestry did not accept");
+            },
+            Err(e) => {
+                warn!(error = %e, "submitAncestry failed");
+            },
+        }
     }
 
     fn ws_lag(&self, update: &FinalityUpdate) -> Option<u64> {
@@ -384,6 +443,7 @@ mod tests {
         assert!(mock.light_client_set());
         assert!(!mock.owner_anchors_enabled());
         assert!(!mock.owner_rotation_enabled());
+        assert_eq!(mock.re_push_count(), 1);
     }
 
     #[tokio::test]
@@ -569,5 +629,71 @@ mod tests {
             } => assert_eq!(finalized_slot, 8),
             other => panic!("{other:?}"),
         }
+    }
+
+    fn update_with_exec(attested: u64, finalized: u64, exec: [u8; 32]) -> FinalityUpdate {
+        let root = format!("0x{}", "11".repeat(32));
+        let hash = format!("0x{}", hex::encode(exec));
+        let bits = format!("0x{}ff", "00".repeat(63));
+        let json = format!(
+            r#"{{"data":{{
+              "attested_header":{{"beacon":{{"slot":"{attested}","state_root":"{root}"}}}},
+              "finalized_header":{{
+                "beacon":{{"slot":"{finalized}","state_root":"{root}"}},
+                "execution":{{"block_hash":"{hash}"}}
+              }},
+              "sync_aggregate":{{"sync_committee_bits":"{bits}"}}
+            }}}}"#
+        );
+        parse_finality_update(&json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_execution_rpc_skips_ancestry() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), 1);
+        assert_eq!(mock.ancestry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn execution_source_walks_ancestry_after_checkpoint() {
+        let (child, parent) = crate::header_rlp::dummy_linked_headers();
+        let ckpt = crate::header_rlp::keccak256(&child);
+        let parent_hash = crate::header_rlp::keccak256(&parent);
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update_with_exec(
+                100, 96, ckpt,
+            )])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap()
+        .with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            ckpt,
+            vec![child, parent],
+        )));
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), 1);
+        assert_eq!(mock.ancestry_count(), 1);
+        assert!(mock.is_proven(&ckpt));
+        assert!(mock.is_proven(&parent_hash));
     }
 }

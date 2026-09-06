@@ -7,20 +7,21 @@
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
-//!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults
+//!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults.
+//!   `ETH_RPC_URL` walks epoch ancestry after each accepted checkpoint.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(feature = "live-submit")]
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use clap::{Parser, Subcommand};
-use eth_light_client_relayer::{
-    AnConfig, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter,
-    MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, StateLock,
-    SubprocessProofGenerator, SubprocessProverConfig,
-};
 #[cfg(feature = "live-submit")]
-use eth_light_client_relayer::{AnInterfaceSubmitter, AnSubmitter};
+use eth_light_client_relayer::AnInterfaceSubmitter;
+use eth_light_client_relayer::{
+    AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource,
+    MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
+    StateLock, SubprocessProofGenerator, SubprocessProverConfig,
+};
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
@@ -158,6 +159,10 @@ enum Cmd {
         /// Skip the one-way owner flip after the first accepted `submitUpdate`.
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
+        /// Execution JSON-RPC. When set, each accepted `submitUpdate` is
+        /// followed by `rePushAnchor` + `submitAncestry` (31/32 coverage).
+        #[arg(long, env = "ETH_RPC_URL")]
+        eth_rpc_url: Option<String>,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -308,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             no_rotate,
             no_flip_owner,
+            eth_rpc_url,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -353,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
                 !no_rotate,
                 !no_flip_owner,
+                eth_rpc_url,
                 an,
                 allow_insecure_graphql,
                 BackoffConfig {
@@ -703,6 +710,7 @@ async fn run_daemon(
     dry_run: bool,
     enable_rotate: bool,
     flip_owner: bool,
+    eth_rpc_url: Option<String>,
     an: AnConfig,
     allow_insecure: bool,
     backoff: BackoffConfig,
@@ -726,7 +734,7 @@ async fn run_daemon(
                 Arc::new(MockProofGenerator::new()),
                 Arc::new(MockAnSubmitter::accepting()),
             )?;
-            return run(relayer, backoff).await;
+            return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
         }
         let prover_dir = prover_dir
             .ok_or_else(|| anyhow::anyhow!("--prover-dir required unless --mock-prove"))?;
@@ -741,7 +749,7 @@ async fn run_daemon(
             Arc::new(gen),
             Arc::new(MockAnSubmitter::accepting()),
         )?;
-        return run(relayer, backoff).await;
+        return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
     }
 
     #[cfg(not(feature = "live-submit"))]
@@ -754,6 +762,7 @@ async fn run_daemon(
             srs_path,
             cfg,
             source,
+            eth_rpc_url,
         );
         Err(live_submit_needs_feature())
     }
@@ -794,7 +803,7 @@ async fn run_daemon(
         if mock_prove {
             let relayer =
                 Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter)?;
-            return run(relayer, backoff).await;
+            return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
         }
         let prover_dir = prover_dir
             .ok_or_else(|| anyhow::anyhow!("--prover-dir required unless --mock-prove"))?;
@@ -804,7 +813,31 @@ async fn run_daemon(
             timeout: Duration::from_secs(prove_timeout_secs),
         });
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
-        return run(relayer, backoff).await;
+        return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+    }
+}
+
+fn attach_execution<S, P, A>(
+    relayer: Relayer<S, P, A>,
+    eth_rpc_url: Option<String>,
+) -> anyhow::Result<Relayer<S, P, A>>
+where
+    S: BeaconSource + 'static,
+    P: ProofGenerator + 'static,
+    A: AnSubmitter + 'static,
+{
+    match eth_rpc_url.filter(|u| !u.is_empty()) {
+        Some(url) => {
+            info!(
+                %url,
+                "ETH_RPC_URL set: daemon will rePushAnchor + submitAncestry after each checkpoint"
+            );
+            Ok(relayer.with_execution(Arc::new(EthExecutionRpc::new(url)?)))
+        },
+        None => {
+            info!("ETH_RPC_URL unset: daemon will not call submitAncestry (checkpoints only)");
+            Ok(relayer)
+        },
     }
 }
 

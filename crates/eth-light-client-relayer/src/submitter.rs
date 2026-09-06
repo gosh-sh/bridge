@@ -32,6 +32,9 @@ pub trait AnSubmitter: Send + Sync {
     async fn submit_ancestry(&self, header_rlps: &[Vec<u8>])
         -> Result<SubmitOutcome, RelayerError>;
 
+    /// Re-send an already-proven hash to `USDCBridge` (`rePushAnchor`).
+    async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
+
     /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors`
     /// (USDCBridge) and `disableOwnerRotation` (EthBeaconLightClient).
     /// Idempotent.
@@ -50,6 +53,8 @@ struct MockInner {
     light_client_set: bool,
     owner_anchors_enabled: bool,
     owner_rotation_enabled: bool,
+    re_push_count: u32,
+    ancestry_count: u32,
 }
 
 impl MockAnSubmitter {
@@ -63,6 +68,8 @@ impl MockAnSubmitter {
                 light_client_set: false,
                 owner_anchors_enabled: true,
                 owner_rotation_enabled: true,
+                re_push_count: 0,
+                ancestry_count: 0,
             }),
         }
     }
@@ -99,6 +106,14 @@ impl MockAnSubmitter {
 
     pub fn light_client_set(&self) -> bool {
         self.inner.lock().unwrap().light_client_set
+    }
+
+    pub fn re_push_count(&self) -> u32 {
+        self.inner.lock().unwrap().re_push_count
+    }
+
+    pub fn ancestry_count(&self) -> u32 {
+        self.inner.lock().unwrap().ancestry_count
     }
 }
 
@@ -173,6 +188,25 @@ impl AnSubmitter for MockAnSubmitter {
         for rlp in &header_rlps[1..] {
             inner.proven.insert(crate::header_rlp::keccak256(rlp));
         }
+        inner.ancestry_count += 1;
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+
+    async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "rePushAnchor rejected".into(),
+            });
+        }
+        if !inner.proven.contains(&block_hash) {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "ERR_NOT_PROVEN".into(),
+            });
+        }
+        inner.re_push_count += 1;
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
@@ -255,6 +289,77 @@ mod ancestry_submit_tests {
         assert!(!mock.owner_rotation_enabled());
         mock.flip_owner().await.unwrap();
         assert!(!mock.owner_rotation_enabled());
+    }
+
+    #[tokio::test]
+    async fn mock_re_push_requires_proven_hash() {
+        let mock = MockAnSubmitter::accepting();
+        let h = [0x11; 32];
+        match mock.re_push_anchor(h).await.unwrap() {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains("NOT_PROVEN"), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
+        mock.mark_proven(h);
+        match mock.re_push_anchor(h).await.unwrap() {
+            SubmitOutcome::Accepted {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(mock.re_push_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn mock_late_register_keeps_head() {
+        let mock = MockAnSubmitter::accepting();
+        let first = crate::types::StepProofBundle {
+            parsed: crate::types::StepPublicInputs {
+                attested_slot: 200,
+                finalized_slot: 192,
+                finalized_beacon_root: [0; 32],
+                participation: 400,
+                committee_commitment: [0xC0; 32],
+                execution_block_hash: [0xAA; 32],
+                attested_state_root: [0; 32],
+            },
+            public_inputs: vec![0u8; 320],
+            proof: vec![0xAB; 8],
+        };
+        mock.submit_update(&first).await.unwrap();
+        let late = crate::types::StepProofBundle {
+            parsed: crate::types::StepPublicInputs {
+                attested_slot: 100,
+                finalized_slot: 96,
+                finalized_beacon_root: [0; 32],
+                participation: 400,
+                committee_commitment: [0xC0; 32],
+                execution_block_hash: [0xBB; 32],
+                attested_state_root: [0; 32],
+            },
+            public_inputs: vec![0u8; 320],
+            proof: vec![0xAB; 8],
+        };
+        match mock.submit_update(&late).await.unwrap() {
+            SubmitOutcome::Accepted {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(mock.head_slot(), Some(192));
+        assert!(mock.is_proven(&[0xAA; 32]));
+        assert!(mock.is_proven(&[0xBB; 32]));
+        match mock.submit_update(&late).await.unwrap() {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains("STALE_UPDATE"), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }
 
@@ -376,6 +481,14 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .await
     }
 
+    async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
+        self.call(
+            "rePushAnchor",
+            json!({ "blockHash": format!("0x{}", hex::encode(block_hash)) }),
+        )
+        .await
+    }
+
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
         if let Some((usdc_addr, usdc_client)) = &self.usdc {
             let lc = ExtendedAddress::parse(&self.config.light_client)
@@ -407,6 +520,10 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 SubmitOutcome::Accepted {
                     ..
                 } => {},
+                // Second call after a wiped `state.json`: already one-way.
+                SubmitOutcome::Rejected {
+                    reason,
+                } if reason.contains("228") || reason.contains("OWNER_ANCHORS_DISABLED") => {},
                 other => return Ok(other),
             }
         }

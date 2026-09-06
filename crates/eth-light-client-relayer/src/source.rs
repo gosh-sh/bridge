@@ -16,6 +16,48 @@ pub trait BeaconSource: Send + Sync {
     async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError>;
 }
 
+/// Execution parent-hash walk used after an accepted checkpoint.
+#[async_trait]
+pub trait ExecutionSource: Send + Sync {
+    async fn ancestry_headers(
+        &self,
+        checkpoint: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError>;
+}
+
+/// In-memory epoch chain for tests (`Relayer::with_execution`).
+pub struct InMemoryExecution {
+    chains: Mutex<std::collections::HashMap<[u8; 32], Vec<Vec<u8>>>>,
+}
+
+impl InMemoryExecution {
+    pub fn single(checkpoint: [u8; 32], headers: Vec<Vec<u8>>) -> Self {
+        let mut chains = std::collections::HashMap::new();
+        chains.insert(checkpoint, headers);
+        Self {
+            chains: Mutex::new(chains),
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionSource for InMemoryExecution {
+    async fn ancestry_headers(
+        &self,
+        checkpoint: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        let chains = self.chains.lock().expect("poisoned");
+        let headers = chains
+            .get(&checkpoint)
+            .cloned()
+            .ok_or_else(|| RelayerError::other("in-memory execution: unknown checkpoint"))?;
+        let max = max.clamp(2, 32);
+        Ok(headers.into_iter().take(max).collect())
+    }
+}
+
 pub struct HttpBeaconSource {
     client: Client,
     base_url: String,
@@ -192,6 +234,17 @@ impl EthExecutionRpc {
             h = parent;
         }
         Ok(headers)
+    }
+}
+
+#[async_trait]
+impl ExecutionSource for EthExecutionRpc {
+    async fn ancestry_headers(
+        &self,
+        checkpoint: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        EthExecutionRpc::ancestry_headers(self, checkpoint, max).await
     }
 }
 

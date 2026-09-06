@@ -11,6 +11,7 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/b
 # Live loop (no --dry-run / --mock-prove / --no-rotate / --no-flip-owner). Binary must be
 # built with `--features live-submit`. Shadow: add those flags here.
 # Rotate is on by default (tvm-sdk#284 co-deploys); n14 for the prove.
+# Set ETH_RPC_URL in the env file for 31/32 ancestry coverage.
 ExecStart=/home/ubuntu/bridge-e2e/bin/eth-lc-relayer daemon \
   --beacon-url ${BEACON_URL} \
   --state /home/ubuntu/bridge-e2e/eth-lc-relayer-state.json \

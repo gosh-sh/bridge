@@ -35,8 +35,8 @@ interface IAcceptedBlockHashSink {
 ///           * that the signing committee is the *chain-anchored* one for this
 ///             period — enforced by `committeeCommitment == _currentCommittee`
 ///             (the rotate ↔ step join). Bootstrapped from a weak-subjectivity
-///             checkpoint; advanced by the rotate proof (future writer, see
-///             `setCommitteeCommitment`).
+///             checkpoint; advanced by `submitRotate`. After
+///             `disableOwnerRotation`, the owner hatch is `reAnchorCommittee`.
 ///
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
 ///         hash (1/32). `submitAncestry` walks that block's execution parent-hash
@@ -52,7 +52,10 @@ contract EthBeaconLightClient {
     uint constant bitCntAddress = 256;
     uint128 constant HeadUpdatedEmit = 701;
     uint128 constant CommitteeRotatedEmit = 702;
+    uint128 constant CommitteeReAnchoredEmit = 703;
     uint128 constant AncestryAcceptedEmit = 704;
+    uint128 constant CheckpointBackfilledEmit = 705;
+    uint128 constant AnchorPushBouncedEmit = 706;
 
     // Error codes (kept clear of the shared USDCBridgeErrors range 204..229).
     uint16 constant ERR_NOT_OWNER          = 209;
@@ -65,9 +68,12 @@ contract EthBeaconLightClient {
     uint16 constant ERR_STALE_UPDATE       = 244;
     uint16 constant ERR_STALE_PERIOD       = 245;
     uint16 constant ERR_OWNER_ROTATION_DISABLED = 246;
+    uint16 constant ERR_REANCHOR_NOT_ARMED = 247;
+    uint16 constant ERR_REANCHOR_NOOP      = 248;
     uint16 constant ERR_UNKNOWN_CHECKPOINT = 249;
     uint16 constant ERR_BAD_ANCESTRY       = 250;
     uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
+    uint16 constant ERR_NOT_PROVEN         = 252;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -80,10 +86,22 @@ contract EthBeaconLightClient {
         uint256 fromCommitteeCommitment,
         uint256 toCommitteeCommitment
     );
+    event CommitteeReAnchored(
+        uint64  period,
+        uint256 fromCommitteeCommitment,
+        uint256 toCommitteeCommitment
+    );
     event AncestryAccepted(
         uint256 checkpointHash,
         uint64  hashesAdded
     );
+    /// Late-registered checkpoint (proof verified, head not rewound).
+    event CheckpointBackfilled(
+        uint64  finalizedSlot,
+        uint256 executionBlockHash
+    );
+    /// USDCBridge rejected `acceptBlockHashFromLightClient` (bounce).
+    event AnchorPushBounced();
 
     /// @notice Deposit-style struct of the 10 proven public inputs
     ///         (`step.rs::pack_step_instances`), all little-endian 32-byte Fr:
@@ -141,9 +159,8 @@ contract EthBeaconLightClient {
     uint256 _l1ChainId;
 
     // Optional sink (a USDCBridge) that receives every proven anchor. 0 = local
-    // only. Owner-settable; NOT threaded through any upgrade migration, so it
-    // must be re-set by the owner after a code upgrade (same convention as
-    // USDCBridge's `_expectedBridgeFr`).
+    // only. Owner-settable; carried through `updateCode` so a VkBlob rotation
+    // does not drop the sink (unlike the previous fail-closed convention).
     address _usdcBridge;
 
     // Head (last accepted finality update).
@@ -172,6 +189,10 @@ contract EthBeaconLightClient {
     // `_ownerAnchorsEnabled`): a re-enable switch would leave the owner key on
     // the path regardless.
     bool _ownerRotationEnabled = true;
+
+    // How many times `reAnchorCommittee` has fired (telemetry / alerting).
+    // Under a live relayer SLA this stays 0.
+    uint64 _reAnchorsApplied;
 
     // Canonicality registry: proven finalized execution block hashes.
     mapping(uint256 => bool) _provenExecutionBlockHash;
@@ -234,8 +255,14 @@ contract EthBeaconLightClient {
         // committee (rotate ↔ step join).
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-        // Monotonic head — reject stale / replayed updates.
-        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
+        // Head only moves forward. A slot behind the head is still admitted
+        // when its execution hash is not yet in the proven set (late-register
+        // a skipped checkpoint of the *current* committee). Same-slot replay
+        // and already-proven hashes revert ERR_STALE_UPDATE.
+        bool advancing = pi.finalizedSlot > _finalizedSlot;
+        bool late = pi.finalizedSlot < _finalizedSlot
+            && !_provenExecutionBlockHash[pi.executionBlockHash];
+        require(advancing || late, ERR_STALE_UPDATE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -248,17 +275,21 @@ contract EthBeaconLightClient {
 
         ensureBalance();
 
-        // Advance head + register the canonical execution block hash.
-        _finalizedSlot = pi.finalizedSlot;
-        _finalizedBeaconRoot = pi.finalizedBeaconRoot;
-        _finalizedExecutionBlockHash = pi.executionBlockHash;
-        _updatesApplied += 1;
-        _pushExecHash(pi.executionBlockHash);
-
-        address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
-        emit HeadUpdated{dest: addrExtern}(
-            pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
-        );
+        if (advancing) {
+            _finalizedSlot = pi.finalizedSlot;
+            _finalizedBeaconRoot = pi.finalizedBeaconRoot;
+            _finalizedExecutionBlockHash = pi.executionBlockHash;
+            _updatesApplied += 1;
+            _pushExecHash(pi.executionBlockHash);
+            address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
+            emit HeadUpdated{dest: addrExtern}(
+                pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
+            );
+        } else {
+            _pushExecHash(pi.executionBlockHash);
+            address addrExtern = address.makeAddrExtern(CheckpointBackfilledEmit, bitCntAddress);
+            emit CheckpointBackfilled{dest: addrExtern}(pi.finalizedSlot, pi.executionBlockHash);
+        }
     }
 
     // ========================================================
@@ -364,15 +395,35 @@ contract EthBeaconLightClient {
             return;
         }
         _provenExecutionBlockHash[h] = true;
-        // Push into the deposit path so `finalizeDeposit` can consult the
-        // hash synchronously from its own storage (TVM messaging is async).
+        _notifySink(h);
+    }
+
+    /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
+    ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
+    ///         push that landed before `setLightClient`). Does not re-prove.
+    function rePushAnchor(uint256 blockHash) public {
+        require(_provenExecutionBlockHash[blockHash], ERR_NOT_PROVEN);
+        tvm.accept();
+        _notifySink(blockHash);
+        ensureBalance();
+    }
+
+    function _notifySink(uint256 h) private {
         if (_usdcBridge != address(0)) {
+            // bounce: true so a rejected sink returns the 1 vmshell and
+            // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
+            // is the retry (submitUpdate would hit ERR_STALE_UPDATE).
             IAcceptedBlockHashSink(_usdcBridge).acceptBlockHashFromLightClient{
                 value: 1 vmshell,
-                bounce: false,
+                bounce: true,
                 flag: 1
             }(_l1ChainId, h);
         }
+    }
+
+    onBounce(TvmSlice /*body*/) external {
+        address addrExtern = address.makeAddrExtern(AnchorPushBouncedEmit, bitCntAddress);
+        emit AnchorPushBounced{dest: addrExtern}();
     }
 
     // ========================================================
@@ -385,8 +436,8 @@ contract EthBeaconLightClient {
     }
 
     /// @notice Sets the deposit-path sink that receives proven anchors (0 to
-    ///         disable the push and keep the registry local-only). Must be
-    ///         re-set after any code upgrade.
+    ///         disable the push and keep the registry local-only). Carried
+    ///         through `updateCode` / `onCodeUpgrade`.
     function setUsdcBridge(address usdcBridge) public onlyOwnerPubkey accept {
         ensureBalance();
         _usdcBridge = usdcBridge;
@@ -409,17 +460,115 @@ contract EthBeaconLightClient {
         _committeePeriod = period;
     }
 
-    /// @notice Permanently gives up the owner's ability to advance the committee
-    ///         directly, leaving `submitRotate` (the rotate proof) as the only
-    ///         writer. This is the call that turns the committee chain from
-    ///         "trusted by the owner key" into "trustless from the checkpoint".
-    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors):
-    ///      a switch back would leave the owner key on the path. Requires the
-    ///      committee to be bootstrapped first, so this cannot brick rotation.
+    /// @notice Permanently drops the *routine* owner committee path
+    ///         (`setCommitteeCommitment`). After this, `submitRotate` is the only
+    ///         permissionless writer; the owner retains `reAnchorCommittee` as the
+    ///         exceptional weak-subjectivity recovery hop (logged, does not write
+    ///         exec hashes). This is the call that turns everyday committee
+    ///         advance from "trusted by the owner key" into "the rotate proof".
+    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors).
+    ///      Requires the committee to be bootstrapped first. Do not call until
+    ///      the opcode decider is on every node; the relayer SLA still matters
+    ///      because re-anchor is a trust hop, not a substitute for liveness.
     function disableOwnerRotation() public onlyOwnerPubkey accept {
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         ensureBalance();
         _ownerRotationEnabled = false;
+    }
+
+    /// @notice Weak-subjectivity recovery: owner sets a fresh committee after
+    ///         `disableOwnerRotation()`, when `submitRotate` cannot trustlessly
+    ///         bridge a gap of more than one period. Not the routine bootstrap
+    ///         path (`setCommitteeCommitment`); an exceptional, logged hop that
+    ///         reintroduces owner trust for one checkpoint. Does NOT write
+    ///         execution-block hashes — those still require a step proof.
+    ///         Source the new commitment from ≥ 2 independent checkpoint-sync
+    ///         providers (M0 §7).
+    /// @dev Armed only after disable (`ERR_REANCHOR_NOT_ARMED` otherwise).
+    ///      `period` must not go backwards. Same committee+period reverts
+    ///      `ERR_REANCHOR_NOOP`.
+    /// @param committeeCommitment — Poseidon commitment of the new WS committee.
+    /// @param period             — period it belongs to (must be ≥ current).
+    function reAnchorCommittee(uint256 committeeCommitment, uint64 period)
+        public onlyOwnerPubkey accept
+    {
+        require(!_ownerRotationEnabled, ERR_REANCHOR_NOT_ARMED);
+        require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
+        require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
+        require(period >= _committeePeriod, ERR_STALE_PERIOD);
+        require(
+            committeeCommitment != _currentCommittee || period != _committeePeriod,
+            ERR_REANCHOR_NOOP
+        );
+        ensureBalance();
+        uint256 from = _currentCommittee;
+        _currentCommittee = committeeCommitment;
+        _committeePeriod = period;
+        _reAnchorsApplied += 1;
+        address addrExtern = address.makeAddrExtern(CommitteeReAnchoredEmit, bitCntAddress);
+        emit CommitteeReAnchored{dest: addrExtern}(period, from, committeeCommitment);
+    }
+
+    /// @notice Replace code while keeping the anchored committee, head, and
+    ///         proven-hash set. Needed because both VkBlobs live in code —
+    ///         a step/rotate re-emit or an Ethereum gindex shift cannot be a
+    ///         fresh deploy without spending the weak-subjectivity trust
+    ///         step again. Mirrors `USDCBridge.updateCode`.
+    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey accept {
+        ensureBalance();
+        TvmCell migrationCell = abi.encode(
+            _ownerPubkey,
+            _l1ChainId,
+            _usdcBridge,
+            _finalizedSlot,
+            _finalizedBeaconRoot,
+            _finalizedExecutionBlockHash,
+            _updatesApplied,
+            _currentCommittee,
+            _committeePeriod,
+            _ownerRotationEnabled,
+            _reAnchorsApplied,
+            _provenExecutionBlockHash,
+            userCell
+        );
+        tvm.commit();
+        tvm.setcode(newcode);
+        tvm.setCurrentCode(newcode);
+        onCodeUpgrade(migrationCell);
+    }
+
+    function onCodeUpgrade(TvmCell cell) private {
+        tvm.accept();
+        tvm.resetStorage();
+        (uint256 pubkey,
+         uint256 l1ChainId,
+         address usdcBridge,
+         uint64 finalizedSlot,
+         uint256 finalizedBeaconRoot,
+         uint256 finalizedExecutionBlockHash,
+         uint64 updatesApplied,
+         uint256 currentCommittee,
+         uint64 committeePeriod,
+         bool ownerRotationEnabled,
+         uint64 reAnchorsApplied,
+         mapping(uint256 => bool) proven,
+         TvmCell /*userCell*/)
+            = abi.decode(cell, (
+                uint256, uint256, address, uint64, uint256, uint256, uint64,
+                uint256, uint64, bool, uint64, mapping(uint256 => bool), TvmCell
+            ));
+        _ownerPubkey = pubkey;
+        _l1ChainId = l1ChainId;
+        _usdcBridge = usdcBridge;
+        _finalizedSlot = finalizedSlot;
+        _finalizedBeaconRoot = finalizedBeaconRoot;
+        _finalizedExecutionBlockHash = finalizedExecutionBlockHash;
+        _updatesApplied = updatesApplied;
+        _currentCommittee = currentCommittee;
+        _committeePeriod = committeePeriod;
+        _ownerRotationEnabled = ownerRotationEnabled;
+        _reAnchorsApplied = reAnchorsApplied;
+        _provenExecutionBlockHash = proven;
     }
 
     // ========================================================
@@ -460,13 +609,16 @@ contract EthBeaconLightClient {
 
     /// @notice The committee-chain trust state. `ownerRotationEnabled` is the one
     ///         that matters: while true the effective trust root for the committee
-    ///         is the owner key regardless of the rotate proof.
+    ///         is the owner key regardless of the rotate proof. `reAnchorsApplied`
+    ///         should stay 0 under a live relayer SLA — each increment is a
+    ///         logged weak-subjectivity hop.
     function getCommitteeState() external view returns (
         uint256 currentCommittee,
         uint64  committeePeriod,
-        bool    ownerRotationEnabled
+        bool    ownerRotationEnabled,
+        uint64  reAnchorsApplied
     ) {
-        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled);
+        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled, _reAnchorsApplied);
     }
 
     function getVersion() external pure returns (string, string) {

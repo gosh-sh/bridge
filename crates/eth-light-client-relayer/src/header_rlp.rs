@@ -122,7 +122,33 @@ pub fn encode_header_rlp(block: &Value) -> Result<Vec<u8>, RelayerError> {
             s.append(&u.as_slice());
         }
     }
-    Ok(s.out().into())
+    let rlp: Vec<u8> = s.out().into();
+    // Runtime fork-gate: the node returns `hash` in the same JSON. If we
+    // rebuilt the RLP wrong (a new header field we do not encode), keccak
+    // diverges. Fail here instead of as a confusing on-chain ERR_BAD_ANCESTRY.
+    if let Some(hash_s) = block.get("hash").and_then(|x| x.as_str()) {
+        let want =
+            decode_qty(hash_s).map_err(|e| RelayerError::other(format!("block.hash: {e}")))?;
+        let got = keccak256(&rlp);
+        if want.as_slice() != got.as_slice() {
+            return Err(RelayerError::other(format!(
+                "header RLP keccak {} != node hash {hash_s} — encoder is behind the current fork",
+                hex::encode(got)
+            )));
+        }
+    }
+    Ok(rlp)
+}
+
+/// Two minimal linked header RLPs for tests (not real Ethereum headers).
+/// `keccak(child)` has `parentHash == keccak(parent)`.
+pub fn dummy_linked_headers() -> (Vec<u8>, Vec<u8>) {
+    let mut parent = vec![0xf8, 33, 0xa0];
+    parent.extend(std::iter::repeat_n(0x01, 32));
+    let p_hash = keccak256(&parent);
+    let mut child = vec![0xf8, 33, 0xa0];
+    child.extend_from_slice(&p_hash);
+    (child, parent)
 }
 
 /// Walk `checkpoint` toward genesis, at most `max` headers (checkpoint first).
@@ -225,5 +251,17 @@ mod tests {
         let got = keccak256(&rlp);
         let want = hex::decode(v["hash"].as_str().unwrap().trim_start_matches("0x")).unwrap();
         assert_eq!(hex::encode(got), hex::encode(&want));
+    }
+
+    #[test]
+    fn encode_rejects_when_node_hash_does_not_match_rlp() {
+        let mut v: Value = serde_json::from_str(include_str!("fixtures/mainnet_block_1.json"))
+            .expect("fixture json");
+        v["hash"] = Value::String(format!("0x{}", "ab".repeat(32)));
+        let err = encode_header_rlp(&v).unwrap_err().to_string();
+        assert!(
+            err.contains("encoder is behind the current fork"),
+            "got {err}"
+        );
     }
 }

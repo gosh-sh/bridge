@@ -86,6 +86,11 @@ coverage/
 lcov.info
 cobertura.xml
 
+# Python bytecode (pytest under audit/spec, scripts/, anywhere else)
+__pycache__/
+*.py[cod]
+*$py.class
+
 # Test artifacts
 test-results/
 *.junit.xml

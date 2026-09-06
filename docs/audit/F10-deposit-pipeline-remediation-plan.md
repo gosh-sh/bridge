@@ -121,14 +121,14 @@ See sibling handoff — USDCBridge Solidity changes in acki-nacki repo (out of s
 
 ## Phase D — larger / optional
 
-- **QC-OFF-01:** skip-after-N-attempts + optional out-of-order finalize.
+- **QC-OFF-01:** skip-after-N-attempts + park; **no** out-of-order finalize ([qc-off-01-hol-policy.md](qc-off-01-hol-policy.md), rejects issue #34).
 - **QC-OFF-10:** incremental `scanned_through_block` in `EthLogSource`.
 - **QC-OFF-02:** operator runbook (manual `finalize-one`, backup relayer SLA).
 - **QC-OFF-04:** TLS/endpoint allowlist, key custody docs.
 - **QC-PROV-04:** upstream axiom-eth padding zero-constraint (accept for testnet).
 
 **Done (Phase D):**
-- `--skip-after-attempts N` parks stuck ids in `state.json` → `parked_deposit_ids`.
+- `--skip-after-attempts N` parks stuck ids in `state.json` → `parked_deposit_ids`. Out-of-order finalize is **not** taken (QC-OFF-01 / issue #34).
 - `scanned_through_block` + shared scan cursor — incremental `eth_getLogs` tail scans.
 - `SubmitOutcome::Pending` distinct from `Rejected` (QC-OFF-11 Pending policy).
 - Live daemon rejects non-HTTPS GraphQL unless loopback / `--allow-insecure-graphql`.

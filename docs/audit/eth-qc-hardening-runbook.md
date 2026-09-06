@@ -83,7 +83,7 @@ Bridge assumes standard ERC-20 semantics (no fee-on-transfer). Circle blacklist/
 
 ### QC-OFF-01 — deposit-relayer head-of-line skip
 
-The CLI default is `--skip-after-attempts 0` (strict sequential). **Production systemd** (`scripts/ursus/deposit-relayer.service`) sets `SKIP_AFTER_ATTEMPTS=64` before `EnvironmentFile` (the env file may override) and passes `--skip-after-attempts ${SKIP_AFTER_ATTEMPTS}`. Parked ids land in `state.json` → `parked_deposit_ids`; run `finalize-one` for each. See `docs/audit/deposit-relayer-operator-runbook.md`.
+The CLI default is `--skip-after-attempts 0` (strict sequential). **Production systemd** (`scripts/ursus/deposit-relayer.service`) sets `SKIP_AFTER_ATTEMPTS=64` before `EnvironmentFile` (the env file may override) and passes `--skip-after-attempts ${SKIP_AFTER_ATTEMPTS}`. Parked ids land in `state.json` → `parked_deposit_ids`; run `finalize-one` for each. Official daemon does **not** finalize out of order ([qc-off-01-hol-policy.md](qc-off-01-hol-policy.md)). See `docs/audit/deposit-relayer-operator-runbook.md`.
 
 Do not ship a live daemon with skip disabled unless operators accept that one stuck `depositId` blocks the queue.
 

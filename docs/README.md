@@ -61,6 +61,8 @@ Canonical documentation for the Acki Nacki ↔ Ethereum bridge. Historical agent
 - [../audit/PROJECT_FACTS.md](../audit/PROJECT_FACTS.md) — Domain facts for agents
 - [../audit/reports/eth-audit-plan.md](../audit/reports/eth-audit-plan.md) — **ETH contracts audit plan** (branch `audit`)
 - [audit/layer_hashes_circuit_audit.md](audit/layer_hashes_circuit_audit.md) — Partner layer-hashes circuit (Phase 0)
+- [audit/qc-off-01-hol-policy.md](audit/qc-off-01-hol-policy.md) — Keep strict depositId HOL; reject out-of-order finalize
+- [audit/deposit-relayer-operator-runbook.md](audit/deposit-relayer-operator-runbook.md) — Deposit relayer ops (park / `finalize-one`)
 
 ### End users
 

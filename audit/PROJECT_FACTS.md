@@ -90,7 +90,7 @@ Re-run when changing `check_binds_to`, `deposit()` CEI/accounting, `nonReentrant
 - **ETH-7 emergency leftover aToken:** `emergencyWithdrawAll` reverts `EmergencyLeftoverAToken` if aUSDC remains after `withdraw(max)` — leftover shares must not become `harvestYield`. Liquid excess remains `skimExcessUsdc` (QC-A1-3). See `audit/findings/BRIDGE-ETH-07/`.
 - **ETH-9:** mainnet `DeployRealBridge` requires `altTokenId == 0` (not a constructor `chainid` check — Foundry binds Circuit 4 with `vm.chainId(1)`). `supplyToAave` checks `approve` bool (`ApproveFailed`). FoT still out of scope. See `audit/findings/BRIDGE-ETH-09/`.
 - **QC-AN-10 / WD-AN-07:** ETH keeps `InvalidAnAccount` / `InvalidRecipient`. AN `finalizeDeposit` / `confirmDeposit` / `initiateWithdrawal` require non-zero recipient (`ERR_ZERO_RECIPIENT`). Snapshot code **223**; production sibling `acki-nacki` code **230** (`223` is already `ERR_WRONG_DAPP` there). See `audit/findings/BRIDGE-AN-10/`.
-- **QC-OFF-01:** production `deposit-relayer` uses `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (`scripts/ursus/deposit-relayer.service`). CLI default remains 0.
+- **QC-OFF-01:** official daemon stays strictly sequential (`next_target = last_processed + 1`); out-of-order finalize is rejected ([issue #34](https://github.com/gosh-sh/bridge/issues/34)). Production systemd uses `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64`; CLI default remains 0. Policy: `docs/audit/qc-off-01-hol-policy.md`.
 - **Per-tx deposit cap:** `MAX_DEPOSIT_AMOUNT = type(uint64).max` on main (#20); overlay documents aggregate TVL uncapped (`DepositWhaleCap.t.sol`). Live docs no longer claim 100 USDC as the contract cap (frontend form still has a 100 USDC convenience cap).
 
 ## Audit classification (ETH pass 2026-07)

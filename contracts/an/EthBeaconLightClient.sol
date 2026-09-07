@@ -556,7 +556,7 @@ contract EthBeaconLightClient {
          bool ownerRotationEnabled,
          uint64 reAnchorsApplied,
          mapping(uint256 => bool) proven,
-         TvmCell /*userCell*/)
+         TvmCell userCell)
             = abi.decode(cell, (
                 uint256, uint256, address, uint64, uint256, uint256, uint64,
                 uint256, uint64, bool, uint64, mapping(uint256 => bool), TvmCell

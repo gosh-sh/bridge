@@ -1,6 +1,6 @@
 diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
 new file mode 100644
-index 000000000..d7236797e
+index 000000000..3cdd079c0
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
 @@ -0,0 +1,1075 @@
@@ -562,7 +562,7 @@ index 000000000..d7236797e
 +         bool ownerRotationEnabled,
 +         uint64 reAnchorsApplied,
 +         mapping(uint256 => bool) proven,
-+         TvmCell /*userCell*/)
++         TvmCell userCell)
 +            = abi.decode(cell, (
 +                uint256, uint256, address, uint64, uint256, uint256, uint64,
 +                uint256, uint64, bool, uint64, mapping(uint256 => bool), TvmCell

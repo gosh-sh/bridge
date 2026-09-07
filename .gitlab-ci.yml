@@ -212,6 +212,321 @@ test:rust:relayer:
     - cd crates/bridge-prover-libraries
     - cargo test --locked -p bridge-relayer-daemon
 
+# ackinacki-bridge is a symlink member of crates/bridge-prover-libraries,
+# so `cargo build --workspace` at the root never sees it. Without this pair
+# the end-user CLI's tests never run in CI — which is how the NODE-3913
+# conformance gaps reached main.
+build:rust:ackinacki-bridge:
+  extends: .rust_base
+  stage: build
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-prover-libraries/target/
+    policy: pull-push
+  script:
+    - cd crates/bridge-prover-libraries
+    - cargo build --locked -p ackinacki-bridge --all-targets
+
+test:rust:ackinacki-bridge:
+  extends: .rust_base
+  stage: test
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-prover-libraries/target/
+    policy: pull
+  needs:
+    - build:rust:ackinacki-bridge
+  script:
+    - cd crates/bridge-prover-libraries
+    - cargo test --locked -p ackinacki-bridge
+    # The probe lives in bridge-prover-lib and guards a post-burn failure;
+    # `-p ackinacki-bridge` does not reach it.
+    #
+    # The filter is `keys::state::probe_tests::`, NOT `keys::`. `keys::`
+    # also selects the pre-existing `keys::common::tests::load_srs_*`,
+    # whose `fixture_srs(17)` PANICS when no ceremony is present — and
+    # `git ls-files crates/bridge-prover-libraries/params/` is empty, so a
+    # clean CI checkout has none. That job would fail on unrelated tests
+    # before reaching ours.
+    #
+    # The fourteen fixture-dependent probe tests are `#[ignore]`d at their
+    # definitions and run in the scheduled job below; this catches the
+    # seven that need no ceremony.
+    - cargo test --locked -p bridge-prover-lib keys::state::probe_tests::
+    # The ceremony probe's negative tests live in `keys::common::tests`, not
+    # in `probe_tests`, so the filter above does not reach them — and they
+    # are the ones guarding against a preflight that waves a truncated SRS
+    # through. They need no ceremony (they build the bad file themselves),
+    # so they belong at merge time.
+    #
+    # `probe_rejects_`, not `keys::common::tests::`: that broader filter
+    # would pull in `load_srs_*`, whose `fixture_srs(17)` panics without a
+    # provisioned params/ — the same trap as `keys::` above. The two
+    # ceremony tests that DO need params/ are `#[ignore]`d and run in the
+    # scheduled job.
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::probe_rejects_
+    # And the two file-mode regressions, which live in the same module and
+    # are also ceremony-free. Their own filters rather than a broader
+    # `keys::common::tests::` for the same reason as above.
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::saving_a_key_artifact
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::a_regenerated_manifest
+
+# The ENOSPC reserve test needs a filesystem it can fill, which means
+# mounting a 1 MiB tmpfs, which means CAP_SYS_ADMIN. `.rust_base` selects
+# `tags: [docker]` — an ordinary shared runner — and handing CAP_SYS_ADMIN
+# to the runner every MR pipeline uses is not a trade worth making for one
+# test.
+#
+# So it gets its own job, on its own tag, behind its own variable. The tag
+# alone is not enough: an unmatched tag leaves the job `pending` rather
+# than failing, which would hang every scheduled pipeline instead of
+# skipping one job. `BRIDGE_ENOSPC_RUNNER=1` is the switch to flip once the
+# runner exists.
+#
+# Until then the job does not run, the MR pipeline is unaffected, and the
+# test is `#[ignore]`d so nothing counts it as passing.
+test:rust:ackinacki-bridge:enospc:
+  extends: .rust_base
+  stage: test
+  tags:
+    - privileged
+  rules:
+    # Gated on an explicit variable, not merely on the pipeline source. A
+    # job whose tag no runner carries does not fail — it sits `pending` and
+    # the scheduled pipeline never completes. Until someone provisions the
+    # runner and sets BRIDGE_ENOSPC_RUNNER=1 in the project's CI variables,
+    # this job simply does not exist.
+    - if: $BRIDGE_ENOSPC_RUNNER != "1"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    # Optional on an MR: `allow_failure: false` on a manual job makes it
+    # BLOCKING — the pipeline sits unfinished until someone presses play.
+    # Opt-in, not a gate.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  needs:
+    - build:rust:ackinacki-bridge
+  script:
+    - cd crates/bridge-prover-libraries
+    - |
+      MP=$(mktemp -d /tmp/bridge-fullfs.XXXXXX)
+      # No `|| true`: on a job tagged `privileged` a failed mount is a
+      # broken runner, and silently skipping is how this test stopped
+      # existing the first time.
+      mount -t tmpfs -o size=1m tmpfs "$MP"
+      trap 'umount "$MP" || true; rmdir "$MP" || true' EXIT
+      BRIDGE_TEST_FULL_FS="$MP" \
+        cargo test --locked -p ackinacki-bridge a_reserve_that_fails -- --include-ignored
+
+# The key-cache tests are the ones that stand between a stale or mismatched
+# keyset and a lost burn, and they cannot run on a plain runner: they need
+# a ~464 MB Hermez ceremony and two ~7 min keygens. Left as `#[ignore]`,
+# they would be permanently invisible — a green pipeline that proves
+# nothing about the branch it is guarding.
+#
+# So they get their own scheduled job with a persistent cache, and the
+# per-MR pipeline stays fast. This is a real gap between merge time and
+# nightly; naming it is the point.
+test:rust:ackinacki-bridge:keycache:
+  extends: .rust_base
+  stage: test
+  rules:
+    # Scheduled runs, plus an opt-in button on an MR so a branch touching
+    # the prover keys can be checked before merge instead of after.
+    #
+    # `allow_failure: true` because a manual job with `allow_failure: false`
+    # blocks the pipeline until someone runs it — which would make every
+    # unrelated MR wait on a 20-minute keygen job nobody needs.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  cache:
+    key: bridge-keycache-v1          # persistent, NOT per-branch
+    paths:
+      - .cache/bridge-keys/
+    policy: pull-push
+  script:
+    - cd crates/bridge-prover-libraries
+    # Provision once; later runs restore from cache. `bootstrap_hermez_srs`
+    # is the tool the preflight error names, so this doubles as a check
+    # that those instructions still work.
+    #
+    # NOTE on the keygen step: `bridge-event-halo2-prover` takes only
+    # --fixture / --out-dir / --seq-no / --selftest and hard-codes
+    # `./params`. It has no --params-dir and no --keygen-only, so it is
+    # driven by CWD, and `--selftest` is the mode that runs keygen without
+    # needing a fixture.
+    - |
+      KEYS=$CI_PROJECT_DIR/.cache/bridge-keys
+      PTAU=$HOME/.cache/halo2-kzg-srs
+      mkdir -p "$KEYS/primary" "$KEYS/alt" "$PTAU"
+      # The ceremony is expensive and never goes stale, so it stays guarded
+      # — but on the WHOLE set, not on k=21 alone. `bootstrap_hermez_srs`
+      # emits [17, 19, 20, 21]; a cache left behind by an earlier job that
+      # ran `--k 21` has only the largest, and `fixture_srs(17)` in the
+      # broad suite needs the exact k=17 file and panics without it.
+      # Guarding on one degree would let that partial cache persist and
+      # fail the scheduled job every night.
+      ceremony_complete() {
+        for k in 17 19 20 21; do
+          [ -f "$1/kzg_bn254_$k.srs" ] || return 1
+        done
+      }
+      if ! ceremony_complete "$KEYS/primary"; then
+        # K=21's ptau is NOT auto-downloaded; only K=20's is. Fetch it, or
+        # bootstrap fails on a clean runner.
+        [ -f "$PTAU/powersOfTau28_hez_final_21.ptau" ] || \
+          curl -L --fail --progress-bar \
+            https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+            -o "$PTAU/powersOfTau28_hez_final_21.ptau"
+        # No --k: DEFAULT_KS is [17, 19, 20, 21]. `--k 21` alone would emit
+        # only the k=21 file — enough for load_srs, which downsizes, but it
+        # leaves every lower degree to be derived at first use inside the
+        # keygen that follows. Generate them here, where a failure is
+        # visible.
+        cargo run --release -p bridge-prover-lib --bin bootstrap_hermez_srs -- \
+          --params-dir "$KEYS/primary"
+      fi
+      # The KEYS are NOT guarded, and that is the point. `bridge-keycache-v1`
+      # is a persistent cache key, so `[ ! -f event_pk.bin ]` would keep a
+      # proving key from before an EVENT_CIRCUIT_REVISION bump forever: the
+      # keygen would be skipped, the cached manifest would still name the
+      # old revision, and `a_complete_cache_is_warm` would fail on every run
+      # until someone thought to clear the cache by hand.
+      #
+      # Running --selftest unconditionally handles the STALE case:
+      # `ensure_keys` is manifest-aware, so a cache from an older revision
+      # regenerates and a current one is a no-op.
+      #
+      # It does NOT handle a TRUNCATED proving key whose manifest is
+      # current: `keys_cached()` only tests that the PK file exists, so
+      # keygen is skipped and `load_pk` fails on every run forever. That is
+      # exactly the state
+      # `a_truncated_pk_beside_a_good_vk_is_corrupt_not_warm` describes.
+      # Repair it first — the probe already knows how to spot it, so ask,
+      # and clear the trio when the answer is Corrupt.
+      cargo run --release --quiet -p bridge-prover-lib --bin probe_event_keys -- \
+        --params-dir "$KEYS/primary" --repair
+      #
+      # This binary hard-codes ./params and takes no --params-dir, so CWD is
+      # the only lever. Run it through cargo: the job builds nothing else
+      # and does not cache target/, so a path into target/release would not
+      # exist.
+      WORK=$(mktemp -d)
+      ln -s "$KEYS/primary" "$WORK/params"
+      ( cd "$WORK" && cargo run --release \
+          --manifest-path "$CI_PROJECT_DIR/crates/bridge-prover-libraries/Cargo.toml" \
+          -p bridge-event-halo2-prover -- --selftest )
+      rm -rf "$WORK"
+    # The alternate trio: a keyset from a PINNED older commit — one that
+    # actually contains crates/bridge-prover-libraries — which is what a
+    # real circuit change produces. Built by checking that commit out into
+    # a scratch tree and running the same keygen there.
+    #
+    # Skipped when BRIDGE_ALT_KEYS_REF is unset, and then the three
+    # alternate-keyset tests skip and say so.
+    - |
+      KEYS=$CI_PROJECT_DIR/.cache/bridge-keys
+      # A PINNED commit, not "the previous tag". An arbitrary release tag
+      # is not a source of Circuit-4 keys — `git ls-tree v0.1.0
+      # crates/bridge-prover-libraries` is empty, the crate did not exist
+      # yet, and the symlink below would then fail on a missing parent and
+      # take the job down.
+      #
+      # Set BRIDGE_ALT_KEYS_REF to a commit that (a) contains
+      # crates/bridge-prover-libraries and (b) predates the current
+      # EVENT_CIRCUIT_REVISION. Leave it unset and the three
+      # alternate-keyset tests skip — which is the honest state until
+      # someone picks one. One of the three,
+      # a_grafted_vk_is_not_installed_either, is the only regression for a
+      # direct vk_opt() consumer, i.e. for bridge-verifier-daemon.
+      ALTREF="${BRIDGE_ALT_KEYS_REF:-}"
+      ALTDIR="$KEYS/alt/${ALTREF:-none}"
+      # A usable alternate keyset is the trio PLUS a ceremony: the fixture
+      # copies one because `KeyManagerState::new` loads the SRS before
+      # anything else, and without it `copy_keyset_from` panics. Guarding
+      # on event_pk.bin alone would let a half-copied directory look
+      # provisioned.
+      alt_complete() {
+        [ -f "$1/event_pk.bin" ] && [ -f "$1/event_vk.bin" ] \
+          && [ -f "$1/event_config_params.json" ] \
+          && { [ -f "$1/kzg_bn254_20.srs" ] || [ -f "$1/kzg_bn254_21.srs" ]; }
+      }
+      if [ -n "$ALTREF" ] && ! alt_complete "$ALTDIR"; then
+        # FETCH FIRST. GitLab clones shallow by default, so the ref is not
+        # in the local object store yet — `cat-file`/`ls-tree` would both
+        # say "no such commit" and take the else branch, and the fetch that
+        # would have fixed it sat inside the branch never taken.
+        git fetch --depth=1 origin "$ALTREF" 2>/dev/null \
+          || git fetch origin "$ALTREF" 2>/dev/null || true
+        if git cat-file -e "$ALTREF^{commit}" 2>/dev/null \
+           && [ -n "$(git ls-tree "$ALTREF" crates/bridge-prover-libraries)" ]; then
+          rm -rf "$ALTDIR"          # a partial directory is not a base
+          mkdir -p "$ALTDIR"
+          ALT=$(mktemp -d)
+          git worktree add --detach "$ALT" "$ALTREF"
+          cp "$KEYS/primary"/kzg_bn254_*.srs "$ALTDIR/"
+          ln -s "$ALTDIR" "$ALT/crates/bridge-prover-libraries/params"
+          # NO `|| true`. Once BRIDGE_ALT_KEYS_REF names a commit that
+          # exists and contains the crate, a checkout, build or keygen
+          # failure is a real problem — and swallowing it turns all three
+          # alternate-keyset tests into a silent skip and the job green,
+          # which is the failure mode this variable exists to escape.
+          ( cd "$ALT/crates/bridge-prover-libraries" \
+            && cargo run --release -p bridge-event-halo2-prover -- --selftest )
+          git worktree remove --force "$ALT"
+        else
+          echo "BRIDGE_ALT_KEYS_REF=$ALTREF does not contain crates/bridge-prover-libraries"
+          echo "-> the three alternate-keyset tests will skip"
+        fi
+      fi
+    # `--ignored` and `--include-ignored` are mutually exclusive: libtest
+    # exits 101 with "the options --include-ignored and --ignored are
+    # mutually exclusive". `--include-ignored` is the one that runs both
+    # sets, which is what this job wants.
+    - |
+      KEYS=$CI_PROJECT_DIR/.cache/bridge-keys
+      ALTREF="${BRIDGE_ALT_KEYS_REF:-}"
+      alt_complete() {
+        [ -f "$1/event_pk.bin" ] && [ -f "$1/event_vk.bin" ] \
+          && [ -f "$1/event_config_params.json" ] \
+          && { [ -f "$1/kzg_bn254_20.srs" ] || [ -f "$1/kzg_bn254_21.srs" ]; }
+      }
+      export BRIDGE_TEST_EVENT_KEYS="$KEYS/primary"
+      if [ -n "$ALTREF" ]; then
+        # The provisioning step above is fatal on failure, so reaching here
+        # with the ref set and no keys means something silently did not
+        # happen. Do not paper over it by leaving the variable unset — that
+        # is precisely how these tests become permanent skips.
+        alt_complete "$KEYS/alt/$ALTREF" || {
+          echo "BRIDGE_ALT_KEYS_REF=$ALTREF is set but the alternate keyset is" >&2
+          echo "incomplete — pk, vk, config and a ceremony are all required" >&2
+          exit 1
+        }
+        export BRIDGE_TEST_EVENT_KEYS_ALT="$KEYS/alt/$ALTREF"
+      fi
+      # `fixture_srs` searches only repo-relative `params/` directories — it
+      # never looks at BRIDGE_TEST_EVENT_KEYS. So the ceremony this job
+      # provisioned in .cache/ is invisible to
+      # `keys::common::tests::load_srs_*`, and the broad filter would panic
+      # on them exactly as it would in the fast job. Give it the directory
+      # it expects:
+      ln -sfn "$KEYS/primary" "$CI_PROJECT_DIR/crates/bridge-prover-libraries/params"
+      # --test-threads=1 is not optional here. Fourteen of these tests each
+      # copy a ~2.65 GB proving key into a TempDir, and the two
+      # grafted-keyset tests copy two keysets apiece; run in parallel that
+      # is tens of GB of temporary files plus both source keysets and
+      # target/, with several proving keys resident at once. A normal
+      # Docker runner meets ENOSPC or the OOM killer long before it meets a
+      # failing assertion.
+      cargo test --locked -p bridge-prover-lib keys:: -- --include-ignored --test-threads=1
+
 test:rust:aggregator:
   extends: .rust_base
   stage: test

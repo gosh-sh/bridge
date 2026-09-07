@@ -162,6 +162,41 @@ pub async fn compose(
     amount: &UsdcAmount,
     bounce: bool,
 ) -> CliResult<ComposedBurn> {
+    // The report has to be THIS withdrawal's.
+    //
+    // `compose` takes the preflight report and the from/to/amount
+    // separately, and nothing checked they described the same request.
+    // Today one caller computes both together so they cannot disagree —
+    // but every EVM check, the balance check and the key check that make
+    // this burn safe live in that report, and pairing it with a different
+    // request would mean sending one withdrawal on another's evidence.
+    //
+    // These three fields existed for exactly this and were read by
+    // nothing, which clippy reports as dead code. They are not dead; the
+    // check was missing.
+    if preflight.from.extended() != from.extended()
+        || preflight.to.address != to.address
+        || preflight.to.chain_id != to.chain_id
+        || preflight.amount.0 != amount.0
+    {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "internal: the preflight report describes a different withdrawal than the one \
+                 being composed (report: {} → 0x{} on chain {} for {}; composing: {} → 0x{} on \
+                 chain {} for {}). Nothing was sent.",
+                preflight.from.extended(),
+                hex::encode(preflight.to.address.as_slice()),
+                preflight.to.chain_id,
+                preflight.amount.display(),
+                from.extended(),
+                hex::encode(to.address.as_slice()),
+                to.chain_id,
+                amount.display(),
+            ),
+            source: None,
+        });
+    }
+
     let keys = load_keypair(from_keys)?;
 
     // The keys we are about to sign with must still be the keys preflight

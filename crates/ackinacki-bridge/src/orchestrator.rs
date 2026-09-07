@@ -13,7 +13,9 @@
 //!    burns from other operators cannot be mis-selected as ours. Exit 11
 //!    on capture timeout (burn bounced, GQL unreachable, or USDCBridge
 //!    never emitted the ExtOut).
+//!
 //! 4b. **Resurrect + coverage-wait** — see [`crate::resurrect`].
+//!
 //! 5. **Prove** — reuses
 //!    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`] with
 //!    the just-captured event and the resurrected `BridgeState`. Exit 12
@@ -378,7 +380,17 @@ pub async fn run(
                 },
                 BurnDecision::Send => {
                     let receipt = burn::send(&context, &from, composed).await?;
-                    info!(an_tx = %receipt.an_tx_hash, "burn broadcast");
+                    // The receipt's own amount, not the requested one:
+                    // this line is what an operator reconciles against,
+                    // and it should say what went on the wire. It also
+                    // makes the field load-bearing — clippy reported it
+                    // as never read, which was true and was the bug in
+                    // the log line rather than in the receipt.
+                    info!(
+                        an_tx = %receipt.an_tx_hash,
+                        amount_micro = receipt.sent_amount_micro,
+                        "burn broadcast",
+                    );
                     if let Some(r) = record.as_mut() {
                         r.status = Status::Burned;
                         r.an_tx_hash = Some(receipt.an_tx_hash.clone());

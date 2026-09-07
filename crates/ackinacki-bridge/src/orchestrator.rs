@@ -30,7 +30,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -41,7 +40,6 @@ use bridge_relayer_daemon::{
     withdraw_e2e::{run_once_with_state, WithdrawE2EConfig},
 };
 use tracing::{info, warn};
-use tvm_client::{net::NetworkConfig, ClientConfig, ClientContext};
 
 use crate::{
     args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs},
@@ -296,7 +294,15 @@ pub async fn run(
         // arms type-check.
         ("<dry-run>".to_string(), bounce)
     } else {
-        let context = build_tvm_client(&args.gql_endpoint)?;
+        // `preflight::run` built one of these from the same endpoint at
+        // its first step, so reaching a failure here means the same
+        // construction succeeded once and then stopped — resource
+        // exhaustion, in practice. Either way nothing has been broadcast,
+        // which is why this shares preflight's constructor rather than
+        // keeping a byte-identical copy that mapped the failure to exit 10
+        // — "the USDC has left the source multisig regardless", about a
+        // run that had not composed a message yet.
+        let context = preflight::build_client_context(&args.gql_endpoint)?;
 
         // Resume: a prior record carrying an an_tx_hash means the burn was
         // already broadcast at least once. Reuse it; never compose a second
@@ -824,22 +830,6 @@ pub async fn run(
 }
 
 // ---- helpers ----
-
-fn build_tvm_client(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
-    let config = ClientConfig {
-        network: NetworkConfig {
-            endpoints: Some(vec![gql_endpoint.to_string()]),
-            sending_endpoint_count: 1,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let ctx = ClientContext::new(config).map_err(|e| CliError::BurnOutcomeUnknown {
-        reason: format!("failed to build tvm_client context for {gql_endpoint}: {e}"),
-        source: Some(anyhow::Error::new(e)),
-    })?;
-    Ok(Arc::new(ctx))
-}
 
 /// Whether stage 3 must actually broadcast.
 ///

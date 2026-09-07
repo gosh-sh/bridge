@@ -297,7 +297,15 @@ pub async fn run(
 
 // -- tvm-sdk client construction ---------------------------------------------
 
-fn build_client_context(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
+/// The one place a `tvm_client` context is constructed.
+///
+/// One place because the failure's exit code is a decision, and a second
+/// copy made it twice: this one refuses with exit 2, the orchestrator's
+/// copy reported exit 10 — published as "the AN burn WAS broadcast" — for
+/// a construction that happens before anything is composed, let alone
+/// sent. `ClientContext::new` only builds config and does not connect, so
+/// every one of its failures is local and pre-send.
+pub(crate) fn build_client_context(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
     let config = ClientConfig {
         network: NetworkConfig {
             endpoints: Some(vec![gql_endpoint.to_string()]),
@@ -2523,6 +2531,56 @@ mod tests {
             "clearing is exactly what does not work here: {msg}"
         );
         assert!(msg.contains("is a directory"), "must keep `why`: {msg}");
+    }
+
+    #[test]
+    fn a_client_context_that_cannot_be_built_is_a_pre_send_refusal() {
+        // Exit 2 is published as "refused before sending, nothing left the
+        // machine", and that is what this is: `ClientContext::new` only
+        // builds config — it does not connect — so every failure of it is
+        // local and happens before any message is composed. The
+        // orchestrator kept a byte-identical copy of this function that
+        // said exit 10 instead, which README's table defines as "the USDC
+        // has left the source multisig regardless".
+        for endpoint in ["", " ", "not a url", "http://", "://x"] {
+            let err = build_client_context(endpoint)
+                .expect_err("a malformed endpoint cannot build a context");
+            assert_eq!(
+                err.exit_code().as_i32(),
+                2,
+                "{endpoint:?} is refused before anything is sent: {err}",
+            );
+            assert_ne!(
+                err.exit_code().as_i32(),
+                10,
+                "{endpoint:?}: exit 10 claims a burn that was never composed",
+            );
+        }
+    }
+
+    #[test]
+    fn the_client_context_is_built_in_exactly_one_place() {
+        // Two copies is how the exit codes came to disagree: the same
+        // construction, the same pre-send moment, refused as exit 2 here
+        // and reported as exit 10 in the orchestrator. Constructing one
+        // somewhere new means deciding again what its failure means, so
+        // make that decision visible rather than inherited.
+        let needle = concat!("ClientContext::", "new(");
+        let count = |src: &str| {
+            src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .filter(|l| l.contains(needle))
+                .count()
+        };
+        let here = count(include_str!("preflight.rs"));
+        let there = count(include_str!("orchestrator.rs")) + count(include_str!("burn.rs"));
+        assert_eq!(here, 1, "this module owns the constructor");
+        assert_eq!(
+            there, 0,
+            "the withdraw pipeline shares that constructor; a second one has to choose an exit \
+             code for its failure, and the copy that chose 10 reported a burn nobody had composed",
+        );
     }
 
     #[test]

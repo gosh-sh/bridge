@@ -892,6 +892,19 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: a `tvm_client` context that cannot be
+  built is exit 2, not exit 10.** The withdraw pipeline kept its own copy
+  of preflight's context constructor, differing from it in one respect:
+  a construction failure was reported as `BurnOutcomeUnknown`, which the
+  exit-code table defines as "the USDC has left the source multisig
+  regardless". `ClientContext::new` only builds configuration — it does
+  not connect — so every failure of it is local and happens before any
+  message is composed. In practice preflight builds a context from the
+  same `--gql-endpoint` first and refuses there, so this was reachable
+  only when the same construction succeeded once and then stopped; the
+  copy is gone regardless, and both call sites now share one constructor
+  and one exit code.
+
 - **`ackinacki-bridge withdraw`: a withdrawal that has already paid out
   can no longer be resumed as an unpaid one.** The resume branch is
   entered whenever the prior record carries an AN tx hash — it does not

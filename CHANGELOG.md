@@ -905,6 +905,42 @@ assigns it when the release is tagged.
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
 
+- **A ceremony file that is present but unreadable is reported as that,
+  not as "no ceremony".** The halo2 readers panic on malformed input
+  rather than returning an error, and the wrappers around them discarded
+  the panic's message. It was not entirely lost — the default panic
+  handler still printed it — but it appeared as a raw Rust panic naming a
+  file inside a dependency, beside a calm refusal that did not mention
+  it. The reason now travels with the error, so the refusal reads
+  "…kzg_bn254_21.srs: SRS is truncated or malformed — the halo2 reader
+  panicked: failed to fill whole buffer" instead of "no Hermez ceremony
+  of degree >= 21", which sent operators to provision a file that was
+  already there. Proving- and verifying-key reader panics are logged with
+  the same detail beside their verdict.
+
+  The same file is also no longer read twice. The lookup tried the exact
+  degree and then re-scanned the directory including that same path, so
+  one bad file cost two full passes — 256 MB at k=21 — and printed the
+  identical panic twice for one problem.
+
+- **Importing the Python helpers no longer runs `tvm-cli`.**
+  `helper/common.py` resolved the binary at module import and then ran
+  `tvm-cli version` through a shell, neither call with a timeout: a
+  candidate on `PATH` that blocks (a wrapper reading stdin, a stale
+  network mount) hung anything that merely imported the module.
+  Resolution is now lazy, cached, bounded by a five-second timeout with
+  stdin closed, and announces itself on stderr. `common.TVM_CLI` and
+  `from helper.common import TVM_CLI` both keep working.
+
+  That banner used to print to **stdout**, which broke
+  `deploy_msig_and_mint.py`'s stated contract that its stdout holds
+  nothing but two eval-able `export` lines — README Step 2 pipes it
+  straight into `eval`, so `Checking cli specified in library: …` was
+  being handed to the shell as a command. The script now redirects
+  everything to stderr for the duration of the run and writes the two
+  lines to the stdout it captured first, so a helper that prints cannot
+  break it by accident.
+
 - **The burn's outcome interpretation is covered by tests.** Everything
   `send` does after the SDK returns — whether the transaction says the
   burn happened, and what to call it — was reachable by no test: the only

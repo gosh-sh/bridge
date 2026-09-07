@@ -39,6 +39,7 @@ Prints diagnostics + tvm-cli output to stderr; only the two `export …`
 lines go to stdout.
 """
 
+import contextlib
 import os
 import re
 import shlex
@@ -90,7 +91,11 @@ def _load_profile(path: str) -> None:
             os.environ.setdefault(k, v)
 
 
-def main():
+def main(emit=None):
+    # Where the two eval-able lines go. `None` for a direct call;
+    # `__main__` passes the real stdout it saved before redirecting
+    # everything else to stderr.
+    emit = emit if emit is not None else sys.stdout
     # Profile resolution: BRIDGE_CONFIG (env) → config/bridge_config
     # (symlink default). Everything else — NETWORK, BRIDGE_GQL_ENDPOINT,
     # USDC_BRIDGE_KEY_PATH — comes from that file.
@@ -204,9 +209,23 @@ def main():
             "its output is eval'd by the documented Step 2"
         )
 
-    print(f"export WITHDRAW_FROM={msig_address}")
-    print(f"export WITHDRAW_FROM_KEYS={shlex.quote(abs_key_path)}")
+    print(f"export WITHDRAW_FROM={msig_address}", file=emit)
+    print(f"export WITHDRAW_FROM_KEYS={shlex.quote(abs_key_path)}", file=emit)
 
 
 if __name__ == "__main__":
-    main()
+    # The contract is that stdout holds the two `export` lines and nothing
+    # else, because README Step 2 pipes it into `eval`. Comments in this
+    # file asserted that; nothing enforced it, and it was not true — the
+    # shared helpers print tvm-cli invocations and their output with a
+    # bare `print`, and `helper.common` printed a banner at import.
+    # `eval` on that tries to run "Checking cli specified in library: …"
+    # as a command.
+    #
+    # Enforced rather than asserted: everything the body prints goes to
+    # stderr, and the two lines are written to the real stdout that was
+    # captured before the redirect. A helper added later cannot break it
+    # by accident.
+    real_stdout = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        main(emit=real_stdout)

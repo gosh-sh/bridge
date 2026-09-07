@@ -57,14 +57,60 @@ def _resolve_tvm_cli():
     for cand in candidates:
         try:
             subprocess.run([cand, "version"], check=True,
+                           # `timeout` and `stdin`, both load-bearing. This
+                           # runs an unknown executable found on PATH: one
+                           # that reads stdin, or sits on a stale network
+                           # mount, blocks here forever. `version` answers
+                           # in milliseconds, so five seconds is generous
+                           # and still bounded — and a candidate that
+                           # cannot manage it is not one to drive a burn
+                           # with.
+                           timeout=5,
+                           stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return cand
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
     return candidates[0] if candidates else "tvm-cli"
 
 
-TVM_CLI = _resolve_tvm_cli()
+# Resolved on FIRST USE, not at import.
+#
+# This was `TVM_CLI = _resolve_tvm_cli()` at module level, so `import
+# helper.common` executed every `tvm-cli` on PATH — before the timeout
+# above, an import could hang forever, and it still spawns processes for
+# anything that merely imports this module: a linter, a test collector, an
+# editor's language server.
+#
+# Cached after the first call, so the walk happens once per process just
+# as it did before.
+_TVM_CLI = None
+
+
+def tvm_cli() -> str:
+    global _TVM_CLI
+    if _TVM_CLI is None:
+        _TVM_CLI = _resolve_tvm_cli()
+        # STDERR, and once. This banner used to be `__check_cli__()` at
+        # module level printing to stdout — so `import helper.common`
+        # both spawned processes and wrote to stdout, and
+        # `deploy_msig_and_mint.py`'s entire contract is that its stdout
+        # holds nothing but two eval-able `export` lines.
+        print(f"Using tvm-cli: {_TVM_CLI}", file=sys.stderr)
+    return _TVM_CLI
+
+
+def __getattr__(name):
+    """Keep `common.TVM_CLI` and `from helper.common import TVM_CLI` working.
+
+    Module-level `__getattr__` (PEP 562) is consulted only for attributes
+    that are NOT found normally, which is exactly why the eager assignment
+    had to go. It does not cover uses of the bare name INSIDE this module
+    — those resolve as globals — so the call sites here use `tvm_cli()`.
+    """
+    if name == "TVM_CLI":
+        return tvm_cli()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 TVM_DEBUGGER = os.getenv('TVM_DEBUGGER', shutil.which("tvm-debugger") or f"{COMPILER_DIR}/tvm-debugger")
 
 NETWORK = os.getenv('NETWORK', 'http://127.0.0.1:80')
@@ -89,8 +135,18 @@ class SkippedReason(Enum):
 
 
 def __check_cli__():
-    print(f"Checking cli specified in library: {TVM_CLI}")
-    execute_cmd(f"{TVM_CLI} version")
+    """Print the resolved tvm-cli and its full version banner.
+
+    No longer called at import. It used to be, at the bottom of this
+    module, which meant importing the helpers ran two subprocesses — one
+    of them through a shell, neither with a timeout — so anything that
+    merely imported this file could hang, and its output landed on
+    stdout. `tvm_cli()` now announces the chosen binary on stderr the
+    first time it resolves; this remains for a caller that wants the
+    version text too.
+    """
+    print(f"Checking cli specified in library: {tvm_cli()}", file=sys.stderr)
+    execute_cmd(f"{tvm_cli()} version")
 
 
 def setup():
@@ -135,7 +191,7 @@ def execute_cmd(command: str, work_dir=None, ignore_error=False, silent=False):
 
 
 def execute_cli_cmd(cmd: str, print_output=False) -> dict:
-    cmd = f"{TVM_CLI} -j {cmd}"
+    cmd = f"{tvm_cli()} -j {cmd}"
     output = execute_cmd(cmd, WORK_DIR, True, False)
 
     if print_output:
@@ -168,7 +224,7 @@ def execute_cmd_without_exit(command: str, work_dir=None, ignore_error=False, si
     return output.strip()
 
 def execute_cli_cmd_without_exit(cmd: str) -> dict:
-    cmd = f"{TVM_CLI} -j {cmd}"
+    cmd = f"{tvm_cli()} -j {cmd}"
     output = execute_cmd_without_exit(cmd, WORK_DIR, True, False)
     try:
         res = json.loads(output)
@@ -732,5 +788,3 @@ def to_legacy_address(addr: str) -> str:
     the legacy '0:<account_id>' form even under tvm-cli v3. Accepts any form."""
     return "0:" + acc_id_of(addr)
 
-
-__check_cli__()

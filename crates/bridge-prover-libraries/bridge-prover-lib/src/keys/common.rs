@@ -63,6 +63,37 @@ pub(crate) fn save_config(
     })
 }
 
+/// Run a halo2 reader, turning its panic into a value and KEEPING what it
+/// said.
+///
+/// These readers `unwrap()` on malformed input, so every call site here is
+/// wrapped. What the wrappers used to do with the panic was
+/// `.unwrap_or(None)` / a fixed sentence — the payload, which is the only
+/// part that says what is actually wrong, went nowhere.
+///
+/// It was not quite lost: the default hook still prints it. But it prints
+/// as a raw Rust panic naming a file inside `halo2curves-axiom`, next to a
+/// calm CLI refusal that does not mention it, so the operator gets two
+/// contradictory signals and no link between them. Returned here, it can be
+/// attributed to the file that caused it.
+///
+/// **The default hook is deliberately left alone.** Silencing it would mean
+/// `panic::set_hook` — process-global, while a tokio runtime and the test
+/// harness run other threads that may panic for unrelated reasons. Losing
+/// one of those to make this output tidier is a bad trade.
+fn catch_reader_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        // `panic!("literal")` gives `&str`; `panic!("{x}")` and
+        // `.unwrap()` give `String`. Anything else is a payload type
+        // nothing in this dependency tree produces.
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panicked with a non-string payload".to_string())
+    })
+}
+
 pub(crate) fn try_load_vk(
     params_dir: &Path,
     prefix: &str,
@@ -78,7 +109,7 @@ pub(crate) fn try_load_vk(
     // to keep aborting the process — `KeyManagerState::new` calls this
     // unconditionally, so a truncated `event_vk.bin` would otherwise take
     // down every manager on this `params_dir`, not just the event one.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    catch_reader_panic(|| {
         let file = std::fs::File::open(vk_path(params_dir, prefix)).ok()?;
         let mut reader = BufReader::new(file);
         VerifyingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(
@@ -87,8 +118,20 @@ pub(crate) fn try_load_vk(
             config.clone(),
         )
         .ok()
-    }))
-    .unwrap_or(None)
+    })
+    .unwrap_or_else(|why| {
+        // The caller's verdict says "matches its digest but this build
+        // cannot deserialise it", which is the right conclusion and does
+        // not say WHY. This line does, beside the raw panic the default
+        // hook already printed, so the two are connected.
+        warn!(
+            target: "bridge_prover_lib::keys",
+            path = %vk_path(params_dir, prefix).display(),
+            %why,
+            "the verifying-key reader panicked; treating the key as unusable",
+        );
+        None
+    })
 }
 
 pub(crate) fn try_load_pk(
@@ -100,7 +143,7 @@ pub(crate) fn try_load_pk(
     // `read_exact(..).unwrap()` plus `F::read(..).unwrap()`
     // (`halo2-axiom/src/poly.rs:169-176`), so a truncated proving key
     // aborts the process instead of returning `None`.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    catch_reader_panic(|| {
         let file = std::fs::File::open(pk_path(params_dir, prefix)).ok()?;
         let mut reader = BufReader::new(file);
         ProvingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(
@@ -109,8 +152,20 @@ pub(crate) fn try_load_pk(
             config.clone(),
         )
         .ok()
-    }))
-    .unwrap_or(None)
+    })
+    .unwrap_or_else(|why| {
+        // Same as `try_load_vk`. This one matters more: the caller turns
+        // it into `Corrupt`, which is a refusal an operator has to act
+        // on, and "why" is what tells them whether `--repair` is the
+        // answer or whether their build is wrong for these keys.
+        warn!(
+            target: "bridge_prover_lib::keys",
+            path = %pk_path(params_dir, prefix).display(),
+            %why,
+            "the proving-key reader panicked; treating the key as unusable",
+        );
+        None
+    })
 }
 
 pub(crate) fn save_vk(
@@ -583,17 +638,56 @@ fn resolve_ceremony(
     min_k: u32,
 ) -> anyhow::Result<(PathBuf, ParamsKZG<Bn256>)> {
     let exact = params_dir.join(format!("kzg_bn254_{min_k}.srs"));
-    if let Ok(srs) = read_srs_file(&exact) {
-        if srs.k() == min_k {
-            assert_hermez_srs(&srs).with_context(|| format!("{}", exact.display()))?;
-            return Ok((exact, srs));
-        }
+    // Whether the exact file is worth reading a SECOND time.
+    //
+    // The scan below walks the directory and re-reads every candidate,
+    // `exact` included. When the first read FAILED that is a wasted pass
+    // over the same bad bytes — 256 MB at k=21, and a second identical
+    // panic printed by the default hook, which is why an operator saw the
+    // halo2 panic twice for one broken file.
+    //
+    // Only skipped when the read failed. A file that reads fine but has
+    // the wrong degree must still reach the scan: `kzg_bn254_20.srs`
+    // holding a k=21 ceremony is a legitimate source to downsize from.
+    let mut exact_err: Option<std::io::Error> = None;
+    match read_srs_file(&exact) {
+        Ok(srs) => {
+            if srs.k() == min_k {
+                assert_hermez_srs(&srs).with_context(|| format!("{}", exact.display()))?;
+                return Ok((exact, srs));
+            }
+        },
+        Err(e) => {
+            warn!(
+                target: "bridge_prover_lib::keys",
+                path = %exact.display(),
+                error = %e,
+                "the exact-degree ceremony file is unreadable; not re-reading it in the scan",
+            );
+            exact_err = Some(e);
+        },
     }
-    let (path, srs) = find_largest_ceremony_ge(params_dir, min_k).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no Hermez ceremony of degree >= {min_k} under {}",
-            params_dir.display()
-        )
+    let skip = exact_err.as_ref().map(|_| exact.as_path());
+    let (path, srs) = find_largest_ceremony_ge(params_dir, min_k, skip).ok_or_else(|| {
+        // "No ceremony of degree >= N" is the wrong sentence when a file
+        // at exactly that degree is sitting right there and could not be
+        // read. The operator goes looking for a missing file, provisions
+        // one, and lands on the same broken bytes — the loader prefers
+        // `kzg_bn254_{k}.srs` by name.
+        //
+        // So when the exact path failed, IT is the answer, with the
+        // reader's own words underneath. The generic sentence is kept for
+        // the case it is actually true of: nothing there at all.
+        match exact_err {
+            Some(e) => anyhow::anyhow!("{}: {e}", exact.display()).context(format!(
+                "no usable Hermez ceremony of degree >= {min_k} under {}",
+                params_dir.display()
+            )),
+            None => anyhow::anyhow!(
+                "no Hermez ceremony of degree >= {min_k} under {}",
+                params_dir.display()
+            ),
+        }
     })?;
     assert_hermez_srs(&srs).with_context(|| format!("{}", path.display()))?;
     Ok((path, srs))
@@ -672,16 +766,20 @@ fn read_srs_file(path: &Path) -> std::io::Result<ParamsKZG<Bn256>> {
     // print never gets printed. And `find_largest_ceremony_ge` calls this in
     // a scan, where one bad file among several must be skipped past rather
     // than abort the run.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+    catch_reader_panic(move || {
         let mut reader = BufReader::new(file);
         ParamsKZG::<Bn256>::read(&mut reader)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-    }))
-    .unwrap_or_else(|_| {
+    })
+    .unwrap_or_else(|why| {
+        // `{why}` — the reader's own words ("failed to fill whole
+        // buffer"), attributed to the file. Without it this said only
+        // "truncated or malformed", while the useful sentence went past
+        // the operator as an unattributed panic.
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "{}: SRS is truncated or malformed (the halo2 reader ran out of input)",
+                "{}: SRS is truncated or malformed — the halo2 reader panicked: {why}",
                 path.display()
             ),
         ))
@@ -704,6 +802,10 @@ fn write_srs_file(path: &Path, srs: &ParamsKZG<Bn256>) -> std::io::Result<()> {
 fn find_largest_ceremony_ge(
     params_dir: &Path,
     min_k: u32,
+    // A path the caller has already read and found unreadable. Reading it
+    // again costs a full pass over the file — 256 MB at k=21 — and prints
+    // a second identical panic, for a verdict the caller already has.
+    skip: Option<&Path>,
 ) -> Option<(PathBuf, ParamsKZG<Bn256>)> {
     let entries = std::fs::read_dir(params_dir).ok()?;
     let mut best: Option<(u32, PathBuf, ParamsKZG<Bn256>)> = None;
@@ -721,6 +823,9 @@ fn find_largest_ceremony_ge(
         };
         // Filename hint only — trust the header after read.
         if k_str.parse::<u32>().is_err() {
+            continue;
+        }
+        if skip == Some(path.as_path()) {
             continue;
         }
         let srs = match read_srs_file(&path) {
@@ -837,11 +942,28 @@ mod tests {
         let mut f = std::fs::File::create(tmp.path().join("kzg_bn254_21.srs")).unwrap();
         f.write_all(&bytes).unwrap();
 
+        let err = probe_ceremony(tmp.path(), 21)
+            .expect_err("a file load_srs cannot deserialize must not probe as usable");
+
+        // And the refusal carries what the reader actually said.
+        //
+        // The wrapper used to swallow the panic payload and substitute a
+        // fixed sentence. The payload was not quite lost — the default
+        // hook printed it — but it printed as a raw Rust panic naming a
+        // file inside `halo2curves-axiom`, beside a CLI refusal that did
+        // not mention it. Two signals, no link. `{err:#}` walks the
+        // context chain to the reader's own words.
+        let msg = format!("{err:#}");
         assert!(
-            probe_ceremony(tmp.path(), 21).is_err(),
-            "a file load_srs cannot deserialize must not probe as usable",
+            msg.contains("failed to fill whole buffer"),
+            "the refusal must carry the reader's own reason: {msg}",
+        );
+        assert!(
+            msg.contains("kzg_bn254_21.srs"),
+            "attributed to the file that caused it: {msg}",
         );
     }
+
 
     #[test]
     fn leak_sweep_names_only_our_own_litter() {

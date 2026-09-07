@@ -30,6 +30,7 @@ dependencies = [
  "bridge-relayer-daemon",
  "clap",
  "dotenvy",
+ "gosh-dense-balanced-tree",
  "hex",
  "rust_decimal",
  "serde",

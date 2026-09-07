@@ -31,8 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::EthereumWallet;
-use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
+use alloy::providers::ProviderBuilder;
 use alloy::signers::Signer;
 use tracing::info;
 
@@ -157,6 +156,47 @@ pub async fn run(
         usdc_bridge = %preflight.usdc_bridge_extended,
         "preflight ok",
     );
+
+    // Chain + deploy checks run ALWAYS, dry-run included: they need no
+    // key, and "the RPC is not the chain you named" / "there is nothing at
+    // that address" are exactly the irreversible mistakes a preflight
+    // exists to catch.
+    preflight::check_destination_chain(&args.rpc_url, to.chain_id).await?;
+    info!(chain_id = to.chain_id, "destination chain ok");
+
+    // The identity our proof will carry. Both ids come from the
+    // `PreflightReport` the stage-1 checks already produced — the GraphQL
+    // lookup that resolved them happened there, and this reuses it.
+    //
+    // The binding is `preflight`, shadowing the module name inside this
+    // function (`let preflight = preflight::run(...)` above). That is the
+    // existing style here; do not rename it, and do not invent a `report` —
+    // the module path still resolves because the calls below are written
+    // `crate::preflight::` where the shadow would bite.
+    let expected_identity = crate::preflight::withdrawal_identity_frs(
+        &preflight.bridge_dapp_id,
+        &preflight.bridge_account_id,
+    );
+    crate::preflight::check_bridge_deploy(
+        &args.rpc_url,
+        args.bridge_address,
+        // Read from `args`, NOT from `plumbing`: `plumbing` is `None` for
+        // every dry run (`let plumbing = if dry_run { None }`), so sourcing
+        // it there would make the "pass --verifiers-dir to a dry run"
+        // advice unreachable — the flag would be accepted and silently
+        // ignored on the one run that has time to use it.
+        args.verifiers_dir.as_deref(),
+        expected_identity,
+        &amount,
+    )
+    .await?;
+    info!(bridge = %args.bridge_address, "bridge deploy ok");
+
+    // The signer only matters for a run that will actually submit.
+    if let Some(p) = plumbing.as_ref() {
+        crate::preflight::parse_eth_signer(&p.eth_private_key)?;
+        info!("burner key ok");
+    }
 
     // ---- 2. Idempotency reserve ----
     // Dry-run skips reservation (spec: "Idempotency state is NOT recorded
@@ -435,36 +475,15 @@ pub async fn run(
     }
 
     // Real submit: build a wallet-filled provider and send.
-    let signer: PrivateKeySigner = plumbing_ref
-        .eth_private_key
-        .parse()
-        .map_err(|e| CliError::EthSubmitFailed {
-            reason: format!("parse --eth-private-key: {e}"),
-            source: None,
-        })?;
-    let probe = ProviderBuilder::new()
-        .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {
-            reason: format!("--rpc-url parse: {e}"),
-            source: None,
-        })?);
-    let chain_id = probe
-        .get_chain_id()
-        .await
-        .map_err(|e| CliError::EthSubmitFailed {
-            reason: format!("get_chain_id: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
-        })?;
-    if chain_id != to.chain_id {
-        return Err(CliError::EthSubmitFailed {
-            reason: format!(
-                "RPC chain_id {chain_id} does not match --to-chain {} — refuse to submit \
-                 to the wrong chain",
-                to.chain_id
-            ),
-            source: None,
-        });
-    }
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
+    // Both the key shape and the chain id were settled in stage 1, before
+    // the burn — `preflight::parse_eth_signer` and
+    // `preflight::check_destination_chain`. Re-parsing here would be the
+    // same work with a worse error (exit 13 "submit failed" for something
+    // that never reached the wire), and re-asking the RPC for its chain id
+    // would only let a load-balanced endpoint disagree with itself between
+    // stage 1 and stage 6.
+    let signer = preflight::parse_eth_signer(&plumbing_ref.eth_private_key)?;
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(to.chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
         .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {

@@ -18,7 +18,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use alloy::primitives::{Address, U256};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::signers::local::PrivateKeySigner;
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
+use bridge_relayer_daemon::bridge::EthBridgeClient;
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
 use tvm_client::abi::{
@@ -47,6 +51,19 @@ pub struct PreflightReport {
     pub amount: UsdcAmount,
     pub usdc_bridge_extended: String,
     pub usdc_bridge_legacy: String,
+    /// The same two ids as `usdc_bridge_extended`, decoded once.
+    ///
+    /// Typed because the only consumer is `withdrawal_identity_frs`, and a
+    /// `String` there would mean parsing hex at the call site — the exact
+    /// place a stray `0x`, an odd length, or a helpful `.rev()` turns into
+    /// a preflight that compares the wrong number and passes.
+    ///
+    /// Byte order is `hex::decode`'s, matching `parse_hex_array::<32>` in
+    /// `bridge-event-prover-lib/src/prover.rs:191`. The proof and this
+    /// check must agree, and they agree by using the same decoding of the
+    /// same hex string.
+    pub bridge_dapp_id: [u8; 32],
+    pub bridge_account_id: [u8; 32],
     pub multisig_ecc3_balance: u128,
     pub owner_pubkey_hex: String,
 }
@@ -172,6 +189,22 @@ pub async fn run(
     let usdc_bridge_extended = format!("{usdc_bridge_dapp_id}::{usdc_bridge_account_id_hex}");
     let usdc_bridge_legacy = format!("0:{usdc_bridge_account_id_hex}");
 
+    // Decode once, here, where both hex strings are in hand and already
+    // known good — `query_usdc_bridge_state` normalises the zerostate
+    // empty dapp_id to 64 zeros, and the account id was validated by
+    // `args`. A helper keeps the two identical; hand-rolling the second
+    // one is how they end up differing.
+    let decode_id = |label: &str, hex_str: &str| -> CliResult<[u8; 32]> {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(hex_str, &mut out).map_err(|e| CliError::Preflight {
+            reason: format!("{label}: expected 64 hex chars, got {hex_str:?} ({e})"),
+            source: None,
+        })?;
+        Ok(out)
+    };
+    let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
+    let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+
     // 7. ECC[3] balance from the parsed account.
     let ecc3_balance = extract_ecc_balance(&account, 3)?;
     if ecc3_balance < amount.0 {
@@ -195,6 +228,8 @@ pub async fn run(
         amount: *amount,
         usdc_bridge_extended,
         usdc_bridge_legacy,
+        bridge_dapp_id,
+        bridge_account_id,
         multisig_ecc3_balance: ecc3_balance,
         owner_pubkey_hex: on_chain_pubkey.to_string(),
     })
@@ -512,6 +547,331 @@ fn pubkeys_equal(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
+// -- EVM-side preflight ------------------------------------------------------
+
+/// The verifier bytecode `aggregate-proof` self-checks its output against.
+/// It joins `{name}.bin` onto `--verifiers-dir` (`aggregate_proof.rs:97`).
+///
+/// `pub(crate)` because Task 8's `check_verifier_bin` uses the same const.
+pub(crate) const WITHDRAW_VERIFIER_BIN: &str = "BridgeWithdrawalAggregatorVerifier.bin";
+
+/// Parse `--eth-private-key` into a signer WITHOUT touching the network.
+/// Split out from [`check_destination_chain`] so the shape check is
+/// unit-testable and so a typo'd key is refused on pure CPU.
+///
+/// The error deliberately carries no part of the input and no text from
+/// the parser. Even a malformed private key is key-shaped material, and
+/// hex decoders are helpful in exactly the wrong way: alloy's reports the
+/// offending character and its position, which puts a byte of the key —
+/// and its offset — into a message bound for logs, shell history and
+/// `--json` stdout. Length is all the operator needs to spot a truncated
+/// paste; the parser's opinion is dropped on purpose.
+pub fn parse_eth_signer(raw: &str) -> CliResult<PrivateKeySigner> {
+    raw.parse::<PrivateKeySigner>()
+        .map_err(|_| CliError::ArgInvalid {
+            flag: "eth-private-key",
+            // Say what is accepted, not what looks tidiest. Alloy's
+            // `FromStr` goes through `hex::decode_to_array`, which takes
+            // the `0x` prefix as optional
+            // (`alloy-signer-local-2.4.1/src/private_key.rs:234`), so a
+            // bare 64-hex key parses. Claiming "0x-prefixed" would
+            // describe a rule this code does not enforce — and the next
+            // reader would either add the rule or trust the message.
+            expected: "32-byte hex EVM private key, 64 hex chars, `0x` prefix optional".into(),
+            got: format!("<redacted {} chars>", raw.len()),
+        })
+}
+
+/// Preflight the destination chain: the RPC answers, and the chain it
+/// reports is the chain the operator named in `--to-chain`.
+///
+/// Deliberately key-free, so `--dry-run` runs it too. This used to live in
+/// stage 6, which meant a wrong RPC was discovered AFTER the irreversible
+/// AN burn and up to ~101 min of waiting. The ticket is explicit that the
+/// cost of a wrong destination chain is irreversible, so the check belongs
+/// before the burn — and a preflight that cannot see it is not much of a
+/// preflight.
+pub async fn check_destination_chain(rpc_url: &str, expected_chain_id: u64) -> CliResult<()> {
+    let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
+        flag: "rpc-url",
+        expected: "an http(s) JSON-RPC URL".into(),
+        got: format!("{rpc_url} ({e})"),
+    })?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("--rpc-url {rpc_url}: eth_chainId failed: {e}"),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    if chain_id != expected_chain_id {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--rpc-url reports chain {chain_id} but --to-chain says {expected_chain_id} — \
+                 refusing before the burn, because a withdrawal aimed at the wrong chain cannot \
+                 be undone"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Strip the 32-byte CREATE prelude `gen_evm_verifier_shplonk` emits, so
+/// what remains is what `eth_getCode` returns for the deployed verifier.
+///
+/// Split out and unit-tested because an off-by-one here would make every
+/// deploy look wrong, which reads as "the check is broken" and gets the
+/// check disabled.
+pub fn expected_verifier_runtime(bin: &[u8]) -> CliResult<&[u8]> {
+    bin.get(32..)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "verifier bin is {} bytes — too short to be a CREATE prelude plus a runtime \
+                 payload. Re-fetch or rebuild it.",
+                bin.len()
+            ),
+            source: None,
+        })
+}
+
+/// The `(dappFr, accFr)` pair a proof for this bridge account will carry.
+///
+/// Same conversion as `bridge-event-prover-lib/src/prover.rs:232-233`, via
+/// the same function, so the two cannot drift.
+///
+/// **Never names `Fr`.** `gosh_dense_balanced_tree` uses `Fr` internally but
+/// does not re-export it, and reaching it through
+/// `halo2_base::halo2_proofs::halo2curves::bn256::Fr` would make `halo2_base`
+/// a direct dependency of this CLI to spell one type. The crate's public
+/// surface is exactly the pair `bytes_to_fr` / `fr_to_bytes`, so round-trip
+/// through it and let inference keep the type anonymous.
+///
+/// Byte order needs no thought here and that is deliberate: both ids arrive
+/// as `hex::decode` of the same hex strings the witness carries
+/// (`account_dapp_id_hex = hex::encode(ctx.account_dapp_id)`,
+/// `bridge-event-witness/src/lib.rs:104`, decoded by `parse_hex_array::<32>`
+/// at `prover.rs:191`). Feed the bytes exactly as decoded — do not reverse
+/// them "to fix endianness". `bytes_to_fr` reads them little-endian and
+/// `fr_to_bytes` writes them back the same way; the reduction mod p in
+/// between is what the circuit does too.
+pub fn withdrawal_identity_frs(dapp_id: &[u8; 32], account_id: &[u8; 32]) -> (U256, U256) {
+    use gosh_dense_balanced_tree::{bytes_to_fr, fr_to_bytes};
+    let as_u256 = |id: &[u8; 32]| U256::from_le_slice(&fr_to_bytes(bytes_to_fr(id)));
+    (as_u256(dapp_id), as_u256(account_id))
+}
+
+/// `eth_getCode` must return something. Factored out because the message
+/// is the whole value of the check: "adapter has no code" tells an operator
+/// what to look at; a decode error three calls later does not.
+async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> CliResult<()> {
+    let code = provider
+        .get_code_at(at)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("{label} {at}: eth_getCode failed: {e}"),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    if code.is_empty() {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "{label} {at}: no contract code at this address — wrong address, an EOA, or an \
+                 address from a different network"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Preflight the destination *deploy*: something is there, its withdrawal
+/// verifier stack is real and is the one this build proves against, its
+/// pinned AN-side identity is ours, and its treasury visibly covers this
+/// amount.
+///
+/// Key-free, so `--dry-run` exercises all of it.
+///
+/// Ordering is deliberate: cheapest and most-likely-wrong first. A typo'd
+/// `--bridge-address` is far more common than a mis-deployed verifier, and
+/// the operator should see the useful message, not a decode failure three
+/// calls deeper.
+///
+/// The treasury check is a **preflight, not a promise** — the same rule the
+/// ticket sets for the multisig's ECC[3] balance. Between this call and
+/// `withdrawByProof` (up to ~101 min later) other withdrawals can drain the
+/// treasury and operators can top it up; the chain has the last word. Its
+/// job is to refuse now when it is already visible that the payout cannot
+/// happen, not to guarantee that it will.
+///
+/// The identity and verifier checks carry no such caveat: both read
+/// `immutable` storage, so what this function sees is what
+/// `withdrawByProof` will see.
+pub async fn check_bridge_deploy(
+    rpc_url: &str,
+    bridge: Address,
+    // `verifiers_dir` is `None` on a dry run that did not pass
+    // `--verifiers-dir` (Task 1 makes it submit-only). Everything else
+    // still runs; only the deployed-bytecode comparison is skipped, and it
+    // is skipped loudly. A `///` here would not compile — doc comments
+    // cannot be applied to function parameters.
+    verifiers_dir: Option<&Path>,
+    expected_identity: (U256, U256),
+    amount: &UsdcAmount,
+) -> CliResult<()> {
+    let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
+        flag: "rpc-url",
+        expected: "an http(s) JSON-RPC URL".into(),
+        got: format!("{rpc_url} ({e})"),
+    })?;
+    let provider = ProviderBuilder::new().connect_http(url);
+
+    // 1. Is there a contract at all? An EOA, or an address from another network,
+    //    returns empty code — the single most likely typo, and today it surfaces as
+    //    a confusing decode failure in stage 4b.
+    require_code(&provider, bridge, "--bridge-address").await?;
+    let client = EthBridgeClient::new(bridge, provider.clone());
+
+    // 2. The withdrawal verifier stack, all three levels. A non-zero address proves
+    //    nothing: an EOA answers every call with empty returndata, and a half-wired
+    //    adapter answers the first and not the second. This is the same walk
+    //    `deploy/shellnet-l2/scripts/preflight.sh:28` performs.
+    let adapter = client
+        .withdrawal_verifier()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: bridgeWithdrawalVerifier() failed: {e} — is this an \
+                 AckiNackiBridge deploy?"
+            ),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    if adapter == Address::ZERO {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: bridgeWithdrawalVerifier is the zero address — this \
+                 deploy cannot verify withdrawal proofs (withdrawByProof reverts \
+                 WithdrawByProofDisabled)"
+            ),
+            source: None,
+        });
+    }
+    require_code(&provider, adapter, "withdrawal verifier adapter").await?;
+    let (wrapper, yul) = client
+        .shplonk_stack(adapter)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "withdrawal verifier adapter {adapter}: could not walk shplonkVerifier() → \
+                 yulVerifier(): {e}. The adapter is not the shape this bridge needs."
+            ),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    require_code(&provider, wrapper, "withdrawal SHPLONK wrapper").await?;
+    require_code(&provider, yul, "withdrawal Yul verifier").await?;
+
+    // 3. Is the deployed Yul runtime the verifier this build proves against? A
+    //    verifier from a different circuit accepts nothing we can produce, and the
+    //    failure lands in stage 6 — after the burn, the anchor wait AND the proof.
+    match verifiers_dir {
+        None => {
+            // A dry run without --verifiers-dir. Say so: silence here would
+            // let an operator read a clean dry run as "the deployed verifier
+            // was checked", which is the one conclusion it does not support.
+            tracing::warn!(
+                "no --verifiers-dir: skipping the deployed-verifier bytecode check. Pass \
+                 --verifiers-dir to a dry run to exercise it — the flag is submit-only for the \
+                 prover, but this check reads it directly and needs no key."
+            );
+        },
+        Some(dir) => {
+            let bin_path = dir.join(WITHDRAW_VERIFIER_BIN);
+            let bin = std::fs::read(&bin_path).map_err(|e| CliError::Preflight {
+                reason: format!("--verifiers-dir: read {}: {e}", bin_path.display()),
+                source: None,
+            })?;
+            let expected = expected_verifier_runtime(&bin)?;
+            let on_chain = provider
+                .get_code_at(yul)
+                .await
+                .map_err(|e| CliError::Preflight {
+                    reason: format!("eth_getCode({yul}) failed: {e}"),
+                    source: Some(anyhow::anyhow!("{e}")),
+                })?;
+            if on_chain.as_ref() != expected {
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "the withdrawal verifier deployed at {yul} is not {}: {} bytes on chain \
+                         vs {} bytes expected. Proofs this build produces would be rejected on \
+                         submit, after the burn and the ~91 min anchor wait.\n\x20 Running your \
+                         own bridge deploy? Point --verifiers-dir at your own verifiers \
+                         directory; see the advanced runbook's \"Running your own verifier\" \
+                         section.",
+                        WITHDRAW_VERIFIER_BIN,
+                        on_chain.len(),
+                        expected.len(),
+                    ),
+                    source: None,
+                });
+            }
+        },
+    }
+
+    // 4. Identity. `withdrawByProof` compares these before it verifies anything
+    //    (`AckiNackiBridge.sol:1164`), so a bridge pinned to a different AN-side
+    //    account rejects every proof we can ever build. Both sides are immutable —
+    //    this is a decision, not a snapshot.
+    let on_chain_identity =
+        client
+            .withdrawal_identity()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: reading the pinned identity failed: {e}"
+                ),
+                source: Some(anyhow::anyhow!("{e}")),
+            })?;
+    if on_chain_identity != expected_identity {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge} is pinned to a different Acki Nacki bridge account: on \
+                 chain (dappFr, accFr) = ({}, {}), this withdrawal would prove ({}, {}). \
+                 withdrawByProof reverts WithdrawIdentityMismatch before it even verifies the \
+                 proof.\n\x20 Check USDC_BRIDGE_ACCOUNT_ID in $BRIDGE_CONFIG against the bridge \
+                 you are withdrawing from.",
+                on_chain_identity.0, on_chain_identity.1, expected_identity.0, expected_identity.1,
+            ),
+            source: None,
+        });
+    }
+
+    // 5. Treasury preflight. See the note above: this refuses early, it does not
+    //    promise.
+    let treasury = client
+        .treasury_balance()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    let needed = U256::from(amount.0);
+    if treasury < needed {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: treasuryBalance is {treasury} µUSDC but this \
+                 withdrawal needs {needed} ({}). withdrawByProof would revert \
+                 WithdrawTreasuryShortfall. Top the treasury up (README Step 3) and re-run.\n\x20 \
+                 Note this is a preflight, not a guarantee — the treasury is shared, and it can \
+                 be drained again while this withdrawal waits for its anchor bundle.",
+                amount.display(),
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +955,381 @@ mod tests {
         assert_eq!(describe_account_status(AccountStatus::AccStateUninit), "Uninit");
         assert_eq!(describe_account_status(AccountStatus::AccStateFrozen), "Frozen");
         assert_eq!(describe_account_status(AccountStatus::AccStateNonexist), "NonExist");
+    }
+
+    #[test]
+    fn eth_private_key_is_rejected_before_any_network_call() {
+        // A malformed key must be caught by shape alone — no RPC needed. The
+        // URL below is deliberately unroutable: if this test ever hangs or
+        // fails on connectivity, the parse order regressed.
+        let err =
+            parse_eth_signer("not-a-key").expect_err("a malformed burner key must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--eth-private-key"),
+            "refusal must name the flag, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not-a-key"),
+            "refusal must not echo key material, got: {msg}"
+        );
+        // The leak that a whole-string check misses: hex decoders name the bad
+        // character and its offset, which is a byte of the key.
+        for ch in "not-a-key".chars().filter(|c| !c.is_whitespace()) {
+            assert!(
+                !msg.contains(&format!("'{ch}'")),
+                "refusal must not quote any character of the input, got: {msg}",
+            );
+        }
+        assert!(
+            msg.contains("<redacted"),
+            "refusal must say only how long it was, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn eth_signer_accepts_a_well_formed_key() {
+        let k = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        parse_eth_signer(k).expect("a well-formed key must be accepted");
+    }
+
+    // -- EVM-side preflight ---------------------------------------------
+
+    #[test]
+    fn verifier_runtime_strips_the_create_prelude() {
+        // gen_evm_verifier_shplonk emits a 32-byte CREATE prelude followed by
+        // the runtime payload; eth_getCode returns only the payload. Off-by-one
+        // here makes every comparison fail and the flag look broken.
+        let mut bin = vec![0xAAu8; 32];
+        bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
+        assert_eq!(expected_verifier_runtime(&bin).unwrap(), &[
+            0x60, 0x80, 0x60, 0x40
+        ]);
+
+        let too_short = vec![0u8; 32];
+        expected_verifier_runtime(&too_short)
+            .expect_err("a bin with no payload after the prelude is not a verifier");
+    }
+
+    #[test]
+    fn identity_frs_match_the_prover() {
+        // Same conversion the prover uses for public inputs [6] and [7]
+        // (`bridge-event-prover-lib/src/prover.rs:232-233`). If this drifts,
+        // the CLI cheerfully approves a bridge that will revert
+        // WithdrawIdentityMismatch on every proof it ever submits.
+        let dapp = [0x11u8; 32];
+        let acc = [0x22u8; 32];
+        let (dapp_fr, acc_fr) = withdrawal_identity_frs(&dapp, &acc);
+        let expect = |id: &[u8; 32]| {
+            U256::from_le_slice(&gosh_dense_balanced_tree::fr_to_bytes(
+                gosh_dense_balanced_tree::bytes_to_fr(id),
+            ))
+        };
+        assert_eq!(dapp_fr, expect(&dapp));
+        assert_eq!(acc_fr, expect(&acc));
+        assert_ne!(dapp_fr, acc_fr, "the two halves must not collapse");
+
+        // The reduction is not decorative: an id at or above the BN254
+        // modulus wraps, and the contract stores the wrapped value. A helper
+        // that skipped Fr and did `U256::from_le_bytes(id)` would agree on
+        // small ids and diverge exactly where it matters.
+        let big = [0xFFu8; 32];
+        assert_ne!(
+            withdrawal_identity_frs(&big, &big).0,
+            U256::from_le_slice(&big),
+            "the id must be reduced mod p, not reinterpreted"
+        );
+    }
+
+    /// Function selectors, pinned with
+    /// `cast sig 'treasuryBalance()'` &c. The mock answers `0x` to anything
+    /// it does not recognise, so a stale selector here makes a test fail
+    /// loudly on an empty decode rather than silently pass.
+    const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
+    const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
+    const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
+    const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
+    const SEL_SHPLONK: &str = "66dbcfb5"; // shplonkVerifier()
+    const SEL_YUL: &str = "c74e1862"; // yulVerifier()
+
+    /// A 32-byte zero word — what a getter returns when its slot is unset.
+    const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    /// A treasury so large that no test in this group trips the shortfall
+    /// branch by accident.
+    const MAX_WORD: &str = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    /// Any non-empty runtime. `require_code` only asks whether there is
+    /// code, so the bytes need not be a real contract.
+    const SOME_CODE: &str = "0x60806040";
+
+    /// `Address::repeat_byte(n)` as a left-padded 32-byte ABI word — the
+    /// form an `address` getter returns.
+    fn word_addr(n: u8) -> String {
+        format!("0x{}{}", "00".repeat(12), format!("{n:02x}").repeat(20))
+    }
+
+    /// A one-shot JSON-RPC responder. `answers` maps a 4-byte selector
+    /// (hex, no `0x`) to the word to return; `eth_getCode` is answered from
+    /// `code` for every address. Anything unmapped returns `0x`, which is
+    /// what a wrong address looks like on a real node.
+    async fn mock_rpc(
+        code: &'static str,
+        answers: std::collections::HashMap<&'static str, String>,
+    ) -> String {
+        mock_rpc_inner(CodeAnswer::Everywhere(code), answers).await
+    }
+
+    /// Per-address `eth_getCode`. The case a single shared answer cannot
+    /// express — bridge has code, adapter does not — and the case that
+    /// catches a wired-up EOA.
+    async fn mock_rpc_code_for(
+        code: &[(Address, &'static str)],
+        answers: std::collections::HashMap<&'static str, String>,
+    ) -> String {
+        let map = code
+            .iter()
+            .map(|(a, c)| (a.to_string().to_lowercase(), *c))
+            .collect();
+        mock_rpc_inner(CodeAnswer::PerAddress(map), answers).await
+    }
+
+    enum CodeAnswer {
+        Everywhere(&'static str),
+        PerAddress(std::collections::HashMap<String, &'static str>),
+    }
+
+    impl CodeAnswer {
+        fn for_address(&self, addr: &str) -> String {
+            match self {
+                CodeAnswer::Everywhere(c) => (*c).to_string(),
+                CodeAnswer::PerAddress(m) => m
+                    .get(&addr.to_lowercase())
+                    .copied()
+                    .unwrap_or("0x")
+                    .to_string(),
+            }
+        }
+    }
+
+    async fn mock_rpc_inner(
+        code: CodeAnswer,
+        answers: std::collections::HashMap<&'static str, String>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let code = std::sync::Arc::new(code);
+        let answers = std::sync::Arc::new(answers);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let answers = answers.clone();
+                let code = code.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
+                    let v: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    let id = v.get("id").cloned().unwrap_or(serde_json::json!(1));
+                    let result = match v.get("method").and_then(|m| m.as_str()) {
+                        Some("eth_chainId") => "0xaa36a7".to_string(), // 11155111
+                        Some("eth_getCode") => {
+                            let at = v["params"][0].as_str().unwrap_or("");
+                            code.for_address(at)
+                        },
+                        Some("eth_call") => {
+                            // `input` first. Alloy 2 builds contract calls with
+                            // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
+                            // which sets `TransactionInput::input`
+                            // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
+                            // and leaves `data` unset — so the request carries
+                            // `"input": "0x…"` and no `"data"` at all. Reading
+                            // `data` yields "", the selector is empty, every
+                            // lookup misses, the mock answers `0x`, and every
+                            // test here passes or fails for reasons unrelated
+                            // to what it claims to check.
+                            //
+                            // `data` stays as a fallback: it is still valid
+                            // JSON-RPC, other clients send it, and the cost is
+                            // one `or_else`.
+                            let call = &v["params"][0];
+                            let data = call["input"]
+                                .as_str()
+                                .or_else(|| call["data"].as_str())
+                                .unwrap_or("");
+                            let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
+                            answers
+                                .get(sel)
+                                .cloned()
+                                .unwrap_or_else(|| "0x".to_string())
+                        },
+                        _ => "0x".to_string(),
+                    };
+                    let payload =
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn an_address_with_no_code_is_refused() {
+        let url = mock_rpc("0x", Default::default()).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::ZERO,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("an EOA or a wrong-network address must be refused");
+        assert!(format!("{err}").contains("no contract code"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_zero_withdrawal_verifier_is_refused() {
+        let answers = std::collections::HashMap::from([(SEL_VERIFIER, ZERO_WORD.to_string())]);
+        let url = mock_rpc(SOME_CODE, answers).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("withdrawByProof reverts WithdrawByProofDisabled on a zero verifier");
+        assert!(format!("{err}").contains("cannot verify"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_verifier_adapter_with_no_code_is_refused() {
+        // The case a non-zero check cannot see: the address is set, and it is
+        // an EOA. `eth_getCode` is answered "0x" for every other address by
+        // this mock, so the bridge itself must carry code — served separately.
+        let answers = std::collections::HashMap::from([(SEL_VERIFIER, word_addr(2))]);
+        let url = mock_rpc_code_for(&[(Address::repeat_byte(1), SOME_CODE)], answers).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("a verifier adapter that is an EOA must be refused");
+        assert!(format!("{err}").contains("adapter"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_identity_mismatch_is_refused_before_the_burn() {
+        // The identity check is the LAST of the four, so the mock has to get
+        // the run all the way through the verifier walk first: adapter (2) →
+        // wrapper (3) → yul (4), each answering its getter and each carrying
+        // code. A mock that stops at the adapter fails on an empty `eth_call`
+        // return long before the assertion, and the test would be green for
+        // the wrong reason — or red for one.
+        let answers = std::collections::HashMap::from([
+            (SEL_VERIFIER, word_addr(2)),         // bridge → adapter
+            (SEL_SHPLONK, word_addr(3)),          // adapter → wrapper
+            (SEL_YUL, word_addr(4)),              // wrapper → yul
+            (SEL_DAPP_FR, ZERO_WORD.to_string()), // on chain: 0
+            (SEL_ACC_FR, ZERO_WORD.to_string()),
+            (SEL_TREASURY, MAX_WORD.to_string()), // not what this test is about
+        ]);
+        let url = mock_rpc_code_for(
+            &[
+                (Address::repeat_byte(1), SOME_CODE),
+                (Address::repeat_byte(2), SOME_CODE),
+                (Address::repeat_byte(3), SOME_CODE),
+                (Address::repeat_byte(4), SOME_CODE),
+            ],
+            answers,
+        )
+        .await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::from(7u8), U256::from(9u8)), // what our proof will carry
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("WithdrawIdentityMismatch is checked before proof verification");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("WithdrawIdentityMismatch"),
+            "must name the revert, got: {msg}"
+        );
+        assert!(
+            msg.contains("different Acki Nacki"),
+            "must say what it means, got: {msg}"
+        );
+    }
+
+    fn sample_from() -> FromAddress {
+        FromAddress {
+            dapp_id_hex: "a".repeat(64),
+            account_id_hex: "b".repeat(64),
+        }
+    }
+
+    fn sample_to() -> ToAddress {
+        ToAddress {
+            address: "0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f"
+                .parse()
+                .unwrap(),
+            chain_id: 11_155_111,
+        }
+    }
+
+    /// The two id byte arrays and the two display strings describe the
+    /// same values — that is exactly what the test below asserts, so
+    /// building them from one pair of variables is the point.
+    fn sample_report() -> PreflightReport {
+        let dapp_id = [0u8; 32];
+        let account_id = [0x1au8; 32];
+        PreflightReport {
+            from: sample_from(),
+            to: sample_to(),
+            amount: UsdcAmount(1_000_000),
+            usdc_bridge_extended: format!("{}::{}", hex::encode(dapp_id), hex::encode(account_id)),
+            usdc_bridge_legacy: format!("0:{}", hex::encode(account_id)),
+            bridge_dapp_id: dapp_id,
+            bridge_account_id: account_id,
+            multisig_ecc3_balance: 1_000_000,
+            // A literal, deliberately. The pinned real key pair
+            // (`PAIR_PUBLIC`) arrives in Task 3, and this task ends with a
+            // green `cargo test` — reaching forward for it would leave
+            // Task 2 uncompilable in a sequential run. Nothing here reads
+            // this field: the test below asserts on the id fields only.
+            owner_pubkey_hex: "ee".repeat(32),
+        }
+    }
+
+    #[test]
+    fn the_report_ids_agree_with_the_strings_they_came_from() {
+        let r = sample_report();
+        assert_eq!(
+            format!(
+                "{}::{}",
+                hex::encode(r.bridge_dapp_id),
+                hex::encode(r.bridge_account_id)
+            ),
+            r.usdc_bridge_extended,
+            "the typed ids and the display string must be the same two values"
+        );
     }
 }

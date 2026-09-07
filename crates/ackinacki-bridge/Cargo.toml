@@ -64,6 +64,11 @@ bridge-prover-lib     = { path = "../bridge-prover-lib" }
 bridge-gql-fetcher    = { path = "../bridge-gql-fetcher" }
 acki-nacki-interface  = { path = "../../acki-nacki-interface" }
 
+# `bytes_to_fr` — the exact conversion the prover uses for public inputs
+# [6] and [7]. Reused rather than reimplemented so the preflight cannot
+# drift from what the proof will actually carry.
+gosh-dense-balanced-tree = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }

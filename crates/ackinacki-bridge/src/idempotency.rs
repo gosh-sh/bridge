@@ -354,6 +354,13 @@ impl UpdateFailed {
     /// as the only option, and an author with a genuinely pre-send write
     /// would then either mislabel it or reach for a `From` impl and undo
     /// the whole guard. The test exercises it.
+    ///
+    /// Keeping it costs one thing: it compiles at the post-burn sites too,
+    /// where it turns a burn on the wire into exit 2. That is what
+    /// `orchestrator`'s
+    /// `no_state_write_in_this_pipeline_claims_that_nothing_was_sent`
+    /// watches for — every `update` in the withdraw pipeline is downstream
+    /// of the send, so the guard there refuses this constructor outright.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn before_send(self) -> CliError {
         CliError::Preflight {

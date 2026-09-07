@@ -1347,21 +1347,72 @@ pub fn check_disk_headroom(
     // Group by device. `st_dev` is what makes two paths share a pool;
     // comparing the paths themselves would miss a bind mount and a symlink
     // both ways.
-    let same_device = match (device_of(params_dir), device_of(pk_cache_dir)) {
-        (Some(a), Some(b)) => a == b,
-        // Cannot tell. Assume shared: over-reserving refuses a run that
-        // would have fit, which costs a flag; under-reserving loses a burn.
-        _ => true,
-    };
+    let shared = share_a_filesystem(device_of(params_dir), device_of(pk_cache_dir));
 
-    if same_device {
-        require_space(params_dir, params_need + pk_need, &[
-            ("--params-dir", params_need),
-            ("--pk-cache-dir", pk_need),
-        ])
+    for r in space_requirements(params_dir, params_need, pk_cache_dir, pk_need, shared) {
+        require_space(r.probe, r.needed, &r.parts)?;
+    }
+    Ok(())
+}
+
+/// Do these two `st_dev` readings mean one pool of free space?
+///
+/// Split out because the answer for the unreadable case is a decision, not
+/// a detail: assume shared. Over-reserving refuses a run that would have
+/// fit, which costs a flag; under-reserving loses a burn. Inlined in the
+/// match it was invisible to the tests — flipping it to `false` left the
+/// whole suite green.
+fn share_a_filesystem(params: Option<u64>, pk_cache: Option<u64>) -> bool {
+    match (params, pk_cache) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// One filesystem's worth of the answer: probe `probe`, insist on `needed`
+/// bytes there, and name `parts` in the refusal so the operator can see
+/// what adds up to the total.
+#[derive(Debug)]
+struct SpaceRequirement<'a> {
+    probe: &'a Path,
+    needed: u64,
+    parts: Vec<(&'static str, u64)>,
+}
+
+/// The requirements this run must satisfy, grouped by the filesystem that
+/// has to hold them.
+///
+/// This is the part of the check that has to be right — the grouping and
+/// the summing — and it is pure, so it can be asserted without controlling
+/// anyone's free space. `require_space` then performs each one.
+fn space_requirements<'a>(
+    params_dir: &'a Path,
+    params_need: u64,
+    pk_cache_dir: &'a Path,
+    pk_need: u64,
+    shared: bool,
+) -> Vec<SpaceRequirement<'a>> {
+    if shared {
+        // One comparison against one `statvfs`. Two independent ones both
+        // pass at 3.5 GB free while the run needs ~3.65 GB.
+        vec![SpaceRequirement {
+            probe: params_dir,
+            needed: params_need + pk_need,
+            parts: vec![("--params-dir", params_need), ("--pk-cache-dir", pk_need)],
+        }]
     } else {
-        require_space(params_dir, params_need, &[("--params-dir", params_need)])?;
-        require_space(pk_cache_dir, pk_need, &[("--pk-cache-dir", pk_need)])
+        vec![
+            SpaceRequirement {
+                probe: params_dir,
+                needed: params_need,
+                parts: vec![("--params-dir", params_need)],
+            },
+            SpaceRequirement {
+                probe: pk_cache_dir,
+                needed: pk_need,
+                parts: vec![("--pk-cache-dir", pk_need)],
+            },
+        ]
     }
 }
 
@@ -2472,6 +2523,73 @@ mod tests {
             "clearing is exactly what does not work here: {msg}"
         );
         assert!(msg.contains("is a directory"), "must keep `why`: {msg}");
+    }
+
+    #[test]
+    fn two_directories_on_one_filesystem_are_asked_for_the_sum() {
+        // The composition the function exists for, and the one thing the
+        // suite could not see before: `require_space` and both helpers
+        // were covered, the summing was not. Two independent comparisons
+        // against the same statvfs both pass at 3.5 GB free while the run
+        // needs ~3.65 GB, and the shortfall then lands during aggregation
+        // — after the burn.
+        let plan = space_requirements(
+            Path::new("/params"),
+            EVENT_KEYGEN_BYTES,
+            Path::new("/params/pk_cache"),
+            OUTER_PK_BYTES,
+            true,
+        );
+        assert_eq!(plan.len(), 1, "one filesystem, one comparison: {plan:?}");
+        assert_eq!(plan[0].probe, Path::new("/params"));
+        assert_eq!(
+            plan[0].needed,
+            EVENT_KEYGEN_BYTES + OUTER_PK_BYTES,
+            "the total is the sum; either half alone is what let the run start and fail late",
+        );
+        assert_eq!(plan[0].parts.as_slice(), &[
+            ("--params-dir", EVENT_KEYGEN_BYTES),
+            ("--pk-cache-dir", OUTER_PK_BYTES),
+        ]);
+    }
+
+    #[test]
+    fn two_filesystems_are_asked_separately() {
+        // The other half of the composition: separate pools must not be
+        // charged for each other, or a host with a small params volume and
+        // a large cache volume is refused a run that fits.
+        let plan = space_requirements(
+            Path::new("/params"),
+            EVENT_KEYGEN_BYTES,
+            Path::new("/mnt/other/pk_cache"),
+            OUTER_PK_BYTES,
+            false,
+        );
+        assert_eq!(plan.len(), 2, "two pools, two comparisons: {plan:?}");
+        assert_eq!(plan[0].probe, Path::new("/params"));
+        assert_eq!(plan[0].needed, EVENT_KEYGEN_BYTES);
+        assert_eq!(plan[1].probe, Path::new("/mnt/other/pk_cache"));
+        assert_eq!(plan[1].needed, OUTER_PK_BYTES);
+        assert!(
+            plan.iter()
+                .all(|r| r.parts.len() == 1 && r.parts[0].1 == r.needed),
+            "neither requirement may carry the other's bytes: {plan:?}",
+        );
+    }
+
+    #[test]
+    fn a_device_id_that_cannot_be_read_is_assumed_shared() {
+        // The arm nothing could reach. It was inlined in the match, so
+        // flipping it to `false` left the whole suite green while halving
+        // what the run reserves on every host whose `st_dev` we cannot
+        // read — and unreadable is the normal case for a `--pk-cache-dir`
+        // that does not exist yet.
+        assert!(share_a_filesystem(None, Some(7)), "params device unknown");
+        assert!(share_a_filesystem(Some(7), None), "pk_cache device unknown");
+        assert!(share_a_filesystem(None, None), "neither readable");
+        // And the two it can read.
+        assert!(share_a_filesystem(Some(7), Some(7)), "same st_dev");
+        assert!(!share_a_filesystem(Some(7), Some(8)), "different st_dev");
     }
 
     #[test]

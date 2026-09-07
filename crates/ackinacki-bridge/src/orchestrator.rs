@@ -1482,6 +1482,94 @@ mod tests {
     }
 
     #[test]
+    fn everything_that_can_refuse_runs_before_the_reservation() {
+        // The order inside `run`'s burn branch IS the fix, and nothing but
+        // the order enforces it. The prompt comes first (a human can still
+        // say no), then `compose` (a bad keys.json, an unresolvable
+        // USDCBridge, a preflight report for a different withdrawal), and
+        // only then the reservation — the first thing this command leaves
+        // on disk. Reserving earlier compiles, passes every other test,
+        // and turns a declined prompt into a record that refuses the
+        // identical re-run with exit 3 for a burn that never happened.
+        //
+        // Read `run`'s body alone: the resume path and the tests below
+        // call `reserve_and_decide` too, with an ordering of their own.
+        let src = include_str!("orchestrator.rs");
+        let from = src
+            .find(concat!("pub async fn ", "run("))
+            .expect("run() is this module's entry point");
+        let body = &src[from..];
+        // Up to the next top-level item. Everything inside a function is
+        // indented, so a column-0 `fn` is where this one ends.
+        let body = &body[..body.find("\nfn ").unwrap_or(body.len())];
+        // The comments in there discuss these calls by name; only the
+        // code decides what runs when.
+        let code = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let at = |what: &str| {
+            code.find(what).unwrap_or_else(|| {
+                panic!("run() no longer calls {what} — the ordering cannot be verified")
+            })
+        };
+        let confirm = at(concat!("confirm_before", "_burn("));
+        let compose = at(concat!("burn::com", "pose("));
+        let reserve = at(concat!("reserve_and", "_decide("));
+        let send = at(concat!("burn::s", "end("));
+
+        assert!(
+            confirm < compose,
+            "the prompt runs before composing, so a declined burn composes nothing and holds no \
+             owner key",
+        );
+        assert!(
+            compose < reserve,
+            "composing runs before reserving: it is the last step that can fail, and failing \
+             after the reservation leaves a record that refuses the identical re-run",
+        );
+        assert!(
+            reserve < send,
+            "reserving runs before sending: the record is what makes a second burn refusable, and \
+             after the send it is too late to write one",
+        );
+    }
+
+    #[test]
+    fn no_state_write_in_this_pipeline_claims_that_nothing_was_sent() {
+        // `UpdateFailed` takes away the `?` and forces a choice at every
+        // call site. The choice can still be made wrongly: the other
+        // constructor compiles at any of them and renders a burn that is
+        // already on the wire as exit 2 — "refused before sending,
+        // nothing left the machine" — which is the single sentence the
+        // type exists to make unsayable, and the one that gets a second
+        // burn fired by a retry wrapper.
+        //
+        // Every `idempotency::update` in this file is downstream of the
+        // burn: the seven of them run at stages 3 through 6. So the
+        // pre-send constructor has no business here at all. If a write
+        // that genuinely precedes the send is ever added, this guard is
+        // where that gets recorded — deliberately, and read by a
+        // reviewer, rather than slipping in as one more call site.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let offenders: Vec<_> = production
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| l.contains(concat!("before", "_send(")))
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "these writes all happen after the burn is on the wire, so none of them may report \
+             itself as a refusal that sent nothing: {offenders:?}",
+        );
+    }
+
+    #[test]
     fn no_refusal_in_this_file_is_the_one_without_a_liveness_verdict() {
         // Two exit-3 variants, and only one of them belongs here.
         //

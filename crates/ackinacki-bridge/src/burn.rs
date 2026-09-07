@@ -370,10 +370,31 @@ pub async fn send(
         source: None,
     })?;
 
+    interpret_processed(&processed.transaction, from, amount_micro, bounce)
+}
+
+/// Everything `send` does after the SDK call returns: decide whether the
+/// transaction says the burn happened, and name it.
+///
+/// Split out because `send` was reachable by no test at all — the only
+/// mention of it in this file's suite is a compile-only signature guard
+/// that is never called. `process_message` needs a live node, so the
+/// function as a whole cannot be driven from a unit test; every decision
+/// it makes after that one call can be, and those are the decisions that
+/// turn "the SDK returned" into "the money moved".
+///
+/// The untestable remainder is now exactly one SDK call and the error map
+/// beside it.
+fn interpret_processed(
+    tx: &Value,
+    from: &FromAddress,
+    amount_micro: u128,
+    bounce: bool,
+) -> CliResult<BurnReceipt> {
     // Classify the returned transaction. `process_message` can return Ok
     // even when the compute phase reverted (exit_code != 0), so we must
     // inspect the tx JSON before declaring success.
-    let Some((aborted, exit_code)) = classify_tx(&processed.transaction) else {
+    let Some((aborted, exit_code)) = classify_tx(tx) else {
         return Err(CliError::BurnOutcomeUnknown {
             reason: format!(
                 "multisig {} returned a transaction this build cannot classify: it carries \
@@ -395,7 +416,7 @@ pub async fn send(
         });
     }
 
-    let an_tx_hash = extract_tx_id(&processed.transaction)?;
+    let an_tx_hash = extract_tx_id(tx)?;
     Ok(BurnReceipt {
         an_tx_hash,
         sent_amount_micro: amount_micro,
@@ -1023,6 +1044,139 @@ mod tests {
             assert!(
                 !rendered.contains(&leaked),
                 "the refusal leaked key material: {rendered}"
+            );
+        }
+    }
+
+    // -- What `send` does with what the SDK hands back ---------------------
+    //
+    // `send` itself needs a live node, and until now that meant nothing
+    // downstream of `process_message` was covered: the only mention of
+    // `send` in this suite is the compile-only guard below, which is
+    // never called. These drive the half that decides whether the money
+    // moved.
+
+    fn seam_from() -> FromAddress {
+        FromAddress {
+            dapp_id_hex: "aa".repeat(32),
+            account_id_hex: "bb".repeat(32),
+        }
+    }
+
+    #[test]
+    fn a_clean_transaction_becomes_a_receipt() {
+        let tx = json!({
+            "id": format!("0x{}", "cd".repeat(32)),
+            "aborted": false,
+            "compute": { "exit_code": 0 },
+        });
+        let r = interpret_processed(&tx, &seam_from(), 1_000_000, true)
+            .expect("a clean transaction is a burn");
+        assert_eq!(r.an_tx_hash, format!("0x{}", "cd".repeat(32)));
+        // Carried through, not re-derived: this is what the post-burn log
+        // line reports and what an operator reconciles against.
+        assert_eq!(r.sent_amount_micro, 1_000_000);
+        assert!(r.bounce);
+    }
+
+    #[test]
+    fn a_reverted_transaction_is_never_a_receipt() {
+        // `process_message` returns Ok for a transaction whose compute
+        // phase reverted. Treating that as success writes a durable
+        // `Burned` plus a hash, and from then on no run re-burns without
+        // an operator hand-editing the record — the withdrawal is
+        // stranded.
+        for (label, tx) in [
+            (
+                "aborted",
+                json!({ "id": "0xab", "aborted": true, "compute": { "exit_code": 0 } }),
+            ),
+            (
+                "exit_code",
+                json!({ "id": "0xab", "aborted": false, "compute": { "exit_code": 108 } }),
+            ),
+            (
+                "top-level exit_code",
+                json!({ "id": "0xab", "exit_code": 60 }),
+            ),
+        ] {
+            let err = interpret_processed(&tx, &seam_from(), 1, true)
+                .expect_err(&format!("{label}: a reverted call must not be a receipt"));
+            assert!(
+                matches!(err, CliError::BurnOutcomeUnknown { .. }),
+                "{label}: {err:?}"
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("aborted"),
+                "{label}: must name the revert: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclassifiable_transaction_is_exit_10_and_says_so() {
+        // Neither field present. `process_message` returns the whole
+        // transaction, so this is a shape change or a filtered response —
+        // not a success, and the burn is on the wire either way.
+        let err = interpret_processed(&json!({ "id": "0xab" }), &seam_from(), 1, true)
+            .expect_err("no evidence is not evidence of success");
+        assert!(
+            matches!(err, CliError::BurnOutcomeUnknown { .. }),
+            "{err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("cannot classify"), "{msg}");
+        assert!(
+            msg.contains("on the wire"),
+            "must not read as 'nothing was sent': {msg}"
+        );
+        assert!(
+            msg.contains(&seam_from().extended()),
+            "must name the multisig to reconcile: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_with_no_usable_id_is_exit_10() {
+        // A clean transaction whose id is not a hash. The old left-pad
+        // turned this into 0x000…0 and reported it as the burn's
+        // identity; a receipt nobody can look up is worse than a refusal
+        // that says so.
+        let tx = json!({ "id": "", "aborted": false, "compute": { "exit_code": 0 } });
+        let err = interpret_processed(&tx, &seam_from(), 1, true)
+            .expect_err("an empty id is not a transaction id");
+        assert!(
+            matches!(err, CliError::BurnOutcomeUnknown { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn no_refusal_from_this_seam_claims_nothing_was_sent() {
+        // The whole point of exit 10. Every path here runs AFTER
+        // `process_message` returned, so the message is on the wire
+        // whatever the transaction says — and a refusal that reads as
+        // "nothing happened" sends the operator to re-run, which burns
+        // again.
+        let cases = [
+            json!({ "id": "0xab" }),
+            json!({ "id": "0xab", "aborted": true }),
+            json!({ "id": "", "aborted": false, "compute": { "exit_code": 0 } }),
+            json!({ "id": "zz", "aborted": false, "compute": { "exit_code": 0 } }),
+        ];
+        for tx in cases {
+            let err = interpret_processed(&tx, &seam_from(), 1, true)
+                .expect_err("none of these is a receipt");
+            assert_eq!(
+                err.exit_code().as_i32(),
+                10,
+                "every refusal here is BurnOutcomeUnknown: {tx} -> {err:?}",
+            );
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains("Nothing was sent") && !msg.contains("nothing was sent"),
+                "the burn IS on the wire; this message says otherwise: {msg}",
             );
         }
     }

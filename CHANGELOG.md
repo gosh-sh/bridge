@@ -905,6 +905,17 @@ assigns it when the release is tagged.
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
 
+- **The burn's outcome interpretation is covered by tests.** Everything
+  `send` does after the SDK returns — whether the transaction says the
+  burn happened, and what to call it — was reachable by no test: the only
+  mention of `send` in the suite is a compile-only guard that is never
+  called, and `process_message` needs a live node. That logic is now its
+  own function, and its tests pin that a reverted transaction never
+  becomes a receipt, that an unclassifiable one is exit 10, and that no
+  refusal on that path can read as "nothing was sent" — the burn is on
+  the wire by then, and a message suggesting otherwise sends an operator
+  to re-run.
+
 - **`scripts/deploy_msig_and_mint.py` quotes what it prints, and the
   Python helpers no longer `cd` through a shell.** README Step 2 is
   `eval "$(scripts/deploy_msig_and_mint.sh)"`, so every character the

@@ -303,17 +303,20 @@ pub async fn run(
         // message — the multisig has no replay guard (sendTransaction
         // happily authorises a second transfer).
         if let Some(p) = prior.as_ref().filter(|p| p.an_tx_hash.is_some()) {
-            let existing = p.an_tx_hash.clone().expect("filtered above");
             info!(
-                an_tx = %existing,
+                an_tx = ?p.an_tx_hash,
                 prior_status = ?p.status,
                 "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
             );
-            let (r, lock) =
+            // The hash the rest of the pipeline captures against is the
+            // one the reservation returned, not the one peeked above.
+            // Carrying the peek's forward here put back the exact
+            // disagreement this seam exists to eliminate, one call along.
+            let (r, an_tx, lock) =
                 resume_recorded_burn(&state_dir, &from, &to, &amount, args.allow_retry, p)?;
             _withdrawal_lock = lock;
             record = Some(r);
-            (existing, bounce)
+            (an_tx, bounce)
         } else {
             // A prior record with no `an_tx_hash` is the ambiguous case, and
             // it has to be classified HERE — before the prompt. `reserve`
@@ -915,10 +918,20 @@ fn resume_recorded_burn(
     amount: &UsdcAmount,
     allow_retry: bool,
     observed: &idempotency::Record,
-) -> CliResult<(idempotency::Record, Option<idempotency::WithdrawalLock>)> {
+) -> CliResult<(
+    idempotency::Record,
+    String,
+    Option<idempotency::WithdrawalLock>,
+)> {
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
     match decision {
-        BurnDecision::Reuse(_) => Ok((r, lock)),
+        // The hash comes from the RESERVATION, not from `observed`. The
+        // two are read minutes apart — the whole of preflight — and the
+        // reservation's is the one taken under the withdrawal lock. An
+        // operator who followed the exit-3 remedy and wrote the real hash
+        // into the record in between is the case that makes them differ,
+        // and it is the case the remedy exists for.
+        BurnDecision::Reuse(h) => Ok((r, h, lock)),
         // A FRESH reservation for an identity this run has just seen a
         // burn recorded against: the record was removed in between.
         //
@@ -928,6 +941,21 @@ fn resume_recorded_burn(
         // the record we now own rather than leaving behind the one no
         // later run can act on.
         BurnDecision::Send => {
+            // Only the caller's peek says a burn happened — the record it
+            // saw is gone. Without a hash there is nothing to restore and
+            // nothing to resume, and writing back a hash-less active
+            // record is the exact shape `read_record` refuses forever.
+            let Some(an_tx) = observed.an_tx_hash.clone() else {
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "idempotency: resume was entered for {} but the record stage 1 read \
+                         carries no AN tx hash, so there is no burn to resume from. Nothing was \
+                         sent.",
+                        r.key,
+                    ),
+                    source: None,
+                });
+            };
             warn!(
                 an_tx = ?observed.an_tx_hash,
                 prior_status = ?observed.status,
@@ -958,7 +986,7 @@ fn resume_recorded_burn(
             if let Some(refusal) = idempotency::terminal_refusal(&restored) {
                 return Err(refusal);
             }
-            Ok((restored, lock))
+            Ok((restored, an_tx, lock))
         },
     }
 }
@@ -1625,7 +1653,7 @@ mod tests {
         let hash = format!("0x{}", "ab".repeat(32));
         let observed = burned_record(dir.path(), &hash);
 
-        let (r, lock) = resume_recorded_burn(
+        let (r, _an_tx, lock) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1671,7 +1699,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
 
-        let (restored, _lock) = resume_recorded_burn(
+        let (restored, _an_tx, _lock) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1692,6 +1720,49 @@ mod tests {
                 .expect("a restored record must not be one read_record refuses")
                 .expect("it exists");
         assert_eq!(reread.an_tx_hash.as_deref(), Some(hash.as_str()));
+    }
+
+    #[test]
+    fn a_resume_acts_on_the_reservations_hash_and_not_the_peeks() {
+        // Stage 1 peeks; preflight then runs for minutes. The exit-3
+        // remedy an operator follows in exactly that window is "write its
+        // hash into an_tx_hash and set status to burned, then re-run with
+        // --allow-retry" — so the record's hash changing between the peek
+        // and the reservation is not hypothetical, it is the documented
+        // recovery. The reservation reads the file under the withdrawal
+        // lock; the peek is stale. Capturing against the stale hash waits
+        // out the timeout for an event belonging to a transaction nobody
+        // is looking for.
+        let dir = tempfile::TempDir::new().unwrap();
+        let stale = format!("0x{}", "11".repeat(32));
+        let real = format!("0x{}", "22".repeat(32));
+        let mut r = burned_record(dir.path(), &stale);
+
+        // What stage 1 read.
+        let observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees the record");
+        assert_eq!(observed.an_tx_hash.as_deref(), Some(stale.as_str()));
+
+        // The operator reconciles on chain and writes the real hash in.
+        r.an_tx_hash = Some(real.clone());
+        idempotency::update(dir.path(), &r).unwrap();
+
+        let (rec, an_tx, _lock) = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+        )
+        .expect("a recorded burn resumes");
+        assert_eq!(
+            an_tx, real,
+            "the run must act on the hash the reservation read, not the one the peek saw",
+        );
+        assert_eq!(rec.an_tx_hash.as_deref(), Some(real.as_str()));
     }
 
     #[test]

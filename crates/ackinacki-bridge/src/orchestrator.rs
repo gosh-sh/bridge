@@ -1452,6 +1452,48 @@ mod tests {
     }
 
     #[test]
+    fn the_first_run_in_a_fresh_state_dir_still_holds_the_lock() {
+        // The lock is taken before the reservation, and the reservation is
+        // what creates the state directory — so on a first invocation the
+        // lock's own `open` hit ENOENT. That is reported as "flock could
+        // not be attempted", which is a supported deployment (a network
+        // mount) and therefore not a refusal: the run proceeds holding
+        // nothing.
+        //
+        // What that costs is the liveness verdict, and the verdict is what
+        // authorises deleting a record. A concurrent retry probes a lock
+        // nobody holds, is told the first run "has already exited", and
+        // the documented recovery then invites deleting the record while
+        // the first run is inside `burn::send`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let fresh = dir.path().join("state-dir-that-does-not-exist-yet");
+        assert!(!fresh.exists());
+
+        let (_r, d, lock) = reserve_and_decide(
+            &fresh,
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect("a first withdrawal in a fresh state dir is ordinary");
+        assert_eq!(d, BurnDecision::Send);
+        assert!(
+            lock.is_some(),
+            "the very first run must own its withdrawal too, or nothing can tell a later run that \
+             it is still alive",
+        );
+
+        // And that is exactly what a concurrent retry asks.
+        let k = idempotency::key(&seam_from(), &seam_to(), &UsdcAmount(1_000_000));
+        assert_eq!(
+            idempotency::WithdrawalLock::probe_holder(&fresh, &k),
+            Some(true),
+            "a retry must see the first run holding this withdrawal, not a free lock",
+        );
+    }
+
+    #[test]
     fn a_plain_retry_over_a_dead_runs_reservation_gets_the_actionable_refusal() {
         // The dead end, in the one arrangement that still reached it. A
         // run peeks and sees nothing; another run reserves and dies during

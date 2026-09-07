@@ -892,6 +892,18 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: the first withdrawal on a host now holds
+  its withdrawal lock.** The lock is taken before the reservation, and
+  the reservation is what creates the state directory — so on a first
+  invocation the lock's own `open` returned ENOENT. That is reported as
+  "flock could not be attempted", which is deliberately not a refusal (a
+  state directory on a filesystem without working flock is supported), so
+  the run proceeded holding nothing. A concurrent retry then probed a
+  lock nobody held, was told the first run "has already exited", and the
+  documented recovery invites deleting the record on exactly that
+  verdict — while the first run may be inside `burn::send`. The lock now
+  creates the state directory before opening.
+
 - **`ackinacki-bridge withdraw`: the exit-3 refusal for a record with no
   AN tx hash no longer tells you to pass `--allow-retry`.** A run whose
   reservation found a hash-less record left behind by an earlier run —

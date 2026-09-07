@@ -634,6 +634,19 @@ impl WithdrawalLock {
     pub fn try_acquire(state_dir: &Path, key: &str) -> CliResult<Option<Self>> {
         use std::os::unix::io::AsRawFd;
 
+        // Before opening anything. The lock is taken BEFORE the
+        // reservation, and the reservation is what used to create this
+        // directory — so on a first invocation the open below returned
+        // ENOENT, which the caller reads as "flock is not available here"
+        // and continues without a lock, because a state dir on a
+        // filesystem without working flock is a supported deployment.
+        //
+        // The first withdrawal on a host therefore held nothing, and a
+        // concurrent retry probing the lock was told the holder had
+        // already exited — the verdict that authorises deleting the
+        // record, while the first run may be inside `burn::send`.
+        ensure_state_dir(state_dir)?;
+
         let path = Self::path(state_dir, key);
         let refuse = |what: &str, e: std::io::Error| CliError::Preflight {
             reason: format!(

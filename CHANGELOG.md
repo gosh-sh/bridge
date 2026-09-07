@@ -953,6 +953,42 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **Two keygens can no longer run over each other in one `params_dir`.**
+  That directory is documented as shared with the bundle daemon, and
+  nothing prevented both from generating keys at once. Per-file writes are
+  atomic, so a file is never torn — but the manifest is written last and
+  hashes whatever is on disk at that moment, so two processes building
+  DIFFERENT circuits could publish a manifest that is internally
+  consistent and describes a mixed keyset. Every later check then passes,
+  the verdict is "warm", and the proof fails at stage 5, after the burn.
+  (Two processes building the same circuit produce identical keys, so that
+  case only wasted ~3 GB and ~7 minutes against a preflight that had
+  reserved for one.)
+
+  Keygen now takes an exclusive `flock` on `<prefix>_keygen.lock` for the
+  whole write, per circuit, so unrelated circuits still run in parallel.
+  A second arrival waits up to 30 minutes with progress logged, then
+  refuses rather than blocking a withdrawal forever — and when it does get
+  in, it re-checks the cache first and adopts what the other process
+  published instead of regenerating it. `flock` rather than a marker file
+  deliberately: the kernel releases it when the holder exits, so a keygen
+  killed mid-write leaves nothing to clean up, and a lock that IS held
+  proves a live holder. Never delete the lock file to "clear" it.
+
+- **The proving key is re-verified at stage 5, before it is used.** Its
+  ~2.65 GB digest was streamed exactly once, in preflight — the runtime
+  gate only asks whether the file exists — and between those two points
+  sit the irreversible burn and up to ~91 minutes of anchor wait. A key
+  replaced in that window (an rsync, a restored backup, another keygen)
+  was not caught: a truncated one reports, but a same-length corruption
+  past the embedded verifying key deserialises happily and leaves the
+  verifying key's digest unchanged. The result was a proof rejected on
+  submit, after the money had moved. Stage 5 now re-streams the key and
+  compares it against the digest preflight recorded — not against the
+  manifest read again, so replacing key and manifest together does not
+  pass. A mismatch is exit 12 with instructions that resume rather than
+  re-burn.
+
 - **An interrupted keygen no longer leaves 2.65 GB nobody can see.** Key
   files are published through a temp file that removes itself on drop —
   but not when the process is killed, and a proving-key write is ~2.65 GB

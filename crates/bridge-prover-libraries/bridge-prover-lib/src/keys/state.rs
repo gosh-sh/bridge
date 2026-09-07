@@ -28,6 +28,148 @@ use super::{
     event::{EVENT_CIRCUIT_REVISION, PREFIX as EVENT_PREFIX},
 };
 
+/// How long to wait for another process's keygen before giving up.
+///
+/// The event circuit takes ~7 minutes; the primary and fallback circuits
+/// are larger. 30 minutes is "somebody is genuinely doing the work" and
+/// not "somebody wedged". A caller that hits the cap gets a refusal
+/// naming the lock, which is better than blocking a withdrawal forever.
+const KEYGEN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Poll interval while waiting. `flock` has no timed variant in libc, so
+/// the wait is `LOCK_NB` in a loop.
+const KEYGEN_LOCK_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Cross-process exclusion for one prefix's keygen.
+///
+/// `params_dir` is documented as shared with the bundle daemon
+/// (`ackinacki-bridge/README.md`), and [`KeyManagerState::run_keygen`] had
+/// nothing stopping two processes from running one at once. Per-file
+/// writes are atomic, so that never tears a file — but the manifest is
+/// written LAST and hashes whatever is on disk at that moment, so an
+/// interleave where the two processes build DIFFERENT circuits publishes a
+/// manifest that is internally consistent and describes a mixed keyset.
+/// Every later check then passes: `new` matches the vk digest, the probe
+/// matches the pk digest, the verdict is warm. `create_proof` takes the
+/// proving key of one circuit while self-verification takes the verifying
+/// key of the other, and the proof fails at stage 5 — after the burn.
+///
+/// (Two processes building the SAME circuit produce byte-identical keys,
+/// so that interleave is harmless for content. It still doubles the ~3 GB
+/// and the ~7 minutes, against a preflight that reserved for one.)
+///
+/// **`flock`, not a marker file.** A lock file created with `O_EXCL` and
+/// removed on the way out is a deadlock the moment a process is killed
+/// mid-keygen: the marker survives and nothing knows it is stale. `flock`
+/// lives on the open descriptor, and the kernel drops it when the
+/// descriptor closes — including on SIGKILL. So a lock that IS held proves
+/// a live holder, which is what makes the timeout message below safe to
+/// write as "find that process" rather than "maybe delete this file".
+///
+/// The lock file itself is created once and never removed. Unlinking it
+/// would race: another process can be holding a lock on an inode whose
+/// name is already gone, and the next arrival would create a fresh file
+/// and lock that instead — two "exclusive" holders, which is the whole
+/// failure this exists to prevent.
+struct KeygenLock {
+    /// Held open for the guard's lifetime; dropping it releases the lock.
+    _file: std::fs::File,
+    /// Whether this acquisition had to wait for somebody else.
+    waited: bool,
+}
+
+impl KeygenLock {
+    fn path(params_dir: &Path, prefix: &str) -> PathBuf {
+        params_dir.join(format!("{prefix}_keygen.lock"))
+    }
+
+    /// Open the lock file and take the lock if it is free.
+    ///
+    /// `Ok(None)` is "somebody holds it" and `Err` is "the lock could not
+    /// be attempted". Keeping those apart is the point: treating an EBADF
+    /// or an EACCES as "busy" would spin for the full half hour and then
+    /// report a contention that never existed.
+    fn try_acquire(params_dir: &Path, prefix: &str) -> anyhow::Result<Option<std::fs::File>> {
+        use std::os::unix::io::AsRawFd;
+
+        let path = Self::path(params_dir, prefix);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open keygen lock {}", path.display()))?;
+
+        // SAFETY: `file` outlives the call, so the descriptor is valid.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(Some(file));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            // A guard, not `Some(A) | Some(B)`: the two constants are the
+            // same value on Linux, so as patterns the second is
+            // unreachable and the compiler says so. Both are named because
+            // POSIX allows them to differ, and this must keep meaning
+            // "already held" on a target where they do.
+            Some(n) if n == libc::EWOULDBLOCK || n == libc::EAGAIN => Ok(None),
+            _ => Err(e).with_context(|| format!("lock {}", path.display())),
+        }
+    }
+
+    fn acquire(params_dir: &Path, prefix: &'static str) -> anyhow::Result<Self> {
+        let path = Self::path(params_dir, prefix);
+        if let Some(file) = Self::try_acquire(params_dir, prefix)? {
+            return Ok(Self {
+                _file: file,
+                waited: false,
+            });
+        }
+
+        warn!(
+            lock = %path.display(),
+            "another process is generating the {prefix} keys; waiting rather than writing over \
+             them. Two keygens in one params_dir can publish a manifest that describes a mixed \
+             keyset",
+        );
+        let started = std::time::Instant::now();
+        let mut announced = std::time::Instant::now();
+        loop {
+            std::thread::sleep(KEYGEN_LOCK_POLL);
+            if let Some(file) = Self::try_acquire(params_dir, prefix)? {
+                info!(
+                    waited_s = started.elapsed().as_secs(),
+                    "acquired the {prefix} keygen lock",
+                );
+                return Ok(Self {
+                    _file: file,
+                    waited: true,
+                });
+            }
+            if started.elapsed() >= KEYGEN_LOCK_WAIT {
+                anyhow::bail!(
+                    "waited {} minutes for the {prefix} keygen lock at {} and it is still held. A \
+                     held flock means a LIVE process holds it — the kernel releases it when that \
+                     process exits, so this is not a stale file and deleting it would let two \
+                     keygens run at once. Find the other process (`fuser {}` or `lsof {}`) and \
+                     let it finish, or stop it. Nothing was written.",
+                    KEYGEN_LOCK_WAIT.as_secs() / 60,
+                    path.display(),
+                    path.display(),
+                    path.display(),
+                );
+            }
+            if announced.elapsed() >= std::time::Duration::from_secs(60) {
+                announced = std::time::Instant::now();
+                info!(
+                    waited_s = started.elapsed().as_secs(),
+                    "still waiting for the {prefix} keygen lock",
+                );
+            }
+        }
+    }
+}
+
 /// SRS + optional VK/PK/config cache with disk-backed lifecycle.
 pub(crate) struct KeyManagerState {
     params_dir: PathBuf,
@@ -75,92 +217,111 @@ impl KeyManagerState {
             pk: None,
             config: None,
         };
-        if let Ok(config) = load_config(&state.params_dir, prefix) {
-            // Refuse to install a verifying key from another circuit
-            // revision. This is the ONLY enforcement point that protects
-            // consumers which never call `ensure_keys` —
-            // `bridge-verifier-daemon` reads `vk_opt()` directly and would
-            // otherwise verify against a stale key without any complaint.
-            //
-            // `None` here means "this circuit does not version its keys",
-            // which is the honest state of primary, fallback and layer
-            // today; they are unaffected.
-            //
-            // Revision AND the two small digests. The revision alone leaves
-            // a grafted key installed: replace `event_vk.bin` with a
-            // different — but valid — verifying key, leave the manifest
-            // saying the current revision, and this gate would wave it
-            // through to `bridge-verifier-daemon`, which then verifies with
-            // the wrong key. The CLI's probe catches that case; the daemon
-            // never runs the CLI's probe.
-            //
-            // The proving key is deliberately NOT hashed here. It is
-            // ~2.65 GB, this runs in every constructor for all four
-            // managers, and the daemon does not load a PK at all. The VK
-            // and config are megabytes and kilobytes; the PK's digest stays
-            // in `probe_event_key_cache`, where the CLI pays for it once.
-            let keys_ok = match expected_revision {
-                None => true,
-                // `.ok().flatten()` — this constructor deliberately
-                // collapses `read_manifest`'s two failures back into one
-                // answer. Absent and unreadable both mean "nothing here can
-                // be trusted", and the action is identical: do not install
-                // the key.
-                //
-                // Choosing to collapse them is not the same as being unable
-                // to tell them apart, which is why `read_manifest` returns
-                // `Result<Option<_>>` regardless. The CLI probe reports to a
-                // human and keeps the two messages distinct; this runs
-                // inside four constructors, in a daemon as often as in the
-                // CLI, and has one thing to say.
-                Some(want) => read_manifest(&state.params_dir, prefix)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| {
-                        // The format comes first here too.
-                        // `deny_unknown_fields` stops a manifest that ADDS a
-                        // field from parsing at all; this stops one that
-                        // reuses these fields differently from being read as
-                        // if it did not.
-                        m.manifest_format == MANIFEST_FORMAT
-                            && m.circuit_revision == want
-                            && sha256_file(&vk_path(&state.params_dir, prefix))
-                                .is_ok_and(|d| d == m.vk_sha256)
-                            && sha256_file(&config_path(&state.params_dir, prefix))
-                                .is_ok_and(|d| d == m.config_sha256)
-                    }),
-            };
-            if !keys_ok {
-                // Loud, and specific. The daemon's own message says "VK not
-                // found", which would send an operator looking for a missing
-                // file rather than a stale one.
-                //
-                // The manifest clause is not padding: this branch is also
-                // where an unreadable manifest lands, and without it the
-                // message names three causes that all involve the keys and
-                // none that involves the record of them.
-                warn!(
-                    params_dir = %state.params_dir.display(),
-                    prefix,
-                    "cached {prefix} keys do not match their manifest, or the manifest could not \
-                     be read (wrong circuit revision; a manifest format this build does not know; \
-                     the verifying key or config was replaced; the manifest is unparseable or \
-                     absent); ignoring them. Re-run the prover to regenerate.",
-                );
-                return state;
-            }
-
-            info!("found {} config: {:?}", prefix, config);
-            if let Some(vk) = try_load_vk(&state.params_dir, prefix, &config) {
-                info!("loaded {} VK from cache", prefix);
-                state.vk = Some(vk);
-            }
-            if pk_path(&state.params_dir, prefix).exists() {
-                info!("{} PK found on disk (will load on demand)", prefix);
-            }
-            state.config = Some(config);
-        }
+        state.install_cached_keys();
         state
+    }
+
+    /// Install cached keys when the manifest vouches for them, and report
+    /// whether [`Self::keys_cached`] can now be true.
+    ///
+    /// Extracted from [`Self::new`] so [`Self::run_keygen`] can ask the
+    /// same question after waiting on the keygen lock: whoever held that
+    /// lock was writing these exact four files, and re-deriving ~3 GB over
+    /// ~7 minutes to reproduce what they have just published is time the
+    /// CLI spends AFTER the burn. One implementation, so the constructor's
+    /// answer and the post-wait answer cannot drift.
+    fn install_cached_keys(&mut self) -> bool {
+        let prefix = self.prefix;
+        let Ok(config) = load_config(&self.params_dir, prefix) else {
+            return false;
+        };
+        // Refuse to install a verifying key from another circuit
+        // revision. This is the ONLY enforcement point that protects
+        // consumers which never call `ensure_keys` —
+        // `bridge-verifier-daemon` reads `vk_opt()` directly and would
+        // otherwise verify against a stale key without any complaint.
+        //
+        // `None` here means "this circuit does not version its keys",
+        // which is the honest state of primary, fallback and layer
+        // today; they are unaffected.
+        //
+        // Revision AND the two small digests. The revision alone leaves
+        // a grafted key installed: replace `event_vk.bin` with a
+        // different — but valid — verifying key, leave the manifest
+        // saying the current revision, and this gate would wave it
+        // through to `bridge-verifier-daemon`, which then verifies with
+        // the wrong key. The CLI's probe catches that case; the daemon
+        // never runs the CLI's probe.
+        //
+        // The proving key is deliberately NOT hashed here. It is
+        // ~2.65 GB, this runs in every constructor for all four
+        // managers, and the daemon does not load a PK at all. The VK
+        // and config are megabytes and kilobytes; the PK's digest stays
+        // in `probe_event_key_cache`, where the CLI pays for it once.
+        let keys_ok = match self.expected_revision {
+            None => true,
+            // `.ok().flatten()` — this constructor deliberately
+            // collapses `read_manifest`'s two failures back into one
+            // answer. Absent and unreadable both mean "nothing here can
+            // be trusted", and the action is identical: do not install
+            // the key.
+            //
+            // Choosing to collapse them is not the same as being unable
+            // to tell them apart, which is why `read_manifest` returns
+            // `Result<Option<_>>` regardless. The CLI probe reports to a
+            // human and keeps the two messages distinct; this runs
+            // inside four constructors, in a daemon as often as in the
+            // CLI, and has one thing to say.
+            Some(want) => read_manifest(&self.params_dir, prefix)
+                .ok()
+                .flatten()
+                .is_some_and(|m| {
+                    // The format comes first here too.
+                    // `deny_unknown_fields` stops a manifest that ADDS a
+                    // field from parsing at all; this stops one that
+                    // reuses these fields differently from being read as
+                    // if it did not.
+                    m.manifest_format == MANIFEST_FORMAT
+                        && m.circuit_revision == want
+                        && sha256_file(&vk_path(&self.params_dir, prefix))
+                            .is_ok_and(|d| d == m.vk_sha256)
+                        && sha256_file(&config_path(&self.params_dir, prefix))
+                            .is_ok_and(|d| d == m.config_sha256)
+                }),
+        };
+        if !keys_ok {
+            // Loud, and specific. The daemon's own message says "VK not
+            // found", which would send an operator looking for a missing
+            // file rather than a stale one.
+            //
+            // The manifest clause is not padding: this branch is also
+            // where an unreadable manifest lands, and without it the
+            // message names three causes that all involve the keys and
+            // none that involves the record of them.
+            warn!(
+                params_dir = %self.params_dir.display(),
+                prefix,
+                "cached {prefix} keys do not match their manifest, or the manifest could not \
+                 be read (wrong circuit revision; a manifest format this build does not know; \
+                 the verifying key or config was replaced; the manifest is unparseable or \
+                 absent); ignoring them. Re-run the prover to regenerate.",
+            );
+            return false;
+        }
+
+        info!("found {} config: {:?}", prefix, config);
+        if let Some(vk) = try_load_vk(&self.params_dir, prefix, &config) {
+            info!("loaded {} VK from cache", prefix);
+            self.vk = Some(vk);
+        }
+        if pk_path(&self.params_dir, prefix).exists() {
+            info!("{} PK found on disk (will load on demand)", prefix);
+        }
+        self.config = Some(config);
+        // Deliberately `keys_cached()` and not `self.vk.is_some()`: the
+        // caller's question is "can regeneration be skipped?", and that
+        // predicate is the one that answers it everywhere else.
+        self.keys_cached()
     }
 
     /// True iff `ensure_keys` can skip regeneration: VK in memory and PK on
@@ -255,6 +416,28 @@ impl KeyManagerState {
     where
         C: Circuit<Fr>,
     {
+        // FIRST of all — before the manifest is retracted, let alone
+        // before a key file is written. Everything below is a sequence of
+        // individually-atomic writes that is not atomic as a SET, and this
+        // is what stops a second process interleaving with it.
+        let lock = KeygenLock::acquire(&self.params_dir, self.prefix)?;
+
+        // We may have just waited minutes for that lock. Whoever held it
+        // was writing these exact four files, so ask whether they are now
+        // good before spending another ~7 minutes and ~3 GB reproducing
+        // them — time the CLI spends after the burn.
+        //
+        // Only when we actually waited: on the uncontended path the
+        // caller has already decided regeneration is needed, and re-asking
+        // would re-read the config on every keygen for nothing.
+        if lock.waited && self.install_cached_keys() {
+            info!(
+                "{} keys were generated by the process we waited for; adopting them",
+                self.prefix
+            );
+            return Ok(());
+        }
+
         // FIRST — before any key file is touched.
         self.retract_manifest()?;
         // The ordering is the whole crash-consistency argument and no unit
@@ -800,6 +983,38 @@ pub fn probe_event_key_cache(params_dir: &Path) -> KeyCacheState {
 /// `load_pk` operator hint. Auto-picks GiB / MiB / KiB so a large BLS
 /// PK reads as "3.62 GiB" while a smaller Circuit-4 PK reads as
 /// "412.7 MiB" instead of "0.40 GiB".
+/// The proving key's recorded digest and the file it describes, for a
+/// caller that wants to re-verify the key LATER.
+///
+/// [`probe_event_key_cache`] streams ~2.65 GB to reach a `Warm` verdict and
+/// nothing repeats that: the runtime gate is `keys_cached()`, which asks
+/// only whether the file exists, and [`KeyManagerState::new`] deliberately
+/// skips the proving key's digest. For the withdraw CLI that one check sits
+/// before the irreversible burn and up to ~91 minutes of anchor wait, and
+/// the key is not read until after both.
+///
+/// Returns the digest the MANIFEST records, which a `Warm` verdict has just
+/// confirmed the file matches. The caller keeps that string and compares a
+/// fresh [`sha256_of`] against it — deliberately not against the manifest
+/// read again later, so replacing the key and its manifest together does
+/// not pass.
+///
+/// `None` when there is no readable manifest, which is every state except
+/// warm; there is nothing to vouch for then.
+pub fn event_pk_recorded_digest(params_dir: &Path) -> Option<(PathBuf, String)> {
+    let m = read_manifest(params_dir, EVENT_PREFIX).ok().flatten()?;
+    Some((pk_path(params_dir, EVENT_PREFIX), m.pk_sha256))
+}
+
+/// Stream a file and return its SHA-256, lower-case hex.
+///
+/// Streaming, so it cannot be fooled by a truncation and cannot panic on
+/// malformed content the way halo2's readers do — the same reason
+/// [`probe_event_key_cache`] hashes before it deserialises.
+pub fn sha256_of(path: &Path) -> std::io::Result<String> {
+    sha256_file(path)
+}
+
 /// Human-readable byte count. Public because `keys` re-exports it: the
 /// probe binary reports leaked temp sizes, and its neighbouring output
 /// ("loading event PK (2.65 GiB)") is already in these units.
@@ -821,7 +1036,121 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use super::*;
+
+    // -- The keygen lock -------------------------------------------------
+    //
+    // `run_keygen` is the write it protects, and running one costs ~7
+    // minutes and ~3 GB, so these exercise the guard directly. What has to
+    // hold: it excludes, it excludes ACROSS PROCESSES (a thread-only lock
+    // would pass a same-process test and fail the case that matters, since
+    // `params_dir` is shared with the bundle daemon), it does not exclude
+    // two different circuits from each other, and a holder that dies
+    // releases it.
+
+    #[test]
+    fn a_second_acquisition_in_this_process_is_refused_while_the_first_lives() {
+        let d = tempfile::TempDir::new().unwrap();
+        let first = KeygenLock::acquire(d.path(), "event").expect("uncontended");
+        assert!(!first.waited, "nothing to wait for");
+
+        // `flock` is per open-file-description, not per process, so a
+        // second `open` here is exactly what a second process does.
+        let path = KeygenLock::path(d.path(), "event");
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `f` is live for the call.
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, -1, "the lock must be held");
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap();
+        assert!(
+            errno == libc::EWOULDBLOCK || errno == libc::EAGAIN,
+            "held, not broken: errno {errno}",
+        );
+
+        // And released on drop, so the next keygen is not blocked forever.
+        drop(first);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "dropping the guard must release the lock",
+        );
+    }
+
+    #[test]
+    fn two_circuits_do_not_block_each_other() {
+        // Per prefix, not per directory. The four managers write disjoint
+        // file sets, and serialising them would turn four independent
+        // keygens into one queue for no correctness gain.
+        let d = tempfile::TempDir::new().unwrap();
+        let _event = KeygenLock::acquire(d.path(), "event").expect("event");
+        let _primary = KeygenLock::acquire(d.path(), "primary").expect("primary must not block");
+        assert_ne!(
+            KeygenLock::path(d.path(), "event"),
+            KeygenLock::path(d.path(), "primary"),
+        );
+    }
+
+    #[test]
+    fn a_lock_held_by_a_dead_process_is_free() {
+        // The reason this is `flock` and not an `O_EXCL` marker file. A
+        // keygen runs for minutes; killing one mid-write is ordinary. A
+        // marker would survive and deadlock every later run until somebody
+        // knew to delete it — and "delete this file if you think it is
+        // stale" is advice that, followed wrongly, lets two keygens run at
+        // once, which is the thing being prevented.
+        let d = tempfile::TempDir::new().unwrap();
+        let path = KeygenLock::path(d.path(), "event");
+
+        // A child process that takes the lock and is then killed. `sh`
+        // holds it on fd 9 and sleeps.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                // `exec sleep`, not `sleep`: a plain `sleep` is forked, and
+                // `child.kill()` would then kill the shell while the forked
+                // sleep kept the inherited descriptor — and the lock with
+                // it. `exec` replaces the shell, so the PID we kill IS the
+                // holder.
+                "exec 9>'{}'; flock -x 9 || exit 1; echo ready; exec sleep 300",
+                path.display()
+            ))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh must be runnable");
+
+        // Wait for it to actually hold the lock before asserting on it.
+        use std::io::Read;
+        let mut out = child.stdout.take().unwrap();
+        let mut buf = [0u8; 6];
+        if out.read_exact(&mut buf).is_err() {
+            // No `flock(1)` on this host: nothing to assert, and inventing
+            // a pass would be worse than skipping.
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+        assert!(
+            KeygenLock::try_acquire(d.path(), "event")
+                .unwrap()
+                .is_none(),
+            "the child holds it",
+        );
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            KeygenLock::try_acquire(d.path(), "event")
+                .unwrap()
+                .is_some(),
+            "the kernel releases a flock when its holder dies",
+        );
+    }
 
     #[test]
     fn format_bytes_picks_unit() {

@@ -1955,6 +1955,7 @@ dependencies = [
  "halo2curves",
  "hex",
  "historical-layer-hashes-movement-checker-circuit",
+ "libc",
  "num-bigint 0.4.8",
  "pse-poseidon",
  "rand 0.8.7",

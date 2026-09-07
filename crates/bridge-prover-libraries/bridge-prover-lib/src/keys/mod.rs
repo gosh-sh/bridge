@@ -15,7 +15,9 @@ mod state;
 pub use common::{
     assert_hermez_srs, leaked_keygen_temp_files, probe_ceremony, LeakedTemp, HERMEZ_S_G2_HEAD,
 };
-pub use state::{format_bytes, probe_event_key_cache, KeyCacheState};
+pub use state::{
+    event_pk_recorded_digest, format_bytes, probe_event_key_cache, sha256_of, KeyCacheState,
+};
 pub mod event;
 pub mod fallback;
 pub mod layer;

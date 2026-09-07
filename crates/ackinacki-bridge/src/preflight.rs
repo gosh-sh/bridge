@@ -21,7 +21,7 @@
 //! is reused for the one direct GraphQL query we make (USDCBridge dapp_id
 //! resolution) — the daemon already uses it, so we inherit its shape.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -744,7 +744,7 @@ pub async fn check_prover_artifacts(
     snark_dir: &Path,
     pk_cache_dir: Option<&Path>,
     allow_verifier_drift: bool,
-) -> CliResult<()> {
+) -> CliResult<Option<PkFingerprint>> {
     check_ceremony(&p.params_dir)?;
     check_verifier_bin(&p.verifiers_dir, allow_verifier_drift)?;
     check_aggregator_runnable(&p.aggregator_dir).await?;
@@ -760,6 +760,18 @@ pub async fn check_prover_artifacts(
     // continues on failure. Refusing the run for it would be stricter than
     // the code it is protecting.
     let cache = bridge_prover_lib::keys::probe_event_key_cache(&p.params_dir);
+
+    // Only a `Warm` verdict means the proving key's bytes were actually
+    // streamed and matched. Recording a digest for a cold or corrupt cache
+    // would pin a file nothing vouched for, and stage 5 would then defend
+    // a key that was never verified.
+    let fingerprint = matches!(cache, KeyCacheState::Warm)
+        .then(|| bridge_prover_lib::keys::event_pk_recorded_digest(&p.params_dir))
+        .flatten()
+        .map(|(path, sha256)| PkFingerprint {
+            path,
+            sha256,
+        });
 
     // `Cold`, specifically — not `!Warm`. `Corrupt` and `Blocked` are also
     // not-warm, and on a read-only `params/` the writability probe would
@@ -790,7 +802,96 @@ pub async fn check_prover_artifacts(
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
     check_disk_headroom(&p.params_dir, &effective_pk_cache, cache)?;
-    Ok(())
+
+    Ok(fingerprint)
+}
+
+/// The proving key as stage 1 verified it, carried to stage 5.
+///
+/// **Its digest is streamed exactly once before the burn.**
+/// `probe_event_key_cache` hashes ~2.65 GB to reach a `Warm` verdict, and
+/// nothing repeats that: the runtime gate is `keys_cached()`, which is
+/// `vk.is_some() && the pk file exists`, and `KeyManagerState::new`
+/// deliberately skips the proving key's digest (four constructors, and the
+/// verifier daemon never loads a proving key at all).
+///
+/// Between that check and `load_pk` in stage 5 sit the burn and up to ~91
+/// minutes of anchor wait. A key replaced inside that window is not exotic
+/// — an rsync, a second keygen, a restored backup — and it is not reliably
+/// caught later: `try_load_pk` is panic-wrapped so a TRUNCATED key reports,
+/// but a same-length corruption past the embedded verifying key
+/// deserialises happily and leaves `transcript_repr()` unchanged (see the
+/// note in `keys/state.rs`). Warm, wrong, and the proof fails after the
+/// money has moved.
+///
+/// **A digest, and not `(len, mtime, inode)`.** That was the first shape of
+/// this check, on the theory that a replaced file always lands on a new
+/// inode. It does not: a test replacing a 16-byte file got the SAME inode
+/// back, because the filesystem reuses one it has just freed. Pair that
+/// with a same-length write inside one mtime tick and the cheap check
+/// passes over exactly the accident it was added for. Re-streaming the key
+/// costs one sequential read on a path that has already spent minutes
+/// proving, and it is the only version that is actually true.
+///
+/// The digest compared against is the one recorded HERE, not the manifest
+/// read again at stage 5 — replacing the key and its manifest together is
+/// a case the second form would wave through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkFingerprint {
+    path: PathBuf,
+    sha256: String,
+}
+
+/// Refuse if the proving key is not the file preflight verified.
+///
+/// Called at the top of stage 5, after the burn — so this is exit 12
+/// (`ProofFailed`), not a preflight refusal. Nothing is lost by stopping
+/// here: a proof built from a key nobody vouched for either fails its own
+/// self-verification or is rejected on submit, and both of those cost the
+/// anchor wait first.
+pub fn recheck_proving_key(before: Option<&PkFingerprint>) -> CliResult<()> {
+    let Some(before) = before else {
+        // Stage 1 found no warm cache, so there is no verified file to
+        // compare against — stage 5 generates one under the keygen lock.
+        return Ok(());
+    };
+    match bridge_prover_lib::keys::sha256_of(&before.path) {
+        Ok(now) if now == before.sha256 => Ok(()),
+        Ok(now) => Err(CliError::ProofFailed {
+            reason: format!(
+                "{} is not the proving key preflight verified: sha256 {}…, was {}…. That digest \
+                 was streamed before the burn and nothing has re-verified it since, so a \
+                 replacement is vouched for by nothing — and a proof built from it fails on \
+                 submit, after the anchor wait.\n\x20 The AN burn is already on the wire. Restore \
+                 the key this run started with, or clear the cache and re-run with --allow-retry, \
+                 which regenerates and resumes from the recorded burn instead of making a second \
+                 one:\n\x20   cargo run --release --manifest-path \
+                 ../bridge-prover-libraries/Cargo.toml -p bridge-prover-lib --bin \
+                 probe_event_keys -- --params-dir '{}' --repair",
+                before.path.display(),
+                &now[..8.min(now.len())],
+                &before.sha256[..8.min(before.sha256.len())],
+                before
+                    .path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .display()
+                    .to_string()
+                    .replace('\'', r"'\''"),
+            ),
+            source: None,
+        }),
+        Err(e) => Err(CliError::ProofFailed {
+            reason: format!(
+                "{} cannot be read back ({e}): preflight verified it before the burn.\n\x20 The \
+                 AN burn is already on the wire. Re-run with --allow-retry — a missing key reads \
+                 as a cold cache, so stage 5 regenerates and resumes from the recorded burn \
+                 rather than making a second one.",
+                before.path.display(),
+            ),
+            source: None,
+        }),
+    }
 }
 
 /// The KZG ceremony, resolved exactly the way the prover will resolve it —
@@ -2123,6 +2224,125 @@ mod tests {
     // and not both, and a shortfall that lands in stage 5 — after the
     // burn. The free-space number itself cannot be arranged portably, so
     // these test the parts that decide what to compare, plus the message.
+
+    // -- The proving key between stage 1 and stage 5 ---------------------
+
+    fn plant_pk(dir: &Path, bytes: &[u8]) -> PkFingerprint {
+        let path = dir.join("event_pk.bin");
+        std::fs::write(&path, bytes).unwrap();
+        let sha256 = bridge_prover_lib::keys::sha256_of(&path).unwrap();
+        PkFingerprint {
+            path,
+            sha256,
+        }
+    }
+
+    #[test]
+    fn an_untouched_proving_key_passes_the_stage_5_recheck() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = plant_pk(dir.path(), b"proving key");
+        recheck_proving_key(Some(&before)).expect("the same bytes are the same key");
+    }
+
+    #[test]
+    fn a_cold_cache_has_nothing_to_recheck() {
+        // Stage 1 records a digest only for a `Warm` verdict, because only
+        // that one streamed the key's bytes. A cold run generates the key
+        // in stage 5 under the keygen lock, and there is no earlier file to
+        // compare against — refusing here would break every first run on a
+        // fresh host.
+        recheck_proving_key(None).expect("nothing was verified, so nothing changed");
+    }
+
+    #[test]
+    fn a_replaced_proving_key_is_refused_after_the_burn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = plant_pk(dir.path(), b"the key preflight verified");
+        std::fs::write(dir.path().join("event_pk.bin"), b"something else entirely").unwrap();
+
+        let err = recheck_proving_key(Some(&before))
+            .expect_err("a key nobody verified must not be proved with");
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, CliError::ProofFailed { .. }),
+            "exit 12: {msg}"
+        );
+        assert!(
+            msg.contains("not the proving key preflight verified"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("already on the wire"),
+            "must say the burn happened: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-retry"),
+            "must give a way out that does not re-burn: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_same_length_replacement_is_still_caught() {
+        // This is why the check is a digest and not `(len, mtime, inode)`.
+        // The first version of it assumed a replaced file lands on a fresh
+        // inode; it does not — the filesystem reuses one it has just
+        // freed, and this exact test caught that with `left: 633990,
+        // right: 633990`. Pair inode reuse with a same-length write inside
+        // one mtime tick and the cheap check waves through precisely the
+        // accident it exists for.
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = plant_pk(dir.path(), b"AAAAAAAAAAAAAAAA");
+        std::fs::remove_file(dir.path().join("event_pk.bin")).unwrap();
+        std::fs::write(dir.path().join("event_pk.bin"), b"BBBBBBBBBBBBBBBB").unwrap();
+
+        let md = std::fs::metadata(dir.path().join("event_pk.bin")).unwrap();
+        assert_eq!(md.len(), 16, "same length, by construction");
+        assert!(
+            recheck_proving_key(Some(&before)).is_err(),
+            "equal length must not be read as equal file"
+        );
+    }
+
+    #[test]
+    fn a_vanished_proving_key_is_refused_and_says_how_to_resume() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let before = plant_pk(dir.path(), b"proving key");
+        std::fs::remove_file(dir.path().join("event_pk.bin")).unwrap();
+
+        let err = recheck_proving_key(Some(&before)).expect_err("the key is gone");
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, CliError::ProofFailed { .. }),
+            "exit 12: {msg}"
+        );
+        assert!(msg.contains("cannot be read back"), "got: {msg}");
+        assert!(
+            msg.contains("--allow-retry"),
+            "the burn already happened; the way forward must not re-burn: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_swapped_symlink_target_is_caught() {
+        // Streaming the bytes reads through the link, so a repointed
+        // symlink is simply different content — no separate rule needed.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"first").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"second").unwrap();
+        std::os::unix::fs::symlink("a.bin", dir.path().join("event_pk.bin")).unwrap();
+        let path = dir.path().join("event_pk.bin");
+        let before = PkFingerprint {
+            sha256: bridge_prover_lib::keys::sha256_of(&path).unwrap(),
+            path,
+        };
+
+        std::fs::remove_file(dir.path().join("event_pk.bin")).unwrap();
+        std::os::unix::fs::symlink("b.bin", dir.path().join("event_pk.bin")).unwrap();
+        assert!(
+            recheck_proving_key(Some(&before)).is_err(),
+            "the link now resolves to different bytes"
+        );
+    }
 
     #[test]
     fn a_warm_cache_asks_for_no_keygen_room() {

@@ -486,7 +486,7 @@ pub fn leaked_keygen_temp_files(params_dir: &Path) -> Vec<LeakedTemp> {
         .filter_map(|e| {
             let path = e.path();
             let md = std::fs::symlink_metadata(&path).ok()?;
-            md.is_file().then(|| LeakedTemp {
+            md.is_file().then_some(LeakedTemp {
                 bytes: md.len(),
                 path,
             })

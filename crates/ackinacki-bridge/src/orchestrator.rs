@@ -218,10 +218,16 @@ pub async fn run(
 
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
+    //
+    // The proving key's identity as of this check travels to stage 5. That
+    // is the ONLY place its ~2.65 GB of bytes are ever verified, and stage
+    // 5 happens after the burn plus up to ~91 minutes of anchor wait — see
+    // [`crate::preflight::PkFingerprint`].
+    let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)?;
         info!("burner key ok");
-        crate::preflight::check_prover_artifacts(
+        pk_fingerprint = crate::preflight::check_prover_artifacts(
             p,
             &args.snark_dir,
             args.pk_cache_dir.as_deref(),
@@ -505,6 +511,13 @@ pub async fn run(
 
     // ---- 5. Prove ----
     info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
+
+    // Before anything reads the key. Stage 1 verified it; the burn and the
+    // anchor wait sit between then and now, and nothing else re-checks —
+    // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
+    // unconditionally, and the refusal it produces is strictly better than
+    // proving against an unvouched-for key and being rejected on submit.
+    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())?;
     // `prover_state_path` and `window_size` are ignored by
     // `run_once_with_state`, but the config struct still has the fields
     // (the daemon binary uses them on the file path). Fill in stubs

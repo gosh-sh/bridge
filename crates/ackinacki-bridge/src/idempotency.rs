@@ -322,8 +322,24 @@ pub fn reserve(
             Ok((prior, Reservation::Found))
         },
         // Active resumable states.
+        //
+        // The second condition is about the HASH, not the status, and it
+        // is what stops this arm handing out advice that leads nowhere.
+        // Only a record with a hash is resumable, and only for that one is
+        // `--allow-retry` the answer; a hash-less record refuses the flag
+        // outright further down the line. Naming the flag anyway sent an
+        // operator from this refusal to another one whose text is
+        // "--allow-retry does NOT override this", which is the dead end
+        // the flag advice was moved out of a round ago — it just moved
+        // here.
+        //
+        // So a hash-less record is handed back for `decide_burn` to
+        // refuse. That is not a weakening: `(None, Found)` is exactly the
+        // combination it rejects, and it is the caller that knows whether
+        // this run holds the withdrawal lock — which is the half of the
+        // answer this function cannot supply and the refusal needs.
         Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
-            if allow_retry {
+            if allow_retry || prior.an_tx_hash.is_none() {
                 // Resume: return the prior record verbatim so the
                 // orchestrator can skip stages by inspecting fields
                 // like `an_tx_hash` / `withdrawal_msg_id`. Do NOT
@@ -336,8 +352,8 @@ pub fn reserve(
                     prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
                     prior_tx: prior.an_tx_hash,
                     prior_msg_id: prior.withdrawal_msg_id,
-                    // Here the flag IS the answer: with it, a record
-                    // carrying a hash resumes at capture.
+                    // Here the flag IS the answer: this record carries a
+                    // hash, so with the flag it resumes at capture.
                     remedy: "Reconcile via GraphQL, or re-run with --allow-retry to resume from \
                              the recorded burn."
                         .to_string(),
@@ -1306,8 +1322,10 @@ mod tests {
 
     #[test]
     fn reserve_duplicate_active_refuses() {
+        // A prior record that CARRIES A HASH and no `--allow-retry`: the
+        // flag really is the answer here, so naming it is right.
         let dir = TempDir::new().unwrap();
-        let _first = reserve_rec(
+        let mut first = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -1315,6 +1333,10 @@ mod tests {
             false,
         )
         .unwrap();
+        first.status = Status::Burned;
+        first.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        update(dir.path(), &first).unwrap();
+
         let second = reserve_rec(
             dir.path(),
             &sample_from(),
@@ -1324,9 +1346,15 @@ mod tests {
         );
         match second {
             Err(CliError::DuplicateInFlight {
-                prior_status, ..
+                prior_status,
+                prior_tx,
+                ..
             }) => {
-                assert_eq!(prior_status, "reserved");
+                assert_eq!(prior_status, "burned");
+                assert!(
+                    prior_tx.is_some(),
+                    "the flag advice needs a hash to be about"
+                );
             },
             other => panic!("expected DuplicateInFlight, got {other:?}"),
         }
@@ -1705,11 +1733,21 @@ mod tests {
     }
 
     #[test]
-    fn reserve_still_refuses_a_hash_less_reserved_record() {
-        // Regression guard for the double-spend this plan deliberately does
-        // NOT introduce: `Reserved` + an_tx_hash == None is also the state a
+    fn a_hash_less_prior_is_never_reported_as_a_created_reservation() {
+        // The double-spend guard, stated as the thing this function is
+        // actually responsible for. `Reserved` + no hash is also what a
         // burn that reached the wire and errored leaves behind, so it must
-        // keep blocking a plain retry.
+        // never look like an identity this run just claimed.
+        //
+        // The refusal itself is `decide_burn`'s, not this function's, and
+        // deliberately so: it is the caller that knows whether this run
+        // holds the withdrawal lock, and that is the half of the answer
+        // the operator needs before deleting anything. What this function
+        // owes is the provenance — `Found`, never `Created` — which is
+        // exactly the input `decide_burn` refuses on. Refusing here as
+        // well only bought a second message, and the second message named
+        // `--allow-retry`, which the refusal downstream then says does not
+        // override it.
         let dir = TempDir::new().unwrap();
         let first = reserve_rec(
             dir.path(),
@@ -1721,17 +1759,23 @@ mod tests {
         .unwrap();
         assert!(first.an_tx_hash.is_none());
 
-        let second = reserve_rec(
-            dir.path(),
-            &sample_from(),
-            &sample_to(),
-            &UsdcAmount(500_000),
-            false,
-        );
-        assert!(
-            matches!(second, Err(CliError::DuplicateInFlight { .. })),
-            "a hash-less Reserved record must still refuse without --allow-retry, got {second:?}",
-        );
+        for allow_retry in [false, true] {
+            let (rec, how) = reserve(
+                dir.path(),
+                &sample_from(),
+                &sample_to(),
+                &UsdcAmount(500_000),
+                allow_retry,
+            )
+            .expect("the record is handed back for the caller to judge");
+            assert!(rec.an_tx_hash.is_none());
+            assert_eq!(
+                how,
+                Reservation::Found,
+                "--allow-retry={allow_retry}: a record somebody else published is never this \
+                 run's to burn against",
+            );
+        }
     }
 
     #[test]

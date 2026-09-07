@@ -1452,6 +1452,58 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_retry_over_a_dead_runs_reservation_gets_the_actionable_refusal() {
+        // The dead end, in the one arrangement that still reached it. A
+        // run peeks and sees nothing; another run reserves and dies during
+        // this one's preflight; this one then reserves without
+        // `--allow-retry`.
+        //
+        // That used to earn "Reconcile via GraphQL, or re-run with
+        // --allow-retry" — and re-running with the flag lands on a refusal
+        // whose text is "--allow-retry does NOT override this". Two
+        // refusals, the first sending the operator to the second, and the
+        // only escape either of them left to find was deleting the record,
+        // which is what permits a second burn.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (r, d, lock_a) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .unwrap();
+        assert_eq!(d, BurnDecision::Send);
+        assert!(r.an_tx_hash.is_none(), "A died before writing a hash");
+        drop(lock_a); // A exits, however it exits — the kernel frees it.
+
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a hash-less record somebody else published is not this run's to burn");
+        assert_eq!(err.exit_code().as_i32(), 3, "{err:?}");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("has already exited"),
+            "the liveness verdict, which is what says deleting is even discussable: {msg}",
+        );
+        assert!(msg.contains("Record:"), "and the path to delete: {msg}");
+        assert!(
+            msg.contains("--allow-retry does NOT override"),
+            "the flag must not be offered by a refusal that then refuses it: {msg}",
+        );
+        assert!(
+            !msg.contains("re-run with --allow-retry to resume"),
+            "that advice belongs to records carrying a hash, not this one: {msg}",
+        );
+    }
+
+    #[test]
     fn a_resumed_run_reuses_the_recorded_burn() {
         // Once A's hash IS on the record, B resumes at capture instead of
         // burning again — the same refusal would strand a recoverable

@@ -117,18 +117,33 @@ pub enum CliError {
 
     // -- Idempotency (exit 3) --
     //
-    // Two situations, two messages, because one message was wrong for one
-    // of them and the wrong half sent operators at the guard itself.
+    // Two situations, two messages, and the split is the PRIOR RECORD'S
+    // HASH — not which stage noticed, and not which flags were passed.
+    // This comment said otherwise for two rounds and the description it
+    // gave was inverted in both halves; the wrong half is what kept
+    // sending operators at the guard itself.
     //
-    // `Duplicate` is the stage-1 refusal: a record exists and this run did
-    // not ask to resume. "Re-run with --allow-retry" is the right advice
-    // and always was.
+    // `DuplicateInFlight` is for a record that carries an AN tx hash.
+    // `reserve` is its only source. Two shapes: a resumable status, where
+    // "re-run with --allow-retry" genuinely resumes at capture, and a
+    // terminal one (`confirmed`, `submitted`), where the flag changes
+    // nothing and the remedy says so instead — see
+    // `idempotency::terminal_refusal`.
     //
-    // `InFlight` is the post-reservation refusal, and it is reached only
-    // WITH `--allow-retry` already set — so telling that operator to pass
-    // the flag they passed is a dead end, and `Prior AN tx: None` reads as
-    // "nothing was sent". The only escape left to find was deleting the
-    // record, which is the one thing that permits a second burn.
+    // `ReservationInFlight` is for a record with NO hash, which cannot say
+    // whether a burn is on the wire, because the hash is written only
+    // after the send returns. Raised in two places — stage 1, before
+    // reserving, and `decide_burn`, after — and independent of
+    // `--allow-retry` in both: the flag does not override it and the text
+    // says so. What it carries instead is the verdict `flock` can give
+    // (`idempotency::liveness_verdict`) and the record's path, because
+    // deleting that record is the real remedy and doing it while another
+    // run is mid-send is the second burn this whole refusal exists to
+    // prevent.
+    //
+    // Naming `--allow-retry` from the hash-less case is therefore always
+    // wrong: it routes an operator to a message whose own text is
+    // "--allow-retry does NOT override this".
     #[error(
         "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {prior_tx:?}. \
          Prior withdrawal msg_id: {prior_msg_id:?}.\n\x20 {remedy}"

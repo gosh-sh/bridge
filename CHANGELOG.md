@@ -892,6 +892,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: the exit-3 refusal for a record with no
+  AN tx hash no longer tells you to pass `--allow-retry`.** A run whose
+  reservation found a hash-less record left behind by an earlier run —
+  and that ran without `--allow-retry` — was told to "re-run with
+  --allow-retry to resume from the recorded burn". Doing that reaches a
+  different exit 3 whose own text is "`--allow-retry` does NOT override
+  this", leaving deletion of the state record as the only escape an
+  operator could find, which is exactly what permits a second burn. A
+  record with no hash now gets the refusal that carries the withdrawal
+  lock's verdict — whether another process is executing this withdrawal
+  right now — and the record's path, in every case rather than only some
+  of them. The `--allow-retry` advice remains where it works: on a record
+  that carries a hash and therefore resumes at capture.
+
 - **`ackinacki-bridge withdraw`: a `tvm_client` context that cannot be
   built is exit 2, not exit 10.** The withdraw pipeline kept its own copy
   of preflight's context constructor, differing from it in one respect:

@@ -32,6 +32,12 @@ use tracing_subscriber::EnvFilter;
 use crate::args::{Cli, Command};
 
 fn main() -> ProcExitCode {
+    // `--json` is a clap flag, but the three failures below happen before
+    // (or during) parsing, and the spec allows no human line on stdout for
+    // a --json run. Scan argv literally, just to pick the sink; `cli.json`
+    // takes over the moment there is a parsed `Cli`.
+    let json = output::wants_json(std::env::args());
+
     // Auto-source $BRIDGE_CONFIG profile file into process env BEFORE
     // clap reads any env= attr. dotenvy::from_path does NOT overwrite
     // vars already set in the shell — so precedence is preserved:
@@ -39,11 +45,55 @@ fn main() -> ProcExitCode {
     // BRIDGE_CONFIG unset = no-op (env-only invocations still work).
     if let Ok(path) = std::env::var("BRIDGE_CONFIG") {
         if let Err(e) = dotenvy::from_path(&path) {
-            eprintln!("fatal: BRIDGE_CONFIG={path} could not be loaded: {e}");
-            return ProcExitCode::from(1);
+            let err = errors::CliError::Usage {
+                reason: format!("BRIDGE_CONFIG={path} could not be loaded: {e}"),
+            };
+            output::print_error(&err, json);
+            return ProcExitCode::from(err.exit_code().as_i32() as u8);
         }
     }
-    let cli = Cli::parse();
+
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // clap's own rendering is the best human text there is; under
+            // --json it becomes the `message` field instead of going to
+            // stderr raw. `--help` / `--version` are not errors: let clap
+            // print them and exit 0.
+            //
+            // ONLY the two kinds a user gets by asking. Deliberately not
+            // DisplayHelpOnMissingArgumentOrSubcommand: that is the
+            // missing-subcommand family, i.e. a usage error, and putting it
+            // here would hand `--json` a help page and exit 0 for what is a
+            // refusal. (This build emits MissingSubcommand today; the other
+            // kind appears the moment anyone sets `arg_required_else_help`,
+            // so exclude it now rather than discover it later.)
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = e.print();
+                return ProcExitCode::from(0);
+            }
+            // Strip clap's own `error: ` prefix. `print_error`'s human
+            // branch adds one, and clap's rendering already carries it, so
+            // keeping both prints `error: error: the following required
+            // arguments…`. The `--json` branch never had the problem —
+            // it puts `reason` straight into the `message` field — which
+            // is exactly why it is worth stripping here rather than
+            // dropping the prefix in `print_error`, where every other
+            // variant depends on it.
+            let rendered = e.render().to_string();
+            let rendered = rendered.trim_end();
+            let reason = rendered
+                .strip_prefix("error: ")
+                .unwrap_or(rendered)
+                .to_string();
+            let err = errors::CliError::Usage { reason };
+            output::print_error(&err, json);
+            return ProcExitCode::from(err.exit_code().as_i32() as u8);
+        },
+    };
     init_tracing();
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -52,11 +102,20 @@ fn main() -> ProcExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("fatal: failed to start tokio runtime: {e}");
-            return ProcExitCode::from(1);
-        }
+            // Nothing has run, so this is a pre-send refusal like any
+            // other. Rare (thread/fd exhaustion), and it is the one failure
+            // that shows up exactly when a machine is already unhealthy and
+            // a script most needs a parseable answer.
+            let err = errors::CliError::Usage {
+                reason: format!("failed to start the async runtime: {e}"),
+            };
+            output::print_error(&err, json);
+            return ProcExitCode::from(err.exit_code().as_i32() as u8);
+        },
     };
 
+    // The parsed value governs everything downstream; the argv scan above
+    // existed only for the three pre-parse escapes.
     let json = cli.json;
     let result = rt.block_on(dispatch(cli));
 

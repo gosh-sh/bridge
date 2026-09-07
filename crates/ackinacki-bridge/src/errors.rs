@@ -97,6 +97,14 @@ pub enum CliError {
     #[error("--from-keys: {path}: {problem}")]
     KeyFilePerms { path: String, problem: String },
 
+    /// Invocation could not be parsed, or `$BRIDGE_CONFIG` could not be
+    /// loaded, or the async runtime would not start. Nothing ran, nothing
+    /// was broadcast — hence exit 2, the same code every other pre-send
+    /// refusal uses. `reason` carries clap's own rendered message so the
+    /// human-readable path loses nothing.
+    #[error("{reason}")]
+    Usage { reason: String },
+
     /// Any other preflight refusal (multisig detection, single-custodian,
     /// owner-key mismatch, balance shortfall, USDCBridge resolution).
     /// `reason` should name the specific check that failed.
@@ -153,6 +161,7 @@ impl CliError {
         match self {
             CliError::ArgInvalid { .. }
             | CliError::KeyFilePerms { .. }
+            | CliError::Usage { .. }
             | CliError::Preflight { .. } => ExitCode::PreflightRefused,
             CliError::DuplicateInFlight { .. } => ExitCode::DuplicateRefused,
             CliError::BurnOutcomeUnknown { .. } => ExitCode::BurnOutcomeUnknown,
@@ -168,6 +177,7 @@ impl CliError {
         match self {
             CliError::ArgInvalid { .. }
             | CliError::KeyFilePerms { .. }
+            | CliError::Usage { .. }
             | CliError::Preflight { .. }
             | CliError::DuplicateInFlight { .. } => Stage::Preflight,
             CliError::BurnOutcomeUnknown { .. } => Stage::Burn,

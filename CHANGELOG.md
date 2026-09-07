@@ -83,6 +83,15 @@ here and how versions are assigned.
 
 ### Changed
 
+- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
+  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
+  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
+  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
+  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
+  cannot outlive the oracle. `updateCode` encoding of the proven set changed
+  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
+  old `mapping => bool` across this upgrade — redeploy or re-prove from the
+  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
 - **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
   `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
   carried `32 - len` extra constant-equality cells and the VK depended on the

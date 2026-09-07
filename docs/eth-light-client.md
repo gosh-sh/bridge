@@ -44,7 +44,7 @@ different language dialect and a different chain.
 |---|---|---|---|
 | `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). `EthBeaconLightClient_rotate_decider.patch` is the same source as a patch for the `acki-nacki` tree; `scripts/check_eth_beacon_lc_sources.sh` keeps them identical. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
-| `USDCBridge` | `acki-nacki` repo, patches `USDCBridge_12pi_chainid_allowlist.patch`, `USDCBridge_disable_owner_allows_light_client.patch` | Acki Nacki | Consumer. Gains `setLightClient`, `acceptBlockHashFromLightClient`, and `disableOwnerAnchors` that accepts a configured light client. |
+| `USDCBridge` | `acki-nacki` repo, patches `USDCBridge_12pi_chainid_allowlist.patch`, `USDCBridge_disable_owner_allows_light_client.patch` | Acki Nacki | Consumer. Gains `setLightClient`, `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (one-year window), and `disableOwnerAnchors` that accepts a configured light client. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
 | Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
@@ -189,8 +189,8 @@ flowchart TD
 ### 3.4 From a checkpoint to a deposit
 
 A step proves one execution block per epoch, the checkpoint. The contract records it in its own
-`_provenExecutionBlockHash` set and pushes it into `USDCBridge` through an internal message
-(`_pushExecHash`, `_notifySink`, `EthBeaconLightClient.sol:392`). Deposits in the other 31
+`_provenEthSlot` map (hash → Ethereum slot) and pushes it into `USDCBridge` through an internal message
+(`_pushExecHash`, `_notifySink`). A hash older than one year behind head is not live. Deposits in the other 31
 blocks of the epoch are covered by **ancestry**: the daemon fetches the epoch's execution
 headers over JSON-RPC, and `submitAncestry(headerRlps)` (`EthBeaconLightClient.sol:369`)
 keccak-hashes each RLP header in the VM and walks `parentHash` from the proven checkpoint
@@ -359,7 +359,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |
-| Proven-hash growth | about 2.6 M hashes per year with ancestry on, stored in the light client and in `USDCBridge`; no eviction |
+| Proven-hash window | one year of Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). Hashes older than `head - 1y` are not `isProven`, are deleted from the FIFO (128/tx), and the sink is told `forgetBlockHashFromLightClient`. USDCBridge must implement that method or the forget bounces while the light client still drops the hash. |
 | Daemon memory at rest | about 14 GB of page cache, the proof is the peak |
 
 ## 6. Verifying a deployment
@@ -386,8 +386,9 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   step-only with owner hops.
 - The proving key is rebuilt for every proof (about 4.5 of the 7 minutes).
 - Any change to the step circuit changes `VK_BLOB`; the contract is upgraded in place with
-  `updateCode` (`EthBeaconLightClient.sol:521`), which carries head, committee and the proven set
-  across the upgrade. The tvm-sdk opcode fixtures and the acki-nacki patch must be re-emitted
+  `updateCode` (`EthBeaconLightClient.sol`), which carries head, committee and the one-year
+  proven FIFO across the upgrade (this encoding is not compatible with the old
+  `mapping(uint256 => bool)`). The tvm-sdk opcode fixtures and the acki-nacki patch must be re-emitted
   with the same blob (`scripts/check_rotate_vkblob_accumulator.sh`,
   `scripts/check_eth_beacon_lc_sources.sh`).
 - Public beacon providers differ in what they serve; a production deployment wants its own

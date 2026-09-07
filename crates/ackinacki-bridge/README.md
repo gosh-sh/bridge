@@ -623,10 +623,12 @@ the condition that failed it has been fixed.
 - `Failed` **with** an `an_tx_hash` → same resume, and no flag needed.
   This is the normal `withdrawByProof`-reverted path: the burn happened,
   so it is skipped and everything after it re-runs.
-- `Failed` **without** an `an_tx_hash` → and only then, a fresh
-  reservation. No production path writes that record (the sole writer of
-  `Failed` is the post-burn revert), so in practice this is a
-  hand-edited file. It is not a "clean slate" you can ask for.
+- `Failed` **without** an `an_tx_hash` → **refused.** No production path
+  writes that combination — the sole writer of `Failed` is the post-burn
+  revert, which by construction has a hash — so it is a hand-edited or
+  corrupt record, and acting on it would broadcast a second burn. There
+  is no "clean slate" you can ask for; see the cleanup rule below for
+  what to do with a record you have reconciled.
 - `Submitted` → **refused even with `--allow-retry`.** There is a
   broadcast EVM tx whose receipt we never observed; re-broadcasting
   risks a double payout. Reconcile the `eth_tx_hash` on-chain first,

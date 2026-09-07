@@ -122,8 +122,13 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 ///   `withdrawByProof` revert path, which by construction only runs after a
 ///   successful burn, so a `Failed` record without an `an_tx_hash` is a
 ///   manual-edit or future-writer edge case.
-/// - Prior `Status::Failed` without `an_tx_hash` → no burn happened yet
-///   (defensive branch): safe to wipe and start fresh.
+/// - Prior `Status::Failed` without `an_tx_hash` → REFUSED by [`read_record`]
+///   before this function chooses anything. There is no production writer of
+///   that combination — `Failed` is written only by the post-burn
+///   `withdrawByProof` revert — so it is a hand-edited or corrupt record, and
+///   the branch that used to wipe it and report a fresh reservation is gone. It
+///   published with `rename`, which excludes nobody, while calling the result
+///   `Created`: two runs could both wipe and both burn.
 /// - Prior `Status::Confirmed` → always refused. The withdrawal already paid
 ///   out; retrying it would either be a no-op or a double-broadcast. To move
 ///   funds again, use a new identity (different amount/recipient).

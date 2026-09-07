@@ -657,12 +657,28 @@ fn resolve_ceremony(
                 return Ok((exact, srs));
             }
         },
+        // A file that is simply ABSENT is the normal case, not a fault:
+        // the shipped layout provisions `kzg_bn254_21.srs` and derives
+        // every lower degree from it, so asking for k=20 on a healthy
+        // params dir lands here every time. Warning "unreadable" for it
+        // reads as a broken ceremony — this warned on the happy path,
+        // which is a regression this file introduced when the reason
+        // started travelling with the error.
+        //
+        // Still recorded either way, because "the exact file is missing"
+        // is the right thing to report if the scan then finds nothing:
+        // "no ceremony of degree >= N" is exactly as unhelpful about a
+        // missing k=20 as it was about an unreadable one.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            exact_err = Some(e);
+        },
         Err(e) => {
             warn!(
                 target: "bridge_prover_lib::keys",
                 path = %exact.display(),
                 error = %e,
-                "the exact-degree ceremony file is unreadable; not re-reading it in the scan",
+                "the exact-degree ceremony file is present but unreadable; not re-reading it in \
+                 the scan",
             );
             exact_err = Some(e);
         },

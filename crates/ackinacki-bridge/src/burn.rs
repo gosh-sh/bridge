@@ -1048,6 +1048,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_sdk_error_maps_render_a_code_and_never_the_error() {
+        // The one key-material path no behavioural test can reach.
+        //
+        // `compose`'s redaction has a test — it runs offline, so a test
+        // can make signing fail and assert the message carries neither
+        // half of the key pair. `send`'s cannot: `process_message` needs
+        // a live node, so nothing exercises its error map. Changing
+        // `e.code()` there to `e` compiles, leaks the public key and the
+        // secret's leading bytes into an operator-visible message, and
+        // leaves every other test green.
+        //
+        // So this asserts on the source, the way
+        // `every_created_reservation_came_from_the_atomic_publish` does
+        // for the reservation invariant. `ClientError`'s Display is the
+        // leak — `tvm_client/src/crypto/errors.rs:118-126` interpolates
+        // the public key verbatim and the secret's first eight
+        // characters — and its `code()` is a number.
+        //
+        // Scoped to the SDK maps, deliberately. An earlier draft banned
+        // `{e}` across the file and tripped on `load_keypair`'s
+        // `format!("cannot read: {e}")`, which renders a `std::io::Error`
+        // and carries nothing. A guard that fires on safe code gets
+        // relaxed, and then it guards nothing.
+        let src = include_str!("burn.rs");
+
+        // Each SDK map, identified by the operator-visible sentence that
+        // is unique to it. If a call site is reworded the guard fails
+        // rather than silently stopping — a renamed message is exactly
+        // when somebody is editing this code.
+        for (what, marker) in [
+            (
+                "compose: encode_message signing",
+                "is no longer the one verified",
+            ),
+            (
+                "compose: body encoding",
+                "check the \\\n             USDCBridge ABI",
+            ),
+            ("send: process_message", "reconcile via \\"),
+        ] {
+            assert!(
+                src.contains(marker),
+                "{what}: the message this guard anchors on is gone — reword the guard with it",
+            );
+        }
+
+        // Built from pieces so the needle cannot match itself.
+        let redacted = concat!("e.co", "de()");
+        // Comment lines excluded: this test's own prose names the call it
+        // is guarding, and counted itself as a fourth site. Same
+        // self-matching trap the reservation guard hit.
+        let sites = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(redacted))
+            .count();
+        assert_eq!(
+            sites, 3,
+            "exactly three SDK errors are rendered in this file and all three must be reduced to \
+             a code. A count of two means one now interpolates the error itself, which on a \
+             signing path prints --from-keys' public key and the head of its secret; a count of \
+             four means a new SDK call arrived and should be looked at rather than counted.",
+        );
+    }
+
     // -- What `send` does with what the SDK hands back ---------------------
     //
     // `send` itself needs a live node, and until now that meant nothing

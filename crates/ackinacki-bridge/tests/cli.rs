@@ -333,21 +333,63 @@ fn a_dry_run_never_reports_a_duplicate() {
     // README: `--dry-run` can produce only 0 or 2. It neither reads nor
     // writes the idempotency store, so exit 3 is unreachable under it —
     // and a state directory full of records must not change that.
+    // The state dir has to contain a record for this to test anything —
+    // and BASE's `--from-keys /nonexistent/keys.json` refuses at the
+    // perms check, which is step 1 of preflight, so the run never reaches
+    // idempotency at all. This asserted `code == 0 || code == 2` against
+    // a run that exited 2 on the key file: true, and about nothing.
     let dir = tempfile::TempDir::new().unwrap();
-    let mut args = with(&["--dry-run", "--yes", "--json", "--state-dir"]);
-    args.push(dir.path().to_str().unwrap().to_string());
+    let keys = dir.path().join("owner.keys.json");
+    std::fs::write(
+        &keys,
+        format!(
+            r#"{{"public":"{}","secret":"{}"}}"#,
+            "1a".repeat(32),
+            "2b".repeat(32)
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    // A record for THIS run's identity, in the state dir it is given. A
+    // real run would refuse it with exit 3; a dry run must not look.
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let planted = state.join(format!("{}.json", "7f".repeat(32)));
+    std::fs::write(&planted, "{}").unwrap();
+
+    let mut args = base_overriding(&[("--from-keys", keys.to_str().unwrap())]);
+    args.extend(
+        ["--dry-run", "--yes", "--json", "--state-dir"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    args.push(state.to_str().unwrap().to_string());
     let out = run_args(&args);
     assert_ne!(code(&out), 3, "a dry run cannot refuse as a duplicate");
+    // It got past the key file — otherwise this is the old vacuous test
+    // wearing a longer body.
+    let msg = error_envelope(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !msg.contains("mode is") && !msg.contains("chmod 400"),
+        "the run must reach past the key-perms check to say anything about idempotency: {msg}",
+    );
     assert!(
         code(&out) == 0 || code(&out) == 2,
         "a dry run exits 0 or 2, got {}",
         code(&out)
     );
     assert_eq!(
-        std::fs::read_dir(dir.path()).unwrap().count(),
-        0,
-        "a dry run must not write to the state directory"
+        std::fs::read_dir(&state).unwrap().count(),
+        1,
+        "a dry run must neither read nor write the store — the planted record is untouched and no \
+         new one appeared",
     );
+    assert_eq!(std::fs::read_to_string(&planted).unwrap(), "{}");
 }
 
 #[test]

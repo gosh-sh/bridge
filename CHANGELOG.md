@@ -1144,6 +1144,14 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **A missing ceremony file is no longer reported as an unreadable one.**
+  A regression from this branch's own error-message work: the code that
+  started carrying the halo2 reader's reason also warned "the
+  exact-degree ceremony file is unreadable" when the file was simply
+  absent — which is the normal case, since the shipped layout provisions
+  `kzg_bn254_21.srs` and derives lower degrees from it. Absent and
+  unreadable are now distinct, and only the second warns.
+
 - **A full or closed output stream no longer replaces the exit code with
   101.** `println!`/`eprintln!` panic when the write fails, so
   `> /dev/full`, a full disk or a closed pipe turned every refusal into

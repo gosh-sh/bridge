@@ -275,6 +275,70 @@ sed -i.bak "s/^# *BRIDGE_ADDRESS=.*/BRIDGE_ADDRESS=$BRIDGE/" "$BRIDGE_CONFIG"
 export BRIDGE_ADDRESS=$BRIDGE   # shell env wins over profile-file value
 ```
 
+
+### Prover artifacts for a self-deploy
+
+The withdrawal proves and aggregates on this machine, so
+`../bridge-prover-libraries/params/` must hold the Hermez ceremony before
+a real run. The provisioning commands live in one place — **README
+Step 0** — and are not repeated here; follow them, then come back.
+
+> **Do not point two different builds at one `params/` during a
+> rollout.** Nothing locks that directory. Two key generations running
+> against it interleave, and the interleaving is not always detectable:
+> if one process writes its keys and another overwrites them before the
+> first records its manifest, the manifest ends up describing the second
+> process's files under the first process's revision number. Every
+> integrity check then passes on a cache holding the wrong keys.
+>
+> Give the new build its own `--params-dir` until every consumer — CLI,
+> bundle relayer, verifier daemon — has been upgraded. Merging back
+> afterwards is a copy, not a race.
+
+### Running your own verifier: `--allow-verifier-drift`
+
+The CLI pins the SHPLONK verifier it was built against and refuses a
+`BridgeWithdrawalAggregatorVerifier.bin` that does not match it byte for
+byte. That is right for the pinned shellnet deploy: a mismatched
+verifier means `aggregate-proof` produces calldata your bridge will
+reject, and without the check you find out in stage 5 — after the burn.
+
+If you ran your own `deploy_bridge_bundle.sh`, your verifier is
+legitimately different, and `--allow-verifier-drift` is how you say so.
+It suppresses **only** the byte-comparison against the pinned artifact.
+It does not weaken any other check, and it does not make a wrong
+verifier work.
+
+Before you pass it, three things must be true, and only you can
+establish them:
+
+1. `BRIDGE_VERIFIERS_DIR` points at the `verifiers/` directory produced
+   by *your* deploy run — not at the repo's pinned
+   `contracts/ethereum/verifiers/`.
+2. The `.bin` in that directory is the one your bridge actually has on
+   chain. Verify it, do not assume it:
+
+   ```bash
+   ADAPTER=$(cast call "$BRIDGE_ADDRESS" 'bridgeWithdrawalVerifier()(address)' --rpc-url "$RPC_URL")
+   WRAPPER=$(cast call "$ADAPTER" 'shplonkVerifier()(address)'  --rpc-url "$RPC_URL")
+   YUL=$(    cast call "$WRAPPER" 'yulVerifier()(address)'      --rpc-url "$RPC_URL")
+   # gen_evm_verifier_shplonk emits a 32-byte CREATE prelude before the
+   # runtime payload; eth_getCode returns only the payload.
+   diff <(cast code "$YUL" --rpc-url "$RPC_URL") \
+        <(printf '0x%s' "$(tail -c +33 "$BRIDGE_VERIFIERS_DIR/BridgeWithdrawalAggregatorVerifier.bin" | xxd -p | tr -d '\n')")
+   ```
+
+   Empty diff, or stop here. This is the same comparison
+   `deploy/shellnet-l2/scripts/preflight.sh:28` runs, and the CLI's own
+   `check_bridge_deploy` runs it for you on every withdraw — the flag
+   does **not** turn that off.
+3. The proving keys in `--params-dir` were generated for that same
+   circuit. A verifier from one deploy and a pk cache from another
+   produce a proof that verifies locally and reverts on chain.
+
+If you cannot satisfy (2), the flag is not the fix — re-deploy or
+re-fetch your artifacts.
+
 ### Step L2 — Treasury seed
 
 Fresh deploy → `treasuryBalance() == 0`. The C4 submit reverts
@@ -504,10 +568,109 @@ AN_TX=$(jq -r '.an_tx_hash' "$STATE_FILE")
 # Query the message tree via GQL; look for exit_code or aborted.
 ```
 
-**Remediation:** If the burn aborted, exit is 10, not 11. State file
-records `Failed` with `stage=burn`. Fix the underlying issue (drift
-→ [Case 3d](#case-3d--multisig--usdcbridge-key-drift)), prune the
-failed state file, re-run.
+**Remediation:** An aborted burn exits 10, not 11. What to do next
+depends on one field, and the two cases are not interchangeable.
+
+Read it first:
+
+```bash
+jq -r '.status, .an_tx_hash' "$STATE_DIR/<sha256>.json"
+```
+
+**`an_tx_hash` is set** (`status` is `burned` or later) — the burn was
+broadcast and its hash is known. Fix the underlying issue (drift →
+[Case 3d](#case-3d--multisig--usdcbridge-key-drift)) and re-run with
+`--allow-retry`: the run reuses the recorded hash, skips the burn
+entirely, and resumes at capture.
+
+**`an_tx_hash` is `null`** (`status: "reserved"`) — ambiguous. The SDK
+either never sent, or sent and failed before returning a hash; the
+record cannot tell you which, and `--allow-retry` here does **not**
+resume — with no hash to reuse, the run composes and broadcasts a
+**second** burn. Reconcile on-chain before doing anything:
+
+```bash
+# List recent transactions on the multisig and look for a
+# sendTransaction to USDCBridge around the time of `reserved_at`.
+tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
+# Then query the message tree via GQL for that window.
+```
+
+- Balance unchanged and no matching transaction → nothing was sent.
+  Re-run with `--allow-retry`.
+- A matching transaction exists → **check whether it succeeded before
+  concluding anything.** A transaction that reached the chain and
+  aborted is not a burn; the CLI classifies exactly this case
+  (`aborted`, or `compute.exit_code != 0`) as a rejected call. Marking
+  such a run `burned` would strand the withdrawal forever, because the
+  resume path would then wait for a `WithdrawalInitiated` event that
+  will never appear.
+
+  ```bash
+  tvm-cli -j query-raw transactions --filter "{\"id\":{\"eq\":\"<hash>\"}}" \
+    --result 'id aborted compute{exit_code} out_messages{id dst}'
+  ```
+
+  - `aborted: true` or `exit_code != 0` → the multisig rejected the call
+    and the USDC stayed put. Nothing landed; fix the cause and re-run
+    with `--allow-retry`.
+  - `aborted: false`, `exit_code: 0` → the multisig *sent* an internal
+    message. That is not yet a burn: USDCBridge can abort it in turn,
+    and the CLI sends with `bounce: true` precisely so the USDC comes
+    back when it does. **Keep walking the tree** — this is the same
+    chain `capture_targeted_withdrawal_event` follows, so it is also
+    exactly what a resumed run will need to find:
+
+    Use the same `blockchain` API and the same **two-step** shape the
+    CLI uses. This is not a stylistic preference: shellnet returns
+    `null` for the nested `dst_transaction { out_messages }` even when
+    it populates `transaction(hash:) { out_messages }` perfectly, which
+    is exactly why `query_msg_dst_tx_out_messages` splits the walk in
+    two (`bridge-gql-fetcher/src/gql_client.rs:796`). Asking for the
+    nested field returns nothing and looks like "no event was emitted"
+    — the single most expensive way to misread this page.
+
+    ```bash
+    GQL=https://shellnet.ackinacki.org/graphql   # = $BRIDGE_GQL_ENDPOINT
+    q() { curl -sS "$GQL" -H 'content-type: application/json' \
+            --data "$(jq -nc --arg q "$1" '{query:$q}')"; }
+
+    # 1. multisig tx → its outbound message to USDCBridge.
+    q '{ blockchain { transaction(hash: "<hash>") {
+           aborted compute { exit_code } out_messages { id dst } } } }'
+
+    # 2. that message → the id of the transaction that consumed it.
+    #    Ask ONLY for the id here; the nested out_messages is null.
+    q '{ blockchain { message(hash: "<out_msg_id>") {
+           dst_transaction { id } } } }'
+
+    # 3. re-query that transaction directly — this is the step the
+    #    nested form silently skips.
+    q '{ blockchain { transaction(hash: "<dst_tx_id>") {
+           aborted compute { exit_code } out_messages { id dst } } } }'
+    ```
+
+    A `null` `dst_transaction` in step 2 means the receiving contract
+    has not run **yet**, not that it rejected the call — the CLI polls
+    this same shape until it turns non-null. Wait and repeat.
+
+    - destination transaction `aborted: true` or `exit_code != 0` → the
+      bridge rejected it and the funds bounced back. **Not** a burn. Do
+      not set `status: burned`; fix the cause and re-run with
+      `--allow-retry`.
+    - destination transaction clean **and** carrying an outbound ExtOut
+      to `:…026a` → that ExtOut is the `WithdrawalInitiated` event. The
+      burn landed. Write the multisig tx hash into `an_tx_hash`, set
+      `status` to `burned`, and re-run with `--allow-retry` so the run
+      resumes at capture instead of re-burning.
+
+  The ExtOut is the only unambiguous evidence. Stopping one hop earlier
+  — at "the multisig transaction succeeded" — is what would let you mark
+  a bounced call as `burned`, after which the resumed run waits forever
+  for an event that was never emitted.
+
+Do **not** delete the state file in either case. It is the only local
+trace that a burn may have been authorised.
 
 ---
 
@@ -529,15 +692,27 @@ ERROR failed to spawn aggregate-proof: <err>
 In-process Circuit-4 failures surface a level up as
 `Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
 
-**Trigger conditions:** Out of disk, OOM, RAM swap-thrash, params
-missing, PK cache corrupt.
+**Trigger conditions:** Out of disk, OOM, RAM swap-thrash.
+
+A missing, truncated or non-Hermez ceremony no longer reaches this stage:
+since the stage-1 prover-artifact checks landed, it is refused before the
+burn with the provisioning commands (README Step 0). Seeing "params
+missing" as the cause of a post-burn `prove failed` means you are on an
+older build.
 
 **Checks:**
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~17 GB expected
-df   ../bridge-prover-libraries/params/      # free disk (need ≥20 GB headroom for first PK write)
-# RAM headroom: C4 K=19 needs ~40 GB peak
+du -sh ../bridge-prover-libraries/params/   # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+# Free space for a cold run, on the ONE filesystem that holds both:
+#   3 GiB  event_pk.bin + vk + config (~2.65 GB measured, rounded up)
+#   1 GiB  outer SHPLONK aggregator PK (~800 MB measured, rounded up;
+#          pk_cache lives inside params/ in the shipped profile)
+#   -----
+#   4 GiB = ~4.3 GB as df reports it — preflight sums these constants
+#          and refuses below the total
+df -h ../bridge-prover-libraries/params/
+# RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
 ```
 
 **Remediation:**
@@ -771,7 +946,7 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
                                                #   override with BRIDGE_WITHDRAW_STATE_DIR
 
 crates/bridge-prover-libraries/                ← halo2 sub-workspace (shared with daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk, ~17 GB)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 ├── target/release/
 │   └── ackinacki-bridge                       ← this CLI (built into the sub-workspace)

@@ -22,91 +22,6 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
-### Changed
-
-- **`ackinacki-bridge withdraw` invocation reduced to five per-request
-  flags; all network endpoints/plumbing resolved from `$BRIDGE_CONFIG`
-  profile file.**
-  The withdraw call is now:
-  ```
-  ackinacki-bridge withdraw \
-      --from <dapp_id::account_id> --from-keys <path> \
-      --to <0x…> --to-chain <chain-id> --amount <usdc> \
-      [--dry-run] [--yes] [--json]
-  ```
-  Everything else (`--rpc-url`, `--bridge-address`, `--gql-endpoint`,
-  `--anchor-layer`, `--i-know-the-wait`, `--params-dir`,
-  `--aggregator-dir`, `--verifiers-dir`, `--work-dir`, `--snark-dir`,
-  `--pk-cache-dir`, `--state-dir`, `--usdc-bridge-account`) is picked
-  up from the profile file pointed to by `$BRIDGE_CONFIG` — the CLI
-  auto-sources it at startup via `dotenvy` before clap reads any
-  `env=` attr. Precedence: **explicit `--flag` > shell env > profile
-  file > compiled default**. Existing `--flag`-heavy invocations
-  continue to work.
-    - `config/bridge_config` is now a **symlink** to the new
-      `config/bridge_config.shellnet` (identical content to the
-      pre-split file). Two sibling profiles ship alongside:
-      `bridge_config.local` (local docker-compose devnet) and
-      `bridge_config.mainnet` (commented-out placeholder for the
-      future mainnet deploy). Switching network is a one-liner:
-      `export BRIDGE_CONFIG=./config/bridge_config.local`.
-    - Four flags gained `env=` attrs so they can live in the profile
-      file instead of the CLI invocation: `BRIDGE_ANCHOR_LAYER`,
-      `BRIDGE_I_KNOW_THE_WAIT` (accepts `true`/`false`/`1`/`0`),
-      `BRIDGE_WORK_DIR`, `BRIDGE_SNARK_DIR`.
-    - The hardcoded shellnet default on `--usdc-bridge-account`
-      (`1a1a…1a1a`) is removed from `src/args.rs`; the value now
-      comes from `USDC_BRIDGE_ACCOUNT_ID` in each profile (so a
-      wrong-network profile fails loudly with a clap "missing
-      required argument" instead of silently talking to the shellnet
-      canonical account).
-    - `scripts/local_smoke.sh` and `scripts/live_smoke.sh` drop
-      ~90 lines each — they now just export `$BRIDGE_CONFIG`,
-      canonicalize `$BRIDGE_SNARK_DIR` to absolute (the aggregator
-      subprocess CWD-changes), and pass only the 5 intent flags.
-      The old `BRIDGE_CONFIG_DIR` env-var fallback for relayer-style
-      `L{1,2}_config/env` sourcing is removed — self-deploy users
-      should either point `$BRIDGE_CONFIG` at their local profile or
-      shadow `BRIDGE_ADDRESS` in the shell.
-    - `scripts/deploy_msig_and_mint.py` drops its `MODE=shellnet|local`
-      branch and reads `NETWORK` / `BRIDGE_GQL_ENDPOINT` /
-      `USDC_BRIDGE_KEY_PATH` from the same profile file. Local
-      detection is now derived from the resolved `NETWORK` URL
-      (`127.*` / `localhost`), not a mode flag. Adding a new network
-      is a single new profile file — no Python edit.
-    - New dep: `dotenvy = "0.15"` in `crates/ackinacki-bridge/Cargo.toml`.
-
-- **`ackinacki-bridge` docs split into a default-user runbook (README)
-  and an advanced self-deploy runbook.**
-  The previous single `docs/live_cli_withdraw_runbook.md` was one long
-  file covering both audiences (default users hitting the pinned
-  shellnet deploy AND advanced users deploying their own bridge +
-  relayer). It is now split so each audience gets a doc scoped to
-  their path:
-    - `crates/ackinacki-bridge/README.md` — default-user runbook.
-      Wallet setup → `scripts/deploy_msig_and_mint.sh` (fresh
-      single-custodian AN multisig + 1 USDC seed) → treasury check
-      → dry-run → real submit, with the full exemplary `cargo run`
-      command inlining every real value (RPC/GQL URLs, pinned
-      `BRIDGE_ADDRESS 0x0F4F…fc7`, relative paths for
-      `--params-dir`, `--aggregator-dir`, `--verifiers-dir`).
-      Includes simplified timing model (L2 only), exit codes,
-      per-scenario error summaries, idempotency semantics, safety,
-      file layout.
-    - `crates/ackinacki-bridge/docs/live_cli_withdraw_runbook.md` →
-      renamed to `docs/advanced_user_withdraw_runbook.md`. Scope
-      narrowed to what advanced users need beyond the README: full
-      L1 vs L2 timing model, self-deploy sequence
-      (Steps L0–L5: `compute_bridge_anchors` →
-      `deploy_bridge_bundle.sh` → treasury seed → cold-start
-      daemon → wait for first bundle → CLI), stress-test loop,
-      and the deep failure-mode catalog (revert-selector table,
-      cast-trace decoding, USDCBridge keypair-drift diagnostic).
-      Cross-references the README for the CLI invocation shape
-      instead of duplicating it.
-    - Internal references in `crates/ackinacki-bridge/config/bridge_config`
-      updated to point at the new file names.
-
 ### Breaking Changes
 
 - **Sub-workspace directory renamed `crates/an-bridge-prover/` → `crates/bridge-prover-libraries/`.**
@@ -175,6 +90,374 @@ assigns it when the release is tagged.
   restarting the daemon (`mv state L1_config/state && mv proofs
   L1_config/proofs`); the file-first startup guard reads only the new
   paths.
+- **The first withdrawal after this upgrade regenerates the Circuit-4
+  proving keys.** Cached keys now carry an `event_manifest.json` naming the
+  circuit revision they were built for, the format version of the manifest
+  itself, and a SHA-256 of each of the three key files. Every cache written
+  before this release has none — so it is treated as cold and rebuilt.
+  There is no way to migrate in place: nothing in the old three files
+  records which circuit produced them, which is the gap being closed.
+
+  Cached key artifacts are now written atomically — temp file, fsync,
+  rename — so an interrupted or out-of-space keygen leaves no half-written
+  key behind. That is **four** files for the event circuit
+  (`event_pk.bin`, `event_vk.bin`, `event_config_params.json` and the new
+  `event_manifest.json`) and **three** for each of primary, fallback and
+  layer: those circuits do not version their keys, so they get no manifest.
+
+  **File modes are unchanged.** A new file gets the mode `File::create`
+  would have given it under your umask; rewriting an existing one leaves
+  its mode alone; and a regenerated manifest takes the mode of the config
+  beside it, since it is deleted and recreated within the keygen and has no
+  previous mode of its own. So a `params/` shared with another service
+  account keeps working. Nothing here is secret — a verifying key is
+  published — and this is worth stating because the obvious implementation
+  of an atomic write silently re-modes every artifact to `0600`.
+
+  **Ownership is not preserved, and cannot be.** A rename publishes a new
+  inode owned by whoever wrote it, and a non-root process cannot chown it
+  back. If any file under `--params-dir` is owned by a different account —
+  seeded by a provisioning script, or by root — the first regeneration
+  after this release moves it to the account that runs keygen. Readers are
+  unaffected as long as they relied on the mode rather than on ownership;
+  if something relied on ownership, `chown` it back after the first run.
+
+  The manifest is fail-closed in both directions: a manifest carrying a
+  field this build does not know, or a `manifest_format` it does not write,
+  is refused rather than partly believed. A build that reads a manifest it
+  does not understand treats the cache as cold and regenerates — which
+  means **two different builds must not share one `params_dir`**, or each
+  will keep rebuilding over the other's keys. Point a new build at its own
+  directory until every consumer is upgraded.
+
+  **Required, before the first run on each host:**
+
+  ```bash
+  # ~4.3 GB free on the --params-dir filesystem, and it must be writable.
+  # (The pk cache lives inside params/ in the shipped profile, so the two
+  # requirements share one filesystem and add up — see below.)
+  #
+  # Run from crates/ackinacki-bridge/.
+  # One subshell, so a failed check exits IT and not the shell you pasted
+  # into. `exit 1` at the top level of an interactive session closes the
+  # session — a rough way to learn your config is wrong.
+  (
+    set -e
+    # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
+    # `dotenvy::from_path` does NOT overwrite what the shell already set
+    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # `from_path_override`, which it does not use), so a plain
+    # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
+    # explicit export. Harmless for a `df`; for `--repair` it means clearing
+    # the keys in the profile's directory while you were pointing at another.
+    #
+    # `--params-dir` is NOT covered here and cannot be: it belongs to a run
+    # that has not happened yet. If you intend to pass it, pass the same path
+    # to these commands.
+    #
+    # `printenv`, NOT `${BRIDGE_PARAMS_DIR+x}`. The shell's `+x` test is true
+    # for a variable that was assigned but never exported, and clap reads
+    # `std::env::var` — the process ENVIRONMENT, which a bare
+    # `BRIDGE_PARAMS_DIR=/foo` at your prompt does not enter. So `+x` here
+    # takes /foo while the CLI, seeing nothing, falls back to the profile:
+    # the exact inversion this block exists to prevent, and on the `--repair`
+    # copy below it clears a directory the next run will not even open.
+    # (Verified: `sh -c 'echo ${BRIDGE_PARAMS_DIR+set}'` prints nothing after
+    # a non-exported assignment; `printenv` agrees with the child.)
+    #
+    # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
+    # blank line, which is the distinction that matters: the CLI treats empty
+    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
+    # string (`args.rs:181`) and fails later on a path of "". Falling back to
+    # the profile there would name a different directory than the run uses.
+    if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
+      # In the environment. Reject empty rather than guess.
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
+    else
+      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
+      # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
+      # then this block sources a profile the CLI will not load at all —
+      # the run falls through to the compiled default while `--repair`
+      # deletes keys somewhere else entirely. Fixing only BRIDGE_PARAMS_DIR
+      # left exactly half of that hole open.
+      BRIDGE_CONFIG=$(printenv BRIDGE_CONFIG) && [ -n "$BRIDGE_CONFIG" ] ||
+        { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
+          echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
+          echo "at your prompt is a shell variable, not an environment one, and the" >&2
+          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
+          echo "pass --params-dir explicitly and give this command the same path." >&2
+          exit 1; }
+      # Refuse the constructs where `.` and dotenvy disagree, rather than
+      # silently resolving to whichever one this shell happens to produce.
+      # `dotenvy` parses KEY=value; `.` EXECUTES the file, so `$(...)`,
+      # backticks and `$VAR` expand here and do not there (dotenvy would hand
+      # the CLI the literal characters). The shipped profile is plain
+      # assignments, so this fires only on a hand-edited one.
+      grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_PARAMS_DIR=' "$BRIDGE_CONFIG" |
+        grep -q '[$`]' &&
+        { echo "BRIDGE_PARAMS_DIR in $BRIDGE_CONFIG uses \$ or backticks; the CLI's" >&2
+          echo "dotenvy parser and this shell would not agree on its value." >&2
+          echo "Pass --params-dir explicitly, and give these commands the same path." >&2
+          exit 1; }
+      # Subshell, so nothing else from the profile leaks into this one.
+      BRIDGE_PARAMS_DIR=$( set -a; . "$BRIDGE_CONFIG"; printf '%s' "${BRIDGE_PARAMS_DIR-}" )
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is absent from $BRIDGE_CONFIG" >&2; exit 1; }
+    fi
+    # Say which directory this resolved to. Every command below acts on it,
+    # and one of them deletes files.
+    echo "BRIDGE_PARAMS_DIR -> $BRIDGE_PARAMS_DIR" >&2
+    df -h "$BRIDGE_PARAMS_DIR"
+  )
+  ```
+
+  A host whose `params/` is read-only or short on space now **refuses in
+  stage 1** instead of failing after the burn. That is the improvement, and
+  it also means an upgrade can turn a previously-working host into one that
+  refuses until it is given room.
+
+  **`bridge-verifier-daemon` must not be restarted until this has been
+  done.** It reads the verifying key and never generates one: against a
+  cache with no manifest it exits with "event VK not found … run the event
+  prover (Circuit 4) first". Order the upgrade as regenerate → restart, not
+  the other way round. The CLI is unaffected — it regenerates on its own —
+  and the bundle relayer is unaffected because Circuit 4 is not its
+  circuit.
+
+  **The keygen itself still runs after the burn**, in stage 5, exactly as
+  before — this release does not move it, it makes stage 1 refuse when it
+  would fail. To do the regeneration up front instead — which is also how
+  you prepare the daemon — run the event prover directly. It takes no `--params-dir` and reads `./params` relative to the
+  working directory (`bridge-event-halo2-prover/src/main.rs:38,151`), so
+  point that at your params dir:
+
+  ```bash
+  # Run from crates/ackinacki-bridge/ — BRIDGE_PARAMS_DIR in the shipped
+  # profile is `../bridge-prover-libraries/params`
+  # (bridge_config.shellnet:65), relative to THAT directory. From the repo
+  # root the same string resolves outside the repository and realpath
+  # fails.
+  cd crates/ackinacki-bridge
+  (
+    # The whole block is one subshell, so the EXIT trap dies with it. A
+    # bare `trap … EXIT` pasted into an interactive shell survives until
+    # that shell exits and expands $WORK only when it fires — so a WORK
+    # reused later for something else gets rm -rf'd on logout.
+    set -e
+    # BRIDGE_PARAMS_DIR is not in the shell's environment unless you put it
+    # there: the profile is read by the Rust CLI at startup, not by your
+    # shell, and the README only asks you to export BRIDGE_CONFIG.
+    #
+    # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
+    # `dotenvy::from_path` does NOT overwrite what the shell already set
+    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # `from_path_override`, which it does not use), so a plain
+    # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
+    # explicit export. Harmless for a `df`; for `--repair` it means clearing
+    # the keys in the profile's directory while you were pointing at another.
+    #
+    # `--params-dir` is NOT covered here and cannot be: it belongs to a run
+    # that has not happened yet. If you intend to pass it, pass the same path
+    # to these commands.
+    #
+    # `printenv`, NOT `${BRIDGE_PARAMS_DIR+x}`. The shell's `+x` test is true
+    # for a variable that was assigned but never exported, and clap reads
+    # `std::env::var` — the process ENVIRONMENT, which a bare
+    # `BRIDGE_PARAMS_DIR=/foo` at your prompt does not enter. So `+x` here
+    # takes /foo while the CLI, seeing nothing, falls back to the profile:
+    # the exact inversion this block exists to prevent, and on the `--repair`
+    # copy below it clears a directory the next run will not even open.
+    # (Verified: `sh -c 'echo ${BRIDGE_PARAMS_DIR+set}'` prints nothing after
+    # a non-exported assignment; `printenv` agrees with the child.)
+    #
+    # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
+    # blank line, which is the distinction that matters: the CLI treats empty
+    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
+    # string (`args.rs:181`) and fails later on a path of "". Falling back to
+    # the profile there would name a different directory than the run uses.
+    if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
+      # In the environment. Reject empty rather than guess.
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
+    else
+      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
+      # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
+      # then this block sources a profile the CLI will not load at all —
+      # the run falls through to the compiled default while `--repair`
+      # deletes keys somewhere else entirely. Fixing only BRIDGE_PARAMS_DIR
+      # left exactly half of that hole open.
+      BRIDGE_CONFIG=$(printenv BRIDGE_CONFIG) && [ -n "$BRIDGE_CONFIG" ] ||
+        { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
+          echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
+          echo "at your prompt is a shell variable, not an environment one, and the" >&2
+          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
+          echo "pass --params-dir explicitly and give this command the same path." >&2
+          exit 1; }
+      # Refuse the constructs where `.` and dotenvy disagree, rather than
+      # silently resolving to whichever one this shell happens to produce.
+      # `dotenvy` parses KEY=value; `.` EXECUTES the file, so `$(...)`,
+      # backticks and `$VAR` expand here and do not there (dotenvy would hand
+      # the CLI the literal characters). The shipped profile is plain
+      # assignments, so this fires only on a hand-edited one.
+      grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_PARAMS_DIR=' "$BRIDGE_CONFIG" |
+        grep -q '[$`]' &&
+        { echo "BRIDGE_PARAMS_DIR in $BRIDGE_CONFIG uses \$ or backticks; the CLI's" >&2
+          echo "dotenvy parser and this shell would not agree on its value." >&2
+          echo "Pass --params-dir explicitly, and give these commands the same path." >&2
+          exit 1; }
+      # Subshell, so nothing else from the profile leaks into this one.
+      BRIDGE_PARAMS_DIR=$( set -a; . "$BRIDGE_CONFIG"; printf '%s' "${BRIDGE_PARAMS_DIR-}" )
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is absent from $BRIDGE_CONFIG" >&2; exit 1; }
+    fi
+    # Say which directory this resolved to. Every command below acts on it,
+    # and one of them deletes files.
+    echo "BRIDGE_PARAMS_DIR -> $BRIDGE_PARAMS_DIR" >&2
+
+    MANIFEST=$(realpath ../bridge-prover-libraries/Cargo.toml)
+    PARAMS=$(realpath "$BRIDGE_PARAMS_DIR")
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    ln -s "$PARAMS" "$WORK/params"
+    # Both paths are absolute, so the cd cannot disturb them.
+    cd "$WORK" && cargo run --release --manifest-path "$MANIFEST" \
+      -p bridge-event-halo2-prover -- --selftest
+  )
+  ```
+
+  `probe_event_keys --params-dir <dir>` (same `--manifest-path` prefix as
+  below) reports what the CLI will decide without changing anything; it
+  does not generate.
+
+  It reports one of four states, and the first word of the output is the
+  one to read:
+
+  - `warm` — nothing to do.
+  - `cold` — nothing to do either: the next run regenerates. A manifest
+    that will not parse lands here, not in a refusal.
+  - `corrupt` — a truncated, unreadable, or digest-mismatched key file.
+    `--repair` clears it and the next run regenerates. This is the case
+    below.
+  - `blocked` — a directory is sitting where a key file belongs, usually a
+    bind mount whose host path does not exist. `--repair` refuses this one
+    without touching anything; remove the directory by hand and re-probe.
+
+  For `corrupt`, clear it with the same tool:
+
+  ```bash
+  # From crates/ackinacki-bridge/, as everything else in this section is.
+  # Without --manifest-path cargo picks up a different workspace here —
+  # `ackinacki-bridge` is a symlink member of bridge-prover-libraries and
+  # is not buildable from its own directory.
+  # This one deletes files, so getting the directory right matters more
+  # here than anywhere else.
+  # One subshell, so a failed check exits IT and not the shell you pasted
+  # into. `exit 1` at the top level of an interactive session closes the
+  # session — a rough way to learn your config is wrong.
+  (
+    set -e
+    # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
+    # `dotenvy::from_path` does NOT overwrite what the shell already set
+    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # `from_path_override`, which it does not use), so a plain
+    # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
+    # explicit export. Harmless for a `df`; for `--repair` it means clearing
+    # the keys in the profile's directory while you were pointing at another.
+    #
+    # `--params-dir` is NOT covered here and cannot be: it belongs to a run
+    # that has not happened yet. If you intend to pass it, pass the same path
+    # to these commands.
+    #
+    # `printenv`, NOT `${BRIDGE_PARAMS_DIR+x}`. The shell's `+x` test is true
+    # for a variable that was assigned but never exported, and clap reads
+    # `std::env::var` — the process ENVIRONMENT, which a bare
+    # `BRIDGE_PARAMS_DIR=/foo` at your prompt does not enter. So `+x` here
+    # takes /foo while the CLI, seeing nothing, falls back to the profile:
+    # the exact inversion this block exists to prevent, and on the `--repair`
+    # copy below it clears a directory the next run will not even open.
+    # (Verified: `sh -c 'echo ${BRIDGE_PARAMS_DIR+set}'` prints nothing after
+    # a non-exported assignment; `printenv` agrees with the child.)
+    #
+    # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
+    # blank line, which is the distinction that matters: the CLI treats empty
+    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
+    # string (`args.rs:181`) and fails later on a path of "". Falling back to
+    # the profile there would name a different directory than the run uses.
+    if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
+      # In the environment. Reject empty rather than guess.
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
+    else
+      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
+      # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
+      # then this block sources a profile the CLI will not load at all —
+      # the run falls through to the compiled default while `--repair`
+      # deletes keys somewhere else entirely. Fixing only BRIDGE_PARAMS_DIR
+      # left exactly half of that hole open.
+      BRIDGE_CONFIG=$(printenv BRIDGE_CONFIG) && [ -n "$BRIDGE_CONFIG" ] ||
+        { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
+          echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
+          echo "at your prompt is a shell variable, not an environment one, and the" >&2
+          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
+          echo "pass --params-dir explicitly and give this command the same path." >&2
+          exit 1; }
+      # Refuse the constructs where `.` and dotenvy disagree, rather than
+      # silently resolving to whichever one this shell happens to produce.
+      # `dotenvy` parses KEY=value; `.` EXECUTES the file, so `$(...)`,
+      # backticks and `$VAR` expand here and do not there (dotenvy would hand
+      # the CLI the literal characters). The shipped profile is plain
+      # assignments, so this fires only on a hand-edited one.
+      grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_PARAMS_DIR=' "$BRIDGE_CONFIG" |
+        grep -q '[$`]' &&
+        { echo "BRIDGE_PARAMS_DIR in $BRIDGE_CONFIG uses \$ or backticks; the CLI's" >&2
+          echo "dotenvy parser and this shell would not agree on its value." >&2
+          echo "Pass --params-dir explicitly, and give these commands the same path." >&2
+          exit 1; }
+      # Subshell, so nothing else from the profile leaks into this one.
+      BRIDGE_PARAMS_DIR=$( set -a; . "$BRIDGE_CONFIG"; printf '%s' "${BRIDGE_PARAMS_DIR-}" )
+      [ -n "$BRIDGE_PARAMS_DIR" ] ||
+        { echo "BRIDGE_PARAMS_DIR is absent from $BRIDGE_CONFIG" >&2; exit 1; }
+    fi
+    # Say which directory this resolved to. Every command below acts on it,
+    # and one of them deletes files.
+    echo "BRIDGE_PARAMS_DIR -> $BRIDGE_PARAMS_DIR" >&2
+    cargo run --release --manifest-path ../bridge-prover-libraries/Cargo.toml \
+      -p bridge-prover-lib --bin probe_event_keys -- \
+      --params-dir "$BRIDGE_PARAMS_DIR" --repair
+  )
+  ```
+
+  Nothing needs to be deleted by hand; `--repair` removes the manifest
+  first, so an interrupted clear cannot leave a cache that still looks
+  trustworthy.
+
+  **During a rollout, do not point two different builds at one
+  `--params-dir`.** Nothing locks that directory, and a keygen from one
+  build interleaving with a keygen from another can leave a cache that
+  passes every check while holding the other build's keys. Give the new
+  build its own directory until every consumer has been upgraded.
+- **`--from-keys` must now be mode `0400`, not `0600`.** The CLI reads the
+  multisig owner's key file and never writes it, so read-only-to-owner is
+  the tightest mode that works, and it is now an exact requirement rather
+  than a "no group or world bits" range. **Every existing key file needs
+  one command**, because the previous documentation told operators to set
+  `0600`:
+
+  ```bash
+  chmod 400 /path/to/owner.keys.json
+  ```
+
+  The refusal names the mode it found and the exact remedy, so a run that
+  hits this is one copy-paste from working. `scripts/deploy_msig_and_mint.sh`
+  now emits `0400` directly. Unchanged: idempotency state files under
+  `--state-dir` stay `0600` — those the CLI does write.
 
 ### Added
 
@@ -281,7 +564,107 @@ assigns it when the release is tagged.
   per-mode absolute snark-dir paths so the aggregate-proof subprocess
   finds the intermediate `.snark` file.
 
+
+- `scripts/check_bridge_abi_in_sync.sh` — `cmp`-based guard that the
+  two runtime `USDCBridge.abi.json` copies stay byte-identical.
+- **README documents the one-time KZG ceremony provisioning** (`Step 0`).
+  `crates/bridge-prover-libraries/params/` is gitignored, and no
+  operator-facing document previously said how to create it — the only
+  description lived in the prover sub-workspace's `TECHNICAL_README.md`. A
+  withdrawal needs exactly one file, `kzg_bn254_21.srs` (~256 MB); lower
+  degrees are derived from it automatically. The `~17 GB` figure in the
+  flags table referred to a `params/` shared with a bundle relayer and has
+  been corrected — a withdraw-only machine needs roughly 3 GB (ceremony +
+  `event_pk.bin`) plus the aggregator's `pk_cache/`. The advanced runbook's
+  disk figures were corrected to match, and "params missing" was dropped
+  from its post-burn prover-failure triggers: preflight now catches that
+  before anything is broadcast.
+
 ### Changed
+
+- **`ackinacki-bridge withdraw` invocation reduced to five per-request
+  flags; all network endpoints/plumbing resolved from `$BRIDGE_CONFIG`
+  profile file.**
+  The withdraw call is now:
+  ```
+  ackinacki-bridge withdraw \
+      --from <dapp_id::account_id> --from-keys <path> \
+      --to <0x…> --to-chain <chain-id> --amount <usdc> \
+      [--dry-run] [--yes] [--json]
+  ```
+  Everything else (`--rpc-url`, `--bridge-address`, `--gql-endpoint`,
+  `--anchor-layer`, `--i-know-the-wait`, `--params-dir`,
+  `--aggregator-dir`, `--verifiers-dir`, `--work-dir`, `--snark-dir`,
+  `--pk-cache-dir`, `--state-dir`, `--usdc-bridge-account`) is picked
+  up from the profile file pointed to by `$BRIDGE_CONFIG` — the CLI
+  auto-sources it at startup via `dotenvy` before clap reads any
+  `env=` attr. Precedence: **explicit `--flag` > shell env > profile
+  file > compiled default**. Existing `--flag`-heavy invocations
+  continue to work.
+    - `config/bridge_config` is now a **symlink** to the new
+      `config/bridge_config.shellnet` (identical content to the
+      pre-split file). Two sibling profiles ship alongside:
+      `bridge_config.local` (local docker-compose devnet) and
+      `bridge_config.mainnet` (commented-out placeholder for the
+      future mainnet deploy). Switching network is a one-liner:
+      `export BRIDGE_CONFIG=./config/bridge_config.local`.
+    - Four flags gained `env=` attrs so they can live in the profile
+      file instead of the CLI invocation: `BRIDGE_ANCHOR_LAYER`,
+      `BRIDGE_I_KNOW_THE_WAIT` (accepts `true`/`false`/`1`/`0`),
+      `BRIDGE_WORK_DIR`, `BRIDGE_SNARK_DIR`.
+    - The hardcoded shellnet default on `--usdc-bridge-account`
+      (`1a1a…1a1a`) is removed from `src/args.rs`; the value now
+      comes from `USDC_BRIDGE_ACCOUNT_ID` in each profile (so a
+      wrong-network profile fails loudly with a clap "missing
+      required argument" instead of silently talking to the shellnet
+      canonical account).
+    - `scripts/local_smoke.sh` and `scripts/live_smoke.sh` drop
+      ~90 lines each — they now just export `$BRIDGE_CONFIG`,
+      canonicalize `$BRIDGE_SNARK_DIR` to absolute (the aggregator
+      subprocess CWD-changes), and pass only the 5 intent flags.
+      The old `BRIDGE_CONFIG_DIR` env-var fallback for relayer-style
+      `L{1,2}_config/env` sourcing is removed — self-deploy users
+      should either point `$BRIDGE_CONFIG` at their local profile or
+      shadow `BRIDGE_ADDRESS` in the shell.
+    - `scripts/deploy_msig_and_mint.py` drops its `MODE=shellnet|local`
+      branch and reads `NETWORK` / `BRIDGE_GQL_ENDPOINT` /
+      `USDC_BRIDGE_KEY_PATH` from the same profile file. Local
+      detection is now derived from the resolved `NETWORK` URL
+      (`127.*` / `localhost`), not a mode flag. Adding a new network
+      is a single new profile file — no Python edit.
+    - New dep: `dotenvy = "0.15"` in `crates/ackinacki-bridge/Cargo.toml`.
+
+- **`ackinacki-bridge` docs split into a default-user runbook (README)
+  and an advanced self-deploy runbook.**
+  The previous single `docs/live_cli_withdraw_runbook.md` was one long
+  file covering both audiences (default users hitting the pinned
+  shellnet deploy AND advanced users deploying their own bridge +
+  relayer). It is now split so each audience gets a doc scoped to
+  their path:
+    - `crates/ackinacki-bridge/README.md` — default-user runbook.
+      Wallet setup → `scripts/deploy_msig_and_mint.sh` (fresh
+      single-custodian AN multisig + 1 USDC seed) → treasury check
+      → dry-run → real submit, with the full exemplary `cargo run`
+      command inlining every real value (RPC/GQL URLs, pinned
+      `BRIDGE_ADDRESS 0x0F4F…fc7`, relative paths for
+      `--params-dir`, `--aggregator-dir`, `--verifiers-dir`).
+      Includes simplified timing model (L2 only), exit codes,
+      per-scenario error summaries, idempotency semantics, safety,
+      file layout.
+    - `crates/ackinacki-bridge/docs/live_cli_withdraw_runbook.md` →
+      renamed to `docs/advanced_user_withdraw_runbook.md`. Scope
+      narrowed to what advanced users need beyond the README: full
+      L1 vs L2 timing model, self-deploy sequence
+      (Steps L0–L5: `compute_bridge_anchors` →
+      `deploy_bridge_bundle.sh` → treasury seed → cold-start
+      daemon → wait for first bundle → CLI), stress-test loop,
+      and the deep failure-mode catalog (revert-selector table,
+      cast-trace decoding, USDCBridge keypair-drift diagnostic).
+      Cross-references the README for the CLI invocation shape
+      instead of duplicating it.
+    - Internal references in `crates/ackinacki-bridge/config/bridge_config`
+      updated to point at the new file names.
+
 
 - **`ackinacki-bridge/config/bridge_config` pinned `BRIDGE_ADDRESS`
   rotated to the newly team-deployed L2 shellnet bridge
@@ -524,10 +907,171 @@ assigns it when the release is tagged.
   points at `crates/bridge-prover-libraries/python/contracts/` (was a
   nonexistent path).
 
-### Added
 
-- `scripts/check_bridge_abi_in_sync.sh` — `cmp`-based guard that the
-  two runtime `USDCBridge.abi.json` copies stay byte-identical.
+- GraphQL BK-update range queries now cap their open-ended upper bound at the
+  schema's signed 64-bit `Int` maximum instead of serializing `u64::MAX`, which
+  live GraphQL servers reject during integer coercion.
+- L2 warm-resume startup now compares the immutable genesis anchor at
+  `anchor_level - 1`; a valid level-2 state no longer fails drift validation
+  after a clean restart.
+- The live relayer runbook now provisions the required K=22 SRS, documents
+  runtime `solc 0.8.19`, isolates the relayer cursor per mode, treats deploys
+  as irreversible broadcasts, keeps production secrets outside Git and
+  reflects the prover's sequential-stage but multi-core execution model. The
+  deployment helper no longer writes a private key into tracked config and
+  archives previous prover state instead of deleting it; an explicit
+  `CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS` gate is now required before
+  any broadcast.
+- **`ackinacki-bridge withdraw --dry-run` no longer requires
+  `BURNER_PRIVATE_KEY` or the prover directories.** `--eth-private-key`,
+  `--aggregator-dir`, `--verifiers-dir`, `--params-dir` and `--work-dir`
+  are now optional at parse time and resolved only for a real withdrawal.
+  A real run missing any of them refuses at stage 1 naming all of them at
+  once, instead of clap listing nine flags before any check runs.
+- **The EVM side is checked before the AN burn — on every run, including
+  `--dry-run`.** None of these need a signing key, so all of them run in
+  stage 1 whether or not the run will submit:
+  - an `RPC_URL` whose `eth_chainId` is not `--to-chain`;
+  - a `--bridge-address` with no contract behind it;
+  - a withdrawal verifier stack that is unset or incomplete — `adapter →
+    shplonkVerifier → yulVerifier`, code required at every level, and the
+    deployed Yul runtime byte-compared against the local
+    `BridgeWithdrawalAggregatorVerifier.bin`. Same walk as
+    `deploy/shellnet-l2/scripts/preflight.sh`. The bytecode comparison
+    needs `--verifiers-dir`, which is submit-only; pass it to a dry run and
+    the dry run performs it too, otherwise it is skipped with a warning;
+  - a bridge pinned to different `(bridgeWithdrawalDappFr,
+    bridgeWithdrawalAccFr)` values than this withdrawal will prove;
+  - a `treasuryBalance` that already cannot cover the amount.
+
+  Previously the first contract call happened in stage 4b — after the
+  irreversible burn and up to ~101 min of anchor wait. The verifier and
+  identity checks read `immutable` storage, so what the preflight sees is
+  what `withdrawByProof` will see. The treasury check is a preflight, not a
+  guarantee: the treasury is shared and can be drained again while a
+  withdrawal waits for its anchor bundle.
+- **The signing key and the prover artifacts are checked in stage 1 too,
+  on real runs.** These need the submit-only flags, so they are gated on
+  them and a `--dry-run` does not reach them: parsing
+  `BURNER_PRIVATE_KEY`, the KZG ceremony at **both** degrees a withdrawal
+  loads (k=20 and k=21 — checking only the larger missed a bad
+  `kzg_bn254_20.srs`, which `load_srs` prefers by exact filename over any
+  larger ceremony), the Circuit-4 key cache, a runnable `aggregate-proof`,
+  and writable output directories with room for what will be written.
+  Previously the burner key was parsed in stage 6 and nothing opened
+  `--params-dir` before stage 5.
+
+  So a clean `--dry-run` means "nothing about either chain is
+  misconfigured" — not "a real run will succeed". `--dry-run`'s `--help`
+  now says exactly that, and no longer claims to compose the messages,
+  which it never did.
+- **The Circuit-4 key cache is validated, not just counted.** Stage 1 now
+  asks the key manager what it will do with `--params-dir` instead of
+  testing that `event_pk.bin` exists. A proving key with no matching
+  config or verifying key means keygen will run, so the ~3 GB headroom
+  check applies; a truncated or empty proving key beside a valid verifying
+  key is refused outright, because the manager would skip keygen and then
+  fail loading it at proof time. Both previously surfaced in stage 5, after
+  the burn. A warm cache is not asked to keep ~3 GB free permanently.
+
+  Also refused in stage 1: a directory at one of the four key paths — a
+  bind mount whose host path does not exist is the usual cause. Keygen
+  replaces those names by rename and cannot write through a directory, so
+  what used to be a stage-5 `EISDIR` after the burn is now an exit-2
+  refusal naming the path. `probe_event_keys` reports it as `blocked` and
+  `--repair` refuses without touching anything: remove the directory by
+  hand. (Symlinks, FIFOs and sockets at those paths are *not* refused —
+  rename replaces them.)
+
+  A real run now makes two extra passes over the ~2.65 GB proving key
+  during preflight — one to verify its digest, one to confirm this build
+  can still deserialise it — on top of the pass stage 5 already made. Tens
+  of seconds before the burn, on a cold page cache. `--dry-run` makes none
+  of them: these checks need the submit-only flags and a dry run has none,
+  so a clean dry run says nothing about the key cache.
+- **Burn and signing failures no longer echo the key file.** The SDK's
+  signing errors embed the public key verbatim and the first eight
+  characters of the secret; both reached stderr and `--json` through the
+  refusal's message and its `source`. Refusals on these paths now carry the
+  SDK error code and nothing else. Reconciliation is unaffected — it was
+  always the on-chain walk, not the message.
+- **The Circuit-4 proving and verifying keys are checked as a pair.**
+  Two keysets from different circuit revisions each load cleanly, and the
+  proof is made with the proving key's embedded verifying key while
+  self-verification uses `event_vk.bin`. Mismatched, the proof was produced
+  and then failed its own verification in stage 5, after the burn. Stage 1
+  now compares the two.
+- **The idempotency record is durable before the burn goes out.** The
+  reservation is now `fsync`ed — the record, the state directory, and the
+  parent of every directory level the run creates — before
+  `sendTransaction`, and a reservation that fails to write removes its own
+  partial file. Previously it was written and left in the page cache, so a
+  power loss between the reservation and the burn could lose the record
+  while the burn landed, and the next run would burn again.
+- **A withdrawal refused before broadcast leaves no idempotency record.**
+  Declining the confirmation prompt (or running without a TTY) used to
+  write a `reserved` state file that made the next identical invocation
+  fail with exit 3 and "duplicate in-flight withdrawal … Prior AN tx:
+  None". The confirmation and every fallible pre-send step (reading
+  `--from-keys`, encoding the payload) now run *before* the reservation,
+  which is taken immediately before the message goes on the wire.
+  A `reserved` record is still a hard block without `--allow-retry`: it is
+  also the state a burn that reached the wire and errored leaves behind, so
+  it must not be cleared automatically.
+- **`--from-keys` refusals name the actual problem.** A missing file and a
+  directory were both reported as "not owner-only readable; run: chmod
+  600 <path>". The key file's two halves are now verified to be an actual
+  key pair during preflight, rather than the `secret` field first being
+  read at burn time — a mismatched pair was previously reported as exit 10
+  ("burn: … reconcile via GraphQL before retrying") even though the SDK had
+  rejected it locally and nothing was ever broadcast.
+- **`--json` covers usage and configuration errors.** A malformed
+  invocation or an unloadable `$BRIDGE_CONFIG` bypassed the machine-refusal
+  contract entirely: clap printed its own human usage block, and the config
+  path used an undocumented exit 1, leaving a `--json` consumer with nothing
+  on stdout. Both now emit the one-line `{"error":{…}}` envelope and exit 2
+  like every other pre-send refusal. `--help` and `--version` still print
+  normally and exit 0.
+- **`--yes` and `--non-interactive` can be passed together.** clap
+  rejected the combination outright, which is the normal shape for a CI
+  wrapper.
+- **`scripts/deploy_msig_and_mint.sh` works on Linux and emits a 0400 keys
+  file.** The committed `python/bin/tvm-cli` was a macOS-arm64 binary that
+  PATH injection made win over a working system install ("Exec format
+  error"); it is no longer tracked, and tvm-cli is now discovered by
+  trying candidates until one answers `version` (`CLI_NAME` still
+  overrides). The emitted multisig keys file is now mode 0400, which the
+  very next documented step requires.
+- **Idempotency state files are created 0600**, and stay 0600 across
+  updates — the atomic writer previously renamed a tmp file created at the
+  ambient umask over the record. A state directory the CLI creates itself
+  is 0700; one the operator supplies keeps the mode they gave it.
+- **`--from-keys` refusals name the mode they found.** The old message
+  said only "is not owner-only readable", so an operator could not tell a
+  wrong mode from a wrong owner or a missing file.
+- **A missing or non-Hermez KZG ceremony is refused before the burn.**
+  Nothing before stage 5 opened `$BRIDGE_PARAMS_DIR`, so an unprovisioned
+  `params/` cost an irreversible AN burn plus up to ~91 min of anchor wait
+  before failing with exit 12. A real run now resolves the ceremony at
+  stage 1 using the same code path the prover uses (so a truncated file is
+  caught, not just an absent one), compares
+  `BridgeWithdrawalAggregatorVerifier.bin` byte-for-byte against the
+  verifier this build embeds, requires a prebuilt `aggregate-proof` that
+  answers `--help` (the `cargo run` fallback is no longer accepted for a
+  real withdrawal — a cold build cannot be verified inside a preflight),
+  proves `--work-dir` / `--snark-dir` / `--pk-cache-dir` / `--params-dir`
+  accept writes, and prints the exact provisioning commands on failure.
+    - New flag `--allow-verifier-drift` for self-deploy operators whose
+      `--verifiers-dir` legitimately holds a regenerated verifier.
+    - `aggregate-proof` gains `--help` / `-h`, which it previously rejected
+      as an unknown argument.
+- **The missing-SRS message names a tool that can actually provision it.**
+  It used to point at `scripts/bootstrap_hermez_srs.sh`, which writes K=20
+  into `crates/bridge-snark-utils/params/` — wrong degree, wrong directory,
+  so following it verbatim failed identically on the next attempt. Both the
+  new preflight refusal and the last-resort panic in `load_srs` now name the
+  `bootstrap_hermez_srs` bin and the `powersOfTau28_hez_final_21.ptau`
+  download.
 
 ### Removed
 
@@ -547,22 +1091,9 @@ assigns it when the release is tagged.
   `scripts/ursus/` retained.
 - Fossil `.tvc` files under `python/contracts/`
   (`USDCBridge.tvc`, `DepositVoucher.tvc`); nothing loaded them.
-### Fixed
-
-- GraphQL BK-update range queries now cap their open-ended upper bound at the
-  schema's signed 64-bit `Int` maximum instead of serializing `u64::MAX`, which
-  live GraphQL servers reject during integer coercion.
-- L2 warm-resume startup now compares the immutable genesis anchor at
-  `anchor_level - 1`; a valid level-2 state no longer fails drift validation
-  after a clean restart.
-- The live relayer runbook now provisions the required K=22 SRS, documents
-  runtime `solc 0.8.19`, isolates the relayer cursor per mode, treats deploys
-  as irreversible broadcasts, keeps production secrets outside Git and
-  reflects the prover's sequential-stage but multi-core execution model. The
-  deployment helper no longer writes a private key into tracked config and
-  archives previous prover state instead of deleting it; an explicit
-  `CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS` gate is now required before
-  any broadcast.
+- `crates/bridge-prover-libraries/python/bin/tvm-cli` and
+  `crates/ackinacki-bridge/tvm-cli.conf.json` are no longer tracked;
+  both are now gitignored. Supply `tvm-cli` on `PATH` or via `CLI_NAME`.
 
 ## [0.1.0] – 2026-06-11
 

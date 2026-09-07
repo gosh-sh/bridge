@@ -132,7 +132,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |
-| `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG SRS params (~17 GB) |
+| `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
 | `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
 | `--pk-cache-dir`        | `BRIDGE_PK_CACHE_DIR`       | Warm-start pk cache (optional; defaults to `$BRIDGE_PARAMS_DIR/pk_cache`) |
@@ -145,7 +145,8 @@ every operator brings their own; see Step 1. `NETWORK` (tvm-cli
 
 ## Quick start
 
-Five ordered steps. All commands run from `crates/ackinacki-bridge/`;
+Six ordered steps, the first a one-off. All commands run from
+`crates/ackinacki-bridge/`;
 paths in the CLI invocation are relative to that directory.
 
 ```bash
@@ -155,6 +156,83 @@ export BRIDGE_CONFIG=./config/bridge_config              # symlink → bridge_co
 # so the `cast call $BRIDGE_ADDRESS …` steps below can reach it.
 set -a && source "$BRIDGE_CONFIG" && set +a
 ```
+
+### Two preconditions the command line does not show
+
+The published invocation is exactly:
+
+    ackinacki-bridge withdraw --from <dapp_id::account_id> --from-keys <path> \
+                              --to <0x…> --to-chain <chain-id> --amount <usdc> \
+                              [--dry-run] [--yes] [--json]
+
+For it to resolve, two things must be true, and neither is visible in the
+command itself:
+
+1. `$BRIDGE_CONFIG` points at a profile file. Everything else the CLI
+   needs — endpoints, bridge address, prover dirs — comes from there.
+2. The working directory is `crates/ackinacki-bridge/`, because every path
+   in every shipped profile is relative to it.
+
+`--dry-run` needs nothing beyond those two. A **real** withdrawal also
+needs `BURNER_PRIVATE_KEY` exported (Step 1): it is per-operator and is
+deliberately in no profile. A real run without it refuses at stage 1,
+naming every missing value at once.
+
+### Step 0 — Provision the KZG ceremony (one-off, ~30 min)
+
+A real withdrawal proves Circuit 4 and aggregates it on this machine, so it
+needs the Hermez Perpetual Powers of Tau ceremony on disk. The directory
+`../bridge-prover-libraries/params/` is gitignored — a fresh checkout has
+nothing in it. `--dry-run` does not need any of this; skip to Step 1 if you
+are only preflighting.
+
+Exactly one file is required: **`kzg_bn254_21.srs` (~256 MB)**. Degree 21,
+not 19, because `KeyManager` loads every circuit's ceremony at startup —
+including the K=21 fallback circuit a withdrawal never proves — and the
+SHPLONK aggregator for `BridgeWithdrawalAggregatorVerifier` is also K=21.
+Degrees 17/19/20 are derived from it automatically on first use.
+
+The K=21 ceremony `.ptau` is **not** auto-downloaded (the shared SHA-256
+trust anchor only reaches K=20), so fetch it once by hand:
+
+```bash
+mkdir -p ~/.cache/halo2-kzg-srs
+curl -L --fail --progress-bar \
+  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau      # ~2.4 GB
+
+cd ../bridge-prover-libraries
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs --k 21 --params-dir ./params
+cd ../ackinacki-bridge
+```
+
+> `scripts/bootstrap_hermez_srs.sh` at the repo root is a **different**
+> tool: it writes K=20 into `crates/bridge-snark-utils/params/` and will not
+> satisfy the CLI. Use the Rust bin above.
+
+The first real withdrawal then generates `event_pk.bin` (~2.65 GB) by
+keygen, and the aggregator populates `params/pk_cache/`. Budget ~4.3 GB for
+a withdraw-only machine, plus headroom — the `~17 GB` figure elsewhere in
+these docs is a `params/` shared with a bundle relayer, which also stores
+the primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
+during Circuit 4 is ~40 GB.
+
+**Do not wipe `params/` between runs** — keygen and the cold aggregator
+cache cost minutes each time.
+
+Finally, build the SHPLONK aggregator. A real withdrawal shells out to it,
+and the CLI refuses to start one without a **prebuilt** binary it can probe
+— it will not fall back to `cargo run`, because a cold build cannot be
+verified inside a preflight and an unverified aggregator costs the burn:
+
+```bash
+cd ../bridge-evm-aggregator
+cargo build --release --bin aggregate-proof
+cd ../ackinacki-bridge
+```
+
+`--dry-run` does not need this either; it is required only for a real run.
 
 ### Step 1 — Create + fund a Sepolia burner wallet
 
@@ -432,8 +510,8 @@ errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout.
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~17 GB expected
-df   ../bridge-prover-libraries/params/      # free disk headroom
+du -sh ../bridge-prover-libraries/params/    # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~4.3 GB (see Step 0)
 ```
 
 **Remediation:** free resources, re-run with `--allow-retry`. If the
@@ -568,7 +646,7 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
                                                #   override with BRIDGE_WITHDRAW_STATE_DIR
 
 ../bridge-prover-libraries/                    ← halo2 sub-workspace (shared with the daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk, ~17 GB)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 └── target/release/ackinacki-bridge            ← this CLI when pre-built (cargo run --release also caches here)
 

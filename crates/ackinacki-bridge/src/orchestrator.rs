@@ -118,7 +118,8 @@ pub enum SubmitStatus {
 /// mapping, and JSON vs. human output — this fn just runs the ballet.
 ///
 /// `skip_prompt` — bypass the pre-burn confirmation prompt (`--yes`).
-/// `--non-interactive` without `--yes` is rejected upstream in `main`, so
+/// `--non-interactive` without `--yes` is refused upstream in `main` (by a
+/// policy check, not by clap — the two flags combine freely), so
 /// the orchestrator only needs the "may I skip the prompt?" bit here.
 pub async fn run(
     args: WithdrawArgs,
@@ -300,8 +301,8 @@ pub async fn run(
 
             // The last reversible moment. `--yes` skips the prompt for
             // scripts; `--non-interactive` without `--yes` is already
-            // refused in `main::dispatch`, so a live prompt here is safe to
-            // block on.
+            // refused in `main::dispatch` (a policy check there, not a clap
+            // conflict), so a live prompt here is safe to block on.
             if !skip_prompt {
                 confirm_before_burn(&from, &to, &amount, &args, anchor_mode)?;
             }
@@ -724,7 +725,8 @@ fn default_state_dir() -> PathBuf {
 ///
 /// Skipped when `--yes` is set. When stdin is closed / not a TTY, we
 /// treat it as an implicit refusal — the operator should have passed
-/// `--yes` (allowed) or `--non-interactive` (already refused upstream).
+/// `--yes`, on its own or alongside `--non-interactive` (which without
+/// `--yes` is already refused upstream in `main`).
 fn confirm_before_burn(
     from: &args::FromAddress,
     to: &args::ToAddress,

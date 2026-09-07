@@ -71,9 +71,9 @@ pub struct Cli {
     pub json: bool,
 
     /// Skip the terminal confirmation prompt. Intended for scripts.
-    /// Mutually exclusive with --non-interactive (which refuses if the
-    /// prompt would be needed).
-    #[arg(long, global = true, conflicts_with = "non_interactive")]
+    /// Combines with --non-interactive: --yes answers the question, and
+    /// --non-interactive guarantees nothing will ever wait for an answer.
+    #[arg(long, global = true)]
     pub yes: bool,
 
     /// Refuse (exit 2) instead of prompting when a confirmation would be
@@ -802,6 +802,38 @@ mod tests {
             msg.contains("BRIDGE_CONFIG"),
             "refusal must point at the profile file, got: {msg}"
         );
+    }
+
+    #[test]
+    fn yes_and_non_interactive_can_be_combined() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "--yes",
+            "--non-interactive",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("a CI wrapper must be able to set both belt and braces");
+        assert!(cli.yes);
+        assert!(cli.non_interactive);
     }
 
     #[test]

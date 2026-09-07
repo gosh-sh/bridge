@@ -76,7 +76,10 @@ fn main() -> ProcExitCode {
 /// exit-code mapping stays in `main` and the orchestrator stays free of
 /// process concerns.
 async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> {
-    // `--non-interactive` + not `--yes` means "refuse if we would prompt".
+    // --non-interactive alone means "refuse rather than block on a prompt".
+    // Together with --yes there is no prompt to block on, so the run
+    // proceeds. That pairing is the normal shape for a CI wrapper.
+    //
     // The prompt itself is orchestrator-owned (it's the last thing before
     // spending money), but the policy check we can front-load here.
     let non_interactive_needs_prompt = cli.non_interactive && !cli.yes;

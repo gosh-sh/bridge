@@ -20,6 +20,8 @@ mod orchestrator;
 mod output;
 mod preflight;
 mod resurrect;
+#[cfg(test)]
+mod test_keys;
 
 use std::io::IsTerminal;
 use std::process::ExitCode as ProcExitCode;

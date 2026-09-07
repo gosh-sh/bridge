@@ -208,6 +208,24 @@ pub fn update(state_dir: &Path, record: &Record) -> CliResult<()> {
     write_record_atomic(state_dir, &path, record)
 }
 
+/// Read the record for this withdrawal identity without creating one.
+///
+/// `reserve()` is a one-way door; the resume path needs to know whether a
+/// prior run already broadcast *before* deciding to prompt and compose.
+/// Missing file is `Ok(None)`, not an error.
+pub fn peek(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+) -> CliResult<Option<Record>> {
+    let path = record_path(state_dir, &key(from, to, amount));
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_record(&path).map(Some)
+}
+
 // -- helpers ------------------------------------------------------------
 
 fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
@@ -217,7 +235,11 @@ fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
     })
 }
 
-fn record_path(state_dir: &Path, key: &str) -> PathBuf {
+/// `pub(crate)` so a post-burn failure can name the exact file an operator
+/// has to edit to resume. The directory holds one record per withdrawal
+/// identity, named by a SHA-256 nobody can compute by hand — "the state
+/// file" without a path is not a recovery instruction.
+pub(crate) fn record_path(state_dir: &Path, key: &str) -> PathBuf {
     state_dir.join(format!("{key}.json"))
 }
 
@@ -537,5 +559,75 @@ mod tests {
         assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_utc(1_000_000_000), "2001-09-09T01:46:40Z");
         assert_eq!(format_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn reserve_still_refuses_a_hash_less_reserved_record() {
+        // Regression guard for the double-spend this plan deliberately does
+        // NOT introduce: `Reserved` + an_tx_hash == None is also the state a
+        // burn that reached the wire and errored leaves behind, so it must
+        // keep blocking a plain retry.
+        let dir = TempDir::new().unwrap();
+        let first = reserve(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            false,
+        )
+        .unwrap();
+        assert!(first.an_tx_hash.is_none());
+
+        let second = reserve(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            false,
+        );
+        assert!(
+            matches!(second, Err(CliError::DuplicateInFlight { .. })),
+            "a hash-less Reserved record must still refuse without --allow-retry, got {second:?}",
+        );
+    }
+
+    #[test]
+    fn peek_is_read_only_and_reports_a_missing_record_as_none() {
+        // `peek` runs before the confirmation prompt on every real run. If
+        // it created anything, a declined prompt would leave the state file
+        // that F4 exists to prevent — the bug would move, not close.
+        let dir = TempDir::new().unwrap();
+        let seen = peek(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+        )
+        .unwrap();
+        assert!(seen.is_none(), "no record yet");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "peek must not create a file",
+        );
+
+        let reserved = reserve(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            false,
+        )
+        .unwrap();
+        let seen = peek(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+        )
+        .unwrap()
+        .expect("the reserved record must be visible");
+        assert_eq!(seen.key, reserved.key);
+        assert_eq!(seen.status, Status::Reserved);
     }
 }

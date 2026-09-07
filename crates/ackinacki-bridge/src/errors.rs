@@ -210,4 +210,18 @@ mod tests {
             ExitCode::CaptureTimeout
         );
     }
+
+    #[test]
+    fn a_post_burn_state_write_failure_is_not_exit_2() {
+        // The distinction the exit-code contract exists for: 2 means nothing
+        // was sent, 10 means it was sent and the outcome is unknown. A failed
+        // state write after a successful broadcast is unambiguously the
+        // second, and reporting it as the first invites a double burn.
+        let e = CliError::BurnOutcomeUnknown {
+            reason: "state file could not be updated".into(),
+            source: None,
+        };
+        assert_eq!(e.exit_code(), ExitCode::BurnOutcomeUnknown);
+        assert_ne!(e.exit_code(), ExitCode::PreflightRefused);
+    }
 }

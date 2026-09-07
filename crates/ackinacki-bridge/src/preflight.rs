@@ -68,23 +68,50 @@ pub struct PreflightReport {
     pub owner_pubkey_hex: String,
 }
 
+/// Whether the ECC[3] sufficiency comparison still applies.
+///
+/// Deliberately not a bare `bool` at the call site: `run(.., true)` reads
+/// as "check the balance" to half of readers and "skip it" to the other
+/// half, and getting it backwards silently disables a money check.
+#[derive(Clone, Copy, Debug)]
+pub enum BalanceCheck {
+    /// No burn has been broadcast for this identity. The multisig must
+    /// hold at least `amount`.
+    Require,
+    /// A prior run already broadcast the burn (`an_tx_hash` on file). The
+    /// balance is expected to be short — that is what success looks like.
+    SkipSpent,
+}
+
+impl BalanceCheck {
+    pub fn from_burn_sent(sent: bool) -> Self {
+        if sent {
+            Self::SkipSpent
+        } else {
+            Self::Require
+        }
+    }
+}
+
 /// Run every preflight check in order and return the aggregated report.
 ///
 /// Sequence:
 /// 1. `--from-keys` file permissions (already checked by args::validate,
-///    re-checked here so `preflight` is self-contained for callers that
-///    skip arg validation).
+///    re-checked here so `preflight` is self-contained for callers that skip
+///    arg validation).
 /// 2. `--from` account exists on AN, is `Active`, has non-zero code hash.
 /// 3. `--from` is a multisig (typed `getCustodians` call succeeds).
-/// 4. `custodianCount == 1` (single-custodian invariant; multi-owner
-///    sends would need submit+confirm from other owners → contract
-///    exit 108).
-/// 5. Owner pubkey decoded from `--from-keys` matches multisig's
-///    on-chain owner pubkey.
-/// 6. USDCBridge live dapp_id resolved via GraphQL (canonical account
-///    default overridden by `--usdc-bridge-account`).
-/// 7. Multisig ECC[3] balance ≥ amount (preflight, not guarantee — the
-///    chain has the final word between check and send).
+/// 4. `custodianCount == 1` (single-custodian invariant; multi-owner sends
+///    would need submit+confirm from other owners → contract exit 108).
+/// 5. Owner pubkey decoded from `--from-keys` matches multisig's on-chain owner
+///    pubkey.
+/// 6. USDCBridge live dapp_id resolved via GraphQL (canonical account default
+///    overridden by `--usdc-bridge-account`).
+/// 7. Multisig ECC[3] balance ≥ amount (preflight, not guarantee — the chain
+///    has the final word between check and send). Skipped, and only skipped,
+///    when `balance_check` says the burn is already on the wire: see
+///    [`BalanceCheck`]. The other six always run — a resume that skipped them
+///    would be a different command wearing the same name.
 pub async fn run(
     from: &FromAddress,
     from_keys: &Path,
@@ -92,6 +119,7 @@ pub async fn run(
     amount: &UsdcAmount,
     gql_endpoint: &str,
     usdc_bridge_account_id_hex: &str,
+    balance_check: BalanceCheck,
 ) -> CliResult<PreflightReport> {
     // 1. File perms (belt-and-suspenders — args::validate already ran this).
     args::check_key_file_perms(from_keys)?;
@@ -206,20 +234,35 @@ pub async fn run(
     let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
 
     // 7. ECC[3] balance from the parsed account.
+    //
+    // The balance is ALWAYS fetched and always reported — it is in the
+    // `PreflightReport` and in the log line, and an operator reconciling a
+    // resumed run wants to see it. Only the refusal is conditional.
     let ecc3_balance = extract_ecc_balance(&account, 3)?;
-    if ecc3_balance < amount.0 {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "--from account {}: ECC[3] balance {} µUSDC ({}) < requested {} µUSDC ({}). \
-                 (ECC[3] is USDC; ECC[2] is Shell — do not confuse them.)",
-                from.extended(),
+    match balance_check {
+        BalanceCheck::Require if ecc3_balance < amount.0 => {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "--from account {}: ECC[3] balance {} µUSDC ({}) < requested {} µUSDC ({}). \
+                     (ECC[3] is USDC; ECC[2] is Shell — do not confuse them.)",
+                    from.extended(),
+                    ecc3_balance,
+                    UsdcAmount(ecc3_balance).display(),
+                    amount.0,
+                    amount.display(),
+                ),
+                source: None,
+            });
+        },
+        BalanceCheck::Require => {},
+        BalanceCheck::SkipSpent => {
+            tracing::info!(
                 ecc3_balance,
-                UsdcAmount(ecc3_balance).display(),
-                amount.0,
-                amount.display(),
-            ),
-            source: None,
-        });
+                requested = amount.0,
+                "resume: skipping the ECC[3] sufficiency check — the burn for this withdrawal is \
+                 already on the wire, so a short balance is expected",
+            );
+        },
     }
 
     Ok(PreflightReport {
@@ -543,7 +586,7 @@ fn normalize_u256_hex(raw: &str) -> Option<String> {
     Some(format!("{v:064x}"))
 }
 
-fn pubkeys_equal(a: &str, b: &str) -> bool {
+pub(crate) fn pubkeys_equal(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
@@ -985,6 +1028,22 @@ mod tests {
             msg.contains("<redacted"),
             "refusal must say only how long it was, got: {msg}",
         );
+    }
+
+    #[test]
+    fn balance_check_variants_are_not_interchangeable() {
+        // Guards the one way this can silently break: `from_burn_sent` wired
+        // backwards would disable the sufficiency check on every fresh run
+        // and enforce it on every resume — both failures are invisible until
+        // money is involved.
+        assert!(matches!(
+            BalanceCheck::from_burn_sent(false),
+            BalanceCheck::Require
+        ));
+        assert!(matches!(
+            BalanceCheck::from_burn_sent(true),
+            BalanceCheck::SkipSpent
+        ));
     }
 
     #[test]

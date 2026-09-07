@@ -33,7 +33,7 @@ use std::time::Duration;
 use alloy::network::EthereumWallet;
 use alloy::providers::ProviderBuilder;
 use alloy::signers::Signer;
-use tracing::info;
+use tracing::{info, warn};
 
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome};
@@ -140,6 +140,25 @@ pub async fn run(
         Some(args.require_submit_plumbing()?)
     };
 
+    // Read the prior record BEFORE preflight. Read-only: `peek` never
+    // creates anything, so this cannot poison a run that is about to be
+    // refused. Used twice — here, to decide whether the ECC[3] sufficiency
+    // check still applies, and in stage 2 to classify a duplicate before
+    // prompting.
+    let state_dir = args.state_dir.clone().unwrap_or_else(default_state_dir);
+    let prior = if dry_run {
+        // A dry run neither reads nor writes idempotency state (spec).
+        None
+    } else {
+        idempotency::peek(&state_dir, &from, &to, &amount)?
+    };
+
+    // A prior record carrying an an_tx_hash means the burn is already on
+    // the wire. Its ECC[3] is spent by definition, and re-checking
+    // sufficiency would refuse every resume of a full-balance withdrawal —
+    // the exact scenario the record exists to rescue.
+    let burn_already_sent = prior.as_ref().is_some_and(|p| p.an_tx_hash.is_some());
+
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
     let preflight = preflight::run(
@@ -149,6 +168,7 @@ pub async fn run(
         &amount,
         &args.gql_endpoint,
         &args.usdc_bridge_account,
+        preflight::BalanceCheck::from_burn_sent(burn_already_sent),
     )
     .await?;
     info!(
@@ -198,21 +218,146 @@ pub async fn run(
         info!("burner key ok");
     }
 
-    // ---- 2. Idempotency reserve ----
-    // Dry-run skips reservation (spec: "Idempotency state is NOT recorded
-    // for a dry-run").
-    let state_dir = args
-        .state_dir
-        .clone()
-        .unwrap_or_else(default_state_dir);
-    let mut record = if !dry_run {
-        info!("stage 2/6: idempotency reserve");
-        let r = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
-        info!(key = %r.key, "reserved");
-        Some(r)
-    } else {
+    // ---- 2. Confirm, then compose (both strictly before any state write) ----
+    //
+    // Ordering is load-bearing. The confirmation and every fallible
+    // pre-send step run BEFORE the reservation, so a declined prompt or a
+    // bad keys.json leaves nothing on disk and the identical command can
+    // simply be re-run. Nothing between the reserve and `burn::send` is
+    // allowed to fail — see burn.rs.
+    //
+    // `state_dir` and `prior` were bound in stage 1 (see the balance-check
+    // note there); `prior` is read-only, so reaching this point has not
+    // created anything.
+    let bounce = true; // spec default; see burn.rs header comment
+
+    // `--dry-run` still returns HERE, before stages 3-6. The early return
+    // below is not part of this block — folding dry-run into the `if` as a
+    // `("<dry-run>", bounce)` arm looks tidier and is wrong: execution then
+    // falls through to capture, prove and submit carrying a fake
+    // transaction hash, and a dry run starts waiting on an anchor bundle
+    // for an event that was never emitted.
+    let mut record = None;
+    let (an_tx_hash, bounce) = if dry_run {
         info!("stage 2/6: idempotency (skipped for --dry-run)");
-        None
+        // Unreachable past the early return below; present only so both
+        // arms type-check.
+        ("<dry-run>".to_string(), bounce)
+    } else {
+        let context = build_tvm_client(&args.gql_endpoint)?;
+
+        // Resume: a prior record carrying an an_tx_hash means the burn was
+        // already broadcast at least once. Reuse it; never compose a second
+        // message — the multisig has no replay guard (sendTransaction
+        // happily authorises a second transfer).
+        if let Some(p) = prior.as_ref().filter(|p| p.an_tx_hash.is_some()) {
+            let existing = p.an_tx_hash.clone().expect("filtered above");
+            info!(
+                an_tx = %existing,
+                prior_status = ?p.status,
+                "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
+            );
+            record = Some(idempotency::reserve(
+                &state_dir,
+                &from,
+                &to,
+                &amount,
+                args.allow_retry,
+            )?);
+            (existing, bounce)
+        } else {
+            // A prior record with no `an_tx_hash` is the ambiguous case, and
+            // it has to be classified HERE — before the prompt. `reserve`
+            // would refuse it correctly, but only after
+            // `confirm_before_burn` has already run, so a plain retry
+            // without `--yes` exits 2 ("stdin is not a TTY") and the
+            // operator never learns that a possibly-in-flight burn is what
+            // is actually blocking them. Exit 3 with the real reason is the
+            // whole point of the code.
+            //
+            // This does not create a record: `peek` is read-only, and the
+            // refusal must leave the state directory exactly as it found it.
+            if let Some(p) = prior.as_ref() {
+                if !args.allow_retry {
+                    // Field names and types are the variant's, not
+                    // invented: `prior_status: String`, `prior_tx` and
+                    // `prior_msg_id` both `Option<String>`. `Status` is not
+                    // `String`, so it has to be formatted.
+                    return Err(CliError::DuplicateInFlight {
+                        prior_status: format!("{:?}", p.status),
+                        prior_tx: p.an_tx_hash.clone(),
+                        prior_msg_id: p.withdrawal_msg_id.clone(),
+                    });
+                }
+                warn!(
+                    key = %p.key,
+                    prior_status = ?p.status,
+                    "--allow-retry: a prior record exists with no an_tx_hash. If its burn reached \
+                     the wire, this run will broadcast a second one. Reconcile first — see the \
+                     runbook's Case 3a.",
+                );
+            }
+
+            // The last reversible moment. `--yes` skips the prompt for
+            // scripts; `--non-interactive` without `--yes` is already
+            // refused in `main::dispatch`, so a live prompt here is safe to
+            // block on.
+            if !skip_prompt {
+                confirm_before_burn(&from, &to, &amount, &args, anchor_mode)?;
+            }
+
+            info!("stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)");
+            let composed = burn::compose(
+                &context,
+                &preflight,
+                &from,
+                &args.from_keys,
+                &to,
+                &amount,
+                bounce,
+            )
+            .await?;
+
+            // Point of no return starts on the next line.
+            info!("stage 2/6: idempotency reserve");
+            let r = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
+            info!(key = %r.key, "reserved");
+            record = Some(r);
+
+            let receipt = burn::send(&context, &from, composed).await?;
+            info!(an_tx = %receipt.an_tx_hash, "burn broadcast");
+            if let Some(r) = record.as_mut() {
+                r.status = Status::Burned;
+                r.an_tx_hash = Some(receipt.an_tx_hash.clone());
+                // `?` would be wrong here, and quietly so. `update` reports
+                // its failures as `CliError::Preflight` — exit 2, whose
+                // published meaning is "refused before sending, nothing
+                // left the machine". The burn is on the wire. Exit 2 tells
+                // an operator, and every script parsing the contract, the
+                // opposite of the truth, and the hash never reaches the
+                // JSON output because the error path carries no fields.
+                //
+                // Reclassify, and put the hash where it can be read: this
+                // is exactly `BurnOutcomeUnknown` — sent, outcome not
+                // durably recorded.
+                if let Err(e) = idempotency::update(&state_dir, r) {
+                    return Err(CliError::BurnOutcomeUnknown {
+                        reason: format!(
+                            "the AN burn was broadcast as {} but the state file could not be \
+                             updated: {e}\n\
+                             \x20 The withdrawal is IN FLIGHT. Do not re-run without \
+                             reconciling — see the runbook's Case 3a.\n\
+                             \x20 To resume, write this hash into {}'s an_tx_hash and set status \
+                             to \"burned\", then re-run with --allow-retry.",
+                            receipt.an_tx_hash,
+                            idempotency::record_path(&state_dir, &r.key).display(),
+                        ),
+                        source: Some(anyhow::anyhow!("{e}")),
+                    });
+                }
+            }
+            (receipt.an_tx_hash, receipt.bounce)
+        }
     };
 
     // Full `--dry-run`: stop before touching either chain. Returning a
@@ -246,56 +391,6 @@ pub async fn run(
     // Past the dry-run return, so `plumbing` is `Some` by construction —
     // it is resolved unconditionally for every non-dry run above.
     let plumbing_ref = plumbing.as_ref().expect("non-dry-run resolves plumbing");
-
-    // ---- 3. Burn ----
-    // Resume: if the prior record already carries an `an_tx_hash`, the AN
-    // burn has been broadcast at least once. Firing again would be a
-    // double-spend on the source side (the multisig has no "same nonce"
-    // guard the way EVM does — sendTransaction happily authorises a
-    // second transfer). Reuse the prior hash and skip straight to capture.
-    let prior_an_tx = record.as_ref().and_then(|r| r.an_tx_hash.clone());
-    let (an_tx_hash, bounce) = if let Some(existing) = prior_an_tx {
-        info!(
-            an_tx = %existing,
-            prior_status = ?record.as_ref().map(|r| r.status),
-            "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
-        );
-        // `bounce` is not persisted; the true value only matters inside
-        // burn::fire (multisig bounce flag on the composed message).
-        // Downstream, it lands in the summary as informational output;
-        // the default matches spec.
-        (existing, true)
-    } else {
-        // Fresh burn — prompt the operator first. This is the last
-        // reversible moment: after burn::fire returns, the multisig has
-        // authorised the outgoing transfer. `--yes` skips the prompt for
-        // scripts; `--non-interactive` without `--yes` is already refused
-        // in `main::dispatch`, so a live prompt here is safe to block on.
-        if !skip_prompt {
-            confirm_before_burn(&from, &to, &amount, &args, anchor_mode)?;
-        }
-
-        info!("stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)");
-        let context = build_tvm_client(&args.gql_endpoint)?;
-        let bounce = true; // spec default; see burn.rs header comment
-        let burn_receipt = burn::fire(
-            &context,
-            &preflight,
-            &from,
-            &args.from_keys,
-            &to,
-            &amount,
-            bounce,
-        )
-        .await?;
-        info!(an_tx = %burn_receipt.an_tx_hash, "burn broadcast");
-        if let Some(r) = record.as_mut() {
-            r.status = Status::Burned;
-            r.an_tx_hash = Some(burn_receipt.an_tx_hash.clone());
-            idempotency::update(&state_dir, r)?;
-        }
-        (burn_receipt.an_tx_hash, burn_receipt.bounce)
-    };
 
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge

@@ -19,7 +19,52 @@ from urllib.parse import urlparse
 
 COMPILER_DIR = "./contracts/compiler"
 SOLD = os.getenv('SOLD', shutil.which("sold") or f"{COMPILER_DIR}/sold")
-TVM_CLI = os.getenv('CLI_NAME', shutil.which("tvm-cli") or f"{COMPILER_DIR}/tvm-cli")
+
+
+def _resolve_tvm_cli():
+    """Pick a tvm-cli that actually runs here.
+
+    `deploy_msig_and_mint.py` prepends python/bin to PATH, so a committed
+    binary built for another OS/arch used to win over a working system
+    install and die with "Exec format error". Explicit CLI_NAME always
+    wins; otherwise take the first candidate that answers `version`.
+    """
+    import subprocess
+
+    explicit = os.getenv('CLI_NAME')
+    if explicit:
+        return explicit
+
+    # EVERY match on PATH, not just the first. `shutil.which` stops at the
+    # first hit, so a broken binary in an early PATH entry — exactly what
+    # the python/bin injection used to be — would be tried, rejected, and
+    # then skipped straight past the working system install to
+    # COMPILER_DIR. Walking PATH ourselves is what makes "the first
+    # candidate that answers `version`" true rather than aspirational.
+    seen = set()
+    candidates = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        cand = os.path.join(entry, "tvm-cli")
+        if cand not in seen and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            seen.add(cand)
+            candidates.append(cand)
+    fallback = f"{COMPILER_DIR}/tvm-cli"
+    if fallback not in seen:
+        candidates.append(fallback)
+
+    for cand in candidates:
+        try:
+            subprocess.run([cand, "version"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return cand
+        except (OSError, subprocess.CalledProcessError):
+            continue
+    return candidates[0] if candidates else "tvm-cli"
+
+
+TVM_CLI = _resolve_tvm_cli()
 TVM_DEBUGGER = os.getenv('TVM_DEBUGGER', shutil.which("tvm-debugger") or f"{COMPILER_DIR}/tvm-debugger")
 
 NETWORK = os.getenv('NETWORK', 'http://127.0.0.1:80')

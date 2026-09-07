@@ -164,6 +164,12 @@ def main():
         is_shellnet=not is_local, verbose_faucet=True,
     )
 
+    # The CLI requires exactly 0400 on --from-keys (read-only for the
+    # owner; it never writes this file). Emit it the way the very next
+    # documented step needs it — without this, README Step 2 and Step 4
+    # contradict each other.
+    os.chmod(msig_key_path, 0o400)
+
     abs_key_path = os.path.abspath(msig_key_path)
     tracer.log_phase("PASS — multisig deployed and USDC-funded")
     tracer.log(f"  WITHDRAW_FROM      = {msig_address}")

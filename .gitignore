@@ -278,3 +278,12 @@ crates/ackinacki-bridge/deploy_msig*.log
 # The profile files point at ./work_dir/shplonk-snark instead, but this
 # catches the direct-invocation case.
 crates/ackinacki-bridge/shplonk-snark/
+
+# tvm-cli is platform-specific; each operator supplies their own on PATH
+# or via CLI_NAME. A committed binary silently shadows the working one,
+# because deploy_msig_and_mint.py prepends this directory to PATH.
+crates/bridge-prover-libraries/python/bin/tvm-cli
+
+# tvm-cli rewrites this file with a machine-local absolute path on every
+# run, so a committed copy makes every operator's tree dirty.
+crates/ackinacki-bridge/tvm-cli.conf.json

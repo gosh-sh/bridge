@@ -475,7 +475,7 @@ to drive the event side. Useful when the node is already running somewhere
 
 | Path | Purpose |
 |---|---|
-| `python/bin/tvm-cli` | Used to encode message bodies / read accounts. Picked up via `PATH` injection unless `CLI_NAME` is set. |
+| `tvm-cli` (on `PATH`, or `CLI_NAME`) | Used to encode message bodies / read accounts. Not shipped in-tree — it is platform-specific, and a committed binary shadowed working system installs via `PATH` injection. The helper tries each candidate and takes the first that answers `version`; `CLI_NAME` overrides. |
 | `python/contracts/{TokenBridge,UpdateCustodianMultisigWallet,GiverV3}.*` | ABIs / TVC / GiverV3 keys the orchestrator deploys & calls. |
 | `python/helper/common.py` | Verbatim `tests/helper/common.py` from acki-nacki — `tvm-cli` wrapper, GQL, deploy helpers. |
 | `python/generate_withdrawals_with_live_event_proving.py` | The orchestrator itself; all artefact paths are anchored to `__file__`, so CWD doesn't matter. |

@@ -72,6 +72,17 @@ a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
 - The `--from` multisig is deployed, single-custodian, and holds ≥
   amount USDC in ECC[3]. `scripts/deploy_msig_and_mint.sh` does both
   in one shot — see Step 2 below.
+- **`tvm-cli` on `PATH`**, needed only by that fixture script (the CLI
+  itself talks to the chain in-process and needs no external binary).
+  It is platform-specific and is **not** shipped in this repo. Check
+  before running Step 2:
+
+  ```bash
+  crates/ackinacki-bridge/scripts/check_fixture_prereqs.sh
+  ```
+
+  `CLI_NAME=/path/to/tvm-cli` overrides whatever is discovered on
+  `PATH`.
 
 ## Timing model
 
@@ -173,6 +184,17 @@ export BURNER_PRIVATE_KEY=0x0123456789abcdef0123456789abcdef0123456789abcdef0123
 on ECC[3] via `USDCBridge.mintAndSend`, then prints two eval-able env
 lines on stdout. Everything else (tvm-cli output, tracer logs) goes
 to stderr, so the `eval` line does not pollute the shell.
+
+The script shells out to `tvm-cli`, which is platform-specific and is
+not shipped here. Confirm the one it will pick actually runs on this
+machine before spending a deploy on finding out:
+
+```bash
+scripts/check_fixture_prereqs.sh
+# OK: tvm-cli = /usr/local/bin/tvm-cli (tvm-cli 3.0.5)
+```
+
+If it fails, install `tvm-cli` or export `CLI_NAME=/path/to/tvm-cli`.
 
 ```bash
 eval "$(scripts/deploy_msig_and_mint.sh)"

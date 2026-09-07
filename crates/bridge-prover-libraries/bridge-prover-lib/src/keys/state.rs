@@ -731,6 +731,41 @@ pub fn probe_event_key_cache(params_dir: &Path) -> KeyCacheState {
                 ),
             };
         }
+
+        // A second question about the same entry, and a different one.
+        // The check above asks whether keygen could REPLACE it. This one
+        // asks whether this function is about to OPEN it — because it is,
+        // two lines below and again further down: `load_config` does
+        // `read_to_string`, `sha256_file` does `io::copy`.
+        //
+        // `open(2)` on a FIFO blocks until a writer appears. Not a slow
+        // read — a block, before any byte is read, and there is no timeout
+        // anywhere in preflight to end it. A character device hands
+        // `io::copy` a stream with no end, which is the same outcome by a
+        // different route. The comment above is right that these are
+        // ordinary directory entries and perfectly replaceable; it just
+        // answers the wrong question for what happens next.
+        //
+        // `metadata`, which FOLLOWS symlinks, because the hazard is
+        // whatever the open reaches — the opposite of the check above,
+        // where the entry itself is the thing being replaced. A dangling
+        // symlink errors here and is left alone, to read as absent
+        // further down.
+        //
+        // `Corrupt`, not `Blocked`: `--repair` clears these four names
+        // with `remove_file`, which unlinks a FIFO, a socket or a device
+        // node exactly as it unlinks a regular file.
+        if std::fs::metadata(&path).is_ok_and(|md| !md.is_file()) {
+            return KeyCacheState::Corrupt {
+                why: format!(
+                    "{} is not a regular file. These four names are read by opening them, and \
+                     opening a FIFO waits for a writer that may never come while a device node \
+                     never reaches an end — either way this check would hang instead of \
+                     answering, which is worse than any verdict it could give",
+                    path.display(),
+                ),
+            };
+        }
     }
 
     let Ok(config) = load_config(params_dir, prefix) else {
@@ -1531,6 +1566,13 @@ mod probe_tests {
         // and a FIFO, socket or device node is an ordinary directory entry
         // that both operations handle. Only a real directory blocks them.
         //
+        // `Blocked` is what this asserts the absence of, and only that.
+        // A non-regular entry is still refused — see
+        // `a_fifo_in_the_cache_is_repairable_rather_than_a_hang` — but as
+        // `Corrupt`, which `--repair` clears, rather than as something an
+        // operator has to go and move by hand. Two questions about one
+        // entry: can keygen replace it, and can this function read it.
+        //
         // `#[cfg(unix)]` because the whole gate is about Unix rename and
         // unlink semantics; there is nothing to assert elsewhere.
         use std::os::unix::fs::symlink;
@@ -1551,10 +1593,8 @@ mod probe_tests {
             "a symlink is replaced by rename as a symlink, whatever it points at"
         );
 
-        // 2. A socket, which is the special file std can make without a new dependency
-        //    (`mkfifo` would need libc). `unlink` removes it and `rename` replaces it,
-        //    so the gate must let it through to be judged on its contents like any
-        //    other file.
+        // 2. A socket. `unlink` removes it and `rename` replaces it, so nothing here
+        //    needs a human — which is the whole of what `Blocked` would have claimed.
         let d = dir_with_placeholder_keys();
         std::fs::remove_file(d.path().join("event_pk.bin")).unwrap();
         let _sock = std::os::unix::net::UnixListener::bind(d.path().join("event_pk.bin")).unwrap();
@@ -1565,6 +1605,48 @@ mod probe_tests {
             ),
             "a socket is an ordinary directory entry; unlink and rename both replace it"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_in_the_cache_is_repairable_rather_than_a_hang() {
+        // `open(2)` on a FIFO blocks until a writer appears — before a
+        // single byte is read, and there is no timeout anywhere in
+        // preflight to end it. This probe runs on every withdrawal,
+        // before the burn, and `load_config` and `sha256_file` both open
+        // these names. A cache entry somebody replaced with a FIFO
+        // therefore did not produce a wrong verdict; it produced no
+        // verdict, forever.
+        //
+        // Repairable, not blocked: `--repair` clears these four names
+        // with `remove_file`, which unlinks a FIFO exactly as it unlinks
+        // a regular file.
+        for name in ["event_config_params.json", "event_pk.bin"] {
+            let d = dir_with_placeholder_keys();
+            let path = d.path().join(name);
+            std::fs::remove_file(&path).unwrap();
+            let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            // SAFETY: a valid NUL-terminated path that this test owns;
+            // `mkfifo` touches nothing else and returns a plain int.
+            let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+            assert_eq!(rc, 0, "mkfifo {name}: {}", std::io::Error::last_os_error());
+
+            match probe_event_key_cache(d.path()) {
+                KeyCacheState::Corrupt {
+                    why,
+                } => {
+                    assert!(why.contains(name), "must name the path; got: {why}");
+                    assert!(
+                        why.contains("not a regular file"),
+                        "must say what is wrong with it; got: {why}",
+                    );
+                },
+                other => panic!(
+                    "a FIFO at {name} is opened by this probe and would never return; it cannot \
+                     be reported as {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]

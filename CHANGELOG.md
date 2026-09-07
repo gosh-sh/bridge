@@ -892,6 +892,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **Key-cache probe: a cache entry that is not a regular file is refused
+  instead of hanging preflight.** The probe guarded the four key paths
+  against being a *directory*, on the grounds that keygen replaces them
+  by `rename` and cannot write through one. That is the right answer to
+  the question of whether keygen can replace the entry, and the wrong one
+  for what happens next: the probe then OPENS those paths —
+  `read_to_string` for `event_config_params.json`, a streaming digest for
+  `event_pk.bin`. `open(2)` on a FIFO blocks until a writer appears, and
+  a device node hands the digest a stream with no end. Either one made
+  the check hang with no timeout anywhere to end it, on every run, before
+  the burn. Such an entry is now `Corrupt` — refuse the run, and
+  `probe_event_keys --repair` clears it, since `remove_file` unlinks a
+  FIFO exactly as it unlinks a regular file.
+
 - **`ackinacki-bridge withdraw`: the first withdrawal on a host now holds
   its withdrawal lock.** The lock is taken before the reservation, and
   the reservation is what creates the state directory — so on a first

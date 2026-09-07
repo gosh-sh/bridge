@@ -310,7 +310,7 @@ pub async fn run(
                 "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
             );
             let (r, lock) =
-                resume_recorded_burn(&state_dir, &from, &to, &amount, args.allow_retry, &existing)?;
+                resume_recorded_burn(&state_dir, &from, &to, &amount, args.allow_retry, p)?;
             _withdrawal_lock = lock;
             record = Some(r);
             (existing, bounce)
@@ -897,16 +897,24 @@ enum BurnDecision {
 /// refuses forever as "acting on it would broadcast a SECOND burn". A
 /// completed withdrawal and an unrecoverable record.
 ///
-/// `observed_hash` is that evidence — read from the record moments ago in
-/// stage 1. It is what makes the `Send` arm below safe to convert into a
-/// restore rather than a refusal.
+/// `observed` is that evidence — the record as stage 1 read it moments ago.
+/// It is what makes the `Send` arm below safe to convert into a restore
+/// rather than a refusal.
+///
+/// The WHOLE record, not just its hash. Restoring a fixed `Burned` was the
+/// next layer of the same defect: this branch is entered on `an_tx_hash`
+/// alone, so a `confirmed` record — a withdrawal that has already paid out
+/// — deleted during the minutes-long preflight came back as `burned` and
+/// was carried through capture, prove and a SECOND `withdrawByProof`.
+/// `reserve` refuses that record; it just never saw it, because the file
+/// was gone.
 fn resume_recorded_burn(
     state_dir: &Path,
     from: &FromAddress,
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-    observed_hash: &str,
+    observed: &idempotency::Record,
 ) -> CliResult<(idempotency::Record, Option<idempotency::WithdrawalLock>)> {
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
     match decision {
@@ -920,23 +928,37 @@ fn resume_recorded_burn(
         // the record we now own rather than leaving behind the one no
         // later run can act on.
         BurnDecision::Send => {
-            let mut r = r;
             warn!(
-                an_tx = %observed_hash,
+                an_tx = ?observed.an_tx_hash,
+                prior_status = ?observed.status,
                 key = %r.key,
-                "the state record was removed while this run was preflighting; restoring it from \
-                 the burn this run already observed, rather than proceeding on a record that says \
-                 no burn happened",
+                "the state record was removed while this run was preflighting; restoring it as \
+                 stage 1 read it, rather than proceeding on a record that says no burn happened",
             );
-            r.status = Status::Burned;
-            r.an_tx_hash = Some(observed_hash.to_string());
-            idempotency::update(state_dir, &r).map_err(|e| {
+            // Verbatim, including the status and `eth_tx_hash`. Writing a
+            // fixed status here is what downgraded a paid-out withdrawal,
+            // and writing only the status back would still lose the EVM
+            // hash an operator needs to reconcile it.
+            let restored = idempotency::Record {
+                key: r.key.clone(),
+                ..observed.clone()
+            };
+            idempotency::update(state_dir, &restored).map_err(|e| {
                 e.after_send(&format!(
-                    "the AN burn {observed_hash} is on the wire — it was recorded before this run \
-                     started, and its record has since been deleted"
+                    "the AN burn {:?} is on the wire — it was recorded before this run started, \
+                     and its record has since been deleted",
+                    restored.an_tx_hash,
                 ))
             })?;
-            Ok((r, lock))
+            // The record is back, so answer exactly as `reserve` would
+            // have if the file had survived: a terminal record is refused
+            // whatever the flags say. Restore FIRST — refusing without
+            // writing would leave behind the fresh hash-less reservation
+            // that `read_record` rejects forever.
+            if let Some(refusal) = idempotency::terminal_refusal(&restored) {
+                return Err(refusal);
+            }
+            Ok((restored, lock))
         },
     }
 }
@@ -1601,7 +1623,7 @@ mod tests {
         // loser's revert writes `Failed` over the winner's `Confirmed`.
         let dir = tempfile::TempDir::new().unwrap();
         let hash = format!("0x{}", "ab".repeat(32));
-        burned_record(dir.path(), &hash);
+        let observed = burned_record(dir.path(), &hash);
 
         let (r, lock) = resume_recorded_burn(
             dir.path(),
@@ -1609,7 +1631,7 @@ mod tests {
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
-            &hash,
+            &observed,
         )
         .expect("a recorded burn resumes");
         assert_eq!(r.an_tx_hash.as_deref(), Some(hash.as_str()));
@@ -1623,7 +1645,7 @@ mod tests {
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
-            &hash,
+            &observed,
         )
         .expect_err("the first resume still holds this withdrawal");
         assert!(
@@ -1655,7 +1677,7 @@ mod tests {
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
-            &hash,
+            &r,
         )
         .expect("the burn is known; the run must not be stranded");
 
@@ -1670,6 +1692,64 @@ mod tests {
                 .expect("a restored record must not be one read_record refuses")
                 .expect("it exists");
         assert_eq!(reread.an_tx_hash.as_deref(), Some(hash.as_str()));
+    }
+
+    #[test]
+    fn a_resume_of_a_paid_out_withdrawal_is_refused_not_downgraded() {
+        // The next layer of the same defect. This branch is entered on
+        // `an_tx_hash` alone — no status check — and `reserve`'s terminal
+        // refusal only fires while the file is still there. Delete the
+        // record during preflight, which takes minutes because it hashes a
+        // 2.65 GB proving key, and a `confirmed` withdrawal came back as
+        // `burned` and was carried through capture, prove and a SECOND
+        // `withdrawByProof`. The concurrent route to that end state was
+        // closed a round ago; this is the sequential one.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "ef".repeat(32));
+        let eth = format!("0x{}", "12".repeat(32));
+        let mut r = burned_record(dir.path(), &an);
+        r.status = Status::Confirmed;
+        r.eth_tx_hash = Some(eth.clone());
+        idempotency::update(dir.path(), &r).unwrap();
+
+        // Stage 1 read it; then it was deleted — which is exactly what the
+        // CLI's own exit-3 message tells a reconciled operator to do.
+        let observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees the record");
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+        )
+        .expect_err("a withdrawal that has already paid out must not resume");
+        assert_eq!(err.exit_code().as_i32(), 3, "{err:?}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("already paid out"),
+            "the remedy a terminal record earns: {msg}",
+        );
+
+        // And the record is back as it was. Not `burned`, and carrying the
+        // EVM hash an operator reconciles against — restoring only the
+        // status would still have dropped that.
+        let reread =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .expect("the restored record must be one read_record accepts")
+                .expect("it exists");
+        assert_eq!(
+            reread.status,
+            Status::Confirmed,
+            "a fixed status here is the defect",
+        );
+        assert_eq!(reread.eth_tx_hash.as_deref(), Some(eth.as_str()));
+        assert_eq!(reread.an_tx_hash.as_deref(), Some(an.as_str()));
     }
 
     #[test]

@@ -892,6 +892,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: a withdrawal that has already paid out
+  can no longer be resumed as an unpaid one.** The resume branch is
+  entered whenever the prior record carries an AN tx hash — it does not
+  look at the status — and the refusal that stops a `confirmed` or
+  `submitted` record only fires while that record's file is still on
+  disk. Deleting the file during a run's preflight, which takes minutes
+  because it hashes a ~2.65 GB proving key, therefore produced a fresh
+  reservation that the resume path rewrote as `burned`: the run then
+  carried a completed withdrawal through capture, prove and a **second**
+  `withdrawByProof`. The record is now restored exactly as the run read
+  it — status, AN tx hash and `eth_tx_hash` — and a restored `confirmed`
+  or `submitted` record is refused with exit 3 and the same message it
+  would have earned had the file never been deleted.
+
 - **`ackinacki-bridge withdraw`: two concurrent runs of the same
   withdrawal no longer both burn.** The reservation answered the same way
   whether it had created the record or found somebody else's, so two runs

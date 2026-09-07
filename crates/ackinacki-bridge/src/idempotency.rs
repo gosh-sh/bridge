@@ -56,6 +56,51 @@ pub enum Status {
     Failed,
 }
 
+impl Status {
+    /// Statuses that forbid any further work on this identity, whatever
+    /// flags the run passes. `Confirmed` has already paid out; `Submitted`
+    /// has a broadcast EVM transaction whose receipt nobody has seen, so
+    /// re-broadcasting risks a double payout.
+    ///
+    /// One list, because two places need it: [`reserve`], and the resume
+    /// path — which restores a record deleted mid-preflight and must then
+    /// answer exactly as `reserve` would have if the file had survived.
+    /// Hardcoding a status in the second of those turned a paid-out
+    /// withdrawal into a `burned` one and carried it through a second
+    /// `withdrawByProof`.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Status::Confirmed | Status::Submitted)
+    }
+}
+
+/// The refusal a record in a terminal status earns, and `None` for every
+/// other status — so this and [`Status::is_terminal`] cannot drift apart.
+///
+/// Exit 3. `--allow-retry` does NOT reach these, so the shared "re-run with
+/// --allow-retry to override" the message used to end on was wrong here: it
+/// named the one flag that changes nothing about a terminal record.
+pub fn terminal_refusal(record: &Record) -> Option<CliError> {
+    if !record.status.is_terminal() {
+        return None;
+    }
+    let remedy = if record.status == Status::Confirmed {
+        "This withdrawal already paid out. `--allow-retry` does not reopen it. To move funds \
+         again, use a different (amount, recipient, chain) — the identity is what the record is \
+         keyed on."
+    } else {
+        "There is a broadcast EVM transaction whose receipt was never observed, and \
+         `--allow-retry` does not override that: re-broadcasting risks a double payout. Reconcile \
+         eth_tx_hash on chain first, then either wait for a run to see the receipt or set the \
+         record to \"failed\" by hand."
+    };
+    Some(CliError::DuplicateInFlight {
+        prior_status: format!("{:?}", record.status).to_ascii_lowercase(),
+        prior_tx: record.an_tx_hash.clone(),
+        prior_msg_id: record.withdrawal_msg_id.clone(),
+        remedy: remedy.to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub key: String,
@@ -244,28 +289,8 @@ pub fn reserve(
         // Terminal states — refuse regardless of --allow-retry.
         // Confirmed already paid out; Submitted has an unresolved
         // in-flight tx and re-broadcasting is a double-spend risk.
-        Status::Confirmed | Status::Submitted => {
-            // `--allow-retry` does NOT reach these, so the shared
-            // "re-run with --allow-retry to override" the message used to
-            // end on was wrong here — it named the one flag that changes
-            // nothing about a terminal record.
-            let remedy = if prior.status == Status::Confirmed {
-                "This withdrawal already paid out. `--allow-retry` does not reopen it. To move \
-                 funds again, use a different (amount, recipient, chain) — the identity is what \
-                 the record is keyed on."
-            } else {
-                "There is a broadcast EVM transaction whose receipt was never observed, and \
-                 `--allow-retry` does not override that: re-broadcasting risks a double payout. \
-                 Reconcile eth_tx_hash on chain first, then either wait for a run to see the \
-                 receipt or set the record to \"failed\" by hand."
-            };
-            Err(CliError::DuplicateInFlight {
-                prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-                prior_tx: prior.an_tx_hash,
-                prior_msg_id: prior.withdrawal_msg_id,
-                remedy: remedy.to_string(),
-            })
-        },
+        Status::Confirmed | Status::Submitted => Err(terminal_refusal(&prior)
+            .expect("Status::is_terminal names exactly the statuses in this arm")),
         // Failed → the only production writer sets this after
         // `withdrawByProof` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
@@ -1033,6 +1058,87 @@ mod tests {
                 .all(|o| matches!(o, Ok(Reservation::Created) | Ok(Reservation::Found))),
             "with --allow-retry none of them should error outright: {outcomes:?}",
         );
+    }
+
+    #[test]
+    fn only_confirmed_and_submitted_are_terminal_everywhere_that_asks() {
+        // Three places have to agree and two of them are match patterns,
+        // which no compiler compares: `Status::is_terminal`, the arm in
+        // `reserve` that builds the refusal behind an `expect`, and the
+        // resume path, which asks by status after restoring a record that
+        // was deleted mid-preflight. Drift between them is a paid-out
+        // withdrawal carried through a second `withdrawByProof`.
+        //
+        // The list is written out rather than derived, so changing
+        // `is_terminal` fails here instead of quietly agreeing with
+        // itself.
+        for (status, terminal) in [
+            (Status::Reserved, false),
+            (Status::Burned, false),
+            (Status::Captured, false),
+            (Status::Proved, false),
+            (Status::Failed, false),
+            (Status::Submitted, true),
+            (Status::Confirmed, true),
+        ] {
+            assert_eq!(status.is_terminal(), terminal, "{status:?}");
+
+            // And `reserve`'s own arm, driven against a real state
+            // directory. Every planted record carries a hash, so
+            // `--allow-retry` resumes each non-terminal one and the only
+            // refusals left are the terminal pair.
+            let dir = TempDir::new().unwrap();
+            let mut rec = fresh_reserved_record(
+                &key(&sample_from(), &sample_to(), &UsdcAmount(1)),
+                &sample_from(),
+                &sample_to(),
+                &UsdcAmount(1),
+            );
+            rec.status = status;
+            rec.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+            update(dir.path(), &rec).unwrap();
+
+            let got = reserve(
+                dir.path(),
+                &sample_from(),
+                &sample_to(),
+                &UsdcAmount(1),
+                true,
+            );
+            assert_eq!(
+                got.is_err(),
+                terminal,
+                "{status:?}: reserve's arm and is_terminal must name the same statuses",
+            );
+            if let Err(e) = got {
+                assert_eq!(e.exit_code().as_i32(), 3, "{status:?}: {e}");
+            }
+        }
+
+        let mut rec = fresh_reserved_record(
+            &key(&sample_from(), &sample_to(), &UsdcAmount(1)),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(1),
+        );
+
+        // And the two that are terminal say different things, because the
+        // operator's next move differs.
+        rec.status = Status::Confirmed;
+        let paid = format!("{}", terminal_refusal(&rec).expect("confirmed is terminal"));
+        rec.status = Status::Submitted;
+        let unresolved = format!("{}", terminal_refusal(&rec).expect("submitted is terminal"));
+        assert!(paid.contains("already paid out"), "{paid}");
+        assert!(
+            unresolved.contains("receipt was never observed"),
+            "{unresolved}"
+        );
+        for m in [&paid, &unresolved] {
+            assert!(
+                !m.contains("re-run with --allow-retry"),
+                "the one flag that changes nothing about a terminal record: {m}",
+            );
+        }
     }
 
     fn sample_from() -> FromAddress {

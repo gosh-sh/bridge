@@ -1,9 +1,9 @@
 diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
 new file mode 100644
-index 000000000..f007432bd
+index 000000000..d7236797e
 --- /dev/null
 +++ b/contracts/exchange/EthBeaconLightClient.sol
-@@ -0,0 +1,1071 @@
+@@ -0,0 +1,1075 @@
 +pragma gosh-solidity >=0.76.1;
 +pragma AbiHeader expire;
 +pragma AbiHeader pubkey;
@@ -415,7 +415,11 @@ index 000000000..f007432bd
 +    }
 +
 +    function _notifySink(uint256 h) private {
-+        if (_usdcBridge != address(0)) {
++        // An unset `_usdcBridge` is `addr_none` (never written), which is not
++        // `address(0)`: comparing only against `address(0)` sent the message
++        // to `addr_none`, the action phase aborted with result code 34 and
++        // the whole `submitUpdate` rolled back on a standalone deployment.
++        if (!_usdcBridge.isNone() && _usdcBridge != address(0)) {
 +            // bounce: true so a rejected sink returns the 1 vmshell and
 +            // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
 +            // is the retry (submitUpdate would hit ERR_STALE_UPDATE).
@@ -694,7 +698,7 @@ index 000000000..f007432bd
 +    // Base v1 (Blake2b transcript), 8 public inputs. Hermez SRS (k=19), Base
 +    // circuit shape num_advice_per_phase=[132]. Source:
 +    //   acki-nacki-bridge/eth-light-client-prover/fixtures/step_vkblob/step_vk_blob.bin
-+    //   sha256 bd108c08afb35668d2872e8a6dd65581fa8fcb06f2471ebd7c93d6ec7d21bab0
++    //   sha256 2d66c2058e615be1f6459d6a01f05dd21cf2ca99ba8ac9935739f5507d320fab
 +    // Magic "VKBLOB\x00\x00" + version 1.
 +    //
 +    // To rotate: regenerate the fixture in acki-nacki-bridge
@@ -900,8 +904,8 @@ index 000000000..f007432bd
 +        hex"c700ab3295c5635503e055e9a627d87ed496ce2bf880409d2239637803fc440e128d7d4b37651bbe1ada294530628c3b5d0ffde59f62229b4aeb8399"
 +        hex"4d46023c597cffaec681f28b09237b6a483f81d8144090952e5a372c6f8f2c5880a343e677a27fb731f8937d00043a1e00cd751f5f66c004559c0392"
 +        hex"09f116ccf4fd05ceebe7fe63f4f60f6517ce63853374b390d3568c005c3fcfd545840ca73d1ccb55447ffa47bd4178681a59e0cd4bc013323ab0f3fa"
-+        hex"f72f6a93d16cbecc1258c3a795d3953b8c214d812097aa07277e4ee0d1a1f010c69d56cda0e5e3d70e20f0b8bea988f4447799420dd139ac1ac1995f"
-+        hex"1e9a75aca01330e33dbdcf4ccabedd4bb0f09c64619cac86118ab8d0646c0585acc64352f2ee2ed3927fee4c2eb510f6112cb9da2a39546f0745047a"
++        hex"f72f6a93d16cbecc1258c3a795d3953b8c214d812097aa07277e4ee0d1a1f010c69d56cda0e5e3d70e20f0b8bea988f4447799420d5258a8617b9516"
++        hex"35cc21236aeb0e44acb5b6801b28dc099e2c2eb658a7a54e06d3894fe9ad6a8fc5b520b99f9d2db655a2e10875f2eb173b27c04b1a6f033b0445047a"
 +        hex"16b85859766507f3a55a115162aa99927c3f985a73f4f524f9972399124ef5f54dbccf59ca07a27d2763a819eedbb90c88ef8e9f0a0edcd280aefc7d"
 +        hex"16e133973369545cb11e0ebf5572a86e6adc7074b3834c51c6c31309b6b7604803ff2b78c420d3548349626490697ad5e9c5bd7fc705c1c60e207f01"
 +        hex"c65f10500320821a3a6e8ff2a9294badc4f9faa29519fdc71be0ecbcae12654b6f959bd90b4f8e07c1e9e32322541f1bbb3879de1081f3d0c330fd29"

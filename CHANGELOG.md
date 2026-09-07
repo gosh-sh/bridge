@@ -73,9 +73,9 @@ here and how versions are assigned.
   `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
   action phase aborted with result code 34 and the whole `submitUpdate` was
   rolled back although the proof had verified. Guard is now
-  `!_usdcBridge.isNone() && _usdcBridge != address(0)`. Observed on the first
-  shellnet shadow deploy (2026-09-04); `EthBeaconLightClient_rotate_decider.patch`
-  still carries the old guard.
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
+  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
+  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
 
 ### Changed
 
@@ -89,9 +89,10 @@ here and how versions are assigned.
   bound to the signed state by `execution_branch`). Regression test
   `execution_root_shape_is_independent_of_extra_data_len`. Fixture
   `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
-  `contracts/an/EthBeaconLightClient.sol` re-emitted; the tvm-sdk opcode
-  fixtures and `EthBeaconLightClient_rotate_decider.patch` still carry the old
-  blob and need the same rotation. Verified on Sepolia: the same blob comes
+  `contracts/an/EthBeaconLightClient.sol` re-emitted,
+  `EthBeaconLightClient_rotate_decider.patch` regenerated from it; the tvm-sdk
+  opcode fixtures still carry the old blob and need the same rotation
+  (`scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`). Verified on Sepolia: the same blob comes
   out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
   18 B of `extra_data`.
 - `crates/eth-light-client-relayer` builds with `--features live-submit`

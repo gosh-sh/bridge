@@ -12,6 +12,33 @@ here and how versions are assigned.
 
 ### Added
 
+- `docs/eth-light-client.md`: design and deployment reference for the beacon
+  light client (components, step update, period rotation, trust switches,
+  deployment topology with ports and endpoints, configuration, operating
+  numbers), with Mermaid diagrams.
+- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
+  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
+  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
+  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
+  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
+  mainnet preset) now proves without code changes; the prover still defaults
+  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
+  The state file is pinned to the first `genesis_validators_root` it sees and
+  refuses a source on another network.
+- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
+  daemon proves a step of the new period, advances the committee with the
+  owner key from that proof's commitment (`setCommitteeCommitment`) and
+  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
+  only (refused after `disableOwnerRotation`).
+- `eth-lc-relayer set-committee --bundle-dir …`: owner
+  `setCommitteeCommitment(commitment, period)` from a proven step bundle
+  (public-input word 5), recording the period in the state file. Bootstraps a
+  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
+  while `--no-rotate`.
+- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
+  a shadow instance on shellnet against Sepolia (build, SRS install, contract
+  compile with the Linux `sold` release, giver funding, deploy, status,
+  systemd unit, README).
 - `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
   Ethereum beacon light-client oracle. Polls `finality_update` **and**
   `light_client/updates` (current 512-committee), proves a step via
@@ -43,8 +70,53 @@ here and how versions are assigned.
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
+### Fixed
+
+- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
+  message to `addr_none` when no `USDCBridge` was configured: the unset
+  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
+  action phase aborted with result code 34 and the whole `submitUpdate` was
+  rolled back although the proof had verified. Guard is now
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
+  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
+  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
+
 ### Changed
 
+- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
+  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
+  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
+  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
+  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
+  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
+  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
+  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
+  old `mapping => bool` across this upgrade — redeploy or re-prove from the
+  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
+- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
+  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
+  carried `32 - len` extra constant-equality cells and the VK depended on the
+  finalized block's `extra_data` length. The fixture VK was emitted over a
+  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
+  VkBlob and would have been rejected by the deployed contract. The chunk is
+  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
+  bound to the signed state by `execution_branch`). Regression test
+  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
+  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
+  `contracts/an/EthBeaconLightClient.sol` re-emitted,
+  `EthBeaconLightClient_rotate_decider.patch` regenerated from it; the tvm-sdk
+  opcode fixtures still carry the old blob and need the same rotation
+  (`scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`). Verified on Sepolia: the same blob comes
+  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
+  18 B of `extra_data`.
+- `crates/eth-light-client-relayer` builds with `--features live-submit`
+  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
+  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
+  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
+  compile.
+- `prove-one` and the daemon keep the prover transcript
+  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
+  stderr tail on failure instead of a bare exit status.
 - `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
   and, after the first accepted `submitUpdate`, issues the one-way owner flip
   (`USDCBridge.setLightClient` + `disableOwnerAnchors`,

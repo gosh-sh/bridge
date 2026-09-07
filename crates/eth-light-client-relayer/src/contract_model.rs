@@ -3,9 +3,14 @@
 //! Proof bytes are assumed valid: these tests pin the `require`s around head
 //! movement, ancestry, sink re-push, and the weak-subjectivity hatch.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 
 use crate::header_rlp::{keccak256, rlp_parent_hash};
+
+/// 365 * 24 * 3600 / 12. Matches `EthBeaconLightClient.SLOTS_PER_YEAR`.
+pub const SLOTS_PER_YEAR: u64 = 2_628_000;
+/// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
+pub const MAX_EVICT_PER_TX: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LcError {
@@ -48,9 +53,13 @@ pub struct LightClient {
     pub period: u64,
     pub owner_rotation_enabled: bool,
     pub re_anchors_applied: u64,
-    pub proven: HashSet<[u8; 32]>,
+    /// Hash → Ethereum slot at admission. Absent / expired ⇒ not live.
+    pub proven: HashMap<[u8; 32], u64>,
+    pub queue: VecDeque<[u8; 32]>,
     /// Each `_notifySink` / `rePushAnchor` (including first insert).
     pub sink_notifies: Vec<[u8; 32]>,
+    /// Each `_forgetSink` after eviction.
+    pub sink_forgets: Vec<[u8; 32]>,
 }
 
 impl LightClient {
@@ -62,16 +71,53 @@ impl LightClient {
             period,
             owner_rotation_enabled: true,
             re_anchors_applied: 0,
-            proven: HashSet::new(),
+            proven: HashMap::new(),
+            queue: VecDeque::new(),
             sink_notifies: Vec::new(),
+            sink_forgets: Vec::new(),
         }
     }
 
-    fn push_exec(&mut self, h: [u8; 32]) {
-        if self.proven.contains(&h) {
+    fn year_cutoff(&self) -> u64 {
+        self.finalized_slot.saturating_sub(SLOTS_PER_YEAR)
+    }
+
+    fn within_year(&self, eth_slot: u64) -> bool {
+        eth_slot >= self.year_cutoff()
+    }
+
+    pub fn is_live(&self, h: &[u8; 32]) -> bool {
+        match self.proven.get(h) {
+            Some(&s) if s != 0 && self.within_year(s) => true,
+            _ => false,
+        }
+    }
+
+    fn evict_expired(&mut self) {
+        let mut n = 0usize;
+        while !self.queue.is_empty() && n < MAX_EVICT_PER_TX {
+            let h = self.queue.pop_front().expect("non-empty");
+            n += 1;
+            match self.proven.get(&h).copied() {
+                Some(s) if self.within_year(s) => self.queue.push_back(h),
+                Some(_) => {
+                    self.proven.remove(&h);
+                    self.sink_forgets.push(h);
+                },
+                None => {},
+            }
+        }
+    }
+
+    fn push_exec(&mut self, h: [u8; 32], eth_slot: u64) {
+        if self.is_live(&h) {
             return;
         }
-        self.proven.insert(h);
+        if eth_slot == 0 {
+            return;
+        }
+        self.proven.insert(h, eth_slot);
+        self.queue.push_back(h);
         self.sink_notifies.push(h);
     }
 
@@ -89,17 +135,22 @@ impl LightClient {
             return Err(LcError::WrongCommittee);
         }
         let advancing = slot > self.finalized_slot;
-        let late = slot < self.finalized_slot && !self.proven.contains(&exec);
+        let late = slot < self.finalized_slot && !self.is_live(&exec);
         if !advancing && !late {
+            return Err(LcError::StaleUpdate);
+        }
+        if late && !self.within_year(slot) {
             return Err(LcError::StaleUpdate);
         }
         if advancing {
             self.finalized_slot = slot;
             self.exec_hash = exec;
-            self.push_exec(exec);
+            self.evict_expired();
+            self.push_exec(exec, slot);
             Ok(UpdateKind::Advanced)
         } else {
-            self.push_exec(exec);
+            self.evict_expired();
+            self.push_exec(exec, slot);
             Ok(UpdateKind::Backfilled)
         }
     }
@@ -112,9 +163,11 @@ impl LightClient {
             return Err(LcError::AncestryTooLong);
         }
         let checkpoint = keccak256(&header_rlps[0]);
-        if !self.proven.contains(&checkpoint) {
+        if !self.is_live(&checkpoint) {
             return Err(LcError::UnknownCheckpoint);
         }
+        let ckpt_slot = *self.proven.get(&checkpoint).expect("live");
+        self.evict_expired();
         let mut want = rlp_parent_hash(&header_rlps[0]).map_err(|_| LcError::BadAncestry)?;
         let mut added = 0u64;
         for rlp in &header_rlps[1..] {
@@ -122,8 +175,8 @@ impl LightClient {
             if h != want {
                 return Err(LcError::BadAncestry);
             }
-            if !self.proven.contains(&h) {
-                self.push_exec(h);
+            if !self.is_live(&h) {
+                self.push_exec(h, ckpt_slot);
                 added += 1;
             }
             want = rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)?;
@@ -132,7 +185,7 @@ impl LightClient {
     }
 
     pub fn re_push_anchor(&mut self, block_hash: [u8; 32]) -> Result<(), LcError> {
-        if !self.proven.contains(&block_hash) {
+        if !self.is_live(&block_hash) {
             return Err(LcError::NotProven);
         }
         self.sink_notifies.push(block_hash);
@@ -209,7 +262,7 @@ mod tests {
             UpdateKind::Advanced
         );
         assert_eq!(c.finalized_slot, 96);
-        assert!(c.proven.contains(&[0x11; 32]));
+        assert!(c.is_live(&[0x11; 32]));
         assert_eq!(c.sink_notifies, vec![[0x11; 32]]);
     }
 
@@ -222,7 +275,7 @@ mod tests {
             LcError::StaleUpdate
         );
         assert_eq!(c.finalized_slot, 96);
-        assert!(!c.proven.contains(&[0x22; 32]));
+        assert!(!c.is_live(&[0x22; 32]));
     }
 
     #[test]
@@ -234,8 +287,8 @@ mod tests {
             UpdateKind::Backfilled
         );
         assert_eq!(c.finalized_slot, 192);
-        assert!(c.proven.contains(&[0xAA; 32]));
-        assert!(c.proven.contains(&[0xBB; 32]));
+        assert!(c.is_live(&[0xAA; 32]));
+        assert!(c.is_live(&[0xBB; 32]));
     }
 
     #[test]
@@ -317,7 +370,7 @@ mod tests {
         c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
         let added = c.submit_ancestry(&[child, parent.clone()]).unwrap();
         assert_eq!(added, 1);
-        assert!(c.proven.contains(&keccak256(&parent)));
+        assert!(c.is_live(&keccak256(&parent)));
     }
 
     #[test]
@@ -349,9 +402,51 @@ mod tests {
         c.re_anchor_committee([0xDD; 32], 2).unwrap();
         let restored = c.snapshot();
         assert_eq!(restored.finalized_slot, 10);
-        assert!(restored.proven.contains(&[0x11; 32]));
+        assert!(restored.is_live(&[0x11; 32]));
         assert!(!restored.owner_rotation_enabled);
         assert_eq!(restored.re_anchors_applied, 1);
         assert_eq!(restored.committee, [0xDD; 32]);
+    }
+
+    #[test]
+    fn year_window_drops_hash_and_forgets_sink() {
+        let mut c = lc();
+        c.submit_update(100, [0x11; 32], [0xC0; 32]).unwrap();
+        assert!(c.is_live(&[0x11; 32]));
+        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+            .unwrap();
+        assert!(!c.is_live(&[0x11; 32]));
+        assert!(c.is_live(&[0x22; 32]));
+        assert_eq!(c.sink_forgets, vec![[0x11; 32]]);
+        assert_eq!(
+            c.re_push_anchor([0x11; 32]).unwrap_err(),
+            LcError::NotProven
+        );
+    }
+
+    #[test]
+    fn late_register_older_than_year_is_stale() {
+        let mut c = lc();
+        c.submit_update(SLOTS_PER_YEAR + 50, [0xAA; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.submit_update(40, [0xBB; 32], [0xC0; 32]).unwrap_err(),
+            LcError::StaleUpdate
+        );
+        assert!(!c.is_live(&[0xBB; 32]));
+    }
+
+    #[test]
+    fn ancestry_expired_checkpoint_unknown() {
+        let mut c = lc();
+        let (child, parent) = dummy_linked_headers();
+        let ckpt = keccak256(&child);
+        c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
+        c.submit_update(32 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.submit_ancestry(&[child, parent]).unwrap_err(),
+            LcError::UnknownCheckpoint
+        );
     }
 }

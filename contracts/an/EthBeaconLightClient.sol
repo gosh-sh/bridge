@@ -12,6 +12,9 @@ import "./EthKeccak.sol";
 ///         (the light client still records the anchor locally).
 interface IAcceptedBlockHashSink {
     function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) external;
+    /// Drop a hash the light client has aged out of its one-year window.
+    /// Missing this function bounces; local eviction still stands.
+    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) external;
 }
 
 /// @title EthBeaconLightClient
@@ -42,11 +45,20 @@ interface IAcceptedBlockHashSink {
 ///         hash (1/32). `submitAncestry` walks that block's execution parent-hash
 ///         chain (keccak256(header RLP) + RLP `parentHash`, ≤ 31 parents) and
 ///         pushes those hashes into the same `_acceptedBlockHash` sink.
+///         Proven hashes expire after `SLOTS_PER_YEAR` (365d of 12s slots) behind
+///         head: `isProven` / the sink forget that window. Deposits older than
+///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
     string constant version = "0.1.0";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
+    // 365 * 24 * 3600 / 12. A proven execution hash older than this many
+    // slots behind head is not canonical for `finalizeDeposit` (one-year SLA).
+    uint64 constant SLOTS_PER_YEAR = 2_628_000;
+    // Amortized compact of the FIFO; leftover expired keys stay unreadable
+    // via `_isLive` until a later tx deletes them.
+    uint16 constant MAX_EVICT_PER_TX = 128;
 
     uint64 constant MIN_BALANCE = 100 vmshell;
     uint constant bitCntAddress = 256;
@@ -56,6 +68,7 @@ contract EthBeaconLightClient {
     uint128 constant AncestryAcceptedEmit = 704;
     uint128 constant CheckpointBackfilledEmit = 705;
     uint128 constant AnchorPushBouncedEmit = 706;
+    uint128 constant AnchorsExpiredEmit = 707;
 
     // Error codes (kept clear of the shared USDCBridgeErrors range 204..229).
     uint16 constant ERR_NOT_OWNER          = 209;
@@ -102,6 +115,8 @@ contract EthBeaconLightClient {
     );
     /// USDCBridge rejected `acceptBlockHashFromLightClient` (bounce).
     event AnchorPushBounced();
+    /// Hashes dropped from the one-year proven window (and forgotten at the sink).
+    event AnchorsExpired(uint64 count);
 
     /// @notice Deposit-style struct of the 10 proven public inputs
     ///         (`step.rs::pack_step_instances`), all little-endian 32-byte Fr:
@@ -194,8 +209,13 @@ contract EthBeaconLightClient {
     // Under a live relayer SLA this stays 0.
     uint64 _reAnchorsApplied;
 
-    // Canonicality registry: proven finalized execution block hashes.
-    mapping(uint256 => bool) _provenExecutionBlockHash;
+    // Canonicality registry: proven execution hashes with the Ethereum slot
+    // they were admitted at. 0 = absent. Live iff slot >= head - SLOTS_PER_YEAR.
+    mapping(uint256 => uint64) _provenEthSlot;
+    // Insertion FIFO used to delete expired keys (lazy `_isLive` is authoritative).
+    mapping(uint64 => uint256) _provenQueue;
+    uint64 _provenQueueHead;
+    uint64 _provenQueueTail;
 
     modifier onlyOwnerPubkey() {
         require(msg.pubkey() == _ownerPubkey, ERR_NOT_OWNER);
@@ -261,8 +281,11 @@ contract EthBeaconLightClient {
         // and already-proven hashes revert ERR_STALE_UPDATE.
         bool advancing = pi.finalizedSlot > _finalizedSlot;
         bool late = pi.finalizedSlot < _finalizedSlot
-            && !_provenExecutionBlockHash[pi.executionBlockHash];
+            && !_isLive(pi.executionBlockHash);
         require(advancing || late, ERR_STALE_UPDATE);
+        if (late) {
+            require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
+        }
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -280,13 +303,15 @@ contract EthBeaconLightClient {
             _finalizedBeaconRoot = pi.finalizedBeaconRoot;
             _finalizedExecutionBlockHash = pi.executionBlockHash;
             _updatesApplied += 1;
-            _pushExecHash(pi.executionBlockHash);
+            _evictExpired();
+            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
             address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
             emit HeadUpdated{dest: addrExtern}(
                 pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
             );
         } else {
-            _pushExecHash(pi.executionBlockHash);
+            _evictExpired();
+            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
             address addrExtern = address.makeAddrExtern(CheckpointBackfilledEmit, bitCntAddress);
             emit CheckpointBackfilled{dest: addrExtern}(pi.finalizedSlot, pi.executionBlockHash);
         }
@@ -361,7 +386,7 @@ contract EthBeaconLightClient {
     // ========================================================
 
     /// @notice Pushes the execution parent-hash chain of an already-proven
-    ///         checkpoint into `_provenExecutionBlockHash` / `USDCBridge`.
+    ///         checkpoint into the one-year window / `USDCBridge`.
     ///         `headerRlps[0]` must keccak256 to a proven checkpoint; each next
     ///         header's keccak256 must equal the previous header's RLP
     ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
@@ -371,15 +396,17 @@ contract EthBeaconLightClient {
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
         uint256 checkpoint = EthKeccak.hash(headerRlps[0]);
-        require(_provenExecutionBlockHash[checkpoint], ERR_UNKNOWN_CHECKPOINT);
+        require(_isLive(checkpoint), ERR_UNKNOWN_CHECKPOINT);
+        uint64 ckptSlot = _provenEthSlot[checkpoint];
+        _evictExpired();
         uint256 want = EthKeccak.rlpParentHash(headerRlps[0]);
         uint64 added = 0;
         uint i;
         for (i = 1; i < headerRlps.length; i++) {
             uint256 h = EthKeccak.hash(headerRlps[i]);
             require(h == want, ERR_BAD_ANCESTRY);
-            if (!_provenExecutionBlockHash[h]) {
-                _pushExecHash(h);
+            if (!_isLive(h)) {
+                _pushExecHash(h, ckptSlot);
                 added += 1;
             }
             want = EthKeccak.rlpParentHash(headerRlps[i]);
@@ -389,31 +416,91 @@ contract EthBeaconLightClient {
         emit AncestryAccepted{dest: addrExtern}(checkpoint, added);
     }
 
-    function _pushExecHash(uint256 h) private {
-        // Duplicate writes are no-ops so `submitAncestry` can re-walk a chain.
-        if (_provenExecutionBlockHash[h]) {
+    function _yearCutoff() private view returns (uint64) {
+        if (_finalizedSlot <= SLOTS_PER_YEAR) {
+            return 0;
+        }
+        return _finalizedSlot - SLOTS_PER_YEAR;
+    }
+
+    function _withinYear(uint64 ethSlot) private view returns (bool) {
+        return ethSlot >= _yearCutoff();
+    }
+
+    function _isLive(uint256 h) private view returns (bool) {
+        uint64 s = _provenEthSlot[h];
+        return s != 0 && _withinYear(s);
+    }
+
+    function _pushExecHash(uint256 h, uint64 ethSlot) private {
+        // Duplicate live writes are no-ops so `submitAncestry` can re-walk.
+        if (_isLive(h)) {
             return;
         }
-        _provenExecutionBlockHash[h] = true;
+        require(ethSlot != 0, ERR_STALE_UPDATE);
+        _provenEthSlot[h] = ethSlot;
+        _provenQueue[_provenQueueHead] = h;
+        _provenQueueHead += 1;
         _notifySink(h);
+    }
+
+    /// Compact the FIFO: expired hashes are deleted and forgotten at the sink;
+    /// still-live hashes are re-queued. Caps work per tx so a long pause does
+    /// not OOG; `_isLive` already hides anything past the cutoff.
+    function _evictExpired() private {
+        uint16 n = 0;
+        uint64 dropped = 0;
+        while (_provenQueueTail < _provenQueueHead && n < MAX_EVICT_PER_TX) {
+            uint256 h = _provenQueue[_provenQueueTail];
+            delete _provenQueue[_provenQueueTail];
+            _provenQueueTail += 1;
+            n += 1;
+            uint64 s = _provenEthSlot[h];
+            if (s != 0 && _withinYear(s)) {
+                _provenQueue[_provenQueueHead] = h;
+                _provenQueueHead += 1;
+            } else if (s != 0) {
+                delete _provenEthSlot[h];
+                _forgetSink(h);
+                dropped += 1;
+            }
+        }
+        if (dropped != 0) {
+            address addrExtern = address.makeAddrExtern(AnchorsExpiredEmit, bitCntAddress);
+            emit AnchorsExpired{dest: addrExtern}(dropped);
+        }
     }
 
     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
     function rePushAnchor(uint256 blockHash) public {
-        require(_provenExecutionBlockHash[blockHash], ERR_NOT_PROVEN);
+        require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();
         _notifySink(blockHash);
         ensureBalance();
     }
 
     function _notifySink(uint256 h) private {
-        if (_usdcBridge != address(0)) {
+        // An unset `_usdcBridge` is `addr_none` (never written), which is not
+        // `address(0)`: comparing only against `address(0)` sent the message
+        // to `addr_none`, the action phase aborted with result code 34 and
+        // the whole `submitUpdate` rolled back on a standalone deployment.
+        if (!_usdcBridge.isNone() && _usdcBridge != address(0)) {
             // bounce: true so a rejected sink returns the 1 vmshell and
             // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
             // is the retry (submitUpdate would hit ERR_STALE_UPDATE).
             IAcceptedBlockHashSink(_usdcBridge).acceptBlockHashFromLightClient{
+                value: 1 vmshell,
+                bounce: true,
+                flag: 1
+            }(_l1ChainId, h);
+        }
+    }
+
+    function _forgetSink(uint256 h) private {
+        if (!_usdcBridge.isNone() && _usdcBridge != address(0)) {
+            IAcceptedBlockHashSink(_usdcBridge).forgetBlockHashFromLightClient{
                 value: 1 vmshell,
                 bounce: true,
                 flag: 1
@@ -528,7 +615,10 @@ contract EthBeaconLightClient {
             _committeePeriod,
             _ownerRotationEnabled,
             _reAnchorsApplied,
-            _provenExecutionBlockHash,
+            _provenEthSlot,
+            _provenQueue,
+            _provenQueueHead,
+            _provenQueueTail,
             userCell
         );
         tvm.commit();
@@ -551,11 +641,16 @@ contract EthBeaconLightClient {
          uint64 committeePeriod,
          bool ownerRotationEnabled,
          uint64 reAnchorsApplied,
-         mapping(uint256 => bool) proven,
-         TvmCell /*userCell*/)
+         mapping(uint256 => uint64) provenEthSlot,
+         mapping(uint64 => uint256) provenQueue,
+         uint64 provenQueueHead,
+         uint64 provenQueueTail,
+         TvmCell userCell)
             = abi.decode(cell, (
                 uint256, uint256, address, uint64, uint256, uint256, uint64,
-                uint256, uint64, bool, uint64, mapping(uint256 => bool), TvmCell
+                uint256, uint64, bool, uint64,
+                mapping(uint256 => uint64), mapping(uint64 => uint256), uint64, uint64,
+                TvmCell
             ));
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
@@ -568,7 +663,10 @@ contract EthBeaconLightClient {
         _committeePeriod = committeePeriod;
         _ownerRotationEnabled = ownerRotationEnabled;
         _reAnchorsApplied = reAnchorsApplied;
-        _provenExecutionBlockHash = proven;
+        _provenEthSlot = provenEthSlot;
+        _provenQueue = provenQueue;
+        _provenQueueHead = provenQueueHead;
+        _provenQueueTail = provenQueueTail;
     }
 
     // ========================================================
@@ -594,13 +692,23 @@ contract EthBeaconLightClient {
 
     /// @notice Whether a finalized execution block hash has been proven canonical.
     function isProvenExecutionBlockHash(uint256 blockHash) external view returns (bool) {
-        return _provenExecutionBlockHash[blockHash];
+        return _isLive(blockHash);
     }
 
     /// @notice Drop-in canonicality query matching `USDCBridge.isAcceptedBlockHash`:
-    ///         true only for the followed L1 and a proven finalized block hash.
+    ///         true only for the followed L1 and a live (in-window) proven hash.
     function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
-        return chainId == _l1ChainId && _provenExecutionBlockHash[blockHash];
+        return chainId == _l1ChainId && _isLive(blockHash);
+    }
+
+    /// @notice Ethereum slots kept in the proven set (`365d / 12s`).
+    function slotsPerYear() external pure returns (uint64) {
+        return SLOTS_PER_YEAR;
+    }
+
+    /// @notice Occupancy of the eviction FIFO (live + not-yet-compacted expired).
+    function provenQueueLen() external view returns (uint64) {
+        return _provenQueueHead - _provenQueueTail;
     }
 
     function getConfig() external view returns (uint256 l1ChainId, address usdcBridge, uint256 ownerPubkey) {
@@ -688,7 +796,7 @@ contract EthBeaconLightClient {
     // Base v1 (Blake2b transcript), 8 public inputs. Hermez SRS (k=19), Base
     // circuit shape num_advice_per_phase=[132]. Source:
     //   acki-nacki-bridge/eth-light-client-prover/fixtures/step_vkblob/step_vk_blob.bin
-    //   sha256 bd108c08afb35668d2872e8a6dd65581fa8fcb06f2471ebd7c93d6ec7d21bab0
+    //   sha256 2d66c2058e615be1f6459d6a01f05dd21cf2ca99ba8ac9935739f5507d320fab
     // Magic "VKBLOB\x00\x00" + version 1.
     //
     // To rotate: regenerate the fixture in acki-nacki-bridge
@@ -894,8 +1002,8 @@ contract EthBeaconLightClient {
         hex"c700ab3295c5635503e055e9a627d87ed496ce2bf880409d2239637803fc440e128d7d4b37651bbe1ada294530628c3b5d0ffde59f62229b4aeb8399"
         hex"4d46023c597cffaec681f28b09237b6a483f81d8144090952e5a372c6f8f2c5880a343e677a27fb731f8937d00043a1e00cd751f5f66c004559c0392"
         hex"09f116ccf4fd05ceebe7fe63f4f60f6517ce63853374b390d3568c005c3fcfd545840ca73d1ccb55447ffa47bd4178681a59e0cd4bc013323ab0f3fa"
-        hex"f72f6a93d16cbecc1258c3a795d3953b8c214d812097aa07277e4ee0d1a1f010c69d56cda0e5e3d70e20f0b8bea988f4447799420dd139ac1ac1995f"
-        hex"1e9a75aca01330e33dbdcf4ccabedd4bb0f09c64619cac86118ab8d0646c0585acc64352f2ee2ed3927fee4c2eb510f6112cb9da2a39546f0745047a"
+        hex"f72f6a93d16cbecc1258c3a795d3953b8c214d812097aa07277e4ee0d1a1f010c69d56cda0e5e3d70e20f0b8bea988f4447799420d5258a8617b9516"
+        hex"35cc21236aeb0e44acb5b6801b28dc099e2c2eb658a7a54e06d3894fe9ad6a8fc5b520b99f9d2db655a2e10875f2eb173b27c04b1a6f033b0445047a"
         hex"16b85859766507f3a55a115162aa99927c3f985a73f4f524f9972399124ef5f54dbccf59ca07a27d2763a819eedbb90c88ef8e9f0a0edcd280aefc7d"
         hex"16e133973369545cb11e0ebf5572a86e6adc7074b3834c51c6c31309b6b7604803ff2b78c420d3548349626490697ad5e9c5bd7fc705c1c60e207f01"
         hex"c65f10500320821a3a6e8ff2a9294badc4f9faa29519fdc71be0ecbcae12654b6f959bd90b4f8e07c1e9e32322541f1bbb3879de1081f3d0c330fd29"

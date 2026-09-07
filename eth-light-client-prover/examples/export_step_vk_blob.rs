@@ -6,24 +6,25 @@
 //! ## Why Hermez, not the chain ceremony
 //!
 //! Since 2026-07-23 the `ZKHALO2VERIFYWITHVK` opcode
-//! (`tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`) is keyed on
-//! the **Hermez Perpetual Powers of Tau** `[s]·G2` (`92 8f af b3 …`, valid for
-//! any K ≤ 28). A KZG verifier only checks openings against `[s]·G2`, and the
-//! VK's fixed / permutation commitments are `Σ cᵢ·[τ^i]G1` — both are ceremony
-//! (τ) specific. So a VkBlob + proof the opcode will accept MUST be keyed on the
-//! Hermez SRS. The legacy Dark DEX `ZKHALO2VERIFY` (`DARK_DEX_KZG_S_G2_BYTES`,
-//! `c6 02 8a cf …`) still uses the chain ceremony — irrelevant here.
+//! (`tvm-sdk/tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`) is keyed
+//! on the **Hermez Perpetual Powers of Tau** `[s]·G2` (`92 8f af b3 …`, valid
+//! for any K ≤ 28). A KZG verifier only checks openings against `[s]·G2`, and
+//! the VK's fixed / permutation commitments are `Σ cᵢ·[τ^i]G1` — both are
+//! ceremony (τ) specific. So a VkBlob + proof the opcode will accept MUST be
+//! keyed on the Hermez SRS. The legacy Dark DEX `ZKHALO2VERIFY`
+//! (`DARK_DEX_KZG_S_G2_BYTES`, `c6 02 8a cf …`) still uses the chain ceremony —
+//! irrelevant here.
 //!
 //! ## What this emits (`out/step_vkblob/`)
 //!
 //! - `step_vk_blob.bin`          — **Base v1** `VkBlob` (magic `VKBLOB\0\0`,
 //!   version 1, transcript Blake2b, shape Base, `BaseCircuitParams` JSON +
 //!   `VerifyingKey::write(RawBytes)`). This is the mature wire the opcode reads
-//!   TODAY (Dark DEX / fallback) — the step is a `BaseCircuitBuilder`, so Base v1
-//!   applies directly (no v2/RLC fork-bump dependency).
+//!   TODAY (Dark DEX / fallback) — the step is a `BaseCircuitBuilder`, so Base
+//!   v1 applies directly (no v2/RLC fork-bump dependency).
 //! - `step_base_circuit_params.json` — the carried config, for reference.
-//! - `step_public_inputs.bin`    — `STEP_INSTANCE_LEN × 32` LE `Fr` (the opcode's
-//!   `public_inputs_cell` payload).
+//! - `step_public_inputs.bin`    — `STEP_INSTANCE_LEN × 32` LE `Fr` (the
+//!   opcode's `public_inputs_cell` payload).
 //! - `step_proof_blake2b.bin`    — raw SHPLONK proof bytes (the `proof_cell`).
 //!
 //! ## Opcode-faithful self-check
@@ -31,8 +32,8 @@
 //! After emitting, this reparses the blob and runs, byte-for-byte, the opcode's
 //! Base branch:
 //!   `VerifyingKey::read::<_, BaseCircuitBuilder<Fr>>(RawBytes, base_params)`
-//! then `verify_proof::<KZG, VerifierSHPLONK, Blake2bRead, SingleStrategy>` against
-//! `srs.verifier_params()`. Because the SRS is the Hermez ceremony, its
+//! then `verify_proof::<KZG, VerifierSHPLONK, Blake2bRead, SingleStrategy>`
+//! against `srs.verifier_params()`. Because the SRS is the Hermez ceremony, its
 //! `(g[0], g2, s_g2)` are the same points the opcode rebuilds its params from
 //! (`build_shared_kzg_params`), so a PASS here is a faithful proxy for on-AN
 //! acceptance. The VK bytes are also asserted byte-stable across a read→write.
@@ -51,37 +52,45 @@
 //! Overridable via env: `STEP_SRS_PATH` (default `data/kzg_params_19.srs`),
 //! `STEP_OUT_DIR` (default `out/step_vkblob`).
 
-use std::fs;
-use std::path::Path;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 
-use eth_light_client_prover::execution::ExecutionPayloadVals;
-use eth_light_client_prover::signing::{
-    native_sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
+use eth_light_client_prover::{
+    bls_core::{signing_root_to_g2, verify_native},
+    execution::ExecutionPayloadVals,
+    live_witness::{step_witness_from_beacon_with_params, ChainParams},
+    signing::native_sync_committee_signing_root,
+    step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN},
 };
-use eth_light_client_prover::bls_core::{signing_root_to_g2, verify_native};
-use eth_light_client_prover::live_witness::step_witness_from_beacon;
-use eth_light_client_prover::step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN};
-
 use gosh_sha256_chip::Sha256Chip;
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::{BaseCircuitParams, CircuitBuilderStage};
-use halo2_base::gates::RangeChip;
-use halo2_base::halo2_proofs::halo2curves::bls12_381::{
-    G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
+use halo2_base::{
+    gates::{
+        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, CircuitBuilderStage},
+        RangeChip,
+    },
+    halo2_proofs::{
+        halo2curves::{
+            bls12_381::{
+                G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
+            },
+            bn256::{Bn256, Fr, G1Affine},
+            ff::Field,
+            group::{Curve, Group},
+            serde::SerdeObject,
+        },
+        plonk::{keygen_pk, keygen_vk, verify_proof, VerifyingKey},
+        poly::{
+            commitment::{Params, ParamsProver},
+            kzg::{
+                commitment::{KZGCommitmentScheme, ParamsKZG},
+                multiopen::VerifierSHPLONK,
+                strategy::SingleStrategy,
+            },
+        },
+        transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
+        SerdeFormat,
+    },
+    utils::testing::gen_proof_with_instances,
 };
-use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
-use halo2_base::halo2_proofs::halo2curves::ff::Field;
-use halo2_base::halo2_proofs::halo2curves::group::{Curve, Group};
-use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
-use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk, verify_proof, VerifyingKey};
-use halo2_base::halo2_proofs::poly::commitment::{Params, ParamsProver};
-use halo2_base::halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
-use halo2_base::halo2_proofs::poly::kzg::multiopen::VerifierSHPLONK;
-use halo2_base::halo2_proofs::poly::kzg::strategy::SingleStrategy;
-use halo2_base::halo2_proofs::transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer};
-use halo2_base::halo2_proofs::SerdeFormat;
-use halo2_base::utils::testing::gen_proof_with_instances;
 use rand::rngs::OsRng;
 use serde_json::Value;
 
@@ -103,7 +112,10 @@ const LOOKUP_BITS: usize = 18;
 // ---------------------------------------------------------------------------
 
 fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s.trim_start_matches("0x")).unwrap().try_into().unwrap()
+    hex::decode(s.trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap()
 }
 fn hexv(s: &str) -> Vec<u8> {
     hex::decode(s.trim_start_matches("0x")).unwrap()
@@ -131,7 +143,9 @@ fn execution(v: &Value, which: &str) -> ExecutionPayloadVals {
     let e = &v["data"][which]["execution"];
     ExecutionPayloadVals {
         parent_hash: h32(e["parent_hash"].as_str().unwrap()),
-        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap()).try_into().unwrap(),
+        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap())
+            .try_into()
+            .unwrap(),
         state_root: h32(e["state_root"].as_str().unwrap()),
         receipts_root: h32(e["receipts_root"].as_str().unwrap()),
         logs_bloom: hexv(e["logs_bloom"].as_str().unwrap()),
@@ -167,13 +181,19 @@ fn fixture_json() -> anyhow::Result<String> {
 
 fn build_witness() -> anyhow::Result<StepWitness> {
     let finality = fixture_json()?;
+    // Signing domain: `BEACON_FORK_VERSION` + `BEACON_GENESIS_VALIDATORS_ROOT`
+    // (the relayer fills them from the beacon node), default mainnet Fulu.
+    // Witness-only, so the VK below is the same for every network.
+    let params = ChainParams::from_env()?;
+    println!("Signing domain: {}", params.label());
     if let Ok(p) = std::env::var("COMMITTEE_JSON_PATH").or_else(|_| std::env::var("BOOTSTRAP_PATH"))
     {
         let committee = std::fs::read_to_string(&p)?;
-        return step_witness_from_beacon(&finality, &committee);
+        return step_witness_from_beacon_with_params(&finality, &committee, &params);
     }
     eprintln!(
-        "WARN: COMMITTEE_JSON_PATH/BOOTSTRAP_PATH unset — synthetic 512-committee (VK emit only, not chain-valid)"
+        "WARN: COMMITTEE_JSON_PATH/BOOTSTRAP_PATH unset — synthetic 512-committee (VK emit only, \
+         not chain-valid)"
     );
     let v: Value = serde_json::from_str(&finality)?;
     let attested = header(&v, "attested_header");
@@ -191,8 +211,8 @@ fn build_witness() -> anyhow::Result<StepWitness> {
         &attested.parent_root,
         &attested.state_root,
         &attested.body_root,
-        &FORK_VERSION_FULU,
-        &MAINNET_GENESIS_VALIDATORS_ROOT,
+        &params.fork_version,
+        &params.genesis_validators_root,
     );
     let msg_hash = signing_root_to_g2(&signing_root);
     let hm = BlsG2::from(msg_hash);
@@ -219,8 +239,8 @@ fn build_witness() -> anyhow::Result<StepWitness> {
         attested,
         finalized,
         finality_branch,
-        fork_version: FORK_VERSION_FULU,
-        genesis_validators_root: MAINNET_GENESIS_VALIDATORS_ROOT,
+        fork_version: params.fork_version,
+        genesis_validators_root: params.genesis_validators_root,
         pubkeys,
         pubkeys_compressed,
         aggregate_pubkey,
@@ -243,7 +263,8 @@ fn write_chunk(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn encode_base_v1_vkblob(config: &BaseCircuitParams, vk: &VerifyingKey<G1Affine>) -> Vec<u8> {
     let mut vk_bytes = Vec::new();
-    vk.write(&mut vk_bytes, SerdeFormat::RawBytes).expect("VerifyingKey::write(RawBytes)");
+    vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
+        .expect("VerifyingKey::write(RawBytes)");
     let cfg_json = serde_json::to_vec(config).expect("serialise BaseCircuitParams");
 
     let mut out = Vec::new();
@@ -382,7 +403,10 @@ fn main() -> anyhow::Result<()> {
     // VK bytes must be byte-stable across read->write.
     let mut reser = Vec::new();
     vk_reread.write(&mut reser, SerdeFormat::RawBytes)?;
-    anyhow::ensure!(reser == vk_bytes_back, "VK bytes not byte-stable across round-trip");
+    anyhow::ensure!(
+        reser == vk_bytes_back,
+        "VK bytes not byte-stable across round-trip"
+    );
     anyhow::ensure!(
         vk_reread.get_domain().k() == K,
         "VK domain.k {} != {K}",
@@ -400,7 +424,13 @@ fn main() -> anyhow::Result<()> {
         Challenge255<G1Affine>,
         Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
         SingleStrategy<'_, Bn256>,
-    >(verifier_params, &vk_reread, strategy, &[instance_refs], &mut transcript)
+    >(
+        verifier_params,
+        &vk_reread,
+        strategy,
+        &[instance_refs],
+        &mut transcript,
+    )
     .is_ok();
     anyhow::ensure!(ok, "SHPLONK verify_proof (opcode path) REJECTED the proof");
     println!("  OK: verify_proof (VerifierSHPLONK + Blake2b + Hermez verifier_params) ACCEPTED\n");
@@ -416,9 +446,21 @@ fn main() -> anyhow::Result<()> {
     fs::write(&proof_path, &proof)?;
 
     println!("=== RESULT: PASS — production step VkBlob is opcode-readable ===");
-    println!("  {vk_blob_path}  ({} B, sha256 {})", vk_blob.len(), sha256_hex(&vk_blob));
-    println!("  {pi_path}  ({} B = {} × 32 Fr)", pi_bytes.len(), inst.len());
-    println!("  {proof_path}  ({} B, sha256 {})", proof.len(), sha256_hex(&proof));
+    println!(
+        "  {vk_blob_path}  ({} B, sha256 {})",
+        vk_blob.len(),
+        sha256_hex(&vk_blob)
+    );
+    println!(
+        "  {pi_path}  ({} B = {} × 32 Fr)",
+        pi_bytes.len(),
+        inst.len()
+    );
+    println!(
+        "  {proof_path}  ({} B, sha256 {})",
+        proof.len(),
+        sha256_hex(&proof)
+    );
     println!("  {cfg_path}");
     Ok(())
 }

@@ -79,6 +79,11 @@ pub struct SubprocessProverConfig {
     pub prover_dir: PathBuf,
     pub srs_path: PathBuf,
     pub timeout: Duration,
+    /// Where to keep the prover transcript
+    /// (`prover-<attested_slot>-{stdout,stderr}.log`). `None` leaves it in
+    /// the per-run temp dir (lost after the run); the error message still
+    /// carries the stderr tail.
+    pub log_dir: Option<PathBuf>,
 }
 
 pub struct SubprocessProofGenerator {
@@ -115,19 +120,56 @@ impl SubprocessProofGenerator {
             .env("STEP_OUT_DIR", &out_dir)
             .env("STEP_SRS_PATH", &self.cfg.srs_path)
             .env("COMMITTEE_JSON_PATH", &committee_path);
-        let status = cmd
+        // Signing domain resolved by the beacon source (fork at
+        // `signature_slot`, network genesis root). Without it the prover
+        // falls back to its own env / mainnet default.
+        if let Some(chain) = &update.chain {
+            cmd.env(
+                crate::types::BeaconChainParams::ENV_FORK_VERSION,
+                chain.fork_version_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
+                chain.genesis_validators_root_hex(),
+            );
+        }
+        let output = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .status();
+            .output();
 
-        let child = tokio::time::timeout(self.cfg.timeout, status)
+        let output = tokio::time::timeout(self.cfg.timeout, output)
             .await
             .map_err(|_| RelayerError::ProofGeneration("step prove timed out".into()))?
             .map_err(|e| RelayerError::ProofGeneration(format!("spawn cargo: {e}")))?;
-        if !child.success() {
+        // Keep the prover transcript next to the bundle: `prove-one` copies the
+        // bundle out, the daemon's tempdir is dropped, so the error also
+        // carries the stderr tail.
+        let log_dir = match &self.cfg.log_dir {
+            Some(d) => {
+                let _ = std::fs::create_dir_all(d);
+                d.clone()
+            },
+            None => out_dir.clone(),
+        };
+        let stem = format!("prover-{}", update.attested_slot);
+        let _ = std::fs::write(log_dir.join(format!("{stem}-stdout.log")), &output.stdout);
+        let _ = std::fs::write(log_dir.join(format!("{stem}-stderr.log")), &output.stderr);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(RelayerError::ProofGeneration(format!(
-                "export_step_vk_blob exited {child}"
+                "export_step_vk_blob exited {}; stderr tail:\n{tail}",
+                output.status
             )));
         }
 
@@ -231,6 +273,7 @@ mod tests {
             prover_dir: ".".into(),
             srs_path: ".".into(),
             timeout: Duration::from_secs(1),
+            log_dir: None,
         });
         let err = gen.generate_step(&sample_update()).await.unwrap_err();
         match err {

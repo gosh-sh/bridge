@@ -85,6 +85,20 @@
 			]
 		},
 		{
+			"name": "slotsPerYear",
+			"inputs": [],
+			"outputs": [
+				{"name":"value0","type":"uint64"}
+			]
+		},
+		{
+			"name": "provenQueueLen",
+			"inputs": [],
+			"outputs": [
+				{"name":"value0","type":"uint64"}
+			]
+		},
+		{
 			"name": "getCommitteeState",
 			"inputs": [],
 			"outputs": [
@@ -129,6 +143,12 @@
 		{
 			"name": "AnchorPushBounced",
 			"inputs": []
+		},
+		{
+			"name": "AnchorsExpired",
+			"inputs": [
+				{"name":"count","type":"uint64"}
+			]
 		}
 	],
 	"fields": []

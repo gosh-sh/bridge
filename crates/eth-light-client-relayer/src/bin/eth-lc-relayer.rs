@@ -5,6 +5,8 @@
 //! - `prove-one` — subprocess `export_step_vk_blob` (needs Hermez SRS + n14
 //!   RAM)
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
+//! - `set-committee` — owner `setCommitteeCommitment` from a proven bundle
+//!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults.
@@ -65,6 +67,31 @@ enum Cmd {
     SubmitOne {
         #[arg(long)]
         bundle_dir: PathBuf,
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
+    },
+    /// Owner `setCommitteeCommitment(commitment, period)` from a proven step
+    /// bundle (public-input word 5 = commitment of the committee that signed
+    /// the attested header). Bootstraps a fresh contract and hops periods
+    /// while rotate is off; records the period in `--state` so the daemon
+    /// does not re-flag it. Refused by the contract after
+    /// `disableOwnerRotation`.
+    SetCommittee {
+        #[arg(long)]
+        bundle_dir: PathBuf,
+        /// Override the period (default: attested slot of the bundle / 8192).
+        #[arg(long)]
+        period: Option<u64>,
+        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
+        state: PathBuf,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -163,6 +190,12 @@ enum Cmd {
         /// followed by `rePushAnchor` + `submitAncestry` (31/32 coverage).
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
+        /// With `--no-rotate`: on a period jump, prove a step of the new
+        /// period and advance the committee with the owner key
+        /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
+        /// Shadow only; refused by the contract after `disableOwnerRotation`.
+        #[arg(long, default_value_t = false, requires = "no_rotate")]
+        owner_hop: bool,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -218,6 +251,28 @@ async fn main() -> anyhow::Result<()> {
                 srs_path,
                 out_dir,
                 timeout_secs,
+            )
+            .await
+        },
+        Cmd::SetCommittee {
+            bundle_dir,
+            period,
+            state,
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+        } => {
+            set_committee(
+                bundle_dir,
+                period,
+                state,
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
             )
             .await
         },
@@ -314,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
             no_rotate,
             no_flip_owner,
             eth_rpc_url,
+            owner_hop,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -360,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
                 !no_rotate,
                 !no_flip_owner,
                 eth_rpc_url,
+                owner_hop,
                 an,
                 allow_insecure_graphql,
                 BackoffConfig {
@@ -378,14 +435,98 @@ async fn main() -> anyhow::Result<()> {
 async fn beacon_watch(beacon_url: String) -> anyhow::Result<()> {
     let src = HttpBeaconSource::new(beacon_url)?;
     let u = src.fetch_finality().await?;
+    let (fork, gvr) = match &u.chain {
+        Some(c) => (c.fork_version_hex(), c.genesis_validators_root_hex()),
+        None => ("?".into(), "?".into()),
+    };
     info!(
         attested_slot = u.attested_slot,
         finalized_slot = u.finalized_slot,
+        signature_slot = u.signature_slot,
         period = u.period(),
+        signing_period = u.signing_period(),
         participation = u.participation,
         exec = %hex::encode(u.execution_block_hash),
+        fork_version = %fork,
+        genesis_validators_root = %gvr,
         "finality_update"
     );
+    Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+#[allow(clippy::too_many_arguments)]
+async fn set_committee(
+    _bundle_dir: PathBuf,
+    _period: Option<u64>,
+    _state: PathBuf,
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+) -> anyhow::Result<()> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+#[allow(clippy::too_many_arguments)]
+async fn set_committee(
+    bundle_dir: PathBuf,
+    period: Option<u64>,
+    state: PathBuf,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    use eth_light_client_relayer::{RelayerState, SLOTS_PER_SYNC_PERIOD};
+
+    let bundle = StepProofBundle::from_dir(&bundle_dir)?;
+    let commitment = bundle.parsed.committee_commitment;
+    if commitment == [0u8; 32] {
+        anyhow::bail!("bundle public inputs carry a zero committee commitment");
+    }
+    let period = period.unwrap_or(bundle.parsed.attested_slot / SLOTS_PER_SYNC_PERIOD);
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+            usdc_bridge: None,
+        });
+    info!(
+        period,
+        attested_slot = bundle.parsed.attested_slot,
+        commitment = %eth_light_client_relayer::le_word_to_uint256_hex(&commitment),
+        "setCommitteeCommitment"
+    );
+    match submitter
+        .set_committee_commitment(commitment, period)
+        .await?
+    {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(tx = ?tx_hash.map(hex::encode), "setCommitteeCommitment accepted");
+        },
+        other => anyhow::bail!("setCommitteeCommitment: {other:?}"),
+    }
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
+    st.last_committee_period = Some(period);
+    st.rotate_pending_period = None;
+    st.save(&state)?;
+    info!(state = %state.display(), period, "state file records the committee period");
     Ok(())
 }
 
@@ -416,6 +557,7 @@ async fn prove_one(
         prover_dir,
         srs_path,
         timeout: Duration::from_secs(timeout_secs),
+        log_dir: Some(out_dir.clone()),
     });
     let bundle = gen.generate_step(&update).await?;
     std::fs::create_dir_all(&out_dir)?;
@@ -464,6 +606,7 @@ async fn ancestry_one(
     Ok(())
 }
 
+#[cfg(not(feature = "live-submit"))]
 fn live_submit_needs_feature() -> anyhow::Error {
     anyhow::anyhow!("rebuild with `--features live-submit` to submit to AN (or pass --dry-run)")
 }
@@ -711,6 +854,7 @@ async fn run_daemon(
     enable_rotate: bool,
     flip_owner: bool,
     eth_rpc_url: Option<String>,
+    owner_hop: bool,
     an: AnConfig,
     allow_insecure: bool,
     backoff: BackoffConfig,
@@ -724,6 +868,7 @@ async fn run_daemon(
     cfg.poll_interval = Duration::from_secs(poll_secs);
     cfg.enable_rotate = enable_rotate;
     cfg.flip_owner = flip_owner;
+    cfg.owner_hop = owner_hop;
 
     if dry_run {
         info!("dry-run: MockAnSubmitter (no AN tx)");
@@ -742,6 +887,7 @@ async fn run_daemon(
             prover_dir,
             srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
             timeout: Duration::from_secs(prove_timeout_secs),
+            log_dir: Some(prover_log_dir(&state_path)),
         });
         let relayer = Relayer::new(
             cfg,
@@ -811,9 +957,10 @@ async fn run_daemon(
             prover_dir,
             srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
             timeout: Duration::from_secs(prove_timeout_secs),
+            log_dir: Some(prover_log_dir(&state_path)),
         });
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
-        return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+        run(attach_execution(relayer, eth_rpc_url)?, backoff).await
     }
 }
 
@@ -839,6 +986,15 @@ where
             Ok(relayer)
         },
     }
+}
+
+/// `<state file dir>/prover-logs`: prover transcripts of the daemon's proves.
+fn prover_log_dir(state: &std::path::Path) -> PathBuf {
+    state
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("prover-logs")
 }
 
 async fn run<S, P, A>(mut relayer: Relayer<S, P, A>, backoff: BackoffConfig) -> anyhow::Result<()>

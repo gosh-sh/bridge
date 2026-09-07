@@ -34,6 +34,20 @@ pub const FORK_VERSION_DENEB: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
 pub const FORK_VERSION_ELECTRA: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
 pub const FORK_VERSION_FULU: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
+/// Sepolia `genesis_validators_root`
+/// (`0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078`,
+/// `GET /eth/v1/beacon/genesis`).
+pub const SEPOLIA_GENESIS_VALIDATORS_ROOT: [u8; 32] = [
+    0xd8, 0xea, 0x17, 0x1f, 0x3c, 0x94, 0xae, 0xa2, 0x1e, 0xbc, 0x42, 0xa1, 0xed, 0x61, 0x05, 0x2a,
+    0xcf, 0x3f, 0x92, 0x09, 0xc0, 0x0e, 0x4e, 0xfb, 0xaa, 0xdd, 0xac, 0x09, 0xed, 0x9b, 0x80, 0x78,
+];
+
+// Sepolia fork versions (`GET /eth/v1/config/spec`, `*_FORK_VERSION`). Same
+// preset as mainnet (512-member committee, 32 slots/epoch, 256 epochs/period),
+// so only the signing domain differs.
+pub const SEPOLIA_FORK_VERSION_ELECTRA: [u8; 4] = [0x90, 0x00, 0x00, 0x74];
+pub const SEPOLIA_FORK_VERSION_FULU: [u8; 4] = [0x90, 0x00, 0x00, 0x75];
+
 // ---------------------------------------------------------------------------
 // In-circuit
 // ---------------------------------------------------------------------------

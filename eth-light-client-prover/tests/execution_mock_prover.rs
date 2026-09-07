@@ -130,3 +130,53 @@ fn execution_payload_root_and_branch_in_circuit() {
         verify_merkle_branch(&chip, ctx, &root, &branch_nodes, EXECUTION_PAYLOAD_GINDEX, &root_target);
     });
 }
+
+/// Regression: the constraint system of `execution_payload_root` must not
+/// depend on `extra_data.len()`. The old code padded the 32-byte chunk with
+/// `load_constant`, which added `32 - len` constant-equality (copy)
+/// constraints and therefore a different VK per finalized block: the fixture
+/// VkBlob (27-byte mainnet `extra_data`) rejected a 25-byte Sepolia block.
+#[test]
+fn execution_root_shape_is_independent_of_extra_data_len() {
+    use halo2_base::gates::circuit::{builder::BaseCircuitBuilder, CircuitBuilderStage};
+
+    let v: Value = serde_json::from_str(FIXTURE).unwrap();
+    let base = execution(&v, "finalized_header");
+
+    let shape = |extra: Vec<u8>| {
+        let mut p = base.clone();
+        p.extra_data = extra;
+        let native = native_execution_payload_root(&p);
+        let mut b = BaseCircuitBuilder::<Fr>::from_stage(CircuitBuilderStage::Mock)
+            .use_k(18)
+            .use_lookup_bits(17);
+        let range = RangeChip::new(17, b.lookup_manager().clone());
+        let chip = Sha256Chip::new(&range);
+        let ctx = b.main(0);
+        let (root, _) = execution_payload_root(&chip, ctx, &p);
+        for (i, &byte) in root.iter().enumerate() {
+            assert_eq!(
+                byte.value().get_lower_32() as u8,
+                native[i],
+                "root byte {i}"
+            );
+        }
+        let stats = b.statistics();
+        let cm = b.pool(0).copy_manager.lock().unwrap();
+        (
+            stats.gate.total_advice_per_phase.clone(),
+            stats.total_lookup_advice_per_phase.clone(),
+            cm.advice_equalities.len(),
+            cm.constant_equalities.len(),
+        )
+    };
+
+    let reference = shape(vec![0xaa; 27]);
+    for len in [0usize, 1, 18, 25, 32] {
+        let got = shape(vec![0xbb; len]);
+        assert_eq!(
+            got, reference,
+            "circuit shape changed for extra_data len {len}"
+        );
+    }
+}

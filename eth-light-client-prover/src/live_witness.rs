@@ -22,9 +22,93 @@ use crate::{
     execution::ExecutionPayloadVals,
     signing::{
         native_sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
+        SEPOLIA_FORK_VERSION_FULU, SEPOLIA_GENESIS_VALIDATORS_ROOT,
     },
     step::{HeaderVals, StepWitness},
 };
+
+/// Env var: 4-byte `fork_version` active at the update's `signature_slot`
+/// (`0x`-hex, e.g. `0x90000075` for Sepolia Fulu).
+pub const ENV_FORK_VERSION: &str = "BEACON_FORK_VERSION";
+/// Env var: 32-byte `genesis_validators_root` of the beacon network (`0x`-hex).
+pub const ENV_GENESIS_VALIDATORS_ROOT: &str = "BEACON_GENESIS_VALIDATORS_ROOT";
+
+/// Network-specific inputs of the sync-committee signing domain (m0_spec §5).
+///
+/// Both values are circuit **witnesses** (not public inputs and not constants),
+/// so the step VK / VkBlob / `EthBeaconLightClient` do not change between
+/// networks; only the witness has to carry the right pair. The committee
+/// commitment pins the proof to a network anyway: a committee of one network
+/// never signs a domain of another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainParams {
+    pub fork_version: [u8; 4],
+    pub genesis_validators_root: [u8; 32],
+}
+
+impl ChainParams {
+    pub const MAINNET_FULU: Self = Self {
+        fork_version: FORK_VERSION_FULU,
+        genesis_validators_root: MAINNET_GENESIS_VALIDATORS_ROOT,
+    };
+
+    pub const SEPOLIA_FULU: Self = Self {
+        fork_version: SEPOLIA_FORK_VERSION_FULU,
+        genesis_validators_root: SEPOLIA_GENESIS_VALIDATORS_ROOT,
+    };
+
+    /// Parse the `0x`-hex pair as delivered by the relayer / operator.
+    pub fn parse(fork_version: &str, genesis_validators_root: &str) -> anyhow::Result<Self> {
+        let fork: [u8; 4] = hexv(fork_version)
+            .with_context(|| format!("{ENV_FORK_VERSION}={fork_version:?}"))?
+            .try_into()
+            .map_err(|_| anyhow!("{ENV_FORK_VERSION} must be 4 bytes, got {fork_version:?}"))?;
+        let gvr = h32(genesis_validators_root).with_context(|| {
+            format!("{ENV_GENESIS_VALIDATORS_ROOT}={genesis_validators_root:?}")
+        })?;
+        Ok(Self {
+            fork_version: fork,
+            genesis_validators_root: gvr,
+        })
+    }
+
+    /// `BEACON_FORK_VERSION` + `BEACON_GENESIS_VALIDATORS_ROOT`. Both unset →
+    /// [`Self::MAINNET_FULU`] (the historical default). Setting only one of the
+    /// two is an error: a half-overridden domain silently proves nothing.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let fork = std::env::var(ENV_FORK_VERSION)
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let gvr = std::env::var(ENV_GENESIS_VALIDATORS_ROOT)
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        match (fork, gvr) {
+            (None, None) => Ok(Self::MAINNET_FULU),
+            (Some(f), Some(g)) => Self::parse(f.trim(), g.trim()),
+            (Some(_), None) => Err(anyhow!(
+                "{ENV_FORK_VERSION} is set but {ENV_GENESIS_VALIDATORS_ROOT} is not"
+            )),
+            (None, Some(_)) => Err(anyhow!(
+                "{ENV_GENESIS_VALIDATORS_ROOT} is set but {ENV_FORK_VERSION} is not"
+            )),
+        }
+    }
+
+    /// Human-readable label for logs (`mainnet`, `sepolia`, or the raw pair).
+    pub fn label(&self) -> String {
+        if self.genesis_validators_root == MAINNET_GENESIS_VALIDATORS_ROOT {
+            format!("mainnet fork=0x{}", hex::encode(self.fork_version))
+        } else if self.genesis_validators_root == SEPOLIA_GENESIS_VALIDATORS_ROOT {
+            format!("sepolia fork=0x{}", hex::encode(self.fork_version))
+        } else {
+            format!(
+                "gvr=0x{} fork=0x{}",
+                hex::encode(self.genesis_validators_root),
+                hex::encode(self.fork_version)
+            )
+        }
+    }
+}
 
 fn hexv(s: &str) -> anyhow::Result<Vec<u8>> {
     Ok(hex::decode(s.trim_start_matches("0x"))?)
@@ -193,9 +277,22 @@ pub fn parse_sync_committee(json: &str) -> anyhow::Result<(Vec<[u8; 48]>, [u8; 4
 
 /// Live step witness: real headers/branches from `finality_update` + real
 /// 512-committee from bootstrap/updates + real `sync_aggregate`.
+///
+/// Mainnet-Fulu signing domain; see [`step_witness_from_beacon_with_params`]
+/// for other networks / forks.
 pub fn step_witness_from_beacon(
     finality_json: &str,
     committee_json: &str,
+) -> anyhow::Result<StepWitness> {
+    step_witness_from_beacon_with_params(finality_json, committee_json, &ChainParams::MAINNET_FULU)
+}
+
+/// [`step_witness_from_beacon`] with an explicit signing domain
+/// (`fork_version` at `signature_slot` + `genesis_validators_root`).
+pub fn step_witness_from_beacon_with_params(
+    finality_json: &str,
+    committee_json: &str,
+    params: &ChainParams,
 ) -> anyhow::Result<StepWitness> {
     let v: Value = serde_json::from_str(finality_json).context("finality_update JSON")?;
     let data = unwrap_data(&v);
@@ -228,8 +325,8 @@ pub fn step_witness_from_beacon(
         &attested.parent_root,
         &attested.state_root,
         &attested.body_root,
-        &FORK_VERSION_FULU,
-        &MAINNET_GENESIS_VALIDATORS_ROOT,
+        &params.fork_version,
+        &params.genesis_validators_root,
     );
     let msg_hash = signing_root_to_g2(&signing_root);
     let mut agg = <G1 as Group>::identity();
@@ -241,15 +338,16 @@ pub fn step_witness_from_beacon(
     anyhow::ensure!(
         verify_native(&sig, &agg.to_affine(), &msg_hash),
         "live committee+bits+signature do not verify the attested signing_root (wrong committee \
-         JSON, fork, or truncated finality_update)"
+         JSON, wrong network/fork [{}], or truncated finality_update)",
+        params.label()
     );
 
     Ok(StepWitness {
         attested,
         finalized,
         finality_branch,
-        fork_version: FORK_VERSION_FULU,
-        genesis_validators_root: MAINNET_GENESIS_VALIDATORS_ROOT,
+        fork_version: params.fork_version,
+        genesis_validators_root: params.genesis_validators_root,
         pubkeys,
         pubkeys_compressed: pk_bytes,
         aggregate_pubkey,
@@ -288,6 +386,26 @@ mod tests {
         header(data, "attested_header").unwrap();
         header(data, "finalized_header").unwrap();
         execution(data, "finalized_header").unwrap();
+    }
+
+    #[test]
+    fn chain_params_parse_sepolia_pair() {
+        let p = ChainParams::parse(
+            "0x90000075",
+            "0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078",
+        )
+        .unwrap();
+        assert_eq!(p, ChainParams::SEPOLIA_FULU);
+        assert!(p.label().starts_with("sepolia"));
+        assert!(ChainParams::MAINNET_FULU.label().starts_with("mainnet"));
+    }
+
+    #[test]
+    fn chain_params_parse_rejects_bad_lengths() {
+        let gvr = format!("0x{}", "11".repeat(32));
+        assert!(ChainParams::parse("0x900000", &gvr).is_err());
+        assert!(ChainParams::parse("0x90000075", "0x1122").is_err());
+        assert!(ChainParams::parse("zz", &gvr).is_err());
     }
 
     #[test]

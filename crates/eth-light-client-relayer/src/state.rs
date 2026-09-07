@@ -24,6 +24,11 @@ pub struct RelayerState {
     /// Relayer already issued the one-way owner flip.
     #[serde(default)]
     pub owner_flip_done: bool,
+    /// `genesis_validators_root` (0x-hex) of the beacon network this state was
+    /// built against. A source reporting a different root is refused, so a
+    /// mainnet state file is never advanced from a Sepolia node or vice versa.
+    #[serde(default)]
+    pub genesis_validators_root: Option<String>,
 }
 
 impl RelayerState {

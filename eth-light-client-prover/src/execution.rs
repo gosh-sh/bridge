@@ -101,11 +101,19 @@ pub fn execution_payload_root<F: BigPrimeField>(
     let f8 = u64_root(ctx, p.gas_used);
     let f9 = u64_root(ctx, p.timestamp);
     let f10 = {
-        // List[byte,32]: mix_in_length(single-chunk, len)
-        let mut chunk = load_bytes(ctx, &p.extra_data);
-        while chunk.len() < 32 {
-            chunk.push(ctx.load_constant(F::ZERO));
-        }
+        // List[byte,32]: mix_in_length(single-chunk, len).
+        //
+        // The chunk is loaded as one full 32-byte witness, zero-padded
+        // natively. Padding with `load_constant` instead puts `32 - len`
+        // cells into the fixed column, so the constraint system (and the VK)
+        // changed with the length of the finalized block's `extra_data`: the
+        // fixture VK was emitted over a 27-byte mainnet `extra_data`, and a
+        // 25-byte Sepolia block produced a different VkBlob. Soundness is
+        // unchanged: any padding/len other than the real one changes the
+        // payload root, which `execution_branch` binds to the signed state.
+        let mut padded = [0u8; 32];
+        padded[..p.extra_data.len()].copy_from_slice(&p.extra_data);
+        let chunk = crate::ssz::load_node(ctx, &padded);
         let len_node = u64_root(ctx, p.extra_data.len() as u64);
         sha256_pair(chip, ctx, &chunk, &len_node)
     };

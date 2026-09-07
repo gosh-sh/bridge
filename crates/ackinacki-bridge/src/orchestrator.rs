@@ -333,8 +333,14 @@ pub async fn run(
             // is actually blocking them. Exit 3 with the real reason is the
             // whole point of the code.
             //
-            // This does not create a record: `peek` is read-only, and the
-            // refusal must leave the state directory exactly as it found it.
+            // This creates no RECORD: `peek` is read-only, and a refusal
+            // that reserved would be the duplicate it is refusing. It is
+            // not quite "leaves the directory as it found it", and saying
+            // so would be a lie an operator could check: the liveness
+            // probe below opens `<key>.lock` with O_CREAT, so an empty
+            // lock file can appear here. It carries no state — the lock
+            // lives in the kernel, not in the bytes — and the next run
+            // reuses it.
             if let Some(p) = prior.as_ref() {
                 // The SAME refusal the post-reservation check produces,
                 // and `--allow-retry` no longer changes it.
@@ -365,24 +371,10 @@ pub async fn run(
                     // The half the record cannot supply. This run holds
                     // no lock — it has not reserved — so the probe is
                     // asking about somebody else.
-                    liveness: match idempotency::WithdrawalLock::probe_holder(&state_dir, &p.key) {
-                        Some(true) => "Another process on this host is executing this withdrawal \
-                                       RIGHT NOW (it holds the withdrawal lock). Do not touch the \
-                                       record and do not delete it: wait for that run to finish \
-                                       and read its outcome. Nothing was sent by this run."
-                            .to_string(),
-                        Some(false) => "No other process on this host holds this withdrawal, so \
-                                        the record was left by a run that has already exited. \
-                                        That is not the same as \"nothing was broadcast\": a run \
-                                        can exit between the send returning and the hash being \
-                                        written, which is exactly the record you are looking at."
-                            .to_string(),
-                        None => "Whether another process holds this withdrawal could not be \
-                                 determined here (`flock` is unavailable — a network mount, \
-                                 typically), so the on-chain reconciliation below is the only \
-                                 evidence available."
-                            .to_string(),
-                    },
+                    liveness: idempotency::liveness_verdict(
+                        idempotency::WithdrawalLock::probe_holder(&state_dir, &p.key),
+                    )
+                    .to_string(),
                 });
             }
 
@@ -1022,11 +1014,8 @@ fn reserve_and_decide(
                 record_path: idempotency::record_path(state_dir, &key)
                     .display()
                     .to_string(),
-                liveness: "Another process on this host is executing this withdrawal RIGHT NOW \
-                           (it holds the withdrawal lock). Do not touch the record and do not \
-                           delete it: wait for that run to finish and read its outcome. Nothing \
-                           was sent by this run."
-                    .to_string(),
+                // We just failed to take it, so somebody holds it.
+                liveness: idempotency::liveness_verdict(Some(true)).to_string(),
             });
         },
         // `flock` unavailable. NOT a refusal: a state dir on a filesystem
@@ -1087,18 +1076,10 @@ fn decide_burn(
             // withdrawal, whatever the record says. That is the half the
             // record cannot supply, and without it the only escape an
             // operator finds is deleting the guard.
-            liveness: if flock_available {
-                "No other process on this host holds this withdrawal, so the record was left by a \
-                 run that has already exited. That is not the same as \"nothing was broadcast\": a \
-                 run can exit between the send returning and the hash being written, which is \
-                 exactly the record you are looking at."
-                    .to_string()
-            } else {
-                "Whether another process holds this withdrawal could not be determined here \
-                 (`flock` is unavailable — a network mount, typically), so the on-chain \
-                 reconciliation below is the only evidence available."
-                    .to_string()
-            },
+            // This run holds the lock, so the answer is "nobody else"
+            // — unless `flock` never worked here, in which case there is
+            // no answer to give.
+            liveness: idempotency::liveness_verdict(flock_available.then_some(false)).to_string(),
         }),
     }
 }
@@ -1670,6 +1651,12 @@ mod tests {
             matches!(err, CliError::ReservationInFlight { .. }),
             "exit 3: {err:?}"
         );
+        // And the refusal carries the verdict, not just the code: this is
+        // the sentence that stops the second operator deleting a record
+        // whose burn is on the wire.
+        let msg = format!("{err}");
+        assert!(msg.contains("RIGHT NOW"), "the live-holder verdict: {msg}");
+        assert!(msg.contains("do not delete it"), "{msg}");
     }
 
     #[test]

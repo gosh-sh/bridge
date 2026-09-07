@@ -670,10 +670,43 @@ impl WithdrawalLock {
     /// them to do — has no acquisition to learn from.)
     pub fn probe_holder(state_dir: &Path, key: &str) -> Option<bool> {
         match Self::try_acquire(state_dir, key) {
+            // We took it, so nobody else had it. The lock is dropped at
+            // the end of this expression, which is the point: asking must
+            // not keep anybody out.
             Ok(Some(_)) => Some(false),
+            // `EWOULDBLOCK`: somebody else is holding it right now.
             Ok(None) => Some(true),
             Err(_) => None,
         }
+    }
+}
+
+/// The sentence a refusal prints about who is executing this withdrawal.
+///
+/// Takes what the lock could tell us — `Some(true)` somebody holds it,
+/// `Some(false)` nobody does, `None` we could not ask — and returns the
+/// verdict for it. One function because three refusals print this and they
+/// have to agree: it is the line that decides whether an operator deletes
+/// a record, and deleting one while a burn is mid-send is the second burn
+/// the whole guard exists to prevent.
+pub fn liveness_verdict(holder: Option<bool>) -> &'static str {
+    match holder {
+        Some(true) => {
+            "Another process on this host is executing this withdrawal RIGHT NOW (it holds the \
+             withdrawal lock). Do not touch the record and do not delete it: wait for that run to \
+             finish and read its outcome. Nothing was sent by this run."
+        },
+        Some(false) => {
+            "No other process on this host holds this withdrawal, so the record was left by a run \
+             that has already exited. That is not the same as \"nothing was broadcast\": a run can \
+             exit between the send returning and the hash being written, which is exactly the \
+             record you are looking at."
+        },
+        None => {
+            "Whether another process holds this withdrawal could not be determined here (`flock` \
+             is unavailable — a network mount, typically), so the on-chain reconciliation below is \
+             the only evidence available."
+        },
     }
 }
 
@@ -1058,6 +1091,85 @@ mod tests {
                 .all(|o| matches!(o, Ok(Reservation::Created) | Ok(Reservation::Found))),
             "with --allow-retry none of them should error outright: {outcomes:?}",
         );
+    }
+
+    #[test]
+    fn the_lock_probe_reports_a_live_holder_as_a_live_holder() {
+        // The verdict that authorises deleting a record, and until now
+        // nothing reached it: two references in the tree, the definition
+        // and one call site. Swapping its two arms compiles and passes
+        // everything, and tells an operator whose withdrawal is mid-send
+        // that the holder has already exited — two lines above the
+        // refusal's offer to delete the record.
+        let dir = TempDir::new().unwrap();
+        let k = key(&sample_from(), &sample_to(), &UsdcAmount(1));
+
+        assert_eq!(
+            WithdrawalLock::probe_holder(dir.path(), &k),
+            Some(false),
+            "an untouched withdrawal has no holder",
+        );
+
+        let held = WithdrawalLock::try_acquire(dir.path(), &k)
+            .expect("flock works on this filesystem")
+            .expect("nobody else holds it");
+        assert_eq!(
+            WithdrawalLock::probe_holder(dir.path(), &k),
+            Some(true),
+            "a held withdrawal has a holder",
+        );
+        // And asking does not take it away from the holder — the probe
+        // acquires and drops, so a second ask must still say "held".
+        assert_eq!(
+            WithdrawalLock::probe_holder(dir.path(), &k),
+            Some(true),
+            "asking must not release somebody else's lock",
+        );
+
+        drop(held);
+        assert_eq!(
+            WithdrawalLock::probe_holder(dir.path(), &k),
+            Some(false),
+            "released means released",
+        );
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_attempted_is_not_reported_as_free() {
+        // `None`, never `Some(false)`. A state dir on a filesystem
+        // without working `flock` is a supported deployment, and
+        // answering "nobody holds it" there is the same false clearance
+        // to delete a record that may be a burn in flight.
+        let dir = TempDir::new().unwrap();
+        // A parent that is a regular file: ENOTDIR for every uid, unlike
+        // a chmod, which root ignores.
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        assert_eq!(
+            WithdrawalLock::probe_holder(&blocker, "0123456789abcdef"),
+            None,
+            "a lock that could not be attempted is not a lock that is free",
+        );
+    }
+
+    #[test]
+    fn the_liveness_verdict_says_wait_only_when_somebody_is_holding_it() {
+        let held = liveness_verdict(Some(true));
+        let free = liveness_verdict(Some(false));
+        let unknown = liveness_verdict(None);
+
+        assert!(held.contains("RIGHT NOW"), "{held}");
+        assert!(held.contains("do not delete it"), "{held}");
+
+        assert!(free.contains("has already exited"), "{free}");
+        assert!(!free.contains("RIGHT NOW"), "{free}");
+        // Free is not a clearance either: the record can still be a burn
+        // whose hash was never written, and the sentence has to say so.
+        assert!(free.contains("not the same as"), "{free}");
+
+        assert!(unknown.contains("could not be determined"), "{unknown}");
+        assert!(!unknown.contains("RIGHT NOW"), "{unknown}");
+        assert!(!unknown.contains("has already exited"), "{unknown}");
     }
 
     #[test]

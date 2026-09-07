@@ -278,6 +278,18 @@ pub async fn run(
     // transaction hash, and a dry run starts waiting on an anchor bundle
     // for an event that was never emitted.
     let mut record = None;
+    // Held for the REST OF THE RUN, not just past the burn.
+    //
+    // Scoping it to the reservation-and-send block was enough for the
+    // double-burn it was added for, and not enough for what comes after:
+    // two runs that both get past the burn reach stage 6 together, and the
+    // loser's `withdrawByProof` reverts on the nullifier and writes
+    // `Failed` over the winner's `Confirmed`. The record then says a
+    // paid-out withdrawal is resumable.
+    //
+    // `_`-prefixed but a real binding — `let _ = ..` would drop the guard
+    // on the spot and the exclusion would silently disappear.
+    let mut _withdrawal_lock: Option<idempotency::WithdrawalLock> = None;
     let (an_tx_hash, bounce) = if dry_run {
         info!("stage 2/6: idempotency (skipped for --dry-run)");
         // Unreachable past the early return below; present only so both
@@ -297,10 +309,9 @@ pub async fn run(
                 prior_status = ?p.status,
                 "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
             );
-            // The resume branch already skips the send, so the
-            // provenance carries no decision here — the hash from `peek` is
-            // evidence a burn happened, and that is what we act on.
-            let (r, _) = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
+            let (r, lock) =
+                resume_recorded_burn(&state_dir, &from, &to, &amount, args.allow_retry, &existing)?;
+            _withdrawal_lock = lock;
             record = Some(r);
             (existing, bounce)
         } else {
@@ -358,12 +369,9 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            // `_withdrawal_lock` is held until this scope ends, which is
-            // past `burn::send` and past the write that records its hash.
-            // Named rather than `_`, because a bare `_` would drop it
-            // immediately and the guarantee would silently disappear.
-            let (r, decision, _withdrawal_lock) =
+            let (r, decision, lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
+            _withdrawal_lock = lock;
             record = Some(r);
 
             match decision {
@@ -843,6 +851,66 @@ enum BurnDecision {
 /// either function could see that. This is the seam, and the tests below
 /// drive it against a real state directory, including from two threads at
 /// once.
+/// Claim the identity for a withdrawal whose burn is ALREADY on the wire,
+/// and hand back a record that says so.
+///
+/// The resume path used to call `reserve` directly and discard its answer,
+/// reasoning that a resume sends nothing so the decision cannot matter.
+/// Two things followed, neither about sending. It took no
+/// `WithdrawalLock`, so a resuming run was invisible to the liveness
+/// probe the exit-3 refusal promises and two concurrent resumes both
+/// reached the submit stage — where the loser's revert writes `Failed`
+/// over the winner's `Confirmed`. And it ignored the reservation, so a
+/// record deleted between the stage-1 `peek` and here left the run
+/// carrying on with the peeked hash and never writing it back: stage 4
+/// then persisted `Captured` with `an_tx_hash: None`, which `read_record`
+/// refuses forever as "acting on it would broadcast a SECOND burn". A
+/// completed withdrawal and an unrecoverable record.
+///
+/// `observed_hash` is that evidence — read from the record moments ago in
+/// stage 1. It is what makes the `Send` arm below safe to convert into a
+/// restore rather than a refusal.
+fn resume_recorded_burn(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    observed_hash: &str,
+) -> CliResult<(idempotency::Record, Option<idempotency::WithdrawalLock>)> {
+    let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    match decision {
+        BurnDecision::Reuse(_) => Ok((r, lock)),
+        // A FRESH reservation for an identity this run has just seen a
+        // burn recorded against: the record was removed in between.
+        //
+        // `Send` is the right general answer for a record with no hash,
+        // and the wrong one here — this branch composed nothing to send,
+        // and it holds evidence the burn happened. Restore the hash into
+        // the record we now own rather than leaving behind the one no
+        // later run can act on.
+        BurnDecision::Send => {
+            let mut r = r;
+            warn!(
+                an_tx = %observed_hash,
+                key = %r.key,
+                "the state record was removed while this run was preflighting; restoring it from \
+                 the burn this run already observed, rather than proceeding on a record that says \
+                 no burn happened",
+            );
+            r.status = Status::Burned;
+            r.an_tx_hash = Some(observed_hash.to_string());
+            idempotency::update(state_dir, &r).map_err(|e| {
+                e.after_send(&format!(
+                    "the AN burn {observed_hash} is on the wire — it was recorded before this run \
+                     started, and its record has since been deleted"
+                ))
+            })?;
+            Ok((r, lock))
+        },
+    }
+}
+
 fn reserve_and_decide(
     state_dir: &Path,
     from: &FromAddress,
@@ -1363,6 +1431,103 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d, BurnDecision::Reuse(format!("0x{}", "ab".repeat(32))));
+    }
+
+    // -- The resume path ---------------------------------------------------
+    //
+    // It used to call `reserve` directly and throw the answer away. These
+    // drive the seam production now goes through — the previous round's
+    // tests exercised `reserve_and_decide`, which the resume branch never
+    // reached, so the defect lived in the one place the coverage did not.
+
+    fn burned_record(dir: &Path, hash: &str) -> idempotency::Record {
+        let (mut r, _, lock) =
+            reserve_and_decide(dir, &seam_from(), &seam_to(), &UsdcAmount(1_000_000), false)
+                .unwrap();
+        r.status = Status::Burned;
+        r.an_tx_hash = Some(hash.to_string());
+        idempotency::update(dir, &r).unwrap();
+        drop(lock);
+        r
+    }
+
+    #[test]
+    fn a_resume_takes_the_withdrawal_lock() {
+        // (a) and (b) of the defect: without this a resuming run was
+        // invisible to the liveness probe the exit-3 refusal promises, and
+        // two concurrent resumes both reached the submit stage — where the
+        // loser's revert writes `Failed` over the winner's `Confirmed`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = format!("0x{}", "ab".repeat(32));
+        burned_record(dir.path(), &hash);
+
+        let (r, lock) = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &hash,
+        )
+        .expect("a recorded burn resumes");
+        assert_eq!(r.an_tx_hash.as_deref(), Some(hash.as_str()));
+        assert!(lock.is_some(), "a resume must own the withdrawal too");
+
+        // And a second resume, concurrent with the first, is refused
+        // rather than racing it to stage 6.
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &hash,
+        )
+        .expect_err("the first resume still holds this withdrawal");
+        assert!(
+            matches!(err, CliError::ReservationInFlight { .. }),
+            "exit 3: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_resume_whose_record_vanished_restores_it_instead_of_poisoning_it() {
+        // (c), and the worst of the three. The record is deleted between
+        // the stage-1 peek and the reservation — which is exactly what the
+        // CLI's own exit-3 message tells operators to do once they have
+        // reconciled. The run used to carry on with the peeked hash and
+        // never write it back, so stage 4 persisted `Captured` with
+        // `an_tx_hash: None` — a shape `read_record` refuses FOREVER as
+        // "acting on it would broadcast a SECOND burn". A completed
+        // withdrawal and an unrecoverable record.
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = format!("0x{}", "cd".repeat(32));
+        let r = burned_record(dir.path(), &hash);
+        let path = idempotency::record_path(dir.path(), &r.key);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
+
+        let (restored, _lock) = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &hash,
+        )
+        .expect("the burn is known; the run must not be stranded");
+
+        // The record is back, and it says what actually happened.
+        assert_eq!(restored.an_tx_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(restored.status, Status::Burned);
+
+        // And it is readable — the shape the guard refuses is exactly what
+        // this used to leave behind.
+        let reread =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .expect("a restored record must not be one read_record refuses")
+                .expect("it exists");
+        assert_eq!(reread.an_tx_hash.as_deref(), Some(hash.as_str()));
     }
 
     #[test]

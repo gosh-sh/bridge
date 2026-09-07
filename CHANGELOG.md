@@ -1144,6 +1144,32 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **Resuming a withdrawal no longer leaves a record no later run can
+  act on.** The resume path — a prior record already carrying an AN tx
+  hash — reserved the identity directly and discarded the reservation's
+  answer, on the grounds that a resume broadcasts nothing. Two things
+  followed that are not about broadcasting.
+
+  It took no withdrawal lock, so a resuming run was invisible to the
+  liveness check the exit-3 refusal promises, and two concurrent resumes
+  both reached the submit stage — where the loser's `withdrawByProof`
+  reverts on the nullifier and writes `Failed` over the winner's
+  `Confirmed`, leaving the record claiming a paid-out withdrawal is
+  resumable.
+
+  And it ignored the reservation, so a record deleted between the initial
+  read and the reservation — the deletion the exit-3 message itself
+  prescribes once an operator has reconciled — left the run carrying on
+  with the hash it had read earlier and never writing it back. The
+  capture stage then persisted `captured` with no `an_tx_hash`, a
+  combination the record guard refuses permanently as "acting on it would
+  broadcast a SECOND burn": a withdrawal that completed, and a record
+  nothing can resume. That case now restores the hash into the record it
+  just claimed instead.
+
+  The lock is also held for the rest of the run rather than only through
+  the burn, which is what excludes the concurrent-resume case above.
+
 - **Two keygens can no longer run over each other in one `params_dir`.**
   That directory is documented as shared with the bundle daemon, and
   nothing prevented both from generating keys at once. Per-file writes are

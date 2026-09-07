@@ -122,9 +122,18 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "USDC")]
     pub amount: String,
 
-    /// Preflight only. Runs every check + composes the messages but
-    /// broadcasts nothing on either side. Idempotency state is NOT
-    /// recorded for a dry-run.
+    /// Preflight only: nothing is broadcast on either side and no
+    /// idempotency state is recorded.
+    ///
+    /// Runs every check that needs no submit-only flag — the Acki Nacki
+    /// account, multisig and key checks, and the EVM side (chain id,
+    /// bridge deploy, verifier stack, pinned identity, treasury).
+    ///
+    /// Does NOT compose or sign the burn message, and does NOT check the
+    /// prover artifacts (`--params-dir`, `--verifiers-dir`,
+    /// `--aggregator-dir`): those need the submit-only flags a dry run
+    /// does not require. Pass them anyway and `--verifiers-dir` will also
+    /// be used to compare against the deployed verifier.
     #[arg(long)]
     pub dry_run: bool,
 
@@ -171,15 +180,15 @@ pub struct WithdrawArgs {
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
     #[arg(long, env = "BURNER_PRIVATE_KEY", value_name = "0x…")]
-    pub eth_private_key: String,
+    pub eth_private_key: Option<String>,
 
     // -- Prover subprocess plumbing (passed through to run_once) --
     #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
-    pub aggregator_dir: PathBuf,
+    pub aggregator_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
-    pub verifiers_dir: PathBuf,
+    pub verifiers_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_PARAMS_DIR")]
-    pub params_dir: PathBuf,
+    pub params_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_SNARK_DIR", default_value = "./shplonk-snark")]
     pub snark_dir: PathBuf,
     #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
@@ -189,7 +198,7 @@ pub struct WithdrawArgs {
     #[arg(long, default_value_t = 1800)]
     pub prover_timeout_s: u64,
     #[arg(long, env = "BRIDGE_WORK_DIR")]
-    pub work_dir: PathBuf,
+    pub work_dir: Option<PathBuf>,
 
     // -- Idempotency --
     /// Directory holding per-withdrawal state files. Defaults to
@@ -471,6 +480,61 @@ fn format_supported_chains() -> String {
         .join(", ")
 }
 
+/// The plumbing a real (non-`--dry-run`) withdrawal needs but a preflight
+/// does not. Collected in one place so a real run refuses ONCE, naming
+/// every missing value, instead of dying on the first `.unwrap()` three
+/// stages in.
+#[derive(Debug, Clone)]
+pub struct SubmitPlumbing {
+    pub eth_private_key: String,
+    pub aggregator_dir: PathBuf,
+    pub verifiers_dir: PathBuf,
+    pub params_dir: PathBuf,
+    pub work_dir: PathBuf,
+}
+
+impl WithdrawArgs {
+    /// Resolve the submit-only plumbing, or refuse listing everything that
+    /// is missing. `--dry-run` never calls this — that is the whole point:
+    /// a preflight must not require an EVM signing key it will never use.
+    pub fn require_submit_plumbing(&self) -> CliResult<SubmitPlumbing> {
+        let mut missing: Vec<&str> = Vec::new();
+        if self.eth_private_key.is_none() {
+            missing.push("--eth-private-key (BURNER_PRIVATE_KEY)");
+        }
+        if self.aggregator_dir.is_none() {
+            missing.push("--aggregator-dir (BRIDGE_AGGREGATOR_DIR)");
+        }
+        if self.verifiers_dir.is_none() {
+            missing.push("--verifiers-dir (BRIDGE_VERIFIERS_DIR)");
+        }
+        if self.params_dir.is_none() {
+            missing.push("--params-dir (BRIDGE_PARAMS_DIR)");
+        }
+        if self.work_dir.is_none() {
+            missing.push("--work-dir (BRIDGE_WORK_DIR)");
+        }
+        if !missing.is_empty() {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "a real withdrawal needs {}. Set them in the profile file pointed to by \
+                     $BRIDGE_CONFIG, or pass them explicitly. (--dry-run does not need any of \
+                     them.)",
+                    missing.join(", "),
+                ),
+                source: None,
+            });
+        }
+        Ok(SubmitPlumbing {
+            eth_private_key: self.eth_private_key.clone().expect("checked above"),
+            aggregator_dir: self.aggregator_dir.clone().expect("checked above"),
+            verifiers_dir: self.verifiers_dir.clone().expect("checked above"),
+            params_dir: self.params_dir.clone().expect("checked above"),
+            work_dir: self.work_dir.clone().expect("checked above"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,5 +681,95 @@ mod tests {
     fn to_accepts_all_lowercase() {
         let raw = "0x742d35cc6634c0532925a3b844bc454e4438f44e";
         assert!(parse_to(raw, Some(11155111)).is_ok());
+    }
+
+    fn submit_plumbing_fixture_all_absent() -> WithdrawArgs {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("parse");
+        let Command::Withdraw(args) = cli.cmd;
+        args
+    }
+
+    #[test]
+    fn dry_run_does_not_require_submit_plumbing() {
+        use clap::Parser;
+        // --rpc-url and --bridge-address ARE still required (see the note on
+        // this task): a dry-run checks the destination chain id, which needs
+        // the endpoint but no key. What must not be required is the signing
+        // key and the four prover directories.
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--dry-run",
+            "--yes",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("--dry-run must parse without --eth-private-key or the prover dirs");
+        let Command::Withdraw(args) = cli.cmd;
+        assert!(args.dry_run);
+        assert!(args.eth_private_key.is_none());
+        assert!(args.params_dir.is_none());
+        assert!(args.work_dir.is_none());
+    }
+
+    #[test]
+    fn real_run_names_every_missing_submit_flag_at_once() {
+        let args = submit_plumbing_fixture_all_absent();
+        let err = args
+            .require_submit_plumbing()
+            .expect_err("a real run without plumbing must refuse");
+        let msg = format!("{err}");
+        for flag in [
+            "--eth-private-key",
+            "--aggregator-dir",
+            "--verifiers-dir",
+            "--params-dir",
+            "--work-dir",
+        ] {
+            assert!(msg.contains(flag), "refusal must name {flag}, got: {msg}");
+        }
+        assert!(
+            msg.contains("BRIDGE_CONFIG"),
+            "refusal must point at the profile file, got: {msg}"
+        );
     }
 }

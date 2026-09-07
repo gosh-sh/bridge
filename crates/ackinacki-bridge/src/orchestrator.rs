@@ -132,6 +132,15 @@ pub async fn run(
     let amount = args::parse_amount(&args.amount)?;
     let anchor_mode = parse_anchor_layer(&args.anchor_layer)?;
 
+    // Resolve submit-only plumbing up front for a real run, so a missing
+    // BURNER_PRIVATE_KEY refuses at stage 1 rather than at stage 6 — after
+    // the burn is already irreversible.
+    let plumbing = if dry_run {
+        None
+    } else {
+        Some(args.require_submit_plumbing()?)
+    };
+
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
     let preflight = preflight::run(
@@ -193,6 +202,10 @@ pub async fn run(
             },
         });
     }
+
+    // Past the dry-run return, so `plumbing` is `Some` by construction —
+    // it is resolved unconditionally for every non-dry run above.
+    let plumbing_ref = plumbing.as_ref().expect("non-dry-run resolves plumbing");
 
     // ---- 3. Burn ----
     // Resume: if the prior record already carries an `an_tx_hash`, the AN
@@ -349,10 +362,10 @@ pub async fn run(
         event_poll_interval: EVENT_POLL_INTERVAL,
         anchor_mode,
         i_know_the_wait: args.i_know_the_wait,
-        work_dir: args.work_dir.clone(),
-        aggregator_dir: args.aggregator_dir.clone(),
-        verifiers_dir: args.verifiers_dir.clone(),
-        params_dir: args.params_dir.clone(),
+        work_dir: plumbing_ref.work_dir.clone(),
+        aggregator_dir: plumbing_ref.aggregator_dir.clone(),
+        verifiers_dir: plumbing_ref.verifiers_dir.clone(),
+        params_dir: plumbing_ref.params_dir.clone(),
         snark_dir: args.snark_dir.clone(),
         pk_cache_dir: args.pk_cache_dir.clone(),
         prover_out_dir: args.prover_out_dir.clone(),
@@ -422,7 +435,7 @@ pub async fn run(
     }
 
     // Real submit: build a wallet-filled provider and send.
-    let signer: PrivateKeySigner = args
+    let signer: PrivateKeySigner = plumbing_ref
         .eth_private_key
         .parse()
         .map_err(|e| CliError::EthSubmitFailed {

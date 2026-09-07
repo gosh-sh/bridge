@@ -637,9 +637,32 @@ the condition that failed it has been fixed.
 
 **Cleanup rule.** `Confirmed` files are keepable forever (small; they
 are your on-chain audit trail). `Failed` files are safe to prune once
-the corresponding AN/ETH tx status is reconciled. `Reserved` files
->24 h old with no `an_tx_hash` are safe to prune — the burn never
-happened.
+the corresponding AN/ETH tx status is reconciled.
+
+**Deleting a `Reserved` record is what a second burn looks like.** A
+record whose status is `Reserved` with no `an_tx_hash` has two readings,
+and nothing in the file distinguishes them: a run is inside the burn
+right now and has not come back to write the hash, or a run died in that
+window. Age does not tell them apart — a run can be mid-anchor-wait for
+90 minutes — so there is no "safe after N hours" rule and this document
+used to state one.
+
+Two conditions, both required, before deleting one:
+
+1. **On-chain reconciliation shows no `initiateWithdrawal`** from this
+   multisig for this identity (advanced runbook, [Case
+   3a](docs/advanced_user_withdraw_runbook.md)).
+2. **No process holds the withdrawal.** The CLI answers this for you: run
+   the identical command again and read the exit-3 refusal. It says
+   either "Another process on this host is executing this withdrawal
+   RIGHT NOW" — in which case wait — or "the record was left by a run
+   that has already exited", which is the condition you need. The check
+   is a `flock` the running command holds across the burn, so the kernel
+   releases it when that process dies, however it dies.
+
+With both satisfied, delete the record and re-run. With a burn found in
+step 1, do not delete: write its hash into `an_tx_hash`, set `status` to
+`"burned"`, and re-run with `--allow-retry` to resume at capture.
 
 ## Safety
 
@@ -712,8 +735,10 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
 **Safe to prune between demos.** `work_dir/`, `proofs/` — regeneration
 is deterministic; ~5 min per proof with warm PK cache.
 `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
-for audit; `Failed` — safe to prune once reconciled; `Reserved` >24 h
-old with no `an_tx_hash` — safe to prune.
+for audit; `Failed` — safe to prune once reconciled. **`Reserved` with
+no `an_tx_hash`: see the cleanup rule under "Idempotency semantics" —
+there is no age at which deleting one is safe, and the exit-3 refusal
+tells you when it is.**
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
 and its `pk_cache/` — cold cache costs ~20 min per proof; warm cache

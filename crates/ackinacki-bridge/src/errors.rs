@@ -116,6 +116,19 @@ pub enum CliError {
     },
 
     // -- Idempotency (exit 3) --
+    //
+    // Two situations, two messages, because one message was wrong for one
+    // of them and the wrong half sent operators at the guard itself.
+    //
+    // `Duplicate` is the stage-1 refusal: a record exists and this run did
+    // not ask to resume. "Re-run with --allow-retry" is the right advice
+    // and always was.
+    //
+    // `InFlight` is the post-reservation refusal, and it is reached only
+    // WITH `--allow-retry` already set — so telling that operator to pass
+    // the flag they passed is a dead end, and `Prior AN tx: None` reads as
+    // "nothing was sent". The only escape left to find was deleting the
+    // record, which is the one thing that permits a second burn.
     #[error("refuse: duplicate in-flight withdrawal ({prior_status}). \
              Prior AN tx: {prior_tx:?}. Prior withdrawal msg_id: {prior_msg_id:?}. \
              Reconcile via GraphQL, or re-run with --allow-retry to override.")]
@@ -123,6 +136,32 @@ pub enum CliError {
         prior_status: String,
         prior_tx: Option<String>,
         prior_msg_id: Option<String>,
+    },
+
+    /// The reservation was found rather than created and carries no AN tx
+    /// hash. Nothing can tell from the record whether a burn is on the
+    /// wire; `another_run_is_live` is what the lock could tell us.
+    #[error("refuse: this withdrawal is already reserved ({prior_status}) and the record carries \
+             no AN tx hash, so whether a burn is on the wire cannot be read from it — the hash is \
+             written only after the send returns.\n\
+             \x20 {liveness}\n\
+             \x20 Record: {record_path}\n\
+             \x20 --allow-retry does NOT override this, and re-running will not change it.\n\
+             \x20 1. Reconcile on chain (advanced runbook, Case 3a): look for a \
+             sendTransaction from this multisig to USDCBridge around the record's reserved_at.\n\
+             \x20 2. If a burn DID land, write its hash into an_tx_hash and set status to \
+             \"burned\", then re-run with --allow-retry — the run resumes at capture.\n\
+             \x20 3. If nothing was broadcast AND the line above says no other run holds this \
+             withdrawal, delete the record and re-run. Deleting it while another run is mid-send \
+             is what causes the second burn this refusal exists to prevent.")]
+    ReservationInFlight {
+        prior_status: String,
+        prior_msg_id: Option<String>,
+        record_path: String,
+        /// Rendered sentence about whether another process holds the
+        /// withdrawal lock. A field rather than a bool so the two cases
+        /// can say different things — including "could not tell".
+        liveness: String,
     },
 
     // -- Burn (exit 10) --
@@ -163,7 +202,8 @@ impl CliError {
             | CliError::KeyFilePerms { .. }
             | CliError::Usage { .. }
             | CliError::Preflight { .. } => ExitCode::PreflightRefused,
-            CliError::DuplicateInFlight { .. } => ExitCode::DuplicateRefused,
+            CliError::DuplicateInFlight { .. }
+            | CliError::ReservationInFlight { .. } => ExitCode::DuplicateRefused,
             CliError::BurnOutcomeUnknown { .. } => ExitCode::BurnOutcomeUnknown,
             CliError::CaptureTimeout { .. } => ExitCode::CaptureTimeout,
             CliError::ProofFailed { .. } => ExitCode::ProofFailed,
@@ -179,7 +219,8 @@ impl CliError {
             | CliError::KeyFilePerms { .. }
             | CliError::Usage { .. }
             | CliError::Preflight { .. }
-            | CliError::DuplicateInFlight { .. } => Stage::Preflight,
+            | CliError::DuplicateInFlight { .. }
+            | CliError::ReservationInFlight { .. } => Stage::Preflight,
             CliError::BurnOutcomeUnknown { .. } => Stage::Burn,
             CliError::CaptureTimeout { .. } => Stage::Capture,
             CliError::ProofFailed { .. } => Stage::Prove,

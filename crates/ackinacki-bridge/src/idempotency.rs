@@ -488,6 +488,88 @@ pub(crate) fn record_path(state_dir: &Path, key: &str) -> PathBuf {
     state_dir.join(format!("{key}.json"))
 }
 
+/// Held for as long as this process owns a withdrawal identity: across the
+/// reservation, the burn, and the write that records its hash.
+///
+/// **It exists to answer one question the record cannot.** A record that
+/// says `reserved` with no `an_tx_hash` has two readings — another run is
+/// inside `burn::send` right now and has not come back to write the hash,
+/// or a run died in that window and left it. `decide_burn` refuses both,
+/// correctly, because the field that would tell them apart is written only
+/// after the send returns. But the refusal then has nothing to tell the
+/// operator except "reconcile", and the only escape they can find on their
+/// own is deleting the record — which is the guard against a second burn.
+///
+/// `flock` answers it. The kernel releases the lock when the holding
+/// process exits, however it exits, so "is somebody executing this
+/// withdrawal right now" becomes a fact rather than a judgement about
+/// wall-clock age or a `pgrep` that is wrong on a different user, under a
+/// wrapper name, or racing.
+///
+/// **Advisory, and additional to the record guard — never instead of it.**
+/// `flock` is per-host and is a no-op or an error on some network
+/// filesystems, so a state dir shared over NFS between two machines is
+/// exactly the case it cannot see. The cross-field checks in
+/// [`read_record`] and the provenance check in `decide_burn` are what hold
+/// there; this only makes the refusal actionable when it can.
+///
+/// Acquired BEFORE the reservation on purpose. Everything between the
+/// reserve and the send is supposed to be infallible, and a lock taken
+/// there would be a new way to fail with the identity already claimed.
+/// Taken first, its only failure is a pre-send refusal like any other.
+#[derive(Debug)]
+pub struct WithdrawalLock {
+    /// Dropping this releases the lock; so does the process dying.
+    _file: fs::File,
+}
+
+impl WithdrawalLock {
+    fn path(state_dir: &Path, key: &str) -> PathBuf {
+        state_dir.join(format!("{key}.lock"))
+    }
+
+    /// Take the lock, or report who has it.
+    ///
+    /// `Ok(None)` means another live process on this host owns this
+    /// withdrawal. `Err` means the lock could not be attempted at all,
+    /// which is not the same thing and must not be read as contention.
+    pub fn try_acquire(state_dir: &Path, key: &str) -> CliResult<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+
+        let path = Self::path(state_dir, key);
+        let refuse = |what: &str, e: std::io::Error| CliError::Preflight {
+            reason: format!(
+                "idempotency: {what} {}: {e} (nothing was sent)",
+                path.display()
+            ),
+            source: None,
+        };
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| refuse("open withdrawal lock", e))?;
+
+        // SAFETY: `file` outlives the call, so the descriptor is valid.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(Some(Self {
+                _file: file,
+            }));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            // A guard rather than two patterns: the constants are equal on
+            // Linux, so the second would be unreachable, and both are
+            // named because POSIX lets them differ.
+            Some(n) if n == libc::EWOULDBLOCK || n == libc::EAGAIN => Ok(None),
+            _ => Err(refuse("lock", e)),
+        }
+    }
+}
+
 fn fresh_reserved_record(
     key: &str,
     from: &FromAddress,

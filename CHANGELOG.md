@@ -887,6 +887,52 @@ assigns it when the release is tagged.
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
 
+- **The exit-3 refusal now says what to do, and the CLI can tell you
+  whether another run is executing the withdrawal.** A record that reads
+  `reserved` with no `an_tx_hash` has two meanings and the file cannot
+  separate them: a run is inside the burn right now and has not returned
+  to write the hash, or a run died in that window. The refusal named
+  neither, rendered the missing hash as `Prior AN tx: None` — which reads
+  as "nothing was sent" — and advised "re-run with `--allow-retry` to
+  override", which is the flag the operator had already passed to get
+  there. The only escape left to find was deleting the record, i.e. the
+  guard against a second burn.
+
+  A withdrawal now holds an advisory `flock` on
+  `<state-dir>/<key>.lock` from before the reservation until after the
+  burn's hash is written. A later run reports which case it is: "another
+  process on this host is executing this withdrawal RIGHT NOW" — wait —
+  or "the record was left by a run that has already exited". The kernel
+  releases the lock when the holder dies, so this is a fact rather than a
+  guess about how old the record is. The refusal also names the record's
+  path, states plainly that `--allow-retry` does not override it, and
+  gives the two branches: hash found on chain → write it in and resume;
+  nothing broadcast **and** no live holder → delete and re-run.
+
+  A second run that arrives while the lock is held is refused before it
+  reserves, so it no longer races the first through capture and submit.
+  The lock is advisory and per-host — `flock` is unavailable on some
+  network filesystems, and the refusal says so rather than claiming
+  knowledge it does not have. The record's own cross-field guards are
+  unchanged and remain what holds in that case.
+
+- **Documentation: there is no age at which deleting a `Reserved` record
+  is safe.** README and the runbook both said `Reserved` files over 24
+  hours old with no `an_tx_hash` were safe to prune, "the burn never
+  happened" — asserting as fact exactly the half the code says is
+  unknowable, about the file that prevents a second burn. Both now state
+  the two real conditions (on-chain reconciliation showing no
+  `initiateWithdrawal`, and no process holding the withdrawal) and point
+  at the exit-3 refusal that answers the second one.
+
+  The runbook's exit-10/11 recovery is corrected to match: it said
+  `--allow-retry` would compose a second burn on a hashless record (it
+  now refuses with exit 3) and prescribed that same flag as the fix for
+  "nothing was sent" (it is not). An operator who reconciles correctly
+  now has a documented way forward for both outcomes. `--allow-retry`
+  also cannot re-open a `Confirmed` record, which one remediation step
+  suggested; changing the amount is the way to a fresh identity.
+
 - **`ackinacki-bridge withdraw`: a failed state-file write after the burn
   no longer reports exit 2.** Exit 2 means "refused before sending,
   nothing left the machine". Four sites reported it after the burn was on

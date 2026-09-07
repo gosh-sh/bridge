@@ -337,7 +337,11 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let (r, decision) =
+            // `_withdrawal_lock` is held until this scope ends, which is
+            // past `burn::send` and past the write that records its hash.
+            // Named rather than `_`, because a bare `_` would drop it
+            // immediately and the guarantee would silently disappear.
+            let (r, decision, _withdrawal_lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
             record = Some(r);
 
@@ -782,20 +786,79 @@ fn reserve_and_decide(
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-) -> CliResult<(idempotency::Record, BurnDecision)> {
+) -> CliResult<(
+    idempotency::Record,
+    BurnDecision,
+    Option<idempotency::WithdrawalLock>,
+)> {
+    // The lock comes FIRST — before the reservation, long before the send.
+    //
+    // Everything between the reserve and `burn::send` is supposed to be
+    // incapable of failing, so a lock taken there would be a new way to
+    // fail with the identity already claimed. Taken here, its only failure
+    // is a pre-send refusal like any other.
+    //
+    // Holding it across the send is what lets a LATER run answer the
+    // question the record cannot: "is somebody executing this withdrawal
+    // right now, or did a run die and leave this behind?" The kernel drops
+    // it when the holder exits, so that answer is a fact rather than a
+    // guess about wall-clock age.
+    let key = idempotency::key(from, to, amount);
+    let (lock, flock_available) = match idempotency::WithdrawalLock::try_acquire(state_dir, &key) {
+        Ok(Some(l)) => (Some(l), true),
+        // Another live process on this host owns this withdrawal. Refuse
+        // before reserving: its outcome is that run's to record, and a
+        // second run racing it through capture and submit gets a reverted
+        // `withdrawByProof` at best.
+        Ok(None) => {
+            let prior = idempotency::peek(state_dir, from, to, amount)?;
+            return Err(CliError::ReservationInFlight {
+                prior_status: prior
+                    .as_ref()
+                    .map(|p| format!("{:?}", p.status).to_ascii_lowercase())
+                    .unwrap_or_else(|| "reserving".to_string()),
+                prior_msg_id: prior.and_then(|p| p.withdrawal_msg_id),
+                record_path: idempotency::record_path(state_dir, &key)
+                    .display()
+                    .to_string(),
+                liveness: "Another process on this host is executing this withdrawal RIGHT NOW \
+                           (it holds the withdrawal lock). Do not touch the record and do not \
+                           delete it: wait for that run to finish and read its outcome. Nothing \
+                           was sent by this run."
+                    .to_string(),
+            });
+        },
+        // `flock` unavailable. NOT a refusal: a state dir on a filesystem
+        // without it is a supported deployment, and the record's own
+        // cross-field guards are what hold there. Proceed, and say the
+        // evidence is missing if it comes to a refusal.
+        Err(e) => {
+            warn!(
+                error = %e,
+                "could not take the withdrawal lock; continuing on the record checks alone",
+            );
+            (None, false)
+        },
+    };
+
     let (r, how) = idempotency::reserve(state_dir, from, to, amount, allow_retry)?;
     info!(key = %r.key, ?how, "reserved");
     // The record AND which side of the atomic publish it came from — NOT
     // the `peek` taken back in stage 1. See [`decide_burn`]: those two
     // disagree in two different ways, and both are a second irreversible
     // burn.
-    let decision = decide_burn(&r, how)?;
-    Ok((r, decision))
+    let decision = decide_burn(&r, how, state_dir, flock_available)?;
+    Ok((r, decision, lock))
 }
 
 fn decide_burn(
     reserved: &idempotency::Record,
     how: idempotency::Reservation,
+    state_dir: &Path,
+    // Whether `flock` worked here at all. Only affects what the refusal
+    // is able to claim — a filesystem without it is a supported
+    // deployment, not a reason to stop.
+    flock_available: bool,
 ) -> CliResult<BurnDecision> {
     match (reserved.an_tx_hash.as_deref(), how) {
         // Someone already broadcast for this identity. Resume at capture.
@@ -812,10 +875,29 @@ fn decide_burn(
         //
         // `an_tx_hash` cannot distinguish them, because it is written only
         // after the send returns. Refuse, and say what to do.
-        (None, idempotency::Reservation::Found) => Err(CliError::DuplicateInFlight {
+        (None, idempotency::Reservation::Found) => Err(CliError::ReservationInFlight {
             prior_status: format!("{:?}", reserved.status).to_ascii_lowercase(),
-            prior_tx: None,
             prior_msg_id: reserved.withdrawal_msg_id.clone(),
+            record_path: idempotency::record_path(state_dir, &reserved.key)
+                .display()
+                .to_string(),
+            // This run holds the withdrawal lock — it took it before
+            // reserving — so no OTHER process can be executing this
+            // withdrawal, whatever the record says. That is the half the
+            // record cannot supply, and without it the only escape an
+            // operator finds is deleting the guard.
+            liveness: if flock_available {
+                "No other process on this host holds this withdrawal, so the record was left by a \
+                 run that has already exited. That is not the same as \"nothing was broadcast\": a \
+                 run can exit between the send returning and the hash being written, which is \
+                 exactly the record you are looking at."
+                    .to_string()
+            } else {
+                "Whether another process holds this withdrawal could not be determined here \
+                 (`flock` is unavailable — a network mount, typically), so the on-chain \
+                 reconciliation below is the only evidence available."
+                    .to_string()
+            },
         }),
     }
 }
@@ -1023,11 +1105,33 @@ mod tests {
         // The same shape covers a hand-edited `{"status":"burned",
         // "an_tx_hash":null}`, which the CLI's own post-burn recovery
         // message invites an operator to produce.
-        let err = decide_burn(&reserved(None), idempotency::Reservation::Found)
-            .expect_err("a record another run owns, with no hash yet, must refuse");
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = decide_burn(
+            &reserved(None),
+            idempotency::Reservation::Found,
+            dir.path(),
+            true,
+        )
+        .expect_err("a record another run owns, with no hash yet, must refuse");
         assert!(
-            matches!(err, CliError::DuplicateInFlight { .. }),
+            matches!(err, CliError::ReservationInFlight { .. }),
             "the honest answer is exit 3, not a second burn: {err:?}",
+        );
+        // And the refusal has to say what to do, or the only escape an
+        // operator finds is deleting the guard.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--allow-retry does NOT override"),
+            "must not send them back to the flag they already passed: {msg}"
+        );
+        assert!(msg.contains("Record:"), "must name the file: {msg}");
+        assert!(
+            msg.contains("Reconcile on chain"),
+            "must give the first step: {msg}"
+        );
+        assert!(
+            msg.contains("while another run is mid-send"),
+            "must state the precondition on deleting it: {msg}"
         );
     }
 
@@ -1043,7 +1147,13 @@ mod tests {
         // multisig with no replay guard. Deciding from what `reserve`
         // returned does not.
         assert_eq!(
-            decide_burn(&reserved(Some("0xdead")), idempotency::Reservation::Found).unwrap(),
+            decide_burn(
+                &reserved(Some("0xdead")),
+                idempotency::Reservation::Found,
+                Path::new("/nonexistent"),
+                true,
+            )
+            .unwrap(),
             BurnDecision::Reuse("0xdead".into()),
             "a record naming a broadcast burn must be resumed, never re-sent",
         );
@@ -1052,7 +1162,13 @@ mod tests {
     #[test]
     fn a_fresh_reservation_sends() {
         assert_eq!(
-            decide_burn(&reserved(None), idempotency::Reservation::Created).unwrap(),
+            decide_burn(
+                &reserved(None),
+                idempotency::Reservation::Created,
+                Path::new("/nonexistent"),
+                true,
+            )
+            .unwrap(),
             BurnDecision::Send,
             "no hash on the record means nothing reached the wire for this identity",
         );
@@ -1084,7 +1200,7 @@ mod tests {
     #[test]
     fn the_first_run_on_a_fresh_identity_sends() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (r, d) = reserve_and_decide(
+        let (r, d, _lock) = reserve_and_decide(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1105,7 +1221,7 @@ mod tests {
         // Run B arrives with --allow-retry. Nothing in the record says
         // "someone is mid-send"; only the reservation's provenance does.
         let dir = tempfile::TempDir::new().unwrap();
-        let (_a, da) = reserve_and_decide(
+        let (_a, da, _lock_a) = reserve_and_decide(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1124,8 +1240,42 @@ mod tests {
         )
         .expect_err("B must not broadcast a second initiateWithdrawal");
         assert!(
-            matches!(err, CliError::DuplicateInFlight { .. }),
+            matches!(err, CliError::ReservationInFlight { .. }),
             "exit 3, not a second burn: {err:?}"
+        );
+        // A's lock is still held — that IS the premise of this test — so
+        // the refusal can say so outright instead of leaving B to guess.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RIGHT NOW"),
+            "must name the live holder: {msg}"
+        );
+        assert!(
+            msg.contains("do not delete it"),
+            "the one thing that would cause the second burn: {msg}"
+        );
+
+        // Now A exits. The record is unchanged and still says nothing
+        // about whether a burn landed — but the question "is anyone
+        // executing this" now has a different, checkable answer, and the
+        // refusal has to change with it.
+        drop(_lock_a);
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+        )
+        .expect_err("a dead run's record still cannot be sent over");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("has already exited"),
+            "must say the holder is gone: {msg}"
+        );
+        assert!(
+            msg.contains("not the same as"),
+            "and must not let that be read as 'nothing was broadcast': {msg}"
         );
     }
 
@@ -1135,7 +1285,7 @@ mod tests {
         // burning again — the same refusal would strand a recoverable
         // withdrawal.
         let dir = tempfile::TempDir::new().unwrap();
-        let (mut r, _) = reserve_and_decide(
+        let (mut r, _, _lock) = reserve_and_decide(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1146,8 +1296,12 @@ mod tests {
         r.status = Status::Burned;
         r.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
         idempotency::update(dir.path(), &r).unwrap();
+        // A exits: the resume is a LATER run, not a concurrent one. Without
+        // this the lock refuses first and the test would be asserting the
+        // wrong thing.
+        drop(_lock);
 
-        let (_, d) = reserve_and_decide(
+        let (_, d, _lock) = reserve_and_decide(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -1193,11 +1347,13 @@ mod tests {
             let mut refusals = 0;
             for h in handles {
                 match h.join().unwrap() {
-                    Ok((_, BurnDecision::Send)) => sends += 1,
-                    Ok((_, BurnDecision::Reuse(h))) => {
+                    Ok((_, BurnDecision::Send, _lock)) => sends += 1,
+                    Ok((_, BurnDecision::Reuse(h), _lock)) => {
                         panic!("attempt {attempt}: nothing has been sent, so nothing to reuse: {h}")
                     },
-                    Err(CliError::DuplicateInFlight { .. }) => refusals += 1,
+                    Err(CliError::ReservationInFlight {
+                        ..
+                    }) => refusals += 1,
                     Err(e) => panic!("attempt {attempt}: unexpected refusal: {e:?}"),
                 }
             }

@@ -559,9 +559,10 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
 - `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
   only under this self-deploy path — see
   [Case 1b](#case-1b--l2-self-deploy-end-to-end). After redeploy,
-  fire a NEW burn (the old state-file's dedup tuple stays valid; use
-  `--allow-retry` OR change the amount by 1 micro-USDC to sidestep
-  dedup).
+  fire a NEW burn. The old state file's dedup tuple stays valid, and
+  `--allow-retry` will NOT re-open it — a `Confirmed` record is refused
+  unconditionally, and a `Reserved` one with no hash is refused too.
+  Change the amount by 1 micro-USDC to get a fresh identity.
 
 #### 3a-ii — Event never observed
 
@@ -593,9 +594,13 @@ entirely, and resumes at capture.
 
 **`an_tx_hash` is `null`** (`status: "reserved"`) — ambiguous. The SDK
 either never sent, or sent and failed before returning a hash; the
-record cannot tell you which, and `--allow-retry` here does **not**
-resume — with no hash to reuse, the run composes and broadcasts a
-**second** burn. Reconcile on-chain before doing anything:
+record cannot tell you which, because the hash is written only after the
+send returns.
+
+`--allow-retry` neither resumes nor overrides this: the run refuses with
+exit 3. (It used to compose and broadcast a **second** burn here. That is
+fixed, and the refusal is now the documented behaviour rather than a
+hazard to warn about.) Reconcile on-chain before doing anything:
 
 ```bash
 # List recent transactions on the multisig and look for a
@@ -605,7 +610,8 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
 ```
 
 - Balance unchanged and no matching transaction → nothing was sent.
-  Re-run with `--allow-retry`.
+  See **"What `re-run` means once a record exists"** below: a record is
+  on disk, and `--allow-retry` alone will refuse it with exit 3.
 - A matching transaction exists → **check whether it succeeded before
   concluding anything.** A transaction that reached the chain and
   aborted is not a burn; the CLI classifies exactly this case
@@ -620,8 +626,10 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
   ```
 
   - `aborted: true` or `exit_code != 0` → the multisig rejected the call
-    and the USDC stayed put. Nothing landed; fix the cause and re-run
-    with `--allow-retry`.
+    and the USDC stayed put. Nothing landed — fix the cause, then follow
+    the "nothing was broadcast" path below; `--allow-retry` on its own
+    refuses, because the record cannot distinguish this from a burn whose
+    hash was never written.
   - `aborted: false`, `exit_code: 0` → the multisig *sent* an internal
     message. That is not yet a burn: USDCBridge can abort it in turn,
     and the CLI sends with `bounce: true` precisely so the USDC comes
@@ -664,8 +672,8 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
 
     - destination transaction `aborted: true` or `exit_code != 0` → the
       bridge rejected it and the funds bounced back. **Not** a burn. Do
-      not set `status: burned`; fix the cause and re-run with
-      `--allow-retry`.
+      not set `status: burned`; fix the cause, then follow the "nothing
+      was broadcast" path below.
     - destination transaction clean **and** carrying an outbound ExtOut
       to `:…026a` → that ExtOut is the `WithdrawalInitiated` event. The
       burn landed. Write the multisig tx hash into `an_tx_hash`, set
@@ -676,6 +684,27 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
   — at "the multisig transaction succeeded" — is what would let you mark
   a bounced call as `burned`, after which the resumed run waits forever
   for an event that was never emitted.
+
+**What "re-run" means once a record exists.** `--allow-retry` resumes a
+withdrawal; it does **not** clear one. A record that is `Reserved` with
+no `an_tx_hash` — which is what an exit 10 leaves — refuses with exit 3
+under `--allow-retry` too, and that is deliberate: the hash is written
+only after the send returns, so the record cannot say whether a burn is
+on the wire, and re-running would broadcast a second one.
+
+So the two outcomes below lead to different actions, and neither of them
+is a bare `--allow-retry`:
+
+- **A burn landed** → write its multisig tx hash into `an_tx_hash`, set
+  `status` to `"burned"`, then re-run with `--allow-retry`. The run
+  resumes at capture and never re-burns.
+- **Nothing was broadcast** → the record has to go, and the exit-3
+  refusal tells you when that is safe. Re-run the identical command and
+  read it: it reports either "Another process on this host is executing
+  this withdrawal RIGHT NOW" — wait — or "the record was left by a run
+  that has already exited". Only in the second case, and only with the
+  reconciliation above showing no `initiateWithdrawal`, delete the record
+  named in the message and re-run.
 
 Do **not** delete the state file in either case. It is the only local
 trace that a burn may have been authorised.
@@ -876,8 +905,11 @@ cp ../../../acki-nacki/config/USDCBridge.keys.json \
 wire, and that record is the only local trace of it — deleting it is how
 the same withdrawal gets burned a second time. Follow
 [Case 3a](#case-3a--capture-timeout--advanced-diagnostics) instead: read `.status` and
-`.an_tx_hash`, reconcile on chain, and re-run with `--allow-retry` only
-once you know what actually landed.
+`.an_tx_hash`, reconcile on chain, and act on what actually landed —
+`--allow-retry` resumes only a record that already carries a hash. If the
+reconciliation shows a burn, write its hash in and set `status` to
+`"burned"` first; if it shows none, see **"What `re-run` means once a
+record exists"** in Case 3a.
 
 (The old text here said "prune the `Failed` state file". No `Failed`
 record can exist at exit 10 in the first place — the only production
@@ -1025,8 +1057,14 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — prec
 - `work_dir/` — regeneration is deterministic; ~5 min per proof with
   warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` —
-  keep for audit; `Failed` — safe to prune once reconciled;
-  `Reserved` >24 h old with no `an_tx_hash` — safe to prune.
+  keep for audit; `Failed` — safe to prune once reconciled.
+- `Reserved` with no `an_tx_hash` — **no age makes this safe.** The
+  record cannot say whether a burn is on the wire, because the hash is
+  written only after the send returns. Re-run the identical command and
+  read the exit-3 refusal: it reports whether any process still holds
+  the withdrawal, and that plus an on-chain reconciliation
+  ([Case 3a](#case-3a--capture-timeout--advanced-diagnostics)) are the
+  two conditions for deleting it.
 
 **Do NOT touch between demos:**
 

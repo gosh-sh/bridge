@@ -40,6 +40,8 @@ lines go to stdout.
 """
 
 import os
+import re
+import shlex
 import sys
 import time
 
@@ -176,8 +178,34 @@ def main():
     tracer.log(f"  WITHDRAW_FROM_KEYS = {abs_key_path}")
 
     # stdout: only the eval-able lines. Nothing else.
+    #
+    # Quoted and validated, because README Step 2 is
+    # `eval "$(scripts/deploy_msig_and_mint.sh)"` — every character
+    # printed here becomes shell code in the operator's own session.
+    #
+    # Neither value is a literal in this file. `abs_key_path` derives from
+    # BRIDGE_WORK_DIR, so an ordinary path with a space already produced a
+    # broken `export` (the shell split it and the second word became a
+    # separate assignment), and one containing `;` or `$(…)` would run.
+    # `msig_address` comes back from `tvm-cli`'s JSON, i.e. from a
+    # subprocess, and was printed unchecked.
+    #
+    # `shlex.quote` for the path, which may legitimately contain spaces.
+    # A shape check for the address, which may not contain anything but
+    # hex: emitting something the CLI would reject later is worse than
+    # failing here, where nothing has been handed to a shell yet.
+    if not re.fullmatch(r"[0-9a-f]{64}::[0-9a-f]{64}", msig_address):
+        tracer.log(
+            f"FAIL — tvm-cli returned an address this script will not "
+            f"emit: {msig_address!r}"
+        )
+        raise SystemExit(
+            "refusing to print an address that is not <64-hex>::<64-hex>; "
+            "its output is eval'd by the documented Step 2"
+        )
+
     print(f"export WITHDRAW_FROM={msig_address}")
-    print(f"export WITHDRAW_FROM_KEYS={abs_key_path}")
+    print(f"export WITHDRAW_FROM_KEYS={shlex.quote(abs_key_path)}")
 
 
 if __name__ == "__main__":

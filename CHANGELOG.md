@@ -905,6 +905,28 @@ assigns it when the release is tagged.
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
 
+- **`scripts/deploy_msig_and_mint.py` quotes what it prints, and the
+  Python helpers no longer `cd` through a shell.** README Step 2 is
+  `eval "$(scripts/deploy_msig_and_mint.sh)"`, so every character the
+  script writes to stdout becomes shell code in the operator's session —
+  and neither printed value was a literal. `WITHDRAW_FROM_KEYS` derives
+  from `BRIDGE_WORK_DIR`, so an ordinary path with a space produced a
+  broken `export` and one containing `;` or `$(…)` executed;
+  `WITHDRAW_FROM` comes back from `tvm-cli`'s JSON and was printed
+  unchecked. The path is `shlex.quote`d now, and the address is refused
+  unless it is `<64-hex>::<64-hex>` — emitting something the CLI would
+  reject later is worse than failing before anything reaches a shell.
+
+  Separately, `helper/common.py` built `cd {work_dir} && {command}` and
+  ran it with `shell=True`, so **every** call through those two helpers
+  broke on a work directory containing a space, and would have executed
+  one containing shell metacharacters. They pass `cwd=` now, which hands
+  the path to the kernel rather than to a parser. The command string
+  itself is still shell-interpreted — the callers build `tvm-cli …`
+  strings with interpolated paths, and converting those to argument lists
+  is a larger change than this; that is the remaining exposure and it is
+  now the only one.
+
 - **`--json` errors now carry the cause chain.** The envelope rendered
   only the outermost `Display`, so everything a stage had wrapped — the
   aggregator's stderr, a `RelayerError`, the keygen-lock timeout naming

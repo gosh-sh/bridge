@@ -106,14 +106,23 @@ def set_config(options: dict):
 
 def execute_cmd(command: str, work_dir=None, ignore_error=False, silent=False):
     global WAS_ERROR
-    if work_dir is not None:
-        command = f"cd {work_dir} && {command}"
- 
+    # `cwd=`, not `cd {work_dir} &&`. The directory came from
+    # BRIDGE_WORK_DIR and was pasted into a shell command line, so an
+    # ordinary path with a space broke every call and one containing
+    # `;` or `$(…)` ran. `cwd=` hands the path to the kernel instead of
+    # to a parser.
+    #
+    # `command` itself is still shell-interpreted — the callers build
+    # `tvm-cli …` strings with interpolated paths, and moving them to
+    # argument lists is a larger change than this. That is the remaining
+    # exposure here, and it is now the only one.
     WAS_ERROR = False
     if not silent:
-        print(command)
+        print(f"[{work_dir or '.'}] {command}")
     try:
-        output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT).decode("utf-8")
+        output = subprocess.check_output(
+            command, shell=True, cwd=work_dir, stderr=subprocess.STDOUT
+        ).decode("utf-8")
         print(output)
     except subprocess.CalledProcessError as e:
         output = e.output.decode("utf-8")
@@ -140,13 +149,15 @@ def execute_cli_cmd(cmd: str, print_output=False) -> dict:
 
 def execute_cmd_without_exit(command: str, work_dir=None, ignore_error=False, silent=False):
     global WAS_ERROR
-    if work_dir is not None:
-        command = f"cd {work_dir} && {command}"
+    # See `execute_cmd`: `cwd=` rather than a shell `cd`, for the same
+    # reason and with the same remaining caveat about `command`.
     WAS_ERROR = False
     if not silent:
-        print(command)
+        print(f"[{work_dir or '.'}] {command}")
     try:
-        output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT).decode("utf-8")
+        output = subprocess.check_output(
+            command, shell=True, cwd=work_dir, stderr=subprocess.STDOUT
+        ).decode("utf-8")
         print(output)
     except subprocess.CalledProcessError as e:
         output = e.output.decode("utf-8")

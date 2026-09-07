@@ -25,10 +25,30 @@ Given the four user inputs (`--from`, `--from-keys`, `--to`,
 `--to-chain`, `--amount`), the tool runs a six-stage in-process
 pipeline:
 
-1. **Preflight** — read-only checks: `--from-keys` file mode is `0400`,
-   `--from` is an active single-custodian multisig whose owner matches
-   `--from-keys`, USDCBridge resolves via GraphQL, multisig ECC[3]
-   balance ≥ amount.
+1. **Preflight** — everything that can be checked before anything is
+   broadcast, on **both** chains.
+
+   *Acki Nacki side:* `--from-keys` file mode is exactly `0400` and its
+   two halves are a real key pair, `--from` is an active single-custodian
+   multisig whose owner matches `--from-keys`, USDCBridge resolves via
+   GraphQL, multisig ECC[3] balance ≥ amount.
+
+   *EVM side, and this runs on `--dry-run` too* — none of it needs a
+   signing key: `eth_chainId` must equal `--to-chain`, `--bridge-address`
+   must hold code, the withdrawal verifier stack must walk (adapter →
+   `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
+   pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
+   and `treasuryBalance` must already cover the amount. **So a dry run can
+   fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
+   half-wired deploy, a drained treasury — not only AN-side ones.**
+
+   *Real runs only*, because these need the submit-only flags: the burner
+   key parses, the KZG ceremony resolves at k=20 **and** k=21, the
+   Circuit-4 key cache is usable, `aggregate-proof` is prebuilt and
+   answers `--help`, and the output directories are writable with room for
+   what will be written. This is the one part of preflight that writes:
+   it creates those directories and drops a short-lived probe file in
+   each.
 2. **Idempotency reserve** — SHA-256 dedup key over
    `(from, to, to_chain, amount)`; refuse a duplicate in-flight unless
    `--allow-retry` is passed.
@@ -333,11 +353,27 @@ credit.
 
 ### Step 4 — Dry-run
 
-Preflight-only preview: argument validation, key file perms,
-single-custodian check, USDCBridge resolution, balance check, and the
-idempotency-key digest all run. Nothing else — no burn, no capture,
-no prove, no `dry_run_withdraw` eth_call. Useful for sanity-checking
-flags and config before the real submit.
+Preflight-only preview: nothing is broadcast on either side and no
+idempotency state is written — a dry run does not even compute the dedup
+digest, because it never reserves.
+
+**It is not AN-side only.** Argument validation, key file perms, the
+single-custodian check, USDCBridge resolution and the balance check all
+run — and so does the whole EVM side, which needs no signing key:
+`eth_chainId` against `--to-chain`, code at `--bridge-address`, the
+verifier-stack walk, the pinned-identity comparison and the treasury
+check. A dry run that fails may be telling you about your RPC or your
+bridge deploy, not about your multisig.
+
+What it does **not** do: compose or sign the burn, capture, prove, or run
+the `dry_run_withdraw` eth_call. It also does not check the prover
+artifacts — the ceremony, the verifier `.bin`, `aggregate-proof`, the key
+cache or disk headroom — because those are gated on the submit-only flags
+a dry run does not require. Pass `--verifiers-dir` and the deployed-verifier
+bytecode comparison joins in; otherwise it is skipped with a warning.
+
+So a clean dry run means "nothing about either chain is misconfigured",
+not "the real run will succeed".
 
 Every network endpoint, bridge address, prover-plumbing dir, and the
 L2 anchor selection is resolved from `$BRIDGE_CONFIG`. The invocation

@@ -275,6 +275,29 @@ pub fn peek(
 
 // -- helpers ------------------------------------------------------------
 
+/// The directory whose entry must be fsynced to make `path`'s own entry
+/// durable — i.e. `path`'s parent, with one correction.
+///
+/// `Path::parent()` answers the **empty** path for a one-component relative
+/// path: `Path::new("withdraw-state").parent()` is `Some("")`, not
+/// `Some(".")`. `File::open("")` is `ENOENT`, so handing that straight to
+/// the fsync refused the very first reservation for
+/// `--state-dir withdraw-state` — before any burn, but for a perfectly
+/// ordinary invocation.
+///
+/// The shipped profiles say `./withdraw-state`, whose parent IS `.`, which
+/// is why nothing caught this: the bug needs a bare relative name, which is
+/// exactly what an operator types when they are not copying from a profile.
+///
+/// `None` only for a path with no parent at all (`/`), where there is
+/// nothing above to sync.
+fn entry_parent(path: &Path) -> Option<&Path> {
+    match path.parent() {
+        Some(p) if p.as_os_str().is_empty() => Some(Path::new(".")),
+        other => other,
+    }
+}
+
 /// Create the state directory if it is missing, restrict what we create to
 /// `0700`, and make the new levels durable.
 ///
@@ -299,6 +322,14 @@ fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
         while !probe.exists() {
             created.push(probe.to_path_buf());
             match probe.parent() {
+                // The EMPTY path, which is what `parent()` answers for a
+                // one-component relative path: `Path::new("withdraw-state")
+                // .parent()` is `Some("")`, not `Some(".")`. Its parent is
+                // the process's current directory, which always exists, so
+                // there is nothing above this level for us to create. Stop
+                // — walking into `""` would push it onto `created` as a
+                // level we "made".
+                Some(p) if p.as_os_str().is_empty() => break,
                 Some(parent) => probe = parent,
                 // Reached the filesystem root without finding anything
                 // that exists. Nothing sane left to do; let create_dir_all
@@ -316,7 +347,7 @@ fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
         // reverse. Syncing "b" before "a" in a/b would order the entry for
         // b ahead of the entry for a that contains it.
         for level in created.iter().rev() {
-            let Some(parent) = level.parent() else {
+            let Some(parent) = entry_parent(level) else {
                 continue;
             };
             // NOT best-effort. This runs before the reservation, which runs
@@ -704,6 +735,53 @@ mod tests {
         assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_utc(1_000_000_000), "2001-09-09T01:46:40Z");
         assert_eq!(format_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn a_bare_relative_state_dir_has_a_syncable_parent() {
+        // `--state-dir withdraw-state` — no `./`, which is what an operator
+        // types when not copying from a profile. `Path::parent()` answers
+        // the EMPTY path there, `File::open("")` is ENOENT, and the
+        // durability fsync (which is deliberately NOT best-effort) then
+        // refused the first reservation outright.
+        //
+        // The two facts the fix rests on, asserted rather than assumed:
+        assert_eq!(
+            Path::new("withdraw-state").parent(),
+            Some(Path::new("")),
+            "a one-component relative path's parent is empty, not `.`",
+        );
+        assert!(
+            !Path::new("").exists(),
+            "the empty path does not exist, which is what made the walk-up loop \
+             push it and the fsync open it",
+        );
+
+        assert_eq!(
+            entry_parent(Path::new("withdraw-state")),
+            Some(Path::new(".")),
+            "the empty parent must be resolved to the current directory",
+        );
+        assert!(
+            std::fs::File::open(entry_parent(Path::new("withdraw-state")).unwrap()).is_ok(),
+            "and that directory must actually be openable for fsync",
+        );
+
+        // Unchanged for every other shape, including the one the shipped
+        // profiles use.
+        assert_eq!(
+            entry_parent(Path::new("./withdraw-state")),
+            Some(Path::new(".")),
+        );
+        assert_eq!(
+            entry_parent(Path::new("/var/lib/bridge/state")),
+            Some(Path::new("/var/lib/bridge")),
+        );
+        assert_eq!(
+            entry_parent(Path::new("/")),
+            None,
+            "the root has no parent to sync",
+        );
     }
 
     #[test]

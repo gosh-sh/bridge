@@ -332,41 +332,62 @@ pub async fn run(
             info!("stage 2/6: idempotency reserve");
             let r = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
             info!(key = %r.key, "reserved");
+
+            // Decide from what `reserve` just returned, NOT from the `peek`
+            // taken in stage 1. See [`decide_burn`]: the two can disagree,
+            // and the disagreement is a second irreversible burn.
+            let decision = decide_burn(&r);
             record = Some(r);
 
-            let receipt = burn::send(&context, &from, composed).await?;
-            info!(an_tx = %receipt.an_tx_hash, "burn broadcast");
-            if let Some(r) = record.as_mut() {
-                r.status = Status::Burned;
-                r.an_tx_hash = Some(receipt.an_tx_hash.clone());
-                // `?` would be wrong here, and quietly so. `update` reports
-                // its failures as `CliError::Preflight` — exit 2, whose
-                // published meaning is "refused before sending, nothing
-                // left the machine". The burn is on the wire. Exit 2 tells
-                // an operator, and every script parsing the contract, the
-                // opposite of the truth, and the hash never reaches the
-                // JSON output because the error path carries no fields.
-                //
-                // Reclassify, and put the hash where it can be read: this
-                // is exactly `BurnOutcomeUnknown` — sent, outcome not
-                // durably recorded.
-                if let Err(e) = idempotency::update(&state_dir, r) {
-                    return Err(CliError::BurnOutcomeUnknown {
-                        reason: format!(
-                            "the AN burn was broadcast as {} but the state file could not be \
-                             updated: {e}\n\
-                             \x20 The withdrawal is IN FLIGHT. Do not re-run without \
-                             reconciling — see the runbook's Case 3a.\n\
-                             \x20 To resume, write this hash into {}'s an_tx_hash and set status \
-                             to \"burned\", then re-run with --allow-retry.",
-                            receipt.an_tx_hash,
-                            idempotency::record_path(&state_dir, &r.key).display(),
-                        ),
-                        source: Some(anyhow::anyhow!("{e}")),
-                    });
-                }
+            match decision {
+                BurnDecision::Reuse(existing) => {
+                    // `composed` is dropped here without being sent, which
+                    // also drops the owner `KeyPair` it holds — the same
+                    // discipline `send` would have applied on return.
+                    warn!(
+                        an_tx = %existing,
+                        "another run reserved this withdrawal and broadcast it while this one was \
+                         preflighting; reusing its AN tx and resuming at capture rather than \
+                         burning a second time. Nothing extra was sent.",
+                    );
+                    (existing, bounce)
+                },
+                BurnDecision::Send => {
+                    let receipt = burn::send(&context, &from, composed).await?;
+                    info!(an_tx = %receipt.an_tx_hash, "burn broadcast");
+                    if let Some(r) = record.as_mut() {
+                        r.status = Status::Burned;
+                        r.an_tx_hash = Some(receipt.an_tx_hash.clone());
+                        // `?` would be wrong here, and quietly so. `update` reports
+                        // its failures as `CliError::Preflight` — exit 2, whose
+                        // published meaning is "refused before sending, nothing
+                        // left the machine". The burn is on the wire. Exit 2 tells
+                        // an operator, and every script parsing the contract, the
+                        // opposite of the truth, and the hash never reaches the
+                        // JSON output because the error path carries no fields.
+                        //
+                        // Reclassify, and put the hash where it can be read: this
+                        // is exactly `BurnOutcomeUnknown` — sent, outcome not
+                        // durably recorded.
+                        if let Err(e) = idempotency::update(&state_dir, r) {
+                            return Err(CliError::BurnOutcomeUnknown {
+                                reason: format!(
+                                    "the AN burn was broadcast as {} but the state file could not be \
+                                     updated: {e}\n\
+                                     \x20 The withdrawal is IN FLIGHT. Do not re-run without \
+                                     reconciling — see the runbook's Case 3a.\n\
+                                     \x20 To resume, write this hash into {}'s an_tx_hash and set status \
+                                     to \"burned\", then re-run with --allow-retry.",
+                                    receipt.an_tx_hash,
+                                    idempotency::record_path(&state_dir, &r.key).display(),
+                                ),
+                                source: Some(anyhow::anyhow!("{e}")),
+                            });
+                        }
+                    }
+                    (receipt.an_tx_hash, receipt.bounce)
+                },
             }
-            (receipt.an_tx_hash, receipt.bounce)
         }
     };
 
@@ -690,6 +711,47 @@ fn build_tvm_client(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
     Ok(Arc::new(ctx))
 }
 
+
+/// Whether stage 3 must actually broadcast.
+///
+/// Decided from the record [`idempotency::reserve`] returned, **not** from
+/// the `peek` taken back in stage 1. Those are different answers, and the
+/// gap between them is a second irreversible burn.
+///
+/// `reserve` is the atomic point: it is the `create_new` that either wins
+/// the identity or reads whatever is already there. `peek` happens much
+/// earlier — before the whole EVM preflight, before the confirmation
+/// prompt, before `compose` — and with an interactive prompt that window is
+/// unbounded. Another run on this host can reserve, burn, and record its
+/// hash inside it.
+///
+/// With `--allow-retry`, `reserve` then hands that run's record back
+/// (`Ok(prior)` for `Reserved | Burned | Captured | Proved`), and it carries
+/// `an_tx_hash`. Without this check the caller stored that record and sent
+/// anyway — a second `initiateWithdrawal` for a withdrawal already on the
+/// wire, against a multisig with no replay guard.
+///
+/// Without `--allow-retry` the same race is already safe: `reserve` returns
+/// `DuplicateInFlight` and the run exits 3. So this is specifically the
+/// `--allow-retry` path, which is exactly the path that exists to be used
+/// after something went wrong — i.e. when a second operator is most likely
+/// to be poking at the same withdrawal.
+#[derive(Debug, PartialEq, Eq)]
+enum BurnDecision {
+    /// No hash on the reserved record: nothing has reached the wire for
+    /// this identity, and this run is the one that broadcasts.
+    Send,
+    /// The reserved record already names a broadcast burn. Reuse its hash
+    /// and resume at capture; do not compose a second message.
+    Reuse(String),
+}
+
+fn decide_burn(reserved: &idempotency::Record) -> BurnDecision {
+    match reserved.an_tx_hash.as_deref() {
+        Some(h) => BurnDecision::Reuse(h.to_string()),
+        None => BurnDecision::Send,
+    }
+}
 /// Parse `--anchor-layer` into an [`AnchorLayerMode`]. Mirrors the relayer
 /// bin's `parse_anchor_layer` so the two CLIs share behavior.
 fn parse_anchor_layer(s: &str) -> CliResult<AnchorLayerMode> {
@@ -828,6 +890,51 @@ fn confirm_before_burn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reserved record, with `an_tx_hash` as the only variable.
+    fn reserved(an_tx_hash: Option<&str>) -> idempotency::Record {
+        idempotency::Record {
+            key: "k".into(),
+            status: Status::Reserved,
+            from_extended: "ab::cd".into(),
+            to_hex: "0x00".into(),
+            to_chain: 11_155_111,
+            amount_micro: 1_000_000,
+            reserved_at: "1970-01-01T00:00:00Z".into(),
+            an_tx_hash: an_tx_hash.map(str::to_string),
+            withdrawal_msg_id: None,
+            block_seq_no: None,
+            proof_json_path: None,
+            eth_tx_hash: None,
+        }
+    }
+
+    #[test]
+    fn a_reservation_that_already_names_a_burn_must_not_send_again() {
+        // The `--allow-retry` race. `peek` runs in stage 1; `reserve` runs
+        // after the EVM preflight, the confirmation prompt and `compose` —
+        // a window that is unbounded when the prompt is live. Another run
+        // on this host can reserve, burn and record its hash inside it, and
+        // `reserve` with `--allow-retry` then hands that record back.
+        //
+        // Deciding from `peek` sends a second `initiateWithdrawal` against a
+        // multisig with no replay guard. Deciding from what `reserve`
+        // returned does not.
+        assert_eq!(
+            decide_burn(&reserved(Some("0xdead"))),
+            BurnDecision::Reuse("0xdead".into()),
+            "a record naming a broadcast burn must be resumed, never re-sent",
+        );
+    }
+
+    #[test]
+    fn a_fresh_reservation_sends() {
+        assert_eq!(
+            decide_burn(&reserved(None)),
+            BurnDecision::Send,
+            "no hash on the record means nothing reached the wire for this identity",
+        );
+    }
 
     #[test]
     fn parse_anchor_layer_auto() {

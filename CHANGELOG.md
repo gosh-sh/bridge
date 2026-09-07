@@ -953,6 +953,46 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **An interrupted keygen no longer leaves 2.65 GB nobody can see.** Key
+  files are published through a temp file that removes itself on drop —
+  but not when the process is killed, and a proving-key write is ~2.65 GB
+  spread over minutes. Ctrl-C, an OOM kill or a container stop anywhere in
+  that window left the whole partial file behind as a `.tmpXXXXXX`: a
+  dotfile, so `ls` did not show it, and nothing removed it, including
+  `probe_event_keys --repair`. The space it held is exactly the headroom
+  the withdraw preflight reserves for the next keygen, so the run that
+  tripped over it was the run that had been told there was room — and it
+  tripped at stage 5, after the burn.
+
+  `probe_event_keys` now reports them on every invocation (whatever the
+  cache verdict) and removes them under `--repair`; matching is
+  `.tmp` + exactly six alphanumerics and regular files only, so a
+  directory or symlink of that name is listed to you and never touched.
+  The withdraw preflight warns when it sees them, and its
+  out-of-space refusal now names how much of the shortfall they are
+  holding and the command that reclaims it — "free 4 GB" is the wrong
+  instruction when 2.65 GB of it is a file the operator cannot see.
+
+- **The halo2 circuit crates are pinned by revision, not `branch = "main"`.**
+  `EVENT_CIRCUIT_REVISION` is bumped by hand and is the only thing between
+  a moved Circuit 4 and a "warm" verdict over keys built for the old one:
+  the manifest format, the revision and the vk/config digests all still
+  match after the circuit moves, because the *files* did not change. Under
+  a branch, one `cargo update` did that silently and the mismatch surfaced
+  as a rejected proof at stage 5, after the burn and the anchor wait. All
+  five crates from `acki-nacki-to-eth-bridge-halo2-circuits` now name
+  revision `5356b178cce8ab5a283096032c774533bcab8e28` — the commit
+  `Cargo.lock` already resolved, so nothing that gets built changes.
+  Moving the circuit is now an edit reviewers see next to the revision
+  constant. Two `cargo run` invocations in the key-cache CI job also
+  gained `--locked`, which the rest of the pipeline already used.
+
+  Not covered: `crates/bridge-snark-utils` declares the same crates at
+  `branch = "main"`, has no committed lockfile at all, and carries a
+  `[patch]` pointing at a sibling checkout. It is excluded from the
+  workspace and built by no CI job; making it reproducible is a separate
+  piece of work.
+
 - **The CI alternate-keyset guard can fire.** `git ls-tree` ran after a
   `cd` into `crates/bridge-prover-libraries` and asked for that path
   again, so it always answered empty: setting `BRIDGE_ALT_KEYS_REF` failed

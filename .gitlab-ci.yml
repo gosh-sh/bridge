@@ -390,7 +390,11 @@ test:rust:ackinacki-bridge:keycache:
         # leaves every lower degree to be derived at first use inside the
         # keygen that follows. Generate them here, where a failure is
         # visible.
-        cargo run --release -p bridge-prover-lib --bin bootstrap_hermez_srs -- \
+        # `--locked`, like every other cargo invocation in these jobs. This
+        # one provisions the ceremony the keygen below builds against, so a
+        # silent dependency bump here is a keyset built from a resolution
+        # nothing else in the pipeline used.
+        cargo run --locked --release -p bridge-prover-lib --bin bootstrap_hermez_srs -- \
           --params-dir "$KEYS/primary"
       fi
       # The KEYS are NOT guarded, and that is the point. `bridge-keycache-v1`
@@ -411,7 +415,7 @@ test:rust:ackinacki-bridge:keycache:
       # `a_truncated_pk_beside_a_good_vk_is_corrupt_not_warm` describes.
       # Repair it first — the probe already knows how to spot it, so ask,
       # and clear the trio when the answer is Corrupt.
-      cargo run --release --quiet -p bridge-prover-lib --bin probe_event_keys -- \
+      cargo run --locked --release --quiet -p bridge-prover-lib --bin probe_event_keys -- \
         --params-dir "$KEYS/primary" --repair
       #
       # This binary hard-codes ./params and takes no --params-dir, so CWD is

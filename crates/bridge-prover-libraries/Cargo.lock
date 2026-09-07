@@ -1398,7 +1398,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "attestation-bls-checker-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=main#5356b178cce8ab5a283096032c774533bcab8e28"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=5356b178cce8ab5a283096032c774533bcab8e28#5356b178cce8ab5a283096032c774533bcab8e28"
 dependencies = [
  "bridge-poseidon",
  "gosh-bls-verification",
@@ -1826,7 +1826,7 @@ dependencies = [
 [[package]]
 name = "bridge-event-prove-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=main#5356b178cce8ab5a283096032c774533bcab8e28"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=5356b178cce8ab5a283096032c774533bcab8e28#5356b178cce8ab5a283096032c774533bcab8e28"
 dependencies = [
  "bridge-poseidon",
  "dense-balanced-tree",
@@ -1903,7 +1903,7 @@ dependencies = [
 [[package]]
 name = "bridge-poseidon"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=main#5356b178cce8ab5a283096032c774533bcab8e28"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=5356b178cce8ab5a283096032c774533bcab8e28#5356b178cce8ab5a283096032c774533bcab8e28"
 dependencies = [
  "gosh-bls-verification",
  "halo2-base",
@@ -2009,7 +2009,7 @@ dependencies = [
 [[package]]
 name = "bridge-test-data-gen"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=main#5356b178cce8ab5a283096032c774533bcab8e28"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=5356b178cce8ab5a283096032c774533bcab8e28#5356b178cce8ab5a283096032c774533bcab8e28"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4228,7 +4228,7 @@ checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
 [[package]]
 name = "historical-layer-hashes-movement-checker-circuit"
 version = "0.1.0"
-source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?branch=main#5356b178cce8ab5a283096032c774533bcab8e28"
+source = "git+https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits?rev=5356b178cce8ab5a283096032c774533bcab8e28#5356b178cce8ab5a283096032c774533bcab8e28"
 dependencies = [
  "bridge-poseidon",
  "gosh-dense-balanced-tree",

@@ -800,7 +800,10 @@ pub fn probe_event_key_cache(params_dir: &Path) -> KeyCacheState {
 /// `load_pk` operator hint. Auto-picks GiB / MiB / KiB so a large BLS
 /// PK reads as "3.62 GiB" while a smaller Circuit-4 PK reads as
 /// "412.7 MiB" instead of "0.40 GiB".
-fn format_bytes(bytes: u64) -> String {
+/// Human-readable byte count. Public because `keys` re-exports it: the
+/// probe binary reports leaked temp sizes, and its neighbouring output
+/// ("loading event PK (2.65 GiB)") is already in these units.
+pub fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;

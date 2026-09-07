@@ -14,7 +14,9 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use bridge_prover_lib::keys::{probe_event_key_cache, KeyCacheState};
+use bridge_prover_lib::keys::{
+    format_bytes, leaked_keygen_temp_files, probe_event_key_cache, KeyCacheState,
+};
 
 fn main() -> Result<()> {
     let mut params_dir: Option<PathBuf> = None;
@@ -38,6 +40,32 @@ fn main() -> Result<()> {
     }
     let dir = params_dir.ok_or_else(|| anyhow::anyhow!("--params-dir is required"))?;
 
+    // Before the verdict, and reported whatever the verdict is. A leaked
+    // temp is orthogonal to whether the keys are usable — a warm cache can
+    // be sitting next to 2.65 GB of litter — and it is invisible to the
+    // operator otherwise: the name starts with a dot, so a plain `ls` does
+    // not list it, and until now nothing removed it either.
+    let leaks = leaked_keygen_temp_files(&dir);
+    if !leaks.is_empty() {
+        let total: u64 = leaks.iter().map(|l| l.bytes).sum();
+        // `format_bytes`, not a fixed GB: the interesting leak is a
+        // ~2.65 GiB proving key, but a killed config write leaves a few
+        // hundred bytes, and printing "0.00 GB" next to a path reads as
+        // "this one is nothing" for a file the operator still has to
+        // delete by hand.
+        println!(
+            "leaked: {} interrupted-keygen temp file(s), {} total",
+            leaks.len(),
+            format_bytes(total),
+        );
+        for l in &leaks {
+            println!("  {} ({})", l.path.display(), format_bytes(l.bytes));
+        }
+        if !repair {
+            println!("  pass --repair to remove them");
+        }
+    }
+
     match probe_event_key_cache(&dir) {
         KeyCacheState::Warm => println!("warm: keys are usable"),
         KeyCacheState::Cold { why } => println!("cold: {why}"),
@@ -48,6 +76,17 @@ fn main() -> Result<()> {
         // watched some files disappear before the refusal.
         KeyCacheState::Blocked { why } => {
             println!("blocked: {why}");
+            // "nothing was changed" has to stay literally true, so this
+            // arm refuses ahead of the temp-file sweep below as well as
+            // ahead of the key deletions. Say so, or an operator who was
+            // just shown a leak list reads the refusal as "and the temps
+            // are gone".
+            if !leaks.is_empty() {
+                println!(
+                    "the {} leaked temp file(s) above were left alone too",
+                    leaks.len()
+                );
+            }
             bail!("this is not something --repair can clear; nothing was changed");
         },
         KeyCacheState::Corrupt { why } => {
@@ -101,5 +140,48 @@ fn main() -> Result<()> {
             }
         },
     }
+
+    // Sweep the litter LAST, and independently of the cache verdict: a
+    // warm cache next to a leaked 2.65 GB temp is the common case, and it
+    // never reaches the `Corrupt` arm above.
+    //
+    // `--repair` is required, like every other deletion here. The paths
+    // come from `leaked_keygen_temp_files`, which matches only
+    // `.tmp` + six alphanumerics and only regular files, so a directory or
+    // a symlink someone put there is never in this list — but re-check the
+    // entry type anyway. The list was taken before the deletions above,
+    // and "the path I am about to delete is still the thing I looked at"
+    // is worth one syscall when the alternative is removing an operator's
+    // file.
+    if repair && !leaks.is_empty() {
+        for l in &leaks {
+            match std::fs::symlink_metadata(&l.path) {
+                Ok(md) if md.is_file() => {},
+                // Gone already, or turned into something else between the
+                // scan and now. Either way, not ours to delete.
+                _ => {
+                    println!("  skipped {} (no longer a regular file)", l.path.display());
+                    continue;
+                },
+            }
+            match std::fs::remove_file(&l.path) {
+                Ok(()) => println!("  removed {}", l.path.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                // Read-only mount, permissions. Surface it: reporting
+                // "swept" over a file that is still there sends the
+                // operator to free space that is not going to appear.
+                Err(e) => bail!("could not remove {}: {e}", l.path.display()),
+            }
+        }
+        let left = leaked_keygen_temp_files(&dir);
+        if !left.is_empty() {
+            bail!(
+                "{} leaked temp file(s) still present after the sweep",
+                left.len()
+            );
+        }
+        println!("swept: interrupted-keygen temp files removed");
+    }
+
     Ok(())
 }

@@ -29,7 +29,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
-use bridge_prover_lib::keys::{probe_ceremony, KeyCacheState};
+use bridge_prover_lib::keys::{leaked_keygen_temp_files, probe_ceremony, KeyCacheState};
 use bridge_relayer_daemon::bridge::EthBridgeClient;
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
@@ -1169,6 +1169,20 @@ pub fn check_disk_headroom(
     pk_cache_dir: &Path,
     cache: KeyCacheState,
 ) -> CliResult<()> {
+    // Report litter before measuring, whether or not the measurement then
+    // refuses. A killed keygen leaves its whole partial temp behind
+    // (`NamedTempFile` cleans up on drop, not on SIGKILL), the name is a
+    // dotfile so `ls` does not show it, and until recently nothing swept
+    // it. A host can accumulate several of these and never be told.
+    for l in leaked_keygen_temp_files(params_dir) {
+        tracing::warn!(
+            path = %l.path.display(),
+            gb = l.bytes as f64 / 1e9,
+            "an interrupted keygen left a temp file behind; it is holding space this run may \
+             need. Remove it with `probe_event_keys --params-dir <dir> --repair`",
+        );
+    }
+
     // What each path needs, in bytes, on this run.
     let params_need = keygen_requirement(params_dir, cache)?;
     let pk_need = pk_cache_requirement(pk_cache_dir);
@@ -1296,12 +1310,34 @@ fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<
         .collect::<Vec<_>>()
         .join(" + ");
 
+    // "Free 4.0 GB" is the wrong instruction when 2.65 GB of the shortfall
+    // is a temp file the operator cannot see. Name it, and name the tool,
+    // before telling them to go find space elsewhere.
+    let leaks = leaked_keygen_temp_files(probe);
+    let reclaimable = if leaks.is_empty() {
+        String::new()
+    } else {
+        let total: u64 = leaks.iter().map(|l| l.bytes).sum();
+        format!(
+            "\n\x20 {:.1} GB of that is {} interrupted-keygen temp file(s) still sitting in {} — \
+             hidden, because the names start with a dot, and nothing removes them on its \
+             own:\n\x20   cargo run --release --manifest-path \
+             ../bridge-prover-libraries/Cargo.toml -p bridge-prover-lib --bin probe_event_keys -- \
+             --params-dir '{}' --repair\n\x20 (run from crates/ackinacki-bridge/; reclaim that \
+             first, it may be all you need)",
+            total as f64 / 1e9,
+            leaks.len(),
+            probe.display(),
+            probe.display().to_string().replace('\'', r"'\''"),
+        )
+    };
+
     Err(CliError::Preflight {
         reason: format!(
             "{}: {:.1} GB free, but this run needs {:.1} GB there ({breakdown}). These paths \
              share one filesystem, so the requirements add up — checking them separately is how a \
              host with room for either and not both reaches stage 5 and fails after the burn. \
-             Free space, or move --pk-cache-dir to another filesystem.",
+             Free space, or move --pk-cache-dir to another filesystem.{reclaimable}",
             probe.display(),
             available as f64 / 1e9,
             needed as f64 / 1e9,
@@ -2193,6 +2229,52 @@ mod tests {
         assert!(
             msg.contains("share one filesystem"),
             "must say why they add up: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_shortfall_names_the_space_a_dead_keygen_is_holding() {
+        // "Free 4.0 GB" is the wrong instruction when most of the
+        // shortfall is a temp file the operator cannot see: the name
+        // starts with a dot, so `ls` does not show it, and a killed
+        // keygen is the only thing that produces one.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".tmpAbC123"), vec![0u8; 4096]).unwrap();
+        let err = require_space(dir.path(), u64::MAX / 4, &[(
+            "--params-dir",
+            EVENT_KEYGEN_BYTES,
+        )])
+        .expect_err("no filesystem in this test has exabytes free");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("interrupted-keygen temp file"),
+            "must say what is holding the space: {msg}"
+        );
+        assert!(
+            msg.contains("probe_event_keys"),
+            "must name the tool: {msg}"
+        );
+        assert!(msg.contains("--repair"), "and the flag: {msg}");
+        assert!(
+            msg.contains("hidden"),
+            "must say why the operator has not seen it: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_shortfall_with_no_litter_does_not_invent_any() {
+        // The other half: a host that is simply full must not be told to
+        // go hunting for temp files that are not there.
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = require_space(dir.path(), u64::MAX / 4, &[(
+            "--params-dir",
+            EVENT_KEYGEN_BYTES,
+        )])
+        .expect_err("no filesystem in this test has exabytes free");
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("interrupted-keygen"),
+            "nothing leaked here: {msg}"
         );
     }
 

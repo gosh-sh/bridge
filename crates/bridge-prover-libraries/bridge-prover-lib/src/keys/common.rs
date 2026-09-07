@@ -436,6 +436,68 @@ fn write_atomic(
     Ok(())
 }
 
+/// One temp file a killed keygen left behind: its path and its size.
+pub struct LeakedTemp {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+/// Temp files [`write_atomic`] left behind in `params_dir`.
+///
+/// `write_atomic` publishes through `tempfile::NamedTempFile`, which
+/// removes itself on drop — but not when the process is killed, and a
+/// proving-key write is ~2.65 GB spread over minutes. Ctrl-C, an OOM kill
+/// or a container stop anywhere in that window leaves the whole partial
+/// file behind.
+///
+/// Nothing removed it. `probe_event_keys --repair` deletes four names it
+/// knows about and sweeps nothing, and the leak is a dotfile, so a plain
+/// `ls` does not show it either.
+///
+/// That matters past tidiness: the bytes sit in exactly the headroom the
+/// CLI preflight reserves for the next keygen. The run that trips over
+/// them is the run that was told there was room — and it trips at stage 5,
+/// after the burn.
+///
+/// **Matching is deliberately narrow.** `tempfile`'s default name is its
+/// `.tmp` prefix plus exactly six alphanumeric characters
+/// (`tempfile-3.27.0/src/lib.rs:195,231`, `util.rs:15`), and only entries
+/// of that exact shape are reported. Anything else under `params_dir` is
+/// somebody's file, not our litter. `symlink_metadata` + `is_file()`, not
+/// `metadata`, so a symlink that happens to match the pattern is left
+/// alone rather than followed to whatever it points at — the caller may
+/// delete what this returns.
+pub fn leaked_keygen_temp_files(params_dir: &Path) -> Vec<LeakedTemp> {
+    fn is_temp_name(name: &str) -> bool {
+        match name.strip_prefix(".tmp") {
+            Some(rest) => rest.len() == 6 && rest.chars().all(|c| c.is_ascii_alphanumeric()),
+            None => false,
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(params_dir) else {
+        // Unreadable directory is not this function's problem to report;
+        // every caller is already failing on it for a better reason.
+        return Vec::new();
+    };
+    let mut found: Vec<LeakedTemp> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(is_temp_name))
+        .filter_map(|e| {
+            let path = e.path();
+            let md = std::fs::symlink_metadata(&path).ok()?;
+            md.is_file().then(|| LeakedTemp {
+                bytes: md.len(),
+                path,
+            })
+        })
+        .collect();
+    // Largest first: the operator wants the 2.65 GB one named, not the
+    // 4 KB config temp that happened to sort ahead of it.
+    found.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
+    found
+}
+
 /// Load a KZG SRS whose `params.k()` is exactly `k`.
 /// Resolution order:
 /// 1. Fast path: `kzg_bn254_{k}.srs` exists and its header matches `k` →
@@ -778,6 +840,90 @@ mod tests {
         assert!(
             probe_ceremony(tmp.path(), 21).is_err(),
             "a file load_srs cannot deserialize must not probe as usable",
+        );
+    }
+
+    #[test]
+    fn leak_sweep_names_only_our_own_litter() {
+        // The pattern has to be narrow: this list is handed to `--repair`,
+        // which deletes it. Everything in `keep` is somebody's file that
+        // merely looks tempish, and deleting any of them would be a far
+        // worse bug than the leak being swept.
+        let dir = tempfile::tempdir().unwrap();
+        let keep = [
+            "event_pk.bin",
+            "kzg_bn254_20.srs",
+            ".tmp",        // prefix alone
+            ".tmpABC",     // too short
+            ".tmpABCDEFG", // too long
+            ".tmpABCDE-",  // right length, not alphanumeric
+            ".tmp-ABCDEF", // hyphen where the random part starts
+            "tmpABCDEF",   // no leading dot
+            ".temporary",
+        ];
+        for f in keep {
+            std::fs::write(dir.path().join(f), b"x").unwrap();
+        }
+        assert!(
+            leaked_keygen_temp_files(dir.path()).is_empty(),
+            "nothing here is a tempfile leak",
+        );
+
+        std::fs::write(dir.path().join(".tmpAbC123"), vec![0u8; 4096]).unwrap();
+        std::fs::write(dir.path().join(".tmp000000"), vec![0u8; 64]).unwrap();
+        let found = leaked_keygen_temp_files(dir.path());
+        assert_eq!(found.len(), 2, "both leaks, and only the leaks");
+        // Largest first: the operator wants the big one named.
+        assert_eq!(found[0].bytes, 4096);
+        assert!(found[0].path.ends_with(".tmpAbC123"));
+        assert_eq!(found[1].bytes, 64);
+
+        // And the files that merely look tempish are still there.
+        for f in keep {
+            assert!(dir.path().join(f).exists(), "{f} must not have been listed");
+        }
+    }
+
+    #[test]
+    fn a_directory_named_like_a_temp_file_is_not_reported() {
+        // `--repair` already refuses to delete a directory it did not
+        // create, and this list must not put one in front of it. A
+        // symlink is the same argument: the caller deletes what this
+        // returns, and following one would delete somebody else's file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".tmpDIRDIR")).unwrap();
+        let real = dir.path().join("something_important.bin");
+        std::fs::write(&real, b"payload").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join(".tmpLNKLNK")).unwrap();
+
+        assert!(leaked_keygen_temp_files(dir.path()).is_empty());
+        assert!(dir.path().join(".tmpDIRDIR").is_dir());
+        assert_eq!(std::fs::read(&real).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn an_unreadable_directory_reports_no_leaks_rather_than_failing() {
+        assert!(leaked_keygen_temp_files(Path::new("/nonexistent/for/this/test")).is_empty());
+    }
+
+    #[test]
+    fn write_atomic_leaves_nothing_behind_when_it_succeeds() {
+        // The other half of the argument: the leak is what a KILLED write
+        // leaves, not what a normal one does. If `write_atomic` littered on
+        // the happy path, the sweep would be papering over a routine bug
+        // rather than an interrupted process.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_vk.bin");
+        write_atomic(&path, None, |w| {
+            use std::io::Write;
+            w.write_all(b"contents")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"contents");
+        assert!(
+            leaked_keygen_temp_files(dir.path()).is_empty(),
+            "a successful write publishes its temp, it does not leave one",
         );
     }
 

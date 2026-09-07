@@ -34,6 +34,19 @@ pub(super) const PREFIX: &str = "event";
 /// circuit definition would be stronger; it needs a stable serialisation
 /// of the circuit that this tree does not have.
 ///
+/// **The circuit is pinned by revision for this reason.**
+/// `bridge-event-prove-circuit` and its four siblings are `rev = "…"` in
+/// `crates/bridge-prover-libraries/Cargo.toml`, not `branch = "main"`.
+/// Under a branch, one `cargo update` moves the circuit while this number
+/// stays put, and nothing downstream notices: `KeyManagerState::new`
+/// checks the manifest format, this revision, and the vk/config digests,
+/// and all of them still match — the FILES did not change, the circuit
+/// did. The keys then prove, and the proof is rejected at stage 5, after
+/// the burn and the anchor wait. A revision pin turns that move into an
+/// edit visible in review next to this constant.
+///
+/// So the two travel together: change the pin, bump this.
+///
 /// Distinct from `MANIFEST_FORMAT`: this describes the CIRCUIT the keys
 /// were built for, that one describes the FILE that says so.
 pub(super) const EVENT_CIRCUIT_REVISION: u32 = 1;

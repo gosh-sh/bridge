@@ -4,6 +4,14 @@
 	"header": ["pubkey", "time", "expire"],
 	"functions": [
 		{
+			"name": "forgetBlockHashFromLightClient",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": []
+		},
+		{
 			"name": "setLightClient",
 			"inputs": [
 				{"name":"lightClient","type":"address"}

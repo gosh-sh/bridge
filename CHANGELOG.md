@@ -88,7 +88,8 @@ here and how versions are assigned.
   are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
   expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
   `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
-  cannot outlive the oracle. `updateCode` encoding of the proven set changed
+  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
+  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
   (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
   old `mapping => bool` across this upgrade — redeploy or re-prove from the
   checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.

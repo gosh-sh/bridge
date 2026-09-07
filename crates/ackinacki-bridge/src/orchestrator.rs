@@ -327,24 +327,54 @@ pub async fn run(
             // This does not create a record: `peek` is read-only, and the
             // refusal must leave the state directory exactly as it found it.
             if let Some(p) = prior.as_ref() {
-                if !args.allow_retry {
-                    // Field names and types are the variant's, not
-                    // invented: `prior_status: String`, `prior_tx` and
-                    // `prior_msg_id` both `Option<String>`. `Status` is not
-                    // `String`, so it has to be formatted.
-                    return Err(CliError::DuplicateInFlight {
-                        prior_status: format!("{:?}", p.status),
-                        prior_tx: p.an_tx_hash.clone(),
-                        prior_msg_id: p.withdrawal_msg_id.clone(),
-                    });
-                }
-                warn!(
-                    key = %p.key,
-                    prior_status = ?p.status,
-                    "--allow-retry: a prior record exists with no an_tx_hash. If its burn reached \
-                     the wire, this run will broadcast a second one. Reconcile first — see the \
-                     runbook's Case 3a.",
-                );
+                // The SAME refusal the post-reservation check produces,
+                // and `--allow-retry` no longer changes it.
+                //
+                // Two things were wrong with the old shape. It emitted
+                // `DuplicateInFlight`, whose text advises passing
+                // `--allow-retry` — which lands on a DIFFERENT exit 3 and
+                // helps nobody — and whose `prior_tx` is structurally
+                // `None` here, printing "Prior AN tx: None" for a record
+                // that may well be a burn in flight. And the recovery
+                // procedure tells an operator to re-run the identical
+                // command and read the refusal, which is precisely the
+                // command that got the uninformative one.
+                //
+                // With the flag it warned and carried on, only to be
+                // refused after the prompt and `compose` by
+                // `decide_burn(None, Found)`. Same answer, later, after
+                // work. The one path this does NOT close is the intended
+                // recovery: an operator who has reconciled and deleted
+                // the record sees `peek` return `None` and never arrives
+                // here at all.
+                return Err(CliError::ReservationInFlight {
+                    prior_status: format!("{:?}", p.status).to_ascii_lowercase(),
+                    prior_msg_id: p.withdrawal_msg_id.clone(),
+                    record_path: idempotency::record_path(&state_dir, &p.key)
+                        .display()
+                        .to_string(),
+                    // The half the record cannot supply. This run holds
+                    // no lock — it has not reserved — so the probe is
+                    // asking about somebody else.
+                    liveness: match idempotency::WithdrawalLock::probe_holder(&state_dir, &p.key) {
+                        Some(true) => "Another process on this host is executing this withdrawal \
+                                       RIGHT NOW (it holds the withdrawal lock). Do not touch the \
+                                       record and do not delete it: wait for that run to finish \
+                                       and read its outcome. Nothing was sent by this run."
+                            .to_string(),
+                        Some(false) => "No other process on this host holds this withdrawal, so \
+                                        the record was left by a run that has already exited. \
+                                        That is not the same as \"nothing was broadcast\": a run \
+                                        can exit between the send returning and the hash being \
+                                        written, which is exactly the record you are looking at."
+                            .to_string(),
+                        None => "Whether another process holds this withdrawal could not be \
+                                 determined here (`flock` is unavailable — a network mount, \
+                                 typically), so the on-chain reconciliation below is the only \
+                                 evidence available."
+                            .to_string(),
+                    },
+                });
             }
 
             // The last reversible moment. `--yes` skips the prompt for
@@ -1449,6 +1479,30 @@ mod tests {
         idempotency::update(dir, &r).unwrap();
         drop(lock);
         r
+    }
+
+    #[test]
+    fn no_refusal_in_this_file_is_the_one_without_a_liveness_verdict() {
+        // Two exit-3 variants, and only one of them belongs here.
+        //
+        // `DuplicateInFlight` serves the statuses that carry a hash —
+        // `confirmed`, `submitted`, and the resumable ones read through
+        // `reserve`. Every refusal THIS file produces is about a record
+        // with no hash, where the record cannot say whether a burn is in
+        // flight and the lock can. Using the other variant here is what
+        // sent an operator who followed the documented recovery — re-run
+        // the identical command and read the refusal — to a message with
+        // no liveness verdict, no record path, and advice to pass
+        // `--allow-retry`, which lands on a different exit 3.
+        let src = include_str!("orchestrator.rs");
+        let wrong = concat!("CliError::Duplicate", "InFlight {");
+        assert!(
+            !src.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .any(|l| l.contains(wrong)),
+            "orchestrator refusals are about hash-less records; that variant cannot report \
+             whether another process holds the withdrawal, which is the half the record lacks",
+        );
     }
 
     #[test]

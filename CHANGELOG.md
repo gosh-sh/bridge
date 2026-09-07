@@ -1144,6 +1144,39 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **The documented exit-3 recovery now reaches the message it describes.**
+  The procedure is "re-run the identical command and read the refusal" —
+  that refusal reports whether another process still holds the
+  withdrawal, which is the condition for deleting the record. The
+  identical command carries no `--allow-retry`, and that path produced a
+  different exit 3: no liveness verdict, no record path, and advice to
+  pass `--allow-retry`, which lands on the refusal it was supposed to be.
+  Its "Prior AN tx" was also structurally empty there, printing
+  `None` — which reads as "nothing was sent" — about a record that may be
+  a burn in flight.
+
+  Both paths now produce the same refusal, and `--allow-retry` no longer
+  changes it: with the flag the run used to warn, compose, and be refused
+  anyway, so the flag only bought the operator a prompt and some work
+  before the same answer. The recovery it does not block is the intended
+  one — an operator who reconciled and deleted the record is not refused,
+  because there is no record left to find.
+
+  `duplicate in-flight` refusals carry their own remedy for the same
+  reason. The sentence used to end "re-run with `--allow-retry` to
+  override" for every status, including `confirmed` and `submitted`,
+  which refuse that flag outright — telling half its readers to try the
+  one thing that cannot work for them.
+
+- **Case 3a's first diagnostic matches the log again.** It grepped for
+  `capture: matched`, `capture: polling` and `enrich_witness: filling`,
+  none of which any binary has ever written, so an operator could not
+  classify their incident before reaching any of the advice below it. It
+  now greps `captured WithdrawalInitiated event` — the one line the
+  capture stage writes on success, whose absence is the whole diagnosis —
+  and reads the event's seq_no out of that line instead of a `seq_no=`
+  field that does not exist.
+
 - **A missing ceremony file is no longer reported as an unreadable one.**
   A regression from this branch's own error-message work: the code that
   started carrying the halo2 reader's reason also warned "the

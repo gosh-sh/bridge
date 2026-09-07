@@ -131,13 +131,20 @@ pub enum CliError {
     // record, which is the one thing that permits a second burn.
     #[error(
         "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {prior_tx:?}. \
-         Prior withdrawal msg_id: {prior_msg_id:?}. Reconcile via GraphQL, or re-run with \
-         --allow-retry to override."
+         Prior withdrawal msg_id: {prior_msg_id:?}.\n\x20 {remedy}"
     )]
     DuplicateInFlight {
         prior_status: String,
         prior_tx: Option<String>,
         prior_msg_id: Option<String>,
+        /// What to actually do, which differs by status.
+        ///
+        /// The sentence used to be baked in and ended "re-run with
+        /// --allow-retry to override" — true of the resumable statuses and
+        /// false of `confirmed` and `submitted`, which refuse the flag
+        /// outright. One message serving two situations told half of its
+        /// readers to try the one thing that cannot work for them.
+        remedy: String,
     },
 
     /// The reservation was found rather than created and carries no AN tx
@@ -296,6 +303,7 @@ mod tests {
                 prior_status: "burned".into(),
                 prior_tx: None,
                 prior_msg_id: None,
+                remedy: "…".into(),
             }
             .exit_code(),
             ExitCode::DuplicateRefused

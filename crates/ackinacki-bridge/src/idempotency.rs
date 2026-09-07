@@ -244,11 +244,28 @@ pub fn reserve(
         // Terminal states — refuse regardless of --allow-retry.
         // Confirmed already paid out; Submitted has an unresolved
         // in-flight tx and re-broadcasting is a double-spend risk.
-        Status::Confirmed | Status::Submitted => Err(CliError::DuplicateInFlight {
-            prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-            prior_tx: prior.an_tx_hash,
-            prior_msg_id: prior.withdrawal_msg_id,
-        }),
+        Status::Confirmed | Status::Submitted => {
+            // `--allow-retry` does NOT reach these, so the shared
+            // "re-run with --allow-retry to override" the message used to
+            // end on was wrong here — it named the one flag that changes
+            // nothing about a terminal record.
+            let remedy = if prior.status == Status::Confirmed {
+                "This withdrawal already paid out. `--allow-retry` does not reopen it. To move \
+                 funds again, use a different (amount, recipient, chain) — the identity is what \
+                 the record is keyed on."
+            } else {
+                "There is a broadcast EVM transaction whose receipt was never observed, and \
+                 `--allow-retry` does not override that: re-broadcasting risks a double payout. \
+                 Reconcile eth_tx_hash on chain first, then either wait for a run to see the \
+                 receipt or set the record to \"failed\" by hand."
+            };
+            Err(CliError::DuplicateInFlight {
+                prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                prior_tx: prior.an_tx_hash,
+                prior_msg_id: prior.withdrawal_msg_id,
+                remedy: remedy.to_string(),
+            })
+        },
         // Failed → the only production writer sets this after
         // `withdrawByProof` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
@@ -256,9 +273,6 @@ pub fn reserve(
         // so the orchestrator's resume branch (`prior_an_tx =
         // record.an_tx_hash.clone()`) skips `burn::send`
         // instead of firing a second `initiateWithdrawal`.
-        // Only wipe when there is no recorded AN tx (defensive:
-        // manual-edited state file, hypothetical future writer
-        // that marks Failed pre-burn).
         Status::Failed => {
             // `Found`, unconditionally, and there is no longer a branch
             // that wipes.
@@ -297,6 +311,11 @@ pub fn reserve(
                     prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
                     prior_tx: prior.an_tx_hash,
                     prior_msg_id: prior.withdrawal_msg_id,
+                    // Here the flag IS the answer: with it, a record
+                    // carrying a hash resumes at capture.
+                    remedy: "Reconcile via GraphQL, or re-run with --allow-retry to resume from \
+                             the recorded burn."
+                        .to_string(),
                 })
             }
         },
@@ -597,6 +616,31 @@ impl WithdrawalLock {
             // named because POSIX lets them differ.
             Some(n) if n == libc::EWOULDBLOCK || n == libc::EAGAIN => Ok(None),
             _ => Err(refuse("lock", e)),
+        }
+    }
+
+    /// Whether a live process on this host is executing `key` right now.
+    ///
+    /// The question the record cannot answer, asked by a run that does
+    /// NOT hold the lock — a refusal deciding what to tell the operator.
+    /// Takes the lock and drops it immediately, so asking never keeps
+    /// anybody out.
+    ///
+    /// `None` when `flock` could not be attempted at all, which is not
+    /// the same as "nobody holds it" and must not be reported as if it
+    /// were: a state dir on a filesystem without working `flock` is a
+    /// supported deployment.
+    ///
+    /// (This existed, was unused once the acquisition itself started
+    /// carrying the answer, and was removed. It is back because the
+    /// stage-1 refusal — the one an operator reaches by re-running the
+    /// identical command, which is what the recovery procedure tells
+    /// them to do — has no acquisition to learn from.)
+    pub fn probe_holder(state_dir: &Path, key: &str) -> Option<bool> {
+        match Self::try_acquire(state_dir, key) {
+            Ok(Some(_)) => Some(false),
+            Ok(None) => Some(true),
+            Err(_) => None,
         }
     }
 }

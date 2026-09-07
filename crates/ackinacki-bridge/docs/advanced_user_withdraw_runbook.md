@@ -512,12 +512,21 @@ bundle. Distinguish via:
 
 ```bash
 LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
-grep -E 'capture: (matched|polling|timed out)' "$LOG" | tail -5
 
-# "matched dst=…:026a" appears but no "enrich_witness: filling" →
-#   event was captured; enricher blocked. Sub-case 3a-i.
-# "polling" only, no "matched" →
-#   event never seen. Sub-case 3a-ii.
+# The capture stage logs exactly one line when it succeeds. Its absence
+# is the whole diagnosis.
+grep -n 'captured WithdrawalInitiated event' "$LOG"
+
+# Present  → the event WAS captured, so the enricher is what blocked.
+#            The line carries `block_seq_no=` — that is the E below.
+#            Sub-case 3a-i.
+# Absent   → the event was never observed. Sub-case 3a-ii.
+```
+
+The enricher's own progress, if you want to see where it stopped:
+
+```bash
+grep -nE 'partial witness:|resolved anchor: L' "$LOG" | tail -5
 ```
 
 #### 3a-i — Enricher blocked on covering bundle
@@ -527,7 +536,7 @@ grep -E 'capture: (matched|polling|timed out)' "$LOG" | tail -5
 on-chain.
 
 ```bash
-E=<event_seq_no from log: "capture: matched … seq_no=E">
+E=$(grep -o 'block_seq_no=[0-9]*' "$LOG" | head -1 | cut -d= -f2)   # the captured event's seq_no
 L=$(cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')
 # L1 math:
 COVER=$(( (E + 1023) / 1024 * 1024 ))

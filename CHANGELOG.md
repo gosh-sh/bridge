@@ -166,10 +166,14 @@ assigns it when the release is tagged.
     # a non-exported assignment; `printenv` agrees with the child.)
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
-    # blank line, which is the distinction that matters: the CLI treats empty
-    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
-    # string (`args.rs:181`) and fails later on a path of "". Falling back to
-    # the profile there would name a different directory than the run uses.
+    # blank line, which is the distinction that matters. Empty is never a
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # makes clap refuse an exported-empty value at parse time — "a value is
+    # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
+    # is a different message from the missing-plumbing refusal an UNSET
+    # variable gets. Rejecting it here fails in the same place the run would,
+    # instead of falling back to the profile and silently naming a different
+    # directory than the run uses.
     if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
       # In the environment. Reject empty rather than guess.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
@@ -235,18 +239,26 @@ assigns it when the release is tagged.
   point that at your params dir:
 
   ```bash
-  # Run from crates/ackinacki-bridge/ — BRIDGE_PARAMS_DIR in the shipped
-  # profile is `../bridge-prover-libraries/params`
-  # (bridge_config.shellnet:65), relative to THAT directory. From the repo
-  # root the same string resolves outside the repository and realpath
-  # fails.
-  cd crates/ackinacki-bridge
+  # Run from the REPO ROOT; the subshell cds from there. The work has to
+  # happen in crates/ackinacki-bridge/ because BRIDGE_PARAMS_DIR in the
+  # shipped profile is `../bridge-prover-libraries/params`
+  # (bridge_config.shellnet:65), relative to THAT directory — from the
+  # repo root the same string resolves outside the repository and
+  # realpath fails. (The instruction used to say "run from
+  # crates/ackinacki-bridge/" and then cd into it, which is a cd that
+  # fails whenever the instruction is followed.)
   (
     # The whole block is one subshell, so the EXIT trap dies with it. A
     # bare `trap … EXIT` pasted into an interactive shell survives until
     # that shell exits and expands $WORK only when it fires — so a WORK
     # reused later for something else gets rm -rf'd on logout.
     set -e
+    # INSIDE the subshell, and after `set -e`. Outside it the cd is
+    # unguarded: run this from anywhere but the repo root and it prints
+    # one line to stderr, everything after it proceeds in whatever
+    # directory you were standing in, and it also leaves your interactive
+    # shell somewhere you did not ask to be.
+    cd crates/ackinacki-bridge
     # BRIDGE_PARAMS_DIR is not in the shell's environment unless you put it
     # there: the profile is read by the Rust CLI at startup, not by your
     # shell, and the README only asks you to export BRIDGE_CONFIG.
@@ -274,10 +286,14 @@ assigns it when the release is tagged.
     # a non-exported assignment; `printenv` agrees with the child.)
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
-    # blank line, which is the distinction that matters: the CLI treats empty
-    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
-    # string (`args.rs:181`) and fails later on a path of "". Falling back to
-    # the profile there would name a different directory than the run uses.
+    # blank line, which is the distinction that matters. Empty is never a
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # makes clap refuse an exported-empty value at parse time — "a value is
+    # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
+    # is a different message from the missing-plumbing refusal an UNSET
+    # variable gets. Rejecting it here fails in the same place the run would,
+    # instead of falling back to the profile and silently naming a different
+    # directory than the run uses.
     if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
       # In the environment. Reject empty rather than guess.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
@@ -384,10 +400,14 @@ assigns it when the release is tagged.
     # a non-exported assignment; `printenv` agrees with the child.)
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
-    # blank line, which is the distinction that matters: the CLI treats empty
-    # as set too — `params_dir: PathBuf` with `env =` accepts the empty
-    # string (`args.rs:181`) and fails later on a path of "". Falling back to
-    # the profile there would name a different directory than the run uses.
+    # blank line, which is the distinction that matters. Empty is never a
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # makes clap refuse an exported-empty value at parse time — "a value is
+    # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
+    # is a different message from the missing-plumbing refusal an UNSET
+    # variable gets. Rejecting it here fails in the same place the run would,
+    # instead of falling back to the profile and silently naming a different
+    # directory than the run uses.
     if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
       # In the environment. Reject empty rather than guess.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
@@ -567,6 +587,48 @@ assigns it when the release is tagged.
 
 - `scripts/check_bridge_abi_in_sync.sh` — `cmp`-based guard that the
   two runtime `USDCBridge.abi.json` copies stay byte-identical.
+- `crates/ackinacki-bridge/scripts/check_fixture_prereqs.sh` — run it
+  before `scripts/deploy_msig_and_mint.sh`. It refuses if `tvm-cli` is
+  absent from `PATH` (and `CLI_NAME` unset) or if the `tvm-cli` it finds
+  cannot execute on this platform — the usual cause being a binary built
+  for another architecture, which otherwise surfaces as an opaque failure
+  part-way through the deploy. Honours `CLI_NAME` to point at a specific
+  binary; also runnable in CI.
+- **Four CI jobs for the `ackinacki-bridge` crate.** The crate lives in
+  the `bridge-prover-libraries` sub-workspace, so none of the existing
+  `*:rust:*` jobs reached it and every one of its tests was unrun in CI.
+
+  | Job | Runs on | What it covers |
+  |-----|---------|----------------|
+  | `build:rust:ackinacki-bridge` | every pipeline | `cargo build --locked -p ackinacki-bridge --all-targets` |
+  | `test:rust:ackinacki-bridge` | every pipeline | the crate's own suite, plus the `bridge-prover-lib` key-cache and ceremony probes that guard a post-burn failure and need no ceremony on disk |
+  | `test:rust:ackinacki-bridge:enospc` | opt-in (see below) | the reserve-under-ENOSPC test, against a real 1 MiB tmpfs |
+  | `test:rust:ackinacki-bridge:keycache` | scheduled, or manual on an MR | the fixture-dependent key-cache and alternate-keyset tests — a ~464 MB Hermez ceremony and two ~7 min keygens, cached under `bridge-keycache-v1` |
+
+  The last two are deliberately not per-MR gates: the keycache job takes
+  ~20 minutes, and the ENOSPC job needs `CAP_SYS_ADMIN` to mount its
+  tmpfs. **This leaves a real gap between merge time and the nightly
+  schedule**; it is named here rather than papered over.
+
+- **Two CI variables**, both set in the project's CI settings, not in
+  `.gitlab-ci.yml`:
+  - `BRIDGE_ENOSPC_RUNNER` — set to `1` once a runner carrying the
+    `privileged` tag exists. Until then `test:rust:ackinacki-bridge:enospc`
+    does not run at all. The variable is the switch and the tag is not,
+    because a job whose tag no runner carries does not fail — it sits
+    `pending` and the scheduled pipeline never finishes.
+  - `BRIDGE_ALT_KEYS_REF` — a commit that contains
+    `crates/bridge-prover-libraries` with a *different* event keyset. When
+    unset, `test:rust:ackinacki-bridge:keycache` skips its three
+    alternate-keyset regressions (including the only coverage of
+    `bridge-verifier-daemon`'s `vk_opt()` consumer) and says so. When set
+    to a ref that does not contain that path, the job fails rather than
+    passing empty.
+
+  Two further variables are consumed by the tests themselves and set by
+  the jobs, not by an operator: `BRIDGE_TEST_FULL_FS` (the tmpfs mount
+  point) and `BRIDGE_TEST_EVENT_KEYS` / `BRIDGE_TEST_EVENT_KEYS_ALT` (the
+  two provisioned keysets).
 - **README documents the one-time KZG ceremony provisioning** (`Step 0`).
   `crates/bridge-prover-libraries/params/` is gitignored, and no
   operator-facing document previously said how to create it — the only
@@ -811,6 +873,91 @@ assigns it when the release is tagged.
   docstring trim.
 
 ### Fixed
+
+- **`ackinacki-bridge withdraw`: two concurrent runs of the same
+  withdrawal no longer both burn.** The reservation answered the same way
+  whether it had created the record or found somebody else's, so two runs
+  with `--allow-retry` and no prior record both proceeded: the first won
+  the create and entered the multi-second broadcast, the second read the
+  first's record — no AN tx hash yet, because the first had not returned —
+  and sent a second `initiateWithdrawal`. The multisig has no replay
+  guard, so that is a second irreversible burn. **Finding a record that
+  someone else created, with no hash on it, is now exit 3
+  (duplicate-refused)**, and inspecting the record's fields is no longer
+  how the two cases are told apart — the field that would distinguish
+  them is written only after the send returns.
+
+- **`ackinacki-bridge withdraw`: a failed state-file write after the burn
+  no longer reports exit 2.** Exit 2 means "refused before sending,
+  nothing left the machine". Four sites reported it after the burn was on
+  the wire, and the last two after `withdrawByProof` had paid out — i.e.
+  after USDC had moved on both chains. Those now report the exit code of
+  the stage they are in, and name what has already happened.
+
+- **`ackinacki-bridge withdraw` refuses when `HOME` is unset instead of
+  putting its state directory in the current directory.** Under systemd,
+  cron, `sudo` without `-H`, and many Docker images, the fallback made
+  the double-burn guard depend on where the operator was standing: the
+  same command from two directories found no prior record either time.
+  Pass `--state-dir` (or `BRIDGE_WITHDRAW_STATE_DIR`) in those
+  environments.
+
+- **`ackinacki-bridge withdraw` refuses a state record that claims a burn
+  it cannot name.** A record with a status at or past `burned` and no
+  `an_tx_hash`, or one whose `key` disagrees with the filename it was
+  read from, is now rejected on read. Both are reachable by hand, and the
+  CLI's own post-burn recovery message asks operators to edit exactly
+  those fields.
+
+- **`ackinacki-bridge withdraw --from-keys` accepts a `0x`-prefixed or
+  short keys.json.** Preflight normalised the file's halves while the
+  signing path only lowercased them, so such a file passed preflight and
+  then failed against the very key preflight had just approved — on every
+  attempt, permanently, with the same command and the same file. Note
+  that key files are parsed as hex only: an all-decimal-digit key is a
+  hex key, not a decimal number.
+
+- **`ackinacki-bridge withdraw` reports exit 10 rather than inventing a
+  success.** Two ways the burn stage could mis-read the network's answer:
+  a transaction carrying neither `aborted` nor `compute.exit_code` was
+  read as "fine", and an empty transaction id was left-padded into
+  `0x000…0` and reported as the burn's hash. The first wrote a durable
+  `burned` status after a possibly-reverted call, from which no re-run
+  can proceed without hand-editing; the second produced a hash that
+  matched nothing in the event query, forever. Both are now exit 10 —
+  "broadcast, outcome unknown, reconcile" — which is what they are. A
+  short id is also lowercased now; the event query is byte-exact, and an
+  upper-case one used to time out five minutes after the money moved.
+
+- **The ceremony refusal says why.** `--params-dir` holding an SRS that
+  is loadable but *not* the Hermez Perpetual Powers of Tau produced "no
+  usable ceremony at k=N" plus instructions to provision one — for a file
+  that was already there. The sentence that matters, that its toxic waste
+  is public and every proof produced with it is forgeable, was the error's
+  source and was never printed. Both the preflight refusal and the
+  prover-side panic now print the full chain and say to delete the named
+  file, which provisioning does not replace.
+
+- **The burn confirmation prompt refuses instead of reading an answer
+  nobody saw.** Every line of the prompt was written with the result
+  discarded, while the `y` it then reads authorises an irreversible burn.
+  With stderr unwritable — a closed pager, a full disk — the terminal sat
+  with no prompt on it and whatever was typed counted as consent. A
+  redirect to a file is unaffected; only a write that actually fails is
+  refused.
+
+- **A malformed argument no longer crashes the CLI.** The truncation
+  applied to untrusted arguments before echoing them back split multibyte
+  characters, so e.g. a `--to` with non-ASCII at the wrong offset exited
+  101 with an unparseable message instead of the `--json` error envelope.
+  Control characters in an argument are now escaped rather than replayed
+  into the terminal.
+
+- **The CI alternate-keyset guard can fire.** `git ls-tree` ran after a
+  `cd` into `crates/bridge-prover-libraries` and asked for that path
+  again, so it always answered empty: setting `BRIDGE_ALT_KEYS_REF` failed
+  the job every run while blaming the operator's ref, and the three
+  alternate-keyset regressions never ran.
 
 - **`aggregate-proof` subprocess now receives an absolute
   `--inner-snark` path.** `SubprocessAggregator::aggregate` spawns the

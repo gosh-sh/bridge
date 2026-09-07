@@ -449,48 +449,60 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     // Same resolution the preflight probe performs — literally the same
     // function, so the two cannot drift. `load_srs` panics where
     // `probe_ceremony` returns an error; that is the only difference.
-    if let Ok((src_path, mut srs)) = resolve_ceremony(params_dir, k) {
-        // The fast path: the exact file was already there and already the
-        // right degree. Nothing to downsize, nothing to persist.
-        if src_path == exact_path && srs.k() == k {
-            return srs;
-        }
-        let src_k = srs.k();
-        if src_k > k {
-            srs.downsize(k);
-        }
-        info!(
-            target: "bridge_prover_lib::keys",
-            src = %src_path.display(),
-            src_k,
-            circuit_k = k,
-            dest = %exact_path.display(),
-            "provisioned circuit SRS by downsizing parent Hermez ceremony"
-        );
-        if let Err(e) = write_srs_file(&exact_path, &srs) {
-            warn!(
-                target: "bridge_prover_lib::keys",
-                path = %exact_path.display(),
-                error = %e,
-                "failed to persist downsized SRS; continuing with in-memory params"
-            );
-        }
+    //
+    // `resolve_ceremony`'s error IS the message. `if let Ok(..)` used to
+    // drop it and panic with "no Hermez SRS (>= k) under <dir>" instead —
+    // a sentence that is simply false when the file IS there, IS
+    // loadable, and is refused only because its tau is public. The
+    // operator was sent to provision a ceremony they already had, and
+    // never learned the one on disk makes every proof forgeable.
+    let (src_path, mut srs) = resolve_ceremony(params_dir, k).unwrap_or_else(|e| {
+        panic!(
+            "cannot load a Hermez Perpetual Powers of Tau SRS (>= k={k}) from {}:\n\
+             \x20 {e:#}\n\
+             If that says a file is NOT Hermez, it is not merely unusable: its toxic waste is \
+             public, so every proof produced with it is forgeable. Delete the file named above — \
+             this loader prefers kzg_bn254_{k}.srs by name over downsizing a larger ceremony, so \
+             provisioning a bigger one does not displace it.\n\
+             Provision with the `bootstrap_hermez_srs` bin in this crate:\n\
+             \x20 cargo build --release --bin bootstrap_hermez_srs\n\
+             \x20 ./target/release/bootstrap_hermez_srs --k 21 --params-dir <this dir>\n\
+             K=21 additionally needs powersOfTau28_hez_final_21.ptau (~2.4 GB) at \
+             ~/.cache/halo2-kzg-srs/ — it is NOT auto-downloaded; fetch it from \
+             https://storage.googleapis.com/zkevm/ptau/. \
+             NOTE: scripts/bootstrap_hermez_srs.sh is a different tool — it writes K=20 into \
+             crates/bridge-snark-utils/params/ and will not satisfy this. Chain-ceremony / \
+             gen_srs fallbacks are disabled.",
+            params_dir.display()
+        )
+    });
+
+    // The fast path: the exact file was already there and already the
+    // right degree. Nothing to downsize, nothing to persist.
+    if src_path == exact_path && srs.k() == k {
         return srs;
     }
-
-    panic!(
-        "no Hermez Perpetual Powers of Tau SRS (>= k={k}) under {}. \
-         Provision it with the `bootstrap_hermez_srs` bin in this crate:\n\
-         \x20 cargo build --release --bin bootstrap_hermez_srs\n\
-         \x20 ./target/release/bootstrap_hermez_srs --k 21 --params-dir <this dir>\n\
-         K=21 additionally needs powersOfTau28_hez_final_21.ptau (~2.4 GB) at \
-         ~/.cache/halo2-kzg-srs/ — it is NOT auto-downloaded; fetch it from \
-         https://storage.googleapis.com/zkevm/ptau/. \
-         NOTE: scripts/bootstrap_hermez_srs.sh is a different tool — it writes \
-         K=20 into crates/bridge-snark-utils/params/ and will not satisfy this. \
-         Chain-ceremony / gen_srs fallbacks are disabled.",
-        params_dir.display()
+    let src_k = srs.k();
+    if src_k > k {
+        srs.downsize(k);
+    }
+    info!(
+        target: "bridge_prover_lib::keys",
+        src = %src_path.display(),
+        src_k,
+        circuit_k = k,
+        dest = %exact_path.display(),
+        "provisioned circuit SRS by downsizing parent Hermez ceremony"
     );
+    if let Err(e) = write_srs_file(&exact_path, &srs) {
+        warn!(
+            target: "bridge_prover_lib::keys",
+            path = %exact_path.display(),
+            error = %e,
+            "failed to persist downsized SRS; continuing with in-memory params"
+        );
+    }
+    srs
 }
 
 /// The resolution [`load_srs`] performs, with the parsed params kept.

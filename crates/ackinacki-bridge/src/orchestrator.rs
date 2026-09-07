@@ -26,7 +26,7 @@
 //! crash leaves a resumable trace. v1 doesn't implement `--resume`, but
 //! the state file is written eagerly regardless so v2 has what it needs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome};
 use bridge_relayer_daemon::withdraw_e2e::{run_once_with_state, WithdrawE2EConfig};
 
-use crate::args::{self, WithdrawArgs};
+use crate::args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs};
 use crate::burn;
 use crate::errors::{CliError, CliResult};
 use crate::idempotency::{self, Status};
@@ -331,15 +331,8 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let (r, how) = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
-            info!(key = %r.key, ?how, "reserved");
-
-            // Decide from what `reserve` just returned — the record AND
-            // which side of the atomic `create_new` it came from — NOT from
-            // the `peek` taken in stage 1. See [`decide_burn`]: those
-            // disagree in two different ways, and both are a second
-            // irreversible burn.
-            let decision = decide_burn(&r, how)?;
+            let (r, decision) =
+                reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
             record = Some(r);
 
             match decision {
@@ -761,6 +754,32 @@ enum BurnDecision {
     Reuse(String),
 }
 
+/// Take the reservation, then decide from what it returned.
+///
+/// A function rather than four lines inline, because the bug this branch
+/// exists to close was not in `reserve` and not in [`decide_burn`] — both
+/// were right on their own. It was in the WIRING: the caller decided from
+/// the stage-1 `peek` instead of from the reservation, and no test of
+/// either function could see that. This is the seam, and the tests below
+/// drive it against a real state directory, including from two threads at
+/// once.
+fn reserve_and_decide(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+) -> CliResult<(idempotency::Record, BurnDecision)> {
+    let (r, how) = idempotency::reserve(state_dir, from, to, amount, allow_retry)?;
+    info!(key = %r.key, ?how, "reserved");
+    // The record AND which side of the atomic publish it came from — NOT
+    // the `peek` taken back in stage 1. See [`decide_burn`]: those two
+    // disagree in two different ways, and both are a second irreversible
+    // burn.
+    let decision = decide_burn(&r, how)?;
+    Ok((r, decision))
+}
+
 fn decide_burn(
     reserved: &idempotency::Record,
     how: idempotency::Reservation,
@@ -851,9 +870,9 @@ fn default_state_dir() -> CliResult<PathBuf> {
 /// `--yes`, on its own or alongside `--non-interactive` (which without
 /// `--yes` is already refused upstream in `main`).
 fn confirm_before_burn(
-    from: &args::FromAddress,
-    to: &args::ToAddress,
-    amount: &args::UsdcAmount,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
     args: &WithdrawArgs,
     anchor_mode: AnchorLayerMode,
 ) -> CliResult<()> {
@@ -875,38 +894,56 @@ fn confirm_before_burn(
         }
     };
 
+    // One string, one write, one result to check. It used to be sixteen
+    // `let _ = writeln!` — and the answer this function then reads is
+    // authoritative over an irreversible burn. With stderr unwritable
+    // (EPIPE from a closed pager, ENOSPC, a closed fd) every discard
+    // succeeded silently, the terminal sat there with no prompt on it,
+    // and whatever the operator eventually typed was taken as consent to
+    // the details they had not been shown.
+    //
+    // A redirect is NOT that case: `2>file` writes fine, and the prompt
+    // is in the file. Only a write that actually fails gets refused.
+    let prompt = format!(
+        "\n\
+         About to withdraw USDC:\n\
+         \x20 from      : {from}\n\
+         \x20 to        : 0x{to_hex} on {chain_name} (chain {chain_id})\n\
+         \x20 amount    : {amount_display} USDC\n\
+         \x20 bridge    : {bridge}\n\
+         \x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\
+         \n\
+         This will:\n\
+         \x20 1. broadcast a multisig sendTransaction burning {amount_display} USDC on Acki \
+         Nacki\n\
+         \x20 2. wait for the covering anchor bundle to land on Sepolia\n\
+         \x20 3. produce a Circuit-4 SHPLONK proof\n\
+         \x20 4. submit withdrawByProof (spends ETH gas)\n\
+         \n\
+         The AN burn is irreversible once broadcast. Pass --yes to skip this prompt.\n\
+         Proceed? [y/N]: ",
+        from = from.extended(),
+        to_hex = hex::encode(to.address.as_slice()),
+        chain_id = to.chain_id,
+        amount_display = amount.display(),
+        bridge = args.bridge_address,
+    );
+
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr);
-    let _ = writeln!(stderr, "About to withdraw USDC:");
-    let _ = writeln!(stderr, "  from      : {}", from.extended());
-    let _ = writeln!(
-        stderr,
-        "  to        : 0x{} on {} (chain {})",
-        hex::encode(to.address.as_slice()),
-        chain_name,
-        to.chain_id,
-    );
-    let _ = writeln!(stderr, "  amount    : {} USDC", amount.display());
-    let _ = writeln!(stderr, "  bridge    : {}", args.bridge_address);
-    let _ = writeln!(stderr, "  anchor    : {:?} (wait {})", anchor_mode, wait_hint);
-    let _ = writeln!(stderr);
-    let _ = writeln!(stderr, "This will:");
-    let _ = writeln!(
-        stderr,
-        "  1. broadcast a multisig sendTransaction burning {} USDC on Acki Nacki",
-        amount.display(),
-    );
-    let _ = writeln!(stderr, "  2. wait for the covering anchor bundle to land on Sepolia");
-    let _ = writeln!(stderr, "  3. produce a Circuit-4 SHPLONK proof");
-    let _ = writeln!(stderr, "  4. submit withdrawByProof (spends ETH gas)");
-    let _ = writeln!(stderr);
-    let _ = writeln!(
-        stderr,
-        "The AN burn is irreversible once broadcast. Pass --yes to skip this prompt."
-    );
-    let _ = write!(stderr, "Proceed? [y/N]: ");
-    let _ = stderr.flush();
+    let shown = stderr
+        .write_all(prompt.as_bytes())
+        .and_then(|()| stderr.flush());
     drop(stderr);
+    if let Err(e) = shown {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "could not print the burn confirmation to stderr ({e}) — refusing to accept an \
+                 answer to a question you were never shown. Nothing was broadcast. Pass --yes if \
+                 you meant to skip the prompt."
+            ),
+            source: None,
+        });
+    }
 
     if !std::io::stdin().is_terminal() {
         return Err(CliError::Preflight {
@@ -1008,18 +1045,182 @@ mod tests {
         );
     }
 
+    // -- The seam: reserve + decide, against a real state directory ------
+    //
+    // `decide_burn` is right on its own and `reserve` is right on its own.
+    // The bug 4660006 fixed was in neither: the caller decided from the
+    // stage-1 `peek`. These drive the composition, which is the only place
+    // that class of defect is visible.
+
+    fn seam_from() -> FromAddress {
+        FromAddress {
+            dapp_id_hex: "a".repeat(64),
+            account_id_hex: "b".repeat(64),
+        }
+    }
+
+    fn seam_to() -> ToAddress {
+        ToAddress {
+            address: "0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f"
+                .parse()
+                .unwrap(),
+            chain_id: 11_155_111,
+        }
+    }
+
+    #[test]
+    fn the_first_run_on_a_fresh_identity_sends() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (r, d) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .unwrap();
+        assert_eq!(d, BurnDecision::Send);
+        assert_eq!(r.status, Status::Reserved);
+        assert!(r.an_tx_hash.is_none());
+    }
+
+    #[test]
+    fn a_second_run_while_the_first_is_still_sending_refuses() {
+        // The exact production sequence, in order: run A reserves and is
+        // now inside `burn::send` — its record exists, `Reserved`, with no
+        // hash, because the hash is written only after the send returns.
+        // Run B arrives with --allow-retry. Nothing in the record says
+        // "someone is mid-send"; only the reservation's provenance does.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_a, da) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .unwrap();
+        assert_eq!(da, BurnDecision::Send, "A broadcasts");
+
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+        )
+        .expect_err("B must not broadcast a second initiateWithdrawal");
+        assert!(
+            matches!(err, CliError::DuplicateInFlight { .. }),
+            "exit 3, not a second burn: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_run_reuses_the_recorded_burn() {
+        // Once A's hash IS on the record, B resumes at capture instead of
+        // burning again — the same refusal would strand a recoverable
+        // withdrawal.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut r, _) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .unwrap();
+        r.status = Status::Burned;
+        r.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        idempotency::update(dir.path(), &r).unwrap();
+
+        let (_, d) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+        )
+        .unwrap();
+        assert_eq!(d, BurnDecision::Reuse(format!("0x{}", "ab".repeat(32))));
+    }
+
+    #[test]
+    fn only_one_of_two_racing_runs_is_allowed_to_burn() {
+        // The end of the argument. Threads, not a scripted sequence: this
+        // is the shape that produced the defect, and it is the shape a
+        // future refactor would have to keep passing. Whichever thread wins
+        // the atomic publish gets `Send`; the other gets exit 3. Never two
+        // sends, never two refusals.
+        use std::sync::{Arc, Barrier};
+
+        for attempt in 0..40 {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = Arc::new(dir.path().to_path_buf());
+            let gate = Arc::new(Barrier::new(2));
+
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let gate = gate.clone();
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        reserve_and_decide(
+                            &path,
+                            &seam_from(),
+                            &seam_to(),
+                            &UsdcAmount(1_000_000),
+                            true,
+                        )
+                    })
+                })
+                .collect();
+
+            let mut sends = 0;
+            let mut refusals = 0;
+            for h in handles {
+                match h.join().unwrap() {
+                    Ok((_, BurnDecision::Send)) => sends += 1,
+                    Ok((_, BurnDecision::Reuse(h))) => {
+                        panic!("attempt {attempt}: nothing has been sent, so nothing to reuse: {h}")
+                    },
+                    Err(CliError::DuplicateInFlight { .. }) => refusals += 1,
+                    Err(e) => panic!("attempt {attempt}: unexpected refusal: {e:?}"),
+                }
+            }
+            assert_eq!(sends, 1, "attempt {attempt}: exactly one run may burn");
+            assert_eq!(refusals, 1, "attempt {attempt}: the other must exit 3");
+        }
+    }
+
+    // `assert!(matches!(..))`, not a bare `matches!(..)`. In statement
+    // position the macro's bool is discarded, so these two asserted only
+    // that `parse_anchor_layer` returned Ok and did not panic — verified
+    // empirically: they passed against a wrong variant.
     #[test]
     fn parse_anchor_layer_auto() {
-        matches!(parse_anchor_layer("auto").unwrap(), AnchorLayerMode::Auto);
-        matches!(parse_anchor_layer("AUTO").unwrap(), AnchorLayerMode::Auto);
+        assert!(matches!(
+            parse_anchor_layer("auto").unwrap(),
+            AnchorLayerMode::Auto
+        ));
+        assert!(matches!(
+            parse_anchor_layer("AUTO").unwrap(),
+            AnchorLayerMode::Auto
+        ));
     }
 
     #[test]
     fn parse_anchor_layer_explicit() {
-        matches!(
+        assert!(matches!(
             parse_anchor_layer("2").unwrap(),
             AnchorLayerMode::Explicit(2)
-        );
+        ));
+        // Pin the number, not just the variant: `Explicit(1)` and
+        // `Explicit(2)` are ~6 min and ~91 min of anchor wait.
+        assert!(matches!(
+            parse_anchor_layer("1").unwrap(),
+            AnchorLayerMode::Explicit(1)
+        ));
     }
 
     #[test]

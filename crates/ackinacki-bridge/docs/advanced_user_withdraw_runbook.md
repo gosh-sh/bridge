@@ -187,10 +187,18 @@ cargo build --release --bin aggregate-proof
 #   -> ./target/release/aggregate-proof
 ```
 
-Both binaries are also lazily built by `cargo run --release` when
-invoked by the smoke wrappers or the exemplary command in the README
-Step 4 / 5. Prebuilding is worth it if you plan >3 invocations —
-saves the ~2 s cargo-startup on each call.
+**Step 2 is mandatory, not an optimisation.** Preflight refuses to
+proceed unless `target/release/aggregate-proof` exists and answers
+`--help`, and it will not accept the `cargo run --release` fallback the
+runtime would otherwise take: verifying that path means paying for a
+cold build inside a check whose whole point is to be instant, and "the
+crate looks present" is not verification. A missing or unrunnable
+aggregator therefore costs one command now instead of the burn plus up
+to 91 minutes of anchor wait later.
+
+Step 1 (the CLI itself) is still just a convenience — `cargo run
+--release` works, and prebuilding only saves the ~2 s cargo startup per
+invocation.
 
 **Env sanity** (run cwd = the CLI crate):
 
@@ -767,14 +775,40 @@ unchanged by the CLI)
 ```bash
 # CLI logs the selector + decoded params where possible; if not:
 cast 4byte <selector>
+```
 
-# Full trace against the deployed verifier (paths relative to CLI cwd)
-CALLDATA=$(jq -r '.calldata_hex' "./work_dir/proof_event_<seq>.json")
-PI=$(jq -c '.public_inputs' "./work_dir/proof_event_<seq>.json")
-cast call $BRIDGE_ADDRESS \
-  'withdrawByProof(bytes,uint256[13])' \
-  "$CALLDATA" "$PI" \
-  --rpc-url $RPC_URL --trace
+**Tracing it yourself.** Three things about the proof file trip people
+up, so all three are spelled out here:
+
+1. **It only exists if you asked for it.** By default the proof lives in
+   memory and is dropped; pass `--prover-out-dir DIR` and the run writes
+   `DIR/proof_event_NNNNNN.json` (`NNNNNN` = the zero-padded anchor
+   seq_no). A re-run without it re-proves, deterministically.
+2. **Its keys are `proof_hex` and `public_instances_hex`** — an array of
+   ten 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
+3. **Those ten are little-endian Fr**, and `uint256` on the wire is
+   big-endian, so each one must be byte-reversed before `cast` sees it.
+
+`pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
+ten `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
+dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot)` — so the
+signature is a parenthesised tuple, not `uint256[13]`:
+
+```bash
+P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
+
+PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
+# ltrimstr + scan/reverse turns each LE Fr into the BE uint256 the ABI
+# expects; join wraps the ten into the tuple literal cast wants.
+PI=$(jq -r '
+  def be: sub("^0[xX]";"") | [scan("..")] | reverse | add;
+  "(" + ([.public_instances_hex[] | "0x" + be] | join(",")) + ")"
+' "$P")
+
+cast call "$BRIDGE_ADDRESS" \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  "$PROOF" "$PI" \
+  --rpc-url "$RPC_URL" --trace
 ```
 
 **Remediation:** Fix the on-chain condition; re-run the SAME CLI
@@ -872,7 +906,7 @@ is the demo default).
 `--allow-retry` needed. The prior state file records `Failed` with
 the original `an_tx_hash` still on disk; `reserve()` recognises that
 as a post-burn revert and resumes verbatim (returns the prior
-record, skipping `burn::fire()` in the orchestrator's stage 3 resume
+record, skipping `burn::send()` in the orchestrator's stage 3 resume
 branch). The AN burn is NOT re-fired — this is what prevents the
 double-spend on the AN side. Capture replays the same event by
 `an_tx_hash`, proof regenerates deterministically against the new

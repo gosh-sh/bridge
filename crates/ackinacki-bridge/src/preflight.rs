@@ -804,7 +804,19 @@ pub fn check_ceremony(params_dir: &Path) -> CliResult<()> {
     for k in REQUIRED_CEREMONY_KS {
         probe_ceremony(params_dir, k).map_err(|e| CliError::Preflight {
             reason: format!(
-                "--params-dir {}: no usable ceremony at k={k}: {e}\n\
+                // `{e:#}` and NOT `{e}`. `resolve_ceremony` wraps the
+                // verdict in the offending path, so `{e}` prints the path
+                // alone and the operator is told "no usable ceremony" —
+                // for a file that IS there and IS loadable and whose only
+                // defect is that its tau is public. The sentence that
+                // matters ("every proof produced with it is forgeable")
+                // is the source, and only `:#` walks the chain to it.
+                "--params-dir {}: the ceremony this build loads at k={k} is unusable:\n\
+                 \x20   {e:#}\n\
+                 \x20 If that says the file is NOT Hermez, it is not merely unusable: its toxic \
+                 waste is public, so every proof produced with it is forgeable. DELETE the file \
+                 named above — provisioning does not replace it, because the loader prefers \
+                 kzg_bn254_{k}.srs by name over downsizing a larger ceremony.\n\
                  \x20 A withdrawal loads k={:?} — one bad or non-Hermez file at any of them \
                  panics the prover after the burn.\n\
                  \x20 Provision once (~2.4 GB download, then a few minutes of CPU):\n\
@@ -2034,6 +2046,362 @@ mod tests {
         .await
         .expect_err("a verifier adapter that is an EOA must be refused");
         assert!(format!("{err}").contains("adapter"), "got: {err}");
+    }
+
+    /// The full four-address walk every late-stage test needs: bridge (1)
+    /// → adapter (2) → wrapper (3) → yul (4), each answering its getter
+    /// and each carrying code. Callers override the entries they are
+    /// actually testing.
+    ///
+    /// Written as a helper because a mock that stops short fails on an
+    /// empty `eth_call` decode long before the assertion, and the test is
+    /// then green or red for a reason it does not name.
+    fn full_walk(
+        overrides: &[(&'static str, String)],
+    ) -> std::collections::HashMap<&'static str, String> {
+        let mut m = std::collections::HashMap::from([
+            (SEL_VERIFIER, word_addr(2)),
+            (SEL_SHPLONK, word_addr(3)),
+            (SEL_YUL, word_addr(4)),
+            (SEL_DAPP_FR, ZERO_WORD.to_string()),
+            (SEL_ACC_FR, ZERO_WORD.to_string()),
+            (SEL_TREASURY, MAX_WORD.to_string()),
+        ]);
+        for (k, v) in overrides {
+            m.insert(k, v.clone());
+        }
+        m
+    }
+
+    /// The four addresses of [`full_walk`], all carrying code.
+    fn full_walk_code() -> Vec<(Address, &'static str)> {
+        (1u8..=4)
+            .map(|n| (Address::repeat_byte(n), SOME_CODE))
+            .collect()
+    }
+
+    // -- Disk headroom ---------------------------------------------------
+    //
+    // `check_disk_headroom` and its four helpers had no tests at all, and
+    // they are what stands between a host with room for either artefact
+    // and not both, and a shortfall that lands in stage 5 — after the
+    // burn. The free-space number itself cannot be arranged portably, so
+    // these test the parts that decide what to compare, plus the message.
+
+    #[test]
+    fn a_warm_cache_asks_for_no_keygen_room() {
+        // A host that already generated the keys is not asked to keep 3 GB
+        // free forever. Getting this wrong makes every warm run refuse.
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            keygen_requirement(dir.path(), KeyCacheState::Warm).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_cold_cache_reserves_the_keygen() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            keygen_requirement(dir.path(), KeyCacheState::Cold {
+                why: "no manifest".into()
+            })
+            .unwrap(),
+            EVENT_KEYGEN_BYTES,
+        );
+    }
+
+    #[test]
+    fn corrupt_and_blocked_refuse_with_different_advice() {
+        // The distinction is the point. `--repair` clears the cache, which
+        // is right for a cache that contradicts itself and wrong for one
+        // with a directory sitting on a key path — that tool refuses, and
+        // sending an operator to it wastes the trip. The `Corrupt` arm also
+        // single-quotes the path, or a copy-paste with a space in it fails
+        // with "unknown argument".
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let corrupt = keygen_requirement(dir.path(), KeyCacheState::Corrupt {
+            why: "event_pk.bin digest does not match the manifest".into(),
+        })
+        .expect_err("a cache whose records disagree with its contents is not one to burn on");
+        let msg = format!("{corrupt}");
+        assert!(msg.contains("--repair"), "must hand over the tool: {msg}");
+        assert!(
+            msg.contains("digest does not match"),
+            "must keep `why`: {msg}"
+        );
+        assert!(msg.contains("'"), "must quote the path: {msg}");
+
+        let blocked = keygen_requirement(dir.path(), KeyCacheState::Blocked {
+            why: "event_vk.bin is a directory".into(),
+        })
+        .expect_err("a directory on a key path is a refusal");
+        let msg = format!("{blocked}");
+        assert!(
+            !msg.contains("--repair"),
+            "--repair refuses this state; offering it sends the operator nowhere: {msg}"
+        );
+        assert!(
+            !msg.contains("Clearing it is safe"),
+            "clearing is exactly what does not work here: {msg}"
+        );
+        assert!(msg.contains("is a directory"), "must keep `why`: {msg}");
+    }
+
+    #[test]
+    fn zero_required_never_touches_the_filesystem() {
+        // The warm-cache path reaches `require_space` with 0, and a path
+        // that does not exist must not turn that into a refusal.
+        require_space(Path::new("/nonexistent/for/this/test"), 0, &[])
+            .expect("nothing to write means nothing to check");
+    }
+
+    #[test]
+    fn an_unmeasurable_filesystem_is_not_a_refusal() {
+        // statvfs failing is a failed measurement, not evidence of a full
+        // disk. Inventing a refusal out of it would block runs on unusual
+        // mounts for no reason.
+        require_space(
+            Path::new("/nonexistent/for/this/test"),
+            EVENT_KEYGEN_BYTES,
+            &[("--params-dir", EVENT_KEYGEN_BYTES)],
+        )
+        .expect("a failed statvfs must not be read as 'no space'");
+    }
+
+    #[test]
+    fn a_shortfall_itemises_what_shares_the_filesystem() {
+        // "needs 4.0 GB" invites the operator to free 4 GB and be
+        // surprised. The sum is the whole reason this is one check.
+        let dir = tempfile::TempDir::new().unwrap();
+        let absurd = u64::MAX / 4; // ~4.6 exabytes: no test host has this
+        let err = require_space(dir.path(), absurd, &[
+            ("--params-dir", EVENT_KEYGEN_BYTES),
+            ("--pk-cache-dir", OUTER_PK_BYTES),
+        ])
+        .expect_err("no filesystem in this test has exabytes free");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--params-dir 3.2 GB"),
+            "must itemise keygen: {msg}"
+        );
+        assert!(
+            msg.contains("--pk-cache-dir 1.1 GB"),
+            "must itemise the aggregator: {msg}"
+        );
+        assert!(
+            msg.contains("share one filesystem"),
+            "must say why they add up: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_zero_part_is_not_itemised() {
+        // A warm cache contributes 0. Printing "--params-dir 0.0 GB" would
+        // point the operator at the one thing that needs nothing.
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = require_space(dir.path(), u64::MAX / 4, &[
+            ("--params-dir", 0),
+            ("--pk-cache-dir", OUTER_PK_BYTES),
+        ])
+        .expect_err("no filesystem in this test has exabytes free");
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("--params-dir"),
+            "0 bytes is not a part: {msg}"
+        );
+        assert!(msg.contains("--pk-cache-dir"), "got: {msg}");
+    }
+
+    #[test]
+    fn two_directories_under_one_root_are_one_device() {
+        // `st_dev`, not path comparison: a bind mount or a symlink makes
+        // two unrelated-looking paths share a pool, and two separate checks
+        // against the same statvfs both pass while the run needs the sum.
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = dir.path().join("params");
+        let b = dir.path().join("params/pk_cache");
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(device_of(&a), device_of(&b));
+        assert!(device_of(&a).is_some());
+        // And a path that is not there is not a device.
+        assert_eq!(device_of(Path::new("/nonexistent/for/this/test")), None);
+    }
+
+    #[test]
+    fn free_space_is_measurable_here_and_not_elsewhere() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            available_bytes(dir.path()).is_some_and(|b| b > 0),
+            "a writable tempdir has measurable free space"
+        );
+        assert_eq!(
+            available_bytes(Path::new("/nonexistent/for/this/test")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_warm_cache_still_reserves_for_the_aggregator() {
+        // The pk-cache requirement is unconditional — its slot name is a
+        // hash over a proof that does not exist until stage 5, so there is
+        // nothing on disk to narrow it against.
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(pk_cache_requirement(dir.path()), OUTER_PK_BYTES);
+        assert_eq!(
+            pk_cache_requirement(Path::new("/nonexistent")),
+            OUTER_PK_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn a_correct_deploy_passes() {
+        // Nothing proves a refusal is a refusal until something proves the
+        // check can also return Ok. Without this test an inverted
+        // comparison anywhere above turns every correct deploy into a
+        // refusal, and all four negative tests still pass.
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect("a deploy that matches on every check must be accepted");
+    }
+
+    #[tokio::test]
+    async fn a_deployed_verifier_from_another_circuit_is_refused() {
+        // The whole deployed-bytecode arm, which nothing reached before:
+        // `verifiers_dir` was `None` in every test, so the branch that
+        // compares the committed .bin against `eth_getCode(yul)` never ran.
+        // Its failure lands in stage 6 otherwise — after the burn, after the
+        // ~91 min anchor wait, and after the proof.
+        let dir = tempfile::TempDir::new().unwrap();
+        // 32-byte CREATE prelude + a runtime that is NOT what the chain has.
+        let mut bin = vec![0u8; 32];
+        bin.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
+
+        // The mock serves SOME_CODE ("0x60806040") at address 4.
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            Some(dir.path()),
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("a verifier from another circuit rejects every proof this build makes");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(WITHDRAW_VERIFIER_BIN),
+            "must name the artefact: {msg}"
+        );
+        assert!(
+            msg.contains("after the burn"),
+            "must say when the failure would otherwise land: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_matching_deployed_verifier_passes() {
+        // The other half: the comparison must accept the bytes it is given.
+        // SOME_CODE is "0x60806040" = the four bytes below.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut bin = vec![0u8; 32];
+        bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
+        std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
+
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            Some(dir.path()),
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect("the deployed runtime equals the committed one past its CREATE prelude");
+    }
+
+    #[tokio::test]
+    async fn a_treasury_shortfall_is_refused_before_the_burn() {
+        // `treasuryBalance` is a new ABI binding no test called. Its check
+        // is the last of the five, so this also proves the four before it
+        // are reachable in sequence.
+        let short = format!("0x{:0>64x}", 999_999u64); // one µUSDC short
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, short)])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("withdrawByProof would revert WithdrawTreasuryShortfall");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("WithdrawTreasuryShortfall"),
+            "must name the revert: {msg}"
+        );
+        assert!(msg.contains("999999"), "must show what is there: {msg}");
+        assert!(msg.contains("1000000"), "must show what is needed: {msg}");
+        assert!(
+            msg.contains("not a guarantee"),
+            "must not promise the treasury will still be there: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_enough_treasury_is_not_a_shortfall() {
+        // The boundary the `<` sits on. `<=` here would refuse every
+        // withdrawal that drains the treasury exactly.
+        let exact = format!("0x{:0>64x}", 1_000_000u64);
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, exact)])).await;
+        check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect("a treasury holding exactly the withdrawal amount is enough");
+    }
+
+    #[tokio::test]
+    async fn the_wrong_destination_chain_is_refused() {
+        // The mock answers eth_chainId 0xaa36a7 = 11155111 (Sepolia). A
+        // withdrawal aimed at the wrong chain cannot be undone, so this
+        // refusal has to happen before the burn — and nothing tested that
+        // it happens at all.
+        let url = mock_rpc(SOME_CODE, Default::default()).await;
+        let err = check_destination_chain(&url, 1)
+            .await
+            .expect_err("--rpc-url on Sepolia with --to-chain 1 must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("11155111"),
+            "must name what the node reports: {msg}"
+        );
+        assert!(
+            msg.contains("cannot be undone"),
+            "must say why it refuses: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_right_destination_chain_passes() {
+        let url = mock_rpc(SOME_CODE, Default::default()).await;
+        check_destination_chain(&url, 11155111)
+            .await
+            .expect("--to-chain matching the node must be accepted");
     }
 
     #[tokio::test]

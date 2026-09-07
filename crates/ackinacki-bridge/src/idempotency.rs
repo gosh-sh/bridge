@@ -112,7 +112,8 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 /// - No prior record → fresh `Status::Reserved` written and returned.
 /// - Prior `Status::Failed` with `an_tx_hash` present → resume: return
 ///   the prior record verbatim so the orchestrator sees the recorded AN
-///   tx hash and skips `burn::fire()`. Wiping here would drop the hash
+///   tx hash and skips `burn::compose`/`burn::send`. Wiping here would
+///   drop the hash
 ///   and cause a second `initiateWithdrawal` broadcast — a double-spend
 ///   on the AN side. The only writer of `Status::Failed` in production
 ///   is the `withdrawByProof` revert path, which by construction only
@@ -221,7 +222,7 @@ pub fn reserve(
         // so a stored `an_tx_hash` means "AN burn is already
         // done". Return the prior record verbatim in that case
         // so the orchestrator's resume branch (`prior_an_tx =
-        // record.an_tx_hash.clone()`) skips `burn::fire()`
+        // record.an_tx_hash.clone()`) skips `burn::send`
         // instead of firing a second `initiateWithdrawal`.
         // Only wipe when there is no recorded AN tx (defensive:
         // manual-edited state file, hypothetical future writer

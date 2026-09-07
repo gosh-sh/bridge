@@ -470,8 +470,9 @@ grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 Distinguishing "nothing broadcast" from "broadcast, unknown outcome"
 is the whole point of the exit-code discipline — scripts that
 pattern-match on a single non-zero would blind an operator to the
-difference that matters for money. `--dry-run` can only produce
-0, 2, or 3.
+difference that matters for money. `--dry-run` can only produce 0 or
+2 — it neither reads nor writes the idempotency store, so exit 3 is
+unreachable under it.
 
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|
@@ -608,11 +609,24 @@ chain) does not.
 prior AN/ETH tx hashes so an operator can reconcile before retrying.
 
 **`--allow-retry`.** Resume-in-place; the CLI keeps the prior record
-verbatim and skips any stage that already completed:
+verbatim. **Exactly one stage is ever skipped: the burn.** Capture,
+proving and submission re-run from scratch on every attempt, whatever
+the recorded status says — the record's later fields are an audit
+trail, not a resume point. That is deliberate: the proof is
+deterministic for a given `(event, on-chain state)`, and re-deriving it
+against the *current* chain state is what lets a retry succeed after
+the condition that failed it has been fixed.
 
-- `Burned` / `Captured` / `Proved` → skip burn, resume from capture.
-  Prior `an_tx_hash` reused, so **the burn is never broadcast twice.**
-- `Failed` → clean-slate restart. No flag needed.
+- `Burned` / `Captured` / `Proved` → skip the burn, re-run from
+  capture. Prior `an_tx_hash` reused, so **the burn is never broadcast
+  twice.**
+- `Failed` **with** an `an_tx_hash` → same resume, and no flag needed.
+  This is the normal `withdrawByProof`-reverted path: the burn happened,
+  so it is skipped and everything after it re-runs.
+- `Failed` **without** an `an_tx_hash` → and only then, a fresh
+  reservation. No production path writes that record (the sole writer of
+  `Failed` is the post-burn revert), so in practice this is a
+  hand-edited file. It is not a "clean slate" you can ask for.
 - `Submitted` → **refused even with `--allow-retry`.** There is a
   broadcast EVM tx whose receipt we never observed; re-broadcasting
   risks a double payout. Reconcile the `eth_tx_hash` on-chain first,
@@ -631,8 +645,11 @@ happened.
 
 - `--from-keys` file contents are never logged, printed, or persisted
   anywhere the CLI writes. The owner public key derived from the file
-  IS written (to state files, printed on preflight) — it's an
-  on-chain-observable identifier, not a secret.
+  is *printed* by preflight, which compares it against the multisig's
+  on-chain custodian — an on-chain-observable identifier, not a secret.
+  It is **not** written to the state file; `Record` holds only
+  `from_extended`, `to_hex`, `to_chain`, `amount_micro`, the timestamp,
+  and the chain identifiers listed below.
 - ETH signer key (`--eth-private-key`) same discipline; never
   persisted, never logged.
 - Idempotency state files under `--state-dir` contain only

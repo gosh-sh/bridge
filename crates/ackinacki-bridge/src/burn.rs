@@ -335,7 +335,17 @@ pub async fn send(
     // Classify the returned transaction. `process_message` can return Ok
     // even when the compute phase reverted (exit_code != 0), so we must
     // inspect the tx JSON before declaring success.
-    let (aborted, exit_code) = classify_tx(&processed.transaction);
+    let Some((aborted, exit_code)) = classify_tx(&processed.transaction) else {
+        return Err(CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "multisig {} returned a transaction this build cannot classify: it carries \
+                 neither `aborted` nor `compute.exit_code`, so nothing in it says the call \
+                 succeeded. The burn is on the wire; reconcile via GraphQL before retrying.",
+                from.extended()
+            ),
+            source: None,
+        });
+    };
     if aborted || exit_code.is_some_and(|c| c != 0) {
         return Err(CliError::BurnOutcomeUnknown {
             reason: format!(
@@ -362,7 +372,7 @@ pub async fn send(
 /// exactly 64 lowercase hex chars.
 ///
 /// The returned `KeyPair` is the ONLY place the secret half lives; it is
-/// consumed by `Signer::Keys` and dropped when `fire` returns.
+/// consumed by `Signer::Keys` and dropped when `compose` returns.
 fn load_keypair(path: &Path) -> CliResult<KeyPair> {
     let contents = std::fs::read_to_string(path).map_err(|e| CliError::KeyFilePerms {
         path: path.display().to_string(),
@@ -460,6 +470,14 @@ async fn encode_initiate_withdrawal_body(
 
 /// Extract `.id` (or `.hash`) from the tx JSON returned by
 /// `process_message`. Normalizes to `0x`-prefixed 64-hex.
+///
+/// This string is the operator's only handle on an irreversible burn: it
+/// is written to the state file, it is the GraphQL filter that waits for
+/// `WithdrawalInitiated`, and it is what every reconciliation instruction
+/// the CLI prints tells them to look up. A value that merely LOOKS like a
+/// hash is worse than none, so anything outside 1..=64 hex digits is exit
+/// 10 — the burn is on the wire either way, and the operator has to know
+/// we cannot name it.
 fn extract_tx_id(tx: &Value) -> CliResult<String> {
     let raw = tx
         .get("id")
@@ -470,28 +488,78 @@ fn extract_tx_id(tx: &Value) -> CliResult<String> {
                 .to_string(),
             source: None,
         })?;
-    let bare = raw.trim_start_matches("0x");
-    // Left-pad if the network returned a shorter id (shellnet quirk).
-    let normalized = if bare.len() < 64 {
-        format!("{:0>64}", bare)
-    } else {
-        bare.to_ascii_lowercase()
-    };
-    Ok(format!("0x{normalized}"))
+    let trimmed = raw.trim();
+    let bare = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    // `"id": ""` used to left-pad into `0x000…0` and then be reported as
+    // "the burn is on the wire, here is its hash". It matched nothing, on
+    // every network, forever.
+    if bare.is_empty() || bare.len() > 64 || !bare.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "process_message returned a transaction id that is not a hash ({} characters \
+                 after the optional 0x, hex-only: {}) — the burn is on the wire but this build \
+                 cannot name it; reconcile via GraphQL",
+                bare.len(),
+                bare.chars().all(|c| c.is_ascii_hexdigit()),
+            ),
+            source: None,
+        });
+    }
+    // Left-pad if the network returned a shorter id (shellnet quirk), and
+    // lowercase on BOTH paths: the GraphQL filter is byte-exact, so a
+    // short UPPERCASE id used to build a query that matched nothing and
+    // time out five minutes after the money had already moved.
+    Ok(format!("0x{:0>64}", bare.to_ascii_lowercase()))
 }
 
 /// `(aborted, compute.exit_code)` extraction. Mirrors
 /// `acki-nacki-interface::classify_tx_json` but returns just the two
-/// fields we need.
-fn classify_tx(tx: &Value) -> (bool, Option<i32>) {
-    let aborted = tx.get("aborted").and_then(|v| v.as_bool()).unwrap_or(false);
-    let exit_code = tx
+/// fields we need — and, unlike it, refuses to guess.
+///
+/// The reference classifier reads a missing or malformed field as "not
+/// aborted", which is right where it lives: the relayer classifies
+/// transactions that already happened, and a wrong guess costs an index
+/// entry. Here the same guess is durable and irreversible. A transaction
+/// we call fine gets `Status::Burned` and a hash written to the state
+/// file, and from then on no run will re-burn without an operator
+/// hand-editing that file — so a reverted burn read as fine strands the
+/// withdrawal. `None` means "this shape carries no evidence either way",
+/// which the caller turns into exit 10 and the operator reconciles.
+///
+/// This is the module discipline stated at the top of the file: we do
+/// not distinguish "not sent" from "sent, waiting" by guessing.
+fn classify_tx(tx: &Value) -> Option<(bool, Option<i32>)> {
+    // `null` is a field that is not there. Anything else that is not a
+    // bool is a shape this build does not understand, and reading it as
+    // `false` is the silent failure.
+    let aborted = match tx.get("aborted") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return None,
+    };
+
+    let raw_exit = tx
         .get("compute")
         .and_then(|c| c.get("exit_code"))
-        .and_then(|v| v.as_i64())
-        .or_else(|| tx.get("exit_code").and_then(|v| v.as_i64()))
-        .map(|c| c as i32);
-    (aborted, exit_code)
+        .filter(|v| !v.is_null())
+        .or_else(|| tx.get("exit_code").filter(|v| !v.is_null()));
+    let exit_code = match raw_exit {
+        None => None,
+        // NOT `as i32`: that folds a value which does not fit into a
+        // plausible code, and 4294967296 folds to 0, i.e. "success".
+        Some(v) => Some(v.as_i64().and_then(|c| i32::try_from(c).ok())?),
+    };
+
+    // Neither field present. `process_message` returns the whole
+    // transaction, so this is a shape change or a filtered response —
+    // not a normal success.
+    if aborted.is_none() && exit_code.is_none() {
+        return None;
+    }
+    Some((aborted.unwrap_or(false), exit_code))
 }
 
 #[cfg(test)]
@@ -536,21 +604,91 @@ mod tests {
     }
 
     #[test]
+    fn extract_tx_id_empty_string_is_not_a_hash() {
+        // The left-pad used to turn this into 0x000…0 and hand it back as
+        // the burn's identity: written to the state file, printed to the
+        // operator, fed to the GraphQL filter that then matched nothing.
+        for id in ["", "0x", "   ", "0X"] {
+            let tx = json!({ "id": id });
+            match extract_tx_id(&tx) {
+                Err(CliError::BurnOutcomeUnknown {
+                    ..
+                }) => (),
+                other => panic!("{id:?} is not a transaction id, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn extract_tx_id_non_hex_is_not_a_hash() {
+        for id in ["not-a-hash", "0xzz", &"a".repeat(65)] {
+            let tx = json!({ "id": id });
+            match extract_tx_id(&tx) {
+                Err(CliError::BurnOutcomeUnknown {
+                    ..
+                }) => (),
+                other => panic!("{id:?} is not a transaction id, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn extract_tx_id_lowercases_a_short_id_too() {
+        // The `< 64` branch skipped the lowercasing, and the GraphQL
+        // filter is byte-exact: an upper-case short id built a query that
+        // matched nothing and timed out five minutes after the burn.
+        let tx = json!({ "id": "0xABC" });
+        assert_eq!(extract_tx_id(&tx).unwrap(), format!("0x{:0>64}", "abc"));
+    }
+
+    #[test]
     fn classify_tx_success() {
         let tx = json!({ "aborted": false, "compute": { "exit_code": 0 } });
-        assert_eq!(classify_tx(&tx), (false, Some(0)));
+        assert_eq!(classify_tx(&tx), Some((false, Some(0))));
     }
 
     #[test]
     fn classify_tx_aborted() {
         let tx = json!({ "aborted": true, "compute": { "exit_code": 108 } });
-        assert_eq!(classify_tx(&tx), (true, Some(108)));
+        assert_eq!(classify_tx(&tx), Some((true, Some(108))));
     }
 
     #[test]
-    fn classify_tx_missing_fields_defaults_to_ok() {
-        let tx = json!({});
-        assert_eq!(classify_tx(&tx), (false, None));
+    fn classify_tx_refuses_to_call_an_unreadable_shape_a_success() {
+        // Reading "no evidence" as "not aborted" is not a neutral default
+        // here: it writes Status::Burned plus a hash, and from then on no
+        // run re-burns without the operator hand-editing the state file.
+        // So a reverted burn read as fine strands the withdrawal.
+        for tx in [
+            json!({}),
+            json!({ "aborted": null, "compute": { "exit_code": null } }),
+            // Present but not a bool — a shape change, not a success.
+            json!({ "aborted": "false" }),
+            json!({ "aborted": 0 }),
+            // Would fold to 0 under `as i32`, i.e. to "success".
+            json!({ "compute": { "exit_code": 4294967296i64 } }),
+        ] {
+            assert_eq!(classify_tx(&tx), None, "unclassifiable: {tx}");
+        }
+    }
+
+    #[test]
+    fn classify_tx_reads_one_field_when_that_is_all_there_is() {
+        // Refusing must not become refusing everything: a transaction that
+        // carries either field is classifiable from it.
+        assert_eq!(classify_tx(&json!({ "aborted": true })), Some((true, None)));
+        assert_eq!(
+            classify_tx(&json!({ "aborted": false })),
+            Some((false, None))
+        );
+        assert_eq!(
+            classify_tx(&json!({ "exit_code": 0 })),
+            Some((false, Some(0)))
+        );
+        assert_eq!(
+            classify_tx(&json!({ "exit_code": 108 })),
+            Some((false, Some(108)))
+        );
     }
 
     #[test]

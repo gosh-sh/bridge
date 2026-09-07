@@ -421,7 +421,7 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
     // AN-side `initiateWithdrawal(amount)` argument are u64 on the wire;
     // anything above 2^64 - 1 micro-USDC (~1.8e13 USDC) cannot be
     // burned even with an over-funded multisig, and letting it through
-    // would trip a downstream cast in `burn::fire` at broadcast time
+    // would trip a downstream cast in `burn::compose` at broadcast time
     // rather than a clean preflight refusal.
     if micros > u64::MAX as u128 {
         return Err(CliError::ArgInvalid {
@@ -511,14 +511,34 @@ fn is_64_hex(s: &str) -> bool {
 
 /// Truncate an untrusted input string for safe echo back in errors. Never
 /// used for anything that could be a key or secret — but as a belt-and-
-/// suspenders default we clip long inputs to 24 chars.
+/// suspenders default we clip long inputs to 24 characters.
+///
+/// Every argument here comes straight from argv, so this function is on
+/// the path of malformed input by construction and must not be the thing
+/// that fails on it. `&s[..24]` panicked whenever byte 24 landed inside a
+/// multibyte character: `--to` with an emoji at the wrong offset turned a
+/// clean "invalid address" refusal into exit 101 and a message no
+/// consumer could parse, which is exactly what the `--json` envelope
+/// exists to prevent. Counting characters also makes N mean what the
+/// sentence above says it means.
 fn redact(s: &str) -> String {
     const N: usize = 24;
-    if s.len() > N {
-        format!("{}…", &s[..N])
-    } else {
-        s.to_string()
+    let mut head = String::new();
+    let mut rest = s.chars();
+    for c in rest.by_ref().take(N) {
+        // Control characters survive argv and land in a multi-line
+        // refusal: a bare newline forges a line the CLI never wrote, and
+        // an ANSI escape repaints the terminal the refusal is read on.
+        if c.is_control() {
+            head.extend(c.escape_debug());
+        } else {
+            head.push(c);
+        }
     }
+    if rest.next().is_some() {
+        head.push('…');
+    }
+    head
 }
 
 fn format_supported_chains() -> String {
@@ -677,6 +697,48 @@ mod tests {
             parse_to(raw, Some(999)),
             Err(CliError::ArgInvalid { flag: "to-chain", .. })
         ));
+    }
+
+    #[test]
+    fn a_multibyte_argument_is_refused_not_panicked_on() {
+        // `&s[..24]` panicked whenever byte 24 fell inside a character.
+        // Every one of these is 24 ASCII bytes followed by one that is
+        // not, so the old slice split it. The result was exit 101 and a
+        // message no `--json` consumer could parse — from an argument
+        // whose only sin was being wrong.
+        let head = "0x742d35Cc6634C0532";
+        assert_eq!(head.len(), 19);
+        for tail in ["привет", "日本語", "🙂🙂", "e\u{301}\u{301}"] {
+            let raw = format!("{head}{tail}");
+            let res = parse_to(&raw, Some(11155111));
+            assert!(
+                matches!(
+                    res,
+                    Err(CliError::ArgInvalid {
+                        flag: "to",
+                        ..
+                    })
+                ),
+                "{raw:?} must be refused, got {res:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn redact_clips_characters_and_neutralises_control_bytes() {
+        // The clip is 24 CHARACTERS, and it always leaves a valid string.
+        let long = "\u{444}".repeat(40);
+        let out = redact(&long);
+        assert_eq!(out.chars().count(), 25, "24 characters plus the ellipsis");
+        assert!(out.ends_with('…'));
+        // Exactly 24 characters is not truncated, and carries no ellipsis.
+        let exact = "\u{444}".repeat(24);
+        assert_eq!(redact(&exact), exact);
+        // A newline in argv would otherwise forge a line inside a
+        // multi-line refusal, and an ANSI escape would repaint the
+        // terminal the refusal is being read on.
+        assert_eq!(redact("a\nb"), "a\\nb");
+        assert_eq!(redact("a\u{1b}[2Jb"), "a\\u{1b}[2Jb");
     }
 
     #[test]

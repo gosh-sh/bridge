@@ -12,7 +12,8 @@
 
 mod common;
 mod state;
-pub use common::{assert_hermez_srs, HERMEZ_S_G2_HEAD};
+pub use common::{assert_hermez_srs, probe_ceremony, HERMEZ_S_G2_HEAD};
+pub use state::{probe_event_key_cache, KeyCacheState};
 pub mod event;
 pub mod fallback;
 pub mod layer;

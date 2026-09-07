@@ -1,4 +1,10 @@
-//! Read-only preflight checks. No signing, no sends, no state writes.
+//! Preflight checks. No signing, no sends — nothing here can move money or
+//! reach either chain's mempool.
+//!
+//! Not side-effect free, though: `check_output_dirs` creates the prover's
+//! output directories and writes a short-lived probe file into each, on the
+//! principle that a path we cannot write at stage 1 is a crash at stage 5,
+//! after the burn. Nothing else here writes.
 //!
 //! Runs after arg validation and before any broadcast. Every failure here
 //! surfaces as [`crate::errors::CliError::Preflight`] and exit code 2.
@@ -17,11 +23,13 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
+use bridge_prover_lib::keys::{probe_ceremony, KeyCacheState};
 use bridge_relayer_daemon::bridge::EthBridgeClient;
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
@@ -627,6 +635,646 @@ fn normalize_u256_hex(raw: &str) -> Option<String> {
 
 pub(crate) fn pubkeys_equal(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+// -- Prover artifacts --------------------------------------------------------
+
+/// Every ceremony degree a withdrawal actually loads.
+///
+/// **Not a minimum — a set.** `KeyManager::new` builds all four managers,
+/// and each asks `load_srs` for one exact degree:
+///
+/// | manager  | circuit `k` | `srs_k` loaded | source |
+/// |----------|-------------|----------------|--------|
+/// | primary  | 20          | **20**         | `primary.rs:44,56` |
+/// | fallback | 21          | **21**         | `fallback.rs:51,62` |
+/// | layer    | 17          | **20**         | `layer.rs:53,61` (`KEYGEN_SRS_K.max(k)`) |
+/// | event    | 19          | **20**         | `event.rs:46,53` (`KEYGEN_SRS_K.max(k)`) |
+///
+/// So {20, 21}, and checking only 21 is not enough. `load_srs` tries the
+/// **exact** path `kzg_bn254_{k}.srs` first and, if the header matches,
+/// refuses a non-Hermez `s_g2`. A structurally valid but non-Hermez
+/// `kzg_bn254_20.srs` sitting next to a perfectly good K=21 file therefore
+/// passes a K=21-only probe and fails at proof time — in stage 5, after the
+/// burn. The K=21 file does not rescue it, because the exact path wins
+/// before any downsizing is considered.
+pub const REQUIRED_CEREMONY_KS: [u32; 2] = [20, 21];
+
+/// Bytes the first Circuit-4 keygen writes into `params_dir`
+/// (`event_pk.bin` ~2.65 GB per `TECHNICAL_README.md`, plus vk and config),
+/// rounded up for slack.
+const EVENT_KEYGEN_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+/// Bytes the outer SHPLONK aggregator keygen writes into the pk cache.
+///
+/// Measured, not guessed: `aggregator_cache.rs:16` documents the slot as
+/// "proving key (SDK's `RawBytes` format, ~800 MB @ K=21)". Rounded up for
+/// the `.meta.json` sibling and slack.
+const OUTER_PK_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// How long the `--help` probe waits in production.
+pub(crate) const AGGREGATOR_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The verifier bytecode this build expects, embedded at compile time.
+///
+/// A size range is not good enough: any plausibly-sized file would pass, so
+/// a stale or corrupted verifier survives preflight and is caught by
+/// `aggregate-proof` only at stage 5 — after the burn and after minutes of
+/// proof generation. The version-control argument for accepting that is
+/// wrong too: a VCS guarantees the integrity of its objects, not of a
+/// working tree anything can overwrite after checkout.
+///
+/// Embedding the bytes makes the expectation exact and self-updating: a
+/// rotated verifier is picked up by the next build, and there is no second
+/// copy of a hash to drift out of sync.
+const EXPECTED_VERIFIER_BIN: &[u8] =
+    include_bytes!("../../../contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin");
+
+/// Fail fast when the artifacts a real run needs are absent or unusable.
+///
+/// Everything here is checked at stage 1 because the alternative is stage 5:
+/// after the irreversible AN burn and up to ~91 min of anchor wait.
+///
+/// Deliberately a thin sequence over four independently callable checks.
+/// They are separate functions because they must be separately testable — a
+/// single fused function short-circuits on the ceremony, and every test for
+/// the later checks would need a real 256 MB SRS on disk to reach its own
+/// assertion.
+pub async fn check_prover_artifacts(
+    p: &crate::args::SubmitPlumbing,
+    snark_dir: &Path,
+    pk_cache_dir: Option<&Path>,
+    allow_verifier_drift: bool,
+) -> CliResult<()> {
+    check_ceremony(&p.params_dir)?;
+    check_verifier_bin(&p.verifiers_dir, allow_verifier_drift)?;
+    check_aggregator_runnable(&p.aggregator_dir).await?;
+
+    // Ask what the key cache is BEFORE deciding what must be writable. A
+    // warm `params_dir` is only ever read, so demanding write access to it
+    // would refuse a perfectly good read-only or shared params mount — a
+    // setup the config file explicitly contemplates ("shared with the bundle
+    // daemon"). Only a cold cache writes there.
+    //
+    // The one write a warm run might still attempt is `load_srs` persisting
+    // a downsized SRS, and that is already best-effort: it warns and
+    // continues on failure. Refusing the run for it would be stricter than
+    // the code it is protecting.
+    let cache = bridge_prover_lib::keys::probe_event_key_cache(&p.params_dir);
+
+    // `Cold`, specifically — not `!Warm`. `Corrupt` and `Blocked` are also
+    // not-warm, and on a read-only `params/` the writability probe would
+    // fire first and report a permissions problem, burying the diagnosis the
+    // operator actually needs ("the proving key is truncated; run --repair",
+    // or "there is a directory where a key file goes"). Both are refused a
+    // few lines below with those messages; neither needs a second, worse one
+    // here.
+    let params_needs_write = matches!(cache, KeyCacheState::Cold { .. });
+
+    // Resolve the pk cache the way the RUNTIME resolves it, once, before
+    // anything branches on it. `driver.rs:349-352` does
+    // `pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"))`, so
+    // `None` does not mean "no cache" — it means "<params_dir>/pk_cache".
+    //
+    // Threading the raw `Option` through instead is how the default path
+    // would end up unchecked: with a warm cache `params_dir` is not passed
+    // to `check_output_dirs` either, so nothing would probe the directory
+    // the aggregator is about to write ~800 MB into.
+    let effective_pk_cache = pk_cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| p.params_dir.join("pk_cache"));
+
+    check_output_dirs(
+        &p.work_dir,
+        snark_dir,
+        &effective_pk_cache,
+        params_needs_write.then_some(p.params_dir.as_path()),
+    )?;
+    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache)?;
+    Ok(())
+}
+
+/// The KZG ceremony, resolved exactly the way the prover will resolve it —
+/// **at every degree the prover will ask for**, not just the largest.
+///
+/// The loop is the point. `probe_ceremony(dir, 21)` succeeding says nothing
+/// about `kzg_bn254_20.srs`, and `load_srs(dir, 20)` will consult that exact
+/// filename before it considers downsizing the K=21 file. See
+/// [`REQUIRED_CEREMONY_KS`] for where each degree comes from.
+pub fn check_ceremony(params_dir: &Path) -> CliResult<()> {
+    for k in REQUIRED_CEREMONY_KS {
+        probe_ceremony(params_dir, k).map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--params-dir {}: no usable ceremony at k={k}: {e}\n\
+                 \x20 A withdrawal loads k={:?} — one bad or non-Hermez file at any of them \
+                 panics the prover after the burn.\n\
+                 \x20 Provision once (~2.4 GB download, then a few minutes of CPU):\n\
+                 \x20   mkdir -p ~/.cache/halo2-kzg-srs\n\
+                 \x20   curl -L --fail --progress-bar \\\n\
+                 \x20     https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \\\n\
+                 \x20     -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau\n\
+                 \x20   cd ../bridge-prover-libraries   # from crates/ackinacki-bridge/\n\
+                 \x20   cargo build --release --bin bootstrap_hermez_srs\n\
+                 \x20   ./target/release/bootstrap_hermez_srs --k 21 --params-dir {}\n\
+                 \x20 That writes kzg_bn254_21.srs (~256 MB); lower degrees are derived from it \
+                 on first use.\n\
+                 \x20 If k=21 is fine and a lower degree is not, you have a stale or foreign \
+                 kzg_bn254_{k}.srs — delete it and let it be re-derived.\n\
+                 \x20 NOTE: scripts/bootstrap_hermez_srs.sh is a different tool — it writes K=20 \
+                 into crates/bridge-snark-utils/params/.",
+                params_dir.display(),
+                REQUIRED_CEREMONY_KS,
+                params_dir.display(),
+            ),
+            source: None,
+        })?;
+    }
+    Ok(())
+}
+
+/// The committed verifier bytecode `aggregate-proof` self-checks against.
+pub fn check_verifier_bin(verifiers_dir: &Path, allow_drift: bool) -> CliResult<()> {
+    let bin = verifiers_dir.join(WITHDRAW_VERIFIER_BIN);
+    match std::fs::metadata(&bin) {
+        Ok(m) if m.is_file() => {},
+        _ => {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "--verifiers-dir {}: missing {WITHDRAW_VERIFIER_BIN} — aggregate-proof \
+                     compares its generated verifier against this committed bytecode and refuses \
+                     without it",
+                    verifiers_dir.display(),
+                ),
+                source: None,
+            })
+        },
+    }
+
+    let on_disk = std::fs::read(&bin).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "--verifiers-dir {}: cannot read {WITHDRAW_VERIFIER_BIN}: {e}",
+            verifiers_dir.display()
+        ),
+        source: None,
+    })?;
+    if on_disk != EXPECTED_VERIFIER_BIN && !allow_drift {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--verifiers-dir {}: {WITHDRAW_VERIFIER_BIN} is not the verifier this build \
+                 expects ({} bytes on disk / sha256 {}, vs {} bytes / {} embedded). \
+                 aggregate-proof would reject it too, but only at stage 5 — after the burn and \
+                 the proof.\n\x20 Running your own bridge deploy? Point --verifiers-dir at your \
+                 own verifiers directory and pass --allow-verifier-drift; see the advanced \
+                 runbook.",
+                verifiers_dir.display(),
+                on_disk.len(),
+                short_sha256(&on_disk),
+                EXPECTED_VERIFIER_BIN.len(),
+                short_sha256(EXPECTED_VERIFIER_BIN),
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// First 8 hex chars of a SHA-256 — enough to tell two artefacts apart in an
+/// error message without printing 64 characters of noise.
+fn short_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(bytes)[..4])
+}
+
+/// Prove we can actually aggregate, not merely that a file with the right
+/// name exists.
+///
+/// `SubprocessAggregator` picks `target/release/aggregate-proof` on
+/// `is_file()` alone and only falls back to `cargo run --release` when that
+/// path is absent (`aggregator.rs:377`, `:432`). So a non-executable stub,
+/// or a binary built for another architecture, is *selected over* a working
+/// cargo build and then fails after the burn. Existence is not the property
+/// we need; runnability is — hence the `--help` smoke run.
+///
+/// **Requires a prebuilt binary; the cargo fallback is refused here.** The
+/// runtime will happily `cargo run --release` when the binary is missing,
+/// but preflight cannot verify that path without paying for a cold build
+/// inside a check whose whole purpose is to be instant — and "the crate
+/// looks present" is not verification. Refusing early with the build command
+/// costs an operator one command; accepting an unverified fallback costs
+/// them the burn and up to 91 minutes. This is deliberately stricter than
+/// the runtime.
+pub async fn check_aggregator_runnable(aggregator_dir: &Path) -> CliResult<()> {
+    check_aggregator_runnable_with_timeout(aggregator_dir, AGGREGATOR_PROBE_TIMEOUT).await
+}
+
+/// The probe, with the wait as a parameter.
+///
+/// Split out for the timeout test: the alternative is a unit test that
+/// sleeps for the production 30 s, which every future run then pays.
+pub(crate) async fn check_aggregator_runnable_with_timeout(
+    aggregator_dir: &Path,
+    // Plain `//`: doc comments cannot be applied to parameters.
+    timeout: Duration,
+) -> CliResult<()> {
+    let refuse = |reason: String| CliError::Preflight {
+        reason,
+        source: None,
+    };
+
+    // Canonicalise BEFORE spawning, because the spawn sets `current_dir` to
+    // this same directory and a child resolves a relative program path
+    // against its OWN cwd — so `--aggregator-dir ./agg` would try to exec
+    // `./agg/agg/target/release/aggregate-proof`. `is_file()` below is
+    // evaluated against the parent's cwd and passes, which makes the failure
+    // look like a broken binary rather than a path bug.
+    //
+    // This is not a corner case: the shipped profile sets
+    // `BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator`, relative by design.
+    //
+    // The runtime does not have this bug: `SubprocessAggregator::new`
+    // canonicalises `aggregator_dir` at construction, so by the time
+    // `release_bin` joins onto it the path is already absolute. Preflight
+    // has no such step, which is why it needs this one.
+    let relative_bin = aggregator_dir.join("target/release/aggregate-proof");
+    if !relative_bin.is_file() {
+        return Err(refuse(format!(
+            "--aggregator-dir {}: no target/release/aggregate-proof.\n\x20 Build it first — this \
+             CLI will not fall back to `cargo run`, because a cold build cannot be verified \
+             inside a preflight and an unverified aggregator costs the burn:\n\x20   cd {} && \
+             cargo build --release --bin aggregate-proof",
+            aggregator_dir.display(),
+            aggregator_dir.display(),
+        )));
+    }
+
+    // Resolve now, while the cwd is still ours.
+    let release_bin = relative_bin.canonicalize().map_err(|e| {
+        refuse(format!(
+            "--aggregator-dir {}: could not resolve {}: {e}",
+            aggregator_dir.display(),
+            relative_bin.display(),
+        ))
+    })?;
+
+    let run = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(&release_bin)
+            .arg("--help")
+            .current_dir(aggregator_dir)
+            // Without this, a timeout cancels the future and leaves the
+            // child running — orphaned, holding the pipes, for as long as it
+            // likes. `timeout` bounds our wait, not its life.
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await;
+
+    match run {
+        // Not just "exited 0" — a stub that ignores its arguments does that
+        // too. The help text must mention the flag we will actually pass,
+        // which only the real binary does.
+        Ok(Ok(out)) if out.status.success() && help_mentions_our_flags(&out) => Ok(()),
+        Ok(Ok(out)) if out.status.success() => Err(refuse(format!(
+            "--aggregator-dir {}: {} answered `--help` but its output does not mention \
+             `--inner-snark` — this is not the aggregate-proof this CLI drives. Rebuild it:\n\
+             \x20   cd {} && cargo build --release --bin aggregate-proof",
+            aggregator_dir.display(),
+            release_bin.display(),
+            aggregator_dir.display(),
+        ))),
+        Ok(Ok(out)) => Err(refuse(format!(
+            "--aggregator-dir {}: {} exists but `--help` exited {} — a stale or \
+             wrong-architecture build would fail only after the burn. Rebuild it:\n\x20   cd {} \
+             && cargo build --release --bin aggregate-proof\n\x20 stderr: {}",
+            aggregator_dir.display(),
+            release_bin.display(),
+            out.status,
+            aggregator_dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ))),
+        Ok(Err(e)) => Err(refuse(format!(
+            "--aggregator-dir {}: {} exists but cannot be executed: {e} — wrong architecture, or \
+             not executable. Rebuild it:\n\x20   cd {} && cargo build --release --bin \
+             aggregate-proof",
+            aggregator_dir.display(),
+            release_bin.display(),
+            aggregator_dir.display(),
+        ))),
+        Err(_) => Err(refuse(format!(
+            "--aggregator-dir {}: {} did not respond to `--help` within {:?} (the process was \
+             killed)",
+            aggregator_dir.display(),
+            release_bin.display(),
+            timeout,
+        ))),
+    }
+}
+
+/// `--help` output must name a flag this CLI actually passes. Guards against
+/// a stub or an unrelated binary parked at the expected path.
+fn help_mentions_our_flags(out: &std::process::Output) -> bool {
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    text.contains("--inner-snark") || err.contains("--inner-snark")
+}
+
+/// Output paths the prover will write to. Creating them now also means the
+/// aggregator subprocess never races on mkdir.
+///
+/// `params_dir` is `Option` because whether it is an output at all depends
+/// on the key cache. When the cache is cold the first Circuit-4 run calls
+/// `ensure_event_keys`, whose `run_keygen` writes `event_vk.bin`,
+/// `event_pk.bin` and `event_config_params.json` straight into `params_dir`
+/// — ~2.65 GB of it — and a read-only `params/` then passes preflight and
+/// fails after the burn. When the cache is warm nothing writes there, and
+/// demanding write access would refuse a read-only or shared `params/` that
+/// works perfectly well; the shipped profile describes exactly that setup
+/// ("shared with the bundle daemon").
+///
+/// The caller decides, because the caller has already probed the cache.
+///
+/// Note also that every shipped profile sets `BRIDGE_PK_CACHE_DIR`
+/// explicitly, so the `params_dir/pk_cache` default never fires — which is
+/// why `params_dir` needs to appear here in its own right rather than being
+/// probed incidentally through the pk-cache path.
+///
+/// This checks that the paths accept writes; [`check_disk_headroom`] checks
+/// that they have room — summed per filesystem, because the shipped profile
+/// puts one inside the other.
+pub fn check_output_dirs(
+    work_dir: &Path,
+    snark_dir: &Path,
+    // Already resolved against the `<params_dir>/pk_cache` default by the
+    // caller — not an `Option`, because "unset" is not a state the runtime
+    // has. Plain `//`: doc comments cannot be applied to parameters.
+    pk_cache_dir: &Path,
+    params_dir: Option<&Path>,
+) -> CliResult<()> {
+    let mut targets: Vec<(&'static str, &Path)> = vec![
+        ("--work-dir", work_dir),
+        ("--snark-dir", snark_dir),
+        // Always. The caller resolved the default already, so this is the
+        // real path either way and it is always written to.
+        ("--pk-cache-dir", pk_cache_dir),
+    ];
+    // Keygen output, and only when keygen will actually run.
+    if let Some(d) = params_dir {
+        targets.push(("--params-dir", d));
+    }
+    for (flag, dir) in targets {
+        ensure_writable_dir(flag, dir)?;
+    }
+    Ok(())
+}
+
+/// Create `dir` if absent and prove we can write into it. A read-only output
+/// path is a stage-5 crash today; here it costs one temp file.
+///
+/// The probe name is unique per process and the file is opened with
+/// `create_new`, so this can never truncate something that was already there
+/// — a fixed name plus `fs::write` would happily destroy an operator's file
+/// that happened to match. Cleanup failure is reported, not swallowed: a
+/// probe we cannot remove is litter inside a directory the prover is about
+/// to fill.
+///
+/// **Scope: writability.** One 4 KiB block proves the filesystem accepts
+/// data. Capacity is checked separately and conditionally — see
+/// [`check_disk_headroom`] — because the amount needed depends on what is
+/// already cached.
+fn ensure_writable_dir(flag: &'static str, dir: &Path) -> CliResult<()> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(dir).map_err(|e| CliError::Preflight {
+        reason: format!("{flag} {}: cannot create: {e}", dir.display()),
+        source: None,
+    })?;
+
+    let probe = dir.join(format!(
+        ".ackinacki-bridge-write-probe.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|e| CliError::Preflight {
+            reason: format!("{flag} {}: not writable: {e}", dir.display()),
+            source: None,
+        })?;
+    // Real bytes, then fsync. `write_all(b"")` loops zero times and issues
+    // no syscall at all, so an empty probe proves only that a directory
+    // entry could be created — it would sail through a filesystem that
+    // cannot accept a single byte. One block, forced to disk, is the
+    // smallest thing that actually exercises the write path.
+    f.write_all(&[0u8; 4096]).map_err(|e| CliError::Preflight {
+        reason: format!("{flag} {}: not writable: {e}", dir.display()),
+        source: None,
+    })?;
+    f.sync_all().map_err(|e| CliError::Preflight {
+        reason: format!("{flag} {}: write could not be flushed: {e}", dir.display()),
+        source: None,
+    })?;
+    drop(f);
+
+    std::fs::remove_file(&probe).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "{flag} {}: wrote a probe file but could not remove it ({}): {e}",
+            dir.display(),
+            probe.display(),
+        ),
+        source: None,
+    })?;
+    Ok(())
+}
+
+/// Refuse when the run cannot fit what it is about to write.
+///
+/// **One check, not two, because free space is a property of the filesystem
+/// and not of the directory.** The shipped profile puts the pk cache
+/// *inside* params (`BRIDGE_PK_CACHE_DIR=…/params/pk_cache`,
+/// `bridge_config.shellnet:68`), so two independent comparisons against the
+/// same `statvfs` both pass at 3.5 GB free while the run needs ~3.65 GB —
+/// and the shortfall lands during aggregation, after the burn. Two checks
+/// that each ask "is there room for my piece?" never notice they are sharing
+/// a pie.
+///
+/// So: group the requirements by device, sum them, compare once. When the
+/// two directories are on different filesystems the sums are independent and
+/// this degrades to the obvious thing.
+///
+/// Takes the already-probed `cache` rather than probing again: the caller
+/// needs the same answer to decide whether `params_dir` must be writable,
+/// and a probe is not cheap. Each one hashes the ~2.65 GB proving key and
+/// then deserialises it, so probing twice would mean four passes over it in
+/// preflight alone.
+pub fn check_disk_headroom(
+    params_dir: &Path,
+    pk_cache_dir: &Path,
+    cache: KeyCacheState,
+) -> CliResult<()> {
+    // What each path needs, in bytes, on this run.
+    let params_need = keygen_requirement(params_dir, cache)?;
+    let pk_need = pk_cache_requirement(pk_cache_dir);
+
+    // Group by device. `st_dev` is what makes two paths share a pool;
+    // comparing the paths themselves would miss a bind mount and a symlink
+    // both ways.
+    let same_device = match (device_of(params_dir), device_of(pk_cache_dir)) {
+        (Some(a), Some(b)) => a == b,
+        // Cannot tell. Assume shared: over-reserving refuses a run that
+        // would have fit, which costs a flag; under-reserving loses a burn.
+        _ => true,
+    };
+
+    if same_device {
+        require_space(params_dir, params_need + pk_need, &[
+            ("--params-dir", params_need),
+            ("--pk-cache-dir", pk_need),
+        ])
+    } else {
+        require_space(params_dir, params_need, &[("--params-dir", params_need)])?;
+        require_space(pk_cache_dir, pk_need, &[("--pk-cache-dir", pk_need)])
+    }
+}
+
+/// `st_dev` for `path`, or `None` if it cannot be read.
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+/// Bytes the Circuit-4 keygen will write into `params_dir` on this run:
+/// `EVENT_KEYGEN_BYTES` when the cache is cold, zero when it is warm, and a
+/// refusal when it is unusable.
+fn keygen_requirement(params_dir: &Path, cache: KeyCacheState) -> CliResult<u64> {
+    match cache {
+        // Keygen is skipped and the space is already spent. A warm host is
+        // not asked to keep 3 GB free forever.
+        KeyCacheState::Warm => Ok(0),
+        KeyCacheState::Corrupt {
+            why,
+        } => Err(CliError::Preflight {
+            reason: format!(
+                "--params-dir {}: the Circuit-4 key cache cannot be trusted: {why}.\n\x20 \
+                 Clearing it is safe — the next run regenerates (~7 min, ~3 GB). Use the tool \
+                 rather than four rm paths, so the manifest goes first and a half-finished clear \
+                 cannot read as a cache hit:\n\x20   cargo run --release --manifest-path \
+                 ../bridge-prover-libraries/Cargo.toml -p bridge-prover-lib --bin \
+                 probe_event_keys -- --params-dir '{}' --repair\n\x20 (run from \
+                 crates/ackinacki-bridge/; the quotes matter if your path contains spaces)",
+                params_dir.display(),
+                // Single-quoted above. A bare {} splits a path with a space
+                // into two arguments, and the operator's copy-paste fails
+                // with a confusing "unknown argument".
+                params_dir.display().to_string().replace('\'', r"'\''"),
+            ),
+            source: None,
+        }),
+        // Blocked: the same exit code as `Corrupt` and a deliberately
+        // different sentence. The `Corrupt` arm above promises "clearing it
+        // is safe" and hands over a `--repair` command; both are false here,
+        // and printing them would send an operator to a tool that refuses.
+        // Nothing to add to `why` — the probe already named the path and
+        // said what to do with it.
+        KeyCacheState::Blocked {
+            why,
+        } => Err(CliError::Preflight {
+            reason: format!("--params-dir {}: {why}", params_dir.display()),
+            source: None,
+        }),
+        // Cold: keygen will run, so the room has to be there.
+        KeyCacheState::Cold {
+            why,
+        } => {
+            tracing::info!(
+                params_dir = %params_dir.display(),
+                %why,
+                "Circuit-4 keys will be generated on this run",
+            );
+            Ok(EVENT_KEYGEN_BYTES)
+        },
+    }
+}
+
+/// Bytes the outer aggregator keygen may write into the pk cache.
+///
+/// Always `OUTER_PK_BYTES`, and the argument is deliberately unused: the
+/// slot's name is a content hash over the inner proof, which does not exist
+/// until stage 5, so there is nothing in the directory this function could
+/// match against to narrow the figure. The parameter stays in the signature
+/// because the day the slot name becomes predictable this is where the
+/// narrowing goes.
+fn pk_cache_requirement(_pk_cache_dir: &Path) -> u64 {
+    OUTER_PK_BYTES
+}
+
+/// Compare one filesystem's free space against the sum of what will be
+/// written to it, and name the parts in the refusal.
+///
+/// `probe` only picks the filesystem — every path in `parts` must be on it.
+fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<()> {
+    if needed == 0 {
+        return Ok(());
+    }
+    let Some(available) = available_bytes(probe) else {
+        // statvfs failed (unusual mount, container quirk). Do not invent a
+        // refusal out of a failed measurement.
+        tracing::warn!(
+            path = %probe.display(),
+            "could not determine free space; skipping the headroom check",
+        );
+        return Ok(());
+    };
+    if available >= needed {
+        return Ok(());
+    }
+
+    // Itemise. "needs 4.3 GB" invites the operator to free 4.3 GB and be
+    // surprised; "3.0 for keygen + 0.9 for the aggregator, same filesystem"
+    // tells them what is actually happening.
+    let breakdown = parts
+        .iter()
+        .filter(|(_, b)| *b > 0)
+        .map(|(name, b)| format!("{name} {:.1} GB", *b as f64 / 1e9))
+        .collect::<Vec<_>>()
+        .join(" + ");
+
+    Err(CliError::Preflight {
+        reason: format!(
+            "{}: {:.1} GB free, but this run needs {:.1} GB there ({breakdown}). These paths \
+             share one filesystem, so the requirements add up — checking them separately is how a \
+             host with room for either and not both reaches stage 5 and fails after the burn. \
+             Free space, or move --pk-cache-dir to another filesystem.",
+            probe.display(),
+            available as f64 / 1e9,
+            needed as f64 / 1e9,
+        ),
+        source: None,
+    })
+}
+
+/// Free space at `path`, or `None` if it cannot be measured.
+///
+/// Uses `libc::statvfs`. `libc` is already in this workspace's lock file, so
+/// depending on it directly costs nothing — and it beats hand-declaring the
+/// struct, whose layout is platform-specific.
+fn available_bytes(path: &Path) -> Option<u64> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c` is a valid NUL-terminated path; `stat` is written only on
+    // success, and we read it only then.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    // f_bavail: blocks available to a non-privileged process.
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
 // -- EVM-side preflight ------------------------------------------------------
@@ -1499,6 +2147,464 @@ mod tests {
         assert!(
             !msg.contains(&"a".repeat(64)) && !msg.contains(&"1".repeat(64)),
             "must not echo any half of the key file, got: {msg}",
+        );
+    }
+
+    // -- prover artifacts -------------------------------------------------
+
+    /// Build an artifact tree that satisfies everything except what the
+    /// caller removes afterwards. `params/` is left empty on purpose: no
+    /// test here goes through `check_prover_artifacts`, precisely because
+    /// that would short-circuit on the ceremony and no later assertion would
+    /// ever run. Each check is exercised directly.
+    fn make_artifact_tree(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("agg/target/release")).unwrap();
+        std::fs::write(root.join("agg/Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::create_dir_all(root.join("agg/src/bin")).unwrap();
+        std::fs::write(
+            root.join("agg/src/bin/aggregate_proof.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("ver")).unwrap();
+        // The real bytes. Anything else is not a verifier, and the check now
+        // says so — a fixture of plausibly-sized zeros would only prove that
+        // the check is too weak to notice.
+        std::fs::write(
+            root.join("ver/BridgeWithdrawalAggregatorVerifier.bin"),
+            EXPECTED_VERIFIER_BIN,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("params")).unwrap();
+        std::fs::create_dir_all(root.join("work")).unwrap();
+    }
+
+    /// Write a shell script at `path` and make it executable. Stands in for
+    /// the real `aggregate-proof`, whose `--help` prints the usage line
+    /// these fixtures imitate.
+    fn write_exec(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn ceremony_check_names_the_provisioning_commands_when_params_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+
+        let err = check_ceremony(&dir.path().join("params"))
+            .expect_err("an empty params dir must refuse before the burn");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kzg_bn254_21.srs"),
+            "must name the file, got: {msg}"
+        );
+        assert!(
+            msg.contains("bootstrap_hermez_srs"),
+            "must name the tool, got: {msg}"
+        );
+        assert!(
+            msg.contains("powersOfTau28_hez_final_21.ptau"),
+            "must name the ptau, got: {msg}"
+        );
+        // The shell script may be NAMED — the message disambiguates the two
+        // tools on purpose, because an operator who reaches for the wrong
+        // one gets K=20 in the wrong directory and no useful error. What it
+        // must never do is OFFER it as the remedy. So the assertion is about
+        // context, not about the substring: every line that mentions the
+        // script must be the line that says it is the wrong tool.
+        //
+        // A bare `!msg.contains(...)` would fail this message and would have
+        // to be satisfied by deleting the disambiguation, which is the one
+        // sentence that keeps an operator off the wrong path.
+        for line in msg
+            .lines()
+            .filter(|l| l.contains("bootstrap_hermez_srs.sh"))
+        {
+            assert!(
+                line.contains("different tool"),
+                "the K=20/bridge-snark-utils shell script may only be named to warn against it,                  never offered as the remedy; got the line: {line}"
+            );
+        }
+        assert!(
+            msg.contains("--bin bootstrap_hermez_srs"),
+            "the remedy must be the crate's own binary, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn verifier_check_refuses_a_dir_without_the_committed_bin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        std::fs::remove_file(
+            dir.path()
+                .join("ver/BridgeWithdrawalAggregatorVerifier.bin"),
+        )
+        .unwrap();
+
+        let err = check_verifier_bin(&dir.path().join("ver"), false)
+            .expect_err("aggregate-proof self-checks against this file; its absence is fatal");
+        assert!(
+            format!("{err}").contains("BridgeWithdrawalAggregatorVerifier.bin"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn verifier_check_refuses_a_truncated_bin() {
+        // The realistic corruption: an interrupted checkout or an LFS miss
+        // leaves a short file.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        std::fs::write(
+            dir.path()
+                .join("ver/BridgeWithdrawalAggregatorVerifier.bin"),
+            b"\x00",
+        )
+        .unwrap();
+
+        let err = check_verifier_bin(&dir.path().join("ver"), false)
+            .expect_err("a 1-byte verifier must be refused");
+        assert!(
+            format!("{err}").contains("sha256"),
+            "must name the mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn verifier_check_refuses_the_right_size_with_wrong_contents() {
+        // The case a size range waves through, and the reason this check
+        // compares bytes: a stale verifier from a previous rotation is
+        // exactly the right size and completely wrong.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let mut corrupted = EXPECTED_VERIFIER_BIN.to_vec();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xff;
+        std::fs::write(
+            dir.path()
+                .join("ver/BridgeWithdrawalAggregatorVerifier.bin"),
+            &corrupted,
+        )
+        .unwrap();
+
+        let err = check_verifier_bin(&dir.path().join("ver"), false)
+            .expect_err("one flipped byte must be refused before the burn");
+        let msg = format!("{err}");
+        assert!(msg.contains("sha256"), "got: {msg}");
+        assert!(
+            msg.contains("--allow-verifier-drift"),
+            "self-deploy users need the escape hatch named, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn verifier_check_accepts_the_expected_bin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        check_verifier_bin(&dir.path().join("ver"), false)
+            .expect("the embedded verifier must match");
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_refuses_a_missing_release_binary() {
+        // A present crate is not a verified aggregator. Preflight refuses
+        // and names the build command rather than trusting the runtime's
+        // cargo fallback, which it cannot check without paying for a cold
+        // build.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path()); // crate sources present, no binary
+
+        let err = check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect_err("preflight requires a prebuilt aggregate-proof");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cargo build --release"),
+            "must name the fix, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_refuses_a_present_but_unrunnable_binary() {
+        // The case existence-only checking waves through, and the one that
+        // hurts most: SubprocessAggregator picks this file over the working
+        // cargo fallback, so a stale or wrong-arch build is *preferred* and
+        // then dies after the burn.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let bin = dir.path().join("agg/target/release/aggregate-proof");
+        std::fs::write(&bin, b"not an executable").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect_err(
+                "a non-executable aggregate-proof must be refused, not accepted on is_file()",
+            );
+        let msg = format!("{err}");
+        assert!(msg.contains("aggregate-proof"), "got: {msg}");
+        assert!(
+            msg.contains("cargo build --release"),
+            "must tell the operator how to recover, and must not suggest the cargo-run fallback \
+             preflight itself forbids, got: {msg}",
+        );
+        assert!(
+            !msg.contains("cargo run"),
+            "must not point at a fallback this check refuses, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_refuses_a_binary_that_exits_zero_but_is_not_ours() {
+        // `exit 0` is not evidence. Some unrelated tool parked at the
+        // expected path — or a stub someone dropped there to get past a
+        // check — would pass a bare exit-status test and then fail on the
+        // real invocation, after the burn.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        write_exec(
+            &dir.path().join("agg/target/release/aggregate-proof"),
+            "#!/bin/sh\nexit 0\n",
+        );
+
+        let err = check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect_err("exit 0 alone must not count as a working aggregate-proof");
+        assert!(format!("{err}").contains("--inner-snark"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_kills_a_hanging_binary() {
+        // `timeout` bounds how long WE wait; without `kill_on_drop` the
+        // child outlives the cancelled future and keeps running. The
+        // assertion is that the probe returns AND the process is gone.
+        //
+        // Two things this test must NOT do, both of which look natural:
+        //
+        //  - trap SIGTERM in the script and check for a marker file. `kill_on_drop`
+        //    calls `Child::start_kill`, which on Unix is SIGKILL, so a TERM handler
+        //    never runs and that test would fail whether or not the fix is present.
+        //  - wait out the production timeout. Thirty seconds in a unit suite is a tax
+        //    on every future run, so the probe takes its timeout as a parameter and the
+        //    test passes a short one.
+        //
+        // So: have the child publish its pid and then `exec`, and check the
+        // pid is gone afterwards. `exec` matters — without it `sh` forks
+        // `sleep` and only the shell is killed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin_dir = dir.path().join("target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let pidfile = dir.path().join("child.pid");
+        // Write to a temp name and rename, so the file is never observed
+        // half-written: the handshake below reads it as soon as it appears.
+        write_exec(
+            &bin_dir.join("aggregate-proof"),
+            &format!(
+                "#!/bin/sh\necho $$ > {p}.tmp\nmv {p}.tmp {p}\nexec sleep 120\n",
+                p = pidfile.display()
+            ),
+        );
+
+        // The child is spawned BY the probe, so the readiness handshake can
+        // only happen after the probe's clock has started. The race is
+        // therefore structural and the only defence is to make the two
+        // bounds provably non-overlapping: the pid must be recorded strictly
+        // before the timeout can fire.
+        const HANDSHAKE: Duration = Duration::from_secs(5);
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+        // Stated as an assertion rather than a comment, so a later tidy-up
+        // that shortens PROBE_TIMEOUT fails loudly instead of going flaky.
+        assert!(
+            HANDSHAKE.saturating_mul(2) <= PROBE_TIMEOUT,
+            "the handshake must complete with room to spare before the probe times out"
+        );
+
+        let probe = tokio::spawn({
+            let dir = dir.path().to_path_buf();
+            async move { check_aggregator_runnable_with_timeout(&dir, PROBE_TIMEOUT).await }
+        });
+
+        let deadline = std::time::Instant::now() + HANDSHAKE;
+        while !pidfile.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            pidfile.exists(),
+            "the fake aggregator did not record its pid within {HANDSHAKE:?} — the runner could \
+             not start a shell in that time, which is a problem with the runner rather than with \
+             kill_on_drop"
+        );
+
+        let started = std::time::Instant::now();
+        let err = probe
+            .await
+            .expect("the probe task must not itself panic")
+            .expect_err("a binary that never answers --help must be refused");
+        assert!(
+            format!("{err}").contains("did not respond"),
+            "the refusal must name the timeout, got: {err}"
+        );
+        assert!(
+            started.elapsed() < PROBE_TIMEOUT + Duration::from_secs(5),
+            "the probe must return at its timeout, not wait out the child's 120 s"
+        );
+
+        // SIGKILL plus reaping is not instantaneous; poll briefly rather
+        // than sleeping a fixed amount and hoping.
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("the child must have started")
+            .trim()
+            .parse()
+            .unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            // signal 0 tests for existence without sending anything.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            gone,
+            "pid {pid} survived the timeout — kill_on_drop is missing, and a hung aggregator \
+             would outlive every withdrawal that probed it"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_accepts_a_relative_aggregator_dir() {
+        // The shipped profile's `BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator`
+        // is relative, so this is the default path, not an edge case.
+        // Without the canonicalize the child resolves the program against
+        // its own cwd — which `current_dir` has just set to the same
+        // relative directory — and execs
+        // `<dir>/<dir>/target/release/aggregate-proof`.
+        //
+        // Create the fixture INSIDE the process cwd so a relative path is a
+        // plain file name — no path-arithmetic crate, and no assumption
+        // about where the temp dir lives relative to the test binary.
+        let dir = tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+        let bin_dir = dir.path().join("target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        write_exec(
+            &bin_dir.join("aggregate-proof"),
+            "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> --name <verifier>'\n",
+        );
+
+        let relative = std::path::Path::new(dir.path().file_name().unwrap());
+        assert!(
+            relative.is_relative(),
+            "the fixture must actually be relative"
+        );
+
+        check_aggregator_runnable(relative)
+            .await
+            .expect("a relative --aggregator-dir must work; the shipped profile uses one");
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_accepts_a_binary_whose_help_names_our_flags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        write_exec(
+            &dir.path().join("agg/target/release/aggregate-proof"),
+            "#!/bin/sh\necho 'usage: aggregate-proof --inner-snark <path> --name <n>'\nexit 0\n",
+        );
+
+        check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect("a binary that answers --help with our flags must pass");
+    }
+
+    #[test]
+    fn output_dirs_check_refuses_an_unusable_path() {
+        // Deliberately NOT a chmod 0500 directory: CI runs these jobs as
+        // root in `rustlang/rust:nightly` (`.gitlab-ci.yml` sets no `user:`),
+        // and root ignores the write bit — the test would pass locally and
+        // fail in CI for a reason unrelated to the code. A path whose parent
+        // is a regular file fails with ENOTDIR for every uid.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let work = blocker.join("work");
+
+        let err = check_output_dirs(
+            &work,
+            &dir.path().join("snark"),
+            // Resolved by the caller, so a plain `&Path` here — not
+            // `Option`.
+            &dir.path().join("params/pk_cache"),
+            Some(&dir.path().join("params")),
+        )
+        .expect_err("an unusable work_dir path fails at stage 5, after the burn");
+        assert!(format!("{err}").contains("--work-dir"), "got: {err}");
+    }
+
+    #[test]
+    fn output_dirs_check_requires_a_writable_params_dir() {
+        // The first Circuit-4 keygen writes event_{vk,pk}.bin into
+        // params_dir itself, and every shipped profile sets
+        // BRIDGE_PK_CACHE_DIR, so the params_dir/pk_cache default never
+        // covers it.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let blocker = dir.path().join("params-is-a-file");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let err = check_output_dirs(
+            &dir.path().join("work"),
+            &dir.path().join("snark"),
+            &dir.path().join("pkcache"), // explicit, as the profiles set it
+            // `Some(..)` = this run will write keys here, i.e. a cold cache.
+            // `None` would mean warm, and a warm run is allowed a read-only
+            // params dir — so passing `None` here would test nothing.
+            Some(&blocker.join("params")),
+        )
+        .expect_err("an unusable params_dir must refuse — keygen writes into it");
+        assert!(format!("{err}").contains("--params-dir"), "got: {err}");
+    }
+
+    #[test]
+    fn a_warm_cache_does_not_need_a_writable_params_dir() {
+        // The read-only / shared `params/` the config file contemplates.
+        // With `None` for params_dir — what a warm probe produces — an
+        // unwritable params dir is simply not this run's problem.
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let blocker = dir.path().join("params-is-a-file");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        check_output_dirs(
+            &dir.path().join("work"),
+            &dir.path().join("snark"),
+            &dir.path().join("pkcache"),
+            None,
+        )
+        .expect("a warm run never writes to params_dir, so it must not be probed");
+    }
+
+    #[test]
+    fn output_dirs_check_creates_what_is_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        let snark = dir.path().join("snark/nested");
+
+        check_output_dirs(
+            &dir.path().join("work"),
+            &snark,
+            &dir.path().join("params/pk_cache"),
+            Some(&dir.path().join("params")),
+        )
+        .expect("missing output dirs are created, not refused");
+        assert!(snark.is_dir());
+        assert!(
+            dir.path().join("params/pk_cache").is_dir(),
+            "default pk_cache must be created"
         );
     }
 }

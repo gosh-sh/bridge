@@ -213,10 +213,19 @@ pub async fn run(
     .await?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
-    // The signer only matters for a run that will actually submit.
+    // Signer + prover artifacts — real runs only (a dry-run has no
+    // plumbing, never submits and never proves).
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)?;
         info!("burner key ok");
+        crate::preflight::check_prover_artifacts(
+            p,
+            &args.snark_dir,
+            args.pk_cache_dir.as_deref(),
+            args.allow_verifier_drift,
+        )
+        .await?;
+        info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
     // ---- 2. Confirm, then compose (both strictly before any state write) ----

@@ -33,5 +33,18 @@ tracing = { workspace = true }
 rand = { workspace = true }
 bridge-gql-fetcher = { workspace = true }
 
+# Atomic key writes. A partial event_pk.bin reads as a cache hit and then
+# fails at load time, on every run, forever — the predicate that would
+# trigger regeneration is the one being fooled.
+#
+# `3.10`, not `3`: `write_atomic` needs `Builder::permissions` to keep
+# today's file modes, and that arrived in 3.10.0, not 3.9 —
+# `tempfile-3.27.0/CHANGELOG.md:134` lists it under `## 3.10.0`, and 3.9.0
+# above it carries only the windows-sys and rustix bumps. A `"3.9"` floor
+# would admit 3.9.0, where the API does not exist, which is precisely the
+# `cargo update -p tempfile --precise` this line is here to stop. The lock
+# already resolves 3.27, so it changes nothing today.
+tempfile = "3.10"
+
 [dev-dependencies]
 tempfile = "3"

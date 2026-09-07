@@ -209,7 +209,7 @@ Outputs:
 | `params/kzg_bn254_17.srs` | ~16 MB  | Circuit 2 (layer, K=17) proving |
 | `params/kzg_bn254_19.srs` | ~64 MB  | Circuit 4 (event, K=19) proving |
 | `params/kzg_bn254_20.srs` | ~128 MB | Circuit 1A (primary, K=20) proving + all keygen |
-| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 3 (fallback, K=21) proving |
+| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 1B (fallback attestation, K=21) proving |
 
 ### K=21 ptau — one-time manual download
 
@@ -800,7 +800,7 @@ cargo test -p bridge-event-prover-lib --test event_prover       -- --nocapture  
 | Symptom | Cause / Fix |
 |---|---|
 | Daemon panics with `SRS … is not Hermez Perpetual Powers of Tau (s_g2 head … expected 928fafb3d0cc)` | `params/kzg_bn254_*.srs` was written by legacy `gen_srs` or the Acki Nacki chain ceremony (head starts with `c6028acf…`). Wipe stale artifacts and re-provision from Hermez: `./target/release/bootstrap_hermez_srs --wipe-cached-keys`. See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). |
-| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 3, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
+| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 1B, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
 | Verifier exits with `"primary VK not found"` / `"layer VK not found"` / `"fallback VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/1B/2 keys on initial start (~10 min). |
 | Verifier exits with `"event VK not found"` | Run `cargo run --release --bin bridge-event-halo2-prover -- --selftest` once. |
 | Prover auto-mode never starts proving — seed seqno keeps moving | Should not happen (bugfix landed 2026-05-23: seed is pinned once at startup). If observed, file an issue. As a workaround, pin via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |

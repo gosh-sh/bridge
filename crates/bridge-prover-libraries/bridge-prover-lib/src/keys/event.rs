@@ -25,6 +25,19 @@ use super::state::KeyManagerState;
 
 pub(super) const PREFIX: &str = "event";
 
+/// Bumped **by hand** whenever the Circuit-4 definition changes in a way
+/// that invalidates cached keys.
+///
+/// A hand-maintained number is a weak fingerprint — only as good as the
+/// discipline of whoever edits the circuit — but strictly better than the
+/// nothing that was there before, and cheap. A content hash over the
+/// circuit definition would be stronger; it needs a stable serialisation
+/// of the circuit that this tree does not have.
+///
+/// Distinct from `MANIFEST_FORMAT`: this describes the CIRCUIT the keys
+/// were built for, that one describes the FILE that says so.
+pub(super) const EVENT_CIRCUIT_REVISION: u32 = 1;
+
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.
 pub(super) const EVENT_KEYGEN_SEED: u64 = 0xE5E5_E5E5_E5E5_E5E5;
@@ -52,7 +65,13 @@ impl EventKeyManager {
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         let srs_k = Self::KEYGEN_SRS_K.max(k);
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k),
+            state: KeyManagerState::new(
+                params_dir,
+                PREFIX,
+                k,
+                srs_k,
+                Some(EVENT_CIRCUIT_REVISION),
+            ),
         }
     }
 
@@ -90,6 +109,27 @@ impl EventKeyManager {
     }
     pub fn vk_opt(&self) -> Option<&VerifyingKey<G1Affine>> {
         self.state.vk_opt()
+    }
+
+    /// Forwarder so tests in `keys::state` can ask the predicate directly.
+    /// `state` is private to this module, so reaching through it from a
+    /// sibling is E0616.
+    ///
+    /// `#[cfg(test)]`: production reaches `keys_cached` through
+    /// `ensure_keys` on `self.state` directly, so outside the test build
+    /// this forwarder has no callers and is dead code.
+    #[cfg(test)]
+    pub(super) fn keys_cached(&self) -> bool {
+        self.state.keys_cached()
+    }
+
+    /// Forwarder for the same reason: the retraction regression must drive
+    /// production code rather than remove the manifest itself. `run_keygen`
+    /// calls `self.state.retract_manifest()` directly, so this exists only
+    /// for that test.
+    #[cfg(test)]
+    pub(super) fn retract_manifest(&self) -> anyhow::Result<()> {
+        self.state.retract_manifest()
     }
     pub fn vk(&self) -> &VerifyingKey<G1Affine> {
         self.state.vk()

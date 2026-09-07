@@ -67,6 +67,19 @@ fn main() -> anyhow::Result<()> {
             // does full keygen (~3-5 min at K=21); subsequent runs load PK
             // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
             "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
+            // Side-effect-free probe. `ackinacki-bridge` preflight runs
+            // this before an irreversible burn to prove the binary is
+            // present, executable on this architecture, and is actually
+            // this tool rather than something else parked at the path —
+            // so the usage text must keep naming the real flags.
+            "--help" | "-h" => {
+                println!(
+                    "aggregate-proof --inner-snark <path> --name <verifier> --out <path>\n\
+                     \x20 [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n\
+                     \x20 [--allow-bin-drift] [--pk-cache-dir <dir>]"
+                );
+                return Ok(());
+            }
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }

@@ -689,6 +689,41 @@ lint:rust:relayer:clippy:
     - cargo clippy --locked -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
   allow_failure: false
 
+# The relayer has had these since it landed; this crate did not, and its
+# drift and warnings were invisible on every MR as a result. Added LAST in
+# the series that fixed them, because a gate nobody can pass is a gate
+# people learn to ignore.
+lint:rust:ackinacki-bridge:fmt:
+  extends: .rust_base
+  stage: test
+  script:
+    # `-p`, not `--all`: the crate is reached through a symlink into the
+    # halo2 sub-workspace, so there is no directory to cd into that owns
+    # only it.
+    - cd crates/bridge-prover-libraries
+    - cargo fmt -p ackinacki-bridge -- --check
+  allow_failure: false
+
+lint:rust:ackinacki-bridge:clippy:
+  extends: .rust_base
+  stage: test
+  cache:
+    key: rust-relayer-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/
+      - crates/bridge-prover-libraries/target/
+    policy: pull
+  needs:
+    - build:rust:ackinacki-bridge
+  script:
+    - cd crates/bridge-prover-libraries
+    # `--all-targets` so `tests/cli.rs` is linted too — it drives the real
+    # binary and is the only end-to-end coverage this crate has.
+    # `--no-deps` because the sub-workspace's other crates carry their own
+    # warnings and this job is about this crate.
+    - cargo clippy --locked -p ackinacki-bridge --all-targets --no-deps -- -D warnings
+  allow_failure: false
+
 lint:solidity:fmt:
   extends: .foundry_base
   stage: test

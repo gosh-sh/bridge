@@ -594,6 +594,14 @@ assigns it when the release is tagged.
   for another architecture, which otherwise surfaces as an opaque failure
   part-way through the deploy. Honours `CLI_NAME` to point at a specific
   binary; also runnable in CI.
+- **`lint:rust:ackinacki-bridge:{fmt,clippy}`.** The relayer has had both
+  since it landed; this crate had neither, so 118 formatting diffs and
+  four clippy warnings were invisible on every MR. Both are
+  `allow_failure: false`, and both are green — added last in the series
+  that fixed what they check, because a gate nobody can pass is a gate
+  people learn to ignore. The clippy job uses `--all-targets` so the new
+  `tests/cli.rs` is linted too.
+
 - **The key-cache CI job runs the keygen-lock and sweep tests, and
   asserts how many tests its filters select.** Those seven live in
   `keys::state::tests::` and `keys::common::tests::`, which none of the

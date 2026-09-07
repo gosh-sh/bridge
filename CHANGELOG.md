@@ -892,6 +892,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`scripts/check_fixture_prereqs.sh` now picks the `tvm-cli` the fixture
+  will pick.** It used `command -v tvm-cli`, which answers with the first
+  match on `PATH` and nothing else, and failed if that one could not run
+  `version`. The fixture's resolver deliberately tries every match,
+  because `deploy_msig_and_mint.py` prepends `python/bin` and the binary
+  committed there may be built for another OS/arch — an early entry that
+  cannot run, with a working system install behind it. The check
+  therefore refused the exact arrangement the fixture supports. It now
+  walks `PATH` the same way, probes each candidate with `version`
+  (bounded, and without handing it stdin), names the one it selected, and
+  reports every candidate it skipped. `CLI_NAME` still wins outright, and
+  is probed rather than assumed, because the fixture will use it whether
+  or not it runs.
+
 - **Key-cache probe: a cache entry that is not a regular file is refused
   instead of hanging preflight.** The probe guarded the four key paths
   against being a *directory*, on the grounds that keygen replaces them

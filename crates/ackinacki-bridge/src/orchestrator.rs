@@ -469,7 +469,7 @@ pub async fn run(
     let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
         CliError::ProofFailed {
             reason: format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(e),
         }
     })?;
     // Multi-user-safe capture: chain-walk from the multisig tx hash we
@@ -626,14 +626,14 @@ pub async fn run(
         .proof_bytes()
         .map_err(|e| CliError::EthSubmitFailed {
             reason: format!("PartnerWithdrawalProof::proof_bytes: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     let pub_inputs = e2e
         .proof
         .public_inputs()
         .map_err(|e| CliError::EthSubmitFailed {
             reason: format!("PartnerWithdrawalProof::public_inputs: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
 
     // Always dry-run first — catches on-chain-side issues (paused bridge,
@@ -652,7 +652,7 @@ pub async fn run(
             .await
             .map_err(|e| CliError::EthSubmitFailed {
                 reason: format!("dry_run_withdraw: {e}"),
-                source: Some(anyhow::anyhow!("{e}")),
+                source: Some(anyhow::Error::new(e)),
             })? {
             DryRunOutcome::WouldSucceed => info!("eth dry-run: withdrawByProof would succeed"),
             DryRunOutcome::WouldRevert {
@@ -701,7 +701,7 @@ pub async fn run(
         .await
         .map_err(|e| CliError::EthSubmitFailed {
             reason: format!("submit_withdraw: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })? {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
@@ -795,7 +795,7 @@ fn build_tvm_client(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
     };
     let ctx = ClientContext::new(config).map_err(|e| CliError::BurnOutcomeUnknown {
         reason: format!("failed to build tvm_client context for {gql_endpoint}: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
+        source: Some(anyhow::Error::new(e)),
     })?;
     Ok(Arc::new(ctx))
 }

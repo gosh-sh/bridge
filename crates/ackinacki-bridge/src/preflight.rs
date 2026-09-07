@@ -308,7 +308,7 @@ fn build_client_context(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
     };
     let ctx = ClientContext::new(config).map_err(|e| CliError::Preflight {
         reason: format!("failed to build tvm_client context for {gql_endpoint}: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
+        source: Some(anyhow::Error::new(e)),
     })?;
     Ok(Arc::new(ctx))
 }
@@ -350,7 +350,7 @@ async fn fetch_account(
     let boc = fetch_account_boc(ctx, dapp_id_hex, account_id_hex).await?;
     Account::construct_from_base64(&boc).map_err(|e| CliError::Preflight {
         reason: format!("parse account BOC for {dapp_id_hex}::{account_id_hex}: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
+        source: Some(e),
     })
 }
 
@@ -537,7 +537,7 @@ fn extract_ecc_balance(account: &Account, ecc_id: u32) -> CliResult<u128> {
     // point lookup is clearer for a single ECC id.
     let val = bal.other.get(&ecc_id).map_err(|e| CliError::Preflight {
         reason: format!("read ECC[{ecc_id}] from account: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
+        source: Some(e),
     })?;
     let Some(v) = val else {
         return Ok(0);
@@ -1578,7 +1578,7 @@ pub async fn check_destination_chain(rpc_url: &str, expected_chain_id: u64) -> C
         .await
         .map_err(|e| CliError::Preflight {
             reason: format!("--rpc-url {rpc_url}: eth_chainId failed: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     if chain_id != expected_chain_id {
         return Err(CliError::Preflight {
@@ -1647,7 +1647,7 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
         .await
         .map_err(|e| CliError::Preflight {
             reason: format!("{label} {at}: eth_getCode failed: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     if code.is_empty() {
         return Err(CliError::Preflight {
@@ -1720,7 +1720,7 @@ pub async fn check_bridge_deploy(
                 "--bridge-address {bridge}: bridgeWithdrawalVerifier() failed: {e} — is this an \
                  AckiNackiBridge deploy?"
             ),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     if adapter == Address::ZERO {
         return Err(CliError::Preflight {
@@ -1741,7 +1741,7 @@ pub async fn check_bridge_deploy(
                 "withdrawal verifier adapter {adapter}: could not walk shplonkVerifier() → \
                  yulVerifier(): {e}. The adapter is not the shape this bridge needs."
             ),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     require_code(&provider, wrapper, "withdrawal SHPLONK wrapper").await?;
     require_code(&provider, yul, "withdrawal Yul verifier").await?;
@@ -1772,7 +1772,7 @@ pub async fn check_bridge_deploy(
                 .await
                 .map_err(|e| CliError::Preflight {
                     reason: format!("eth_getCode({yul}) failed: {e}"),
-                    source: Some(anyhow::anyhow!("{e}")),
+                    source: Some(anyhow::Error::new(e)),
                 })?;
             if on_chain.as_ref() != expected {
                 return Err(CliError::Preflight {
@@ -1805,7 +1805,7 @@ pub async fn check_bridge_deploy(
                 reason: format!(
                     "--bridge-address {bridge}: reading the pinned identity failed: {e}"
                 ),
-                source: Some(anyhow::anyhow!("{e}")),
+                source: Some(anyhow::Error::new(e)),
             })?;
     if on_chain_identity != expected_identity {
         return Err(CliError::Preflight {
@@ -1828,7 +1828,7 @@ pub async fn check_bridge_deploy(
         .await
         .map_err(|e| CliError::Preflight {
             reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
-            source: Some(anyhow::anyhow!("{e}")),
+            source: Some(anyhow::Error::new(e)),
         })?;
     let needed = U256::from(amount.0);
     if treasury < needed {

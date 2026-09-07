@@ -905,6 +905,25 @@ assigns it when the release is tagged.
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
 
+- **`--json` errors now carry the cause chain.** The envelope rendered
+  only the outermost `Display`, so everything a stage had wrapped — the
+  aggregator's stderr, a `RelayerError`, the keygen-lock timeout naming
+  the process to wait for — was printed in human mode and dropped
+  entirely under `--json`. A script reading the machine output got
+  `"withdraw-e2e pipeline failed"` and nothing about why.
+
+  A `causes` array is added alongside `message`, outermost first, `[]`
+  when the error has no source. **`message` is unchanged**: consumers
+  already match on it, and folding the chain in would silently change
+  what those patterns see. Both output modes now walk the chain through
+  one function, so they cannot disagree about the cause of a failure.
+
+  Sixteen error mappings also flattened their cause at construction
+  (`anyhow!("{e}")` keeps a rendered string and no source); they now
+  preserve it, so there is a chain for the envelope to carry. Three of
+  those were already `anyhow::Error` values with `.context()` hops, where
+  the flattening had been discarding the most.
+
 - **`--dry-run` no longer needs `HOME`.** The refusal added for an unset
   `HOME` was raised before the check that skips idempotency state
   entirely, so under systemd, cron and most Docker images a dry run

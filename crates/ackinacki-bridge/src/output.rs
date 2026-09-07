@@ -69,15 +69,55 @@ pub fn wants_json(argv: impl Iterator<Item = String>) -> bool {
     argv.skip(1).any(|a| a == "--json")
 }
 
+/// Walk a `#[source]` chain into a flat list, outermost cause first.
+///
+/// Shared by both output modes so they cannot disagree about what the
+/// cause of a failure was — the human branch used to walk this and the
+/// JSON branch did not, which is the whole bug below.
+///
+/// Bounded. An error graph is a chain by construction, but a
+/// pathological `source()` that returns itself would spin here forever
+/// while holding stdout, on a path that only runs when something has
+/// already gone wrong. Twelve is far past anything this crate builds:
+/// the deepest real chain is a `CliError` over an anyhow with a couple of
+/// `.context()` hops over an io::Error.
+fn cause_chain(err: &CliError) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(c) = cause {
+        out.push(c.to_string());
+        if out.len() == 12 {
+            out.push("(cause chain truncated)".to_string());
+            break;
+        }
+        cause = c.source();
+    }
+    out
+}
+
 /// The one-line `{"error":{…}}` envelope. Single source of truth for the
 /// machine refusal shape, lifted out of [`print_error`] so it can be
 /// asserted on directly.
+///
+/// **`causes` carries the `#[source]` chain, which this used to drop.**
+/// `format!("{err}")` renders only the outermost `Display`, so everything
+/// a stage wrapped — the aggregator's stderr, a `RelayerError`, the
+/// keygen-lock timeout that names the process to wait for — was visible
+/// in human mode and invisible under `--json`. A `--json` consumer got
+/// "withdraw-e2e pipeline failed" and nothing about why, on the one
+/// output mode a script is reading.
+///
+/// Additive, not a change to `message`: consumers already read that
+/// field, and rewriting it to include the chain would silently change
+/// what their pattern matches. `causes` is `[]` for the many errors that
+/// carry no source.
 pub fn error_json(err: &CliError) -> String {
     let value = json!({
         "error": {
             "stage": err.stage(),
             "exit_code": err.exit_code().as_i32(),
             "message": format!("{err}"),
+            "causes": cause_chain(err),
         }
     });
     // Fall back to a raw string if serde ever fails (it won't for the shape
@@ -101,17 +141,13 @@ pub fn print_error(err: &CliError, json_mode: bool) {
         return;
     }
     eprintln!("error: {err}");
-    // Walk the `#[source]` chain so the underlying anyhow context (e.g.
-    // aggregator stderr, RelayerError::other messages) is visible without
-    // needing a debug build. `CliError` variants carry
-    // `#[source] Option<anyhow::Error>`, and the anyhow chain itself may
-    // nest further. Each hop indented for readability.
-    let mut cause: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    let mut depth = 0usize;
-    while let Some(c) = cause {
+    // The same walk the JSON envelope does, through the same function, so
+    // the two modes cannot report different causes for one failure. The
+    // underlying anyhow context (aggregator stderr, `RelayerError::other`
+    // messages, the keygen-lock timeout) is what makes a stage-5 failure
+    // diagnosable without a debug build.
+    for (depth, c) in cause_chain(err).iter().enumerate() {
         eprintln!("  caused by [{depth}]: {c}");
-        cause = c.source();
-        depth += 1;
     }
 }
 
@@ -173,5 +209,96 @@ mod tests {
             "must carry clap's text so a human can still read it: {json}",
         );
         assert!(!json.contains('\n'), "must be a single line: {json}");
+        assert_eq!(
+            v["error"]["causes"].as_array().map(Vec::len),
+            Some(0),
+            "an error with no source gets an empty list, not a missing field: {json}",
+        );
+    }
+
+    #[test]
+    fn the_json_envelope_carries_the_whole_cause_chain() {
+        // `format!("{err}")` renders only the outermost Display, so
+        // everything a stage wrapped was visible in human mode and
+        // invisible under `--json` — on the one output mode a script
+        // reads. A stage-5 failure said "withdraw-e2e pipeline failed"
+        // and nothing about why: not the aggregator's stderr, not the
+        // keygen-lock timeout naming the process to wait for.
+        let inner = anyhow::anyhow!("flock held by pid 4242")
+            .context("waited 30 minutes for the event keygen lock")
+            .context("event keygen failed");
+        let err = CliError::ProofFailed {
+            reason: "withdraw-e2e pipeline failed: event keygen failed".into(),
+            source: Some(inner),
+        };
+
+        let v: serde_json::Value = serde_json::from_str(&error_json(&err)).unwrap();
+        let causes: Vec<&str> = v["error"]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            causes,
+            vec![
+                "event keygen failed",
+                "waited 30 minutes for the event keygen lock",
+                "flock held by pid 4242",
+            ],
+            "outermost first, every hop present",
+        );
+        assert!(
+            !error_json(&err).contains('\n'),
+            "still one line, however deep the chain",
+        );
+    }
+
+    #[test]
+    fn both_output_modes_report_the_same_causes() {
+        // One walk, one function. The human branch had it and the JSON
+        // branch did not, which is exactly how they came to disagree.
+        let err = CliError::EthSubmitFailed {
+            reason: "submit failed".into(),
+            source: Some(anyhow::anyhow!("connection refused").context("eth_sendRawTransaction")),
+        };
+        let v: serde_json::Value = serde_json::from_str(&error_json(&err)).unwrap();
+        let from_json: Vec<String> = v["error"]["causes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(from_json, cause_chain(&err));
+        assert_eq!(from_json.len(), 2);
+    }
+
+    #[test]
+    fn a_self_referential_cause_chain_terminates() {
+        // Nothing in this crate builds one, and a real error graph is a
+        // chain — but this walk runs while holding stdout on a path that
+        // only executes when something has already failed, so it is
+        // bounded rather than trusted.
+        #[derive(Debug)]
+        struct Loop;
+        impl std::fmt::Display for Loop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "loops back to itself")
+            }
+        }
+        impl std::error::Error for Loop {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                // A fresh leak each hop, so the walk sees an endless
+                // chain rather than a borrow of self.
+                Some(Box::leak(Box::new(Loop)))
+            }
+        }
+        let err = CliError::ProofFailed {
+            reason: "x".into(),
+            source: Some(anyhow::Error::new(Loop)),
+        };
+        let chain = cause_chain(&err);
+        assert!(chain.len() <= 13, "bounded, got {}", chain.len());
+        assert_eq!(chain.last().unwrap(), "(cause chain truncated)");
     }
 }

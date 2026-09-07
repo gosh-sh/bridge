@@ -71,6 +71,16 @@ fn error_envelope(out: &Output) -> serde_json::Value {
         Some(code(out) as i64),
         "the envelope's exit_code must equal the process exit code: {line}"
     );
+    // Always present, `[]` when there is no source. The field carries the
+    // `#[source]` chain that `--json` used to drop entirely — a stage-5
+    // failure said "withdraw-e2e pipeline failed" and nothing about why,
+    // on the one output mode a script reads. Asserting it here means
+    // every integration case pins its presence, not just the one test
+    // that cares about a deep chain.
+    assert!(
+        v["error"]["causes"].is_array(),
+        "the envelope must always carry a causes list: {line}"
+    );
     v
 }
 

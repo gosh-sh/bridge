@@ -115,8 +115,8 @@ sequenceDiagram
   R->>P: FINALITY_UPDATE_PATH, COMMITTEE_JSON_PATH,<br/>BEACON_FORK_VERSION, BEACON_GENESIS_VALIDATORS_ROOT
   P-->>R: step_proof.bin + step_public_inputs.bin (about 7 min, about 25 GB RSS)
   R->>LC: submitUpdate(proof, publicInputs), signed external message
-  LC->>LC: parse PI; participation >= 342 of 512; committee == _currentCommittee; slot advances
-  LC->>LC: tvm.accept(); zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
+  LC->>LC: parse PI, participation >= 342 of 512, committee == _currentCommittee, slot advances
+  LC->>LC: tvm.accept(), then zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
   LC-->>UB: acceptBlockHashFromLightClient(chainId, execHash), only when usdcBridge is set
   LC-->>R: HeadUpdated event
   opt ETH_RPC_URL set

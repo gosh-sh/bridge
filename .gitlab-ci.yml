@@ -433,6 +433,15 @@ test:rust:ackinacki-bridge:keycache:
     # alternate-keyset tests skip and say so.
     - |
       KEYS=$CI_PROJECT_DIR/.cache/bridge-keys
+      # `git -C "$CI_PROJECT_DIR"`, because this step runs after a
+      # `cd crates/bridge-prover-libraries`. `git ls-tree <ref> <path>`
+      # resolves the path relative to the CWD, so from inside that directory
+      # it asks for `crates/bridge-prover-libraries/crates/bridge-prover-libraries`
+      # and always answers empty — the guard could never fire, the alt keys
+      # were never built, and the later `alt_complete` check then failed the
+      # whole job while blaming the operator's ref. Verified: 1 entry from
+      # the repo root, 0 from inside.
+      #
       # A PINNED commit, not "the previous tag". An arbitrary release tag
       # is not a source of Circuit-4 keys — `git ls-tree v0.1.0
       # crates/bridge-prover-libraries` is empty, the crate did not exist
@@ -466,7 +475,7 @@ test:rust:ackinacki-bridge:keycache:
         git fetch --depth=1 origin "$ALTREF" 2>/dev/null \
           || git fetch origin "$ALTREF" 2>/dev/null || true
         if git cat-file -e "$ALTREF^{commit}" 2>/dev/null \
-           && [ -n "$(git ls-tree "$ALTREF" crates/bridge-prover-libraries)" ]; then
+           && [ -n "$(git -C "$CI_PROJECT_DIR" ls-tree "$ALTREF" crates/bridge-prover-libraries)" ]; then
           rm -rf "$ALTDIR"          # a partial directory is not a base
           mkdir -p "$ALTDIR"
           ALT=$(mktemp -d)

@@ -21,7 +21,7 @@
 //! against the same key on different hosts could still race — but for
 //! the "single user re-running my broken script" case it does the job.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +66,30 @@ pub struct Record {
     pub block_seq_no: Option<u64>,
     pub proof_json_path: Option<PathBuf>,
     pub eth_tx_hash: Option<String>,
+}
+
+/// Which side of the atomic `create_new` this run came out on.
+///
+/// `reserve` used to return a bare `Record` for both, and the caller could
+/// not tell them apart. That is the concurrent double-burn: two runs with
+/// `--allow-retry`, no prior record, both `peek` → `None`. A wins the
+/// `create_new` and enters the multi-second `burn::send`; B gets EEXIST,
+/// reads A's record — `Reserved`, `an_tx_hash` still `None` because A has
+/// not returned yet — and, seeing no hash, decides to send. A second
+/// `initiateWithdrawal` against a multisig with no replay guard.
+///
+/// No amount of inspecting the record's *fields* distinguishes those two
+/// states, because the field that would (`an_tx_hash`) is populated only
+/// after the send returns. The provenance has to be carried out of the
+/// syscall that knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reservation {
+    /// This run won `create_new`: the identity is ours and nothing else
+    /// holds it.
+    Created,
+    /// The record already existed. Another run owns this identity — either
+    /// still in flight, or finished and being resumed.
+    Found,
 }
 
 /// Compute the deduplication key. Deliberately does NOT include the
@@ -116,143 +140,207 @@ pub fn reserve(
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-) -> CliResult<Record> {
+) -> CliResult<(Record, Reservation)> {
     ensure_state_dir(state_dir)?;
 
     let key = key(from, to, amount);
     let path = record_path(state_dir, &key);
 
-    // First-writer-wins probe: create_new is atomic on POSIX + Windows
-    // (fails EEXIST rather than truncating). If it succeeds we own a fresh
-    // reservation; if it fails EEXIST we need to inspect the prior record.
-    use std::os::unix::fs::OpenOptionsExt;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600) // in-flight money. NOT 0400 like --from-keys: the CLI
-        // rewrites this file on every stage transition.
-        .open(&path)
-    {
-        Ok(mut f) => {
-            let record = fresh_reserved_record(&key, from, to, amount);
-            // Any failure from here on must leave NO file behind: we own a
-            // path that exists but holds nothing a later run can read, and
-            // nothing has been sent. `commit` runs the fallible part so a
-            // single cleanup covers all of it.
-            let commit = |f: &mut std::fs::File| -> std::io::Result<()> {
-                let body = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
-                f.write_all(&body)?;
-                // The burn goes out microseconds from now. Without this the
-                // record is page cache, and a power loss between here and
-                // the send lets the next run reserve cleanly and burn
-                // again — the one failure this file exists to prevent.
-                f.sync_all()?;
-                // The file's bytes being durable does not make its *name*
-                // durable. `create_new` added a directory entry, and that
-                // entry needs its own fsync or a crash can leave the data
-                // with nothing pointing at it.
-                std::fs::File::open(state_dir)?.sync_all()?;
-                Ok(())
-            };
-            if let Err(e) = commit(&mut f) {
-                // Report what actually happened. The unlink can itself
-                // fail — a read-only remount, a vanished directory — and
-                // telling the operator "the partial record was removed"
-                // when it is still sitting there sends them to the wrong
-                // place: the next run will trip over a file they were told
-                // was gone.
-                let cleanup = match fs::remove_file(&path) {
-                    Ok(()) => "the partial record was removed".to_string(),
-                    Err(rm) => format!(
-                        "WARNING: could not remove the partial record ({rm}) — delete {} by hand \
-                         before re-running",
-                        path.display()
-                    ),
-                };
-                return Err(CliError::Preflight {
-                    reason: format!(
-                        "idempotency: reserve {}: {e} (nothing was sent; {cleanup})",
-                        path.display()
-                    ),
-                    source: None,
-                });
+    // First-writer-wins, publishing the name and the contents together.
+    //
+    // `create_new` alone gives exclusion but NOT atomicity of content: it
+    // makes the file exist, empty, and only then does the write land. A
+    // racing run that hits EEXIST inside that window reads zero bytes and
+    // is told "prior record is corrupt … delete it manually if you know
+    // it's stale" — advice which, followed, deletes the only guard against
+    // a second burn while the first run is still inside `burn::send`.
+    // (Found by `only_one_of_many_racing_reservations_creates`; every
+    // earlier test called `reserve` sequentially, where the window cannot
+    // be observed.)
+    //
+    // `hard_link` is the POSIX primitive that does both: it fails EEXIST
+    // when the destination exists, and when it succeeds the destination
+    // already carries the content. So build a complete, synced temp file
+    // first, then link it into place. `NamedTempFile` creates 0600 — in-
+    // flight money, and NOT 0400 like `--from-keys`, because the CLI
+    // rewrites this file on every stage transition — and deletes itself on
+    // every error path, so a failure here can no longer leave a partial
+    // record behind at all.
+    let record = fresh_reserved_record(&key, from, to, amount);
+    let publish = || -> std::io::Result<bool> {
+        let mut tmp = tempfile::NamedTempFile::new_in(state_dir)?;
+        let body = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
+        tmp.write_all(&body)?;
+        // The burn goes out microseconds from now. Without this the record
+        // is page cache, and a power loss between here and the send lets
+        // the next run reserve cleanly and burn again — the one failure
+        // this file exists to prevent.
+        tmp.as_file().sync_all()?;
+        match std::fs::hard_link(tmp.path(), &path) {
+            Ok(()) => {},
+            // Someone else won the identity. Their record is complete by
+            // construction, so the read below sees whole JSON.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        // The file's bytes being durable does not make its *name* durable.
+        // The link added a directory entry, and that entry needs its own
+        // fsync or a crash can leave the data with nothing pointing at it.
+        std::fs::File::open(state_dir)?.sync_all()?;
+        Ok(true)
+    };
+    let won = publish().map_err(|e| CliError::Preflight {
+        reason: format!(
+            "idempotency: reserve {}: {e} (nothing was sent; no partial record was left behind)",
+            path.display()
+        ),
+        source: None,
+    })?;
+
+    if won {
+        return Ok((record, Reservation::Created));
+    }
+
+    // EEXIST: inspect whoever got there first. Their record is complete by
+    // construction — `hard_link` only publishes a fully written file — so
+    // this read cannot see a torn one.
+    let prior = read_record(&path)?;
+    match prior.status {
+        // Terminal states — refuse regardless of --allow-retry.
+        // Confirmed already paid out; Submitted has an unresolved
+        // in-flight tx and re-broadcasting is a double-spend risk.
+        Status::Confirmed | Status::Submitted => {
+            Err(CliError::DuplicateInFlight {
+                prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                prior_tx: prior.an_tx_hash,
+                prior_msg_id: prior.withdrawal_msg_id,
+            })
+        }
+        // Failed → the only production writer sets this after
+        // `withdrawByProof` reverts on an already-broadcast burn,
+        // so a stored `an_tx_hash` means "AN burn is already
+        // done". Return the prior record verbatim in that case
+        // so the orchestrator's resume branch (`prior_an_tx =
+        // record.an_tx_hash.clone()`) skips `burn::fire()`
+        // instead of firing a second `initiateWithdrawal`.
+        // Only wipe when there is no recorded AN tx (defensive:
+        // manual-edited state file, hypothetical future writer
+        // that marks Failed pre-burn).
+        Status::Failed => {
+            if prior.an_tx_hash.is_some() {
+                Ok((prior, Reservation::Found))
+            } else {
+                // Wiped back to a fresh reservation. The identity is
+                // effectively ours from here, and there is no burn to
+                // collide with — `Failed` without a hash is only ever
+                // written by a pre-burn path.
+                let record = fresh_reserved_record(&key, from, to, amount);
+                write_record_atomic(state_dir, &path, &record)?;
+                Ok((record, Reservation::Created))
             }
-            Ok(record)
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let prior = read_record(&path)?;
-            match prior.status {
-                // Terminal states — refuse regardless of --allow-retry.
-                // Confirmed already paid out; Submitted has an unresolved
-                // in-flight tx and re-broadcasting is a double-spend risk.
-                Status::Confirmed | Status::Submitted => {
-                    Err(CliError::DuplicateInFlight {
-                        prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-                        prior_tx: prior.an_tx_hash,
-                        prior_msg_id: prior.withdrawal_msg_id,
-                    })
-                }
-                // Failed → the only production writer sets this after
-                // `withdrawByProof` reverts on an already-broadcast burn,
-                // so a stored `an_tx_hash` means "AN burn is already
-                // done". Return the prior record verbatim in that case
-                // so the orchestrator's resume branch (`prior_an_tx =
-                // record.an_tx_hash.clone()`) skips `burn::fire()`
-                // instead of firing a second `initiateWithdrawal`.
-                // Only wipe when there is no recorded AN tx (defensive:
-                // manual-edited state file, hypothetical future writer
-                // that marks Failed pre-burn).
-                Status::Failed => {
-                    if prior.an_tx_hash.is_some() {
-                        Ok(prior)
-                    } else {
-                        let record = fresh_reserved_record(&key, from, to, amount);
-                        write_record_atomic(state_dir, &path, &record)?;
-                        Ok(record)
-                    }
-                }
-                // Active resumable states.
-                Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
-                    if allow_retry {
-                        // Resume: return the prior record verbatim so the
-                        // orchestrator can skip stages by inspecting fields
-                        // like `an_tx_hash` / `withdrawal_msg_id`. Do NOT
-                        // overwrite with a fresh Reserved — that would drop
-                        // the stored AN tx hash and cause an unconditional
-                        // re-burn (double-spend on the AN side).
-                        Ok(prior)
-                    } else {
-                        Err(CliError::DuplicateInFlight {
-                            prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-                            prior_tx: prior.an_tx_hash,
-                            prior_msg_id: prior.withdrawal_msg_id,
-                        })
-                    }
-                },
+        }
+        // Active resumable states.
+        Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
+            if allow_retry {
+                // Resume: return the prior record verbatim so the
+                // orchestrator can skip stages by inspecting fields
+                // like `an_tx_hash` / `withdrawal_msg_id`. Do NOT
+                // overwrite with a fresh Reserved — that would drop
+                // the stored AN tx hash and cause an unconditional
+                // re-burn (double-spend on the AN side).
+                Ok((prior, Reservation::Found))
+            } else {
+                Err(CliError::DuplicateInFlight {
+                    prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+                    prior_tx: prior.an_tx_hash,
+                    prior_msg_id: prior.withdrawal_msg_id,
+                })
             }
         },
-        // Anything other than EEXIST — ENOSPC on a full state directory is
-        // the realistic one. Nothing was sent here either, and that is the
-        // one fact an operator needs before deciding whether to re-run, so
-        // say it on every pre-send refusal rather than only the rewritten
-        // ones.
-        Err(e) => Err(CliError::Preflight {
-            reason: format!(
-                "idempotency: create {}: {e} (nothing was sent)",
-                path.display()
-            ),
-            source: None,
-        }),
     }
 }
 
 /// Persist a status/field update to the record's file. Overwrite-in-place
 /// via write-temp + rename so a mid-write crash never leaves a torn file.
 /// No history preserved — we only need the latest for refuse-duplicate.
-pub fn update(state_dir: &Path, record: &Record) -> CliResult<()> {
-    ensure_state_dir(state_dir)?;
+/// A state-file write that did not land.
+///
+/// **Deliberately not convertible into [`CliError`].** There is no `From`
+/// impl, so `idempotency::update(..)?` inside a function returning
+/// `CliResult` is a compile error. That is the entire point of the type.
+///
+/// The right exit code depends on a fact the author has to supply and
+/// cannot be trusted to remember: whether anything has already gone on the
+/// wire. Exit 2 is published as "refused before sending, nothing left the
+/// machine"; after a burn — let alone after `withdrawByProof` has paid out
+/// — that is a false statement to an operator and to every script matching
+/// on the contract. Four call sites drifted into `?` exactly because the
+/// compiler had no opinion. Now it does: pick [`Self::before_send`] or
+/// [`Self::after_send`] at each one.
+#[derive(Debug)]
+pub struct UpdateFailed {
+    record_path: PathBuf,
+    reason: String,
+}
+
+impl UpdateFailed {
+    /// Nothing has been broadcast for this withdrawal yet, so this is an
+    /// ordinary pre-send refusal: exit 2, and re-running is safe.
+    /// `#[allow(dead_code)]` outside tests, deliberately. Every `update`
+    /// in the pipeline today happens after the burn, so nothing in the
+    /// release build calls this — but its absence would leave `after_send`
+    /// as the only option, and an author with a genuinely pre-send write
+    /// would then either mislabel it or reach for a `From` impl and undo
+    /// the whole guard. The test exercises it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn before_send(self) -> CliError {
+        CliError::Preflight {
+            reason: format!(
+                "idempotency: could not write {}: {} (nothing was sent)",
+                self.record_path.display(),
+                self.reason,
+            ),
+            source: None,
+        }
+    }
+
+    /// Something is already on the wire. `what_landed` names it, because
+    /// "the state file could not be written" without saying what it was
+    /// meant to record leaves the operator unable to reconstruct it.
+    ///
+    /// Exit 10 rather than 2: the defining fact is that value moved and our
+    /// record of it is not durable, so the operator must reconcile on chain
+    /// before re-running. It is deliberately the same code whether the
+    /// payout has happened or not — "sent, and the local record is behind"
+    /// is one operational state, and the message carries the detail.
+    pub fn after_send(self, what_landed: &str) -> CliError {
+        CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "{what_landed}, but the state file could not be updated: {}\n\
+                 \x20 The local record is now BEHIND the chain. Do not re-run without \
+                 reconciling — see the runbook's Case 3a.\n\
+                 \x20 The record that needed writing is {}.",
+                self.reason,
+                self.record_path.display(),
+            ),
+            source: None,
+        }
+    }
+}
+
+/// Persist a status/field update to the record's file.
+///
+/// Returns [`UpdateFailed`], which does not convert into `CliError` — see
+/// that type for why. Every caller must say whether anything has been
+/// broadcast yet.
+pub fn update(state_dir: &Path, record: &Record) -> Result<(), UpdateFailed> {
     let path = record_path(state_dir, &record.key);
-    write_record_atomic(state_dir, &path, record)
+    let fail = |e: CliError| UpdateFailed {
+        record_path: path.clone(),
+        reason: format!("{e}"),
+    };
+    ensure_state_dir(state_dir).map_err(fail)?;
+    write_record_atomic(state_dir, &path, record).map_err(fail)
 }
 
 /// Read the record for this withdrawal identity without creating one.
@@ -416,14 +504,71 @@ fn read_record(path: &Path) -> CliResult<Record> {
         reason: format!("idempotency: read {}: {e}", path.display()),
         source: None,
     })?;
-    serde_json::from_slice::<Record>(&bytes).map_err(|e| CliError::Preflight {
+    let record: Record = serde_json::from_slice(&bytes).map_err(|e| CliError::Preflight {
         reason: format!(
             "idempotency: prior record at {} is corrupt: {e} \
              (delete it manually if you know it's stale)",
             path.display()
         ),
         source: None,
-    })
+    })?;
+
+    // Serde only checks that the FIELDS are well typed. Two cross-field
+    // invariants are what actually make this record safe to act on, and
+    // both are reachable by hand — the CLI's own post-burn recovery message
+    // asks an operator to edit `an_tx_hash` and `status` by hand, so a
+    // fumbled edit is an expected input, not an exotic one.
+    //
+    // 1. A status at or past `Burned` without a hash. `{"status":"burned",
+    //    "an_tx_hash":null}` deserialises cleanly, and every consumer then
+    //    reads "no hash" as "nothing was sent" — so the run burns again,
+    //    against a record that says a burn already happened.
+    if record.an_tx_hash.is_none()
+        && matches!(
+            record.status,
+            Status::Burned | Status::Captured | Status::Proved | Status::Submitted | Status::Confirmed
+        )
+    {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "idempotency: prior record at {} says status={:?} but carries no an_tx_hash. \
+                 Those cannot both be true: every status past `reserved` is written only after a \
+                 burn was broadcast, and the hash is written with it.\n\
+                 \x20 This is what a hand-edited record looks like when the status was set and \
+                 the hash was not. Acting on it would broadcast a SECOND burn.\n\
+                 \x20 Reconcile on chain (runbook Case 3a), then either fill in an_tx_hash or \
+                 set status back to \"reserved\".",
+                path.display(),
+                record.status,
+            ),
+            source: None,
+        });
+    }
+
+    // 2. The record's own key must match the filename it was read from.
+    //    The name IS the identity — a SHA-256 over (from, to, chain,
+    //    amount) — so a record copied or renamed into another identity's
+    //    slot would let one withdrawal's burn vouch for a different one.
+    let expected = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if record.key != expected {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "idempotency: prior record at {} carries key {} but its filename says {}. The \
+                 filename is the withdrawal identity, so this record belongs to a different \
+                 withdrawal — it was copied or renamed here. Refusing rather than letting one \
+                 withdrawal's state answer for another.",
+                path.display(),
+                record.key,
+                expected,
+            ),
+            source: None,
+        });
+    }
+
+    Ok(record)
 }
 
 fn write_record_atomic(state_dir: &Path, dst: &Path, record: &Record) -> CliResult<()> {
@@ -537,6 +682,169 @@ mod tests {
     use std::str::FromStr;
     use tempfile::TempDir;
 
+    /// `reserve` keeping only the record.
+    ///
+    /// Most tests here predate `Reservation` and are about the record's
+    /// contents, not about which side of `create_new` produced it. The
+    /// provenance has its own test below, so widening the return type did
+    /// not quietly stop anything from being checked.
+    fn reserve_rec(
+        state_dir: &Path,
+        from: &FromAddress,
+        to: &ToAddress,
+        amount: &UsdcAmount,
+        allow_retry: bool,
+    ) -> CliResult<Record> {
+        reserve(state_dir, from, to, amount, allow_retry).map(|(r, _)| r)
+    }
+
+    #[test]
+    fn a_hand_edited_record_claiming_a_burn_without_a_hash_is_refused() {
+        // The CLI's own post-burn recovery message asks the operator to
+        // write an_tx_hash and set status to "burned" by hand. Setting the
+        // status and fumbling the hash produces exactly this record — which
+        // serde accepts, and which every consumer then reads as "no burn
+        // happened", so the next run burns again.
+        let dir = TempDir::new().unwrap();
+        let k = key(&sample_from(), &sample_to(), &UsdcAmount(500_000));
+        let mut rec = fresh_reserved_record(&k, &sample_from(), &sample_to(), &UsdcAmount(500_000));
+        rec.status = Status::Burned;
+        assert!(rec.an_tx_hash.is_none());
+        std::fs::write(
+            record_path(dir.path(), &k),
+            serde_json::to_vec_pretty(&rec).unwrap(),
+        )
+        .unwrap();
+
+        let err = reserve_rec(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            true,
+        )
+        .expect_err("burned-without-a-hash is not a state the field can produce");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no an_tx_hash"),
+            "must name the contradiction, got: {msg}",
+        );
+        assert!(
+            msg.contains("SECOND burn"),
+            "must say what acting on it would cost, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_record_copied_into_another_identitys_slot_is_refused() {
+        // The filename IS the identity — a SHA-256 over (from, to, chain,
+        // amount). A record carrying a different key in that slot would let
+        // one withdrawal's burn vouch for another's.
+        let dir = TempDir::new().unwrap();
+        let mine = key(&sample_from(), &sample_to(), &UsdcAmount(500_000));
+        let theirs = key(&sample_from(), &sample_to(), &UsdcAmount(999_999));
+        let rec =
+            fresh_reserved_record(&theirs, &sample_from(), &sample_to(), &UsdcAmount(999_999));
+        std::fs::write(
+            record_path(dir.path(), &mine),
+            serde_json::to_vec_pretty(&rec).unwrap(),
+        )
+        .unwrap();
+
+        let err = reserve_rec(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            true,
+        )
+        .expect_err("a record in the wrong slot must not answer for this withdrawal");
+        assert!(
+            format!("{err}").contains("belongs to a different withdrawal"),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn reserve_reports_whether_it_created_the_record() {
+        // The distinction the concurrent double-burn turned on. `Created`
+        // means this run won `create_new` and owns the identity; `Found`
+        // means someone else does — possibly a run that is inside
+        // `burn::send` right now and has not written its hash yet.
+        let dir = TempDir::new().unwrap();
+        let (_, how) = reserve(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            false,
+        )
+        .unwrap();
+        assert_eq!(how, Reservation::Created, "first writer wins create_new");
+
+        let (rec, how) = reserve(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            true,
+        )
+        .unwrap();
+        assert_eq!(how, Reservation::Found, "second run reads what is there");
+        assert!(
+            rec.an_tx_hash.is_none(),
+            "and it has no hash yet — which is exactly why the fields alone \
+             cannot tell this apart from a fresh reservation",
+        );
+    }
+
+    #[test]
+    fn only_one_of_many_racing_reservations_creates() {
+        // There were no concurrency tests on this store at all, which is
+        // why the concurrent double-burn survived a round of review: every
+        // existing test calls `reserve` sequentially, and sequentially the
+        // second call always sees a record whose fields have settled.
+        //
+        // Eight threads, one identity, all with --allow-retry. `create_new`
+        // is atomic, so exactly one must come back `Created`; the rest are
+        // `Found` and, having no hash to reuse, must refuse rather than
+        // send.
+        use std::sync::Arc;
+
+        let dir = Arc::new(TempDir::new().unwrap());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let dir = Arc::clone(&dir);
+            handles.push(std::thread::spawn(move || {
+                reserve(
+                    dir.path(),
+                    &sample_from(),
+                    &sample_to(),
+                    &UsdcAmount(500_000),
+                    true,
+                )
+                .map(|(_, how)| how)
+            }));
+        }
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let created = outcomes
+            .iter()
+            .filter(|o| matches!(o, Ok(Reservation::Created)))
+            .count();
+        assert_eq!(
+            created, 1,
+            "exactly one racing run may own the identity, got {created}: {outcomes:?}",
+        );
+        assert!(
+            outcomes.iter().all(|o| matches!(
+                o,
+                Ok(Reservation::Created) | Ok(Reservation::Found)
+            )),
+            "with --allow-retry none of them should error outright: {outcomes:?}",
+        );
+    }
+
     fn sample_from() -> FromAddress {
         FromAddress {
             dapp_id_hex: "a".repeat(64),
@@ -575,7 +883,7 @@ mod tests {
     #[test]
     fn reserve_first_time_writes_a_fresh_record() {
         let dir = TempDir::new().unwrap();
-        let rec = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let rec = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .expect("first reserve should succeed");
         assert_eq!(rec.status, Status::Reserved);
         assert!(rec.an_tx_hash.is_none());
@@ -585,9 +893,9 @@ mod tests {
     #[test]
     fn reserve_duplicate_active_refuses() {
         let dir = TempDir::new().unwrap();
-        let _first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let _first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
-        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false);
+        let second = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false);
         match second {
             Err(CliError::DuplicateInFlight { prior_status, .. }) => {
                 assert_eq!(prior_status, "reserved");
@@ -599,9 +907,9 @@ mod tests {
     #[test]
     fn reserve_allows_retry_over_active_when_flag_set() {
         let dir = TempDir::new().unwrap();
-        let _first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let _first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
-        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
+        let second = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
             .expect("--allow-retry should override refuse-duplicate");
         // Prior was Reserved with no downstream fields → status stays Reserved.
         assert_eq!(second.status, Status::Reserved);
@@ -615,13 +923,13 @@ mod tests {
         // broadcast — a double-spend on the AN side. Resume semantics must
         // hand the caller back the prior record verbatim.
         let dir = TempDir::new().unwrap();
-        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         first.status = Status::Burned;
         first.an_tx_hash = Some("0xdeadbeef".into());
         update(dir.path(), &first).unwrap();
 
-        let resumed = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
+        let resumed = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true)
             .expect("--allow-retry over Burned should resume");
         assert_eq!(resumed.status, Status::Burned, "prior status preserved");
         assert_eq!(
@@ -634,13 +942,15 @@ mod tests {
     #[test]
     fn reserve_refuses_confirmed_even_with_retry() {
         let dir = TempDir::new().unwrap();
-        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
+        // Same as above: a confirmed payout implies a burn.
         first.status = Status::Confirmed;
+        first.an_tx_hash = Some("0xburned".into());
         first.eth_tx_hash = Some("0xabc".into());
         update(dir.path(), &first).unwrap();
 
-        let attempt = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
+        let attempt = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
         assert!(
             matches!(attempt, Err(CliError::DuplicateInFlight { .. })),
             "Confirmed is terminal — --allow-retry must not resurrect it, got {attempt:?}"
@@ -652,13 +962,18 @@ mod tests {
         // Submitted = we broadcast an EVM tx but never observed the receipt.
         // Re-broadcasting without reconciling risks paying twice.
         let dir = TempDir::new().unwrap();
-        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
+        // The AN burn necessarily happened first — `Submitted` cannot
+        // exist without it, and `read_record` now enforces that — so the
+        // fixture has to carry the hash to be a record the field could
+        // actually produce.
         first.status = Status::Submitted;
+        first.an_tx_hash = Some("0xburned".into());
         first.eth_tx_hash = Some("0xpending".into());
         update(dir.path(), &first).unwrap();
 
-        let attempt = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
+        let attempt = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), true);
         assert!(
             matches!(attempt, Err(CliError::DuplicateInFlight { .. })),
             "Submitted must refuse until reconciled, got {attempt:?}"
@@ -672,13 +987,13 @@ mod tests {
         // writer that marks Failed pre-burn). Safe to wipe and start
         // fresh without `--allow-retry`.
         let dir = TempDir::new().unwrap();
-        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         first.status = Status::Failed;
         // an_tx_hash intentionally left None
         update(dir.path(), &first).unwrap();
 
-        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let second = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .expect("Failed without an_tx_hash is retryable without --allow-retry");
         assert_eq!(second.status, Status::Reserved);
         assert!(second.an_tx_hash.is_none());
@@ -689,14 +1004,14 @@ mod tests {
         // Regression (Sergey review 2026-09-01, «Failed всё ещё жжёт ECC
         // второй раз»): the sole production writer of Status::Failed is
         // the withdrawByProof-revert arm of the orchestrator, which only
-        // fires after a successful AN burn. If reserve() wiped the
+        // fires after a successful AN burn. If reserve_rec() wiped the
         // record on Failed, the stored `an_tx_hash` would be dropped and
         // the orchestrator's Some(existing) resume branch would miss —
         // firing a SECOND `initiateWithdrawal` on retry (double-burn of
         // ECC[3] on the AN side). Retry after Case 3e (top-up-treasury,
         // re-run) must resume without --allow-retry.
         let dir = TempDir::new().unwrap();
-        let mut first = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         first.status = Status::Failed;
         first.an_tx_hash = Some("0xdeadbeef".into());
@@ -704,7 +1019,7 @@ mod tests {
         first.block_seq_no = Some(12345);
         update(dir.path(), &first).unwrap();
 
-        let second = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let second = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .expect("Failed with an_tx_hash must resume without --allow-retry");
         assert_eq!(second.status, Status::Failed, "prior status preserved for resume");
         assert_eq!(
@@ -719,7 +1034,7 @@ mod tests {
     #[test]
     fn update_persists_stage_transition() {
         let dir = TempDir::new().unwrap();
-        let mut rec = reserve(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+        let mut rec = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         rec.status = Status::Burned;
         rec.an_tx_hash = Some("0xdeadbeef".into());
@@ -735,6 +1050,46 @@ mod tests {
         assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_utc(1_000_000_000), "2001-09-09T01:46:40Z");
         assert_eq!(format_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn a_failed_state_write_after_the_wire_is_never_exit_2() {
+        use crate::errors::ExitCode;
+
+        // Exit 2 is published as "refused before sending, nothing left the
+        // machine". Four call sites reached it with `?` after the burn — two
+        // of them after withdrawByProof had already paid out — because
+        // `update` returned a plain `CliError` and the compiler had no
+        // opinion. `UpdateFailed` has no `From<..> for CliError`, so `?` no
+        // longer compiles and the code must be chosen; these assert that
+        // both choices map where they claim.
+        let dir = TempDir::new().unwrap();
+        let rec = fresh_reserved_record(
+            &key(&sample_from(), &sample_to(), &UsdcAmount(1)),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(1),
+        );
+        // A path that cannot be written: its parent is a regular file, which
+        // is ENOTDIR for every uid — unlike a chmod, which root ignores.
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let e = update(&blocker.join("state"), &rec)
+            .expect_err("writing under a regular file must fail");
+
+        assert_eq!(
+            e.after_send("the AN burn is on the wire").exit_code(),
+            ExitCode::BurnOutcomeUnknown,
+            "once anything is on the wire the honest code is 10, never 2",
+        );
+
+        let e = update(&blocker.join("state"), &rec).expect_err("same failure");
+        let before = e.before_send();
+        assert_eq!(before.exit_code(), ExitCode::PreflightRefused);
+        assert!(
+            format!("{before}").contains("nothing was sent"),
+            "the pre-send arm must still say so: {before}",
+        );
     }
 
     #[test]
@@ -791,7 +1146,7 @@ mod tests {
         // burn that reached the wire and errored leaves behind, so it must
         // keep blocking a plain retry.
         let dir = TempDir::new().unwrap();
-        let first = reserve(
+        let first = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -801,7 +1156,7 @@ mod tests {
         .unwrap();
         assert!(first.an_tx_hash.is_none());
 
-        let second = reserve(
+        let second = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -834,7 +1189,7 @@ mod tests {
             "peek must not create a file",
         );
 
-        let reserved = reserve(
+        let reserved = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -866,7 +1221,7 @@ mod tests {
         assert!(!dir.exists());
         let dir = dir.as_path();
 
-        let mut rec = reserve(
+        let mut rec = reserve_rec(
             dir,
             &sample_from(),
             &sample_to(),
@@ -905,7 +1260,7 @@ mod tests {
         // mode rides the rename back onto the record.
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        let mut rec = reserve(
+        let mut rec = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -941,7 +1296,7 @@ mod tests {
         // failed write, after a restart, after a recycled pid — and then
         // `create_new` turns a retry into a hard error.
         let dir = TempDir::new().unwrap();
-        let mut rec = reserve(
+        let mut rec = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -969,7 +1324,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        reserve(
+        reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -994,7 +1349,7 @@ mod tests {
         let key = key(&sample_from(), &sample_to(), &UsdcAmount(500_000));
         std::fs::write(record_path(dir.path(), &key), b"").unwrap();
 
-        let err = reserve(
+        let err = reserve_rec(
             dir.path(),
             &sample_from(),
             &sample_to(),
@@ -1143,7 +1498,7 @@ mod tests {
         // nothing was sent, and must leave no record for the next run to trip
         // over. Whether ENOSPC hit `create_new` or `write_all` is the
         // filesystem's business — both are real, and both must behave.
-        let err = reserve(
+        let err = reserve_rec(
             &dir,
             &sample_from(),
             &sample_to(),

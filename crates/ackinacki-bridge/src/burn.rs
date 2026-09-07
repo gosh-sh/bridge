@@ -182,9 +182,12 @@ pub async fn compose(
     // here.
     //
     // `preflight.owner_pubkey_hex` is the on-chain custodian pubkey that
-    // check 5 already matched this file against; `pubkeys_equal` is the
-    // existing comparison and handles the `0x` and case normalisation, so
-    // reuse it rather than `!=` on raw strings. Neither key is echoed — the
+    // check 5 already matched this file against; `pubkeys_equal` compares
+    // the two as VALUES — normalising `0x`, case and padding — so reuse it
+    // rather than `!=` on raw strings. `load_keypair` above normalises the
+    // same way, so both sides of this comparison and the bytes handed to
+    // the SDK all agree; while they did not, a `0x`-prefixed keys.json
+    // dead-ended here on every attempt. Neither key is echoed — the
     // on-chain half would be safe to print, but there is nothing to
     // disambiguate here that the message does not say.
     if !crate::preflight::pubkeys_equal(&keys.public, &preflight.owner_pubkey_hex) {
@@ -369,28 +372,42 @@ fn load_keypair(path: &Path) -> CliResult<KeyPair> {
         reason: format!("--from-keys {}: not valid JSON", path.display()),
         source: None,
     })?;
-    let public = json
-        .get("public")
-        .and_then(|v| v.as_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| CliError::Preflight {
+    // Normalised the SAME way preflight normalises, via
+    // `normalize_u256_hex`, and not merely lowercased.
+    //
+    // Preflight reads this file through `load_owner_keypair_hex`, which
+    // normalises, and compares the result against the on-chain custodian
+    // key. `compose` re-reads it and compares again. When the two used
+    // different rules, a `0x`-prefixed or unpadded `keys.json` passed
+    // preflight and then failed that re-check — permanently, since
+    // re-running does the same thing — with "the public key … is no longer
+    // the one verified … Nothing was sent. Re-run."
+    //
+    // It is also what goes to the SDK: `Signer::Keys` gets these strings,
+    // so handing it a `0x` prefix would move the failure into the signing
+    // path whose error text this module deliberately withholds.
+    let half = |field: &str| -> CliResult<String> {
+        let raw = json
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CliError::Preflight {
+                reason: format!(
+                    "--from-keys {}: missing '{field}' string field",
+                    path.display()
+                ),
+                source: None,
+            })?;
+        crate::preflight::normalize_key_file_hex(raw).ok_or_else(|| CliError::Preflight {
             reason: format!(
-                "--from-keys {}: missing 'public' string field",
+                "--from-keys {}: '{field}' field is not 1-64 hex characters (an optional \
+                 `0x` prefix is accepted)",
                 path.display()
             ),
             source: None,
-        })?;
-    let secret = json
-        .get("secret")
-        .and_then(|v| v.as_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| CliError::Preflight {
-            reason: format!(
-                "--from-keys {}: missing 'secret' string field",
-                path.display()
-            ),
-            source: None,
-        })?;
+        })
+    };
+    let public = half("public")?;
+    let secret = half("secret")?;
     Ok(KeyPair { public, secret })
 }
 
@@ -687,6 +704,64 @@ mod tests {
             !matches!(err, CliError::BurnOutcomeUnknown { .. }),
             "a key-file problem must never be reported as an ambiguous burn, got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn a_0x_prefixed_keys_file_still_composes() {
+        // The permanent dead end. Preflight normalised the file's halves;
+        // `load_keypair` only lowercased them. So a `0x`-prefixed or
+        // unpadded keys.json passed preflight and then failed `compose`'s
+        // re-check against the very key preflight had just approved —
+        // "the public key … is no longer the one verified … Re-run." — on
+        // every attempt, forever. Same file, same command, same failure.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("keys.json");
+        // Upper case AND a `0x` prefix: the two shapes lowercasing alone
+        // cannot reconcile.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"public":"0x{}","secret":"0x{}"}}"#,
+                PAIR_PUBLIC.to_ascii_uppercase(),
+                PAIR_SECRET.to_ascii_uppercase(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let composed = compose(
+            &offline_ctx(),
+            &sample_preflight(),
+            &sample_from(),
+            &path,
+            &sample_to(),
+            &UsdcAmount(1_000_000),
+            true,
+        )
+        .await
+        .expect("a 0x-prefixed keys.json is the same key and must compose");
+        assert_eq!(composed.validated_message_id.len(), 64);
+    }
+
+    #[test]
+    fn an_all_decimal_key_stays_hex() {
+        // `normalize_u256_hex` reads an all-digit string as DECIMAL, which
+        // is right for a uint256 off the chain and wrong for a key file.
+        // Reusing it here would silently turn this perfectly ordinary hex
+        // key into a different 256-bit value — a worse bug than the one the
+        // normalisation was added to fix.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("keys.json");
+        let digits = "1".repeat(64);
+        std::fs::write(
+            &path,
+            format!(r#"{{"public":"{digits}","secret":"{digits}"}}"#),
+        )
+        .unwrap();
+        let kp = load_keypair(&path).unwrap();
+        assert_eq!(kp.public, digits, "an all-digit key is hex, not decimal");
+        assert_eq!(kp.secret, digits);
     }
 
     #[tokio::test]

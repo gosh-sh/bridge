@@ -146,7 +146,10 @@ pub async fn run(
     // refused. Used twice — here, to decide whether the ECC[3] sufficiency
     // check still applies, and in stage 2 to classify a duplicate before
     // prompting.
-    let state_dir = args.state_dir.clone().unwrap_or_else(default_state_dir);
+    let state_dir = match args.state_dir.clone() {
+        Some(d) => d,
+        None => default_state_dir()?,
+    };
     let prior = if dry_run {
         // A dry run neither reads nor writes idempotency state (spec).
         None
@@ -267,13 +270,11 @@ pub async fn run(
                 prior_status = ?p.status,
                 "stage 3/6: resume — skipping burn (prior an_tx_hash on file)",
             );
-            record = Some(idempotency::reserve(
-                &state_dir,
-                &from,
-                &to,
-                &amount,
-                args.allow_retry,
-            )?);
+            // The resume branch already skips the send, so the
+            // provenance carries no decision here — the hash from `peek` is
+            // evidence a burn happened, and that is what we act on.
+            let (r, _) = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
+            record = Some(r);
             (existing, bounce)
         } else {
             // A prior record with no `an_tx_hash` is the ambiguous case, and
@@ -330,13 +331,15 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let r = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
-            info!(key = %r.key, "reserved");
+            let (r, how) = idempotency::reserve(&state_dir, &from, &to, &amount, args.allow_retry)?;
+            info!(key = %r.key, ?how, "reserved");
 
-            // Decide from what `reserve` just returned, NOT from the `peek`
-            // taken in stage 1. See [`decide_burn`]: the two can disagree,
-            // and the disagreement is a second irreversible burn.
-            let decision = decide_burn(&r);
+            // Decide from what `reserve` just returned — the record AND
+            // which side of the atomic `create_new` it came from — NOT from
+            // the `peek` taken in stage 1. See [`decide_burn`]: those
+            // disagree in two different ways, and both are a second
+            // irreversible burn.
+            let decision = decide_burn(&r, how)?;
             record = Some(r);
 
             match decision {
@@ -370,19 +373,12 @@ pub async fn run(
                         // is exactly `BurnOutcomeUnknown` — sent, outcome not
                         // durably recorded.
                         if let Err(e) = idempotency::update(&state_dir, r) {
-                            return Err(CliError::BurnOutcomeUnknown {
-                                reason: format!(
-                                    "the AN burn was broadcast as {} but the state file could not be \
-                                     updated: {e}\n\
-                                     \x20 The withdrawal is IN FLIGHT. Do not re-run without \
-                                     reconciling — see the runbook's Case 3a.\n\
-                                     \x20 To resume, write this hash into {}'s an_tx_hash and set status \
-                                     to \"burned\", then re-run with --allow-retry.",
-                                    receipt.an_tx_hash,
-                                    idempotency::record_path(&state_dir, &r.key).display(),
-                                ),
-                                source: Some(anyhow::anyhow!("{e}")),
-                            });
+                            return Err(e.after_send(&format!(
+                                "the AN burn was broadcast as {}, and to resume you must write \
+                                 that hash into the record's an_tx_hash and set status to \
+                                 \"burned\" before re-running with --allow-retry",
+                                receipt.an_tx_hash,
+                            )));
                         }
                     }
                     (receipt.an_tx_hash, receipt.bounce)
@@ -478,7 +474,11 @@ pub async fn run(
         r.status = Status::Captured;
         r.withdrawal_msg_id = Some(captured.message_id.clone());
         r.block_seq_no = Some(captured.block_seq_no);
-        idempotency::update(&state_dir, r)?;
+        idempotency::update(&state_dir, r).map_err(|e| {
+            e.after_send(
+                "the AN burn is on the wire and its WithdrawalInitiated event was captured",
+            )
+        })?;
     }
 
     // ---- 4b. Resurrect BridgeState from contract; wait for coverage ----
@@ -560,7 +560,9 @@ pub async fn run(
         r.status = Status::Proved;
         r.withdrawal_msg_id = Some(e2e.captured.message_id.clone());
         r.block_seq_no = Some(e2e.captured.block_seq_no);
-        idempotency::update(&state_dir, r)?;
+        idempotency::update(&state_dir, r).map_err(|e| {
+            e.after_send("the AN burn is on the wire and the Circuit-4 proof is complete")
+        })?;
     }
 
     // ---- 6. Submit (dry-run then real) ----
@@ -642,7 +644,12 @@ pub async fn run(
             if let Some(r) = record.as_mut() {
                 r.status = Status::Submitted;
                 r.eth_tx_hash = Some(tx.clone());
-                idempotency::update(&state_dir, r)?;
+                idempotency::update(&state_dir, r).map_err(|e| {
+                    e.after_send(&format!(
+                        "withdrawByProof paid out on the EVM side as {tx} — the USDC has MOVED on \
+                         both chains"
+                    ))
+                })?;
             }
             SubmitSummary {
                 eth_tx: Some(tx),
@@ -657,6 +664,13 @@ pub async fn run(
             // retry will re-prove — still deterministic.
             if let Some(r) = record.as_mut() {
                 r.status = Status::Failed;
+                // Deliberately swallowed, and the only `update` in this file
+                // that is. We are already returning `EthSubmitFailed` (exit
+                // 13), which names the revert and is strictly more useful
+                // than "we also could not write it down"; replacing it with
+                // an `after_send` refusal would hide the revert reason
+                // behind a bookkeeping failure. The record staying at
+                // `Proved` is safe — it still blocks a plain retry.
                 let _ = idempotency::update(&state_dir, r);
             }
             return Err(CliError::EthSubmitFailed {
@@ -669,7 +683,9 @@ pub async fn run(
     if let Some(r) = record.as_mut() {
         r.status = Status::Confirmed;
         r.eth_tx_hash = submit.eth_tx.clone();
-        idempotency::update(&state_dir, r)?;
+        idempotency::update(&state_dir, r).map_err(|e| {
+            e.after_send("the withdrawal completed on both chains and its payout receipt was seen")
+        })?;
     }
 
     Ok(WithdrawSuccess {
@@ -711,7 +727,6 @@ fn build_tvm_client(gql_endpoint: &str) -> CliResult<Arc<ClientContext>> {
     Ok(Arc::new(ctx))
 }
 
-
 /// Whether stage 3 must actually broadcast.
 ///
 /// Decided from the record [`idempotency::reserve`] returned, **not** from
@@ -746,10 +761,30 @@ enum BurnDecision {
     Reuse(String),
 }
 
-fn decide_burn(reserved: &idempotency::Record) -> BurnDecision {
-    match reserved.an_tx_hash.as_deref() {
-        Some(h) => BurnDecision::Reuse(h.to_string()),
-        None => BurnDecision::Send,
+fn decide_burn(
+    reserved: &idempotency::Record,
+    how: idempotency::Reservation,
+) -> CliResult<BurnDecision> {
+    match (reserved.an_tx_hash.as_deref(), how) {
+        // Someone already broadcast for this identity. Resume at capture.
+        (Some(h), _) => Ok(BurnDecision::Reuse(h.to_string())),
+        // We won `create_new`: the identity is ours, nothing is in flight.
+        (None, idempotency::Reservation::Created) => Ok(BurnDecision::Send),
+        // The record was already there and carries no hash. Two states look
+        // identical from here and both forbid sending:
+        //
+        //  * another run is INSIDE `burn::send` right now and has not come back to write its hash —
+        //    send and we double-burn;
+        //  * a record was hand-edited to `burned` with a null hash, which the CLI's own post-burn
+        //    recovery message invites.
+        //
+        // `an_tx_hash` cannot distinguish them, because it is written only
+        // after the send returns. Refuse, and say what to do.
+        (None, idempotency::Reservation::Found) => Err(CliError::DuplicateInFlight {
+            prior_status: format!("{:?}", reserved.status).to_ascii_lowercase(),
+            prior_tx: None,
+            prior_msg_id: reserved.withdrawal_msg_id.clone(),
+        }),
     }
 }
 /// Parse `--anchor-layer` into an [`AnchorLayerMode`]. Mirrors the relayer
@@ -782,12 +817,29 @@ fn split_extended(ext: &str) -> Option<(String, String)> {
 /// Default idempotency directory when `--state-dir` and env are absent.
 /// Under `$HOME/.bridge-withdraw-state/` so a system-wide install does not
 /// clash across users.
-fn default_state_dir() -> PathBuf {
-    let base = std::env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".bridge-withdraw-state")
+/// `$HOME/.bridge-withdraw-state`, or a refusal.
+///
+/// **No cwd fallback.** Falling back to `.` makes the double-burn guard
+/// relative to wherever the operator happened to be standing: the same
+/// command run from two directories finds no prior record either time and
+/// burns twice, silently. `HOME` is routinely unset under systemd, cron,
+/// `sudo` without `-H`, and many Docker images — i.e. exactly the automated
+/// contexts where nobody is watching.
+///
+/// Refusing costs one flag; guessing costs a second irreversible burn.
+fn default_state_dir() -> CliResult<PathBuf> {
+    let base = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| CliError::Preflight {
+            reason: "HOME is not set, so there is no default --state-dir. That directory is the \
+                     only thing stopping the same withdrawal from being burned twice, and a \
+                     cwd-relative fallback would make it depend on where you were standing.\n\x20 \
+                     Pass --state-dir (or set BRIDGE_WITHDRAW_STATE_DIR) to an absolute path that \
+                     persists between runs."
+                .to_string(),
+            source: None,
+        })?;
+    Ok(PathBuf::from(base).join(".bridge-withdraw-state"))
 }
 
 /// Terminal confirmation before the AN burn. Prints the money-moving
@@ -910,6 +962,26 @@ mod tests {
     }
 
     #[test]
+    fn a_record_we_did_not_create_and_that_has_no_hash_refuses() {
+        // The concurrent half. Two runs, same identity, both --allow-retry,
+        // no prior record: both `peek` → None, A wins `create_new` and
+        // enters the multi-second `burn::send`, B gets EEXIST and reads A's
+        // record — `Reserved`, `an_tx_hash` still None, because A has not
+        // returned yet. Deciding on the fields alone says Send, and that is
+        // a second initiateWithdrawal.
+        //
+        // The same shape covers a hand-edited `{"status":"burned",
+        // "an_tx_hash":null}`, which the CLI's own post-burn recovery
+        // message invites an operator to produce.
+        let err = decide_burn(&reserved(None), idempotency::Reservation::Found)
+            .expect_err("a record another run owns, with no hash yet, must refuse");
+        assert!(
+            matches!(err, CliError::DuplicateInFlight { .. }),
+            "the honest answer is exit 3, not a second burn: {err:?}",
+        );
+    }
+
+    #[test]
     fn a_reservation_that_already_names_a_burn_must_not_send_again() {
         // The `--allow-retry` race. `peek` runs in stage 1; `reserve` runs
         // after the EVM preflight, the confirmation prompt and `compose` —
@@ -921,7 +993,7 @@ mod tests {
         // multisig with no replay guard. Deciding from what `reserve`
         // returned does not.
         assert_eq!(
-            decide_burn(&reserved(Some("0xdead"))),
+            decide_burn(&reserved(Some("0xdead")), idempotency::Reservation::Found).unwrap(),
             BurnDecision::Reuse("0xdead".into()),
             "a record naming a broadcast burn must be resumed, never re-sent",
         );
@@ -930,7 +1002,7 @@ mod tests {
     #[test]
     fn a_fresh_reservation_sends() {
         assert_eq!(
-            decide_burn(&reserved(None)),
+            decide_burn(&reserved(None), idempotency::Reservation::Created).unwrap(),
             BurnDecision::Send,
             "no hash on the record means nothing reached the wire for this identity",
         );

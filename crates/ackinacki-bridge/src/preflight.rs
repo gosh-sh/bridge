@@ -574,9 +574,14 @@ fn load_owner_keypair_hex(path: &Path) -> CliResult<(String, String)> {
                 ),
                 source: None,
             })?;
-        normalize_u256_hex(raw).ok_or_else(|| CliError::Preflight {
+        // The key-file parser, not the uint256 one: see
+        // `normalize_key_file_hex`. A key of all decimal digits must stay
+        // hex, and `burn::load_keypair` reads the same file with the same
+        // rule so the two cannot disagree.
+        normalize_key_file_hex(raw).ok_or_else(|| CliError::Preflight {
             reason: format!(
-                "--from-keys {}: '{field}' field is not a valid uint256",
+                "--from-keys {}: '{field}' field is not 1-64 hex characters (an optional `0x` \
+                 prefix is accepted)",
                 path.display()
             ),
             source: None,
@@ -615,7 +620,7 @@ fn load_owner_keypair_hex(path: &Path) -> CliResult<(String, String)> {
 
 /// Coerce a `uint256` from any of {`0x<hex>`, `<hex>`, `<decimal>`} into
 /// 64-char lowercase hex with leading zeros preserved.
-fn normalize_u256_hex(raw: &str) -> Option<String> {
+pub(crate) fn normalize_u256_hex(raw: &str) -> Option<String> {
     use alloy_primitives::U256;
     let raw = raw.trim();
     if raw.is_empty() {
@@ -633,8 +638,43 @@ fn normalize_u256_hex(raw: &str) -> Option<String> {
     Some(format!("{v:064x}"))
 }
 
+/// Compare two ed25519 public keys.
+///
+/// A plain case-insensitive comparison, and that is only correct because
+/// **both sides are canonicalised before they get here** — 64 lowercase hex
+/// characters, no prefix, zero-padded:
+///
+/// * the on-chain half through [`normalize_u256_hex`], which must accept
+///   the decimal form because that is one of the shapes tvm renders a
+///   `uint256` in;
+/// * the key-file half through [`normalize_key_file_hex`], which must
+///   **not**, because a keys.json field is always hex and a key that
+///   happens to be all decimal digits would otherwise be silently
+///   reinterpreted as a decimal number.
+///
+/// Normalising again here would undo that: applying `normalize_u256_hex` to
+/// an already-canonical all-digit key turns it into a different value. The
+/// asymmetry between the two parsers is the point, not an oversight.
 pub(crate) fn pubkeys_equal(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+
+/// Canonicalise a hex field read out of a `keys.json`: 64 lowercase hex
+/// characters, no `0x`, zero-padded on the left.
+///
+/// Deliberately **not** [`normalize_u256_hex`]. That one accepts a decimal
+/// form, which is right for a `uint256` coming back from the chain and
+/// wrong for a key file: `"1111…1111"` is a perfectly ordinary 64-character
+/// hex key, and reading it as decimal yields a different 256-bit value.
+/// Preflight and `burn::load_keypair` both go through here so the value
+/// they compare — and the value handed to the SDK — are the same bytes.
+pub(crate) fn normalize_key_file_hex(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let bare = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(raw);
+    if bare.is_empty() || bare.len() > 64 || !bare.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("{:0>64}", bare.to_ascii_lowercase()))
 }
 // -- Prover artifacts --------------------------------------------------------
 
@@ -1873,8 +1913,22 @@ mod tests {
                 let answers = answers.clone();
                 let code = code.clone();
                 tokio::spawn(async move {
+                    // Serve every request on the connection, not just the
+                    // first. `check_bridge_deploy` makes several calls in a
+                    // row (eth_getCode, then the getter walk), and reqwest
+                    // keeps the connection alive between them. A handler
+                    // that answered once and returned closed the socket
+                    // under the client mid-sequence: the run then failed
+                    // with a transport error instead of the refusal the
+                    // test asserts on, intermittently and only under
+                    // parallel load. `a_zero_withdrawal_verifier_is_refused`
+                    // was the one that showed it.
                     let mut buf = vec![0u8; 8192];
+                    loop {
                     let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return; // client hung up
+                    }
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
                     let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
                     let v: serde_json::Value =
@@ -1922,7 +1976,10 @@ mod tests {
                         payload.len(),
                         payload
                     );
-                    let _ = sock.write_all(resp.as_bytes()).await;
+                    if sock.write_all(resp.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    }
                 });
             }
         });

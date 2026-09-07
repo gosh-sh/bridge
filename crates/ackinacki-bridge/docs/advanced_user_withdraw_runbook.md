@@ -838,8 +838,19 @@ cp ../../../acki-nacki/config/USDCBridge.keys.json \
    python/contracts/USDCBridge.shellnet.keys.json
 ```
 
-Then prune the `Failed` state file and re-run. Note that
-`scripts/deploy_msig_and_mint.sh` validates the key against
+**Do not delete the state file.** Exit 10 means the burn reached the
+wire, and that record is the only local trace of it — deleting it is how
+the same withdrawal gets burned a second time. Follow
+[Case 3a](#case-3a--capture-timeout--advanced-diagnostics) instead: read `.status` and
+`.an_tx_hash`, reconcile on chain, and re-run with `--allow-retry` only
+once you know what actually landed.
+
+(The old text here said "prune the `Failed` state file". No `Failed`
+record can exist at exit 10 in the first place — the only production
+writer of `Failed` is the `withdrawByProof` revert path, which is
+exit 13.)
+
+Note that `scripts/deploy_msig_and_mint.sh` validates the key against
 `getOwnerPubkey` before minting, so if you always deploy via that
 wrapper you should not hit this path.
 

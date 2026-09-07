@@ -379,6 +379,76 @@ fn a_dry_run_does_not_need_a_state_directory_at_all() {
 }
 
 #[test]
+fn a_full_output_stream_does_not_replace_the_exit_code_with_101() {
+    // `println!` and `eprintln!` PANIC when the write fails, so a full
+    // disk, a closed pipe or a `> /dev/full` turned every refusal into
+    // exit 101 — discarding the exit-code contract this whole branch is
+    // about. The worst case is not reachable from a test: `print_success`
+    // runs only after the burn landed and `withdrawByProof` was mined, so
+    // the process that told a wrapper "unknown failure" had already moved
+    // value on both chains. Same `emit`, so pinning the error path pins
+    // that one too.
+    if !std::path::Path::new("/dev/full").exists() {
+        // Linux-only device. Skipping is right: inventing a pass on a
+        // platform where the case cannot arise would be worse.
+        return;
+    }
+    let devfull = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
+    };
+
+    // The machine path: the envelope's own stream is full.
+    let out = bin()
+        .args(["--json", "withdraw"])
+        .stdout(devfull())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a usage error is exit 2 whether or not stdout accepted the envelope",
+    );
+    // And it is not silently dropped: one hop to the other stream, marked
+    // so nobody parses a rescued line as the machine contract.
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("NOT the machine output"), "got: {e}");
+    assert!(
+        e.contains("\"exit_code\":2"),
+        "the envelope itself is repeated: {e}"
+    );
+
+    // The human path: stderr is full instead.
+    let out = bin()
+        .args(["withdraw"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(devfull())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("--from"),
+        "the human error is rescued to the other stream",
+    );
+
+    // Both gone. Nothing can be said, and the exit code still says it.
+    let out = bin()
+        .args(["--json", "withdraw"])
+        .stdout(devfull())
+        .stderr(devfull())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "with nowhere to write, the exit code is the whole answer and must survive",
+    );
+}
+
+#[test]
 fn the_zero_recipient_is_refused() {
     let mut args = base_overriding(&[("--to", "0x0000000000000000000000000000000000000000")]);
     args.push("--json".to_string());

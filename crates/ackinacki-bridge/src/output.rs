@@ -15,6 +15,68 @@ use serde_json::json;
 
 use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 
+/// Write a whole block to stdout without panicking on failure.
+///
+/// `println!` panics when the write fails, which turns a full disk, a
+/// closed pipe or a `> /dev/full` into **exit 101** — discarding the
+/// exit-code contract this module exists to serve. Reproduced:
+/// `ackinacki-bridge --json withdraw > /dev/full` exited 101, and so did
+/// `withdraw 2>/dev/full`.
+///
+/// The worst case is [`print_success`], which is reached only after the
+/// burn landed AND `withdrawByProof` was mined. Value has moved on both
+/// chains and the wrapper is told the process died of something
+/// unknown — the one reading a script is most likely to retry.
+///
+/// The exit code is the answer, not the printing. So: report whether the
+/// write landed, and let the caller decide; never take the process down
+/// for it.
+fn write_stdout(s: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(s.as_bytes())?;
+    out.flush()
+}
+
+/// As [`write_stdout`], for stderr.
+fn write_stderr(s: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    err.write_all(s.as_bytes())?;
+    err.flush()
+}
+
+/// One of the two terminal streams, as something selectable at runtime.
+type Sink = fn(&str) -> std::io::Result<()>;
+
+/// Put `s` in front of the operator, preferring `primary`.
+///
+/// One fallback hop, not a loop: a `--json` consumer whose stdout is full
+/// may still have a working stderr, and a human whose stderr is
+/// redirected into a full file may still have a terminal on stdout. If
+/// both are gone there is nothing left to say and nothing to be gained by
+/// dying over it — the exit code still carries the outcome, which is the
+/// part a script reads.
+///
+/// The fallback copy is prefixed, so nobody mistakes a rescued line for
+/// output that arrived on the stream it was addressed to. For `--json`
+/// that matters: an envelope on stderr is not the machine contract, and
+/// must not be parsed as though it were.
+fn emit(s: &str, to_stdout: bool) {
+    let (primary, secondary): (Sink, Sink) = if to_stdout {
+        (write_stdout, write_stderr)
+    } else {
+        (write_stderr, write_stdout)
+    };
+    if primary(s).is_ok() {
+        return;
+    }
+    let _ = secondary(&format!(
+        "ackinacki-bridge: could not write the line below to its own stream; it is repeated here \
+         and is NOT the machine output\n{s}"
+    ));
+}
+
 /// Print a successful terminal summary. Chooses stderr-human or
 /// stdout-json based on `json`.
 pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
@@ -22,8 +84,11 @@ pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
         // One line to stdout. `WithdrawSuccess` is `Serialize` and holds
         // no key material.
         match serde_json::to_string(summary) {
-            Ok(s) => println!("{s}"),
-            Err(e) => eprintln!("output: failed to serialize success as JSON: {e}"),
+            Ok(s) => emit(&format!("{s}\n"), true),
+            Err(e) => emit(
+                &format!("output: failed to serialize success as JSON: {e}\n"),
+                false,
+            ),
         }
         return;
     }
@@ -34,23 +99,30 @@ pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
     };
-    eprintln!();
-    eprintln!("withdraw complete:");
-    eprintln!("  amount:       {} USDC", summary.burn.amount);
-    eprintln!("  AN tx:        {}", summary.burn.an_tx);
-    eprintln!("  msg id:       {}", summary.capture.withdrawal_msg_id);
-    eprintln!(
-        "  block:        seq={} id={}",
-        summary.capture.block_seq_no, summary.capture.block_id
+    // Built whole, then written once. Sixteen separate `eprintln!`s were
+    // sixteen chances to panic and sixteen chances to tear the summary in
+    // half — the same reasoning that replaced the burn confirmation
+    // prompt's discarded writes with one checked `write_all`.
+    let eth = match s.eth_tx.as_deref() {
+        Some(tx) => format!("  ETH tx:       {tx} ({status})\n"),
+        None => format!("  ETH tx:       (none) ({status})\n"),
+    };
+    emit(
+        &format!(
+            "\nwithdraw complete:\n\x20 amount:       {} USDC\n\x20 AN tx:        {}\n\x20 msg \
+             id:       {}\n\x20 block:        seq={} id={}\n\x20 proof:        {} bytes, {} \
+             public inputs, self_verified={}\n{eth}",
+            summary.burn.amount,
+            summary.burn.an_tx,
+            summary.capture.withdrawal_msg_id,
+            summary.capture.block_seq_no,
+            summary.capture.block_id,
+            summary.proof.calldata_bytes,
+            summary.proof.pi_count,
+            summary.proof.self_verified,
+        ),
+        false,
     );
-    eprintln!(
-        "  proof:        {} bytes, {} public inputs, self_verified={}",
-        summary.proof.calldata_bytes, summary.proof.pi_count, summary.proof.self_verified
-    );
-    match s.eth_tx.as_deref() {
-        Some(tx) => eprintln!("  ETH tx:       {tx} ({status})"),
-        None => eprintln!("  ETH tx:       (none) ({status})"),
-    }
 }
 
 /// Literal scan of argv for `--json`.
@@ -137,18 +209,19 @@ pub fn error_json(err: &CliError) -> String {
 /// fn just picks the sink and the shape.
 pub fn print_error(err: &CliError, json_mode: bool) {
     if json_mode {
-        println!("{}", error_json(err));
+        emit(&format!("{}\n", error_json(err)), true);
         return;
     }
-    eprintln!("error: {err}");
+    let mut block = format!("error: {err}\n");
     // The same walk the JSON envelope does, through the same function, so
     // the two modes cannot report different causes for one failure. The
     // underlying anyhow context (aggregator stderr, `RelayerError::other`
     // messages, the keygen-lock timeout) is what makes a stage-5 failure
     // diagnosable without a debug build.
     for (depth, c) in cause_chain(err).iter().enumerate() {
-        eprintln!("  caused by [{depth}]: {c}");
+        block.push_str(&format!("  caused by [{depth}]: {c}\n"));
     }
+    emit(&block, false);
 }
 
 #[cfg(test)]

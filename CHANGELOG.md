@@ -1144,6 +1144,22 @@ assigns it when the release is tagged.
   Control characters in an argument are now escaped rather than replayed
   into the terminal.
 
+- **A full or closed output stream no longer replaces the exit code with
+  101.** `println!`/`eprintln!` panic when the write fails, so
+  `> /dev/full`, a full disk or a closed pipe turned every refusal into
+  the panic exit — discarding the 0/2/3/10/11/12/13 contract that exists
+  precisely so a script can tell "nothing was broadcast" from "broadcast,
+  outcome unknown". The worst case was the success summary, which is
+  reached only after the burn landed **and** `withdrawByProof` was mined:
+  value moved on both chains and the wrapper was told the process died of
+  something unknown.
+
+  Every terminal write is now a single checked `write_all` with one
+  fallback hop to the other stream, prefixed so a rescued line is not
+  mistaken for the machine output. With both streams gone the process
+  stays silent and still exits with the code that describes what happened
+  to the money.
+
 - **Resuming a withdrawal no longer leaves a record no later run can
   act on.** The resume path — a prior record already carrying an AN tx
   hash — reserved the identity directly and discarded the reservation's

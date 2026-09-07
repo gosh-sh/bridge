@@ -361,8 +361,9 @@ pub async fn send(
 /// The returned `KeyPair` is the ONLY place the secret half lives; it is
 /// consumed by `Signer::Keys` and dropped when `fire` returns.
 fn load_keypair(path: &Path) -> CliResult<KeyPair> {
-    let contents = std::fs::read_to_string(path).map_err(|_| CliError::KeyFilePerms {
+    let contents = std::fs::read_to_string(path).map_err(|e| CliError::KeyFilePerms {
         path: path.display().to_string(),
+        problem: format!("cannot read: {e}"),
     })?;
     let json: Value = serde_json::from_str(&contents).map_err(|_| CliError::Preflight {
         reason: format!("--from-keys {}: not valid JSON", path.display()),

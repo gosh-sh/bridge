@@ -69,6 +69,14 @@ acki-nacki-interface  = { path = "../../acki-nacki-interface" }
 # drift from what the proof will actually carry.
 gosh-dense-balanced-tree = { workspace = true }
 
+# Atomic state-file writes. Draws a random name, retries on collision, and
+# creates 0600 on Unix — the mode the rename carries onto the record.
+tempfile = "3"
+
+# statvfs + errno constants. Already in this workspace's lock file via
+# transitive deps, so this costs nothing.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }

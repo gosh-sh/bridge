@@ -25,7 +25,7 @@ Given the four user inputs (`--from`, `--from-keys`, `--to`,
 `--to-chain`, `--amount`), the tool runs a six-stage in-process
 pipeline:
 
-1. **Preflight** — read-only checks: `--from-keys` file mode is `0600`,
+1. **Preflight** — read-only checks: `--from-keys` file mode is `0400`,
    `--from` is an active single-custodian multisig whose owner matches
    `--from-keys`, USDCBridge resolves via GraphQL, multisig ECC[3]
    balance ≥ amount.
@@ -179,7 +179,7 @@ eval "$(scripts/deploy_msig_and_mint.sh)"
 # → sets WITHDRAW_FROM      (e.g. 2bd287b8ddb28adec2a17863ffc2d6e1c4fc48fbd1c833c6564f7f843588aad0::2bd287b8ddb28adec2a17863ffc2d6e1c4fc48fbd1c833c6564f7f843588aad0)
 #     format: <64-hex dapp_id>::<64-hex account_id> — single-custodian, both halves match
 # → sets WITHDRAW_FROM_KEYS (e.g. ./work_dir/msig_withdraw_cli.keys.json — the script emits an absolute path)
-#     format: path to a keys.json file, mode 0600
+#     format: path to a keys.json file, mode 0400
 ```
 
 Set the remaining per-invocation vars yourself:
@@ -363,7 +363,7 @@ vs subprocess failure origins, etc.) see the
 Nothing was broadcast; no state file written. The CLI prints the
 specific reason. Common causes:
 
-- `--from-keys` file is not mode `0600` → `chmod 600 <path>`
+- `--from-keys` file is not mode `0400` → `chmod 400 <path>`
 - `--from` is not `dapp_id::account_id` shape, or points to a
   multisig with >1 custodian, or the owner pubkey from `--from-keys`
   does not match the on-chain multisig

@@ -181,7 +181,7 @@ pub async fn run(
             source: None,
         }
     })?;
-    let local_pubkey = load_owner_pubkey_hex(from_keys)?;
+    let (local_pubkey, _secret) = load_owner_keypair_hex(from_keys)?;
     if !pubkeys_equal(&local_pubkey, on_chain_pubkey) {
         // Do NOT echo the local key back — even the public half is a stable
         // identifier that a user might not want in shell history. The
@@ -537,33 +537,72 @@ fn extract_ecc_balance(account: &Account, ecc_id: u32) -> CliResult<u128> {
 
 // -- Owner key normalization + comparison ------------------------------------
 
-/// Load the ed25519 public half from a TVM keys.json. The secret half is
-/// touched only insofar as `read_to_string` reads the whole file; it never
-/// leaves this function. The returned public hex is 64 lowercase chars.
-fn load_owner_pubkey_hex(path: &Path) -> CliResult<String> {
-    let contents = std::fs::read_to_string(path).map_err(|_| CliError::KeyFilePerms {
+/// Read `--from-keys` and return both halves, normalised. Preflight needs
+/// the public half for the owner match; it validates the secret half too so
+/// a truncated or hand-edited keys.json is refused HERE rather than at
+/// stage 3, after the confirmation prompt and the idempotency reserve.
+///
+/// The secret is returned as hex and immediately dropped by the caller —
+/// it is never logged, never stored, and never placed in an error.
+fn load_owner_keypair_hex(path: &Path) -> CliResult<(String, String)> {
+    let contents = std::fs::read_to_string(path).map_err(|e| CliError::KeyFilePerms {
         path: path.display().to_string(),
+        problem: format!("cannot read: {e}"),
     })?;
     let json: Value = serde_json::from_str(&contents).map_err(|_| CliError::Preflight {
         reason: format!("--from-keys {}: not valid JSON", path.display()),
         source: None,
     })?;
-    let pubkey = json.get("public").and_then(|v| v.as_str()).ok_or_else(|| {
-        CliError::Preflight {
+
+    let half = |field: &str| -> CliResult<String> {
+        let raw = json
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CliError::Preflight {
+                reason: format!(
+                    "--from-keys {}: missing '{field}' string field — a keys.json must carry both \
+                     'public' and 'secret'",
+                    path.display()
+                ),
+                source: None,
+            })?;
+        normalize_u256_hex(raw).ok_or_else(|| CliError::Preflight {
             reason: format!(
-                "--from-keys {}: missing 'public' string field",
+                "--from-keys {}: '{field}' field is not a valid uint256",
                 path.display()
             ),
             source: None,
-        }
-    })?;
-    normalize_u256_hex(pubkey).ok_or_else(|| CliError::Preflight {
-        reason: format!(
-            "--from-keys {}: 'public' field is not a valid uint256",
-            path.display()
-        ),
-        source: None,
-    })
+        })
+    };
+
+    let public = half("public")?;
+    let secret = half("secret")?;
+
+    // Both halves parse — now prove they belong together. `KeyPair::decode`
+    // derives the verifying key from the secret and compares it to the
+    // declared public. Skipping this lets a mismatched file sail through
+    // preflight AND through the on-chain owner comparison above (which only
+    // reads `public`). It would still be caught before the wire — the SDK
+    // calls this same `decode` while signing — but by then it is reported
+    // as BurnOutcomeUnknown (exit 10), telling the operator to reconcile a
+    // transaction that never existed.
+    //
+    // The SDK's error text embeds the public key; we drop it and emit our
+    // own, because no part of the key file goes into an error, a log, or
+    // --json output.
+    tvm_client::crypto::KeyPair::new(public.clone(), secret.clone())
+        .decode()
+        .map_err(|_| CliError::Preflight {
+            reason: format!(
+                "--from-keys {}: 'public' and 'secret' do not form a key pair (the public key \
+                 derived from 'secret' is a different one) — this file cannot sign for any \
+                 multisig",
+                path.display()
+            ),
+            source: None,
+        })?;
+
+    Ok((public, secret))
 }
 
 /// Coerce a `uint256` from any of {`0x<hex>`, `<hex>`, `<decimal>`} into
@@ -1389,6 +1428,77 @@ mod tests {
             ),
             r.usdc_bridge_extended,
             "the typed ids and the display string must be the same two values"
+        );
+    }
+
+    // -- --from-keys ------------------------------------------------------
+
+    // The pinned pair is declared once, in `crate::test_keys` — do NOT
+    // redeclare it here. Two copies that drift produce a keys.json whose
+    // halves do not match, and that fails inside the SDK rather than
+    // visibly.
+    use crate::test_keys::{PAIR_PUBLIC, PAIR_SECRET};
+
+    /// Write a keys.json and return its path.
+    fn write_keys(dir: &std::path::Path, public: &str, secret: &str) -> std::path::PathBuf {
+        let path = dir.join("keys.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"public":"{public}","secret":"{secret}"}}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn keypair_missing_secret_is_a_preflight_refusal() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("keys.json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, r#"{{"public":"{}"}}"#, "a".repeat(64)).unwrap();
+
+        let err = load_owner_keypair_hex(&path)
+            .expect_err("a keys.json with no secret half must be refused at preflight");
+        let msg = format!("{err}");
+        assert!(msg.contains("--from-keys"), "must name the flag, got: {msg}");
+        assert!(
+            msg.contains("secret"),
+            "must name the missing field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn keypair_with_matching_halves_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+
+        let (public, secret) = load_owner_keypair_hex(&path).expect("a real pair must be accepted");
+        assert_eq!(public, PAIR_PUBLIC);
+        assert_eq!(secret, PAIR_SECRET);
+    }
+
+    #[test]
+    fn keypair_with_mismatched_halves_is_refused() {
+        // The whole point of the ticket's "валидная пара" wording. Two
+        // independently well-formed 64-hex strings are NOT a key pair, and
+        // letting them through means the multisig rejects the signature after
+        // the message is already on the wire — an ambiguous exit 10 instead of
+        // a clean exit 2.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_keys(dir.path(), &"a".repeat(64), &"1".repeat(64));
+
+        let err = load_owner_keypair_hex(&path)
+            .expect_err("independent public/secret halves must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("--from-keys"), "must name the flag, got: {msg}");
+        assert!(
+            msg.contains("do not form a key pair") || msg.contains("does not match"),
+            "must say why, got: {msg}",
+        );
+        assert!(
+            !msg.contains(&"a".repeat(64)) && !msg.contains(&"1".repeat(64)),
+            "must not echo any half of the key file, got: {msg}",
         );
     }
 }

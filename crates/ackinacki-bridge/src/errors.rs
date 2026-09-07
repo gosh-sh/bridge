@@ -9,7 +9,7 @@
 //!
 //! **Never** put key file contents, private-key material, or the resolved
 //! signer public key into any error `Display` impl. Preflight refusals may
-//! print the *path* to a key file to guide `chmod 600 <path>`, but never the
+//! print the *path* to a key file to guide `chmod 400 <path>`, but never the
 //! bytes inside.
 
 use thiserror::Error;
@@ -90,10 +90,12 @@ pub enum CliError {
         got: String,
     },
 
-    /// Key file mode/ownership refusal. Prints the path only, never
-    /// contents.
-    #[error("--from-keys: key file {path} is not owner-only readable; run: chmod 600 {path}")]
-    KeyFilePerms { path: String },
+    /// Key file rejection. `problem` names which check failed so the
+    /// operator gets the right remedy; `path` is echoed to make the
+    /// remedy copy-pasteable. Contents are NEVER read here, let alone
+    /// printed.
+    #[error("--from-keys: {path}: {problem}")]
+    KeyFilePerms { path: String, problem: String },
 
     /// Any other preflight refusal (multisig detection, single-custodian,
     /// owner-key mismatch, balance shortfall, USDCBridge resolution).

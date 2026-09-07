@@ -97,9 +97,10 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "dapp_id::account_id")]
     pub from: String,
 
-    /// Path to the multisig owner's keys.json. File must be a regular
-    /// file, owned by the current uid, and mode `0600` — otherwise the
-    /// CLI refuses with `chmod 600 <path>`.
+    /// Path to the multisig owner's keys.json. Must be a regular file,
+    /// owned by the current uid, mode exactly `0400` (read-only for the
+    /// owner — the CLI never writes this file). Otherwise the CLI refuses
+    /// with `chmod 400 <path>`.
     #[arg(long, value_name = "PATH")]
     pub from_keys: PathBuf,
 
@@ -417,31 +418,61 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
     Ok(UsdcAmount(micros))
 }
 
-/// Enforce `--from-keys` file is a regular file, owned by the current uid,
-/// and mode is `0600` or stricter (no group/world bits).
+/// The one mode `--from-keys` may have.
+///
+/// Read-only for the owner. The CLI reads this file and nothing else, so a
+/// write bit buys nothing and an execute bit is meaningless; pinning the
+/// exact value makes the requirement checkable from a script instead of
+/// approximately describable in prose.
+pub const KEY_FILE_MODE: u32 = 0o400;
+
+/// Enforce that `--from-keys` is a regular file owned by the current uid
+/// and mode is exactly [`KEY_FILE_MODE`]. Each failure names its own remedy —
+/// telling someone to `chmod 400` a path that does not exist wastes a
+/// round trip and hides the real problem.
 pub fn check_key_file_perms(path: &std::path::Path) -> CliResult<()> {
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).map_err(|_| CliError::KeyFilePerms {
+
+    let refuse = |problem: String| CliError::KeyFilePerms {
         path: path.display().to_string(),
-    })?;
+        problem,
+    };
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(refuse("does not exist".into()));
+        },
+        Err(e) => {
+            return Err(refuse(format!("cannot stat: {e}")));
+        },
+    };
     if !meta.is_file() {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+        return Err(refuse("not a regular file".into()));
     }
-    // uid check
     let uid_now = unsafe { libc_getuid() };
     if meta.uid() != uid_now {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+        return Err(refuse(format!(
+            "owned by uid {} but this process runs as uid {uid_now}",
+            meta.uid()
+        )));
     }
-    // Mode: reject any bit outside owner rw.
+    // Exactly 0400. The CLI only ever reads this file — it never writes,
+    // rotates or appends — so read-only-to-owner is the tightest mode that
+    // still works, and an exact match is a contract an operator and a
+    // script can both check. "Owner-only" as a range would also admit 0600
+    // and 0700, which grant a write and an execute bit nothing needs.
+    //
+    // This refuses 0600, which is what today's README tells people to set,
+    // so the message has to be immediately actionable and the changelog
+    // entry is a breaking change.
     let mode = meta.mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+    if mode != KEY_FILE_MODE {
+        return Err(refuse(format!(
+            "mode is {mode:04o}, must be exactly {KEY_FILE_MODE:04o} (read-only for the owner; \
+             the CLI never writes this file); run: chmod 400 {}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -771,5 +802,64 @@ mod tests {
             msg.contains("BRIDGE_CONFIG"),
             "refusal must point at the profile file, got: {msg}"
         );
+    }
+
+    #[test]
+    fn key_file_refusal_distinguishes_missing_from_loose() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let missing = dir.path().join("nope.json");
+        let err = check_key_file_perms(&missing).expect_err("missing file must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("does not exist"), "got: {msg}");
+        assert!(
+            !msg.contains("chmod 400"),
+            "chmod is useless here, got: {msg}"
+        );
+
+        let a_dir = dir.path();
+        let err = check_key_file_perms(a_dir).expect_err("a directory must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("not a regular file"), "got: {msg}");
+
+        let loose = dir.path().join("loose.json");
+        std::fs::write(&loose, "{}").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = check_key_file_perms(&loose).expect_err("0644 must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("chmod 400"), "got: {msg}");
+        assert!(
+            msg.contains("0644") || msg.contains("644"),
+            "must name the mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_file_mode_is_exactly_0400() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let accepted = dir.path().join("ok.json");
+        std::fs::write(&accepted, "{}").unwrap();
+        std::fs::set_permissions(&accepted, std::fs::Permissions::from_mode(0o400)).unwrap();
+        check_key_file_perms(&accepted).expect("0400 is the required mode");
+
+        // Every other owner-only mode is refused too. 0600 is the important
+        // one: it is what today's README tells operators to set, so this is
+        // the assertion that pins the breaking change.
+        for mode in [0o600u32, 0o700, 0o500, 0o440, 0o000] {
+            let f = dir.path().join(format!("m{mode:o}.json"));
+            std::fs::write(&f, "{}").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            let err = check_key_file_perms(&f).expect_err(&format!(
+                "mode {mode:04o} must be refused, but was accepted"
+            ));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("chmod 400"),
+                "mode {mode:04o} must be refused with the exact remedy, got: {msg}",
+            );
+        }
     }
 }

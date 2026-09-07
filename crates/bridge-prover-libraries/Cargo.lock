@@ -32,6 +32,7 @@ dependencies = [
  "dotenvy",
  "gosh-dense-balanced-tree",
  "hex",
+ "libc",
  "rust_decimal",
  "serde",
  "serde_json",

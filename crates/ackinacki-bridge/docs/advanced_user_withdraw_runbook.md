@@ -215,7 +215,7 @@ done
 the default-user path):
 
 - `WITHDRAW_FROM` = `<dapp_id>::<account_id>` of the source AN multisig
-- `WITHDRAW_FROM_KEYS` = path to that multisig owner's `keys.json` (mode `0600`)
+- `WITHDRAW_FROM_KEYS` = path to that multisig owner's `keys.json` (mode `0400`)
 - `WITHDRAW_TO` = EVM recipient (`0x…` or `eip155:<id>:0x…`)
 - `WITHDRAW_TO_CHAIN` = numeric EIP-155 chain id (`11155111` for Sepolia)
 - `WITHDRAW_AMOUNT` = decimal USDC (e.g. `1.000000`), ≤ 6 fractional digits
@@ -622,7 +622,7 @@ regeneration is expensive.
 CLI never broadcast anything. Common causes with the human message
 the CLI prints:
 
-- `arg-invalid: --from-keys`: file mode is not `0600` → `chmod 600 <path>`
+- `arg-invalid: --from-keys`: file mode is not `0400` → `chmod 400 <path>`
 - `arg-invalid: --from`: not `dapp_id::account_id` shape, or dapp_id
   is wrong workchain
 - `preflight: multisig at --from is not deployed / not single-custodian`

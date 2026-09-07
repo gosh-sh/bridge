@@ -944,6 +944,29 @@ pub fn check_ceremony(params_dir: &Path) -> CliResult<()> {
     Ok(())
 }
 
+/// One `--help` run, bounded by `timeout`. Factored out so the ETXTBSY
+/// retry above has a single thing to repeat.
+async fn spawn_help(
+    release_bin: &Path,
+    aggregator_dir: &Path,
+    timeout: std::time::Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(release_bin)
+            .arg("--help")
+            .current_dir(aggregator_dir)
+            // Without this, a timeout cancels the future and leaves the
+            // child running — orphaned, holding the pipes, for as long as
+            // it likes. `timeout` bounds our wait, not its life.
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+}
+
 /// The committed verifier bytecode `aggregate-proof` self-checks against.
 pub fn check_verifier_bin(verifiers_dir: &Path, allow_drift: bool) -> CliResult<()> {
     let bin = verifiers_dir.join(WITHDRAW_VERIFIER_BIN);
@@ -1068,20 +1091,34 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
         ))
     })?;
 
-    let run = tokio::time::timeout(
-        timeout,
-        tokio::process::Command::new(&release_bin)
-            .arg("--help")
-            .current_dir(aggregator_dir)
-            // Without this, a timeout cancels the future and leaves the
-            // child running — orphaned, holding the pipes, for as long as it
-            // likes. `timeout` bounds our wait, not its life.
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output(),
-    )
-    .await;
+    // ETXTBSY is retried, and only ETXTBSY.
+    //
+    // Linux refuses to exec a file that any process has open for writing.
+    // The obvious case — a `cargo build` still running — is a real one an
+    // operator hits by pipelining build and run. The less obvious case is
+    // a fork/exec race inside a multi-threaded process: a concurrently
+    // spawning thread's child inherits the writer's descriptor for the
+    // window between fork and exec, and this exec fails while that window
+    // is open. It made this crate's own suite fail intermittently under
+    // parallel test threads, and it would do the same to an operator's
+    // scripted build-then-withdraw.
+    //
+    // Reporting that as "wrong architecture, or not executable" — which is
+    // what the arm below says — sends them to rebuild a binary that is
+    // fine. Three tries over ~300 ms costs nothing on the path that
+    // matters and removes the misdiagnosis.
+    let mut run = spawn_help(&release_bin, aggregator_dir, timeout).await;
+    for _ in 0..2 {
+        let busy = matches!(
+            &run,
+            Ok(Err(e)) if e.raw_os_error() == Some(libc::ETXTBSY)
+        );
+        if !busy {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        run = spawn_help(&release_bin, aggregator_dir, timeout).await;
+    }
 
     match run {
         // Not just "exited 0" — a stub that ignores its arguments does that
@@ -1105,6 +1142,15 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
             out.status,
             aggregator_dir.display(),
             String::from_utf8_lossy(&out.stderr).trim(),
+        ))),
+        // Still busy after the retries. Say what that actually is: the
+        // remedy is to wait for the writer, not to rebuild.
+        Ok(Err(e)) if e.raw_os_error() == Some(libc::ETXTBSY) => Err(refuse(format!(
+            "--aggregator-dir {}: {} cannot be executed because another process still has it open \
+             for writing (ETXTBSY). The binary is almost certainly fine — a build is probably \
+             still running. Wait for it to finish and re-run; nothing was sent.",
+            aggregator_dir.display(),
+            release_bin.display(),
         ))),
         Ok(Err(e)) => Err(refuse(format!(
             "--aggregator-dir {}: {} exists but cannot be executed: {e} — wrong architecture, or \

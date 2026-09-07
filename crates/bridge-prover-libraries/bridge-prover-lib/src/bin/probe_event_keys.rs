@@ -15,7 +15,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use bridge_prover_lib::keys::{
-    format_bytes, leaked_keygen_temp_files, probe_event_key_cache, KeyCacheState,
+    format_bytes, leaked_keygen_temp_files, probe_event_key_cache, sweep_leaked_keygen_temp_files,
+    KeyCacheState,
 };
 
 fn main() -> Result<()> {
@@ -145,42 +146,30 @@ fn main() -> Result<()> {
     // warm cache next to a leaked 2.65 GB temp is the common case, and it
     // never reaches the `Corrupt` arm above.
     //
-    // `--repair` is required, like every other deletion here. The paths
-    // come from `leaked_keygen_temp_files`, which matches only
-    // `.tmp` + six alphanumerics and only regular files, so a directory or
-    // a symlink someone put there is never in this list — but re-check the
-    // entry type anyway. The list was taken before the deletions above,
-    // and "the path I am about to delete is still the thing I looked at"
-    // is worth one syscall when the alternative is removing an operator's
-    // file.
+    // The deletion itself lives in the library, behind the keygen lock,
+    // and it belongs there rather than here. The first version of this
+    // sweep ran in this file and matched `.tmp` + six alphanumerics —
+    // which is exactly the name a keygen writes its ~2.65 GB proving key
+    // into. Run against a directory with a live keygen it unlinked that
+    // file, and the keygen then failed at its final rename, after the
+    // full seven minutes. Asking every caller to remember to take a lock
+    // is how that comes back; putting the lock inside the only function
+    // that deletes is how it does not.
     if repair && !leaks.is_empty() {
-        for l in &leaks {
-            match std::fs::symlink_metadata(&l.path) {
-                Ok(md) if md.is_file() => {},
-                // Gone already, or turned into something else between the
-                // scan and now. Either way, not ours to delete.
-                _ => {
-                    println!("  skipped {} (no longer a regular file)", l.path.display());
-                    continue;
-                },
-            }
-            match std::fs::remove_file(&l.path) {
-                Ok(()) => println!("  removed {}", l.path.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-                // Read-only mount, permissions. Surface it: reporting
-                // "swept" over a file that is still there sends the
-                // operator to free space that is not going to appear.
-                Err(e) => bail!("could not remove {}: {e}", l.path.display()),
-            }
+        match sweep_leaked_keygen_temp_files(&dir) {
+            Ok(removed) => {
+                for p in &removed {
+                    println!("  removed {}", p.display());
+                }
+                println!(
+                    "swept: {} interrupted-keygen temp file(s) removed",
+                    removed.len()
+                );
+            },
+            // A running keygen, a read-only mount. Both are worth the
+            // operator's attention and neither is "swept".
+            Err(e) => bail!("{e:#}"),
         }
-        let left = leaked_keygen_temp_files(&dir);
-        if !left.is_empty() {
-            bail!(
-                "{} leaked temp file(s) still present after the sweep",
-                left.len()
-            );
-        }
-        println!("swept: interrupted-keygen temp files removed");
     }
 
     Ok(())

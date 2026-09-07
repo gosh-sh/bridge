@@ -228,17 +228,27 @@ pub fn reserve(
         // manual-edited state file, hypothetical future writer
         // that marks Failed pre-burn).
         Status::Failed => {
-            if prior.an_tx_hash.is_some() {
-                Ok((prior, Reservation::Found))
-            } else {
-                // Wiped back to a fresh reservation. The identity is
-                // effectively ours from here, and there is no burn to
-                // collide with — `Failed` without a hash is only ever
-                // written by a pre-burn path.
-                let record = fresh_reserved_record(&key, from, to, amount);
-                write_record_atomic(state_dir, &path, &record)?;
-                Ok((record, Reservation::Created))
-            }
+            // `Found`, unconditionally, and there is no longer a branch
+            // that wipes.
+            //
+            // The old one fired when `an_tx_hash` was absent, on the
+            // stated grounds that "`Failed` without a hash is only ever
+            // written by a pre-burn path". No such path exists — the sole
+            // production writer of `Failed` is the post-burn
+            // `withdrawByProof` revert — so the branch only ever ran on a
+            // hand-edited or corrupt record, and it answered by writing a
+            // fresh record with `rename` and reporting `Created`.
+            //
+            // That is the whole invariant broken in one line. `Created` is
+            // the caller's evidence that THIS run won the atomic publish,
+            // and `rename` excludes nobody: two runs reading the same
+            // record could both wipe, both be told they created it, and
+            // both burn. `read_record` now refuses that record outright,
+            // so the case cannot reach here at all — and if a future edit
+            // ever lets it through, `Found` is still the safe answer,
+            // because `decide_burn` turns it into exit 3 rather than a
+            // second `initiateWithdrawal`.
+            Ok((prior, Reservation::Found))
         }
         // Active resumable states.
         Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
@@ -524,10 +534,25 @@ fn read_record(path: &Path) -> CliResult<Record> {
     //    "an_tx_hash":null}` deserialises cleanly, and every consumer then
     //    reads "no hash" as "nothing was sent" — so the run burns again,
     //    against a record that says a burn already happened.
+    //
+    // `Failed` belongs in this list and was missing from it. Its ONLY
+    // production writer is the `withdrawByProof` revert path
+    // (`orchestrator.rs`), which by construction runs after a successful
+    // burn — so a `Failed` record without a hash is exactly as impossible
+    // as a `Burned` one, and exactly as hand-editable. Leaving it out is
+    // what made `reserve`'s wipe branch reachable, and that branch
+    // published a fresh record with a plain rename and called the result
+    // `Created` — the one word that is supposed to mean "this run won the
+    // atomic publish". Two runs could both win it.
     if record.an_tx_hash.is_none()
         && matches!(
             record.status,
-            Status::Burned | Status::Captured | Status::Proved | Status::Submitted | Status::Confirmed
+            Status::Burned
+                | Status::Captured
+                | Status::Proved
+                | Status::Submitted
+                | Status::Confirmed
+                | Status::Failed
         )
     {
         return Err(CliError::Preflight {
@@ -982,22 +1007,71 @@ mod tests {
     }
 
     #[test]
-    fn reserve_over_failed_without_an_tx_hash_wipes_to_reserved() {
-        // Defensive branch: a `Failed` record with no `an_tx_hash` means
-        // no burn happened (only reachable via manual edit or a future
-        // writer that marks Failed pre-burn). Safe to wipe and start
-        // fresh without `--allow-retry`.
+    fn a_failed_record_with_no_hash_is_refused_not_wiped() {
+        // This test used to assert the opposite, and the behaviour it
+        // asserted was a double-burn path.
+        //
+        // `reserve` wiped a `Failed`/no-hash record back to a fresh
+        // `Reserved` one and reported `Reservation::Created`. That word is
+        // the caller's evidence that this run won the atomic publish — but
+        // the wipe went through `rename`, which excludes nobody. Two runs
+        // reading the same record both wiped, both were told they created
+        // it, and `decide_burn` sent for both.
+        //
+        // The justification in the comment ("only ever written by a
+        // pre-burn path") described a writer that does not exist: the sole
+        // production writer of `Failed` is the post-burn `withdrawByProof`
+        // revert. So the record is a hand-edit, and `read_record` now
+        // refuses it with the same message as `burned`-with-no-hash.
         let dir = TempDir::new().unwrap();
         let mut first = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
             .unwrap();
         first.status = Status::Failed;
-        // an_tx_hash intentionally left None
+        // an_tx_hash intentionally left None — the impossible combination.
         update(dir.path(), &first).unwrap();
 
-        let second = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
-            .expect("Failed without an_tx_hash is retryable without --allow-retry");
-        assert_eq!(second.status, Status::Reserved);
-        assert!(second.an_tx_hash.is_none());
+        let err = reserve_rec(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000), false)
+            .expect_err("a Failed record with no hash cannot be acted on");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no an_tx_hash"),
+            "must name the contradiction: {msg}"
+        );
+        assert!(
+            msg.contains("SECOND burn"),
+            "must say what acting on it would cost: {msg}"
+        );
+
+        // And `peek` refuses it too, so a real run stops at stage 1 rather
+        // than after the confirmation prompt and `compose`.
+        assert!(
+            peek(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(500_000)).is_err(),
+            "the same record must not read as absent"
+        );
+    }
+
+    #[test]
+    fn every_created_reservation_came_from_the_atomic_publish() {
+        // The invariant the wipe broke, stated where a reader can check
+        // it: `Reservation::Created` is returned from exactly one place,
+        // the `hard_link` that fails EEXIST when somebody else won.
+        //
+        // Not a behavioural test — a grep with an assertion on it. If a
+        // future branch grows a second `Created`, this fails and whoever
+        // wrote it has to argue that their publish excludes too.
+        let src = include_str!("idempotency.rs");
+        // The needle is built from two pieces on purpose: spelled whole,
+        // it would appear in this file and count itself.
+        let needle = concat!("Ok((record, Reservation::", "Created))");
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "exactly one site may report a created reservation",
+        );
+        assert!(
+            src.contains(concat!("std::fs::hard_", "link(tmp.path(), &path)")),
+            "and that site must still be the one that publishes by hard_link",
+        );
     }
 
     #[test]

@@ -903,11 +903,23 @@ assigns it when the release is tagged.
   environments.
 
 - **`ackinacki-bridge withdraw` refuses a state record that claims a burn
-  it cannot name.** A record with a status at or past `burned` and no
-  `an_tx_hash`, or one whose `key` disagrees with the filename it was
-  read from, is now rejected on read. Both are reachable by hand, and the
-  CLI's own post-burn recovery message asks operators to edit exactly
-  those fields.
+  it cannot name.** A record with no `an_tx_hash` whose status is any of
+  `burned`, `captured`, `proved`, `submitted`, `failed` or `confirmed`, or
+  one whose `key` disagrees with the filename it was read from, is now
+  rejected on read. Every one of those statuses is written only after a
+  burn was broadcast, so "no hash" and "past reserved" cannot both be
+  true. All are reachable by hand, and the CLI's own post-burn recovery
+  message asks operators to edit exactly those fields.
+
+  `failed` is in that list, and was the one initially left out of it. The
+  gap was not cosmetic: with `failed`/no-hash readable, the reservation
+  wiped the record and reported the result as a NEW reservation — a claim
+  that means "this run won the atomic publish", made about a plain
+  `rename` that excludes nobody. Two runs could both wipe, both be told
+  they had created it, and both burn. There is now exactly one place in
+  the crate that can report a created reservation, and it is the
+  `hard_link` that fails when somebody else won; a test asserts that
+  count.
 
 - **`ackinacki-bridge withdraw --from-keys` accepts a `0x`-prefixed or
   short keys.json.** Preflight normalised the file's halves while the
@@ -1004,6 +1016,18 @@ assigns it when the release is tagged.
   cache verdict) and removes them under `--repair`; matching is
   `.tmp` + exactly six alphanumerics and regular files only, so a
   directory or symlink of that name is listed to you and never touched.
+
+  **The sweep takes every circuit's keygen lock first and refuses if any
+  is held**, naming the circuit. That name shape is also what a keygen
+  writes its ~2.65 GB proving key into while the write is in progress, so
+  a sweep run against a live keygen would unlink the file being written —
+  the write survives, but the rename that publishes it fails, and the
+  keygen dies at the end having spent its full seven minutes. Under the
+  withdraw CLI that is stage 5, after the burn. It refuses rather than
+  waits: `--repair` is run to free space, and blocking it behind a keygen
+  that is itself consuming that space helps nobody. As a second guard for
+  any future writer that does not take the lock, a file observed still
+  changing is skipped rather than deleted.
   The withdraw preflight warns when it sees them, and its
   out-of-space refusal now names how much of the shortfall they are
   holding and the command that reclaims it — "free 4 GB" is the wrong

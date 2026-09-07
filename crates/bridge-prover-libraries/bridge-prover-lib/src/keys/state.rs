@@ -983,6 +983,96 @@ pub fn probe_event_key_cache(params_dir: &Path) -> KeyCacheState {
 /// `load_pk` operator hint. Auto-picks GiB / MiB / KiB so a large BLS
 /// PK reads as "3.62 GiB" while a smaller Circuit-4 PK reads as
 /// "412.7 MiB" instead of "0.40 GiB".
+/// Every prefix whose keygen writes into a `params_dir`.
+///
+/// Named here rather than derived, because the sweep below has to exclude
+/// ALL of them: a `.tmpXXXXXX` in that directory belongs to whichever
+/// keygen is running, and the lock is per circuit.
+const ALL_KEYGEN_PREFIXES: [&str; 4] = [
+    super::primary::PREFIX,
+    super::fallback::PREFIX,
+    super::layer::PREFIX,
+    EVENT_PREFIX,
+];
+
+/// Delete the temp files an interrupted keygen left in `params_dir` —
+/// **but never one a keygen is still writing.**
+///
+/// The two halves of this were added in the same series and collided.
+/// `write_atomic` publishes through a `.tmpXXXXXX` sibling that grows to
+/// the full ~2.65 GB over minutes, and the sweep matches exactly that
+/// name shape. A `--repair` run against a directory with a live keygen
+/// therefore unlinked the file being written. The write itself survives
+/// (the descriptor outlives the name), but the `rename` that publishes it
+/// fails ENOENT — so the keygen dies at the END, having burned its seven
+/// minutes, and in the withdraw CLI that is stage 5, after the money
+/// moved. Three separate CLI messages hand operators this exact command.
+///
+/// So the sweep takes the keygen lock for every circuit first, and
+/// refuses outright if any is held. Not "waits": `--repair` is an
+/// operator command run to free space, and blocking it for half an hour
+/// behind a keygen that is itself consuming that space is not a trade
+/// worth making. Refusing names the circuit and says to re-run after.
+///
+/// The locks cover every `write_atomic` caller that exists today — all
+/// four are inside `run_keygen`. The liveness re-stat below covers the
+/// one they do not: a writer added later, outside the lock. It is
+/// deliberately not an age cutoff. A cutoff has to guess how long a write
+/// takes, and guessing short destroys data while guessing long makes the
+/// tool useless; observing the file actually change does neither.
+pub fn sweep_leaked_keygen_temp_files(params_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut held = Vec::new();
+    let mut locks = Vec::new();
+    for prefix in ALL_KEYGEN_PREFIXES {
+        match KeygenLock::try_acquire(params_dir, prefix)? {
+            Some(f) => locks.push(f),
+            None => held.push(prefix),
+        }
+    }
+    if !held.is_empty() {
+        anyhow::bail!(
+            "not sweeping: a keygen is running in {} ({} lock(s) held: {}). Its temp file is \
+             indistinguishable from a leaked one, and deleting it makes the keygen fail at the \
+             very end — after the full run. Wait for it to finish and re-run.",
+            params_dir.display(),
+            held.len(),
+            held.join(", "),
+        );
+    }
+
+    let mut removed = Vec::new();
+    for leak in super::common::leaked_keygen_temp_files(params_dir) {
+        // Observe it, rather than assume. Anything still being written by
+        // a process that does not take the lock changes here.
+        let before = std::fs::symlink_metadata(&leak.path).ok().map(|m| m.len());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = std::fs::symlink_metadata(&leak.path).ok().map(|m| m.len());
+        if before.is_none() || before != after {
+            info!(
+                path = %leak.path.display(),
+                "skipping a temp file that is still changing — something is writing it",
+            );
+            continue;
+        }
+        // Re-check the entry type immediately before the unlink: the scan
+        // that produced this list ran before the sleep.
+        match std::fs::symlink_metadata(&leak.path) {
+            Ok(md) if md.is_file() => {},
+            _ => continue,
+        }
+        match std::fs::remove_file(&leak.path) {
+            Ok(()) => removed.push(leak.path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            // Read-only mount, permissions. Surface it: reporting "swept"
+            // over a file that is still there sends the operator to free
+            // space that is not going to appear.
+            Err(e) => return Err(e).with_context(|| format!("remove {}", leak.path.display())),
+        }
+    }
+    // `locks` drops here, releasing every flock.
+    Ok(removed)
+}
+
 /// The proving key's recorded digest and the file it describes, for a
 /// caller that wants to re-verify the key LATER.
 ///
@@ -1150,6 +1240,83 @@ mod tests {
                 .is_some(),
             "the kernel releases a flock when its holder dies",
         );
+    }
+
+    #[test]
+    fn the_sweep_refuses_while_any_keygen_holds_its_lock() {
+        // The collision between the two fixes in this series. The sweep
+        // matches `.tmp` + six alphanumerics, which is exactly the name a
+        // keygen writes its ~2.65 GB proving key into — so run against a
+        // live keygen it unlinked the file being written, and the keygen
+        // then failed at its final rename after the full seven minutes.
+        // In the withdraw CLI that is stage 5, after the burn.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".tmpLIVE01"), vec![0u8; 4096]).unwrap();
+
+        // Every circuit's lock is checked, not just the event one: a temp
+        // file in this directory belongs to whichever keygen is running,
+        // and the name does not say which.
+        for prefix in ALL_KEYGEN_PREFIXES {
+            let held = KeygenLock::acquire(d.path(), prefix).expect("uncontended");
+            let err = sweep_leaked_keygen_temp_files(d.path())
+                .expect_err("a live keygen's temp file must not be deleted");
+            let msg = format!("{err}");
+            assert!(msg.contains("a keygen is running"), "got: {msg}");
+            assert!(msg.contains(prefix), "must name the circuit: {msg}");
+            assert!(
+                d.path().join(".tmpLIVE01").exists(),
+                "{prefix}: the file must still be there",
+            );
+            drop(held);
+        }
+
+        // And with nothing held, it sweeps.
+        let removed = sweep_leaked_keygen_temp_files(d.path()).expect("no keygen is running");
+        assert_eq!(removed.len(), 1);
+        assert!(!d.path().join(".tmpLIVE01").exists());
+    }
+
+    #[test]
+    fn the_sweep_leaves_a_file_that_is_still_growing() {
+        // Defence in depth for a writer that does NOT take the lock —
+        // none exists today (all four `write_atomic` callers are inside
+        // `run_keygen`), but "nobody will add one" is not something this
+        // file can enforce. Deliberately an observation, not an age
+        // cutoff: a cutoff has to guess how long a write takes, and
+        // guessing short deletes live data.
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join(".tmpGROW01");
+        std::fs::write(&path, vec![0u8; 1024]).unwrap();
+
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                // Longer than the sweep's observation window, so the file
+                // is provably still changing when it looks.
+                for _ in 0..6 {
+                    let mut f = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap();
+                    use std::io::Write;
+                    f.write_all(&[0u8; 1024]).unwrap();
+                    drop(f);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+            })
+        };
+
+        let removed = sweep_leaked_keygen_temp_files(d.path()).expect("no lock is held");
+        assert!(
+            removed.is_empty(),
+            "a file that changed under observation must not be removed",
+        );
+        assert!(path.exists(), "and it must still be there");
+        writer.join().unwrap();
+
+        // Once it stops changing, it is ordinary litter again.
+        let removed = sweep_leaked_keygen_temp_files(d.path()).expect("no lock is held");
+        assert_eq!(removed.len(), 1);
     }
 
     #[test]

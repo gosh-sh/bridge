@@ -12,6 +12,10 @@ here and how versions are assigned.
 
 ### Added
 
+- `docs/eth-light-client.md`: design and deployment reference for the beacon
+  light client (components, step update, period rotation, trust switches,
+  deployment topology with ports and endpoints, configuration, operating
+  numbers), with Mermaid diagrams.
 - `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
   `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
   (`/eth/v1/config/spec`), picking the `fork_version` active at the update's

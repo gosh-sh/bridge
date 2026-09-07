@@ -7,16 +7,15 @@
 //! surface be unit-tested without a live network.
 //!
 //! Naming rationale (from Ekaterina's spec):
-//! - `--from` / `--to` — the two sides of the bridge; the value's shape
-//!   carries the type (the flag name doesn't say "address").
+//! - `--from` / `--to` — the two sides of the bridge; the value's shape carries
+//!   the type (the flag name doesn't say "address").
 //! - `--from-keys` — keys *to what's in --from*; no owner_ prefix.
-//! - `--amount` — token is fixed (USDC); putting the token in the flag name
-//!   is a trap that breaks the moment a second token arrives.
-//! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous
-//!   once the source side is selectable too.
+//! - `--amount` — token is fixed (USDC); putting the token in the flag name is
+//!   a trap that breaks the moment a second token arrives.
+//! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous once
+//!   the source side is selectable too.
 
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use alloy_primitives::Address;
 use clap::{Parser, Subcommand};
@@ -51,14 +50,12 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     about = "Acki Nacki ↔ EVM bridge CLI. Currently ships the `withdraw` subcommand.",
     long_about = "Composes a single-custodian multisig sendTransaction that calls \
                   USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
-                  resurrects the prover's mirror of `AckiNackiBridge` state from the \
-                  on-chain contract at --bridge-address, waits for the covering L1/L2 \
-                  anchor bundle to land (fed by a relayer running on some other host), \
-                  produces the Circuit-4 SHPLONK proof, and submits withdrawByProof on \
-                  the EVM side.\n\n\
-                  Third-party end-user CLI: expects only an EVM RPC URL and the deployed \
-                  AckiNackiBridge address — no local `prover_state.json`, no daemon on \
-                  this machine."
+                  resurrects the prover's mirror of `AckiNackiBridge` state from the on-chain \
+                  contract at --bridge-address, waits for the covering L1/L2 anchor bundle to \
+                  land (fed by a relayer running on some other host), produces the Circuit-4 \
+                  SHPLONK proof, and submits withdrawByProof on the EVM side.\n\nThird-party \
+                  end-user CLI: expects only an EVM RPC URL and the deployed AckiNackiBridge \
+                  address — no local `prover_state.json`, no daemon on this machine."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -106,8 +103,8 @@ pub struct WithdrawArgs {
 
     /// EVM recipient. Accepts:
     /// - `0x…` (20-byte hex); mixed-case must pass EIP-55 checksum
-    /// - CAIP-10 form `eip155:<chain>:<0x…>` (chain redundantly encoded;
-    ///   must match --to-chain if that is also supplied)
+    /// - CAIP-10 form `eip155:<chain>:<0x…>` (chain redundantly encoded; must
+    ///   match --to-chain if that is also supplied)
     #[arg(long, value_name = "0x… | eip155:<chain>:<0x…>")]
     pub to: String,
 
@@ -162,7 +159,6 @@ pub struct WithdrawArgs {
     pub allow_verifier_drift: bool,
 
     // -- Environment / plumbing --
-
     /// GraphQL endpoint for the AN chain (event capture + account queries).
     #[arg(long, env = "BRIDGE_GQL_ENDPOINT", value_name = "URL")]
     pub gql_endpoint: String,
@@ -177,7 +173,12 @@ pub struct WithdrawArgs {
 
     /// Anchor layer selection passed through to the enricher. Use `auto`
     /// (default) on L1 deploys; `2` with `--i-know-the-wait` on L2.
-    #[arg(long, env = "BRIDGE_ANCHOR_LAYER", default_value = "auto", value_name = "auto|1|2")]
+    #[arg(
+        long,
+        env = "BRIDGE_ANCHOR_LAYER",
+        default_value = "auto",
+        value_name = "auto|1|2"
+    )]
     pub anchor_layer: String,
 
     /// Acknowledge the L≥2 wait budget (up to ~101 min chain-time for L2).
@@ -328,7 +329,8 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
     } else {
         let chain = to_chain.ok_or_else(|| CliError::ArgInvalid {
             flag: "to-chain",
-            expected: "required when --to is plain 0x… (no default — irreversible on wrong chain)".into(),
+            expected: "required when --to is plain 0x… (no default — irreversible on wrong chain)"
+                .into(),
             got: "<absent>".into(),
         })?;
         (raw, chain)
@@ -378,7 +380,10 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         });
     }
 
-    Ok(ToAddress { address, chain_id })
+    Ok(ToAddress {
+        address,
+        chain_id,
+    })
 }
 
 /// Parse `--amount` as decimal USDC, reject > 6 fractional digits (no
@@ -412,11 +417,14 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
             expected: "value fits in u128 micro-USDC".into(),
             got: raw.into(),
         })?;
-    let micros: u128 = scaled.trunc().try_into().map_err(|_| CliError::ArgInvalid {
-        flag: "amount",
-        expected: "value fits in u128 micro-USDC".into(),
-        got: raw.into(),
-    })?;
+    let micros: u128 = scaled
+        .trunc()
+        .try_into()
+        .map_err(|_| CliError::ArgInvalid {
+            flag: "amount",
+            expected: "value fits in u128 micro-USDC".into(),
+            got: raw.into(),
+        })?;
     // Cap at u64::MAX micro-USDC. The multisig ECC[3] balance and the
     // AN-side `initiateWithdrawal(amount)` argument are u64 on the wire;
     // anything above 2^64 - 1 micro-USDC (~1.8e13 USDC) cannot be
@@ -624,7 +632,10 @@ mod tests {
         let raw = format!("0x{}::{}", "a".repeat(64), "b".repeat(64));
         assert!(matches!(
             parse_from(&raw),
-            Err(CliError::ArgInvalid { flag: "from", .. })
+            Err(CliError::ArgInvalid {
+                flag: "from",
+                ..
+            })
         ));
     }
 
@@ -633,7 +644,10 @@ mod tests {
         let raw = format!("0:{}", "a".repeat(64));
         assert!(matches!(
             parse_from(&raw),
-            Err(CliError::ArgInvalid { flag: "from", .. })
+            Err(CliError::ArgInvalid {
+                flag: "from",
+                ..
+            })
         ));
     }
 
@@ -641,7 +655,10 @@ mod tests {
     fn amount_rejects_seven_decimals() {
         assert!(matches!(
             parse_amount("1.0000001"),
-            Err(CliError::ArgInvalid { flag: "amount", .. })
+            Err(CliError::ArgInvalid {
+                flag: "amount",
+                ..
+            })
         ));
     }
 
@@ -670,7 +687,10 @@ mod tests {
         let raw = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, None),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
     }
 
@@ -686,7 +706,10 @@ mod tests {
         let raw = "eip155:1:0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, Some(11155111)),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
     }
 
@@ -695,7 +718,10 @@ mod tests {
         let raw = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, Some(999)),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
     }
 
@@ -750,7 +776,13 @@ mod tests {
         let raw = "0x0000000000000000000000000000000000000000";
         let res = parse_to(raw, Some(11155111));
         assert!(
-            matches!(res, Err(CliError::ArgInvalid { flag: "to", .. })),
+            matches!(
+                res,
+                Err(CliError::ArgInvalid {
+                    flag: "to",
+                    ..
+                })
+            ),
             "0x0 recipient must be refused, got {res:?}",
         );
     }
@@ -766,7 +798,13 @@ mod tests {
         let over = "18446744073709.551616";
         let res = parse_amount(over);
         assert!(
-            matches!(res, Err(CliError::ArgInvalid { flag: "amount", .. })),
+            matches!(
+                res,
+                Err(CliError::ArgInvalid {
+                    flag: "amount",
+                    ..
+                })
+            ),
             "one micro above u64::MAX must be refused, got {res:?}",
         );
     }
@@ -785,7 +823,13 @@ mod tests {
         // Deliberately corrupted checksum (swap two case bits).
         let raw = "0x742D35Cc6634c0532925a3b844Bc454e4438f44e";
         let res = parse_to(raw, Some(11155111));
-        assert!(matches!(res, Err(CliError::ArgInvalid { flag: "to", .. })));
+        assert!(matches!(
+            res,
+            Err(CliError::ArgInvalid {
+                flag: "to",
+                ..
+            })
+        ));
     }
 
     #[test]

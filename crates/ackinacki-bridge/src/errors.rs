@@ -129,9 +129,11 @@ pub enum CliError {
     // the flag they passed is a dead end, and `Prior AN tx: None` reads as
     // "nothing was sent". The only escape left to find was deleting the
     // record, which is the one thing that permits a second burn.
-    #[error("refuse: duplicate in-flight withdrawal ({prior_status}). \
-             Prior AN tx: {prior_tx:?}. Prior withdrawal msg_id: {prior_msg_id:?}. \
-             Reconcile via GraphQL, or re-run with --allow-retry to override.")]
+    #[error(
+        "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {prior_tx:?}. \
+         Prior withdrawal msg_id: {prior_msg_id:?}. Reconcile via GraphQL, or re-run with \
+         --allow-retry to override."
+    )]
     DuplicateInFlight {
         prior_status: String,
         prior_tx: Option<String>,
@@ -141,19 +143,19 @@ pub enum CliError {
     /// The reservation was found rather than created and carries no AN tx
     /// hash. Nothing can tell from the record whether a burn is on the
     /// wire; `another_run_is_live` is what the lock could tell us.
-    #[error("refuse: this withdrawal is already reserved ({prior_status}) and the record carries \
-             no AN tx hash, so whether a burn is on the wire cannot be read from it — the hash is \
-             written only after the send returns.\n\
-             \x20 {liveness}\n\
-             \x20 Record: {record_path}\n\
-             \x20 --allow-retry does NOT override this, and re-running will not change it.\n\
-             \x20 1. Reconcile on chain (advanced runbook, Case 3a): look for a \
-             sendTransaction from this multisig to USDCBridge around the record's reserved_at.\n\
-             \x20 2. If a burn DID land, write its hash into an_tx_hash and set status to \
-             \"burned\", then re-run with --allow-retry — the run resumes at capture.\n\
-             \x20 3. If nothing was broadcast AND the line above says no other run holds this \
-             withdrawal, delete the record and re-run. Deleting it while another run is mid-send \
-             is what causes the second burn this refusal exists to prevent.")]
+    #[error(
+        "refuse: this withdrawal is already reserved ({prior_status}) and the record carries no \
+         AN tx hash, so whether a burn is on the wire cannot be read from it — the hash is \
+         written only after the send returns.\n\x20 {liveness}\n\x20 Record: {record_path}\n\x20 \
+         --allow-retry does NOT override this, and re-running will not change it.\n\x20 1. \
+         Reconcile on chain (advanced runbook, Case 3a): look for a sendTransaction from this \
+         multisig to USDCBridge around the record's reserved_at.\n\x20 2. If a burn DID land, \
+         write its hash into an_tx_hash and set status to \"burned\", then re-run with \
+         --allow-retry — the run resumes at capture.\n\x20 3. If nothing was broadcast AND the \
+         line above says no other run holds this withdrawal, delete the record and re-run. \
+         Deleting it while another run is mid-send is what causes the second burn this refusal \
+         exists to prevent."
+    )]
     ReservationInFlight {
         prior_status: String,
         prior_msg_id: Option<String>,
@@ -198,16 +200,36 @@ impl CliError {
     /// `Err(e)` before returning.
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            CliError::ArgInvalid { .. }
-            | CliError::KeyFilePerms { .. }
-            | CliError::Usage { .. }
-            | CliError::Preflight { .. } => ExitCode::PreflightRefused,
-            CliError::DuplicateInFlight { .. }
-            | CliError::ReservationInFlight { .. } => ExitCode::DuplicateRefused,
-            CliError::BurnOutcomeUnknown { .. } => ExitCode::BurnOutcomeUnknown,
-            CliError::CaptureTimeout { .. } => ExitCode::CaptureTimeout,
-            CliError::ProofFailed { .. } => ExitCode::ProofFailed,
-            CliError::EthSubmitFailed { .. } => ExitCode::EthSubmitFailed,
+            CliError::ArgInvalid {
+                ..
+            }
+            | CliError::KeyFilePerms {
+                ..
+            }
+            | CliError::Usage {
+                ..
+            }
+            | CliError::Preflight {
+                ..
+            } => ExitCode::PreflightRefused,
+            CliError::DuplicateInFlight {
+                ..
+            }
+            | CliError::ReservationInFlight {
+                ..
+            } => ExitCode::DuplicateRefused,
+            CliError::BurnOutcomeUnknown {
+                ..
+            } => ExitCode::BurnOutcomeUnknown,
+            CliError::CaptureTimeout {
+                ..
+            } => ExitCode::CaptureTimeout,
+            CliError::ProofFailed {
+                ..
+            } => ExitCode::ProofFailed,
+            CliError::EthSubmitFailed {
+                ..
+            } => ExitCode::EthSubmitFailed,
         }
     }
 
@@ -215,16 +237,36 @@ impl CliError {
     /// `--json` error emitter.
     pub fn stage(&self) -> Stage {
         match self {
-            CliError::ArgInvalid { .. }
-            | CliError::KeyFilePerms { .. }
-            | CliError::Usage { .. }
-            | CliError::Preflight { .. }
-            | CliError::DuplicateInFlight { .. }
-            | CliError::ReservationInFlight { .. } => Stage::Preflight,
-            CliError::BurnOutcomeUnknown { .. } => Stage::Burn,
-            CliError::CaptureTimeout { .. } => Stage::Capture,
-            CliError::ProofFailed { .. } => Stage::Prove,
-            CliError::EthSubmitFailed { .. } => Stage::Submit,
+            CliError::ArgInvalid {
+                ..
+            }
+            | CliError::KeyFilePerms {
+                ..
+            }
+            | CliError::Usage {
+                ..
+            }
+            | CliError::Preflight {
+                ..
+            }
+            | CliError::DuplicateInFlight {
+                ..
+            }
+            | CliError::ReservationInFlight {
+                ..
+            } => Stage::Preflight,
+            CliError::BurnOutcomeUnknown {
+                ..
+            } => Stage::Burn,
+            CliError::CaptureTimeout {
+                ..
+            } => Stage::Capture,
+            CliError::ProofFailed {
+                ..
+            } => Stage::Prove,
+            CliError::EthSubmitFailed {
+                ..
+            } => Stage::Submit,
         }
     }
 }
@@ -259,7 +301,10 @@ mod tests {
             ExitCode::DuplicateRefused
         );
         assert_eq!(
-            CliError::CaptureTimeout { an_tx: "0x…".into() }.exit_code(),
+            CliError::CaptureTimeout {
+                an_tx: "0x…".into()
+            }
+            .exit_code(),
             ExitCode::CaptureTimeout
         );
     }

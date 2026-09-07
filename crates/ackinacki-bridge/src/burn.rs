@@ -7,14 +7,14 @@
 //! error, or JSON field.
 //!
 //! Encoding path (v1, in-library via tvm-sdk — no `tvm-cli` shell-out):
-//!   1. `encode_message_body` against the USDCBridge ABI to produce the
-//!      base64 payload cell for `initiateWithdrawal(dstChainId, recipient)`.
+//!   1. `encode_message_body` against the USDCBridge ABI to produce the base64
+//!      payload cell for `initiateWithdrawal(dstChainId, recipient)`.
 //!      `is_internal = true` because the payload will be carried by the
 //!      multisig's outbound internal message, not signed externally.
-//!   2. `process_message` against the multisig's `sendTransaction`, signed
-//!      with the KeyPair loaded from `--from-keys`. The multisig forwards
-//!      the payload with `value = 1 AN`, `cc[3] = <amount>` (ECC[3] USDC
-//!      required by USDCBridge), and `flags = 1`.
+//!   2. `process_message` against the multisig's `sendTransaction`, signed with
+//!      the KeyPair loaded from `--from-keys`. The multisig forwards the
+//!      payload with `value = 1 AN`, `cc[3] = <amount>` (ECC[3] USDC required
+//!      by USDCBridge), and `flags = 1`.
 //!
 //! Bounce semantics: caller passes `bounce`. Ekaterina's spec defaults to
 //! `bounce = true` so a bridge revert returns USDC to the multisig instead
@@ -25,36 +25,39 @@
 //! Error mapping discipline. The split into [`compose`] and [`send`] is
 //! exactly this discipline made structural:
 //! - [`compose`] is the **pre-send** half. Key-file open/parse failures →
-//!   `CliError::KeyFilePerms` / `Preflight`; body encoding, the multisig
-//!   call composition, and the validating `encode_message` → `Preflight`.
-//!   Every one of them is exit 2 and provably means nothing was broadcast,
-//!   which is what lets the orchestrator take the idempotency reserve
-//!   *after* this half and before the next one.
+//!   `CliError::KeyFilePerms` / `Preflight`; body encoding, the multisig call
+//!   composition, and the validating `encode_message` → `Preflight`. Every one
+//!   of them is exit 2 and provably means nothing was broadcast, which is what
+//!   lets the orchestrator take the idempotency reserve *after* this half and
+//!   before the next one.
 //! - [`send`] is the **post-commit** half. Every failure is
 //!   `BurnOutcomeUnknown` (exit 10), including a clean-looking `Ok` whose
 //!   transaction aborted: we can't reliably tell "not sent" from "sent,
 //!   waiting" from the tvm-sdk error shape, so we default to the safe
 //!   assumption that the operator must reconcile.
-//! - Neither half lets an SDK error text through. The signing path
-//!   interpolates the public key verbatim and the secret's first eight
-//!   characters into its messages (`tvm_client/src/crypto/errors.rs:118-126`),
-//!   so the error CODE is kept as a classifier and the text is dropped.
+//! - Neither half lets an SDK error text through. The signing path interpolates
+//!   the public key verbatim and the secret's first eight characters into its
+//!   messages (`tvm_client/src/crypto/errors.rs:118-126`), so the error CODE is
+//!   kept as a classifier and the text is dropped.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use serde_json::{json, Value};
 use tracing::debug;
-use tvm_client::abi::{
-    encode_message_body, Abi, CallSet, ParamsOfEncodeMessage, ParamsOfEncodeMessageBody, Signer,
+use tvm_client::{
+    abi::{
+        encode_message_body, Abi, CallSet, ParamsOfEncodeMessage, ParamsOfEncodeMessageBody, Signer,
+    },
+    crypto::KeyPair,
+    processing::{process_message, ParamsOfProcessMessage},
+    ClientContext,
 };
-use tvm_client::crypto::KeyPair;
-use tvm_client::processing::{process_message, ParamsOfProcessMessage};
-use tvm_client::ClientContext;
 
-use crate::args::{FromAddress, ToAddress, UsdcAmount};
-use crate::errors::{CliError, CliResult};
-use crate::preflight::PreflightReport;
+use crate::{
+    args::{FromAddress, ToAddress, UsdcAmount},
+    errors::{CliError, CliResult},
+    preflight::PreflightReport,
+};
 
 /// Vendored USDCBridge ABI — embedded at build time so the binary has no
 /// runtime companion directory.
@@ -444,8 +447,8 @@ fn load_keypair(path: &Path) -> CliResult<KeyPair> {
             })?;
         crate::preflight::normalize_key_file_hex(raw).ok_or_else(|| CliError::Preflight {
             reason: format!(
-                "--from-keys {}: '{field}' field is not 1-64 hex characters (an optional \
-                 `0x` prefix is accepted)",
+                "--from-keys {}: '{field}' field is not 1-64 hex characters (an optional `0x` \
+                 prefix is accepted)",
                 path.display()
             ),
             source: None,
@@ -453,7 +456,10 @@ fn load_keypair(path: &Path) -> CliResult<KeyPair> {
     };
     let public = half("public")?;
     let secret = half("secret")?;
-    Ok(KeyPair { public, secret })
+    Ok(KeyPair {
+        public,
+        secret,
+    })
 }
 
 /// Encode `USDCBridge.initiateWithdrawal(dstChainId, recipient)` as an
@@ -474,18 +480,15 @@ async fn encode_initiate_withdrawal_body(
     let abi = Abi::Json(USDC_BRIDGE_ABI_JSON.to_string());
     let call_set = CallSet::some_with_function_and_input("initiateWithdrawal", params)
         .expect("initiateWithdrawal params are always Some");
-    let encoded = encode_message_body(
-        ctx.clone(),
-        ParamsOfEncodeMessageBody {
-            abi,
-            call_set,
-            is_internal: true,
-            signer: Signer::None,
-            processing_try_index: None,
-            address: None,
-            signature_id: None,
-        },
-    )
+    let encoded = encode_message_body(ctx.clone(), ParamsOfEncodeMessageBody {
+        abi,
+        call_set,
+        is_internal: true,
+        signer: Signer::None,
+        processing_try_index: None,
+        address: None,
+        signature_id: None,
+    })
     .await
     .map_err(|e| CliError::Preflight {
         reason: format!(
@@ -604,36 +607,29 @@ mod tests {
     #[test]
     fn extract_tx_id_prefers_id_field() {
         let tx = json!({ "id": "0xabc", "hash": "0xdef" });
-        assert_eq!(
-            extract_tx_id(&tx).unwrap(),
-            format!("0x{:0>64}", "abc"),
-        );
+        assert_eq!(extract_tx_id(&tx).unwrap(), format!("0x{:0>64}", "abc"),);
     }
 
     #[test]
     fn extract_tx_id_falls_back_to_hash() {
         let tx = json!({ "hash": "abc" });
-        assert_eq!(
-            extract_tx_id(&tx).unwrap(),
-            format!("0x{:0>64}", "abc"),
-        );
+        assert_eq!(extract_tx_id(&tx).unwrap(), format!("0x{:0>64}", "abc"),);
     }
 
     #[test]
     fn extract_tx_id_full_64_hex_lowercased() {
         let full = "A".repeat(64);
         let tx = json!({ "id": format!("0x{full}") });
-        assert_eq!(
-            extract_tx_id(&tx).unwrap(),
-            format!("0x{}", "a".repeat(64)),
-        );
+        assert_eq!(extract_tx_id(&tx).unwrap(), format!("0x{}", "a".repeat(64)),);
     }
 
     #[test]
     fn extract_tx_id_missing_is_burn_unknown() {
         let tx = json!({});
         match extract_tx_id(&tx) {
-            Err(CliError::BurnOutcomeUnknown { .. }) => (),
+            Err(CliError::BurnOutcomeUnknown {
+                ..
+            }) => (),
             other => panic!("expected BurnOutcomeUnknown, got {other:?}"),
         }
     }
@@ -752,9 +748,11 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, r#"{{"secret":"{}"}}"#, "1".repeat(64)).unwrap();
         match load_keypair(&path) {
-            Err(CliError::Preflight { reason, .. }) => {
+            Err(CliError::Preflight {
+                reason, ..
+            }) => {
                 assert!(reason.contains("missing 'public'"), "got {reason}");
-            }
+            },
             other => panic!("expected Preflight, got {other:?}"),
         }
     }
@@ -764,7 +762,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("nope.json");
         match load_keypair(&path) {
-            Err(CliError::KeyFilePerms { .. }) => (),
+            Err(CliError::KeyFilePerms {
+                ..
+            }) => (),
             other => panic!("expected KeyFilePerms, got {other:?}"),
         }
     }

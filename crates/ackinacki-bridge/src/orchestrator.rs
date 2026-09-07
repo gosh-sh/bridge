@@ -6,54 +6,55 @@
 //! 2. **Idempotency** ([`crate::idempotency`]) — exit 3 on duplicate.
 //! 3. **Burn** ([`crate::burn`]) — exit 10 on unknown-outcome mid-send.
 //! 4. **Capture** — chain-follows the multisig `an_tx_hash` through
-//!    USDCBridge's `dst_transaction` to the WithdrawalInitiated ExtOut
-//!    via [`bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event`].
-//!    This is multi-user-safe: filtering by our specific tx hash instead
-//!    of youngest-picking a shared USDCBridge queue means concurrent
-//!    burns from other operators cannot be mis-selected as ours. Exit 11
-//!    on capture timeout (burn bounced, GQL unreachable, or USDCBridge
-//!    never emitted the ExtOut).
+//!    USDCBridge's `dst_transaction` to the WithdrawalInitiated ExtOut via
+//!    [`bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event`].
+//!    This is multi-user-safe: filtering by our specific tx hash instead of
+//!    youngest-picking a shared USDCBridge queue means concurrent burns from
+//!    other operators cannot be mis-selected as ours. Exit 11 on capture
+//!    timeout (burn bounced, GQL unreachable, or USDCBridge never emitted the
+//!    ExtOut).
 //!
 //! 4b. **Resurrect + coverage-wait** — see [`crate::resurrect`].
 //!
 //! 5. **Prove** — reuses
-//!    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`] with
-//!    the just-captured event and the resurrected `BridgeState`. Exit 12
-//!    on prover failure.
+//!    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`] with the
+//!    just-captured event and the resurrected `BridgeState`. Exit 12 on prover
+//!    failure.
 //! 6. **Submit** — reuses [`bridge_relayer_daemon::bridge::EthBridgeClient`]
-//!    `dry_run_withdraw` (always) and `submit_withdraw` (unless
-//!    `--dry-run`). Exit 13 on revert.
+//!    `dry_run_withdraw` (always) and `submit_withdraw` (unless `--dry-run`).
+//!    Exit 13 on revert.
 //!
 //! Every stage transition updates the idempotency record so a mid-flight
 //! crash leaves a resumable trace. v1 doesn't implement `--resume`, but
 //! the state file is written eagerly regardless so v2 has what it needs.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use alloy::network::EthereumWallet;
-use alloy::providers::ProviderBuilder;
-use alloy::signers::Signer;
-use tracing::{info, warn};
-
+use alloy::{network::EthereumWallet, providers::ProviderBuilder, signers::Signer};
 use bridge_event_witness::AnchorLayerMode;
-use bridge_relayer_daemon::bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome};
-use bridge_relayer_daemon::withdraw_e2e::{run_once_with_state, WithdrawE2EConfig};
+use bridge_relayer_daemon::{
+    bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome},
+    withdraw_e2e::{run_once_with_state, WithdrawE2EConfig},
+};
+use tracing::{info, warn};
+use tvm_client::{net::NetworkConfig, ClientConfig, ClientContext};
 
-use crate::args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs};
-use crate::burn;
-use crate::errors::{CliError, CliResult};
-use crate::idempotency::{self, Status};
-use crate::preflight;
-use crate::resurrect::{covering_bundle_seq_no, stride_for, wait_for_coverage};
-use tvm_client::net::NetworkConfig;
-use tvm_client::{ClientConfig, ClientContext};
+use crate::{
+    args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs},
+    burn,
+    errors::{CliError, CliResult},
+    idempotency::{self, Status},
+    preflight,
+    resurrect::{covering_bundle_seq_no, stride_for, wait_for_coverage},
+};
 
 /// Default `WithdrawalInitiated` ExtOut `dst` sentinel — `makeAddrExtern(618)`.
 /// Matches the relayer daemon CLI default (`bin/relayer.rs:470`).
-const DEFAULT_EVENT_DST: &str =
-    ":000000000000000000000000000000000000000000000000000000000000026a";
+const DEFAULT_EVENT_DST: &str = ":000000000000000000000000000000000000000000000000000000000000026a";
 
 /// Capture wait budget — matches Python driver expectation (a few blocks
 /// after the burn broadcast). Not exposed as a flag because v1 users don't
@@ -455,16 +456,14 @@ pub async fn run(
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
     // back into its two halves — the capture helper wants them separately.
-    let (bridge_dapp_id_hex, bridge_account_id_hex) = split_extended(
-        &preflight.usdc_bridge_extended,
-    )
-    .ok_or_else(|| CliError::Preflight {
-        reason: format!(
-            "internal: usdc_bridge_extended {} is not `dapp_id::account_id`",
-            preflight.usdc_bridge_extended
-        ),
-        source: None,
-    })?;
+    let (bridge_dapp_id_hex, bridge_account_id_hex) =
+        split_extended(&preflight.usdc_bridge_extended).ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "internal: usdc_bridge_extended {} is not `dapp_id::account_id`",
+                preflight.usdc_bridge_extended
+            ),
+            source: None,
+        })?;
 
     info!("stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)");
     let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
@@ -524,11 +523,12 @@ pub async fn run(
         target_covering_seq_no,
         "waiting for on-chain coverage",
     );
-    let ro_provider = ProviderBuilder::new()
-        .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {
+    let ro_provider = ProviderBuilder::new().connect_http(args.rpc_url.parse().map_err(|e| {
+        CliError::EthSubmitFailed {
             reason: format!("--rpc-url is not a valid URL: {e}"),
             source: None,
-        })?);
+        }
+    })?);
     let ro_bridge_for_wait = EthBridgeClient::new(args.bridge_address, ro_provider);
     let bridge_state = wait_for_coverage(
         &ro_bridge_for_wait,
@@ -621,22 +621,30 @@ pub async fn run(
 
     // ---- 6. Submit (dry-run then real) ----
     info!("stage 6/6: submit withdrawByProof");
-    let proof_bytes = e2e.proof.proof_bytes().map_err(|e| CliError::EthSubmitFailed {
-        reason: format!("PartnerWithdrawalProof::proof_bytes: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
-    })?;
-    let pub_inputs = e2e.proof.public_inputs().map_err(|e| CliError::EthSubmitFailed {
-        reason: format!("PartnerWithdrawalProof::public_inputs: {e}"),
-        source: Some(anyhow::anyhow!("{e}")),
-    })?;
+    let proof_bytes = e2e
+        .proof
+        .proof_bytes()
+        .map_err(|e| CliError::EthSubmitFailed {
+            reason: format!("PartnerWithdrawalProof::proof_bytes: {e}"),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
+    let pub_inputs = e2e
+        .proof
+        .public_inputs()
+        .map_err(|e| CliError::EthSubmitFailed {
+            reason: format!("PartnerWithdrawalProof::public_inputs: {e}"),
+            source: Some(anyhow::anyhow!("{e}")),
+        })?;
 
     // Always dry-run first — catches on-chain-side issues (paused bridge,
     // treasury shortfall) before we spend gas.
     {
-        let ro_provider = ProviderBuilder::new()
-            .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {
-                reason: format!("--rpc-url is not a valid URL: {e}"),
-                source: None,
+        let ro_provider =
+            ProviderBuilder::new().connect_http(args.rpc_url.parse().map_err(|e| {
+                CliError::EthSubmitFailed {
+                    reason: format!("--rpc-url is not a valid URL: {e}"),
+                    source: None,
+                }
             })?);
         let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
         match ro_bridge
@@ -647,12 +655,14 @@ pub async fn run(
                 source: Some(anyhow::anyhow!("{e}")),
             })? {
             DryRunOutcome::WouldSucceed => info!("eth dry-run: withdrawByProof would succeed"),
-            DryRunOutcome::WouldRevert { reason } => {
+            DryRunOutcome::WouldRevert {
+                reason,
+            } => {
                 return Err(CliError::EthSubmitFailed {
                     reason: format!("withdrawByProof dry-run reverted: {reason}"),
                     source: None,
                 });
-            }
+            },
         }
     }
 
@@ -666,12 +676,17 @@ pub async fn run(
     // stage 1 and stage 6.
     let signer = preflight::parse_eth_signer(&plumbing_ref.eth_private_key)?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(to.chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_http(args.rpc_url.parse().map_err(|e| CliError::EthSubmitFailed {
-            reason: format!("--rpc-url parse: {e}"),
-            source: None,
-        })?);
+    let provider =
+        ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(
+                args.rpc_url
+                    .parse()
+                    .map_err(|e| CliError::EthSubmitFailed {
+                        reason: format!("--rpc-url parse: {e}"),
+                        source: None,
+                    })?,
+            );
     let bridge = EthBridgeClient::new(args.bridge_address, provider);
 
     // NB: `Status::Submitted` is written only AFTER `submit_withdraw`
@@ -688,7 +703,9 @@ pub async fn run(
             reason: format!("submit_withdraw: {e}"),
             source: Some(anyhow::anyhow!("{e}")),
         })? {
-        WithdrawSubmitOutcome::Paid { tx_hash } => {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        } => {
             let tx = format!("{tx_hash:?}");
             info!(tx = %tx, "withdrawByProof paid out");
             // Preserve the two-step trail (Submitted → Confirmed) so debug
@@ -709,8 +726,10 @@ pub async fn run(
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
             }
-        }
-        WithdrawSubmitOutcome::Reverted { reason } => {
+        },
+        WithdrawSubmitOutcome::Reverted {
+            reason,
+        } => {
             // Preserve the proof so a follow-up run can re-submit without
             // re-proving. `proof_json_path` is populated by the aggregator
             // subprocess if the operator passed `--prover-out-dir`; when
@@ -731,7 +750,7 @@ pub async fn run(
                 reason: format!("withdrawByProof reverted: {reason}"),
                 source: None,
             });
-        }
+        },
     };
 
     if let Some(r) = record.as_mut() {
@@ -1030,7 +1049,7 @@ fn confirm_before_burn(
             // their own. Say so out loud.
             let _ = n;
             "unbounded (no shipped relayer for L≥3)"
-        }
+        },
     };
 
     // One string, one write, one result to check. It used to be sixteen
@@ -1044,23 +1063,13 @@ fn confirm_before_burn(
     // A redirect is NOT that case: `2>file` writes fine, and the prompt
     // is in the file. Only a write that actually fails gets refused.
     let prompt = format!(
-        "\n\
-         About to withdraw USDC:\n\
-         \x20 from      : {from}\n\
-         \x20 to        : 0x{to_hex} on {chain_name} (chain {chain_id})\n\
-         \x20 amount    : {amount_display} USDC\n\
-         \x20 bridge    : {bridge}\n\
-         \x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\
-         \n\
-         This will:\n\
-         \x20 1. broadcast a multisig sendTransaction burning {amount_display} USDC on Acki \
-         Nacki\n\
-         \x20 2. wait for the covering anchor bundle to land on Sepolia\n\
-         \x20 3. produce a Circuit-4 SHPLONK proof\n\
-         \x20 4. submit withdrawByProof (spends ETH gas)\n\
-         \n\
-         The AN burn is irreversible once broadcast. Pass --yes to skip this prompt.\n\
-         Proceed? [y/N]: ",
+        "\nAbout to withdraw USDC:\n\x20 from      : {from}\n\x20 to        : 0x{to_hex} on \
+         {chain_name} (chain {chain_id})\n\x20 amount    : {amount_display} USDC\n\x20 bridge    \
+         : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis will:\n\x20 1. \
+         broadcast a multisig sendTransaction burning {amount_display} USDC on Acki Nacki\n\x20 \
+         2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. produce a Circuit-4 \
+         SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH gas)\n\nThe AN burn is \
+         irreversible once broadcast. Pass --yes to skip this prompt.\nProceed? [y/N]: ",
         from = from.extended(),
         to_hex = hex::encode(to.address.as_slice()),
         chain_id = to.chain_id,

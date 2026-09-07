@@ -8,14 +8,14 @@
 //! [`EthBridgeClient::read_full_state`] + [`BridgeState::from_contract`].
 //!
 //! Two responsibilities:
-//! 1. **[`wait_for_coverage`]** — poll the contract until the covering
-//!    bundle for the just-fired burn lands (i.e.
-//!    `storedLastSeenBlockSeqNo >= ceil(burn_seq_no / stride) * stride`).
-//!    Returns the resurrected `BridgeState` snapshot at the moment
-//!    coverage was observed. This is the state the enricher needs.
-//! 2. **[`covering_bundle_seq_no`]** — the pure math: round the burn
-//!    seq_no up to the next multiple of the anchoring stride. Exposed
-//!    for tests and for the orchestrator to log the target.
+//! 1. **[`wait_for_coverage`]** — poll the contract until the covering bundle
+//!    for the just-fired burn lands (i.e. `storedLastSeenBlockSeqNo >=
+//!    ceil(burn_seq_no / stride) * stride`). Returns the resurrected
+//!    `BridgeState` snapshot at the moment coverage was observed. This is the
+//!    state the enricher needs.
+//! 2. **[`covering_bundle_seq_no`]** — the pure math: round the burn seq_no up
+//!    to the next multiple of the anchoring stride. Exposed for tests and for
+//!    the orchestrator to log the target.
 //!
 //! **Anchoring assumption.** L1 stride is 1024 seq_nos (`W·P`); L2 stride
 //! is 16 384 seq_nos (`W²`). `AnchorLayerMode::Auto` picks L1 here — if
@@ -27,12 +27,10 @@ use std::time::{Duration, Instant};
 
 use alloy::{network::Network, providers::Provider};
 use anyhow::{Context, Result};
-use tracing::info;
-
 use bridge_event_witness::AnchorLayerMode;
-use bridge_prover_lib::bridge_state::BridgeState;
-use bridge_prover_lib::AnchorMode;
+use bridge_prover_lib::{bridge_state::BridgeState, AnchorMode};
 use bridge_relayer_daemon::bridge::{EthBridgeClient, HISTORY_PROOF_WINDOW};
+use tracing::info;
 
 /// Resolve the anchoring stride the CLI should wait against. See module
 /// docstring for the Auto-vs-Explicit-2 caveat.
@@ -107,8 +105,8 @@ where
         );
         if observed >= target_seq_no {
             let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
-                "BridgeState::from_contract failed — on-chain layer window shape does not \
-                 match HISTORY_PROOF_WINDOW (128)",
+                "BridgeState::from_contract failed — on-chain layer window shape does not match \
+                 HISTORY_PROOF_WINDOW (128)",
             )?;
             info!(
                 observed_last_seen = observed,
@@ -156,7 +154,10 @@ mod tests {
 
     #[test]
     fn covering_bundle_zero_is_zero() {
-        assert_eq!(covering_bundle_seq_no(0, bridge_prover_lib::BUNDLE_STRIDE_L1), 0);
+        assert_eq!(
+            covering_bundle_seq_no(0, bridge_prover_lib::BUNDLE_STRIDE_L1),
+            0
+        );
     }
 
     #[test]

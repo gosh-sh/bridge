@@ -4,8 +4,8 @@
 //! 1. Wire the module tree together.
 //! 2. Set up tracing (stderr, `RUST_LOG` env filter, no ANSI when not a TTY).
 //! 3. Dispatch subcommands to [`orchestrator::run`] and translate the typed
-//!    [`errors::CliError`] into a process exit code per
-//!    [`errors::ExitCode`]'s wire contract.
+//!    [`errors::CliError`] into a process exit code per [`errors::ExitCode`]'s
+//!    wire contract.
 //!
 //! All human vs. `--json` formatting is delegated to [`output`]. All
 //! validation lives in [`args`]. There is deliberately no business logic
@@ -23,8 +23,7 @@ mod resurrect;
 #[cfg(test)]
 mod test_keys;
 
-use std::io::IsTerminal;
-use std::process::ExitCode as ProcExitCode;
+use std::{io::IsTerminal, process::ExitCode as ProcExitCode};
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -89,7 +88,9 @@ fn main() -> ProcExitCode {
                 .strip_prefix("error: ")
                 .unwrap_or(rendered)
                 .to_string();
-            let err = errors::CliError::Usage { reason };
+            let err = errors::CliError::Usage {
+                reason,
+            };
             output::print_error(&err, json);
             return ProcExitCode::from(err.exit_code().as_i32() as u8);
         },
@@ -123,11 +124,11 @@ fn main() -> ProcExitCode {
         Ok(summary) => {
             output::print_success(&summary, json);
             ProcExitCode::from(errors::ExitCode::Success.as_i32() as u8)
-        }
+        },
         Err(e) => {
             output::print_error(&e, json);
             ProcExitCode::from(e.exit_code().as_i32() as u8)
-        }
+        },
     }
 }
 
@@ -148,15 +149,15 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
         Command::Withdraw(args) => {
             if non_interactive_needs_prompt && !args.dry_run {
                 return Err(errors::CliError::Preflight {
-                    reason: "--non-interactive requires --yes or --dry-run \
-                             (would otherwise block on confirmation prompt)"
+                    reason: "--non-interactive requires --yes or --dry-run (would otherwise block \
+                             on confirmation prompt)"
                         .to_string(),
                     source: None,
                 });
             }
             let dry_run = args.dry_run;
             orchestrator::run(args, dry_run, skip_prompt).await
-        }
+        },
     }
 }
 

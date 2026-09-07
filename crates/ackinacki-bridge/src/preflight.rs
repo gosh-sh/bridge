@@ -21,28 +21,34 @@
 //! is reused for the one direct GraphQL query we make (USDCBridge dapp_id
 //! resolution) — the daemon already uses it, so we inherit its shape.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use alloy::primitives::{Address, U256};
-use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
+use alloy::{
+    primitives::{Address, U256},
+    providers::{Provider, ProviderBuilder},
+    signers::local::PrivateKeySigner,
+};
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::keys::{leaked_keygen_temp_files, probe_ceremony, KeyCacheState};
 use bridge_relayer_daemon::bridge::EthBridgeClient;
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
-use tvm_client::abi::{
-    encode_message, Abi, CallSet, ParamsOfEncodeMessage, Signer,
+use tvm_client::{
+    abi::{encode_message, Abi, CallSet, ParamsOfEncodeMessage, Signer},
+    account::{get_account, ParamsOfGetAccount},
+    net::NetworkConfig,
+    tvm::{run_tvm, ParamsOfRunTvm},
+    ClientConfig, ClientContext,
 };
-use tvm_client::account::{get_account, ParamsOfGetAccount};
-use tvm_client::net::NetworkConfig;
-use tvm_client::tvm::{run_tvm, ParamsOfRunTvm};
-use tvm_client::{ClientConfig, ClientContext};
 
-use crate::args::{self, FromAddress, ToAddress, UsdcAmount};
-use crate::errors::{CliError, CliResult};
+use crate::{
+    args::{self, FromAddress, ToAddress, UsdcAmount},
+    errors::{CliError, CliResult},
+};
 
 /// Vendored multisig ABI. Embedded at build time so the binary has no
 /// runtime companion directory; passed to `tvm_client` as `Abi::Json(...)`.
@@ -135,11 +141,10 @@ pub async fn run(
     // Shared tvm-sdk client — used for account fetch + local getter exec.
     let context = build_client_context(gql_endpoint)?;
 
-    // 2. Fetch --from account BOC, parse via tvm_block::Account, verify
-    //    Active + has code_hash.
+    // 2. Fetch --from account BOC, parse via tvm_block::Account, verify Active +
+    //    has code_hash.
     let account = fetch_account(&context, &from.dapp_id_hex, &from.account_id_hex).await?;
-    let account_boc =
-        fetch_account_boc(&context, &from.dapp_id_hex, &from.account_id_hex).await?;
+    let account_boc = fetch_account_boc(&context, &from.dapp_id_hex, &from.account_id_hex).await?;
     let acc_type = describe_account_status(account.status());
     if account.status() != AccountStatus::AccStateActive {
         return Err(CliError::Preflight {
@@ -153,7 +158,8 @@ pub async fn run(
     if account.get_code_hash().is_none() {
         return Err(CliError::Preflight {
             reason: format!(
-                "--from account {}: no code_hash (Active but codeless — impossible without corruption)",
+                "--from account {}: no code_hash (Active but codeless — impossible without \
+                 corruption)",
                 from.extended()
             ),
             source: None,
@@ -170,8 +176,8 @@ pub async fn run(
     if custodians.len() != 1 {
         return Err(CliError::Preflight {
             reason: format!(
-                "--from account {}: single-custodian multisig required, found {} custodians. \
-                 This CLI's sendTransaction path signs alone and cannot satisfy multi-owner \
+                "--from account {}: single-custodian multisig required, found {} custodians. This \
+                 CLI's sendTransaction path signs alone and cannot satisfy multi-owner \
                  confirmation (would fail with contract exit 108 on-chain).",
                 from.extended(),
                 custodians.len()
@@ -179,16 +185,18 @@ pub async fn run(
             source: None,
         });
     }
-    let on_chain_pubkey = custodians[0].owner_pubkey_hex.as_deref().ok_or_else(|| {
-        CliError::Preflight {
-            reason: format!(
-                "--from account {}: custodian 0 has no owner_pubkey — this CLI does not \
-                 support address-owned custodians (only pubkey-owned).",
-                from.extended()
-            ),
-            source: None,
-        }
-    })?;
+    let on_chain_pubkey =
+        custodians[0]
+            .owner_pubkey_hex
+            .as_deref()
+            .ok_or_else(|| CliError::Preflight {
+                reason: format!(
+                    "--from account {}: custodian 0 has no owner_pubkey — this CLI does not \
+                     support address-owned custodians (only pubkey-owned).",
+                    from.extended()
+                ),
+                source: None,
+            })?;
     let (local_pubkey, _secret) = load_owner_keypair_hex(from_keys)?;
     if !pubkeys_equal(&local_pubkey, on_chain_pubkey) {
         // Do NOT echo the local key back — even the public half is a stable
@@ -197,7 +205,8 @@ pub async fn run(
         // "you gave me the wrong keys.json".
         return Err(CliError::Preflight {
             reason: format!(
-                "--from-keys does not match on-chain owner of {}: expected pubkey {} (from getCustodians)",
+                "--from-keys does not match on-chain owner of {}: expected pubkey {} (from \
+                 getCustodians)",
                 from.extended(),
                 on_chain_pubkey
             ),
@@ -205,8 +214,8 @@ pub async fn run(
         });
     }
 
-    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active.
-    //    One GQL round-trip through the same helper the daemon uses.
+    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active. One
+    //    GQL round-trip through the same helper the daemon uses.
     let gql = create_client(gql_endpoint).map_err(|e| CliError::Preflight {
         reason: format!("failed to build GraphQL client for {gql_endpoint}: {e}"),
         source: Some(e),
@@ -315,18 +324,18 @@ async fn fetch_account_boc(
         account_id: account_id_hex.to_string(),
         dapp_id: dapp_id_hex.to_string(),
     };
-    let r = get_account(ctx.clone(), params).await.map_err(|e| CliError::Preflight {
-        reason: format!(
-            "fetch account {dapp_id_hex}::{account_id_hex}: {}",
-            e.message()
-        ),
-        source: Some(anyhow::anyhow!("{e:?}")),
-    })?;
+    let r = get_account(ctx.clone(), params)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "fetch account {dapp_id_hex}::{account_id_hex}: {}",
+                e.message()
+            ),
+            source: Some(anyhow::anyhow!("{e:?}")),
+        })?;
     if r.boc.is_empty() {
         return Err(CliError::Preflight {
-            reason: format!(
-                "account {dapp_id_hex}::{account_id_hex}: not on chain (empty BOC)"
-            ),
+            reason: format!("account {dapp_id_hex}::{account_id_hex}: not on chain (empty BOC)"),
             source: None,
         });
     }
@@ -340,9 +349,7 @@ async fn fetch_account(
 ) -> CliResult<Account> {
     let boc = fetch_account_boc(ctx, dapp_id_hex, account_id_hex).await?;
     Account::construct_from_base64(&boc).map_err(|e| CliError::Preflight {
-        reason: format!(
-            "parse account BOC for {dapp_id_hex}::{account_id_hex}: {e}"
-        ),
+        reason: format!("parse account BOC for {dapp_id_hex}::{account_id_hex}: {e}"),
         source: Some(anyhow::anyhow!("{e}")),
     })
 }
@@ -376,22 +383,19 @@ async fn call_get_custodians(
     // Encode an empty-input getCustodians call as an unsigned external
     // message aimed at the multisig. This is the same shape tvm-cli's
     // `runx` builds under the hood.
-    let encoded = encode_message(
-        ctx.clone(),
-        ParamsOfEncodeMessage {
-            abi: abi.clone(),
-            address: Some(address_extended.to_string()),
-            call_set: Some(CallSet {
-                function_name: "getCustodians".to_string(),
-                header: None,
-                input: Some(json!({})),
-            }),
-            signer: Signer::None,
-            deploy_set: None,
-            processing_try_index: None,
-            signature_id: None,
-        },
-    )
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(address_extended.to_string()),
+        call_set: Some(CallSet {
+            function_name: "getCustodians".to_string(),
+            header: None,
+            input: Some(json!({})),
+        }),
+        signer: Signer::None,
+        deploy_set: None,
+        processing_try_index: None,
+        signature_id: None,
+    })
     .await
     .map_err(|e| CliError::Preflight {
         reason: format!(
@@ -401,62 +405,62 @@ async fn call_get_custodians(
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
 
-    let run = run_tvm(
-        ctx.clone(),
-        ParamsOfRunTvm {
-            message: encoded.message,
-            account: account_boc.to_string(),
-            abi: Some(abi),
-            execution_options: None,
-            boc_cache: None,
-            return_updated_account: Some(false),
-        },
-    )
+    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
+        message: encoded.message,
+        account: account_boc.to_string(),
+        abi: Some(abi),
+        execution_options: None,
+        boc_cache: None,
+        return_updated_account: Some(false),
+    })
     .await
     .map_err(|e| CliError::Preflight {
         reason: format!(
-            "run_tvm getCustodians on {address_extended}: {} — is this address a deployed multisig?",
+            "run_tvm getCustodians on {address_extended}: {} — is this address a deployed \
+             multisig?",
             e.message()
         ),
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
 
-    let decoded = run.decoded.and_then(|d| d.output).ok_or_else(|| CliError::Preflight {
-        reason: format!(
-            "run_tvm getCustodians on {address_extended}: no decoded output (ABI mismatch?)"
-        ),
-        source: None,
-    })?;
+    let decoded = run
+        .decoded
+        .and_then(|d| d.output)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm getCustodians on {address_extended}: no decoded output (ABI mismatch?)"
+            ),
+            source: None,
+        })?;
     parse_custodians(&decoded)
 }
 
 fn parse_custodians(json: &Value) -> CliResult<Vec<Custodian>> {
-    let arr = json.get("custodians").and_then(|v| v.as_array()).ok_or_else(|| {
-        CliError::Preflight {
+    let arr = json
+        .get("custodians")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| CliError::Preflight {
             reason: format!("getCustodians output missing `custodians` array: {json}"),
             source: None,
-        }
-    })?;
+        })?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, entry) in arr.iter().enumerate() {
         let owner_pubkey_hex = match entry.get("owner_pubkey") {
             Some(Value::Null) | None => None,
             Some(v) => {
                 let s = v.as_str().ok_or_else(|| CliError::Preflight {
-                    reason: format!(
-                        "getCustodians[{i}].owner_pubkey: expected string, got {v}"
-                    ),
+                    reason: format!("getCustodians[{i}].owner_pubkey: expected string, got {v}"),
                     source: None,
                 })?;
                 Some(normalize_u256_hex(s).ok_or_else(|| CliError::Preflight {
-                    reason: format!(
-                        "getCustodians[{i}].owner_pubkey: not a valid uint256: {s}"
-                    ),
+                    reason: format!("getCustodians[{i}].owner_pubkey: not a valid uint256: {s}"),
                     source: None,
                 })?)
-            }
+            },
         };
-        out.push(Custodian { owner_pubkey_hex });
+        out.push(Custodian {
+            owner_pubkey_hex,
+        });
     }
     Ok(out)
 }
@@ -485,8 +489,8 @@ async fn query_usdc_bridge_state(
     if account.is_null() {
         return Err(CliError::Preflight {
             reason: format!(
-                "USDCBridge account {account_id_hex}: GraphQL returned no account node — \
-                 wrong --usdc-bridge-account, or wrong --gql-endpoint?"
+                "USDCBridge account {account_id_hex}: GraphQL returned no account node — wrong \
+                 --usdc-bridge-account, or wrong --gql-endpoint?"
             ),
             source: None,
         });
@@ -510,7 +514,11 @@ async fn query_usdc_bridge_state(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let dapp_id = if raw_dapp.is_empty() { zero64 } else { raw_dapp };
+    let dapp_id = if raw_dapp.is_empty() {
+        zero64
+    } else {
+        raw_dapp
+    };
     Ok((dapp_id, acc_type))
 }
 
@@ -644,13 +652,12 @@ pub(crate) fn normalize_u256_hex(raw: &str) -> Option<String> {
 /// **both sides are canonicalised before they get here** — 64 lowercase hex
 /// characters, no prefix, zero-padded:
 ///
-/// * the on-chain half through [`normalize_u256_hex`], which must accept
-///   the decimal form because that is one of the shapes tvm renders a
-///   `uint256` in;
-/// * the key-file half through [`normalize_key_file_hex`], which must
-///   **not**, because a keys.json field is always hex and a key that
-///   happens to be all decimal digits would otherwise be silently
-///   reinterpreted as a decimal number.
+/// * the on-chain half through [`normalize_u256_hex`], which must accept the
+///   decimal form because that is one of the shapes tvm renders a `uint256` in;
+/// * the key-file half through [`normalize_key_file_hex`], which must **not**,
+///   because a keys.json field is always hex and a key that happens to be all
+///   decimal digits would otherwise be silently reinterpreted as a decimal
+///   number.
 ///
 /// Normalising again here would undo that: applying `normalize_u256_hex` to
 /// an already-canonical all-digit key turns it into a different value. The
@@ -670,7 +677,10 @@ pub(crate) fn pubkeys_equal(a: &str, b: &str) -> bool {
 /// they compare — and the value handed to the SDK — are the same bytes.
 pub(crate) fn normalize_key_file_hex(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    let bare = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(raw);
+    let bare = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
     if bare.is_empty() || bare.len() > 64 || !bare.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -1839,8 +1849,9 @@ pub async fn check_bridge_deploy(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn normalize_accepts_0x_prefix() {
@@ -1916,10 +1927,22 @@ mod tests {
 
     #[test]
     fn describe_account_status_covers_all_variants() {
-        assert_eq!(describe_account_status(AccountStatus::AccStateActive), "Active");
-        assert_eq!(describe_account_status(AccountStatus::AccStateUninit), "Uninit");
-        assert_eq!(describe_account_status(AccountStatus::AccStateFrozen), "Frozen");
-        assert_eq!(describe_account_status(AccountStatus::AccStateNonexist), "NonExist");
+        assert_eq!(
+            describe_account_status(AccountStatus::AccStateActive),
+            "Active"
+        );
+        assert_eq!(
+            describe_account_status(AccountStatus::AccStateUninit),
+            "Uninit"
+        );
+        assert_eq!(
+            describe_account_status(AccountStatus::AccStateFrozen),
+            "Frozen"
+        );
+        assert_eq!(
+            describe_account_status(AccountStatus::AccStateNonexist),
+            "NonExist"
+        );
     }
 
     #[test]
@@ -2120,60 +2143,60 @@ mod tests {
                     // was the one that showed it.
                     let mut buf = vec![0u8; 8192];
                     loop {
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 {
-                        return; // client hung up
-                    }
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
-                    let v: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-                    let id = v.get("id").cloned().unwrap_or(serde_json::json!(1));
-                    let result = match v.get("method").and_then(|m| m.as_str()) {
-                        Some("eth_chainId") => "0xaa36a7".to_string(), // 11155111
-                        Some("eth_getCode") => {
-                            let at = v["params"][0].as_str().unwrap_or("");
-                            code.for_address(at)
-                        },
-                        Some("eth_call") => {
-                            // `input` first. Alloy 2 builds contract calls with
-                            // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
-                            // which sets `TransactionInput::input`
-                            // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
-                            // and leaves `data` unset — so the request carries
-                            // `"input": "0x…"` and no `"data"` at all. Reading
-                            // `data` yields "", the selector is empty, every
-                            // lookup misses, the mock answers `0x`, and every
-                            // test here passes or fails for reasons unrelated
-                            // to what it claims to check.
-                            //
-                            // `data` stays as a fallback: it is still valid
-                            // JSON-RPC, other clients send it, and the cost is
-                            // one `or_else`.
-                            let call = &v["params"][0];
-                            let data = call["input"]
-                                .as_str()
-                                .or_else(|| call["data"].as_str())
-                                .unwrap_or("");
-                            let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
-                            answers
-                                .get(sel)
-                                .cloned()
-                                .unwrap_or_else(|| "0x".to_string())
-                        },
-                        _ => "0x".to_string(),
-                    };
-                    let payload =
-                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}).to_string();
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
-                         {}\r\n\r\n{}",
-                        payload.len(),
-                        payload
-                    );
-                    if sock.write_all(resp.as_bytes()).await.is_err() {
-                        return;
-                    }
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return; // client hung up
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
+                        let v: serde_json::Value =
+                            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                        let id = v.get("id").cloned().unwrap_or(serde_json::json!(1));
+                        let result = match v.get("method").and_then(|m| m.as_str()) {
+                            Some("eth_chainId") => "0xaa36a7".to_string(), // 11155111
+                            Some("eth_getCode") => {
+                                let at = v["params"][0].as_str().unwrap_or("");
+                                code.for_address(at)
+                            },
+                            Some("eth_call") => {
+                                // `input` first. Alloy 2 builds contract calls with
+                                // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
+                                // which sets `TransactionInput::input`
+                                // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
+                                // and leaves `data` unset — so the request carries
+                                // `"input": "0x…"` and no `"data"` at all. Reading
+                                // `data` yields "", the selector is empty, every
+                                // lookup misses, the mock answers `0x`, and every
+                                // test here passes or fails for reasons unrelated
+                                // to what it claims to check.
+                                //
+                                // `data` stays as a fallback: it is still valid
+                                // JSON-RPC, other clients send it, and the cost is
+                                // one `or_else`.
+                                let call = &v["params"][0];
+                                let data = call["input"]
+                                    .as_str()
+                                    .or_else(|| call["data"].as_str())
+                                    .unwrap_or("");
+                                let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
+                                answers
+                                    .get(sel)
+                                    .cloned()
+                                    .unwrap_or_else(|| "0x".to_string())
+                            },
+                            _ => "0x".to_string(),
+                        };
+                        let payload = serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})
+                            .to_string();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                             {}\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        if sock.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
                     }
                 });
             }
@@ -2882,7 +2905,10 @@ mod tests {
         let err = load_owner_keypair_hex(&path)
             .expect_err("a keys.json with no secret half must be refused at preflight");
         let msg = format!("{err}");
-        assert!(msg.contains("--from-keys"), "must name the flag, got: {msg}");
+        assert!(
+            msg.contains("--from-keys"),
+            "must name the flag, got: {msg}"
+        );
         assert!(
             msg.contains("secret"),
             "must name the missing field, got: {msg}"
@@ -2912,7 +2938,10 @@ mod tests {
         let err = load_owner_keypair_hex(&path)
             .expect_err("independent public/secret halves must be refused");
         let msg = format!("{err}");
-        assert!(msg.contains("--from-keys"), "must name the flag, got: {msg}");
+        assert!(
+            msg.contains("--from-keys"),
+            "must name the flag, got: {msg}"
+        );
         assert!(
             msg.contains("do not form a key pair") || msg.contains("does not match"),
             "must say why, got: {msg}",

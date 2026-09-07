@@ -1,9 +1,9 @@
 //! Terminal output for success + error.
 //!
 //! Two output modes:
-//! - **Human** — pretty stderr lines (tracing already handles logs; this
-//!   module owns the FINAL summary the user sees after everything is
-//!   done). Never printed to stdout.
+//! - **Human** — pretty stderr lines (tracing already handles logs; this module
+//!   owns the FINAL summary the user sees after everything is done). Never
+//!   printed to stdout.
 //! - **`--json`** — one line JSON on stdout, nothing else on stdout, ever.
 //!   Stdout is a machine contract; stderr is the human tap.
 //!
@@ -13,8 +13,7 @@
 
 use serde_json::json;
 
-use crate::errors::CliError;
-use crate::orchestrator::WithdrawSuccess;
+use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 
 /// Print a successful terminal summary. Chooses stderr-human or
 /// stdout-json based on `json`.
@@ -107,8 +106,7 @@ pub fn print_error(err: &CliError, json_mode: bool) {
     // needing a debug build. `CliError` variants carry
     // `#[source] Option<anyhow::Error>`, and the anyhow chain itself may
     // nest further. Each hop indented for readability.
-    let mut cause: Option<&(dyn std::error::Error + 'static)> =
-        std::error::Error::source(err);
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
     let mut depth = 0usize;
     while let Some(c) = cause {
         eprintln!("  caused by [{depth}]: {c}");

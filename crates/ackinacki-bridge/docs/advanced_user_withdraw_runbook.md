@@ -756,7 +756,7 @@ df -h ../bridge-prover-libraries/params/
 
 - Free resources; re-run with the same tuple — `--allow-retry` if the
   first attempt left a `Reserved` state file. The witness under
-  `./work_dir/witness_event_<seq>.json` (relative to the CLI cwd) is
+  `./work_dir/event_<seq>_witness.json` (relative to the CLI cwd) is
   deterministic and reusable; do NOT delete it between attempts.
 - If cold-cache slowness is the real issue (not OOM), bump the
   timeout:
@@ -846,7 +846,7 @@ given `(event, on-chain contract state)` — if the chain state changed
 (treasury seeded, covering bundle landed), the proof regenerates
 against the new state.
 
-**Do not delete `work_dir/witness_event_*.json`** between attempts;
+**Do not delete `work_dir/event_*_witness.json`** between attempts;
 regeneration is expensive.
 
 ---
@@ -963,7 +963,7 @@ ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 jq . "$(ls -t "$STATE_DIR"/*.json | head -1)" 2>/dev/null
 
 # Latest captured witness + generated proof (written into --work-dir)
-ls -lt ./work_dir/witness_event_*.json 2>/dev/null | head -3
+ls -lt ./work_dir/event_*_witness.json 2>/dev/null | head -3
 ls -lt ./work_dir/proof_event_*.json   2>/dev/null | head -3
 
 # Circuit 4 PK cache (should exist after first successful run)
@@ -1013,7 +1013,7 @@ crates/ackinacki-bridge/                       ← CLI run cwd
 ├── scripts/                                   ← see README § Scripts
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
-    ├── witness_event_<seq>.json               ← enriched witness (input to Circuit 4)
+    ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
     ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr

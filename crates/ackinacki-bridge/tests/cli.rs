@@ -341,6 +341,34 @@ fn a_dry_run_never_reports_a_duplicate() {
 }
 
 #[test]
+fn a_dry_run_does_not_need_a_state_directory_at_all() {
+    // The regression the test above could not see, because it passes
+    // `--state-dir`. `bin()` clears the environment — which is what
+    // systemd, cron and most Docker images hand a process — and the
+    // unset-HOME refusal was being raised BEFORE the `if dry_run` guard.
+    // So the one command whose whole purpose is to be safe to run
+    // anywhere started failing with a double-burn refusal about a
+    // directory it never touches.
+    //
+    // The previous round documented this instead of noticing it: the
+    // key-perms test grew a comment explaining that a dry run now needs
+    // a state dir. It does not.
+    let out = run_with(&["--dry-run", "--yes", "--json"]);
+    let msg = error_envelope(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !msg.contains("HOME is not set"),
+        "a dry run reads and writes no state, so it must not be refused for not being able to \
+         name that directory: {msg}"
+    );
+    // It still fails — there is no node at 127.0.0.1:1 — and that is the
+    // point: it fails at the network, where a dry run is supposed to.
+    assert_eq!(code(&out), 2);
+}
+
+#[test]
 fn the_zero_recipient_is_refused() {
     let mut args = base_overriding(&[("--to", "0x0000000000000000000000000000000000000000")]);
     args.push("--json".to_string());
@@ -371,8 +399,9 @@ fn a_group_readable_key_file_is_refused_with_the_remedy() {
     let mut args = base_overriding(&[("--from-keys", keys.to_str().unwrap())]);
     args.push("--dry-run".to_string());
     args.push("--json".to_string());
-    // `bin()` clears the environment, which includes HOME — and an unset
-    // HOME is now its own refusal, ahead of this one. Give it a state dir.
+    // A state dir so this exercises the key-perms refusal and not the
+    // network. (It used to be here because an unset HOME refused a dry
+    // run outright — that was a bug, and it is fixed.)
     args.push("--state-dir".to_string());
     args.push(dir.path().to_str().unwrap().to_string());
     let out = run_args(&args);

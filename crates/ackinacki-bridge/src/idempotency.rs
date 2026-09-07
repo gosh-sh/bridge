@@ -168,6 +168,12 @@ pub fn reserve(
     // every error path, so a failure here can no longer leave a partial
     // record behind at all.
     let record = fresh_reserved_record(&key, from, to, amount);
+    // Whether the record reached its name. Everything after the
+    // `hard_link` can still fail, and the two sides of that need different
+    // sentences: before it, nothing exists and nothing was left behind;
+    // after it, a COMPLETE record is on disk and other processes can
+    // already see it.
+    let published = std::cell::Cell::new(false);
     let publish = || -> std::io::Result<bool> {
         let mut tmp = tempfile::NamedTempFile::new_in(state_dir)?;
         let body = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
@@ -178,7 +184,7 @@ pub fn reserve(
         // this file exists to prevent.
         tmp.as_file().sync_all()?;
         match std::fs::hard_link(tmp.path(), &path) {
-            Ok(()) => {},
+            Ok(()) => published.set(true),
             // Someone else won the identity. Their record is complete by
             // construction, so the read below sees whole JSON.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
@@ -191,10 +197,31 @@ pub fn reserve(
         Ok(true)
     };
     let won = publish().map_err(|e| CliError::Preflight {
-        reason: format!(
-            "idempotency: reserve {}: {e} (nothing was sent; no partial record was left behind)",
-            path.display()
-        ),
+        // "No partial record was left behind" was true of a torn file and
+        // false of the case that actually reaches here: the `hard_link`
+        // succeeded and the directory fsync did not. An operator read that
+        // as "nothing is on disk", and the next run then refused with exit
+        // 3 about a record they had been told did not exist — straight
+        // into deleting it.
+        //
+        // The record is NOT removed in that case, and deliberately. It is
+        // complete and already visible to other processes; unlinking a
+        // published reservation is the double-burn this file exists to
+        // prevent. Say what is there instead.
+        reason: if published.get() {
+            format!(
+                "idempotency: reserve {}: {e}\n\x20 Nothing was sent. The record IS on disk and \
+                 complete — the failure was making its directory entry durable, which means it \
+                 may not survive a power loss.\n\x20 It is not stale: a later run refusing this \
+                 identity with exit 3 is correct, and that refusal explains what to do with it.",
+                path.display()
+            )
+        } else {
+            format!(
+                "idempotency: reserve {}: {e} (nothing was sent; no record was left behind)",
+                path.display()
+            )
+        },
         source: None,
     })?;
 

@@ -146,9 +146,27 @@ pub async fn run(
     // refused. Used twice — here, to decide whether the ECC[3] sufficiency
     // check still applies, and in stage 2 to classify a duplicate before
     // prompting.
-    let state_dir = match args.state_dir.clone() {
-        Some(d) => d,
-        None => default_state_dir()?,
+    // Resolved only when the run will actually use it.
+    //
+    // `default_state_dir` REFUSES when HOME is unset, which is right for a
+    // real run — that directory is the only thing stopping a second burn.
+    // A dry run neither reads nor writes it, so resolving it eagerly made
+    // `--dry-run` fail under systemd, cron and most Docker images with a
+    // double-burn refusal about a path it would never touch. The check
+    // added to close a real hole started refusing the one command whose
+    // whole purpose is to be safe to run anywhere.
+    //
+    // The dry-run placeholder is deliberately NOT `PathBuf::new()`:
+    // joining a filename onto an empty path yields a relative one, which
+    // is the cwd-relative state directory this refusal exists to prevent.
+    // A path that cannot exist fails loudly instead — and nothing reaches
+    // it, because `peek` is guarded below, the reservation lives inside
+    // the `else` of `if dry_run`, and every `update` is behind
+    // `record.as_mut()`, which stays `None` for a dry run.
+    let state_dir = match (&args.state_dir, dry_run) {
+        (Some(d), _) => d.clone(),
+        (None, false) => default_state_dir()?,
+        (None, true) => PathBuf::from("/nonexistent/dry-run-uses-no-state-dir"),
     };
     let prior = if dry_run {
         // A dry run neither reads nor writes idempotency state (spec).
@@ -546,7 +564,21 @@ pub async fn run(
         pk_cache_dir: args.pk_cache_dir.clone(),
         prover_out_dir: args.prover_out_dir.clone(),
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
-        prover_seq_no: 0,
+        // The event's own block seq_no, not a constant.
+        //
+        // It is stamped into `event_{:06}_witness.json` and
+        // `proof_event_{:06}.json` (`withdraw_e2e/driver.rs`), so a
+        // hard-coded 0 named every run's files identically: two
+        // withdrawals through one `--work-dir` silently overwrote each
+        // other's witness, which the runbook simultaneously told operators
+        // to keep because regenerating it is expensive. It also made every
+        // documented `proof_event_<seq>.json` path wrong — there was only
+        // ever `proof_event_000000.json`.
+        //
+        // `u32`, and the capture's seq_no is `u64`. A saturating cast, not
+        // `as`: `as` wraps, and a wrapped seq_no is a filename that
+        // collides with a real one rather than an obviously wrong number.
+        prover_seq_no: u32::try_from(captured.block_seq_no).unwrap_or(u32::MAX),
         replay_latest: true,
     };
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)

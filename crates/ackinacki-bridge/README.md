@@ -554,7 +554,7 @@ df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run
 **Remediation:** free resources, re-run with `--allow-retry`. If the
 first attempt was a cold cache and merely slow (not OOM/thrashing),
 bump `--prover-timeout-s 3600` on the retry. Don't delete
-`./work_dir/witness_event_<seq>.json` between attempts — it's
+`./work_dir/event_<seq>_witness.json` between attempts — it's
 deterministic and reused.
 
 ### On-chain submit reverted (exit 13)
@@ -712,7 +712,7 @@ crates/ackinacki-bridge/                       ← run cwd
 ├── scripts/                                   ← see § Scripts
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
-    ├── witness_event_<seq>.json               ← enriched witness (input to Circuit 4)
+    ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
     ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr via the smoke wrappers

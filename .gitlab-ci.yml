@@ -274,6 +274,46 @@ test:rust:ackinacki-bridge:
     # `keys::common::tests::` for the same reason as above.
     - cargo test --locked -p bridge-prover-lib keys::common::tests::saving_a_key_artifact
     - cargo test --locked -p bridge-prover-lib keys::common::tests::a_regenerated_manifest
+    # The keygen lock and the temp-file sweep. `keys::state::tests::` is a
+    # different module from `probe_tests::` above, so the filter there
+    # never reached these — seven tests guarding a second keygen writing
+    # over the first, and `--repair` deleting a live keygen's 2.65 GB temp
+    # file, ran only in the nightly job. They need no fixtures and finish
+    # in under two seconds.
+    - cargo test --locked -p bridge-prover-lib keys::state::tests::
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::leak_sweep
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::a_directory_named_like_a_temp
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::an_unreadable_directory
+    - cargo test --locked -p bridge-prover-lib keys::common::tests::write_atomic_leaves_nothing
+    # Every filter above is a substring, and a substring that matches
+    # NOTHING exits 0 — so a renamed test silently stops being run and the
+    # job stays green. Assert the count instead of trusting the names.
+    #
+    # `--list` counts test DEFINITIONS, `#[ignore]`d ones included, so this
+    # number is larger than what this job executes. That is the point: it
+    # pins the filters to the set of tests they name, whether or not each
+    # one runs here.
+    - |
+      EXPECTED=35
+      GOT=$(cargo test --locked -p bridge-prover-lib --lib -- \
+              keys::state::probe_tests:: \
+              keys::common::tests::probe_rejects_ \
+              keys::common::tests::saving_a_key_artifact \
+              keys::common::tests::a_regenerated_manifest \
+              keys::state::tests:: \
+              keys::common::tests::leak_sweep \
+              keys::common::tests::a_directory_named_like_a_temp \
+              keys::common::tests::an_unreadable_directory \
+              keys::common::tests::write_atomic_leaves_nothing \
+              --list 2>/dev/null | grep -c ': test$')
+      if [ "$GOT" -ne "$EXPECTED" ]; then
+        echo "key-cache filters select $GOT tests, expected $EXPECTED." >&2
+        echo "A filter that matches nothing still exits 0, so this is the only thing" >&2
+        echo "standing between a renamed test and it silently never running again." >&2
+        echo "If you added or renamed one on purpose, update EXPECTED here." >&2
+        exit 1
+      fi
+      echo "key-cache filters select $GOT tests, as expected"
 
 # The ENOSPC reserve test needs a filesystem it can fill, which means
 # mounting a 1 MiB tmpfs, which means CAP_SYS_ADMIN. `.rust_base` selects

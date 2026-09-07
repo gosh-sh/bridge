@@ -594,6 +594,16 @@ assigns it when the release is tagged.
   for another architecture, which otherwise surfaces as an opaque failure
   part-way through the deploy. Honours `CLI_NAME` to point at a specific
   binary; also runnable in CI.
+- **The key-cache CI job runs the keygen-lock and sweep tests, and
+  asserts how many tests its filters select.** Those seven live in
+  `keys::state::tests::` and `keys::common::tests::`, which none of the
+  four existing substring filters matched, so they ran only in the
+  nightly job — while guarding a second keygen writing over the first and
+  `--repair` deleting a live keygen's 2.65 GB temp file. A libtest filter
+  matching NOTHING still exits 0, so a renamed test silently stops
+  running and the job stays green; the job now counts what the filters
+  select and fails if that number moves.
+
 - **Four CI jobs for the `ackinacki-bridge` crate.** The crate lives in
   the `bridge-prover-libraries` sub-workspace, so none of the existing
   `*:rust:*` jobs reached it and every one of its tests was unrun in CI.
@@ -886,6 +896,33 @@ assigns it when the release is tagged.
   (duplicate-refused)**, and inspecting the record's fields is no longer
   how the two cases are told apart — the field that would distinguish
   them is written only after the send returns.
+
+- **`--dry-run` no longer needs `HOME`.** The refusal added for an unset
+  `HOME` was raised before the check that skips idempotency state
+  entirely, so under systemd, cron and most Docker images a dry run
+  failed with a double-burn refusal about a directory it never touches —
+  the one command whose purpose is to be safe to run anywhere. Resolved
+  only when the run will actually use it.
+
+- **Witness and proof files are named after the event again.** The seq_no
+  stamped into `event_<seq>_witness.json` and `proof_event_<seq>.json` was
+  hard-coded to `0`, so every withdrawal wrote `event_000000_witness.json`
+  and `proof_event_000000.json`. Two withdrawals through one `--work-dir`
+  overwrote each other's witness — which the runbook simultaneously told
+  operators to keep, because regenerating it is expensive — and every
+  documented `<seq>` path was wrong. It is the event's block seq_no now.
+  The runbook and README also had the witness filename backwards
+  (`witness_event_<seq>.json`); it is `event_<seq>_witness.json`.
+
+- **A reservation that fails after publishing says so.** If the directory
+  fsync failed after the record's name was already linked, the refusal
+  still read "no partial record was left behind" — while a complete
+  record sat on disk. An operator read that as "nothing is there" and the
+  next run then refused with exit 3 about a record they had been told did
+  not exist. The two cases now say different things, and the record is
+  deliberately NOT removed in the second: it is complete and already
+  visible to other processes, and unlinking a published reservation is
+  the double-burn the file exists to prevent.
 
 - **The exit-3 refusal now says what to do, and the CLI can tell you
   whether another run is executing the withdrawal.** A record that reads

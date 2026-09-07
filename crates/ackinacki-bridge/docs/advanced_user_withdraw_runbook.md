@@ -715,8 +715,14 @@ is a bare `--allow-retry`:
   reconciliation above showing no `initiateWithdrawal`, delete the record
   named in the message and re-run.
 
-Do **not** delete the state file in either case. It is the only local
-trace that a burn may have been authorised.
+Deleting the record belongs to the second bullet and only to the second
+bullet. It is the only local trace that a burn may have been authorised,
+so it goes **after** both conditions above have been met — the on-chain
+reconciliation found no `initiateWithdrawal`, and the refusal said no
+other run is executing this withdrawal — and never before. In the first
+case the record is edited, not deleted. Deleting it while another run is
+mid-send is the second burn that every refusal on this page exists to
+prevent.
 
 ---
 

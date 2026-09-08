@@ -618,12 +618,16 @@ contract AckiNackiBridge {
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
     /// @param anWorkchain Acki Nacki destination workchain id (TVM, e.g. 0).
+    ///                    Not range-checked (ETH-10). A wrong non-zero
+    ///                    destination is one-way: no refund, timeout, or owner
+    ///                    rescue (owner 2026-09-08).
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
     ///                    (`ERR_ZERO_RECIPIENT`, QC-AN-10). Keep this ETH
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
+    ///                    A wrong non-zero destination is one-way (no refund).
     function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();

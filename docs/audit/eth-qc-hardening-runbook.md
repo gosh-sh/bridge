@@ -79,7 +79,7 @@ NB-Q1 (2026-08-04): the `WITHDRAW_ANCHOR_LAYER = 1` pin was removed. `withdrawBy
 | 4 | Deploy | Replacement `AckiNackiBridge` with `bridgeWithdrawalVerifier = address(0)` (withdraws off) or a patched verifier. Migrate treasury by owner ops; old contract cannot be upgraded (no proxy). | hours–day |
 | 5 | Users | Unwithdrawn AN→ETH events stay claimable on the **new** contract only after a new Circuit 4 proof against its windows — communicate the cut-over. Funds on the old contract remain in its USDC/aUSDC until migrated. | announced |
 
-Do **not** restore an on-chain pause without an explicit product reversal of #20. See `audit/findings/BRIDGE-ETH-04/`.
+Do **not** restore an on-chain pause without an explicit product reversal of #20. See `audit/findings/BRIDGE-ETH-04/`. Owner confirmation 2026-09-08 (sauin Q3): scoped pause stays a future product, not this generation.
 
 ### QC-A1-2 — USDC trust
 
@@ -119,3 +119,18 @@ Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inp
 7. Relayer uses `expectedPrevAnchor(numLayers)` for verifyBlock
 8. Withdraw relayer monitors `anchorRemainingAppends(L, finalRoot)` (alert when remaining ≤ 28). `layerWindowLen` is occupancy only.
 9. Production `deposit-relayer` runs with `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (QC-OFF-01; `scripts/ursus/deposit-relayer.service`)
+
+---
+
+## Owner decisions — sauin re-review 2026-09-08
+
+Confirmed on [PR #39](https://github.com/gosh-sh/bridge/pull/39) (`Все да`). Not patches; they close the open-question list.
+
+| # | Decision |
+|---|---------|
+| 1 | **n14 regen** is required before `WIRE_VERIFY_BLOCK` on mainnet. It is not scheduled from this repo. Until `ShplonkArtefactPairingPendingN14` is green, do not ship the three verifyBlock artefacts. |
+| 2 | **Option A** (Circuit 4 `anchorLayer` PI + single-window scan) remains the re-keygen target and would close ETH-09. Until then `circuit4-anchor-binding.md` is the interim property. |
+| 3 | **Scoped pause** (withdraw + `verifyBlock` only) is not restored. ETH-04 incident plan stands. |
+| 4 | **Metrics:** `scripts/deposit_relayer_textfile_metrics.sh` is the ETH-16 close. A Prometheus scrape of `RelayerMetrics` is a later crate change, not this PR. |
+| 5 | **`altTokenId`:** script-level `require` in `DeployRealBridge` when `chainid == 1` is the intended guarantee. The contract does not enforce it; tests may keep `vm.chainId(1)`. |
+| 6 | **Deposit is one-way.** Wrong non-zero `anWorkchain` / `anAccount` is the user's loss. No refund, timeout, or owner rescue on the roadmap. Zero recipient stays rejected on both sides. |

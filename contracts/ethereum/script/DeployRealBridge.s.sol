@@ -92,6 +92,8 @@ contract DeployRealBridge is Script {
             require(useAxiomOracle, "ETH-5: mainnet forbids MockBlockHeaderOracle");
             require(w.wireVerifyBlock, "ETH-5: mainnet requires WIRE_VERIFY_BLOCK=true");
             require(w.altTokenId == 0, "ETH-9: mainnet altTokenId must be 0");
+            // Owner 2026-09-08 (sauin Q5): this script-level require is the
+            // intended guarantee. The contract does not enforce altTokenId.
         }
 
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));

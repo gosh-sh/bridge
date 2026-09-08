@@ -18,7 +18,7 @@ Incident controls that remain:
 - Owner AAVE: `emergencyWithdrawAll`, `harvestYield`.
 - Relayer halt off-chain.
 
-A **scoped** pause (withdraw + verifyBlock only, deposits open) is a possible future product; it is not this change.
+A **scoped** pause (withdraw + verifyBlock only, deposits open) is a possible future product; owner 2026-09-08 confirmed it is not this generation.
 
 ## PoC
 

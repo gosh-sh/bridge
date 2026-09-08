@@ -1,7 +1,7 @@
 # Circuit 4 — `finalRoot` binding (ETH-15)
 
 **Status:** written property for the flat `_isKnownAnchor` scan (NB-Q1).  
-**Option A** (`anchorLayer` public input + per-window scan) still needs Circuit 4 re-keygen.  
+**Option A** (`anchorLayer` public input + per-window scan) remains the Circuit 4 re-keygen target (owner, 2026-09-08). It is also what closes ETH-09 (single-window scan). Until re-keygen, this file is the interim answer.  
 **In circuit-audit scope:** this file + `crates/an-bridge-prover/bridge-event-prover-lib/src/prover.rs` + partner `bridge-event-prove-circuit`.
 
 ## What the contract checks

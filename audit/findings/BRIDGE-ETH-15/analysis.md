@@ -15,7 +15,7 @@ No Solidity exploit was found: forging an anchor still requires a verified `veri
 ## Disposition
 
 Written property: `docs/audit/circuit4-anchor-binding.md`.  
-Option A (PI slot `anchorLayer` + `_isKnownLayerAnchor`) is not this change — it needs Circuit 4 re-keygen.
+Option A (PI slot `anchorLayer` + `_isKnownLayerAnchor`) is not this change — it needs Circuit 4 re-keygen. Owner 2026-09-08: that re-keygen remains the target; this written property is the interim answer. It also closes ETH-09 when it lands.
 
 ## PoC
 

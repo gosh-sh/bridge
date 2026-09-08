@@ -71,8 +71,8 @@ Two MetaMask transactions on Etherscan: **approve**, then **deposit**.
 | Field | Value |
 | --- | --- |
 | `amount` | USDC base units, e.g. `1000000` for 1 USDC (≤ what you approved) |
-| `anWorkchain` | `0` (ask operator if unsure) |
-| `anAccount` | Your Acki Nacki account as **bytes32**: 64 hex chars, `0x`-prefixed. Must **not** be all zeros. Any valid account works, including full-width ids like `0x20c2db9c…834c9`. |
+| `anWorkchain` | `0` (ask operator if unsure). A wrong non-zero workchain is one-way — no refund. |
+| `anAccount` | Your Acki Nacki account as **bytes32**: 64 hex chars, `0x`-prefixed. Must **not** be all zeros. Any valid account works, including full-width ids like `0x20c2db9c…834c9`. A wrong non-zero destination **cannot be refunded** — check both fields with the operator before sending. |
 
 Confirm in MetaMask and **save the transaction hash**.
 

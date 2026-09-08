@@ -29,13 +29,18 @@ contracts/ethereum/lib/
 .env.local
 .env.production
 .env.*.local
-.env.shellnet
 .env.sepolia
 
 # Operator env copies (may contain keys / GraphQL tokens). Keep the examples.
 scripts/ursus/*.env
 !scripts/ursus/*.env.example
 .secrets
+
+# Personal editor backups of shellnet env files
+# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored. The tracked
+# shellnet config is a development fixture; production secrets stay external.
+.env.shellnet.*.bak
+.env.shellnet.*.bak.*
 
 # IDE
 .vscode/
@@ -181,12 +186,11 @@ out/
 # Review packs for partners (produced by build_pack.sh; not for git)
 dist/
 
-# Doc / code bundles for partners (zip / tar archives produced on
-# demand by `scripts/build_partner_pack.sh` to ship selected docs +
-# reference sources via messenger; the canonical source lives under
-# docs/ and crates/). Patterns are anchored to the repo root so any
-# future top-level `<topic>_for_<recipient>_*.{zip,tar.gz,sha256}` is
-# auto-ignored.
+# Doc / code bundles for partners (ad-hoc zip / tar archives produced
+# out-of-band to ship selected docs + reference sources via messenger;
+# the canonical source always lives under docs/ and crates/). Patterns
+# are anchored to the repo root so any top-level
+# `<topic>_for_<recipient>_*.{zip,tar.gz,sha256}` is auto-ignored.
 /*_for_*.zip
 /*_for_*.tar.gz
 /*_for_*.sha256
@@ -202,10 +206,9 @@ deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
 
-# R15 / M2 bridge-evm-aggregator spike (standalone workspace, lock + target +
-# regenerated KZG SRS + generated Yul/.bin artefacts; only the source tree
-# under src/ + tests/ is committed).
-crates/bridge-evm-aggregator/Cargo.lock
+# R15 / M2 bridge-evm-aggregator standalone workspace. Its Cargo.lock is
+# committed because `aggregate-proof` is a deployed binary; only generated
+# target/SRS/output artefacts remain local.
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/
@@ -266,3 +269,49 @@ eth-light-client-prover/out/
 eth-light-client-prover/*.srs
 eth-light-client-prover/shard_snark/
 eth-light-client-prover/rotate_tree/
+crates/bridge-prover-libraries/relayer-state.json
+crates/bridge-prover-libraries/relayer-state.json.stale_*
+crates/bridge-prover-libraries/state.stale_*/
+crates/bridge-prover-libraries/submissions/
+crates/bridge-prover-libraries/diag/
+
+# Prover SRS / vk / pk artefacts — ~40 GB total, regenerated on demand
+# by keygen (~7 min per circuit). Shared between the bundle daemon and
+# the withdraw-e2e CLI (`BRIDGE_PARAMS_DIR` / `--params-dir`). Mirrors
+# `crates/bridge-snark-utils/params/*.srs` and
+# `crates/bridge-evm-aggregator/params/`.
+crates/bridge-prover-libraries/params/
+
+# Per-mode config dirs (L1_config/, L2_config/) — the runtime subdirs
+# hold live prover state, proofs, and scratch witnesses, never commit.
+# The `env` files and `shellnet.common` are tracked development fixtures.
+# Production runtime envs and keys live outside the repository.
+crates/bridge-prover-libraries/L1_config/relayer-state.json*
+crates/bridge-prover-libraries/L1_config/state/
+crates/bridge-prover-libraries/L1_config/state.pre_deploy_*/
+crates/bridge-prover-libraries/L1_config/proofs/
+crates/bridge-prover-libraries/L1_config/work_dir/
+crates/bridge-prover-libraries/L2_config/relayer-state.json*
+crates/bridge-prover-libraries/L2_config/state/
+crates/bridge-prover-libraries/L2_config/state.pre_deploy_*/
+crates/bridge-prover-libraries/L2_config/proofs/
+crates/bridge-prover-libraries/L2_config/work_dir/
+
+# CLI smoke-test runtime dirs (created by scripts/local_smoke.sh,
+# scripts/live_smoke.sh, scripts/deploy_msig_and_mint.{sh,py} when
+# invoked from the CLI crate root). Contain multisig keys.json,
+# per-withdrawal idempotency state, aggregate-proof scratch, and logs.
+crates/ackinacki-bridge/work_dir/
+crates/ackinacki-bridge/withdraw-state/
+
+# Per-user output artifacts from scripts/deploy_msig_and_mint.{sh,py}
+# — the eval-able env line + stdout/stderr captures. Contain absolute
+# local paths and per-run multisig addresses; not source-of-truth.
+crates/ackinacki-bridge/deploy_msig*.env
+crates/ackinacki-bridge/deploy_msig*.log
+
+# Aggregator scratch dir if a user runs the CLI without setting
+# BRIDGE_SNARK_DIR (falls back to args.rs default `./shplonk-snark`).
+# The profile files point at ./work_dir/shplonk-snark instead, but this
+# catches the direct-invocation case.
+crates/ackinacki-bridge/shplonk-snark/

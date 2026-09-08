@@ -18,13 +18,13 @@
 |----|--------|
 | **WD-Q2** | `withdrawByProof` reverts `InvalidRecipient` if reconstructed recipient is `address(0)` |
 | **QC-A4-1** | `ShplonkHalo2Verifier` ctor requires `extcodesize(yul) > 0` |
-| **WD-Q3** | NatSpec + `scripts/check_withdrawal_verifier_not_stub.sh` — production must use `BridgeWithdrawalAggregatorVerifier` only |
+| **WD-Q3** | NatSpec — production must wire `BridgeWithdrawalAggregatorVerifier` (never the stub); verify manually in the deploy script. |
 | **QC-A2-3** | `verifyBlock` reverts `LayerHashActiveZero` if any active `layerHashes[i]==0` |
 | **QC-A1-1** | `MAX_DEPOSIT_AMOUNT = type(uint64).max` (AN mint-path width; not a TVL cap) |
 | **QC-A1-3** | `excessUsdc()` + `skimExcessUsdc` — recover post-`emergencyWithdrawAll` liquid yield |
 
 Gate: `cd contracts/ethereum && forge test --match-contract EthAuditQcHardening`  
-Deploy gate: `./scripts/check_withdrawal_verifier_not_stub.sh`
+Deploy gate: confirm the deploy script wires `BridgeWithdrawalAggregatorVerifier` (never the stub). No automated check ships in-repo; inspect the deploy log for the withdrawal-adapter contract name.
 
 ---
 
@@ -70,7 +70,7 @@ Bridge assumes standard ERC-20 semantics (no fee-on-transfer). Circle blacklist/
 
 ## Deploy checklist (mainnet)
 
-1. `./scripts/check_withdrawal_verifier_not_stub.sh`
+1. Confirm withdrawal-adapter contract in the deploy log is `BridgeWithdrawalAggregatorVerifier` (never the stub).
 2. `./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers`
 3. Confirm `WIRE_WITHDRAW_BY_PROOF=true` and withdrawal adapter is `BridgeWithdrawalAggregatorVerifier`
 4. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path

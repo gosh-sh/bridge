@@ -53,7 +53,8 @@ pub use state::RelayerState;
 pub use types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
 pub use withdraw_e2e::{
     capture_next_withdrawal_event, run_once as run_withdraw_e2e_once,
-    snapshot_baseline_msg_ids, CapturedEvent, WithdrawE2EConfig, WithdrawE2ESummary,
+    run_once_with_state as run_withdraw_e2e_once_with_state, snapshot_baseline_msg_ids,
+    CapturedEvent, WithdrawE2EConfig, WithdrawE2ESummary,
 };
 pub use withdraw_prover::{
     MockWithdrawalProver, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,

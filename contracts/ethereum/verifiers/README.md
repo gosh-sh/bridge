@@ -1,8 +1,6 @@
 # R15 SHPLONK verifier bytecode (production)
 
-Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. There is no
-Groth16 anywhere in this path — the gnark wrappers and their generated Solidity verifiers were
-retired.
+Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. 
 
 Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-08-18**, the same
 metric `scripts/check_eip170_verifier_bins.sh` uses. Two of them had drifted from the figures this
@@ -27,8 +25,7 @@ limbs + 10 re-exposed Circuit-4 public inputs). Landed 2026-07-07 (M4).
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
 envelopes, so at `K=20` it needs 44 advice columns and the aggregator Yul exceeds EIP-170
-(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul drops to 21 493 B. The
-gnark Groth16 fallback hybrid is retired.
+(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul drops to 21 493 B. 
 
 ## Generate SHPLONK `.bin` (1A + 1B + 2)
 

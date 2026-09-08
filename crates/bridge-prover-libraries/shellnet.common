@@ -1,0 +1,46 @@
+# shellnet.common — shared Sepolia-E2E env sourced by both L1_config/env
+# and L2_config/env. Contains only settings that are identical between L1
+# and L2 modes. Per-mode files layer their own vars on top and set
+# `BRIDGE_CONFIG_DIR`, which drives `bridge-prover-lib::paths`.
+#
+# NOT sourced directly by tools. Consumed via:
+#   cd crates/bridge-prover-libraries
+#   set -a && source L1_config/env && set +a    # or L2_config/env
+#   cargo run --release -p bridge-relayer-daemon --bin relayer -- daemon-live
+#
+# SAFETY:
+#   * shellnet.common IS tracked in git — it carries the shared shellnet burner
+#     that every operator needs to reproduce a run. Only personal editor
+#     backups (see bridge/.gitignore `.env.shellnet.*.bak*`) are ignored.
+#   * RELAYER_PRIVATE_KEY is a Sepolia-only burner. Do NOT reuse this key
+#     for anything of value on any other network.
+
+# --- Ethereum side (Sepolia) --------------------------------------------------
+# Single shared shellnet burner used for BOTH the deploy (owner) role and the
+# relayer role. `verifyBlock` and `withdrawByProof` are permissionless so one
+# key covers everything for the shellnet E2E. Address:
+# 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307. For the deploy path
+# (`scripts/deploy_bridge_bundle.sh`) re-export the same value as `PRIVATE_KEY`
+# — e.g. `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh`.
+RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
+
+# --- Acki Nacki side (shellnet) -----------------------------------------------
+BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
+
+# --- local dirs ---------------------------------------------------------------
+# `params/` holds ~17 GB of pre-built SRS + per-circuit vk/pk files.
+# Do NOT wipe — keygen would re-burn ~7 min.
+BRIDGE_PARAMS_DIR=./params
+
+# --- C1/C2 R15 SHPLONK aggregation (mandatory) --------------------------------
+# `daemon-live` unconditionally wraps LiveBlockSource with AggregatedBlockSource
+# because the on-chain AckiNackiBridge verifier only accepts aggregated
+# calldata (raw halo2 bytes revert with AttestationProofRejected()). Both
+# vars are required — the daemon refuses to start without them.
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+
+# --- backoff (defaults are already sane; overridable) -------------------------
+# --backoff-initial-secs 2 --backoff-max-secs 60 --backoff-multiplier 2

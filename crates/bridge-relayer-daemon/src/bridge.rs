@@ -50,6 +50,11 @@ use alloy::{
     providers::Provider,
 };
 use async_trait::async_trait;
+// `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
+// with `bridge_prover_lib::bridge_state::BridgeState::from_contract` — the
+// relayer's `read_full_state` populates them (with BE→LE reversal on all
+// `uint256` scalars) so consumers see a single unified byte order.
+use bridge_prover_lib::bridge_state::{EthBridgeContractState, HistoryWindow};
 
 use crate::{
     error::RelayerError,
@@ -90,37 +95,6 @@ pub const HISTORY_PROOF_WINDOW: usize = 128;
 // `MAX_LAYER_HASHES` (layer count = 10) is defined in `crate::types` and
 // used here via the `use` at the top of the file — kept there as the
 // single source of truth.
-
-/// Native mirror of one on-chain `HistoryWindow` (added 2026-08 alongside
-/// `getLayerWindow(uint8)`). Consumed by the daemon's chain-resurrect
-/// path to rebuild `BridgeState` when starting fresh against an
-/// already-advanced contract.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractLayerWindow {
-    /// Full slot buffer, chronological-by-cursor. Unused slots are zero.
-    pub data: Vec<[u8; 32]>,
-    /// Parallel heights buffer.
-    pub heights: Vec<u64>,
-    /// Number of valid entries currently in the window (saturates at W).
-    pub data_len: u16,
-    /// Next slot to overwrite (always `mod W`).
-    pub write_cursor: u16,
-    /// Height of the last appended entry (zero when empty).
-    pub last_height: u64,
-}
-
-/// Full contract state readable by an off-chain resurrect: the four scalar
-/// mirrors plus all 10 layer windows. Sufficient to reconstruct
-/// `BridgeState` byte-for-byte via `BridgeState::from_contract`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractFullState {
-    pub last_seen_block_seq_no: u64,
-    pub bk_set_commitment: U256,
-    pub last_bk_set_update_seq_no: u64,
-    pub prev_max_level_layer_hash: U256,
-    /// Index `L-1` corresponds to layer `L` (1..=10).
-    pub layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES],
-}
 
 /// Outcome of `submit_block`. The relayer interprets this to decide
 /// whether to advance state, retry, or skip.
@@ -755,7 +729,7 @@ where
     /// this call and let the normal startup drift routing re-observe on
     /// the next cycle — a one-block skew triggers an immediate re-read,
     /// not a mis-seed.
-    pub async fn read_full_state(&self) -> Result<ContractFullState, RelayerError> {
+    pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
         let last = self
             .contract
             .storedLastSeenBlockSeqNo()
@@ -784,7 +758,14 @@ where
         // Read all 10 layer windows.
         // `HistoryWindow` on the sol! side has fixed-size arrays that
         // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
-        let mut windows: Vec<ContractLayerWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
+        //
+        // Endianness: on-chain `uint256` slots come out BE via
+        // `U256::to_be_bytes`; `BridgeState.layer_windows` stores LE
+        // (`Fr::to_repr()`). We reverse each slot here so the returned
+        // `EthBridgeContractState` is byte-for-byte comparable to a local
+        // `BridgeState` snapshot. Same convention applies to the two scalar
+        // `uint256` fields (`bk_set_commitment`, `prev_max_level_layer_hash`).
+        let mut windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
         for layer in 1..=MAX_LAYER_HASHES as u8 {
             let w = self
                 .contract
@@ -792,25 +773,35 @@ where
                 .call()
                 .await
                 .map_err(map_contract_err)?;
-            let data: Vec<[u8; 32]> = w.data.iter().map(|u| u.to_be_bytes()).collect();
+            let data: Vec<[u8; 32]> = w
+                .data
+                .iter()
+                .map(|u| {
+                    let mut le = u.to_be_bytes::<32>();
+                    le.reverse();
+                    le
+                })
+                .collect();
             let heights: Vec<u64> = w.heights.to_vec();
-            windows.push(ContractLayerWindow {
+            // Widen on-chain `uint16` cursors to `usize` for the shared
+            // `HistoryWindow` shape. `from_contract` validates bounds.
+            windows.push(HistoryWindow {
                 data,
                 heights,
-                data_len: w.dataLen,
-                write_cursor: w.writeCursor,
+                data_len: w.dataLen as usize,
+                write_cursor: w.writeCursor as usize,
                 last_height: w.lastHeight,
             });
         }
-        let layer_windows: [ContractLayerWindow; MAX_LAYER_HASHES] = windows
+        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] = windows
             .try_into()
             .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
 
-        Ok(ContractFullState {
+        Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
-            bk_set_commitment: bk,
+            bk_set_commitment: bk.to_le_bytes::<32>(),
             last_bk_set_update_seq_no: last_bk,
-            prev_max_level_layer_hash: anchor,
+            genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
     }

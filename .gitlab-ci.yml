@@ -133,7 +133,7 @@ build:rust:release:
     - tags
 
 # bridge-relayer-daemon depends on bridge-prover-lib (halo2) and must build as
-# a member of crates/an-bridge-prover (symlink member). Standalone
+# a member of crates/bridge-prover-libraries (symlink member). Standalone
 # `cd crates/bridge-relayer-daemon && cargo …` cannot resolve workspace=true
 # circuit deps. Without this job, relayer regressions ship to main silently.
 build:rust:relayer:
@@ -143,10 +143,10 @@ build:rust:relayer:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/an-bridge-prover/target/
+      - crates/bridge-prover-libraries/target/
     policy: pull-push
   script:
-    - cd crates/an-bridge-prover
+    - cd crates/bridge-prover-libraries
     - cargo build --locked -p bridge-relayer-daemon --all-targets
 
 # bridge-evm-aggregator is excluded from the workspace (axiom halo2-lib vs gosh
@@ -231,12 +231,12 @@ test:rust:relayer:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/an-bridge-prover/target/
+      - crates/bridge-prover-libraries/target/
     policy: pull
   needs:
     - build:rust:relayer
   script:
-    - cd crates/an-bridge-prover
+    - cd crates/bridge-prover-libraries
     - cargo test --locked -p bridge-relayer-daemon
 
 test:rust:aggregator:
@@ -339,12 +339,12 @@ lint:rust:relayer:clippy:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:
       - .cargo/
-      - crates/an-bridge-prover/target/
+      - crates/bridge-prover-libraries/target/
     policy: pull
   needs:
     - build:rust:relayer
   script:
-    - cd crates/an-bridge-prover
+    - cd crates/bridge-prover-libraries
     - cargo clippy --locked -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
   allow_failure: false
 

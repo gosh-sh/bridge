@@ -1,7 +1,7 @@
 //! [`WithdrawalProver`] — drive the partner's Circuit 4 (withdrawal) prover
 //! library from the relayer.
 //!
-//! The withdrawal circuit lives in `crates/an-bridge-prover`'s
+//! The withdrawal circuit lives in `crates/bridge-prover-libraries`'s
 //! `bridge-event-prover-lib`, whose cargo workspace pins the gosh `halo2-lib`
 //! fork + `tvm_vm` — a dependency tree incompatible with this relayer crate's
 //! alloy / `abigen` stack. Force-merging two halo2 backends into one binary
@@ -13,7 +13,7 @@
 //!   [`PartnerWithdrawalProof`] so the relayer + submit path can be driven in
 //!   unit tests in microseconds.
 //! - [`SubprocessWithdrawalProver`] — production. Shells out to
-//!   `an-bridge-prover`'s `bridge-event-halo2-prover` binary (`--fixture
+//!   `bridge-prover-libraries`'s `bridge-event-halo2-prover` binary (`--fixture
 //!   <witness> [--out-dir <dir>] [--seq-no N]`), which proves the
 //!   `PrivateWitness`, **self-verifies**, optionally writes
 //!   `proof_event_{seq:06}.json`, and prints a single-line JSON summary (the
@@ -39,7 +39,7 @@ use async_trait::async_trait;
 
 use crate::{error::RelayerError, withdrawal::PartnerWithdrawalProof};
 
-/// Name of the partner binary inside the `an-bridge-prover` workspace.
+/// Name of the partner binary inside the `bridge-prover-libraries` workspace.
 pub const PROVER_BIN: &str = "bridge-event-halo2-prover";
 
 /// Produces a [`PartnerWithdrawalProof`] for a Circuit 4 `PrivateWitness`.
@@ -120,21 +120,21 @@ impl WithdrawalProver for MockWithdrawalProver {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SubprocessWithdrawalProver — invokes an-bridge-prover's binary
+// SubprocessWithdrawalProver — invokes bridge-prover-libraries's binary
 // ─────────────────────────────────────────────────────────────────────
 
 /// Configuration for the out-of-process `bridge-event-halo2-prover` invocation.
 #[derive(Clone, Debug)]
 pub struct SubprocessWithdrawalProverConfig {
-    /// Path to the `crates/an-bridge-prover` workspace root. The prebuilt
+    /// Path to the `crates/bridge-prover-libraries` workspace root. The prebuilt
     /// release binary is expected at
     /// `<dir>/target/release/bridge-event-halo2-prover`; if absent we fall back
     /// to `cargo run --release -p bridge-event-halo2-prover`.
-    pub an_bridge_prover_dir: PathBuf,
+    pub bridge_prover_libraries_dir: PathBuf,
     /// Working directory for the prover process. The binary reads the SRS +
     /// Circuit 4 PK/VK from `./params` **relative to this dir**. Defaults to
-    /// `an_bridge_prover_dir`. (Only honoured for the prebuilt-binary path;
-    /// the `cargo run` fallback always runs from `an_bridge_prover_dir`.)
+    /// `bridge_prover_libraries_dir`. (Only honoured for the prebuilt-binary path;
+    /// the `cargo run` fallback always runs from `bridge_prover_libraries_dir`.)
     pub work_dir: PathBuf,
     /// Optional dir to also persist `proof_event_{seq:06}.json` (passed as
     /// `--out-dir`). The proof is returned regardless via stdout.
@@ -147,11 +147,11 @@ pub struct SubprocessWithdrawalProverConfig {
 }
 
 impl SubprocessWithdrawalProverConfig {
-    pub fn new(an_bridge_prover_dir: impl Into<PathBuf>) -> Self {
-        let dir = an_bridge_prover_dir.into();
+    pub fn new(bridge_prover_libraries_dir: impl Into<PathBuf>) -> Self {
+        let dir = bridge_prover_libraries_dir.into();
         Self {
             work_dir: dir.clone(),
-            an_bridge_prover_dir: dir,
+            bridge_prover_libraries_dir: dir,
             out_dir: None,
             seq_no: 0,
             timeout: Duration::from_secs(1800),
@@ -169,8 +169,8 @@ impl SubprocessWithdrawalProver {
     pub fn new(mut config: SubprocessWithdrawalProverConfig) -> Self {
         // Subprocess spawn with `current_dir` needs absolute paths; operators
         // often pass relative dirs.
-        if let Ok(abs) = config.an_bridge_prover_dir.canonicalize() {
-            config.an_bridge_prover_dir = abs;
+        if let Ok(abs) = config.bridge_prover_libraries_dir.canonicalize() {
+            config.bridge_prover_libraries_dir = abs;
         }
         if let Ok(abs) = config.work_dir.canonicalize() {
             config.work_dir = abs;
@@ -183,7 +183,7 @@ impl SubprocessWithdrawalProver {
     fn release_bin(&self) -> Option<PathBuf> {
         let bin = self
             .config
-            .an_bridge_prover_dir
+            .bridge_prover_libraries_dir
             .join("target/release")
             .join(PROVER_BIN);
         bin.is_file().then_some(bin)
@@ -219,7 +219,7 @@ impl WithdrawalProver for SubprocessWithdrawalProver {
             c
         } else {
             let mut c = Command::new("cargo");
-            c.current_dir(&self.config.an_bridge_prover_dir)
+            c.current_dir(&self.config.bridge_prover_libraries_dir)
                 .args(["run", "--release", "-p", PROVER_BIN, "--"])
                 .args(&args);
             c

@@ -1,0 +1,45 @@
+# bridge_config.mainnet — placeholder profile for the future mainnet deploy.
+#
+# WHAT IT IS
+# ----------
+# Schema-only stub. No mainnet AN cluster + mainnet EVM bridge deploy
+# exists yet as of this file's creation date. Copy `bridge_config.shellnet`
+# and replace the values once the deploy pair is real. Every key below
+# must be filled in — the CLI will refuse with "missing required
+# argument …" for anything left blank.
+#
+# The file is checked in commented-out so accidentally sourcing it fails
+# loudly (unset env vars trip the CLI's clap-required checks) instead of
+# silently connecting to shellnet or, worse, submitting a withdraw
+# against a wrong-network bridge address.
+
+# --- Ethereum side ------------------------------------------------------------
+# RPC_URL=https://…                             # mainnet EVM RPC
+
+# --- Acki Nacki side ----------------------------------------------------------
+# NETWORK=…                                     # AN mainnet tvm-cli --url target
+# BRIDGE_GQL_ENDPOINT=https://…                 # AN mainnet GraphQL
+
+# On-chain USDCBridge account id. Almost certainly different from the
+# shellnet palindromic — pull from the mainnet generate_zerostate config.
+# USDC_BRIDGE_ACCOUNT_ID=
+
+# USDC_BRIDGE_KEY_PATH=…                        # bridge-owner key (mainnet)
+
+# --- Anchor selection (mainnet is L2 — always) --------------------------------
+# BRIDGE_ANCHOR_LAYER=2
+# BRIDGE_I_KNOW_THE_WAIT=true
+
+# --- local dirs (shared install layout) ---------------------------------------
+# BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params
+# BRIDGE_PK_CACHE_DIR=../bridge-prover-libraries/params/pk_cache
+# BRIDGE_WORK_DIR=./work_dir
+# BRIDGE_SNARK_DIR=./work_dir/shplonk-snark
+# BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
+
+# --- SHPLONK aggregation ------------------------------------------------------
+# BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+# BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+
+# --- Deploy target ------------------------------------------------------------
+# BRIDGE_ADDRESS=0x…                            # AckiNackiBridge on EVM mainnet

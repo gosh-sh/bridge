@@ -12,9 +12,14 @@
 //!    [`bridge_event_witness::export_from_event_boc_base64`],
 //! 3. enriches it via [`bridge_event_witness::enrich_witness`]
 //!    (events-tree + block-tree Merkle proofs + anchor),
-//! 4. shells out to `bridge-event-halo2-prover` through
-//!    [`crate::withdraw_prover::SubprocessWithdrawalProver`] to produce
-//!    the R15 SHPLONK aggregator calldata.
+//! 4. runs the C4 SHPLONK pipeline
+//!    ([`crate::aggregator::Circuit4ShplonkPipeline`]) —
+//!    [`crate::aggregator::InProcessCircuit4SnarkProver`] re-proves the
+//!    witness with a Poseidon transcript at K=19, then
+//!    [`crate::aggregator::SubprocessAggregator`] shells out to
+//!    `aggregate-proof --name BridgeWithdrawalAggregatorVerifier` to
+//!    produce the 22-instance SHPLONK calldata the deployed Yul verifier
+//!    accepts byte-for-byte.
 //!
 //! `run_once` intentionally does **not** touch Ethereum — it returns the
 //! [`crate::withdrawal::PartnerWithdrawalProof`] and leaves ETH-side
@@ -27,6 +32,7 @@ pub mod capture;
 pub mod driver;
 
 pub use capture::{
-    capture_next_withdrawal_event, snapshot_baseline_msg_ids, CapturedEvent,
+    capture_next_withdrawal_event, capture_targeted_withdrawal_event,
+    snapshot_baseline_msg_ids, CapturedEvent,
 };
-pub use driver::{run_once, WithdrawE2EConfig, WithdrawE2ESummary};
+pub use driver::{run_once, run_once_with_state, WithdrawE2EConfig, WithdrawE2ESummary};

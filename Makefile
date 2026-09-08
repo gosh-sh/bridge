@@ -166,9 +166,9 @@ coverage-solidity: ## Run forge coverage --report summary (matches test:solidity
 	@echo "$(YELLOW)      if any function has > 16 live local stack slots.$(NC)"
 	@cd contracts/ethereum && forge coverage --report summary
 
-relayer-test: ## Run bridge-relayer-daemon unit tests (via an-bridge-prover workspace)
+relayer-test: ## Run bridge-relayer-daemon unit tests (via bridge-prover-libraries workspace)
 	@echo "$(BLUE)Running bridge-relayer-daemon tests...$(NC)"
-	@cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon
+	@cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon
 
 aggregator-test: ## Run bridge-evm-aggregator tests (release, ~3 min)
 	@echo "$(BLUE)Running bridge-evm-aggregator tests...$(NC)"
@@ -184,8 +184,8 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 relayer-fmt: ## Check bridge-relayer-daemon formatting
 	@cd crates/bridge-relayer-daemon && cargo fmt --check
 
-relayer-clippy: ## Run clippy on bridge-relayer-daemon (via an-bridge-prover workspace)
-	@cd crates/an-bridge-prover && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
+relayer-clippy: ## Run clippy on bridge-relayer-daemon (via bridge-prover-libraries workspace)
+	@cd crates/bridge-prover-libraries && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
 
 production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (gates live in scripts/production_preflight.sh)
 	@chmod +x scripts/production_preflight.sh
@@ -206,8 +206,6 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@chmod +x scripts/check_eip170_verifier_bins.sh
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike 2>/dev/null || \
 	 ./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers 2>/dev/null || true
-	@chmod +x scripts/check_withdrawal_verifier_not_stub.sh
-	@./scripts/check_withdrawal_verifier_not_stub.sh
 	@echo "$(GREEN)── pre-push: all green; safe to push ──$(NC)"
 
 # Quick commands

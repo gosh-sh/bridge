@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Relayer skeleton for the AN→ETH bridge: fetches AN block data + proofs, drives them through `AckiNackiBridge.verifyBlock` on Ethereum (Phase 5.1)."
 
-# Build via the an-bridge-prover workspace (member symlink
-# crates/an-bridge-prover/bridge-relayer-daemon → ../bridge-relayer-daemon):
-#   cd crates/an-bridge-prover && cargo test -p bridge-relayer-daemon
+# Build via the bridge-prover-libraries workspace (member symlink
+# crates/bridge-prover-libraries/bridge-relayer-daemon → ../bridge-relayer-daemon):
+#   cd crates/bridge-prover-libraries && cargo test -p bridge-relayer-daemon
 # Path deps below are relative to that member path.
 
 [dependencies]
@@ -39,7 +39,7 @@ bridge-gql-fetcher = { path = "../bridge-gql-fetcher" }
 # In-process wrap of Poseidon-transcript proof bytes → snark-verifier `.snark`,
 # so the daemon no longer shells out to `export-1a1b2-poseidon-snark` (which
 # independently re-fetched + re-proved every bundle). Must be resolved through
-# the an-bridge-prover workspace so its halo2-base [patch] rewrites apply.
+# the bridge-prover-libraries workspace so its halo2-base [patch] rewrites apply.
 bridge-snark-wrap = { path = "../bridge-snark-wrap" }
 # In-process Circuit 4 (event) Poseidon prover — replaces the historical
 # `SubprocessCircuit4SnarkProver` shell-out to `export-c4-poseidon-snark`

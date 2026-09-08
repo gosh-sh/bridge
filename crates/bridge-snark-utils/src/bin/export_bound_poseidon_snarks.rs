@@ -11,7 +11,10 @@ use bridge_prover_lib::{
         generate_fallback_proof_with_transcript, generate_primary_proof_with_transcript, ProofOutput,
     },
     transcript::TranscriptKind,
-    verifier::{verify_fallback_proof_with_transcript, verify_layer_proof_with_transcript},
+    verifier::{
+        verify_fallback_proof_with_transcript, verify_layer_proof_with_transcript,
+        verify_primary_proof_with_transcript,
+    },
     Fr,
 };
 use bridge_snark_utils::{
@@ -61,8 +64,11 @@ const CIRCUITS: &[CircuitExport<'static>] = &[
     },
     CircuitExport {
         name: "layer_hashes",
-        vk_key: "layer_hashes_vk.bin",
-        config_key: "layer_hashes_config_params.json",
+        // KeyManager PREFIX is "layer" (layer_vk.bin). The June 2026
+        // layer_hashes_*.bin files are a leftover naming split — do not
+        // feed them to snark-verifier after a PREFIX=layer re-keygen.
+        vk_key: "layer_vk.bin",
+        config_key: "layer_config_params.json",
         srs_k_override: Some(20),
     },
 ];
@@ -115,9 +121,24 @@ fn main() -> anyhow::Result<()> {
         bound.last_seen_block_seqno,
         TranscriptKind::Poseidon,
     )?;
-    km.unload_primary_pk();
     let primary_proof_path = snark_dir.join("primary.proof.bin");
     std::fs::write(&primary_proof_path, &primary.proof_bytes)?;
+    {
+        let ok = verify_primary_proof_with_transcript(
+            &km,
+            &primary.proof_bytes,
+            &attestation_instances(&primary),
+            TranscriptKind::Poseidon,
+        );
+        println!("SELF_VERIFY primary (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+        anyhow::ensure!(
+            ok,
+            "primary Poseidon inner snark failed native verification — refusing to export an \
+             invalid snark (stale/mismatched keys?). Move aside params/primary_{{vk,pk}}.bin \
+             and primary_config_params.json so ensure_keys re-keygens."
+        );
+    }
+    km.unload_primary_pk();
 
     let fallback_bytes = bound
         .attestation_fallback_bytes
@@ -188,8 +209,8 @@ fn main() -> anyhow::Result<()> {
             "layer-hashes Poseidon inner snark failed native verification — refusing to export an \
              invalid snark. This is almost always stale/mismatched layer keys: \
              `ensure_keys` short-circuits on cached vk/pk, so a bound witness regenerated after \
-             the keys is proved against the wrong VK. Delete params/layer_hashes_{{vk,pk}}.bin + \
-             layer_hashes_config_params.json and re-run to keygen against the current witness."
+             the keys is proved against the wrong VK. Move aside params/layer_{{vk,pk}}.bin + \
+             layer_config_params.json and re-run to keygen against the current witness."
         );
     }
     km.unload_layer_pk();

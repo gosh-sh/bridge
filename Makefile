@@ -171,7 +171,7 @@ ci: format-check lint test ## Run CI checks locally
 coverage-solidity: ## Run forge coverage --report summary (matches test:solidity:coverage CI job)
 	@echo "$(BLUE)Running forge coverage --report summary...$(NC)"
 	@echo "$(YELLOW)Note: coverage disables optimizer; --ir-minimum avoids stack-too-deep.$(NC)"
-	@cd contracts/ethereum && forge coverage --ir-minimum --report summary --no-match-contract ShplonkArtefactPairingPendingN14
+	@cd contracts/ethereum && forge coverage --ir-minimum --report summary
 
 relayer-test: ## Run bridge-relayer-daemon unit tests (via an-bridge-prover workspace)
 	@echo "$(BLUE)Running bridge-relayer-daemon tests...$(NC)"
@@ -252,13 +252,10 @@ pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN
 	@cd contracts/ethereum && forge fmt --check
 	@chmod +x scripts/check_shplonk_artefacts.sh
 	@./scripts/check_shplonk_artefacts.sh
-	@cd contracts/ethereum && forge test --no-match-contract ShplonkArtefactPairingPendingN14
+	@cd contracts/ethereum && forge test
 	@$(MAKE) audit-solidity-test
 	@$(MAKE) pre-push-an
 	@echo "$(GREEN)── pre-push-audit: green ──$(NC)"
-
-test-pairing-pending-n14: ## ETH-06: run quarantined 1A/1B/C2 pairing (expected red until n14 regen)
-	@cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairingPendingN14 -vv
 
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"
@@ -269,7 +266,7 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@cd contracts/ethereum && forge fmt --check
 	@chmod +x scripts/check_shplonk_artefacts.sh
 	@./scripts/check_shplonk_artefacts.sh
-	@cd contracts/ethereum && forge test --no-match-contract ShplonkArtefactPairingPendingN14
+	@cd contracts/ethereum && forge test
 	@$(MAKE) coverage-solidity
 	@cargo test --workspace --locked
 	@$(MAKE) relayer-test

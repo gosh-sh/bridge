@@ -6,7 +6,7 @@ Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefa
 |------|---------|-----------|---------------------|
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | **21 493 B** — EIP-170 OK |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | **21 493 B** — EIP-170 OK (K=21 inner) |
-| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | **19 100 B** — EIP-170 OK |
+| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | **23 111 B** — EIP-170 OK (k_outer=21) |
 | `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 10 | **20 987 B** — EIP-170 OK (K=19 inner) |
 
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
@@ -71,6 +71,6 @@ Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c &
 
 Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
 
-**ETH-6:** hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (Circuit 4). 1A/1B/C2 pairing is `ShplonkArtefactPairingPendingN14` until n14 regen — do not `WIRE_VERIFY_BLOCK` on mainnet until that contract is green.
+**ETH-6:** hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (all four pairs). CREATE `extcodehash` pins are in `ShplonkDeployLib`.
 
 M2 multiply spike fixtures live under `test/fixtures/r15_spike/` for Foundry only — **not** valid production verifiers.

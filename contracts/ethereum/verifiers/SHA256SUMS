@@ -1,14 +1,13 @@
 # ETH-6 pin of committed SHPLONK runtime + smoke calldata.
-# Default pairing (ShplonkArtefactPairing.t.sol): Circuit 4 PASS.
-# 1A/1B/C2 pairing is quarantined in ShplonkArtefactPairingPendingN14
-# (Yul 2026-08-12 vs calldata 2026-06-23). Regen both on n14, update this
-# file and ShplonkDeployLib *_YUL_CODEHASH (CREATE extcodehash), then fold
-# those tests back into the default suite.
+# Default pairing (ShplonkArtefactPairing.t.sol): all four pairs.
+# 1A/1B bins unchanged vs 2026-08-12; calldata regenerated 2026-09-08 on n14
+# (Hermez PPoT). LayerHashes Yul regenerated at k_outer=21 (23111 B).
+# CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
 c9f83de6b3a0e2b67b3f31149343eaa4c1140e7693d577b2010bee8746185886  BridgeWithdrawalAggregatorVerifier.bin
 d9a867a688a72d9ce1aad4cfeb7eff75d74aea6ada798e279092a33a1656ab64  BridgeWithdrawalAggregatorVerifier_calldata.bin
 db36c101ad9edf1e0bcb3456276b78bc9bca177d9016b82cfddcfe34db4131df  FallbackAggregatorVerifier.bin
-5282547ee3387780441615974bab4d73c21debca8b667170d27920fcdd74a1f2  FallbackAggregatorVerifier_calldata.bin
-563a231fc620605d800baa1c01d05f370cbffff3febf9ec7b368ea53799ff8ad  LayerHashesAggregatorVerifier.bin
-b4667a6fd54111c26b08bbfd0653e1f8a29d3c00e86b355a51caa598dae35b34  LayerHashesAggregatorVerifier_calldata.bin
+32cd3f693cb9e570d0de97c073c75607b6efe063f2f47ae5f33740aa2f57a4c5  FallbackAggregatorVerifier_calldata.bin
+bb34278118a0ce7c193005110dec26d59f85dd46759851114b439d9d127e9dce  LayerHashesAggregatorVerifier.bin
+72252dbd10a7706114e81b5853d1c6d9e955483b20aa92fcbec6a1ac97b556a5  LayerHashesAggregatorVerifier_calldata.bin
 0389a20844ced3093503df7bca989684a1f0d19f931c915826b5f261e6d7f82a  PrimaryAggregatorVerifier.bin
-187d69e221d1fc42825d366ebb859d7bdf5e94290320890917c9805e595f7ad7  PrimaryAggregatorVerifier_calldata.bin
+79f19391e73822ebd3e57ac350739d9fd2d9d5c189f55c6d515fb49558b9b47f  PrimaryAggregatorVerifier_calldata.bin

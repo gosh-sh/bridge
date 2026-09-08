@@ -112,7 +112,7 @@ Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inp
 
 1. `./scripts/check_withdrawal_verifier_not_stub.sh`
 2. `./scripts/check_shplonk_artefacts.sh` (SHA-256 pin + EIP-170)
-3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing --no-match-contract ShplonkArtefactPairingPendingN14` — Circuit 4 pairing green. 1A/1B/C2 live in `ShplonkArtefactPairingPendingN14` until n14 regen (`make test-pairing-pending-n14`, CI `allow_failure`); do not deploy `WIRE_VERIFY_BLOCK` until that contract is green.
+3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing` — all four pairs (1A/1B/C2/C4) green after the 2026-09-08 n14 regen.
 4. Confirm `WIRE_VERIFY_BLOCK=true` and `USE_AXIOM_ORACLE=true` on mainnet (`DeployRealBridge` `envBool`; ETH-5)
 5. Confirm Circuit 4 is wired together with the verifyBlock triple (constructor `WithdrawRequiresVerifyBlock`)
 6. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path
@@ -128,7 +128,7 @@ Confirmed on [PR #39](https://github.com/gosh-sh/bridge/pull/39) (`Все да`)
 
 | # | Decision |
 |---|---------|
-| 1 | **n14 regen** is required before `WIRE_VERIFY_BLOCK` on mainnet. It is not scheduled from this repo. Until `ShplonkArtefactPairingPendingN14` is green, do not ship the three verifyBlock artefacts. |
+| 1 | **n14 regen landed 2026-09-08.** `ShplonkArtefactPairing` covers 1A/1B/C2/C4. `WIRE_VERIFY_BLOCK` on mainnet still needs the usual deploy checklist (this row no longer blocks on pairing). |
 | 2 | **Option A** (Circuit 4 `anchorLayer` PI + single-window scan) remains the re-keygen target and would close ETH-09. Until then `circuit4-anchor-binding.md` is the interim property. |
 | 3 | **Scoped pause** (withdraw + `verifyBlock` only) is not restored. ETH-04 incident plan stands. |
 | 4 | **Metrics:** `scripts/deposit_relayer_textfile_metrics.sh` is the ETH-16 close. A Prometheus scrape of `RelayerMetrics` is a later crate change, not this PR. |

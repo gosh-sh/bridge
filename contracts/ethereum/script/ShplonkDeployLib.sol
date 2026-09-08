@@ -36,7 +36,7 @@ library ShplonkDeployLib {
     bytes32 internal constant FALLBACK_YUL_CODEHASH =
         0xce215c9aca95eb5c5006615dbfee217d9a3aa0d6847cecef6dcee822ec283c00;
     bytes32 internal constant LAYER_HASHES_YUL_CODEHASH =
-        0xc9069dae8f4758c4619061db8115850d73edb3124bea36e29e2f783664b09aef;
+        0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
         0x8c7a66973776b835349c8053d1b302149162cbece4a7b70e8a5c25c593fee1b5;
 

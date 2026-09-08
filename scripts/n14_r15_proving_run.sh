@@ -4,11 +4,23 @@
 # Usage (from dev machine):
 #   ./scripts/n14_r15_proving_run.sh sync-and-start
 #   ./scripts/n14_r15_proving_run.sh continue-bc      # skip Phase A if bound proofs exist
+#   ./scripts/n14_r15_proving_run.sh continue-bc-nosync
 #   ./scripts/n14_r15_proving_run.sh continue-c       # Phase C only (snarks cached)
+#   ./scripts/n14_r15_proving_run.sh continue-c-nosync-eth06  # Phase C, keep Circuit 4
 #   ./scripts/n14_r15_proving_run.sh status
 #   ./scripts/n14_r15_proving_run.sh pull-artifacts
 #
 # Requires: ssh access to gosh@94.156.178.14:22488 (see .cursor/rules/external-ssh.mdc)
+# cargo is *not* --locked: crates/bridge-snark-utils has no Cargo.lock in git;
+# rsync --delete would also wipe a remotely generated lock.
+#
+# Circuit 2: Phase A uses --num-layers 3 --num-chain-steps 2 (keygen REF_*).
+# The June 2026 layer PK (k=17, 20 advice) was built against a smaller Circuit 2
+# (TREE_DEPTH=2). origin/main is TREE_DEPTH=8 and NUM_MERKLE_SIBLINGS=4; that PK
+# overflows advice even at 3/2. If Circuit 2 panics NOT ENOUGH ADVICE COLUMNS,
+# move aside halo2-prover/params/layer_{pk,vk,config}* (bridge/params/layer_*
+# are symlinks into that dir) so ensure_keys re-keygens. Do NOT sync-and-start
+# from a local circuits checkout on circuit4-single-final-root / halo2 main.
 set -euo pipefail
 
 N14="gosh@94.156.178.14"
@@ -80,11 +92,13 @@ do_sync() {
   fi
 }
 
-# Remote job body. $1 = skip_phase_a (0|1), $2 = phase_c_only (0|1)
+# Remote job body. $1 = skip_phase_a (0|1), $2 = phase_c_only (0|1),
+# $3 = skip_circuit4 (0|1) — ETH-06 keeps the committed Circuit 4 pair.
 do_start() {
   local skip_phase_a="${1:-0}"
   local phase_c_only="${2:-0}"
-  echo "==> starting proving job on n14 (log: ${REMOTE_LOG}, skip_phase_a=${skip_phase_a}, phase_c_only=${phase_c_only})"
+  local skip_circuit4="${3:-0}"
+  echo "==> starting proving job on n14 (log: ${REMOTE_LOG}, skip_phase_a=${skip_phase_a}, phase_c_only=${phase_c_only}, skip_circuit4=${skip_circuit4})"
   ${SSH} "mkdir -p ${REMOTE_ROOT}/logs ${REMOTE_ROOT}/params ${REMOTE_ROOT}/proofs ~/bin"
   ${SSH} "nohup bash -lc '
     set -euo pipefail
@@ -106,24 +120,28 @@ do_start() {
     else
       cd crates/bridge-snark-utils
       echo \"--- Phase A: cargo +nightly build export-bound-block-proofs ---\"
-      cargo +nightly build --release --locked --bin export-bound-block-proofs
+      cargo +nightly build --release --bin export-bound-block-proofs
       echo \"--- Phase A: export-bound-block-proofs ---\"
-      cargo +nightly run --release --locked --bin export-bound-block-proofs -- \
+      # Shape matches LayerHashesKeyManager REF_NUM_LAYERS=3 / REF_NUM_PREV_CHAIN_STEPS=2.
+      # Remote comments must not contain apostrophes (this body is single-quoted over SSH).
+      cargo +nightly run --release --bin export-bound-block-proofs -- \
         --params-dir ../../params \
-        --out-dir ../../proofs/bound
+        --out-dir ../../proofs/bound \
+        --num-layers 3 \
+        --num-chain-steps 2
     fi
 
     if [[ \"${phase_c_only}\" != \"1\" ]]; then
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
     echo \"--- build export-inner-aggregator + export-spike-artifacts ---\"
-    cargo +nightly build --release --locked \
+    cargo +nightly build --release \
       --bin export-inner-aggregator \
       --bin export-spike-artifacts
 
     cd ${REMOTE_ROOT}/crates/bridge-snark-utils
     echo \"--- Phase A2: export-bound-poseidon-snarks (in-process Snark export) ---\"
-    cargo +nightly build --release --locked --bin export-bound-poseidon-snarks
-    cargo +nightly run --release --locked --bin export-bound-poseidon-snarks -- \
+    cargo +nightly build --release --bin export-bound-poseidon-snarks
+    cargo +nightly run --release --bin export-bound-poseidon-snarks -- \
       --params-dir ../../params \
       --bound-dir ../../proofs/bound \
       --snark-dir ../../proofs/bound/poseidon-snark
@@ -131,7 +149,7 @@ do_start() {
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
     echo \"--- Phase B: export-spike-artifacts (sanity; needs solc 0.8.19) ---\"
     if command -v solc >/dev/null; then
-      cargo +nightly run --release --locked --bin export-spike-artifacts || echo \"WARN: spike export failed (non-fatal)\"
+      cargo +nightly run --release --bin export-spike-artifacts || echo \"WARN: spike export failed (non-fatal)\"
     else
       echo \"SKIP spike: solc missing\"
     fi
@@ -140,7 +158,7 @@ do_start() {
     cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
     if [[ \"${phase_c_only}\" == \"1\" ]]; then
       echo \"--- build export-inner-aggregator (continue-c) ---\"
-      cargo +nightly build --release --locked --bin export-inner-aggregator
+      cargo +nightly build --release --bin export-inner-aggregator
     fi
 
     # Circuit 4 (bridge event / withdrawal) inner Poseidon snark. Fills the
@@ -150,8 +168,8 @@ do_start() {
     if [[ ! -f \"\${SNARK_DIR}/circuit4.snark\" ]]; then
       cd ${REMOTE_ROOT}/crates/bridge-snark-utils
       echo \"--- Phase A2b: export-c4-poseidon-snark ---\"
-      cargo +nightly build --release --locked --bin export-c4-poseidon-snark
-      cargo +nightly run --release --locked --bin export-c4-poseidon-snark -- \
+      cargo +nightly build --release --bin export-c4-poseidon-snark
+      cargo +nightly run --release --bin export-c4-poseidon-snark -- \
         --params-dir ../../params \
         --snark-dir \${SNARK_DIR}
       cd ${REMOTE_ROOT}/crates/bridge-evm-aggregator
@@ -164,7 +182,7 @@ do_start() {
       local snark=\"\$1\" name=\"\$2\"
       if [[ -f \"\${snark}\" ]]; then
         echo \"--- Phase C: export-inner-aggregator \${name} ---\"
-        cargo +nightly run --release --locked --bin export-inner-aggregator -- \
+        cargo +nightly run --release --bin export-inner-aggregator -- \
           --inner-snark \"\${snark}\" \
           --out-dir \"\${OUT}\" \
           --name \"\${name}\"
@@ -176,7 +194,11 @@ do_start() {
     export_one \"\${SNARK_DIR}/primary.snark\" PrimaryAggregatorVerifier
     export_one \"\${SNARK_DIR}/fallback.snark\" FallbackAggregatorVerifier
     export_one \"\${SNARK_DIR}/layer_hashes.snark\" LayerHashesAggregatorVerifier
-    export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier
+    if [[ \"${skip_circuit4}\" == \"1\" ]]; then
+      echo \"SKIP BridgeWithdrawalAggregatorVerifier: committed Circuit 4 pair kept\"
+    else
+      export_one \"\${SNARK_DIR}/circuit4.snark\" BridgeWithdrawalAggregatorVerifier
+    fi
 
     echo \"--- EIP-170 check ---\"
     cd ${REMOTE_ROOT}
@@ -215,5 +237,8 @@ case "${cmd}" in
   start) do_start 0 0 ;;
   status) do_status ;;
   pull-artifacts) do_pull ;;
-  *) echo "usage: $0 {sync-and-start|continue-bc|continue-c|sync|start|status|pull-artifacts}"; exit 1 ;;
+  continue-bc-nosync) do_start 1 0 ;;
+  continue-c-nosync) do_start 1 1 0 ;;
+  continue-c-nosync-eth06) do_start 1 1 1 ;;
+  *) echo "usage: $0 {sync-and-start|continue-bc|continue-c|continue-bc-nosync|continue-c-nosync|continue-c-nosync-eth06|sync|start|status|pull-artifacts}"; exit 1 ;;
 esac

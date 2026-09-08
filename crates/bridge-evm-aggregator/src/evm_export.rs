@@ -212,6 +212,9 @@ pub fn aggregate_and_prove_cached(
     let verifier_size = eip170::assert_eip170(&verifier_bytecode, &bin_ref)?;
 
     let evm_calldata = encode_calldata(&instances, &evm_proof);
+    if let Some(dir) = artifacts_dir {
+        std::fs::write(dir.join(format!("{base_name}_calldata.bin")), &evm_calldata)?;
+    }
 
     Ok(AggregatorExportResult {
         verifier_bytecode,

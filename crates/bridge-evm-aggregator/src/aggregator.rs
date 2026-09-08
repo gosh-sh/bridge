@@ -99,8 +99,11 @@ impl AggregatorConfig {
                 universality: VerifierUniversality::PreprocessedAsWitness,
             },
             "LayerHashesAggregatorVerifier" => Self {
-                k_outer: 22,
-                lookup_bits_outer: 21,
+                // k=21 Hermez outer (2026-09-08 n14). k=22 is the historical
+                // preset, but Hermez k=22 ptau is not fetchable (GCS/S3 403);
+                // k=21 Yul is 23111 B, still under EIP-170.
+                k_outer: 21,
+                lookup_bits_outer: 20,
                 universality: VerifierUniversality::Full,
             },
             "BridgeWithdrawalAggregatorVerifier" => Self {

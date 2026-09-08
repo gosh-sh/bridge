@@ -1062,6 +1062,23 @@ impl Drop for BurnPermit<'_> {
     fn drop(&mut self) {}
 }
 
+/// The `Drop` above is the whole of that guarantee, and an empty `Drop`
+/// reads as removable to everyone who meets it — including
+/// `clippy::empty_drop`, whose own documentation says such an impl "has
+/// no effect". It has one effect, and it is the only one asked of it:
+/// `needs_drop` becomes true, so the value lives to the end of its scope
+/// and the borrow it holds lives with it.
+///
+/// Deleting the impl compiles, passes clippy and passes every test — the
+/// protection just stops existing. So the property is asserted at compile
+/// time, where a dead-code sweep meets it instead of a runbook does.
+const _: () = assert!(
+    std::mem::needs_drop::<BurnPermit<'static>>(),
+    "BurnPermit must need dropping: that is what keeps its borrow of the withdrawal lock alive \
+     past the send, across the write that records the AN tx hash. Removing `impl Drop` silently \
+     shortens the borrow to the permit's last use.",
+);
+
 /// A borrow of the withdrawal lock that lasts to the end of its scope.
 ///
 /// [`BurnPermit`] covers the send. This covers everything after it —
@@ -1082,6 +1099,16 @@ pub struct LockHold<'a>(std::marker::PhantomData<&'a WithdrawalLock>);
 impl Drop for LockHold<'_> {
     fn drop(&mut self) {}
 }
+
+/// Same trick, same silence, same assertion. `LockHold` carries only
+/// `PhantomData`, so without the impl it needs no drop at all, the borrow
+/// ends at its last use — which is never, since nothing reads it — and
+/// `drop(_withdrawal_lock)` through stages 4-6 compiles again.
+const _: () = assert!(
+    std::mem::needs_drop::<LockHold<'static>>(),
+    "LockHold must need dropping: it holds no data, so `impl Drop` is the ONLY thing keeping its \
+     borrow of the withdrawal lock open for the rest of the run.",
+);
 
 impl<'a> BurnPermit<'a> {
     /// Check that this run still owns `key`, and issue the permission to
@@ -2071,6 +2098,13 @@ mod tests {
         // orchestrator with no lock on a filesystem that supports one.
         // The kernel is asked, so it does not matter how the lock was
         // lost — only that it is gone.
+        //
+        // ANOTHER process holds it: `lock` above is still alive, and a
+        // probe from this same process is denied by it, so this is the
+        // `(never took, somebody holds it)` arm. The remedy on this arm
+        // is the one that must never say "delete" — the holder may be
+        // inside `burn::send`, and deleting the record there is the
+        // second burn every guard in this file exists to prevent.
         let err = BurnPermit::issue(dir.path(), key, None)
             .expect_err("a run with no lock on a locking filesystem must not broadcast");
         assert_eq!(
@@ -2078,19 +2112,97 @@ mod tests {
             crate::errors::ExitCode::PreflightRefused,
             "the check is BEFORE the send, so its refusal is a pre-send one: {err}",
         );
+        let msg = format!("{err}");
         assert!(
-            format!("{err}").contains("never took"),
+            msg.contains("never took"),
             "the refusal has to say which half failed: {err}",
         );
+        assert!(
+            msg.contains("Do not delete the record"),
+            "the holder may be mid-send, so this arm forbids the deletion outright: {msg}",
+        );
+        for permission in [
+            "delete the record named below",
+            "delete the record and re-run",
+        ] {
+            assert!(
+                !msg.contains(permission),
+                "swapping this arm's remedy for one of the others ships the double-burn \
+                 instruction, and until this assertion existed nothing objected: {msg}",
+            );
+        }
 
         drop(lock);
         // Nobody holds it now, and this run claims none either. Still a
         // refusal: `flock` demonstrably works in this directory, so a run
-        // about to broadcast should have been holding one.
+        // about to broadcast should have been holding one — and HERE
+        // deleting is right, because nothing was sent and nobody is
+        // executing this identity.
+        let err = BurnPermit::issue(dir.path(), key, None)
+            .expect_err("an unheld lock on a filesystem that locks is not permission to send");
+        let msg = format!("{err}");
         assert!(
-            BurnPermit::issue(dir.path(), key, None).is_err(),
-            "an unheld lock on a filesystem that locks is not permission to send",
+            msg.contains("internal defect")
+                && msg
+                    .to_ascii_lowercase()
+                    .contains("delete the record named below"),
+            "with nobody holding the identity the operator is unblocked, not stranded: {msg}",
         );
+        assert!(
+            !msg.contains("Do not delete the record"),
+            "and not told to wait for a run that does not exist: {msg}",
+        );
+    }
+
+    #[test]
+    fn only_the_arms_that_know_nobody_is_executing_the_withdrawal_permit_a_deletion() {
+        // The invariant behind the three remedies, stated once rather
+        // than left implicit in three string literals. Every refusal
+        // `issue` can raise is built here from a real lock state, and the
+        // rule is read off the kernel's answer: the moment the probe says
+        // somebody holds this identity, no remedy may authorise touching
+        // the record.
+        let dir = TempDir::new().unwrap();
+        let key = "0f1e2d3c4b5a6978";
+
+        // (never took, somebody holds it) — the forbidden one.
+        let LockAttempt::Held(other) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
+            panic!("an uncontested lock in a fresh TempDir must be taken");
+        };
+        let contended = format!(
+            "{}",
+            BurnPermit::issue(dir.path(), key, None).expect_err("somebody holds it"),
+        );
+
+        // (holds, nobody does) — the lock file was replaced under us.
+        std::fs::remove_file(WithdrawalLock::path(dir.path(), key)).unwrap();
+        let replaced = format!(
+            "{}",
+            BurnPermit::issue(dir.path(), key, Some(&other))
+                .expect_err("an unnamed inode guards nothing"),
+        );
+        drop(other);
+
+        // (never took, nobody does) — the internal defect.
+        let unheld = format!(
+            "{}",
+            BurnPermit::issue(dir.path(), key, None).expect_err("no lock, and flock works here"),
+        );
+
+        assert!(
+            !contended
+                .to_ascii_lowercase()
+                .contains("delete the record named below"),
+            "a live holder is the one state in which the record must not be touched: {contended}",
+        );
+        for permitted in [&replaced, &unheld] {
+            assert!(
+                permitted
+                    .to_ascii_lowercase()
+                    .contains("delete the record named below"),
+                "with the identity demonstrably free, the operator needs the way out: {permitted}",
+            );
+        }
     }
 
     #[test]

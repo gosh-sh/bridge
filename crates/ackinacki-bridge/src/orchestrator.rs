@@ -997,13 +997,20 @@ fn reserve_and_decide(
     // it when the holder exits, so that answer is a fact rather than a
     // guess about wall-clock age.
     let key = idempotency::key(from, to, amount);
-    let (lock, flock_available) = match idempotency::WithdrawalLock::try_acquire(state_dir, &key) {
-        Ok(Some(l)) => (Some(l), true),
+
+    // Before the lock, and propagated. Preparing the state directory and
+    // taking the lock are different questions, and letting the first
+    // answer the second is what made a failed `mkdir` read as "this
+    // filesystem has no flock, carry on unlocked".
+    idempotency::ensure_state_dir(state_dir)?;
+
+    let (lock, flock_available) = match idempotency::WithdrawalLock::try_acquire(state_dir, &key)? {
+        idempotency::LockAttempt::Held(l) => (Some(l), true),
         // Another live process on this host owns this withdrawal. Refuse
         // before reserving: its outcome is that run's to record, and a
         // second run racing it through capture and submit gets a reverted
         // `withdrawByProof` at best.
-        Ok(None) => {
+        idempotency::LockAttempt::Contended => {
             let prior = idempotency::peek(state_dir, from, to, amount)?;
             return Err(CliError::ReservationInFlight {
                 prior_status: prior
@@ -1018,14 +1025,24 @@ fn reserve_and_decide(
                 liveness: idempotency::liveness_verdict(Some(true)).to_string(),
             });
         },
-        // `flock` unavailable. NOT a refusal: a state dir on a filesystem
-        // without it is a supported deployment, and the record's own
-        // cross-field guards are what hold there. Proceed, and say the
-        // evidence is missing if it comes to a refusal.
-        Err(e) => {
+        // `flock` unavailable — and now that means the filesystem cannot
+        // do it, not merely that something went wrong. NOT a refusal: a
+        // state dir on such a mount is a supported deployment, and the
+        // record's own cross-field guards are what hold there. Proceed,
+        // and say the evidence is missing if it comes to a refusal.
+        //
+        // Everything else left through the `?` above, as a refusal with
+        // nothing sent. That is the direction to be wrong in: an
+        // unnecessary refusal costs a re-run, and continuing unlocked
+        // costs a record that a later run is told is safe to delete.
+        idempotency::LockAttempt::Unsupported {
+            why,
+        } => {
             warn!(
-                error = %e,
-                "could not take the withdrawal lock; continuing on the record checks alone",
+                reason = %why,
+                "this filesystem does not implement flock; continuing on the record checks alone. \
+                 A refusal from this run will say the liveness evidence is missing rather than \
+                 claim nobody holds this withdrawal",
             );
             (None, false)
         },
@@ -1448,6 +1465,74 @@ mod tests {
         assert!(
             msg.contains("not the same as"),
             "and must not let that be read as 'nothing was broadcast': {msg}"
+        );
+    }
+
+    #[test]
+    fn a_lock_this_run_could_not_take_refuses_instead_of_continuing_unlocked() {
+        // The blanket downgrade. Every failure to take the lock used to
+        // read as "this filesystem has no flock" and the run carried on
+        // holding nothing — which is invisible to the liveness probe, so
+        // the next run is told this one "has already exited" and the
+        // runbook makes that the condition for deleting the record. The
+        // failures that reach this are the asymmetric ones: `EMFILE` is
+        // per-process, so the other run opens the same lock normally.
+        //
+        // A directory where the lock file goes is the uid-independent way
+        // to make the open fail while leaving the state directory itself
+        // perfectly usable — unlike a chmod, which root ignores.
+        let dir = tempfile::TempDir::new().unwrap();
+        let k = idempotency::key(&seam_from(), &seam_to(), &UsdcAmount(1_000_000));
+        std::fs::create_dir(dir.path().join(format!("{k}.lock"))).unwrap();
+
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a lock this run cannot take is not a lock nobody needs");
+        assert_eq!(err.exit_code().as_i32(), 2, "nothing was sent: {err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("nothing was sent"),
+            "the refusal must say so outright: {msg}",
+        );
+
+        // And it refused BEFORE reserving, so it left no record for a
+        // later run to be told is safe to delete.
+        let records: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .collect();
+        assert!(records.is_empty(), "refused before reserving: {records:?}");
+    }
+
+    #[test]
+    fn a_state_directory_that_cannot_be_prepared_is_not_a_verdict_about_locking() {
+        // Two questions, and the first must not answer the second. A
+        // failed `mkdir` used to arrive at the caller as `Err` from
+        // `try_acquire`, indistinguishable from `flock` being unavailable,
+        // and was read as the latter.
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let err = reserve_and_decide(
+            &blocker.join("state"),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a state directory under a regular file cannot be created");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mkdir"),
+            "and it says the directory is the problem, not the lock: {msg}",
         );
     }
 

@@ -892,6 +892,35 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: a withdrawal lock this run could not take
+  is now a refusal, not a downgrade.** Every failure to take the lock was
+  read as "this filesystem does not implement `flock`" — a supported
+  deployment — and the run continued holding nothing. A run holding
+  nothing is invisible to the liveness probe, so the next run is told it
+  "has already exited", which the runbook gives as the condition for
+  deleting the state record; deleting it while that run is inside
+  `burn::send` is a second burn. The failures that reach this are the
+  asymmetric ones, where one process fails and another does not: `EMFILE`
+  is per-process, and a state directory left half-prepared is finished
+  for every run but the one that hit it.
+
+  Only `ENOLCK`, `EOPNOTSUPP` and `ENOSYS` now mean "this filesystem
+  cannot lock" and let the run proceed with the liveness evidence
+  declared missing. Everything else — including errnos this build has
+  never seen — refuses with exit 2 and nothing sent. **Runs that
+  previously continued past a lock failure will now stop.** Preparing the
+  state directory is also no longer able to answer a question about
+  locking: it happens before the lock is attempted, and its failures say
+  so in those words.
+
+  Two smaller consequences of the same split: the state directory's own
+  entry is now fsynced on every invocation rather than only when this run
+  created it — a run that created it and died before syncing left nothing
+  behind for a later run to notice — and a state directory reachable by
+  anyone but its owner is reported. It is not corrected: 0755 there may be
+  a directory a run failed to restrict or one an operator chose, and
+  nothing on disk tells them apart.
+
 - **`scripts/check_fixture_prereqs.sh` now picks the `tvm-cli` the fixture
   will pick.** It used `command -v tvm-cli`, which answers with the first
   match on `PATH` and nothing else, and failed if that one could not run

@@ -30,6 +30,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::{
     args::{FromAddress, ToAddress, UsdcAmount},
@@ -506,9 +507,40 @@ fn entry_parent(path: &Path) -> Option<&Path> {
 /// followed it landed. Syncing the innermost directory and not the path
 /// that reaches it is a half-measure that looks complete.
 ///
-/// The `if !state_dir.exists()` guard is load-bearing: an existing
-/// directory the operator chose keeps whatever mode they gave it.
-fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
+/// Three steps, and which of them run on every call is the point, so they
+/// are three functions rather than three blocks inside one `if`.
+///
+/// Only what THIS call creates is chmod'ed: an existing directory the
+/// operator chose keeps whatever mode they gave it. That is a real
+/// requirement, and it is also what made a half-finished setup permanent.
+/// A first call that created the directory and then failed at the fsync or
+/// the chmod refused the run — correctly — and every call after it found
+/// the directory present and returned `Ok` from inside the existence guard
+/// without ever finishing the job.
+///
+/// The two abandoned halves are not equally recoverable, and pretending
+/// otherwise is how the guard came to cover both:
+///
+///  * **Durability** leaves no trace when it is skipped, and redoing it costs
+///    one `open` and one `fsync`. So [`sync_entry_of`] runs unconditionally. It
+///    covers the level the records live in; a deeper level whose sync was
+///    abandoned is not covered, because nothing says it happened.
+///  * **Mode** is observable but not attributable: 0755 here may be a directory
+///    we failed to restrict or one an operator chose.
+///    [`report_permissive_mode`] says what it sees instead of guessing — a
+///    record carries no key material, but it does carry amounts and destination
+///    addresses.
+pub(crate) fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
+    create_missing_levels(state_dir)?;
+    sync_entry_of(state_dir)?;
+    report_permissive_mode(state_dir);
+    Ok(())
+}
+
+/// Create the levels that do not exist yet, sync each new level's entry,
+/// and restrict the innermost one to 0700 — all of it only when there is
+/// something to create.
+fn create_missing_levels(state_dir: &Path) -> CliResult<()> {
     use std::os::unix::fs::PermissionsExt;
     if !state_dir.exists() {
         // Which levels are we about to bring into existence? Walk up to
@@ -578,6 +610,59 @@ fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
     Ok(())
 }
 
+/// Make `path`'s own directory entry durable.
+///
+/// NOT best-effort, and not conditional. This runs before the reservation,
+/// which runs before an irreversible burn: an entry we cannot make durable
+/// is a reservation we cannot promise to find again, and a run that
+/// created the directory and died before syncing it leaves nothing behind
+/// for a later run to notice.
+fn sync_entry_of(path: &Path) -> CliResult<()> {
+    let Some(parent) = entry_parent(path) else {
+        return Ok(());
+    };
+    std::fs::File::open(parent)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "idempotency: could not make {} durable (fsync of {}): {e}",
+                path.display(),
+                parent.display(),
+            ),
+            source: None,
+        })
+}
+
+/// Is this mode readable, writable or traversable by anyone but the owner?
+fn mode_is_permissive(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// Report — never correct — a state directory anyone but its owner can
+/// reach.
+///
+/// Correcting it would override an operator who meant it, and nothing on
+/// disk distinguishes that from a run that created the directory and could
+/// not restrict it. Saying what is there costs nothing and is the half
+/// that was being lost silently.
+fn report_permissive_mode(state_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(md) = fs::metadata(state_dir) else {
+        return;
+    };
+    let mode = md.permissions().mode() & 0o777;
+    if mode_is_permissive(mode) {
+        warn!(
+            state_dir = %state_dir.display(),
+            mode = format!("{mode:04o}"),
+            "the withdrawal state directory can be reached by more than its owner. Records carry \
+             no key material, but they do carry amounts and destination addresses. A run that \
+             created this directory and could not restrict it to 0700 refuses — so a mode like \
+             this one outlives that refusal, and `chmod 700` is the fix if it was not deliberate",
+        );
+    }
+}
+
 /// `pub(crate)` so a post-burn failure can name the exact file an operator
 /// has to edit to resume. The directory holds one record per withdrawal
 /// identity, named by a SHA-256 nobody can compute by hand — "the state
@@ -621,31 +706,115 @@ pub struct WithdrawalLock {
     _file: fs::File,
 }
 
+/// What one attempt to take a withdrawal lock found.
+///
+/// Three outcomes rather than two-and-an-error, because the caller has to
+/// treat three cases differently and the old shape could only express two.
+/// `try_acquire` returned `Err` both for a filesystem that does not
+/// implement `flock` and for a lock it simply failed to open, and the
+/// caller read every `Err` as the first — "proceed, the record's own
+/// guards hold here".
+///
+/// That is not a cosmetic conflation. A run that proceeds without the lock
+/// is invisible to the liveness probe, so a second run is told "the record
+/// was left by a run that has already exited" — which the runbook gives as
+/// the condition for deleting the record. Deleting it while the first run
+/// is inside `burn::send` is the second burn the lock exists to prevent.
+/// The failures that matter are the ones that hit ONE process and not the
+/// other: `EMFILE` is per-process, and a state directory left half-prepared
+/// by a run that died mid-setup is finished for everyone but the run that
+/// hit it.
+#[derive(Debug)]
+pub enum LockAttempt {
+    /// This process owns the identity until the guard is dropped.
+    Held(WithdrawalLock),
+    /// Another live process on this host owns it right now.
+    Contended,
+    /// This filesystem does not implement `flock`. A supported
+    /// deployment — a network mount, typically — so not a refusal: the
+    /// record's cross-field guards are what hold there, and any refusal
+    /// says the evidence is missing rather than inventing it.
+    Unsupported { why: String },
+}
+
+impl LockAttempt {
+    /// What this attempt says about OTHER processes: `Some(true)` somebody
+    /// holds the withdrawal, `Some(false)` nobody does, `None` no evidence.
+    ///
+    /// `Unsupported` is `None` and never `Some(false)`. That distinction is
+    /// the whole point: `Some(false)` is what the runbook turns into
+    /// permission to delete the record.
+    pub fn holder_verdict(&self) -> Option<bool> {
+        match self {
+            LockAttempt::Held(_) => Some(false),
+            LockAttempt::Contended => Some(true),
+            LockAttempt::Unsupported {
+                ..
+            } => None,
+        }
+    }
+}
+
+/// How to read the errno `flock` reported.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FlockVerdict {
+    /// Somebody holds it.
+    Contended,
+    /// The call cannot work on this filesystem, whoever runs it.
+    Unsupported,
+    /// Everything else. The caller must refuse rather than continue
+    /// unlocked.
+    Fatal,
+}
+
+/// An ALLOWLIST, and deliberately a short one.
+///
+/// The defect this replaces was a catch-all reading every unexpected errno
+/// as "no `flock` here". Renaming a catch-all changes nothing, so the rule
+/// is inverted: three errnos mean the filesystem cannot do this at all, and
+/// everything else — `EACCES`, `EMFILE`, `EBADF`, `EINTR`, an errno this
+/// build has never seen — is fatal. Being wrong in this direction costs a
+/// refusal with nothing sent; being wrong in the other direction costs a
+/// second burn.
+fn classify_flock_error(raw: Option<i32>) -> FlockVerdict {
+    match raw {
+        // A guard rather than two patterns: the constants are equal on
+        // Linux, so the second would be unreachable, and both are named
+        // because POSIX lets them differ.
+        Some(n) if n == libc::EWOULDBLOCK || n == libc::EAGAIN => FlockVerdict::Contended,
+        // `ENOLCK` — no locks available, which is how several network
+        // filesystems answer. `EOPNOTSUPP` and `ENOSYS` — the operation
+        // is not implemented. Nothing about the caller, everything about
+        // the filesystem, and identical for every process on the host.
+        Some(n) if n == libc::ENOLCK || n == libc::EOPNOTSUPP || n == libc::ENOSYS => {
+            FlockVerdict::Unsupported
+        },
+        _ => FlockVerdict::Fatal,
+    }
+}
+
 impl WithdrawalLock {
     fn path(state_dir: &Path, key: &str) -> PathBuf {
         state_dir.join(format!("{key}.lock"))
     }
 
-    /// Take the lock, or report who has it.
+    /// Take the lock, or say what stopped us.
     ///
-    /// `Ok(None)` means another live process on this host owns this
-    /// withdrawal. `Err` means the lock could not be attempted at all,
-    /// which is not the same thing and must not be read as contention.
-    pub fn try_acquire(state_dir: &Path, key: &str) -> CliResult<Option<Self>> {
+    /// `Err` is a refusal the caller must propagate — it means this
+    /// process could not attempt the lock, which is not the same as the
+    /// filesystem being unable to. [`LockAttempt`] carries that
+    /// distinction; it used to be lost, and losing it ends in a second
+    /// burn.
+    ///
+    /// **The state directory must already exist.** Creating it here was
+    /// the fix for one instance of exactly the bug above — the open
+    /// returned `ENOENT` on a first invocation and the caller read it as
+    /// "no flock here" — but it left directory preparation able to
+    /// masquerade as a verdict about locking. `reserve_and_decide` calls
+    /// `ensure_state_dir` before this, so a directory that cannot be
+    /// prepared is a refusal about the directory, said in those words.
+    pub fn try_acquire(state_dir: &Path, key: &str) -> CliResult<LockAttempt> {
         use std::os::unix::io::AsRawFd;
-
-        // Before opening anything. The lock is taken BEFORE the
-        // reservation, and the reservation is what used to create this
-        // directory — so on a first invocation the open below returned
-        // ENOENT, which the caller reads as "flock is not available here"
-        // and continues without a lock, because a state dir on a
-        // filesystem without working flock is a supported deployment.
-        //
-        // The first withdrawal on a host therefore held nothing, and a
-        // concurrent retry probing the lock was told the holder had
-        // already exited — the verdict that authorises deleting the
-        // record, while the first run may be inside `burn::send`.
-        ensure_state_dir(state_dir)?;
 
         let path = Self::path(state_dir, key);
         let refuse = |what: &str, e: std::io::Error| CliError::Preflight {
@@ -666,17 +835,17 @@ impl WithdrawalLock {
         // SAFETY: `file` outlives the call, so the descriptor is valid.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
-            return Ok(Some(Self {
+            return Ok(LockAttempt::Held(Self {
                 _file: file,
             }));
         }
         let e = std::io::Error::last_os_error();
-        match e.raw_os_error() {
-            // A guard rather than two patterns: the constants are equal on
-            // Linux, so the second would be unreachable, and both are
-            // named because POSIX lets them differ.
-            Some(n) if n == libc::EWOULDBLOCK || n == libc::EAGAIN => Ok(None),
-            _ => Err(refuse("lock", e)),
+        match classify_flock_error(e.raw_os_error()) {
+            FlockVerdict::Contended => Ok(LockAttempt::Contended),
+            FlockVerdict::Unsupported => Ok(LockAttempt::Unsupported {
+                why: e.to_string(),
+            }),
+            FlockVerdict::Fatal => Err(refuse("lock", e)),
         }
     }
 
@@ -698,15 +867,16 @@ impl WithdrawalLock {
     /// identical command, which is what the recovery procedure tells
     /// them to do — has no acquisition to learn from.)
     pub fn probe_holder(state_dir: &Path, key: &str) -> Option<bool> {
-        match Self::try_acquire(state_dir, key) {
-            // We took it, so nobody else had it. The lock is dropped at
-            // the end of this expression, which is the point: asking must
-            // not keep anybody out.
-            Ok(Some(_)) => Some(false),
-            // `EWOULDBLOCK`: somebody else is holding it right now.
-            Ok(None) => Some(true),
-            Err(_) => None,
-        }
+        // `Held` is dropped at the end of this expression, which is the
+        // point: asking must not keep anybody out.
+        //
+        // `Err` collapses to `None` — no evidence — rather than to a
+        // verdict. This function is called while BUILDING a refusal, so it
+        // has nowhere to propagate to; what it must never do is answer
+        // "nobody holds it" because it could not ask.
+        Self::try_acquire(state_dir, key)
+            .ok()
+            .and_then(|a| a.holder_verdict())
     }
 }
 
@@ -1139,9 +1309,12 @@ mod tests {
             "an untouched withdrawal has no holder",
         );
 
-        let held = WithdrawalLock::try_acquire(dir.path(), &k)
+        let held = match WithdrawalLock::try_acquire(dir.path(), &k)
             .expect("flock works on this filesystem")
-            .expect("nobody else holds it");
+        {
+            LockAttempt::Held(l) => l,
+            other => panic!("nobody else holds it: {other:?}"),
+        };
         assert_eq!(
             WithdrawalLock::probe_holder(dir.path(), &k),
             Some(true),
@@ -1161,6 +1334,136 @@ mod tests {
             Some(false),
             "released means released",
         );
+    }
+
+    #[test]
+    fn the_entry_sync_reports_failure_rather_than_shrugging() {
+        // The half a first call can abandon without leaving a trace:
+        // `create_dir_all` succeeds, this fails, the run refuses — and
+        // before the split, every later call found the directory present
+        // and returned `Ok` from inside the existence guard without ever
+        // syncing. Whether it now runs on every call is visible in
+        // `ensure_state_dir`'s three-line body; what a test can pin is
+        // that it is not best-effort, because an `fsync` that happened is
+        // not observable from here at all.
+        let dir = TempDir::new().unwrap();
+        let ok = dir.path().join("state");
+        std::fs::create_dir(&ok).unwrap();
+        sync_entry_of(&ok).expect("a real parent syncs");
+
+        // A parent that is not there. `File::open` on a REGULAR file
+        // succeeds — it is only an open — so a regular-file parent is not
+        // the way to make this fail; an absent one is, and it is
+        // uid-independent, unlike a chmod, which root ignores.
+        let err = sync_entry_of(&dir.path().join("vanished").join("state"))
+            .expect_err("a parent that does not exist cannot be synced");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        assert!(
+            format!("{err}").contains("durable"),
+            "must name what was lost: {err}",
+        );
+    }
+
+    #[test]
+    fn a_state_directory_reachable_by_anyone_else_is_reported() {
+        // 0700 is what this tool creates; anything looser is either an
+        // operator's choice or a run that could not restrict what it made,
+        // and nothing on disk tells them apart. So: report, never correct.
+        assert!(
+            !mode_is_permissive(0o700),
+            "what we create is not a finding"
+        );
+        assert!(!mode_is_permissive(0o500));
+        assert!(mode_is_permissive(0o750), "group can traverse and read");
+        assert!(mode_is_permissive(0o755));
+        assert!(mode_is_permissive(0o701), "other can traverse");
+        assert!(mode_is_permissive(0o770));
+    }
+
+    #[test]
+    fn preparing_a_directory_that_already_exists_leaves_its_mode_alone() {
+        // The requirement the existence guard is there for, kept: an
+        // operator who chose a mode keeps it, and the report above is what
+        // stops that being silent.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+
+        ensure_state_dir(&state).expect("an existing directory is usable");
+
+        let mode = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750, "a mode we did not set is not ours to change");
+    }
+
+    #[test]
+    fn only_three_errnos_mean_this_filesystem_cannot_lock() {
+        // An allowlist, asserted as one. The defect being replaced was a
+        // catch-all that read every unexpected errno as "no flock here"
+        // and carried on unlocked; renaming a catch-all would have changed
+        // nothing, so what has to be pinned is that the default is fatal.
+        //
+        // `EMFILE` is the one to look at twice: it is per-process, so the
+        // run that hits it proceeds unlocked while every other process on
+        // the host opens the same lock normally — and is then told that
+        // this run has already exited.
+        assert_eq!(
+            classify_flock_error(Some(libc::EWOULDBLOCK)),
+            FlockVerdict::Contended,
+        );
+        assert_eq!(
+            classify_flock_error(Some(libc::EAGAIN)),
+            FlockVerdict::Contended,
+        );
+
+        for unsupported in [libc::ENOLCK, libc::EOPNOTSUPP, libc::ENOSYS] {
+            assert_eq!(
+                classify_flock_error(Some(unsupported)),
+                FlockVerdict::Unsupported,
+                "errno {unsupported} is a property of the filesystem, not of this run",
+            );
+        }
+
+        for fatal in [
+            libc::EACCES,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EBADF,
+            libc::EINTR,
+            libc::ENOSPC,
+            libc::EROFS,
+            libc::EIO,
+            // An errno this build has never seen. The default has to be
+            // fatal, or the next unfamiliar one repeats the defect.
+            424_242,
+        ] {
+            assert_eq!(
+                classify_flock_error(Some(fatal)),
+                FlockVerdict::Fatal,
+                "errno {fatal} says nothing about whether this filesystem can lock, so it may not \
+                 be read as permission to continue unlocked",
+            );
+        }
+
+        // No errno at all is not evidence of anything either.
+        assert_eq!(classify_flock_error(None), FlockVerdict::Fatal);
+    }
+
+    #[test]
+    fn no_attempt_that_failed_to_ask_reports_the_withdrawal_free() {
+        // `Some(false)` is the verdict the runbook turns into permission
+        // to delete the record. Only an attempt that actually took the
+        // lock may produce it.
+        assert_eq!(
+            LockAttempt::Unsupported {
+                why: "whatever the mount said".into(),
+            }
+            .holder_verdict(),
+            None,
+            "\"we cannot ask here\" is not \"nobody holds it\"",
+        );
+        assert_eq!(LockAttempt::Contended.holder_verdict(), Some(true));
     }
 
     #[test]

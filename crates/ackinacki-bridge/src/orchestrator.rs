@@ -782,14 +782,28 @@ pub async fn run(
             // field is gone and re-proving is the only path there was.
             if let Some(r) = record.as_mut() {
                 r.status = Status::Failed;
-                // Deliberately swallowed, and the only `update` in this file
-                // that is. We are already returning `EthSubmitFailed` (exit
-                // 13), which names the revert and is strictly more useful
-                // than "we also could not write it down"; replacing it with
-                // an `after_send` refusal would hide the revert reason
-                // behind a bookkeeping failure. The record staying at
-                // `Proved` is safe — it still blocks a plain retry.
-                let _ = idempotency::update(&state_dir, r);
+                // Deliberately not propagated, and the only `update` in
+                // this file that is not. We are already returning
+                // `EthSubmitFailed` (exit 13), which names the revert and
+                // is strictly more useful than "we also could not write it
+                // down"; replacing it with an `after_send` refusal would
+                // hide the revert reason behind a bookkeeping failure. The
+                // record staying at `Proved` is safe — it still blocks a
+                // plain retry.
+                //
+                // Not propagated is not the same as unsaid, which is what
+                // it used to be. An operator reading this run's output
+                // would otherwise see exit 13, go to the record to find
+                // `Failed`, and find `Proved` with nothing anywhere
+                // explaining the difference.
+                if let Err(e) = idempotency::update(&state_dir, r) {
+                    warn!(
+                        error = %e.after_send("the withdrawal reverted on chain"),
+                        "could not mark the record failed after the revert; it stays at `proved`, \
+                         which still refuses a plain retry. The exit code and the revert reason \
+                         below are the authoritative outcome",
+                    );
+                }
             }
             return Err(CliError::EthSubmitFailed {
                 reason: format!("withdrawByProof reverted: {reason}"),

@@ -12,6 +12,20 @@
 //! here — a bug in this file should be trivially visible as
 //! misrouting/misformatting, never a pipeline mistake.
 
+//! ---
+//!
+//! `let_underscore_must_use` is on for this crate. `#[must_use]` alone
+//! does not cover `let _ = ..`, which is the form that silently drops a
+//! `Result` — including a state-file write standing between a burn and
+//! the record of it. Nine sites predate the lint and every one of them
+//! is a deliberate discard; each now says so at the point of the
+//! discard, and a tenth has to argue its case rather than blend in.
+//!
+//! `expect` rather than `allow`: it fires when the exemption stops being
+//! needed, so a site that grows a real error path does not keep a stale
+//! waiver.
+#![warn(clippy::let_underscore_must_use)]
+
 mod args;
 mod burn;
 mod errors;
@@ -71,6 +85,11 @@ fn main() -> ProcExitCode {
                 e.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "--help / --version with a closed stdout: nothing to say and nowhere \
+                              to say it"
+                )]
                 let _ = e.print();
                 return ProcExitCode::from(0);
             }
@@ -169,6 +188,12 @@ fn init_tracing() {
         EnvFilter::new("warn,ackinacki_bridge=info,bridge_relayer_daemon=info")
     });
     let is_tty = std::io::stderr().is_terminal();
+    // `try_init` fails only when a subscriber is already installed,
+    // which in this binary means a test set one up on purpose.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a subscriber that is already installed is the caller's, not an error"
+    )]
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

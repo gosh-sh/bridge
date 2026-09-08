@@ -1095,6 +1095,11 @@ fn write_record_atomic(state_dir: &Path, dst: &Path, record: &Record) -> CliResu
     // `reserve`: that one is the only write preceding an irreversible send,
     // so it is the only one where losing the entry costs money. A lost
     // stage-transition update costs a redundant re-check on resume.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "argued above: only `reserve`'s entry precedes an irreversible send, so only \
+                  that one is worth failing a run over"
+    )]
     let _ = std::fs::File::open(state_dir).and_then(|d| d.sync_all());
     Ok(())
 }
@@ -2430,6 +2435,10 @@ mod tests {
             let chunk = vec![0u8; 64 * 1024];
             // ENOSPC here is the success condition, not an error.
             while f.write_all(&chunk).is_ok() {}
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the disk is full by construction here, so this fails on purpose"
+            )]
             let _ = f.sync_all();
         }
 
@@ -2440,6 +2449,10 @@ mod tests {
             std::fs::write(&probe, vec![0u8; 512]),
             Err(ref e) if e.raw_os_error() == Some(libc::ENOSPC)
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup of a probe that may never have been created"
+        )]
         let _ = std::fs::remove_file(&probe);
         if !full {
             // The variable was set, so someone meant this to run. Failing is

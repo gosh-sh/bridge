@@ -71,6 +71,11 @@ fn emit(s: &str, to_stdout: bool) {
     if primary(s).is_ok() {
         return;
     }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the fallback stream is the last one there is; if it fails too there is nowhere \
+                  left to report it"
+    )]
     let _ = secondary(&format!(
         "ackinacki-bridge: could not write the line below to its own stream; it is repeated here \
          and is NOT the machine output\n{s}"

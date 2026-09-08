@@ -1269,6 +1269,12 @@ mod tests {
         let composed = compose(ctx, preflight, from, from_keys, to, amount, true)
             .await
             .expect("signature guard only");
+        // Asserting on the failure would tie a unit test to whatever
+        // this host's resolver does with `example.invalid`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "this helper exists to reach compose+sign; the send cannot succeed offline"
+        )]
         let _ = send(ctx, from, composed).await;
     }
 }

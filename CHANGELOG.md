@@ -943,6 +943,39 @@ assigns it when the release is tagged.
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
 
+- **`ackinacki-bridge withdraw`: two more refusals stop claiming nothing
+  was broadcast.** Both fire after the AN burn is on the wire and the
+  record is written, and both reported exit 2 — whose published contract
+  is that nothing was broadcast and no state file was written.
+
+    - Stage 6 re-parses `--eth-private-key`, which stage 1 already
+      parsed. Its failure was `exit 2`; it is now **exit 13**, naming the
+      stage that could not complete. Nothing is submitted to the EVM
+      chain and re-running with `--allow-retry` resumes from the recorded
+      burn.
+    - The corrupt-record refusal used to end "delete it manually if you
+      know it's stale". A resuming run reaches that refusal too, where
+      deleting the record destroys the only local trace of a live
+      withdrawal. It now says the opposite and points at the runbook's
+      Case 3a.
+
+  Scripts that pattern-match exit codes: a stage-6 signer failure changes
+  from 2 to 13. Nothing that previously exited 0, 3, 10 or 11 is
+  affected.
+
+- **Advanced runbook: a fourth copy of the deletion gate, in the "safe to
+  prune between demos" list.** It told an operator to read the exit-3
+  refusal because "it reports whether any process still holds the
+  withdrawal" — which on a filesystem without `flock` it explicitly does
+  not — and gave two conditions where the procedure 400 lines above gives
+  three verdicts. A fifth, milder copy was in the CLI README's equivalent
+  list. Both now point at the canonical procedure instead of summarising
+  it, since every summary so far has dropped the third verdict.
+
+  A test now checks this rather than a reader: any block in the shipped
+  documents that sends someone to the exit-3 refusal for the liveness
+  answer has to say the answer can be missing.
+
 - **`ackinacki-bridge withdraw`: the burn is refused if this run no
   longer owns the withdrawal it reserved.** The withdrawal lock is taken
   before the reservation and is meant to be held across the multi-second
@@ -954,12 +987,28 @@ assigns it when the release is tagged.
 
   The last step before the broadcast now asks the kernel whether this run
   still holds the lock, and refuses with exit 2 if it does not. This is
-  an internal invariant, so in normal operation you will never see it;
-  if you do, nothing was broadcast and re-running is safe. On a
-  filesystem that cannot `flock` at all — a supported deployment — there
-  is no lock to check and the run proceeds on the record's own guards, as
-  before. A new `stage 3/6: broadcasting the burn` log line reports
-  `locked=true|false` so which case you are in is on the record.
+  an internal invariant, so in normal operation you will never see it.
+  If you do, nothing was broadcast — but **a plain re-run is not the
+  remedy**, and the first version of this entry said it was. The
+  reservation is already on disk, so the next run refuses it with exit 3
+  and a message written for a burn that may be in flight. The refusal
+  therefore names the record and splits by case: another process holds
+  the lock (wait, delete nothing); this run held one the kernel no longer
+  knows about, which is what a cleanup sweeping `*.lock` produces (stop
+  that, then delete the record and re-run); or this run never took one
+  (internal defect, delete the record, re-run, and please report it).
+
+  On a filesystem that cannot `flock` at all — a supported deployment —
+  there is no lock to check and the run proceeds on the record's own
+  guards, as before. A new `stage 3/6: broadcasting the burn` log line
+  reports `locked=true|false` so which case you are in is on the record.
+
+  **The lock is now held for the whole run, not just the send.** The
+  first version of this guard protected the nine lines between the check
+  and the broadcast; everything after — the write that records the AN tx
+  hash, then capture, prove and submit, up to ~101 minutes — was back to
+  convention, and one line anywhere in there released the lock with the
+  build green. A concurrent run's liveness probe covers all of it now.
 
 - **`ackinacki-bridge withdraw`: the "could not be determined" liveness
   verdict no longer blames the filesystem for every cause.** The exit-3
@@ -1038,6 +1087,18 @@ assigns it when the release is tagged.
   inconsistency detected at the start of the capture stage changes from 2
   to 12 — it is downstream of the burn, so exit 2 was the same lie there.
   Nothing that previously exited 0, 3, 11 or 13 is affected.
+
+- **`ackinacki-bridge withdraw`: the exit-10 documentation no longer
+  promises the AN tx hash is on the record.** It said the idempotency
+  record is "persisted with the AN tx hash", which is the reverse of the
+  dominant case: every failure inside the send propagates before the
+  block that writes it, so what an exit 10 usually leaves is a
+  `Reserved` record with `an_tx_hash: null` — the CLI cannot write a
+  hash it never learned. The hash is there only for the two exit 10s
+  raised after the send returned. Reconciliation is the remedy either
+  way; where the hash is not on the record it is not in the CLI either,
+  and the advanced runbook's Case 3a is the procedure. (The runbook has
+  had this right all along; only the exit-code table was wrong.)
 
 - **`ackinacki-bridge withdraw`: the state record drops its unused
   `proof_json_path` field.** It was written as `null` on every record and

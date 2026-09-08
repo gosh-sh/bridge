@@ -469,9 +469,14 @@ impl UpdateFailed {
 
 /// Persist a status/field update to the record's file.
 ///
-/// Returns [`UpdateFailed`], which does not convert into `CliError` — see
-/// that type for why. Every caller must say whether anything has been
-/// broadcast yet.
+/// Returns [`UpdateFailed`], which deliberately has no `From` impl for
+/// `CliError`, so `?` does not compile here and every caller has to
+/// choose: `after_send` (exit 10, the burn is on the wire and the record
+/// is behind it) or `before_send` (exit 2, nothing left the machine).
+/// Getting that choice wrong is an exit code that lies about money, which
+/// is why the type refuses to choose for you. [`UpdateFailed`] carries
+/// the longer version; the rule is here so a caller does not have to go
+/// and find it.
 ///
 /// Takes `create_missing_levels` and not the whole of
 /// [`ensure_state_dir`], which is a narrowing rather than a shortcut. The
@@ -2151,6 +2156,41 @@ mod tests {
         assert!(
             !msg.contains("Do not delete the record"),
             "and not told to wait for a run that does not exist: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_permit_survives_a_probe_that_could_not_be_taken() {
+        // The `(holds, could not ask)` arm: this run has the lock object
+        // in hand and the kernel could not be reached for a second
+        // opinion. Proceeding is right — a lock we hold is better
+        // evidence than a probe that failed — and refusing here would
+        // turn a full descriptor table into a refused withdrawal.
+        //
+        // Unreachable through the real `try_acquire` in a test, so the
+        // probe is made to fail the one uid-independent way: the state
+        // directory's parent is a regular file, which is ENOTDIR for
+        // everyone. The `held` half is a lock taken in a directory that
+        // does work.
+        let dir = TempDir::new().unwrap();
+        let key = "5a5a5a5a5a5a5a5a";
+        let LockAttempt::Held(lock) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
+            panic!("an uncontested lock in a fresh TempDir must be taken");
+        };
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let (permit, logged) = captured_logs(|| {
+            BurnPermit::issue(&blocker, key, Some(&lock))
+                .expect("a lock in hand outweighs a probe that could not be made")
+        });
+        assert!(
+            permit.holds_a_lock(),
+            "the permit rests on the lock this run actually holds",
+        );
+        assert!(
+            logged.contains("could not re-check the withdrawal lock"),
+            "and says so, because the operator's next question is why: {logged}",
         );
     }
 

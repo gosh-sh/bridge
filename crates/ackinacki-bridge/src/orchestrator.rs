@@ -2327,6 +2327,33 @@ mod tests {
     }
 
     #[test]
+    fn the_hash_less_refusal_is_raised_from_exactly_three_places() {
+        // `errors.rs` describes where this refusal comes from, and an
+        // operator reading that description is being told which
+        // situations produce it. It said "two places" while there were
+        // three — the contended-lock arm was added and the prose was not
+        // — so one of the three situations had no documented existence.
+        //
+        // A count rather than a list of line numbers: line numbers rot
+        // every commit, and what a reader needs is to be sent back here
+        // when the set changes at all.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let sites: Vec<&str> = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(concat!("CliError::", "ReservationInFlight")))
+            .collect();
+        assert_eq!(
+            sites.len(),
+            3,
+            "the hash-less refusal is raised from three places — stage 1, the contended lock, and \
+             `decide_burn`. If that changed, `errors.rs`'s description of where it comes from has \
+             to change with it: {sites:#?}",
+        );
+    }
+
+    #[test]
     fn no_refusal_after_the_send_claims_to_be_pre_send() {
         // The class, rather than the two spellings the guard above knows.
         // A `CliError::Preflight` IS the claim — exit 2's published
@@ -3054,6 +3081,61 @@ mod tests {
         assert!(
             msg.contains("case 3a"),
             "exit 10's remedy is reconciliation, and the message has to say where: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_restored_record_that_comes_back_without_a_hash_refuses_as_post_send() {
+        // The `else` at the end of the resume arm, which nothing reached.
+        // It fires when the reservation hands back a record carrying no
+        // AN tx hash — and the only way there is an `observed` whose
+        // status `read_record` accepts without one, i.e. `Reserved`.
+        // The caller's filter never produces that; this function is the
+        // unit under test, and the exit code the branch carries is what a
+        // future caller inherits.
+        //
+        // The point is the CODE, not the prose: a run that has lost the
+        // hash it was resuming from has a burn on the wire it can no
+        // longer name, and exit 2 there invites a retry wrapper to make a
+        // second one.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "ba".repeat(32));
+        let r = burned_record(dir.path(), &an);
+
+        let mut observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees the record");
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+        // A shape `read_record` accepts: no hash, and a status that does
+        // not require one.
+        observed.an_tx_hash = None;
+        observed.status = Status::Reserved;
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+            &mut None,
+        )
+        .expect_err("there is no burn to resume from");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "every line in this arm is downstream of a burn: {err}",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no burn to resume from") && msg.contains("Reconcile"),
+            "the operator is left reconciling, which is the only move available: {msg}",
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("nothing was sent"),
+            "the sentence a retry wrapper acts on: {msg}",
         );
     }
 

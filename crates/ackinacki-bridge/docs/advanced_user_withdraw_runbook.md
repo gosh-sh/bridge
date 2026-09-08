@@ -1021,10 +1021,14 @@ ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 # Peek at the newest
 jq . "$(ls -t "$STATE_DIR"/*.json | head -1)" 2>/dev/null
 
-# Latest captured witness + generated proof (written into --work-dir)
+# Latest captured witness (written into --work-dir)
 WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
 ls -lt "$WORK_DIR"/event_*_witness.json 2>/dev/null | head -3
-ls -lt "$WORK_DIR"/proof_event_*.json   2>/dev/null | head -3
+
+# The proof JSON is written ONLY under --prover-out-dir, which has no
+# default: without that flag no such file is produced anywhere, and this
+# line printed nothing for every run that did not pass it.
+[ -n "${PROVER_OUT_DIR:-}" ] && ls -lt "$PROVER_OUT_DIR"/proof_event_*.json 2>/dev/null | head -3
 
 # Circuit 4 PK cache (should exist after first successful run)
 ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null

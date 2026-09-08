@@ -160,8 +160,11 @@ pub enum CliError {
     //
     // `ReservationInFlight` is for a record with NO hash, which cannot say
     // whether a burn is on the wire, because the hash is written only
-    // after the send returns. Raised in two places — stage 1, before
-    // reserving, and `decide_burn`, after — and independent of
+    // after the send returns. Raised in THREE places — stage 1 before
+    // reserving, the contended-lock arm of `reserve_and_decide_holding`,
+    // and `decide_burn` after the reservation. (This said two for several
+    // rounds; `the_hash_less_refusal_is_raised_from_exactly_three_places`
+    // is what keeps the count honest now.) Independent of
     // `--allow-retry` in both: the flag does not override it and the text
     // says so. What it carries instead is the verdict `flock` can give
     // (`idempotency::liveness_verdict`) and the record's path, because

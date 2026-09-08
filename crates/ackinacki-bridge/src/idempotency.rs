@@ -40,6 +40,19 @@ use crate::{
     errors::{CliError, CliResult},
 };
 
+/// The clause a refusal from this module uses to say the wire is
+/// untouched. Written once and pasted nowhere.
+///
+/// It is true of every caller this module was built for and false of one
+/// that arrived later: `reserve` and [`WithdrawalLock::try_acquire`] are
+/// both reached from the orchestrator's resume arm, which is entered only
+/// when a burn is already on the wire. That caller re-badges the refusal
+/// to exit 10 and has to take this clause back out again — see
+/// `orchestrator::resumed_refusal`. Removing a fixed string is an exact
+/// operation; guessing at the punctuation of three hand-written variants
+/// is not, which is why they are no longer hand-written.
+pub(crate) const NOTHING_SENT_CLAUSE: &str = " (nothing was sent)";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -276,15 +289,16 @@ pub fn reserve(
         // prevent. Say what is there instead.
         reason: if published.get() {
             format!(
-                "idempotency: reserve {}: {e}\n\x20 Nothing was sent. The record IS on disk and \
-                 complete — the failure was making its directory entry durable, which means it \
-                 may not survive a power loss.\n\x20 It is not stale: a later run refusing this \
-                 identity with exit 3 is correct, and that refusal explains what to do with it.",
+                "idempotency: reserve {}: {e}{NOTHING_SENT_CLAUSE}\n\x20 The record IS on disk \
+                 and complete — the failure was making its directory entry durable, which means \
+                 it may not survive a power loss.\n\x20 It is not stale: a later run refusing \
+                 this identity with exit 3 is correct, and that refusal explains what to do with \
+                 it.",
                 path.display()
             )
         } else {
             format!(
-                "idempotency: reserve {}: {e} (nothing was sent; no record was left behind)",
+                "idempotency: reserve {}: {e}{NOTHING_SENT_CLAUSE} No record was left behind.",
                 path.display()
             )
         },
@@ -879,7 +893,7 @@ impl WithdrawalLock {
         let path = Self::path(state_dir, key);
         let refuse = |what: &str, e: std::io::Error| CliError::Preflight {
             reason: format!(
-                "idempotency: {what} {}: {e} (nothing was sent)",
+                "idempotency: {what} {}: {e}{NOTHING_SENT_CLAUSE}",
                 path.display()
             ),
             source: None,

@@ -948,7 +948,16 @@ fn resume_recorded_burn(
     observed: &idempotency::Record,
     hold: &mut Option<idempotency::WithdrawalLock>,
 ) -> CliResult<(idempotency::Record, String)> {
-    let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    // Every refusal raised anywhere inside this function is a post-send
+    // refusal, and this is the FIRST line of it — not just the `reserve`
+    // further down. `reserve_and_decide` reaches four separate
+    // `CliError::Preflight` sources before it returns: preparing the state
+    // directory, opening the withdrawal lock, the `peek` behind a
+    // contended one, and `reserve` itself. Each of them says "nothing was
+    // sent" about a run whose entry condition is a burn already on the
+    // wire.
+    let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
+        .map_err(|e| resumed_refusal(e, observed))?;
     *hold = lock;
     match decision {
         // The hash comes from the RESERVATION, not from `observed`. The
@@ -1055,17 +1064,24 @@ fn resume_recorded_burn(
 ///
 /// `resume_recorded_burn` is entered only through
 /// `.filter(|p| p.an_tx_hash.is_some())`, so a burn is on the wire for
-/// every line inside it, and by the time `reserve` is asked this run has
-/// written the record back itself. Exit 2's published contract is the
-/// conjunction of two things that are both false here — nothing was
-/// broadcast, and no state file was written — and a retry wrapper reading
-/// it fires the second burn.
+/// EVERY line inside it — from its first statement, not merely from the
+/// point where this run has written the record back itself. Exit 2's
+/// published contract is that nothing was broadcast, which is false the
+/// moment the function is entered, and a retry wrapper reading it fires
+/// the second burn.
 ///
 /// Only the pre-send half moves. The exit-3 refusals out of the same call
 /// are the entire reason it is made: they carry the per-status remedy, and
 /// re-badging them would hide the duplicate this arm exists to catch.
 /// Anything else `reserve` might grow passes through untouched rather than
 /// being swept into exit 10 by a catch-all.
+///
+/// The forwarded text is edited, not quoted. `reserve` and `try_acquire`
+/// write [`idempotency::NOTHING_SENT_CLAUSE`] into their own refusals, and
+/// carrying it through unchanged produced a message that said a burn was
+/// on the wire and, two lines below, that nothing had been sent. An
+/// operator reconciling a live withdrawal reads whichever half they see
+/// first.
 fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
     match e {
         CliError::Preflight {
@@ -1073,11 +1089,20 @@ fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
             source,
         } => CliError::BurnOutcomeUnknown {
             reason: format!(
-                "the AN burn {:?} is on the wire — it was recorded before this run started — but \
-                 the reservation covering it could not be completed: {reason}\n\x20 The local \
-                 record may be behind the chain. Do not re-run without reconciling — see the \
-                 runbook's Case 3a.",
-                observed.an_tx_hash,
+                "the AN burn {} is on the wire — it was recorded before this run started — but \
+                 the reservation covering it could not be completed: {}\n\x20 The local record \
+                 may be behind the chain. Do not re-run without reconciling — see the runbook's \
+                 Case 3a.",
+                // Plain, because this is the string an operator pastes
+                // into a block explorer. `{:?}` on the `Option` rendered
+                // it as `Some("0x…")`, quotes included. The fallback is
+                // unreachable through `resume_recorded_burn` — the filter
+                // at the call site is what makes this whole function
+                // honest — but printing `None` beside "is on the wire"
+                // would be the same class of lie this function exists to
+                // remove.
+                observed.an_tx_hash.as_deref().unwrap_or("<none recorded>"),
+                reason.replace(idempotency::NOTHING_SENT_CLAUSE, ""),
             ),
             source,
         },
@@ -2432,6 +2457,60 @@ mod tests {
         );
         assert_eq!(reread.eth_tx_hash.as_deref(), Some(eth.as_str()));
         assert_eq!(reread.an_tx_hash.as_deref(), Some(an.as_str()));
+    }
+
+    #[test]
+    fn the_first_line_of_the_resume_arm_cannot_report_that_nothing_was_sent() {
+        // The escape that survived the round that was supposed to close
+        // it. The fix landed on the `reserve` call deep inside this
+        // function — a branch its own test documents as unreachable by
+        // construction today — while the function's FIRST statement,
+        // executed on every resume, kept propagating exit 2.
+        //
+        // The lever is the withdrawal lock: a directory where the lock
+        // file goes makes `try_acquire`'s `open` fail with EISDIR for
+        // every uid, after `ensure_state_dir` has already succeeded. That
+        // is one of four `CliError::Preflight` sources behind the single
+        // `?` on the first line, and the one that carries
+        // `NOTHING_SENT_CLAUSE` in its own text — so this pins the
+        // re-badging and the clause's removal in one run.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "cd".repeat(32));
+        let observed = burned_record(dir.path(), &an);
+
+        let lock_path = dir.path().join(format!("{}.lock", observed.key));
+        // `burned_record` reserved, so `try_acquire` has already created it.
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+            &mut None,
+        )
+        .expect_err("a lock that cannot be opened is still a refusal");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "entry to this function is gated on a burn being on the wire, so its first line is \
+             already downstream of the send: {err}",
+        );
+        let msg = format!("{err}");
+        assert!(
+            !msg.to_ascii_lowercase().contains("nothing was sent"),
+            "the inner refusal's pre-send clause has to come back out, or the message contradicts \
+             itself: {msg}",
+        );
+        assert!(
+            msg.contains(&an) && !msg.contains("Some("),
+            "the hash is what the operator pastes into an explorer; `{{:?}}` on the Option \
+             wrapped it in `Some(\"…\")`: {msg}",
+        );
     }
 
     #[test]

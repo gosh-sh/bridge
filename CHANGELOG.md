@@ -926,6 +926,14 @@ assigns it when the release is tagged.
   moved between 106/4, 107/3 and 108/2 on its own, which is how one gets
   waved through as "the usual two".
 
+  Serialising the four writers was not the whole race: a fifth test,
+  `ipc::tests::bkupd_paths_match_pattern`, asserts the literal
+  `"proofs/bkupd_000042.json"` and resolves it through the same
+  `BRIDGE_PROOFS_DIR` the others set — a reader of what they write, in
+  the same process, and it failed with
+  `left: "/tmp/override_proofs/bkupd_000042.json"`. It takes the same
+  lock now.
+
   Neither the flake nor the two fixture failures were ever visible in CI:
   every `-p bridge-prover-lib` invocation in `.gitlab-ci.yml` is filtered
   to `keys::`, and no fmt or clippy job covers the crate at all. That gap
@@ -934,6 +942,24 @@ assigns it when the release is tagged.
   and is not addressed here. Until its fmt step lands, do not run
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
+
+- **`ackinacki-bridge withdraw`: the burn is refused if this run no
+  longer owns the withdrawal it reserved.** The withdrawal lock is taken
+  before the reservation and is meant to be held across the multi-second
+  `burn::send`, so a second run's liveness probe can see it. Nothing
+  enforced that. A run that reached the send holding nothing was
+  invisible to that probe, and the concurrent run asking about it was
+  told the record had been left by a run that already exited — which the
+  recovery procedure turns into permission to delete it, mid-send.
+
+  The last step before the broadcast now asks the kernel whether this run
+  still holds the lock, and refuses with exit 2 if it does not. This is
+  an internal invariant, so in normal operation you will never see it;
+  if you do, nothing was broadcast and re-running is safe. On a
+  filesystem that cannot `flock` at all — a supported deployment — there
+  is no lock to check and the run proceeds on the record's own guards, as
+  before. A new `stage 3/6: broadcasting the burn` log line reports
+  `locked=true|false` so which case you are in is on the record.
 
 - **`ackinacki-bridge withdraw`: the "could not be determined" liveness
   verdict no longer blames the filesystem for every cause.** The exit-3
@@ -945,10 +971,14 @@ assigns it when the release is tagged.
   handles was sent to check their mount.
 
   The verdict now names no cause, and the reason is emitted as a `warn`
-  line immediately above the refusal, carrying the underlying error. The
-  runbook's "could not be determined" section splits the two situations
-  and says the second one is fixable — resolve the error, re-run, and you
-  get a real verdict.
+  line immediately above the refusal, carrying the underlying error —
+  **for both causes.** The first version of this fix logged only the
+  failed attempt (`EACCES`, `EMFILE`), so a filesystem that genuinely
+  cannot lock — NFS, overlay mounts, the case the verdict exists for —
+  got a sentence pointing at a log line that was never written. Both arms
+  now log, each carrying its errno. The runbook's "could not be
+  determined" section splits the two situations and says the second one
+  is fixable — resolve the error, re-run, and you get a real verdict.
 
 - **Advanced runbook: the delete-the-record procedure now covers all
   three liveness verdicts, not two.** The exit-3 refusal reports one of
@@ -968,25 +998,46 @@ assigns it when the release is tagged.
   withdrawal. No CLI behaviour changed; the message always said this and
   the procedure did not.
 
+  **The same correction now covers the other two places that stated the
+  gate.** The first pass fixed the advanced runbook only. The CLI
+  README's cleanup rule ran the identical two-verdict elimination and
+  ended "with both satisfied, delete the record and re-run"; and step 3
+  of the refusal the CLI itself prints — the copy an operator is looking
+  at when they decide — gated the deletion on a description ("the line
+  above says no other run holds this withdrawal") that a lockless mount
+  satisfies by elimination. The README carries the three-row table, and
+  the refusal rules the third verdict out by name.
+
 - **`ackinacki-bridge withdraw`: a failed reservation while resuming a
   recorded burn now exits 10, not 2.** The resume path is entered only
   when the record read at stage 1 carries an AN tx hash, so a burn is on
   the wire for every line inside it, and the run has already written the
-  record back before it re-asks the reservation. Two of that path's
-  failures still reported themselves as exit 2, whose documented contract
-  is "nothing broadcast, no state file written" — both false there. A
-  wrapper that retries on 2, which the exit-code table invites, would have
-  broadcast a second `initiateWithdrawal` against a multisig with no
-  replay guard.
+  record back before it re-asks the reservation. Those failures reported
+  themselves as exit 2, whose documented contract is "nothing broadcast,
+  no state file written" — both false there. A wrapper that retries on 2,
+  which the exit-code table invites, would have broadcast a second
+  `initiateWithdrawal` against a multisig with no replay guard.
 
-  Those failures are now exit 10 and name the AN transaction to reconcile
-  instead of the dedup digest. The exit-3 duplicate refusals raised by the
-  same reservation are unchanged and still reach the operator as
-  themselves, with their per-status remedy — only the pre-send half moved.
+  Every pre-send refusal the resume path can raise is now exit 10 and
+  names the AN transaction to reconcile instead of the dedup digest —
+  including the ones behind the path's very first statement, which
+  reaches four of them: preparing the state directory, opening the
+  withdrawal lock, reading the record behind a contended one, and the
+  reservation itself. The exit-3 duplicate refusals raised by the same
+  call are unchanged and still reach the operator as themselves, with
+  their per-status remedy — only the pre-send half moves.
+
+  The exit-10 message no longer contradicts itself either: the refusal it
+  wraps was written for a caller that had not sent anything, and its
+  "nothing was sent" is removed rather than quoted. The AN hash prints
+  plainly instead of as `Some("0x…")`, since it is the string an operator
+  pastes into an explorer.
 
   Scripts that pattern-match exit codes: a resumed withdrawal that fails
-  to re-reserve changes from 2 to 10. Nothing that previously exited 0, 3,
-  11, 12 or 13 is affected.
+  to re-reserve changes from 2 to 10. Separately, an internal
+  inconsistency detected at the start of the capture stage changes from 2
+  to 12 — it is downstream of the burn, so exit 2 was the same lie there.
+  Nothing that previously exited 0, 3, 11 or 13 is affected.
 
 - **`ackinacki-bridge withdraw`: the state record drops its unused
   `proof_json_path` field.** It was written as `null` on every record and

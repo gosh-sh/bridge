@@ -1621,6 +1621,27 @@ mod probe_tests {
         // Repairable, not blocked: `--repair` clears these four names
         // with `remove_file`, which unlinks a FIFO exactly as it unlinks
         // a regular file.
+        // Bounded, because the regression this guards against is a HANG.
+        // Called directly, a regression here does not fail — it never
+        // returns, and no job in .gitlab-ci.yml sets a `timeout:`, so it
+        // surfaces as the pipeline default killing the whole job and
+        // naming nothing. A dedicated thread and a `recv_timeout` turn
+        // that back into a named assertion.
+        //
+        // The thread is left blocked on purpose when it does hang: it is
+        // stuck inside `open(2)` on a FIFO with no writer, which nothing
+        // in this process can interrupt, and the test binary is about to
+        // exit anyway. Leaking it is the price of reporting rather than
+        // waiting.
+        fn probe_within(dir: &Path, budget: std::time::Duration) -> Option<KeyCacheState> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let dir = dir.to_path_buf();
+            std::thread::spawn(move || {
+                let _ = tx.send(probe_event_key_cache(&dir));
+            });
+            rx.recv_timeout(budget).ok()
+        }
+
         for name in ["event_config_params.json", "event_pk.bin"] {
             let d = dir_with_placeholder_keys();
             let path = d.path().join(name);
@@ -1631,7 +1652,20 @@ mod probe_tests {
             let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
             assert_eq!(rc, 0, "mkfifo {name}: {}", std::io::Error::last_os_error());
 
-            match probe_event_key_cache(d.path()) {
+            // Ten seconds against a probe that answers in microseconds on
+            // this fixture: generous enough never to flake, short enough
+            // to be a test failure rather than a job timeout.
+            let verdict = probe_within(d.path(), std::time::Duration::from_secs(10))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the probe never returned for a FIFO at {name}: it is blocked in \
+                         `open(2)` waiting for a writer that will never come, which is the defect \
+                         — preflight has no timeout of its own and would wait there before the \
+                         burn"
+                    )
+                });
+
+            match verdict {
                 KeyCacheState::Corrupt {
                     why,
                 } => {

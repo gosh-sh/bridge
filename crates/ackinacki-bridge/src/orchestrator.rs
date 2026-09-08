@@ -330,6 +330,14 @@ pub async fn run(
                 p,
                 &mut _withdrawal_lock,
             )?;
+            // From here to the end of this branch, same guarantee as the
+            // burn arm gets from its permit. The resume path never sends,
+            // so there is no permit to carry it — but everything below
+            // still runs for up to ~101 minutes with a concurrent run's
+            // liveness probe asking whether this one is alive.
+            let _held = _withdrawal_lock
+                .as_ref()
+                .map(idempotency::WithdrawalLock::hold);
             record = Some(r);
             (an_tx, bounce)
         } else {
@@ -412,6 +420,15 @@ pub async fn run(
             let (r, decision, lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
             _withdrawal_lock = lock;
+            // Before the match, so BOTH arms are covered. `Reuse` issues
+            // no permit — it is the "another run broadcast while this one
+            // preflighted, resume at capture" case, which is exactly when
+            // two runs are working the same identity — and `Send`'s
+            // permit borrow ends with its arm, leaving the tail of this
+            // branch on convention alone.
+            let _held = _withdrawal_lock
+                .as_ref()
+                .map(idempotency::WithdrawalLock::hold);
             record = Some(r);
 
             match decision {
@@ -493,6 +510,35 @@ pub async fn run(
         }
     };
 
+    // The lock is settled: whichever branch above ran, what this process
+    // holds will not change again. Say that to the compiler rather than
+    // to the next reader.
+    //
+    // Two statements, and both are needed. Rebinding immutably refuses
+    // `_withdrawal_lock = None` (E0384) and `.take()` (E0596). The hold
+    // borrows it for the rest of the function, so `drop(_withdrawal_lock)`
+    // is E0505 as well — a value with a `Drop` impl is live to the end of
+    // its scope, which is what pins the borrow open. Dropping the HOLD
+    // does not release the lock, so there is no one-line way back out.
+    //
+    // The three of them were the escape this guard has been chasing for
+    // four rounds: stages 4-6 run for up to ~101 minutes, and a second
+    // run asking "is anybody executing this withdrawal?" is answered by
+    // the kernel holding this descriptor, not by anything on disk. Lose
+    // it here and the concurrent run is told the record was left by a run
+    // that already exited — which the runbook turns into permission to
+    // delete it.
+    //
+    // ABOVE the dry-run return, not below it. Placed below, the stretch
+    // between the burn branch closing and this line was covered by
+    // nothing — the permit's borrow ends with its own arm. A dry run
+    // holds no lock, so the `map` yields `None` and the early return is
+    // unaffected.
+    let _withdrawal_lock = _withdrawal_lock;
+    let _lock_held_to_the_end = _withdrawal_lock
+        .as_ref()
+        .map(idempotency::WithdrawalLock::hold);
+
     // Full `--dry-run`: stop before touching either chain. Returning a
     // stub success record keeps the output path uniform.
     if dry_run {
@@ -520,29 +566,6 @@ pub async fn run(
             },
         });
     }
-
-    // The lock is settled: whichever branch above ran, what this process
-    // holds will not change again. Say that to the compiler rather than
-    // to the next reader.
-    //
-    // Two statements, and both are needed. Rebinding immutably refuses
-    // `_withdrawal_lock = None` (E0384) and `.take()` (E0596). The hold
-    // borrows it for the rest of the function, so `drop(_withdrawal_lock)`
-    // is E0505 as well — a value with a `Drop` impl is live to the end of
-    // its scope, which is what pins the borrow open. Dropping the HOLD
-    // does not release the lock, so there is no one-line way back out.
-    //
-    // The three of them were the escape this guard has been chasing for
-    // four rounds: stages 4-6 run for up to ~101 minutes, and a second
-    // run asking "is anybody executing this withdrawal?" is answered by
-    // the kernel holding this descriptor, not by anything on disk. Lose
-    // it here and the concurrent run is told the record was left by a run
-    // that already exited — which the runbook turns into permission to
-    // delete it.
-    let _withdrawal_lock = _withdrawal_lock;
-    let _lock_held_to_the_end = _withdrawal_lock
-        .as_ref()
-        .map(idempotency::WithdrawalLock::hold);
 
     // Past the dry-run return, so `plumbing` is `Some` by construction —
     // it is resolved unconditionally for every non-dry run above.
@@ -2140,7 +2163,12 @@ mod tests {
             .enumerate()
             .filter(|(_, l)| {
                 let t = l.trim_start();
-                t.contains(concat!("reserve_and", "_decide("))
+                // BOTH names. `reserve_and_decide_holding(` does not
+                // contain `reserve_and_decide(` — the trailing paren made
+                // the helper invisible to this scan, and it returns the
+                // same three-element tuple.
+                (t.contains(concat!("reserve_and", "_decide("))
+                    || t.contains(concat!("reserve_and_decide", "_holding(")))
                     && !t.starts_with("//")
                     && !t.starts_with("///")
                     // The definition, not a call.
@@ -2169,14 +2197,31 @@ mod tests {
                 );
             }
             // And the positive form, so a spelling nobody anticipated has
-            // to be named here rather than quietly discarded there.
+            // to be named here rather than quietly discarded there. A
+            // tail-position call returns the tuple onward and destructures
+            // nothing, which is the one shape with no slot to check.
+            // `let (` rather than `let `: the tail call sits one line
+            // below an unrelated `let attempt = …`, which the joined
+            // statement picks up.
+            let is_tail_call = !stmt.contains("let (");
             assert!(
-                stmt.contains(", lock)")
-                    || stmt.contains(concat!("reserve_and_decide", "_holding(")),
+                is_tail_call || stmt.contains(", lock)"),
                 "the lock has to land in a named binding the caller then places: \
                  orchestrator.rs:{}: {stmt}",
                 n + 1,
             );
+            // Binding it and dropping it on the next line is the same
+            // release with two statements instead of one. Look at what
+            // happens to `lock` before the enclosing block ends.
+            if !is_tail_call {
+                let after = lines[n..(n + 6).min(lines.len())].join("\n");
+                assert!(
+                    !after.contains(concat!("drop(", "lock)")),
+                    "the lock is bound and then dropped, which is the underscore with extra \
+                     steps: orchestrator.rs:{}: {after}",
+                    n + 1,
+                );
+            }
         }
     }
 
@@ -2364,9 +2409,25 @@ mod tests {
             }
             // The whole statement, which rustfmt may have wrapped: from
             // this line to the one that ends it.
-            let end_of_stmt = (n..post_send_lines.len())
-                .find(|&i| post_send_lines[i].contains("?;"))
-                .map_or(post_send_lines.len(), |i| i + 1);
+            // The END OF THIS STATEMENT, not the next `?;` anywhere
+            // below. A bare `?` inline in a multi-line expression has no
+            // `?;` of its own, so the old scan ran on — measured at 48
+            // lines past the call — until it met an unrelated `map_err`
+            // and pronounced the site clean.
+            //
+            // A statement ends at the first line whose trailing character
+            // is `;` at this nesting depth. Tracking depth is what stops
+            // a `;` inside a nested closure from ending it early.
+            let mut depth = 0i32;
+            let mut end_of_stmt = post_send_lines.len();
+            for (k, l) in post_send_lines.iter().enumerate().skip(n) {
+                depth += l.chars().filter(|&c| c == '(' || c == '{').count() as i32;
+                depth -= l.chars().filter(|&c| c == ')' || c == '}').count() as i32;
+                if depth <= 0 && l.trim_end().ends_with(';') {
+                    end_of_stmt = k + 1;
+                    break;
+                }
+            }
             let stmt = post_send_lines[n..end_of_stmt].join("\n");
             if !stmt.contains("map_err") {
                 offenders.push(format!(

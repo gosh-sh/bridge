@@ -2050,6 +2050,73 @@ mod tests {
     }
 
     #[test]
+    fn no_shipped_document_says_the_refusal_always_answers_the_liveness_question() {
+        // Four copies of the deletion gate, found one per review round by
+        // a human reading. The rule keeps being restated in summary form
+        // — a cleanup list, a "safe to prune between demos" heading —
+        // and every summary drops the third verdict, because the third
+        // verdict is the awkward one.
+        //
+        // What every wrong copy has in common is not a word count. It is
+        // the claim that the exit-3 refusal REPORTS whether another run
+        // holds the withdrawal. On a filesystem without `flock` it
+        // reports that it could not tell, and an operator who was
+        // promised an answer reads the absence of "RIGHT NOW" as one.
+        //
+        // So: any block that sends a reader to the refusal for the
+        // liveness answer has to admit the answer can be missing. The
+        // canonical procedures do; the summaries did not.
+        const DOCS: [(&str, &str); 2] = [
+            ("README.md", include_str!("../README.md")),
+            (
+                "docs/advanced_user_withdraw_runbook.md",
+                include_str!("../docs/advanced_user_withdraw_runbook.md"),
+            ),
+        ];
+        // Any of these means the block does not promise an answer it
+        // cannot give.
+        const HEDGES: [&str; 5] = [
+            "three",
+            "could not be determined",
+            "does not always",
+            "only sometimes",
+            "never does",
+        ];
+
+        let mut offenders = Vec::new();
+        for (name, text) in DOCS {
+            for (i, block) in text.split("\n\n").enumerate() {
+                // Whitespace collapsed first. These are hard-wrapped
+                // documents, so every phrase this looks for straddles a
+                // line break somewhere — the first version of this guard
+                // matched nothing at all and looked like a pass.
+                let lower = block
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let sends_them_there =
+                    lower.contains("exit-3 refusal") || lower.contains("liveness line");
+                let about_the_lock = lower.contains("holds the withdrawal")
+                    || lower.contains("holds this withdrawal")
+                    || lower.contains("liveness");
+                if !(sends_them_there && about_the_lock) {
+                    continue;
+                }
+                if !HEDGES.iter().any(|h| lower.contains(h)) {
+                    offenders.push(format!("{name} block {i}: {}", block.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these blocks send an operator to the exit-3 refusal for the liveness answer without \
+             saying it may not have one — which is every run on a mount without `flock`, and the \
+             reading that deletes a record mid-send: {offenders:#?}",
+        );
+    }
+
+    #[test]
     fn the_refusal_rules_out_the_third_verdict_by_name() {
         // The refusal's step 3 used to gate the deletion on "the line
         // above says no other run holds this withdrawal" and stop there.

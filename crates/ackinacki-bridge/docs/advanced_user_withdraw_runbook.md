@@ -1118,13 +1118,17 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — prec
   warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` —
   keep for audit; `Failed` — safe to prune once reconciled.
-- `Reserved` with no `an_tx_hash` — **no age makes this safe.** The
-  record cannot say whether a burn is on the wire, because the hash is
-  written only after the send returns. Re-run the identical command and
-  read the exit-3 refusal: it reports whether any process still holds
-  the withdrawal, and that plus an on-chain reconciliation
-  ([Case 3a](#case-3a--capture-timeout--advanced-diagnostics)) are the
-  two conditions for deleting it.
+- `Reserved` with no `an_tx_hash` — **no age makes this safe, and this
+  list is not where the rule lives.** The record cannot say whether a
+  burn is on the wire, because the hash is written only after the send
+  returns. Deleting one takes a procedure with **three** liveness
+  verdicts, only one of which permits it: the exit-3 refusal does not
+  always report an answer, and on a filesystem without `flock` it never
+  does. Follow
+  [Case 3a](#case-3a--capture-timeout--advanced-diagnostics) and nothing
+  else — a summary of that procedure here is exactly how the
+  two-verdict version survived a round of review 400 lines from its own
+  correction.
 
 **Do NOT touch between demos:**
 

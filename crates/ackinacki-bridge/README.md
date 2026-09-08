@@ -760,9 +760,11 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
 is deterministic; ~5 min per proof with warm PK cache.
 `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
 for audit; `Failed` — safe to prune once reconciled. **`Reserved` with
-no `an_tx_hash`: see the cleanup rule under "Idempotency semantics" —
-there is no age at which deleting one is safe, and the exit-3 refusal
-tells you when it is.**
+no `an_tx_hash`: there is no age at which deleting one is safe, and the
+rule is not repeated here.** It takes the three-verdict procedure under
+"Idempotency semantics" above — the exit-3 refusal answers the liveness
+question only sometimes, and a shorter version of the rule is how the
+wrong one keeps getting copied.
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
 and its `pk_cache/` — cold cache costs ~20 min per proof; warm cache

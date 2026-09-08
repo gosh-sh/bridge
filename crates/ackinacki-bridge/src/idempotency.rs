@@ -115,7 +115,6 @@ pub struct Record {
     pub an_tx_hash: Option<String>,
     pub withdrawal_msg_id: Option<String>,
     pub block_seq_no: Option<u64>,
-    pub proof_json_path: Option<PathBuf>,
     pub eth_tx_hash: Option<String>,
 }
 
@@ -185,10 +184,10 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 ///   on-chain, then either wait or mark the record `Failed` manually.
 /// - Any other active status (`Reserved`, `Burned`, `Captured`, `Proved`) →
 ///   refused unless `--allow-retry` is set. With the flag, the **prior record
-///   is returned as-is** — `an_tx_hash`, `withdrawal_msg_id`, `block_seq_no`,
-///   `proof_json_path` are all preserved so the orchestrator can skip stages
-///   that already completed. This is v1's resume path (a `--resume` alias may
-///   be added later).
+///   is returned as-is** — `an_tx_hash`, `withdrawal_msg_id` and `block_seq_no`
+///   are all preserved so the orchestrator can skip stages that already
+///   completed. This is v1's resume path (a `--resume` alias may be added
+///   later).
 pub fn reserve(
     state_dir: &Path,
     from: &FromAddress,
@@ -940,7 +939,6 @@ fn fresh_reserved_record(
         an_tx_hash: None,
         withdrawal_msg_id: None,
         block_seq_no: None,
-        proof_json_path: None,
         eth_tx_hash: None,
     }
 }
@@ -1409,6 +1407,38 @@ mod tests {
 
         let mode = fs::metadata(&state).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o750, "a mode we did not set is not ours to change");
+    }
+
+    #[test]
+    fn a_record_survives_a_rollback_across_the_dropped_proof_path_field() {
+        // Removing a field from a persisted record has two directions,
+        // and only one of them is obvious. A NEW build reading an OLD
+        // record must ignore the field it no longer knows; an OLD build
+        // reading a NEW record must not choke on its absence — which is
+        // what a rollback in the middle of an in-flight withdrawal does.
+        //
+        // If it did choke, the message it would give is
+        // "prior record is corrupt … delete it manually if you know it's
+        // stale", and deleting a record mid-withdrawal is the one action
+        // every guard in this module exists to prevent. That is why this
+        // is asserted rather than assumed.
+        let base = r#""key":"k","status":"burned","from_extended":"a::b","to_hex":"0x00",
+            "to_chain":1,"amount_micro":1,"reserved_at":"now",
+            "an_tx_hash":"0xab","withdrawal_msg_id":null,"block_seq_no":null,
+            "eth_tx_hash":null"#;
+
+        // 1. An old record, still carrying the field this build dropped.
+        let old = format!(r#"{{{base},"proof_json_path":"/tmp/proof_event_000001.json"}}"#);
+        let r: Record = serde_json::from_str(&old)
+            .expect("a field this build no longer knows is ignored, not an error");
+        assert_eq!(r.an_tx_hash.as_deref(), Some("0xab"));
+
+        // 2. A new record, without it — what an older build would read after a
+        //    rollback. `Option` is serde's one defaulting case, which is the whole
+        //    reason this removal is safe.
+        let new = format!("{{{base}}}");
+        let r: Record = serde_json::from_str(&new).expect("a missing optional field is None");
+        assert_eq!(r.status, Status::Burned);
     }
 
     #[test]

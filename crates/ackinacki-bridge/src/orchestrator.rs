@@ -769,11 +769,17 @@ pub async fn run(
         WithdrawSubmitOutcome::Reverted {
             reason,
         } => {
-            // Preserve the proof so a follow-up run can re-submit without
-            // re-proving. `proof_json_path` is populated by the aggregator
-            // subprocess if the operator passed `--prover-out-dir`; when
-            // absent (default), the proof lives only in memory and a
-            // retry will re-prove — still deterministic.
+            // Keep the record so a follow-up run resumes here instead of
+            // burning again. The proof itself is NOT kept: it is
+            // regenerated, which is safe because it is deterministic per
+            // (event, prover_state).
+            //
+            // This used to say the record carried a `proof_json_path`
+            // "populated by the aggregator subprocess if the operator
+            // passed `--prover-out-dir`". The flag is real and does write
+            // `<dir>/proof_event_<seq>.json`, but nothing ever put that
+            // path on the record and nothing ever read it back, so the
+            // field is gone and re-proving is the only path there was.
             if let Some(r) = record.as_mut() {
                 r.status = Status::Failed;
                 // Deliberately swallowed, and the only `update` in this file
@@ -1286,7 +1292,6 @@ mod tests {
             an_tx_hash: an_tx_hash.map(str::to_string),
             withdrawal_msg_id: None,
             block_seq_no: None,
-            proof_json_path: None,
             eth_tx_hash: None,
         }
     }

@@ -892,6 +892,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: the state record drops its unused
+  `proof_json_path` field.** It was written as `null` on every record and
+  read by nothing; the comment beside the `withdrawByProof` revert path
+  claimed the aggregator populated it when `--prover-out-dir` was given,
+  which was never true. `--prover-out-dir` itself is unaffected and still
+  writes `<dir>/proof_event_<seq>.json`; what it never did was put that
+  path on the record. A resumed run re-proves, as it already did, which
+  is safe because the proof is deterministic per (event, prover_state).
+
+  Records are compatible in both directions, so a rollback mid-withdrawal
+  is not affected: a build without the field ignores it in an older
+  record, and a build with it reads a newer record that omits it as
+  `null`.
+
 - **`ackinacki-bridge withdraw`: deleting the state record no longer
   substitutes for `--allow-retry`.** When a record is removed between the
   run's first read of it and its reservation — the window the exit-3

@@ -1738,6 +1738,61 @@ mod tests {
     }
 
     #[test]
+    fn the_resume_branch_never_reads_the_peeked_hash_after_reserving() {
+        // The defect a commit named after it did not close. The seam
+        // returns the hash the RESERVATION read; a test pins the seam;
+        // nothing pinned that `run` uses what came back. Going back to
+        // the peeked hash is one underscore of edit — `let (r, _an_tx,
+        // lock)` and then read `p.an_tx_hash` — and it leaves the suite
+        // and `clippy -D warnings` both green while capture waits out its
+        // timeout against a transaction nobody is looking for, with the
+        // burn already on the wire.
+        //
+        // What is asserted is the invariant, not the spelling: after the
+        // reservation, the record stage 1 peeked is not read for its hash
+        // again. The evasion above REQUIRES that read — underscore the
+        // binding and there is nothing left to return — so this catches
+        // it whatever the binding is called.
+        //
+        // Its limit, stated rather than papered over: copying the peeked
+        // hash into a local BEFORE the call and using that afterwards is
+        // invisible to any text check. That is a deliberate act, not a
+        // one-character slip, which is the difference this is drawn at.
+        let src = include_str!("orchestrator.rs");
+        let from = src
+            .find(concat!("pub async fn ", "run("))
+            .expect("run() is this module's entry point");
+        let body = &src[from..];
+        let body = &body[..body.find("\nfn ").unwrap_or(body.len())];
+
+        let branch_start = body
+            .find(concat!("if let Some(p) = prior.as_ref()", ".filter("))
+            .expect("run() no longer has a resume branch — this guard cannot be verified");
+        let branch = &body[branch_start..];
+        let branch = &branch[..branch
+            .find("\n        } else {")
+            .expect("the resume branch is the `if` half of the burn/resume choice")];
+
+        let call = branch
+            .find(concat!("resume_recorded", "_burn("))
+            .expect("the resume branch no longer goes through the seam");
+
+        let after_the_reservation = &branch[call..];
+        let offenders: Vec<_> = after_the_reservation
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(concat!("p.an_tx", "_hash")))
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the peek is minutes older than the reservation, and the exit-3 remedy tells \
+             operators to rewrite the hash in exactly that window — so once the reservation has \
+             answered, its record is the only one this run may act on: {offenders:?}",
+        );
+    }
+
+    #[test]
     fn no_state_write_in_this_pipeline_claims_that_nothing_was_sent() {
         // `UpdateFailed` takes away the `?` and forces a choice at every
         // call site. The choice can still be made wrongly: the other
@@ -1770,26 +1825,112 @@ mod tests {
     }
 
     #[test]
-    fn no_refusal_in_this_file_is_the_one_without_a_liveness_verdict() {
-        // Two exit-3 variants, and only one of them belongs here.
+    fn the_duplicate_refusal_is_never_built_by_hand_in_this_file() {
+        // What this checks and what it used to CLAIM to check are not the
+        // same thing, and the gap was already load-bearing.
         //
-        // `DuplicateInFlight` serves the statuses that carry a hash —
-        // `confirmed`, `submitted`, and the resumable ones read through
-        // `reserve`. Every refusal THIS file produces is about a record
-        // with no hash, where the record cannot say whether a burn is in
-        // flight and the lock can. Using the other variant here is what
-        // sent an operator who followed the documented recovery — re-run
-        // the identical command and read the refusal — to a message with
-        // no liveness verdict, no record path, and advice to pass
-        // `--allow-retry`, which lands on a different exit 3.
+        // It was called "no refusal in this file is the one without a
+        // liveness verdict" and said every refusal here is about a
+        // hash-less record. That stopped being true when the resume path
+        // grew a terminal case: `resume_recorded_burn` restores a deleted
+        // `confirmed` record and then refuses it, which IS a
+        // `DuplicateInFlight` and is correct — the record carries a hash,
+        // so the liveness verdict is not the half that is missing. The
+        // assertion stayed green only because the constructor moved into
+        // `idempotency::terminal_refusal` one module over. A guard whose
+        // stated invariant is false and whose text still passes is worse
+        // than none: it reads as coverage.
+        //
+        // The rule that survives, narrower and true: this file does not
+        // BUILD that variant. Its remedy differs per status — the wrong
+        // half of one shared sentence sent operators to a flag that
+        // refuses them — so it has exactly one owner. The mapping itself
+        // is pinned by
+        // `a_refusal_about_a_hash_less_record_carries_the_liveness_verdict`
+        // below, behaviourally, which is where an invariant of that shape
+        // belongs.
+        //
+        // Production code only. The test below names the variant in order
+        // to assert which refusal comes back, and a guard its own
+        // neighbours trip over gets loosened until it means nothing.
         let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
         let wrong = concat!("CliError::Duplicate", "InFlight {");
+        let offenders: Vec<_> = production
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| l.contains(wrong))
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
+            .collect();
         assert!(
-            !src.lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .any(|l| l.contains(wrong)),
-            "orchestrator refusals are about hash-less records; that variant cannot report \
-             whether another process holds the withdrawal, which is the half the record lacks",
+            offenders.is_empty(),
+            "build it through `idempotency::terminal_refusal`, which owns the per-status remedy; \
+             a second construction site is how the two came to disagree: {offenders:?}",
+        );
+    }
+
+    #[test]
+    fn a_refusal_about_a_hash_less_record_carries_the_liveness_verdict() {
+        // The invariant the guard above was named after, asserted where
+        // it can actually be checked: which variant an exit 3 uses is
+        // decided by whether the prior record carries an AN tx hash, and
+        // by nothing else — not by which stage noticed, not by the flags.
+        //
+        // A hash-less record cannot say whether a burn is on the wire, so
+        // its refusal must carry what the lock can say instead. A record
+        // with a hash can, so its refusal talks about resuming.
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // 1. Hash-less, left by a run that has exited.
+        let (_r, _d, lock) = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .unwrap();
+        drop(lock);
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a hash-less record somebody else published");
+        assert!(
+            matches!(err, CliError::ReservationInFlight { .. }),
+            "no hash means the verdict is the missing half: {err:?}",
+        );
+        assert!(format!("{err}").contains("has already exited"));
+
+        // 2. The same identity once it carries a hash, without the flag.
+        let mut r = idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+            .unwrap()
+            .unwrap();
+        r.status = Status::Burned;
+        r.an_tx_hash = Some(format!("0x{}", "5c".repeat(32)));
+        idempotency::update(dir.path(), &r).unwrap();
+
+        let err = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a recorded burn without --allow-retry");
+        assert!(
+            matches!(err, CliError::DuplicateInFlight { .. }),
+            "a hash makes the flag the answer, and that is the other variant: {err:?}",
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("--allow-retry"), "{msg}");
+        assert!(
+            !msg.contains("does NOT override"),
+            "that sentence belongs to the hash-less refusal: {msg}",
         );
     }
 

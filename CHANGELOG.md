@@ -943,6 +943,34 @@ assigns it when the release is tagged.
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
 
+- **`ackinacki-bridge withdraw`: a preflight refusal on a withdrawal
+  whose burn is already recorded now exits 10, not 2.** Six checks in
+  stage 1 — balance, destination chain, bridge deploy, signer key, prover
+  artifacts, client context — reported exit 2 whether or not a prior run
+  had already broadcast for this identity. Exit 2's published contract is
+  "nothing broadcast, no state file written". The first half survives a
+  stage-1 refusal; the second does not, and it is the half an operator
+  acts on: the runbook attaches "do not delete the state file" to exit 10
+  while telling an exit-2 reader no state file exists.
+
+  The refusal now names the AN transaction already on the wire, says
+  nothing new was sent or written, and says not to delete the record.
+  Fix what preflight named and re-run: the run resumes from the recorded
+  burn. A first run's preflight refusal is unchanged — with no prior
+  burn, exit 2 is exactly right.
+
+  Scripts that pattern-match exit codes: this is the last of the exit-2
+  reclassifications in this branch. Preflight refusals on a fresh
+  withdrawal stay 2; on a withdrawal with a recorded burn they become 10.
+
+- **CLI README and advanced runbook: `proof_event_<seq>.json` is not in
+  `work_dir/`.** Both directory listings placed it there and the
+  runbook's diagnostic looked for it there. It is written only under
+  `--prover-out-dir`, which has no default, so the listing described a
+  file that never appears and the diagnostic could not fire. The listings
+  say where it actually goes, and the diagnostic asks for the directory
+  rather than reading an environment variable nothing sets.
+
 - **`ackinacki-bridge withdraw`: the refusal that says "do not delete"
   can no longer be mistaken for the one that says "delete".** When the
   pre-send ownership check refuses, its remedy depends on what the kernel

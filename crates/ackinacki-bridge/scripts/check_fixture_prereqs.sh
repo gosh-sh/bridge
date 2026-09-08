@@ -14,7 +14,17 @@ set -euo pipefail
 # and the binary committed there may be built for another OS/arch — an
 # early entry that cannot run, with a working system install behind it.
 # So this check failed on precisely the arrangement the fixture supports.
-COMPILER_DIR="${COMPILER_DIR:-./contracts/compiler}"
+# Hardcoded, NOT `${COMPILER_DIR:-…}`, because the resolver hardcodes it
+# too (`helper/common.py`: `COMPILER_DIR = "./contracts/compiler"`, no
+# env read). Honouring an override here would let this check probe a
+# candidate the fixture never tries — the same disagreement the rest of
+# this file exists to remove, reintroduced by a convenience.
+#
+# The directory does not exist in this repository, so this candidate
+# never runs. It is listed because the resolver lists it: leaving it out
+# would make the two disagree about what was tried, which is what the
+# FAIL message below reports.
+COMPILER_DIR="./contracts/compiler"
 
 # `timeout` is coreutils and not present everywhere (macOS). Use it when
 # it is there; the stdin redirect below is the half that matters and

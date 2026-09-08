@@ -1348,6 +1348,25 @@ pub fn check_disk_headroom(
         );
     }
 
+    for r in plan_disk_headroom(params_dir, pk_cache_dir, cache)? {
+        require_space(r.probe, r.needed, &r.parts)?;
+    }
+    Ok(())
+}
+
+/// Everything the check DECIDES, decided — and nothing performed.
+///
+/// A seam because the deciding is what has to be right and the performing
+/// needs a filesystem with a known amount of free space, which a test does
+/// not have. The helpers below were each tested on their own for two
+/// rounds while the composition — reading the two device ids at all, and
+/// summing in the right direction — was reached by nothing: replacing
+/// `shared` with a constant `false` passed the whole suite.
+fn plan_disk_headroom<'a>(
+    params_dir: &'a Path,
+    pk_cache_dir: &'a Path,
+    cache: KeyCacheState,
+) -> CliResult<Vec<SpaceRequirement<'a>>> {
     // What each path needs, in bytes, on this run.
     let params_need = keygen_requirement(params_dir, cache)?;
     let pk_need = pk_cache_requirement(pk_cache_dir);
@@ -1357,10 +1376,13 @@ pub fn check_disk_headroom(
     // both ways.
     let shared = share_a_filesystem(device_of(params_dir), device_of(pk_cache_dir));
 
-    for r in space_requirements(params_dir, params_need, pk_cache_dir, pk_need, shared) {
-        require_space(r.probe, r.needed, &r.parts)?;
-    }
-    Ok(())
+    Ok(space_requirements(
+        params_dir,
+        params_need,
+        pk_cache_dir,
+        pk_need,
+        shared,
+    ))
 }
 
 /// Do these two `st_dev` readings mean one pool of free space?
@@ -2580,6 +2602,122 @@ mod tests {
             there, 0,
             "the withdraw pipeline shares that constructor; a second one has to choose an exit \
              code for its failure, and the copy that chose 10 reported a burn nobody had composed",
+        );
+    }
+
+    #[test]
+    fn the_headroom_check_reads_both_device_ids() {
+        // The composition, reached at last. `space_requirements` and
+        // `share_a_filesystem` were each pinned for two rounds while
+        // nothing called the function that puts them together — an
+        // unconditional `panic!` as its first statement left the whole
+        // suite green — so replacing `shared` with a constant `false`
+        // passed too, and quietly halved what the run reserves on the
+        // shipped profile, where the pk cache lives INSIDE params.
+        let d = tempfile::TempDir::new().unwrap();
+        let params = d.path().join("params");
+        let pk_cache = params.join("pk_cache");
+        std::fs::create_dir_all(&pk_cache).unwrap();
+
+        let plan = plan_disk_headroom(&params, &pk_cache, KeyCacheState::Cold {
+            why: "no manifest".into(),
+        })
+        .expect("a cold cache is a requirement, not a refusal");
+
+        assert_eq!(
+            plan.len(),
+            1,
+            "two directories of one tempdir share a device, so the run must ask that device once \
+             for the total: {plan:?}",
+        );
+        assert_eq!(
+            plan[0].needed,
+            EVENT_KEYGEN_BYTES + OUTER_PK_BYTES,
+            "and the total is the sum — the shortfall this exists for lands mid-aggregation, \
+             after the burn",
+        );
+    }
+
+    #[test]
+    fn a_cache_that_cannot_be_trusted_refuses_before_any_measuring() {
+        // The other half of "is this function reached at all": a verdict
+        // that is a refusal rather than a number must come back out of
+        // `check_disk_headroom` itself, not merely out of the helper.
+        // This is the one deterministic path through the whole function —
+        // it needs no assumption about the host's free space.
+        let d = tempfile::TempDir::new().unwrap();
+        let err = check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
+            why: "digest mismatch".into(),
+        })
+        .expect_err("an untrustworthy cache is not something to spend a burn on");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("digest mismatch"), "must keep `why`: {msg}");
+        assert!(msg.contains("--repair"), "and name the way out: {msg}");
+    }
+
+    #[test]
+    fn a_leaked_keygen_temp_is_reported_before_the_measurement_decides_anything() {
+        // A killed keygen leaves its whole partial temp behind
+        // (`NamedTempFile` cleans up on drop, not on SIGKILL), the name is
+        // a dotfile so `ls` does not show it, and it is holding space this
+        // run may need. Reporting it only when the measurement then
+        // refuses would hide it in exactly the case where the run
+        // continues and the next one does not.
+        //
+        // Captured rather than eyeballed: `with_default` is per-thread, so
+        // this does not disturb tests running beside it.
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<String>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let d = tempfile::TempDir::new().unwrap();
+        // `tempfile`'s own shape: `.tmp` plus six alphanumerics.
+        let leak = d.path().join(".tmpAb12Cd");
+        std::fs::write(&leak, vec![0u8; 4096]).unwrap();
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        let _ = tracing::subscriber::with_default(subscriber, || {
+            // `Corrupt` so the outcome is a refusal on every host: the
+            // point here is what was said on the way, not the verdict.
+            check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
+                why: "digest mismatch".into(),
+            })
+        });
+
+        let logged = sink.0.lock().unwrap().clone();
+        assert!(
+            logged.contains(".tmpAb12Cd"),
+            "the leak must be named before the measurement decides anything: {logged}",
+        );
+        assert!(
+            logged.contains("--repair"),
+            "and it must say how to remove it: {logged}",
         );
     }
 

@@ -958,7 +958,7 @@ impl WithdrawalLock {
         // one place that has it, and an operator staring at "could not be
         // determined" has no other way to learn why.
         match Self::try_acquire(state_dir, key) {
-            Ok(attempt) => attempt.holder_verdict(),
+            Ok(attempt) => Self::verdict_with_reason(&attempt),
             Err(e) => {
                 warn!(
                     error = %e,
@@ -969,6 +969,31 @@ impl WithdrawalLock {
                 None
             },
         }
+    }
+
+    /// [`LockAttempt::holder_verdict`], plus the log line the `None`
+    /// verdict promises for the half that is not an error.
+    ///
+    /// Split out because `Unsupported` needs a filesystem whose `flock`
+    /// answers `ENOLCK` and no test can conjure one — which is how the
+    /// line came to be missing on exactly the deployments the verdict was
+    /// written for. `probe_holder` warned in its `Err` arm only, so a
+    /// network mount got "the log line above this refusal says why"
+    /// pointing at nothing at all, and the runbook's Case 3a asks the
+    /// operator to read that line to tell the two apart.
+    fn verdict_with_reason(attempt: &LockAttempt) -> Option<bool> {
+        if let LockAttempt::Unsupported {
+            why,
+        } = attempt
+        {
+            warn!(
+                reason = %why,
+                "this filesystem does not implement flock, so this refusal cannot say whether \
+                 another run holds this withdrawal. Move the state directory to local disk for a \
+                 real verdict",
+            );
+        }
+        attempt.holder_verdict()
     }
 }
 
@@ -1331,6 +1356,56 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Run `f` with a subscriber of our own and hand back everything it
+    /// logged.
+    ///
+    /// Three things in this module promise an operator a log line and had
+    /// no test that one is emitted: the two `warn!`s in `probe_holder`,
+    /// which the "could not be determined" verdict points at by name, and
+    /// `report_permissive_mode`. Prose about a line that does not exist
+    /// reads exactly like prose about a line that does — deleting either
+    /// `warn!` left the whole suite green — and on a lockless mount that
+    /// silence is what an operator gets instead of the reason their
+    /// verdict is missing.
+    ///
+    /// `with_default` installs the subscriber for THIS THREAD only, so a
+    /// capturing test does not swallow or interleave with anything the
+    /// harness runs beside it.
+    fn captured_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("test sink").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl tracing_subscriber::fmt::MakeWriter<'_> for Sink {
+            type Writer = Self;
+
+            fn make_writer(&self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let logged = String::from_utf8(sink.0.lock().expect("test sink").clone())
+            .expect("the fmt layer writes UTF-8");
+        (out, logged)
+    }
 
     /// `reserve` keeping only the record.
     ///
@@ -1787,6 +1862,96 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_liveness_verdict_comes_with_the_reason_it_is_missing() {
+        // The verdict says "the log line above this refusal says why", and
+        // the runbook's Case 3a asks the operator to read that line to
+        // tell a lockless filesystem from a failed attempt. Both halves of
+        // that promise were unpinned: `probe_holder` warned in its `Err`
+        // arm only, so the `Unsupported` case — NFS and overlay mounts,
+        // which is what the section was written for — emitted nothing at
+        // all, and no test noticed either way.
+        //
+        // The attempt that FAILED. A state dir whose parent is a regular
+        // file gives ENOTDIR for every uid, unlike a chmod, which root
+        // ignores.
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let (verdict, logged) =
+            captured_logs(|| WithdrawalLock::probe_holder(&blocker, "0123456789abcdef"));
+        assert_eq!(verdict, None, "an attempt that failed answers nothing");
+        assert!(
+            logged.contains("could not test the withdrawal lock"),
+            "the verdict points at a line that has to exist: {logged}",
+        );
+        assert!(
+            logged.contains("Not a directory") || logged.contains("os error 20"),
+            "and the line has to carry the errno, which is the half that says WHICH case this is: \
+             {logged}",
+        );
+        assert!(
+            liveness_verdict(verdict).contains("the log line above this refusal says why"),
+            "the promise this test exists to keep",
+        );
+
+        // The attempt that SUCCEEDED and answered nothing — a filesystem
+        // without flock. Unreachable through `probe_holder` in a test, so
+        // the attempt is supplied directly.
+        let (verdict, logged) = captured_logs(|| {
+            WithdrawalLock::verdict_with_reason(&LockAttempt::Unsupported {
+                why: "No locks available (os error 37)".into(),
+            })
+        });
+        assert_eq!(
+            verdict, None,
+            "a filesystem that cannot lock answers nothing"
+        );
+        assert!(
+            logged.contains("does not implement flock"),
+            "the case the section in the runbook was written for is the one that logged nothing: \
+             {logged}",
+        );
+        assert!(
+            logged.contains("os error 37"),
+            "and it carries the errno the operator needs to tell it from EACCES: {logged}",
+        );
+    }
+
+    #[test]
+    fn a_permissive_state_directory_is_reported_and_a_private_one_is_not() {
+        // `report_permissive_mode` is a warning and nothing else — it
+        // returns `()` and changes no state, so deleting its body left the
+        // suite green. What it buys is an operator noticing that the
+        // directory holding their withdrawal amounts and destinations is
+        // world-readable.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (_, logged) = captured_logs(|| report_permissive_mode(&open));
+        assert!(
+            logged.contains("can be reached by more than its owner"),
+            "0755 on the state directory has to be said out loud: {logged}",
+        );
+        assert!(
+            logged.contains("0755"),
+            "and the mode named, so the operator knows what to chmod: {logged}",
+        );
+
+        let shut = dir.path().join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_, quiet) = captured_logs(|| report_permissive_mode(&shut));
+        assert!(
+            quiet.is_empty(),
+            "a private directory is the expected case and must not warn about itself: {quiet}",
+        );
+    }
+
+    #[test]
     fn the_permit_to_send_is_issued_only_to_a_run_that_still_holds_the_lock() {
         let dir = TempDir::new().unwrap();
         let key = "0123456789abcdef";
@@ -1866,6 +2031,22 @@ mod tests {
         assert!(unknown.contains("could not be determined"), "{unknown}");
         assert!(!unknown.contains("RIGHT NOW"), "{unknown}");
         assert!(!unknown.contains("has already exited"), "{unknown}");
+
+        // And it names NO cause. This arm is reached both by a filesystem
+        // that cannot lock and by an attempt that failed — EACCES on the
+        // state directory, EMFILE when the process is out of descriptors,
+        // an errno nobody has seen yet — so the sentence that used to
+        // stand here, "flock is unavailable — a network mount, typically",
+        // sent an operator to check their mount when they were out of file
+        // handles. Only the log line knows which, and the verdict points
+        // at it. `contains("could not be determined")` alone did not
+        // notice the difference: the old text said that too.
+        assert!(!unknown.contains("network mount"), "{unknown}");
+        assert!(!unknown.contains("flock is unavailable"), "{unknown}");
+        assert!(
+            unknown.contains("the log line above this refusal says why"),
+            "the verdict has to hand the operator somewhere to look: {unknown}",
+        );
     }
 
     #[test]

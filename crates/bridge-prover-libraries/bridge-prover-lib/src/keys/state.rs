@@ -1608,6 +1608,65 @@ mod probe_tests {
         );
     }
 
+    /// A real, tiny, deserialisable key pair — not the event circuit's.
+    ///
+    /// `try_load_vk` and `try_load_pk` read against `BaseCircuitBuilder<Fr>`
+    /// with whatever `BaseCircuitParams` the config on disk carries, so any
+    /// circuit of that shape exercises the same readers. The event circuit
+    /// needs ~7 minutes and ~3 GB; this needs a small k and a toxic-waste
+    /// SRS, which `ParamsKZG::setup` draws in memory and never writes.
+    fn dir_with_a_real_tiny_key_pair() -> TempDir {
+        use halo2_base::{
+            gates::circuit::builder::BaseCircuitBuilder,
+            halo2_proofs::poly::kzg::commitment::ParamsKZG,
+        };
+        use rand::rngs::OsRng;
+
+        const K: usize = 8;
+        let mut builder = BaseCircuitBuilder::<Fr>::new(false).use_k(K);
+        // One cell, so the circuit is non-degenerate and `calculate_params`
+        // has something to size.
+        builder.main(0).load_witness(Fr::from(1));
+        let params = builder.calculate_params(Some(9));
+
+        let srs = ParamsKZG::<Bn256>::setup(K as u32, OsRng);
+        let vk = keygen_vk(&srs, &builder).expect("keygen_vk on a one-cell circuit");
+        let pk = keygen_pk(&srs, vk.clone(), &builder).expect("keygen_pk on a one-cell circuit");
+
+        let d = TempDir::new().unwrap();
+        save_config(d.path(), "event", &params).unwrap();
+        save_vk(d.path(), "event", &vk).unwrap();
+        save_pk(d.path(), "event", &pk).unwrap();
+        save_manifest(d.path(), "event", EVENT_CIRCUIT_REVISION).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_cache_this_build_can_actually_read_is_warm() {
+        // The positive control, and the one verdict nothing on the merge
+        // gate proved was reachable. Every other test here asserts a
+        // NON-warm outcome, so a change that made `Warm` unreachable —
+        // a digest comparison that can never match, a revision check that
+        // always trips — passes all of them. The tests that do assert
+        // `Warm` are `#[ignore]`d behind real event keys, and the job that
+        // runs them is scheduled or manual-with-allow_failure: it cannot
+        // block a merge.
+        //
+        // What this cannot cover is the event circuit specifically: the
+        // key here is a one-cell circuit at k=8. What it does cover is
+        // every gate between the directory and the halo2 readers, plus the
+        // readers themselves — which is the whole of what the probe
+        // decides.
+        let d = dir_with_a_real_tiny_key_pair();
+        match probe_event_key_cache(d.path()) {
+            KeyCacheState::Warm => {},
+            other => panic!(
+                "a cache whose files this build wrote and can read back must be warm; got \
+                 {other:?}"
+            ),
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_fifo_in_the_cache_is_repairable_rather_than_a_hang() {

@@ -294,7 +294,7 @@ test:rust:ackinacki-bridge:
     # pins the filters to the set of tests they name, whether or not each
     # one runs here.
     - |
-      EXPECTED=36
+      EXPECTED=37
       GOT=$(cargo test --locked -p bridge-prover-lib --lib -- \
               keys::state::probe_tests:: \
               keys::common::tests::probe_rejects_ \

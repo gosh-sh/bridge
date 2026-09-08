@@ -75,7 +75,8 @@ require_file "${VERIFIERS}/BridgeWithdrawalAggregatorVerifier_calldata.bin" "C4 
 echo "--- [3/5] Foundry production pairing gate (ETH-6 Circuit 4; 1A/1B/C2 quarantined) ---"
 if ! (
   cd contracts/ethereum
-  forge test --match-contract ShplonkArtefactPairing -vv
+  forge test --match-contract ShplonkArtefactPairing \
+             --no-match-contract ShplonkArtefactPairingPendingN14 -vv
 ); then
   fail=1
 fi

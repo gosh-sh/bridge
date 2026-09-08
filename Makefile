@@ -257,6 +257,9 @@ pre-push-audit: ## Audit branch gate: fmt + main forge test + audit overlay + AN
 	@$(MAKE) pre-push-an
 	@echo "$(GREEN)── pre-push-audit: green ──$(NC)"
 
+test-pairing-pending-n14: ## ETH-06: run quarantined 1A/1B/C2 pairing (expected red until n14 regen)
+	@cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairingPendingN14 -vv
+
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"
 	@$(MAKE) format-check

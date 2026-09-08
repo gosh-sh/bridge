@@ -1132,11 +1132,36 @@ contract AckiNackiBridge {
     }
 
     /// @notice Occupancy of layer `L`'s ring (`0..=HISTORY_PROOF_WINDOW`).
-    ///         Withdraw relayer SLA (ETH-03): alert when this approaches 128
-    ///         for the layer that still holds a pending `finalRoot`.
+    ///         Saturates at 128 on first fill and stays there — it is not
+    ///         headroom for a given `finalRoot`. Use `anchorRemainingAppends`.
     function layerWindowLen(uint8 layer) external view returns (uint16) {
         if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
         return _layerWindows[layer].dataLen;
+    }
+
+    /// @notice Next write index of layer `L`'s ring (`0..=HISTORY_PROOF_WINDOW-1`).
+    function layerWindowWriteCursor(uint8 layer) external view returns (uint16) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        return _layerWindows[layer].writeCursor;
+    }
+
+    /// @notice How many further `_appendLayer` calls `anchor` survives on `layer`
+    ///         before eviction. 0 = not in the window. When the ring is full the
+    ///         oldest hash returns 1 (the next append overwrites it). Idle layers
+    ///         never evict: remaining stays until that layer appends again
+    ///         (ETH-18 / ETH-03). Duplicate copies return the newest remaining.
+    function anchorRemainingAppends(uint8 layer, uint256 anchor) external view returns (uint256) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        HistoryWindow storage w = _layerWindows[layer];
+        uint256 n = w.dataLen;
+        uint256 best = 0;
+        for (uint256 i = 0; i < n; i++) {
+            if (w.data[i] != anchor) continue;
+            uint256 remaining =
+                (i + HISTORY_PROOF_WINDOW - uint256(w.writeCursor)) % HISTORY_PROOF_WINDOW + 1;
+            if (remaining > best) best = remaining;
+        }
+        return best;
     }
 
     /// @notice View helper: is `anchor` present in layer `L`'s rolling window?

@@ -38,6 +38,8 @@ Use the view `expectedPrevAnchor(numLayers)` (or the relayer helper that mirrors
 
 **Rule:** prove `applyBkSetUpdate` against the **live** on-chain `storedLastSeenBlockSeqNo`. If `verifyBlock` advances between prove and submit, re-prove — do not treat revert as a consensus bug.
 
+**ETH-12 ordering:** the two cursors move independently. A BK-set rotation applied *before* the layer cursor has reached that block makes intermediate `verifyBlock`s unverifiable (their proofs still carry the old commitment). Relayer must apply rotation only after `verifyBlock` has landed the attested seq_no, or fall-forward across the gap with proofs under the new commitment. Zero `newCommitmentL3` is still accepted by `_requireCanonicalFr` — do not submit a zero rotation.
+
 ### QC-A2-4 — permanent layer shrink
 
 `_highestActiveLayer()` does not decrease when AN permanently drops layers (windows retain history). Partner must keep `prev_max_level_layer_hash_for` aligned. Fail-closed stalls are preferred over wrong anchors.
@@ -53,7 +55,9 @@ A `blockSeqNo` jump (strictly greater than `storedLastSeenBlockSeqNo`) is **perm
 1. **Primary:** submit `withdrawByProof` against the original Circuit 4 `finalRoot` before that hash is evicted (128 subsequent `verifyBlock`s on that layer).
 2. **Fallback:** re-prove Circuit 4 against a **still-in-window** descendant (`test_reproveAgainstLaterInWindowAnchor_succeeds` pins the contract path; `reprove_against_later_layer_hash_keeps_nullifier` pins the daemon translation). Partner dense chain is at most `MAX_CHAIN_LEN = 11` rungs (`gosh-dense-balanced-tree`); pick a remaining window entry within that hop bound. If no such root remains, that withdrawal event is stranded until/unless the circuit hop bound is raised — funds still sit in treasury.
 
-**Alert (ETH-03):** poll `layerWindowLen(L)` for each active layer. When occupancy ≥ 100 (of 128) and a pending withdrawal is still bound to an older hash in that ring, page the withdraw relayer. After wrap (`layerWindowLen == 128` and `isKnownLayerAnchor(L, finalRoot) == false`) only the re-prove path remains.
+**Alert (ETH-03 / ETH-18):** poll `anchorRemainingAppends(L, finalRoot)` for each pending withdrawal. Page when remaining ≤ 28 (100 of 128 appends used on that hash). `layerWindowLen(L)` saturates at 128 on first fill and stays there — it is occupancy, not headroom. After wrap (`anchorRemainingAppends == 0` and `isKnownLayerAnchor(L, finalRoot) == false`) only the re-prove path remains.
+
+Idle layers never evict: remaining for a hash on an abandoned layer stays until that layer appends again. Lifetime is 128 appends **on that layer**, not a uniform wall clock.
 
 Gate: `cd audit/spec/ethereum && forge test --match-contract WithdrawAnchorEviction -vv`
 
@@ -108,10 +112,10 @@ Fixture: `deposit-prover/fixtures/deposit_10proofs/proof_00/` (384 B `public_inp
 
 1. `./scripts/check_withdrawal_verifier_not_stub.sh`
 2. `./scripts/check_shplonk_artefacts.sh` (SHA-256 pin + EIP-170)
-3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing` — Circuit 4 pairing green. 1A/1B/C2 live in `ShplonkArtefactPairingPendingN14` until n14 regen; do not deploy `WIRE_VERIFY_BLOCK` until that contract is green.
+3. `cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairing --no-match-contract ShplonkArtefactPairingPendingN14` — Circuit 4 pairing green. 1A/1B/C2 live in `ShplonkArtefactPairingPendingN14` until n14 regen (`make test-pairing-pending-n14`, CI `allow_failure`); do not deploy `WIRE_VERIFY_BLOCK` until that contract is green.
 4. Confirm `WIRE_VERIFY_BLOCK=true` and `USE_AXIOM_ORACLE=true` on mainnet (`DeployRealBridge` `envBool`; ETH-5)
 5. Confirm Circuit 4 is wired together with the verifyBlock triple (constructor `WithdrawRequiresVerifyBlock`)
 6. Confirm `MAX_DEPOSIT_AMOUNT` / product policy matches AN `uint64` mint path
 7. Relayer uses `expectedPrevAnchor(numLayers)` for verifyBlock
-8. Withdraw relayer monitors `layerWindowLen(L)` vs `HISTORY_PROOF_WINDOW` (alert at occupancy ≥ 100)
+8. Withdraw relayer monitors `anchorRemainingAppends(L, finalRoot)` (alert when remaining ≤ 28). `layerWindowLen` is occupancy only.
 9. Production `deposit-relayer` runs with `--skip-after-attempts` / `SKIP_AFTER_ATTEMPTS=64` (QC-OFF-01; `scripts/ursus/deposit-relayer.service`)

@@ -11,7 +11,12 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 /// @title ShplonkAggregatorForgeryTest
 /// @notice Forgery negatives for R15 aggregator adapters (mock SHPLONK = always false).
 contract ShplonkAggregatorForgeryTest is Test {
-    /// @dev Address that always reverts on staticcall — simulates failed crypto.
+    /// @dev Codeless address. A high-level call with a return value reverts via
+    ///         Solidity's `extcodesize` check — not because staticcall always
+    ///         fails. The production adapter uses a low-level staticcall in
+    ///         `ShplonkHalo2Verifier`, where a codeless target would return
+    ///         success; the real guard is the constructor `extcodesize` check
+    ///         (QC-A4-1 / ETH-19 comment).
     address internal constant FAILING_SHPLONK = address(0xdead);
 
     function test_withdrawalAggregator_rejectsGroth16StubProof() public {

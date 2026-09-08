@@ -109,6 +109,7 @@ contract WithdrawAnchorEvictionTest is Test {
         _submitBlock(WINDOW + 1);
         assertFalse(bridge.isKnownLayerAnchor(1, evictedL1), "post: oldest L1 evicted");
         assertEq(bridge.layerWindowLen(1), WINDOW, "ring stays full after wrap");
+        assertEq(bridge.anchorRemainingAppends(1, evictedL1), 0, "ETH-18: evicted is 0");
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
             tokenId: 0,
@@ -149,6 +150,23 @@ contract WithdrawAnchorEvictionTest is Test {
         assertEq(bridge.storedLastSeenBlockSeqNo(), 1_000_000);
         assertTrue(bridge.isKnownLayerAnchor(1, firstL1), "seq_no jump must not evict the previous L1 hash");
         assertTrue(bridge.isKnownLayerAnchor(1, jumped[0]), "jumped head recorded");
+    }
+
+    /// @dev ETH-18: remaining appends, not occupancy, is the SLA signal.
+    function test_eth18_anchorRemainingAppends_countsUntilEviction() public {
+        uint256 first = _submitBlock(1);
+        assertEq(bridge.layerWindowLen(1), 1);
+        assertEq(bridge.anchorRemainingAppends(1, first), WINDOW, "first append survives 128 more");
+
+        for (uint256 i = 2; i <= WINDOW; i++) {
+            _submitBlock(i);
+        }
+        assertEq(bridge.layerWindowLen(1), WINDOW, "occupancy saturated");
+        assertEq(bridge.anchorRemainingAppends(1, first), 1, "next append evicts the oldest");
+
+        _submitBlock(WINDOW + 1);
+        assertEq(bridge.anchorRemainingAppends(1, first), 0);
+        assertEq(bridge.layerWindowLen(1), WINDOW, "occupancy still 128 after wrap");
     }
 
     /// @dev ETH-3 / WD-Q1: after the original `finalRoot` is evicted, a new

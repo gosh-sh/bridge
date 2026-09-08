@@ -280,6 +280,28 @@ test:solidity:
       - contracts/ethereum/node_modules/
     policy: pull
 
+# ETH-06: 1A/1B/C2 pairing stays red until n14 regen. Visible, does not gate the pipeline.
+test:solidity:pairing-pending-n14:
+  extends: .foundry_base
+  stage: test
+  needs:
+    - build:solidity
+  allow_failure: true
+  script:
+    - export PATH="$FOUNDRY_DIR/bin:$PATH"
+    - cd contracts/ethereum
+    - npm install
+    - test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
+    - forge test --match-contract ShplonkArtefactPairingPendingN14 -vv
+  cache:
+    key: foundry-npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - contracts/ethereum/out/
+      - contracts/ethereum/cache/
+      - contracts/ethereum/lib/
+      - contracts/ethereum/node_modules/
+    policy: pull
+
 # Audit overlay — ETH contract spec tests (branch `audit` + MRs touching audit/ or bridge src)
 test:solidity:audit:
   extends: .foundry_base

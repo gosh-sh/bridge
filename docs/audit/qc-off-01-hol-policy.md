@@ -35,4 +35,4 @@ Issue #34 is correct that AN `finalizeDeposit` does not require monotonic ids. T
 | CLI `deposit-relayer daemon` | `--skip-after-attempts 0` (disabled) — tests / explicit strict mode |
 | Production systemd `scripts/ursus/deposit-relayer.service` | `SKIP_AFTER_ATTEMPTS=64` (env file may override) |
 
-Park SLA: treat a `deposit parked` log as a page; run `finalize-one` within the backup-relayer window in the operator runbook.
+Park SLA: treat a `deposit parked` log as a page; run `finalize-one` within the backup-relayer window in the operator runbook. Detection: `scripts/deposit_relayer_textfile_metrics.sh` over `state.json` (ETH-16) — alert `parked_deposits > 0`, climbing `attempts_since_progress`, stale `state_mtime`.

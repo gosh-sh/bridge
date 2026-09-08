@@ -33,8 +33,15 @@
 
 4. Inspect cursor / parked ids:
    ```bash
-   jq '{last_processed, parked, scanned_through}' deposit-relayer-state.json
+   jq '{last_processed_deposit_id, parked_deposit_ids, scanned_through_block, attempts_since_progress}' deposit-relayer-state.json
    ```
+
+5. **ETH-16 metrics (no daemon change):** scrape `state.json` with
+   `scripts/deposit_relayer_textfile_metrics.sh` into a node_exporter textfile
+   directory. Alert on `bridge_deposit_relayer_parked_deposits > 0`, on
+   `bridge_deposit_relayer_attempts_since_progress` climbing toward
+   `SKIP_AFTER_ATTEMPTS`, and on a stale `bridge_deposit_relayer_state_mtime_seconds`
+   (daemon hung or dead). Treat a `deposit parked` log as a page either way.
 
 ---
 

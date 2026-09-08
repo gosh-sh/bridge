@@ -4,22 +4,20 @@ PoC: `audit/spec/ethereum/DepositFoTInvariant.t.sol`, handler `FoTTreasuryHandle
 
 ## Assumption gate
 
-`PROJECT_FACTS.md`: bridge assumes standard ERC-20 — exact `transferFrom` credit. FoT tokens violate TR-1:
+`PROJECT_FACTS.md`: bridge assumes standard ERC-20 — exact `transferFrom` credit. ETH-11 enforces that: a fee-on-transfer or rebasing token reverts `TransferAmountMismatch` instead of crediting `treasuryBalance`.
 
-`liquid + principal < treasuryBalance` after `deposit(amount)`.
-
-## Verdict: **QC** (QC-A1-2 / DEP-FOT-ASSUME)
+## Verdict: **QC closed fail-closed** (ETH-11)
 
 | Check | Outcome |
 |-------|---------|
-| TR-1 with FoT deposits | **Fails** (documented inverted invariant + unit asserts) |
-| Nominal `treasuryBalance` vs custody | Gap = `amount * feeBps / 10000` |
-| TR-1 green under FoT | **No** → not BC |
-| Production USDC fix | Out of scope — trust assumption |
+| FoT `deposit` | **Reverts** `TransferAmountMismatch` |
+| `treasuryBalance` / custody after revert | Both stay 0 |
+| TR-1 after FoT attempts | **Holds** (nothing credited) |
+| FoT-aware accounting (credit net) | Still out of scope |
 
 ## Stateful campaign
 
-`FoTTreasuryHandler.depositFoT` in fuzz; inverted invariant `invariant_TR1_FoT_solvency_gap_after_deposit` passes when gap exists.
+`FoTTreasuryHandler.depositFoT` attempts a FoT deposit and expects revert; invariant `invariant_TR1_FoT_deposit_does_not_credit` asserts empty ledger.
 
 Fee bps in campaign: 5% (`FOT_FEE_BPS=500`); unit tests cover 1% and 10%.
 

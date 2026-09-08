@@ -14,7 +14,7 @@ The gate is **`DeployRealBridge` on `chainid == 1`**, not the constructor. Const
 
 `deposit` already reverts `TransferFromFailed` if `transferFrom` returns false. `supplyToAave` called `usdc.approve` and ignored the bool. Circle USDC returns bool; ignoring it is inconsistent and would book `suppliedPrincipal` even if a token refused the approve (the mock still writes allowance when returning false).
 
-Do **not** add fee-on-transfer support. `DepositFoTInvariant.t.sol` remains the QC that FoT is out of scope.
+Do **not** add fee-on-transfer *support* (credit the net received). ETH-11 fail-closed: custody delta must equal `amount` or `deposit` / `withdrawByProof` revert. `DepositFoTInvariant.t.sol` asserts the revert.
 
 ## PoC
 

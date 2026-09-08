@@ -358,6 +358,9 @@ contract AckiNackiBridge {
     error InvalidAmount();
     error InvalidUsdc();
     error TransferFromFailed();
+    /// @notice ETH-11: `transferFrom` returned true but custody did not grow
+    ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
+    error TransferAmountMismatch();
     error DepositTooLarge();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
@@ -404,6 +407,9 @@ contract AckiNackiBridge {
     error StaleBkSetCommitment(uint256 supplied, uint256 stored);
     error BkUpdateSeqNoNotMonotonic(uint64 supplied, uint64 stored);
     error BkUpdateMerkleMismatch(uint256 computedRoot, uint256 blockId);
+    /// @notice ETH-12: a zero `newCommitmentL3` would force every later
+    ///         `verifyBlock` to attest a zero BK-set commitment.
+    error ZeroBkSetCommitment();
 
     // withdrawByProof (Circuit 4, single-final-root) errors
     error WithdrawByProofDisabled();
@@ -632,12 +638,10 @@ contract AckiNackiBridge {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
-        if (!usdc.transferFrom(msg.sender, address(this), amount)) {
-            revert TransferFromFailed();
-        }
+        uint256 credited = _pullExactUsdc(amount);
 
         uint256 depositId = depositCounter++;
-        treasuryBalance += amount;
+        treasuryBalance += credited;
 
         emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
     }
@@ -877,6 +881,7 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
+        if (newCommitmentL3 == 0) revert ZeroBkSetCommitment();
         // ETH-02: stored commitment and attestation `blockId` must be canonical
         // Fr. Unreduced `newCommitmentL3` would otherwise land in
         // `storedBkSetCommitment` while adapters compare raw words.
@@ -1307,9 +1312,7 @@ contract AckiNackiBridge {
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        if (!usdc.transfer(recipient, pub.amount)) {
-            revert WithdrawTransferFailed(recipient, pub.amount);
-        }
+        _pushExactUsdc(recipient, pub.amount);
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -1330,6 +1333,32 @@ contract AckiNackiBridge {
     ///      verify as one field element and occupy two keys (ETH-1 / ETH-2).
     function _requireCanonicalFr(uint256 value) internal pure {
         if (value >= BN254_R) revert FieldElementOutOfRange(value);
+    }
+
+    /// @dev ETH-11 / TR-4: credit exactly `amount` USDC. A fee-on-transfer or
+    ///      rebasing token that moves a different custody delta reverts.
+    function _pullExactUsdc(uint256 amount) internal returns (uint256 credited) {
+        uint256 before = usdc.balanceOf(address(this));
+        if (!usdc.transferFrom(msg.sender, address(this), amount)) {
+            revert TransferFromFailed();
+        }
+        uint256 afterBal = usdc.balanceOf(address(this));
+        if (afterBal < before || afterBal - before != amount) {
+            revert TransferAmountMismatch();
+        }
+        return amount;
+    }
+
+    /// @dev ETH-11: debit exactly `amount` USDC. Same FoT/rebase fail-closed.
+    function _pushExactUsdc(address recipient, uint256 amount) internal {
+        uint256 before = usdc.balanceOf(address(this));
+        if (!usdc.transfer(recipient, amount)) {
+            revert WithdrawTransferFailed(recipient, amount);
+        }
+        uint256 afterBal = usdc.balanceOf(address(this));
+        if (before < afterBal || before - afterBal != amount) {
+            revert WithdrawTransferFailed(recipient, amount);
+        }
     }
 
     /// @dev Recombine a split-α `recipient` (10/10 byte halves) back into the

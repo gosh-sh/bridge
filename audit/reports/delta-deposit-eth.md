@@ -129,7 +129,7 @@ Open baseline rows **не удалены** — formal author ack still pending.
 | ID | Class | PoC | Auditor view |
 |----|-------|-----|--------------|
 | **QC-A1-5** | QC | `DepositEdgeCases.t.sol::test_directUsdcTransfer_doesNotCreditTreasury` | Прямой USDC transfer на bridge — донат; `treasuryBalance` не растёт. Ожидаемо; задокументировать для ops (не баг). |
-| **QC-A1-6** | QC | `DepositEdgeCases.t.sol::test_feeOnTransferToken_treasuryOverstatesCustody` | Fee-on-transfer: `treasuryBalance == amount` но `balanceOf < amount` ⇒ TR-1 solvency gap при смене token assumptions. Подтверждает QC-A1-2 конкретно. |
+| **QC-A1-6** | QC | `DepositEdgeCases.t.sol::test_feeOnTransferToken_reverts` | Fee-on-transfer fails closed (`TransferAmountMismatch`); ETH-11. |
 | **QC-A1-7** | OK | `DepositEdgeCases.t.sol::test_returnlessToken_revertsOnDeposit` | Returnless `transferFrom` → revert при decode bool. Fail-closed для USDT-style; не баг. |
 | **QC-A1-8** | OK | `DepositWorkchain.t.sol` | L1 не валидирует `anWorkchain`; любой `int8` в event. Согласовано с QC-AN-J4 (AN игнорирует). |
 | **QC-ETH-DEP-01** | OK | `DepositEdgeCases.t.sol` | `sender` = `msg.sender`; third party cannot pull approved USDC from another address. |

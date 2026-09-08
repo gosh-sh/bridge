@@ -13,9 +13,8 @@ import "@bridge-test/mocks/FeeOnTransferERC20.sol";
 import "./handlers/AuditHandlers.sol";
 
 /// @title DepositFoTInvariantTest
-/// @notice TD-23 — TR-1 under fee-on-transfer token assumptions (QC-A1-2 / DEP-FOT-ASSUME).
-/// @dev INV: TR-1 (`liquid + principal >= treasuryBalance`) is **not** applicable to FoT tokens;
-///      stateful campaign uses inverted invariant documenting the solvency gap after deposits.
+/// @notice TD-23 / ETH-11 — FoT deposits fail closed (`TransferAmountMismatch`).
+/// @dev TR-1 holds because a non-exact custody delta cannot credit `treasuryBalance`.
 contract DepositFoTInvariantTest is StdInvariant, Test {
     AckiNackiBridge internal bridge;
     FeeOnTransferERC20 internal fot;
@@ -43,57 +42,43 @@ contract DepositFoTInvariantTest is StdInvariant, Test {
         return fot.balanceOf(address(bridge)) + bridge.suppliedPrincipal();
     }
 
-    function _tr1Holds() internal view returns (bool) {
-        return _custody() >= bridge.treasuryBalance();
+    /// @dev ETH-11: FoT attempts revert; ledger and custody stay empty.
+    function invariant_TR1_FoT_deposit_does_not_credit() public view {
+        assertEq(bridge.treasuryBalance(), 0, "ETH-11 FoT must not credit treasury");
+        assertEq(_custody(), 0, "ETH-11 FoT must not leave custody");
     }
 
-    /// @dev TD-23 inverted invariant — passes once FoT deposits create TR-1 gap (QC, not BC).
-    function invariant_TR1_FoT_solvency_gap_after_deposit() public view {
-        if (handler.fotDepositOps() == 0) return;
-        assertLt(_custody(), bridge.treasuryBalance(), "TD-23 FoT TR-1 gap");
-    }
-
-    /// @dev Nominal ledger still tracks `deposit(amount)` — TR-2-style ghost cross-check.
-    function invariant_TR2_nominal_ghost_matches_treasury() public view {
-        if (handler.fotDepositOps() == 0) return;
-        assertEq(bridge.treasuryBalance(), handler.ghostDeposited(), "TD-23 nominal ledger");
-    }
-
-    /// @dev Unit smoke — treasuryBalance vs actual custody after one FoT deposit.
-    function test_TD23_unit_smoke_treasury_overstates_custody() public {
+    function test_TD23_unit_smoke_fot_deposit_reverts() public {
         uint256 amount = 100 * UsdcTestLib.UNIT;
         address user = address(0xF023);
 
         fot.mint(user, amount);
         vm.startPrank(user);
         fot.approve(address(bridge), amount);
+        vm.expectRevert(AckiNackiBridge.TransferAmountMismatch.selector);
         bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
-        assertEq(bridge.treasuryBalance(), amount, "ledger credits nominal");
-        assertLt(fot.balanceOf(address(bridge)), amount, "custody net-of-fee");
-        assertFalse(_tr1Holds(), "TR-1 must not hold");
+        assertEq(bridge.treasuryBalance(), 0);
+        assertEq(fot.balanceOf(address(bridge)), 0);
     }
 
-    /// @dev Handler path — TR-1 formula fails after stateful deposit selector.
-    function test_TD23_handler_deposit_TR1_formula_fails() public {
+    function test_TD23_handler_deposit_reverts_and_TR1_holds() public {
         handler.depositFoT(UsdcTestLib.UNIT);
         assertGt(handler.fotDepositOps(), 0);
-        assertFalse(_tr1Holds(), "TR-1 broken after handler FoT deposit");
-        assertEq(handler.ghostCustodyReceived(), fot.balanceOf(address(bridge)));
+        assertEq(bridge.treasuryBalance(), 0);
+        assertEq(_custody(), 0);
     }
 
-    /// @dev Fee envelope 1% — gap proportional to fee bps.
-    function test_TD23_fee_one_percent_TR1_gap() public {
-        _assertFoTGapAtFeeBps(100);
+    function test_TD23_fee_one_percent_reverts() public {
+        _assertFoTRevertsAtFeeBps(100);
     }
 
-    /// @dev Fee envelope 10% — larger gap.
-    function test_TD23_fee_ten_percent_TR1_gap() public {
-        _assertFoTGapAtFeeBps(1_000);
+    function test_TD23_fee_ten_percent_reverts() public {
+        _assertFoTRevertsAtFeeBps(1_000);
     }
 
-    function _assertFoTGapAtFeeBps(uint256 feeBps) internal {
+    function _assertFoTRevertsAtFeeBps(uint256 feeBps) internal {
         FeeOnTransferERC20 token = new FeeOnTransferERC20("F", "F", 6, feeBps);
         AckiNackiBridge b = new AckiNackiBridge(
             address(new MockBlockHeaderOracle()),
@@ -109,13 +94,11 @@ contract DepositFoTInvariantTest is StdInvariant, Test {
         token.mint(user, amount);
         vm.startPrank(user);
         token.approve(address(b), amount);
+        vm.expectRevert(AckiNackiBridge.TransferAmountMismatch.selector);
         b.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
-        uint256 custody = token.balanceOf(address(b));
-        assertEq(b.treasuryBalance(), amount);
-        assertLt(custody, amount);
-        assertEq(amount - custody, (amount * feeBps) / 10_000, "gap equals fee");
-        assertLt(custody + b.suppliedPrincipal(), b.treasuryBalance());
+        assertEq(b.treasuryBalance(), 0);
+        assertEq(token.balanceOf(address(b)), 0);
     }
 }

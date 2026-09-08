@@ -80,8 +80,8 @@ contract DepositEdgeCasesTest is Test {
         assertEq(usdc.balanceOf(address(bridge)), 50 * UsdcTestLib.UNIT, "custody still grows");
     }
 
-    /// @dev TR-4 / QC-A1-2 — fee-on-transfer breaks strict solvency (treasury > balance).
-    function test_feeOnTransferToken_treasuryOverstatesCustody() public {
+    /// @dev TR-4 / ETH-11 — fee-on-transfer fails closed (custody delta must equal amount).
+    function test_feeOnTransferToken_reverts() public {
         FeeOnTransferERC20 token = new FeeOnTransferERC20("FUSDC", "FUSDC", 6, 1_000);
         AckiNackiBridge bridge = _bridge(address(token));
         address user = address(0xA11CE);
@@ -90,11 +90,12 @@ contract DepositEdgeCasesTest is Test {
         token.mint(user, amount);
         vm.startPrank(user);
         token.approve(address(bridge), amount);
+        vm.expectRevert(AckiNackiBridge.TransferAmountMismatch.selector);
         bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
-        assertEq(bridge.treasuryBalance(), amount, "ledger credits full amount");
-        assertLt(token.balanceOf(address(bridge)), amount, "custody is net-of-fee");
+        assertEq(bridge.treasuryBalance(), 0, "ledger unchanged");
+        assertEq(token.balanceOf(address(bridge)), 0, "custody unchanged on revert");
     }
 
     /// @dev A1-F8 — non-standard token without bool return fails closed.
@@ -159,14 +160,7 @@ contract DepositEdgeCasesTest is Test {
         vm.startPrank(user);
         usdc.approve(address(bridge), UsdcTestLib.UNIT);
         vm.expectEmit(true, true, false, true);
-        emit Deposit(
-            0,
-            user,
-            UsdcTestLib.UNIT,
-            int8(0),
-            bytes32(uint256(uint160(user))),
-            block.timestamp
-        );
+        emit Deposit(0, user, UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(user))), block.timestamp);
         bridge.deposit(UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(user))));
         vm.stopPrank();
     }
@@ -198,14 +192,7 @@ contract DepositEdgeCasesTest is Test {
         vm.startPrank(relayer);
         usdc.approve(address(bridge), UsdcTestLib.UNIT);
         vm.expectEmit(true, true, false, true);
-        emit Deposit(
-            0,
-            relayer,
-            UsdcTestLib.UNIT,
-            int8(0),
-            bytes32(uint256(uint160(relayer))),
-            block.timestamp
-        );
+        emit Deposit(0, relayer, UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(relayer))), block.timestamp);
         bridge.deposit(UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(relayer))));
         vm.stopPrank();
     }

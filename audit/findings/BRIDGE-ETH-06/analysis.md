@@ -43,6 +43,6 @@ Regen Primary / Fallback / LayerHashes **together with** matching `_calldata.bin
 cd contracts/ethereum && forge test --match-contract ShplonkArtefactPairingPendingN14 -vv
 ```
 
-All three must PASS before mainnet `WIRE_VERIFY_BLOCK=true`. Fold them back into `ShplonkArtefactPairing.t.sol` and drop `--no-match-contract ShplonkArtefactPairingPendingN14` from Makefile / GitLab / `test.sh`.
+All three must PASS before mainnet `WIRE_VERIFY_BLOCK=true`. Fold them back into `ShplonkArtefactPairing.t.sol` and drop `--no-match-contract ShplonkArtefactPairingPendingN14` from Makefile / GitLab / `test.sh`. Update `ShplonkDeployLib` `*_YUL_CODEHASH` pins (CREATE `extcodehash`) in the same change as `SHA256SUMS`.
 
-Default `forge test` stays green on Circuit 4. The desync is still pinned by `SHA256SUMS` and the quarantined contract (not a silent skip).
+Default `forge test` stays green on Circuit 4. The desync is still pinned by `SHA256SUMS` and the quarantined contract (not a silent skip). Production adapters refuse a `.bin` whose runtime keccak256 does not match the pin (`YulCodehashMismatch`) — an env-path swap cannot silently wire a different circuit.

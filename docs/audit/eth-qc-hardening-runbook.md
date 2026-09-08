@@ -38,7 +38,7 @@ Use the view `expectedPrevAnchor(numLayers)` (or the relayer helper that mirrors
 
 **Rule:** prove `applyBkSetUpdate` against the **live** on-chain `storedLastSeenBlockSeqNo`. If `verifyBlock` advances between prove and submit, re-prove — do not treat revert as a consensus bug.
 
-**ETH-12 ordering:** the two cursors move independently. A BK-set rotation applied *before* the layer cursor has reached that block makes intermediate `verifyBlock`s unverifiable (their proofs still carry the old commitment). Relayer must apply rotation only after `verifyBlock` has landed the attested seq_no, or fall-forward across the gap with proofs under the new commitment. Zero `newCommitmentL3` is still accepted by `_requireCanonicalFr` — do not submit a zero rotation.
+**ETH-12 ordering:** the two cursors move independently. A BK-set rotation applied *before* the layer cursor has reached that block makes intermediate `verifyBlock`s unverifiable (their proofs still carry the old commitment). Relayer must apply rotation only after `verifyBlock` has landed the attested seq_no, or fall-forward across the gap with proofs under the new commitment. `applyBkSetUpdate` reverts `ZeroBkSetCommitment` if `newCommitmentL3 == 0`.
 
 ### QC-A2-4 — permanent layer shrink
 
@@ -83,7 +83,7 @@ Do **not** restore an on-chain pause without an explicit product reversal of #20
 
 ### QC-A1-2 — USDC trust
 
-Bridge assumes standard ERC-20 semantics (no fee-on-transfer). Circle blacklist/pause on the bridge address freezes flows — operational risk.
+Bridge assumes standard ERC-20 semantics (exact `transferFrom` / `transfer` credit). A fee-on-transfer or rebasing token that moves a different custody delta reverts `TransferAmountMismatch` (ETH-11). Circle blacklist/pause on the bridge address freezes flows — operational risk.
 
 ### QC-OFF-01 — deposit-relayer head-of-line skip
 

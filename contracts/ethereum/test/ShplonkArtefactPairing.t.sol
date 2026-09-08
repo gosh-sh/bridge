@@ -87,4 +87,12 @@ contract ShplonkArtefactPairingTest is Test {
         ShplonkHalo2Verifier w = ShplonkHalo2Verifier(ShplonkDeployLib.deployShplonkWrapper(yul));
         assertEq(w.VERIFY_GAS_CAP(), VERIFY_GAS_CAP);
     }
+
+    function test_eth6_withdrawalYul_extcodehashMatchesPin() public {
+        bytes32 pin = 0x8c7a66973776b835349c8053d1b302149162cbece4a7b70e8a5c25c593fee1b5;
+        address yul = ShplonkDeployLib.deployYulFromBin(
+            "verifiers/BridgeWithdrawalAggregatorVerifier.bin", pin
+        );
+        assertEq(yul.codehash, pin, "ETH-06: CREATE runtime must match committed extcodehash");
+    }
 }

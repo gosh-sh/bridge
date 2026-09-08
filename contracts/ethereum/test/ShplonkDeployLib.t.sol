@@ -50,4 +50,19 @@ contract ShplonkDeployLibTest is Test {
 
         assertFalse(ShplonkHalo2Verifier(wrapper).verify(calldata_));
     }
+
+    function test_eth6_wrongExtcodehash_reverts() public {
+        bytes32 pin = 0x8c7a66973776b835349c8053d1b302149162cbece4a7b70e8a5c25c593fee1b5;
+        bytes32 wrong = bytes32(uint256(1));
+        vm.expectRevert(
+            abi.encodeWithSelector(ShplonkDeployLib.YulCodehashMismatch.selector, pin, wrong)
+        );
+        this.deployWithdrawalYulWrongPin();
+    }
+
+    function deployWithdrawalYulWrongPin() external {
+        ShplonkDeployLib.deployYulFromBin(
+            "verifiers/BridgeWithdrawalAggregatorVerifier.bin", bytes32(uint256(1))
+        );
+    }
 }

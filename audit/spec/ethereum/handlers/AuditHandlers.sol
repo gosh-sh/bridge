@@ -27,7 +27,8 @@ contract DepositHandler is Test {
     /// @dev BOUNDS: amount ∈ [1, MAX_DEPOSIT_AMOUNT]
     function deposit(uint256 amountSeed, uint256 userSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
-        address user = address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("dep-inv", userSeed, depositOps))))));
+        address user =
+            address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("dep-inv", userSeed, depositOps))))));
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
@@ -156,9 +157,8 @@ contract TreasuryHandler is Test {
     /// @dev TD-14 / TR-3 cross — direct USDC transfer does not credit `treasuryBalance`.
     function donateDirectUsdc(uint256 amountSeed) external {
         uint256 amount = bound(amountSeed, 1, bridge.MAX_DEPOSIT_AMOUNT());
-        address donor = address(
-            uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("donate", donateNonce++, amountSeed)))))
-        );
+        address donor =
+            address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("donate", donateNonce++, amountSeed))))));
         usdc.mint(donor, amount);
         vm.startPrank(donor);
         usdc.transfer(address(bridge), amount);
@@ -177,8 +177,7 @@ contract TreasuryHandler is Test {
         if (bridge.isNullifierUsed(nullifier)) return;
 
         (uint256 hi, uint256 lo) = _split(recipient);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier
-            .WithdrawalPublicInputs({
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
             tokenId: 0,
             amount: amount,
             recipientHi: hi,
@@ -207,8 +206,8 @@ contract TreasuryHandler is Test {
 }
 
 /// @title FoTTreasuryHandler
-/// @notice TD-23 — deposit handler for fee-on-transfer tokens in TR-1 invariant campaigns.
-/// @dev Ghost `ghostDeposited` tracks nominal `deposit(amount)`; custody is net-of-fee.
+/// @notice TD-23 / ETH-11 — FoT `deposit` must revert (`TransferAmountMismatch`).
+/// @dev Each call attempts a fee-on-transfer deposit and expects it to fail closed.
 contract FoTTreasuryHandler is Test {
     AckiNackiBridge public immutable bridge;
     FeeOnTransferERC20 public immutable fot;
@@ -235,17 +234,17 @@ contract FoTTreasuryHandler is Test {
     function depositFoT(uint256 amountSeed) external {
         if (minDepositAmount > bridge.MAX_DEPOSIT_AMOUNT()) return;
         uint256 amount = bound(amountSeed, minDepositAmount, bridge.MAX_DEPOSIT_AMOUNT());
-        address user = address(
-            uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("fot-dep", depositNonce++, amountSeed)))))
-        );
-        uint256 custodyBefore = fot.balanceOf(address(bridge));
+        address user =
+            address(uint160(Bn254FrLib.toFr(uint256(keccak256(abi.encode("fot-dep", depositNonce++, amountSeed))))));
         fot.mint(user, amount);
         vm.startPrank(user);
         fot.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        try bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user)))) {
+            revert("ETH-11: FoT deposit must revert");
+        } catch {
+            // fail closed — no treasury credit
+        }
         vm.stopPrank();
-        ghostDeposited += amount;
-        ghostCustodyReceived += fot.balanceOf(address(bridge)) - custodyBefore;
         fotDepositOps++;
     }
 }
@@ -259,13 +258,7 @@ contract AaveHandler is Test {
     MockAavePool public immutable pool;
     address public immutable owner;
 
-    constructor(
-        AckiNackiBridge _bridge,
-        MockERC20 _usdc,
-        MockAUSDC _aUSDC,
-        MockAavePool _pool,
-        address _owner
-    ) {
+    constructor(AckiNackiBridge _bridge, MockERC20 _usdc, MockAUSDC _aUSDC, MockAavePool _pool, address _owner) {
         bridge = _bridge;
         usdc = _usdc;
         aUSDC = _aUSDC;
@@ -359,13 +352,7 @@ contract WithdrawReplayHandler is Test {
     uint256[] public spentNullifiers;
     uint256 internal withdrawNonce;
 
-    constructor(
-        AckiNackiBridge _bridge,
-        uint256 _seedAnchor,
-        uint256 _dappFr,
-        uint256 _accFr,
-        address _recipient
-    ) {
+    constructor(AckiNackiBridge _bridge, uint256 _seedAnchor, uint256 _dappFr, uint256 _accFr, address _recipient) {
         bridge = _bridge;
         seedAnchor = _seedAnchor;
         dappFr = _dappFr;
@@ -387,8 +374,7 @@ contract WithdrawReplayHandler is Test {
 
     function _withdraw(uint256 amount, uint256 nullifier) internal {
         (uint256 hi, uint256 lo) = _split(recipient);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier
-            .WithdrawalPublicInputs({
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
             tokenId: 0,
             amount: amount,
             recipientHi: hi,

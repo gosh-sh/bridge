@@ -179,6 +179,12 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         _apply(blockId, SEQ, L2, poisoned);
     }
 
+    function test_applyBkSetUpdate_rejectsZeroNewCommitment() public {
+        uint256 blockId = _merkleRoot(L2, 0);
+        vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
+        _apply(blockId, SEQ, L2, 0);
+    }
+
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
         uint256 blockId = _merkleRoot(L2, L3);
 

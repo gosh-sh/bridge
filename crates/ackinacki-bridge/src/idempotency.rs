@@ -2423,13 +2423,14 @@ mod tests {
         // legitimately say it in several registers — a table, a warning,
         // a pointer to the procedure — and the rule is about the
         // acknowledgement, not the wording.
-        // Every entry here was checked against the two copies this guard
-        // exists to catch. Two candidates were REMOVED after measuring:
-        // "case 3a", because the defective README pointed at Case 3a in
-        // one breath and gave the two-verdict rule in the next; and "no
-        // age makes this safe", which the defective RUNBOOK copy says
-        // verbatim. A link is not an acknowledgement, and neither is
-        // ruling out the wrong criterion.
+        //
+        // Every entry was checked against the copies this guard exists to
+        // catch. Two candidates were REMOVED after measuring: "case 3a",
+        // because the defective README pointed at Case 3a in one breath
+        // and gave the two-verdict rule in the next; and "no age makes
+        // this safe", which the defective RUNBOOK copy says verbatim. A
+        // link is not an acknowledgement, and neither is ruling out the
+        // wrong criterion.
         const HEDGES: [&str; 8] = [
             "three",
             "could not be determined",
@@ -2439,6 +2440,24 @@ mod tests {
             "do not delete",
             "delete nothing",
             "can be missing",
+        ];
+        // Sentences that hand somebody permission. The state-file
+        // spelling is here because the documents call the same object two
+        // things and only one of them was watched.
+        // IMPERATIVE forms only. "Deleting the record destroys the only
+        // local trace" is a description of a hazard, not permission to
+        // act, and a list that cannot tell the two apart flags every
+        // changelog entry that ever explained this defect. `Failed`
+        // records are also excluded on purpose: they carry a hash by
+        // construction, so pruning one is not this rule's business.
+        const AUTHORISES: [&str; 7] = [
+            "delete the record and re-run",
+            "delete the record, and re-run",
+            "then delete the record",
+            "delete the state file and re-run",
+            "then delete the state file",
+            "conditions for deleting it",
+            "safe to delete",
         ];
 
         let mut offenders = Vec::new();
@@ -2464,51 +2483,58 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                // TWO triggers, because the first one alone was keyed on
-                // the vocabulary the CORRECTED text uses — a block became
-                // fully visible to it only once somebody had already
-                // rewritten it, which is the wrong way round.
-                //
-                // (a) it DIRECTS the reader to the refusal for the
-                //     answer. The third conjunct is what separates an
-                //     instruction from prose describing one: a changelog
-                //     entry may say a run was invisible to the liveness
-                //     check without telling anybody to go and read it.
+                // (a) The block sends a reader to the refusal FOR THE
+                //     ANSWER. Block-scoped, and with no third "does it
+                //     sound like an instruction" conjunct: that conjunct
+                //     was added to silence two changelog entries and took
+                //     the surviving copy of the gate out of scope with
+                //     them. Changelog prose is handled where it belongs,
+                //     in the hedge vocabulary.
                 let promises_an_answer = (lower.contains("exit-3 refusal")
                     || lower.contains("liveness line"))
                     && (lower.contains("holds the withdrawal")
                         || lower.contains("holds this withdrawal")
-                        || lower.contains("liveness"))
-                    && (lower.contains("read the")
-                        || lower.contains("reports whether")
-                        || lower.contains("tells you")
-                        || lower.contains("answers this for you"));
-                // (b) or it authorises the deletion outright — the
-                // sentence that actually costs money, and the one the
-                // first version scored false on both conjuncts.
-                let authorises_a_deletion = [
-                    "delete the record and re-run",
-                    "delete the record, and re-run",
-                    "conditions for deleting it",
-                    "then delete the record",
-                    "safe to delete",
-                ]
-                .iter()
-                .any(|p| lower.contains(p));
+                        || lower.contains("liveness"));
 
-                if !(promises_an_answer || authorises_a_deletion) {
-                    continue;
+                // Trigger (a) applies to the INSTRUCTIONAL documents only.
+                // Promising a reader an answer is something a procedure
+                // does; a changelog entry recounting a past defect
+                // mentions the same machinery without directing anybody,
+                // and flagging it was what the discarded third conjunct
+                // was really for. Trigger (b) applies everywhere, because
+                // telling somebody to delete the record is dangerous
+                // wherever it is written.
+                let instructs = name != "CHANGELOG.md";
+                if instructs && promises_an_answer && !HEDGES.iter().any(|h| lower.contains(h)) {
+                    offenders.push(format!(
+                        "{name} block {i} (promises an answer): {}",
+                        block.trim()
+                    ));
                 }
-                if !HEDGES.iter().any(|h| lower.contains(h)) {
-                    offenders.push(format!("{name} block {i}: {}", block.trim()));
+
+                // (b) A sentence authorises the deletion. SENTENCE-scoped,
+                //     not block-scoped: a "do not delete" three bullets
+                //     away in an adjacent branch of the same procedure
+                //     satisfied a block-wide search while the sentence in
+                //     front of the reader said the opposite.
+                for sentence in lower.split(". ") {
+                    if !AUTHORISES.iter().any(|p| sentence.contains(p)) {
+                        continue;
+                    }
+                    if !HEDGES.iter().any(|h| sentence.contains(h)) {
+                        offenders.push(format!(
+                            "{name} block {i} (authorises a deletion): {}",
+                            sentence.trim(),
+                        ));
+                    }
                 }
             }
         }
         assert!(
             offenders.is_empty(),
-            "these blocks either send an operator to the exit-3 refusal for a liveness answer it \
-             may not have, or authorise deleting the record without naming the verdict that \
-             permits it — which is every run on a mount without `flock`, and the reading that \
+            "these send an operator to the exit-3 refusal for a liveness answer it may not have, \
+             or authorise deleting the record in a sentence that does not name the verdict \
+             permitting it — which is every run on a mount without `flock`, and the reading that \
              deletes a record mid-send: {offenders:#?}",
         );
     }

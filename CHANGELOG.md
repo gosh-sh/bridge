@@ -1077,7 +1077,8 @@ assigns it when the release is tagged.
   **The same correction now covers the other two places that stated the
   gate.** The first pass fixed the advanced runbook only. The CLI
   README's cleanup rule ran the identical two-verdict elimination and
-  ended "with both satisfied, delete the record and re-run"; and step 3
+  ended by authorising the deletion once "both" were satisfied, without
+  saying that one of the two can come back unanswered; and step 3
   of the refusal the CLI itself prints — the copy an operator is looking
   at when they decide — gated the deletion on a description ("the line
   above says no other run holds this withdrawal") that a lockless mount

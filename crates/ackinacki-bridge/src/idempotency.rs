@@ -80,7 +80,7 @@ impl Status {
 /// Exit 3. `--allow-retry` does NOT reach these, so the shared "re-run with
 /// --allow-retry to override" the message used to end on was wrong here: it
 /// named the one flag that changes nothing about a terminal record.
-pub fn terminal_refusal(record: &Record) -> Option<CliError> {
+fn terminal_refusal(record: &Record) -> Option<CliError> {
     if !record.status.is_terminal() {
         return None;
     }

@@ -925,19 +925,8 @@ fn resume_recorded_burn(
         BurnDecision::Send => {
             // Only the caller's peek says a burn happened — the record it
             // saw is gone. Without a hash there is nothing to restore and
-            // nothing to resume, and writing back a hash-less active
-            // record is the exact shape `read_record` refuses forever.
-            let Some(an_tx) = observed.an_tx_hash.clone() else {
-                return Err(CliError::Preflight {
-                    reason: format!(
-                        "idempotency: resume was entered for {} but the record stage 1 read \
-                         carries no AN tx hash, so there is no burn to resume from. Nothing was \
-                         sent.",
-                        r.key,
-                    ),
-                    source: None,
-                });
-            };
+            // nothing to resume, and this arm exists only because the
+            // caller saw one.
             warn!(
                 an_tx = ?observed.an_tx_hash,
                 prior_status = ?observed.status,
@@ -960,15 +949,35 @@ fn resume_recorded_burn(
                     restored.an_tx_hash,
                 ))
             })?;
-            // The record is back, so answer exactly as `reserve` would
-            // have if the file had survived: a terminal record is refused
-            // whatever the flags say. Restore FIRST — refusing without
-            // writing would leave behind the fresh hash-less reservation
-            // that `read_record` rejects forever.
-            if let Some(refusal) = idempotency::terminal_refusal(&restored) {
-                return Err(refusal);
-            }
-            Ok((restored, an_tx, lock))
+
+            // The file is back, so ask it the whole question the deletion
+            // skipped — by asking `reserve`, which is the thing that asks
+            // it. Checking only for a terminal status left the rest of the
+            // gate out: a `burned` record deleted mid-preflight resumed
+            // with no `--allow-retry`, where the identical record still on
+            // disk exits 3. Deleting the file is not consent, and it is
+            // the CLI's own message that tells operators to delete it.
+            //
+            // Restore FIRST and ask second. Refusing before writing would
+            // leave behind the fresh hash-less reservation this arm was
+            // handed, which `read_record` rejects forever.
+            let (reserved, _) = idempotency::reserve(state_dir, from, to, amount, allow_retry)?;
+            let Some(an_tx) = reserved.an_tx_hash.clone() else {
+                // Unreachable by construction — the record just written
+                // came from `peek`, so `read_record` has already accepted
+                // its shape, and an active status with no hash is one of
+                // the shapes it does not. Refuse rather than invent a
+                // hash: this is the field a second burn turns on.
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "idempotency: resume restored {} but the record carries no AN tx hash, so \
+                         there is no burn to resume from. Nothing was sent.",
+                        reserved.key,
+                    ),
+                    source: None,
+                });
+            };
+            Ok((reserved, an_tx, lock))
         },
     }
 }
@@ -2060,6 +2069,97 @@ mod tests {
             "the run must act on the hash the reservation read, not the one the peek saw",
         );
         assert_eq!(rec.an_tx_hash.as_deref(), Some(real.as_str()));
+    }
+
+    #[test]
+    fn deleting_the_record_is_not_consent_to_resume_without_the_flag() {
+        // `--allow-retry` is how an operator says "act on a withdrawal
+        // that already has a record". The restore path skipped that: it
+        // wrote the record back and asked only whether the status was
+        // terminal, so a `burned` record deleted mid-preflight resumed
+        // with no flag at all — where the identical record still on disk
+        // exits 3.
+        //
+        // The window is not incidental. Deleting the record is what the
+        // CLI's own exit-3 message tells a reconciled operator to do, so
+        // the gate was being lifted by the documented recovery.
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = format!("0x{}", "3d".repeat(32));
+        let r = burned_record(dir.path(), &hash);
+
+        // The control: file present, no flag.
+        let present = reserve_and_decide(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a recorded burn without the flag is exit 3");
+        assert_eq!(present.exit_code().as_i32(), 3);
+
+        // Same identity, same absent flag, file deleted between the peek
+        // and the reservation.
+        let observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees it");
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+            &observed,
+        )
+        .expect_err("deleting the file is not the consent the flag is");
+        assert_eq!(
+            err.exit_code().as_i32(),
+            3,
+            "the same answer the file-present run got: {err}",
+        );
+        assert!(
+            format!("{err}").contains("--allow-retry"),
+            "and the same remedy: {err}",
+        );
+
+        // And the record is back on disk, so the operator has something
+        // to pass the flag against.
+        let reread =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .expect("the restored record must be readable")
+                .expect("it exists");
+        assert_eq!(reread.an_tx_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(reread.status, Status::Burned);
+    }
+
+    #[test]
+    fn the_flag_still_resumes_a_record_that_was_deleted_mid_preflight() {
+        // The other half: the gate is a gate, not a wall. With the flag,
+        // the restored record resumes exactly as one that never went
+        // missing would.
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = format!("0x{}", "4e".repeat(32));
+        let r = burned_record(dir.path(), &hash);
+        let observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .unwrap();
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+
+        let (rec, an_tx, _lock) = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+        )
+        .expect("with the flag, a restored record resumes");
+        assert_eq!(an_tx, hash);
+        assert_eq!(rec.status, Status::Burned);
     }
 
     #[test]

@@ -892,6 +892,19 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: deleting the state record no longer
+  substitutes for `--allow-retry`.** When a record is removed between the
+  run's first read of it and its reservation — the window the exit-3
+  message itself sends a reconciled operator into — the run restores what
+  it saw and carries on. It used to ask only whether the restored status
+  was terminal, so a `burned` record deleted in that window resumed with
+  no `--allow-retry` at all, while the identical record still on disk
+  exits 3. The restored file is now put back to `reserve`, which is what
+  asks the whole question: the terminal refusal, and the flag as consent
+  to act on a withdrawal that already has a record. **A resume after such
+  a deletion now needs `--allow-retry`, as it does without one.** The
+  record is still restored first, so the flag has something to act on.
+
 - **`ackinacki-bridge withdraw`: a withdrawal lock this run could not take
   is now a refusal, not a downgrade.** Every failure to take the lock was
   read as "this filesystem does not implement `flock`" — a supported

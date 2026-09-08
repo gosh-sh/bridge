@@ -966,6 +966,17 @@ assigns it when the release is tagged.
   a directory a run failed to restrict or one an operator chose, and
   nothing on disk tells them apart.
 
+- **The fixture's `tvm-cli` resolver fails where it decides, not where it
+  is used.** When every candidate failed its `version` probe it returned
+  the first one anyway — a binary it had just proven does not run — so
+  the deploy started, and the failure arrived later as "Exec format
+  error" from a command the operator never chose. With nothing on `PATH`
+  at all it returned `./contracts/compiler/tvm-cli`, a path that does not
+  exist in this repository. It now raises, listing every candidate it
+  tried and pointing at
+  `crates/ackinacki-bridge/scripts/check_fixture_prereqs.sh`, which
+  reports the same thing without starting a deploy.
+
 - **`scripts/check_fixture_prereqs.sh` now picks the `tvm-cli` the fixture
   will pick.** It used `command -v tvm-cli`, which answers with the first
   match on `PATH` and nothing else, and failed if that one could not run

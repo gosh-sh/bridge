@@ -71,7 +71,25 @@ def _resolve_tvm_cli():
             return cand
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
-    return candidates[0] if candidates else "tvm-cli"
+    # Every candidate was tried and every one of them failed. Returning
+    # `candidates[0]` — a binary this function has just proven does not
+    # run — moved the failure to whichever subprocess used it first, where
+    # it surfaces as "Exec format error" from a command nobody chose,
+    # after the deploy has already started doing things.
+    #
+    # Raise here instead, naming what was tried, so the diagnosis is at
+    # the point the decision was made. `tvm_cli()` is called lazily and
+    # already prints its choice to stderr, so this reaches the operator on
+    # the same stream and before any work.
+    tried = "\n".join(f"  - {c}" for c in candidates) or "  (nothing on PATH)"
+    raise RuntimeError(
+        "no working tvm-cli found. Each candidate below was run with "
+        "`version` and none of them answered:\n"
+        f"{tried}\n"
+        "Install a native tvm-cli, or set CLI_NAME=/path/to/tvm-cli. "
+        "`crates/ackinacki-bridge/scripts/check_fixture_prereqs.sh` "
+        "reports the same thing without starting a deploy."
+    )
 
 
 # Resolved on FIRST USE, not at import.

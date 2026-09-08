@@ -943,6 +943,24 @@ assigns it when the release is tagged.
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
 
+- **CLI README and advanced runbook: exit 10 no longer tells you to
+  deploy a fresh multisig.** Its remediation for a key mismatch ended
+  "re-run `scripts/deploy_msig_and_mint.sh` … and start over". That
+  script deploys a NEW multisig — a different `--from`, so a different
+  dedup identity — which orphans the record for the burn already on the
+  wire: nothing will ever resume it. Both documents now say to correct
+  the key file and re-run the same withdrawal command, which resumes
+  from the recorded burn, and say plainly that the deploy script is for
+  standing up a new test withdrawal rather than recovering one.
+
+  The exit-code table also still described exit 10 as "AN burn WAS
+  broadcast", which is one of its three populations. It now names what
+  the three share, which is what a script should key on: do not treat
+  this identity as untouched. Exit 2's row gains the half that actually
+  distinguishes it — **no record on disk** — since the same preflight
+  failure on a withdrawal that has one is exit 10, with the same checks
+  and the same message.
+
 - **`ackinacki-bridge withdraw`: a preflight refusal on a withdrawal
   whose burn is already recorded now exits 10, not 2.** Six checks in
   stage 1 — balance, destination chain, bridge deploy, signer key, prover

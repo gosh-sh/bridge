@@ -261,8 +261,11 @@ pub async fn run(
     // Ordering is load-bearing. The confirmation and every fallible
     // pre-send step run BEFORE the reservation, so a declined prompt or a
     // bad keys.json leaves nothing on disk and the identical command can
-    // simply be re-run. Nothing between the reserve and `burn::send` is
-    // allowed to fail — see burn.rs.
+    // simply be re-run. Between the reserve and `burn::send` there is
+    // exactly ONE thing allowed to fail — `BurnPermit::issue`, whose
+    // whole job is to stop a run that has lost the withdrawal lock — and
+    // its refusal names the reservation it leaves behind. Anything else
+    // added there is a new way to strand an identity; see burn.rs.
     //
     // `state_dir` and `prior` were bound in stage 1 (see the balance-check
     // note there); `prior` is read-only, so reaching this point has not
@@ -1214,10 +1217,12 @@ fn reserve_and_decide(
 )> {
     // The lock comes FIRST — before the reservation, long before the send.
     //
-    // Everything between the reserve and `burn::send` is supposed to be
-    // incapable of failing, so a lock taken there would be a new way to
-    // fail with the identity already claimed. Taken here, its only failure
-    // is a pre-send refusal like any other.
+    // A lock TAKEN between the reserve and `burn::send` would be a new way
+    // to fail with the identity already claimed. Taken here, its only
+    // failure is a pre-send refusal like any other. (`BurnPermit::issue`
+    // does run down there and can refuse — it re-CHECKS this lock rather
+    // than acquiring one, and stopping a run that has lost it is the
+    // point. See its rustdoc for what its refusal leaves behind.)
     //
     // Holding it across the send is what lets a LATER run answer the
     // question the record cannot: "is somebody executing this withdrawal

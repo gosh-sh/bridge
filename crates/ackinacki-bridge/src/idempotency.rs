@@ -746,10 +746,18 @@ pub(crate) fn record_path(state_dir: &Path, key: &str) -> PathBuf {
 /// [`read_record`] and the provenance check in `decide_burn` are what hold
 /// there; this only makes the refusal actionable when it can.
 ///
-/// Acquired BEFORE the reservation on purpose. Everything between the
-/// reserve and the send is supposed to be infallible, and a lock taken
-/// there would be a new way to fail with the identity already claimed.
-/// Taken first, its only failure is a pre-send refusal like any other.
+/// Acquired BEFORE the reservation on purpose: a lock TAKEN between the
+/// reserve and the send would be a new way to fail with the identity
+/// already claimed. Taken first, its only failure is a pre-send refusal
+/// like any other.
+///
+/// That argument used to be stated as "everything between the reserve and
+/// the send is infallible", which is no longer true and was the weaker
+/// claim anyway. [`BurnPermit::issue`] fails there deliberately — it is
+/// the one step whose entire purpose is to stop a run that has lost this
+/// lock. What the ordering buys is that the FAILURE MODE is bounded: a
+/// refusal from `issue` leaves the reservation and nothing else, and its
+/// message says so.
 ///
 /// `#[must_use]`, though not for the reason it is usually reached for:
 /// this type is only ever returned inside a `Result`, which already
@@ -1092,6 +1100,18 @@ impl<'a> BurnPermit<'a> {
     /// A refusal here costs a re-run with nothing broadcast. The other
     /// direction costs a second burn, which is the whole reason the check
     /// is on this side of the send.
+    ///
+    /// **This is a fallible step between the reservation and the send,
+    /// which three comments in the tree used to say could not exist.**
+    /// They were written when the only candidate was taking the lock, and
+    /// the argument was about the identity being claimed with no way to
+    /// unclaim it. That cost is real and it is paid here: a refusal
+    /// leaves a `Reserved` record with no hash, and the NEXT run reads it
+    /// at stage 1 and exits 3 — a refusal whose remedy is written for a
+    /// burn that may be in flight. So the message below does not say
+    /// "re-running is safe", which is what it used to say and is not
+    /// true; it names the record and says which of the three situations
+    /// this is, because only one of them permits deleting it.
     pub fn issue(state_dir: &Path, key: &str, held: Option<&'a WithdrawalLock>) -> CliResult<Self> {
         let probe = WithdrawalLock::probe_holder(state_dir, key);
         match (held, probe) {
@@ -1104,26 +1124,55 @@ impl<'a> BurnPermit<'a> {
                 Ok(Self(Some(l)))
             },
             (None, None) => Ok(Self(None)),
-            (held, _) => Err(CliError::Preflight {
-                reason: format!(
-                    "idempotency: this run no longer owns {}, so it must not broadcast: it {} the \
-                     withdrawal lock and the kernel says {}.{NOTHING_SENT_CLAUSE}\n\x20 This is \
-                     an internal invariant, not an operator error — the lock is taken before the \
-                     reservation and is meant to be held across the send. Re-running is safe.",
-                    WithdrawalLock::path(state_dir, key).display(),
-                    if held.is_some() {
-                        "holds"
-                    } else {
-                        "never took"
-                    },
-                    if probe == Some(true) {
-                        "another process holds it"
-                    } else {
-                        "nobody does"
-                    },
-                ),
-                source: None,
-            }),
+            (held, _) => {
+                // What this run leaves behind, said plainly, because the
+                // next run cannot work it out: `reserve` has already
+                // published a `Reserved` record with no hash, which stage
+                // 1 refuses with exit 3 and a remedy written for a burn
+                // that might be in flight. The operator needs to know
+                // that THIS message is the evidence no burn happened —
+                // and in one of the three cases, that it is not.
+                let (what_we_hold, what_the_kernel_says, remedy) = match (held.is_some(), probe) {
+                    (false, Some(true)) => (
+                        "never took",
+                        "another process holds it",
+                        "ANOTHER RUN OWNS THIS WITHDRAWAL and may be inside its send. Do not \
+                         delete the record and do not re-run until that run has finished: wait \
+                         and read its outcome.",
+                    ),
+                    (true, _) => (
+                        "holds",
+                        "nobody does",
+                        "The lock file was unlinked or replaced while this run held it — a \
+                         cleanup sweeping *.lock does exactly this. Nothing was broadcast for \
+                         this identity by this run. Stop whatever removes those files, then \
+                         delete the record named below and re-run.",
+                    ),
+                    _ => (
+                        "never took",
+                        "nobody does",
+                        "This is an internal defect, not an operator error: the lock is taken \
+                         before the reservation and this run reached the send without one. \
+                         Nothing was broadcast. Delete the record named below and re-run, and \
+                         please report it.",
+                    ),
+                };
+                Err(CliError::Preflight {
+                    reason: format!(
+                        "idempotency: this run does not own {}, so it must not broadcast: it {} \
+                         the withdrawal lock and the kernel says {}.{NOTHING_SENT_CLAUSE}\n\x20 \
+                         {}\n\x20 A reservation for this identity IS on disk — {} — and a plain \
+                         re-run will refuse it with exit 3, whose message has to assume a burn \
+                         may be in flight. This message is the evidence that one is not.",
+                        WithdrawalLock::path(state_dir, key).display(),
+                        what_we_hold,
+                        what_the_kernel_says,
+                        remedy,
+                        record_path(state_dir, key).display(),
+                    ),
+                    source: None,
+                })
+            },
         }
     }
 
@@ -2038,6 +2087,49 @@ mod tests {
         assert!(
             BurnPermit::issue(dir.path(), key, None).is_err(),
             "an unheld lock on a filesystem that locks is not permission to send",
+        );
+    }
+
+    #[test]
+    fn a_lock_file_replaced_under_a_running_withdrawal_is_not_permission_to_send() {
+        // The arm nothing reached: this run holds a `WithdrawalLock`, and
+        // the kernel says the identity is free. `flock` is attached to the
+        // open file description, so unlinking the path leaves this
+        // process holding a lock on an inode with no name — and the next
+        // `open` + `flock` creates a NEW file and succeeds. Two runs then
+        // both believe they own the withdrawal.
+        //
+        // Not hypothetical: any cleanup that sweeps `*.lock` out of the
+        // state directory produces it, and `/proc/self/fd` shows the
+        // holder pointing at "… .lock (deleted)".
+        let dir = TempDir::new().unwrap();
+        let key = "fedcba9876543210";
+        let LockAttempt::Held(lock) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
+            panic!("an uncontested lock in a fresh TempDir must be taken");
+        };
+        std::fs::remove_file(WithdrawalLock::path(dir.path(), key)).unwrap();
+
+        let err = BurnPermit::issue(dir.path(), key, Some(&lock))
+            .expect_err("a lock on an unlinked inode guards nothing");
+        let msg = format!("{err}");
+        assert_eq!(
+            err.exit_code(),
+            crate::errors::ExitCode::PreflightRefused,
+            "the check runs before the send, so its refusal is a pre-send one: {err}",
+        );
+        assert!(
+            msg.contains("unlinked or replaced"),
+            "the operator has to be told what to stop doing, not just that something is wrong: \
+             {msg}",
+        );
+        assert!(
+            !msg.contains("Re-running is safe"),
+            "a plain re-run meets the exit-3 refusal for this reservation; the message must say \
+             what to do with the record: {msg}",
+        );
+        assert!(
+            msg.contains(&record_path(dir.path(), key).display().to_string()),
+            "and name it: {msg}",
         );
     }
 

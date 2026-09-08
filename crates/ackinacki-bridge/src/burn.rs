@@ -340,6 +340,13 @@ pub async fn send(
     context: &Arc<ClientContext>,
     from: &FromAddress,
     composed: ComposedBurn,
+    // Never read. It is here so that broadcasting requires a value only
+    // `BurnPermit::issue` can produce, and so that the borrow inside it
+    // keeps the withdrawal lock alive for the duration of this call — see
+    // [`crate::idempotency::BurnPermit`]. A parameter rather than a
+    // comment because two rounds of review found the lock released
+    // between the reservation and this line with the suite green.
+    _permit: &crate::idempotency::BurnPermit<'_>,
 ) -> CliResult<BurnReceipt> {
     let ComposedBurn {
         encode,
@@ -1265,6 +1272,10 @@ mod tests {
         from_keys: &Path,
         to: &ToAddress,
         amount: &UsdcAmount,
+        // Taken rather than built: a permit cannot be conjured outside
+        // `idempotency`, which is the point of it. See
+        // [`crate::idempotency::BurnPermit`].
+        permit: &crate::idempotency::BurnPermit<'_>,
     ) {
         let composed = compose(ctx, preflight, from, from_keys, to, amount, true)
             .await
@@ -1275,6 +1286,6 @@ mod tests {
             clippy::let_underscore_must_use,
             reason = "this helper exists to reach compose+sign; the send cannot succeed offline"
         )]
-        let _ = send(ctx, from, composed).await;
+        let _ = send(ctx, from, composed, permit).await;
     }
 }

@@ -972,6 +972,101 @@ impl WithdrawalLock {
     }
 }
 
+/// Permission to broadcast, checked at the last reversible moment.
+///
+/// The withdrawal lock is taken before the reservation and is supposed to
+/// be held across [`crate::burn::send`]. Nothing made that true. The lock
+/// lived in a mutable `Option` in the orchestrator, and `= None`,
+/// `.take()` or `drop()` anywhere between the reservation and the send
+/// released it, compiled, passed clippy and passed every test — leaving
+/// the run inside the multi-second send with no lock, invisible to the
+/// liveness probe of a second run that is then told nobody holds this
+/// withdrawal and invited to delete the record.
+///
+/// Two defences, and the borrow is the important one:
+///
+/// * [`Held`](Self::Held) borrows the lock, so the lock cannot be reassigned,
+///   moved or dropped while a permit exists. That is the compiler refusing, not
+///   a test noticing.
+/// * [`issue`](Self::issue) asks the kernel rather than the caller. A
+///   reservation that never took a lock on a filesystem that supports one — the
+///   underscored tuple slot, the same defect one layer up — is refused here,
+///   before anything is sent.
+///
+/// `burn::send` takes one. It never reads it: what it needs is for the
+/// value to be impossible to produce without the check.
+///
+/// One private field, holding the lock this permit rests on — `None` on a
+/// filesystem that cannot lock. Private because a permit written out at
+/// the send site would be the way around the check; a tuple struct with a
+/// private field cannot be built outside this module at all.
+#[derive(Debug)]
+pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
+
+impl<'a> BurnPermit<'a> {
+    /// Check that this run still owns `key`, and issue the permission to
+    /// send if it does.
+    ///
+    /// `flock` locks are per open file description, so a second `open` +
+    /// `flock` from THIS process is denied by a lock this process already
+    /// holds — which is what makes the check possible from the inside.
+    /// The four answers:
+    ///
+    /// | held | probe | verdict |
+    /// |---|---|---|
+    /// | yes | somebody holds it | that somebody is us: send |
+    /// | yes | nobody holds it | the lock file was replaced under us: refuse |
+    /// | yes | could not ask | send; the lock object is the better evidence |
+    /// | no | anything but "could not ask" | this filesystem locks and we hold nothing: refuse |
+    ///
+    /// A refusal here costs a re-run with nothing broadcast. The other
+    /// direction costs a second burn, which is the whole reason the check
+    /// is on this side of the send.
+    pub fn issue(state_dir: &Path, key: &str, held: Option<&'a WithdrawalLock>) -> CliResult<Self> {
+        let probe = WithdrawalLock::probe_holder(state_dir, key);
+        match (held, probe) {
+            (Some(l), Some(true)) => Ok(Self(Some(l))),
+            (Some(l), None) => {
+                warn!(
+                    "could not re-check the withdrawal lock before sending; proceeding on the \
+                     lock this run already holds. `probe_holder` logged the reason above",
+                );
+                Ok(Self(Some(l)))
+            },
+            (None, None) => Ok(Self(None)),
+            (held, _) => Err(CliError::Preflight {
+                reason: format!(
+                    "idempotency: this run no longer owns {}, so it must not broadcast: it {} the \
+                     withdrawal lock and the kernel says {}.{NOTHING_SENT_CLAUSE}\n\x20 This is \
+                     an internal invariant, not an operator error — the lock is taken before the \
+                     reservation and is meant to be held across the send. Re-running is safe.",
+                    WithdrawalLock::path(state_dir, key).display(),
+                    if held.is_some() {
+                        "holds"
+                    } else {
+                        "never took"
+                    },
+                    if probe == Some(true) {
+                        "another process holds it"
+                    } else {
+                        "nobody does"
+                    },
+                ),
+                source: None,
+            }),
+        }
+    }
+
+    /// Whether this permit rests on a lock this run holds, or on the
+    /// filesystem being unable to lock at all. Worth a log line before an
+    /// irreversible send: it is the difference between a run a concurrent
+    /// one can see and a run it cannot.
+    #[must_use]
+    pub fn holds_a_lock(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 /// The sentence a refusal prints about who is executing this withdrawal.
 ///
 /// Takes what the lock could tell us — `Some(true)` somebody holds it,
@@ -1688,6 +1783,68 @@ mod tests {
             WithdrawalLock::probe_holder(&blocker, "0123456789abcdef"),
             None,
             "a lock that could not be attempted is not a lock that is free",
+        );
+    }
+
+    #[test]
+    fn the_permit_to_send_is_issued_only_to_a_run_that_still_holds_the_lock() {
+        let dir = TempDir::new().unwrap();
+        let key = "0123456789abcdef";
+
+        // Held: the probe's second `open` + `flock` is denied by our own
+        // lock — per open file description, so this works from inside the
+        // holding process — and that is what "we still own it" looks like.
+        let LockAttempt::Held(lock) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
+            panic!("an uncontested lock in a fresh TempDir must be taken");
+        };
+        assert!(
+            BurnPermit::issue(dir.path(), key, Some(&lock))
+                .expect("a run holding its own lock may send")
+                .holds_a_lock(),
+            "and the permit it gets rests on that lock",
+        );
+
+        // The defect one layer up, reproduced here rather than grepped
+        // for: `let (r, decision, _)` at the reservation leaves the
+        // orchestrator with no lock on a filesystem that supports one.
+        // The kernel is asked, so it does not matter how the lock was
+        // lost — only that it is gone.
+        let err = BurnPermit::issue(dir.path(), key, None)
+            .expect_err("a run with no lock on a locking filesystem must not broadcast");
+        assert_eq!(
+            err.exit_code(),
+            crate::errors::ExitCode::PreflightRefused,
+            "the check is BEFORE the send, so its refusal is a pre-send one: {err}",
+        );
+        assert!(
+            format!("{err}").contains("never took"),
+            "the refusal has to say which half failed: {err}",
+        );
+
+        drop(lock);
+        // Nobody holds it now, and this run claims none either. Still a
+        // refusal: `flock` demonstrably works in this directory, so a run
+        // about to broadcast should have been holding one.
+        assert!(
+            BurnPermit::issue(dir.path(), key, None).is_err(),
+            "an unheld lock on a filesystem that locks is not permission to send",
+        );
+    }
+
+    #[test]
+    fn a_filesystem_that_cannot_lock_at_all_may_still_send() {
+        // The supported lockless deployment: `probe_holder` has no answer,
+        // and no answer is not a refusal — the record's cross-field guards
+        // are what hold there. The lever is a state dir whose parent is a
+        // regular file, so the probe's `open` fails for every uid.
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let permit = BurnPermit::issue(&blocker, "0123456789abcdef", None)
+            .expect("a run that could not ask is not a run that must stop");
+        assert!(
+            !permit.holds_a_lock(),
+            "and it must not claim a lock it does not have",
         );
     }
 

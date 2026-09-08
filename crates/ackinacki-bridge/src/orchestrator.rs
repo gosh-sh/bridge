@@ -425,7 +425,23 @@ pub async fn run(
                     (existing, bounce)
                 },
                 BurnDecision::Send => {
-                    let receipt = burn::send(&context, &from, composed).await?;
+                    // The last reversible moment, and the only one that
+                    // checks rather than assumes. `issue` asks the kernel
+                    // whether this run still owns the identity it
+                    // reserved, and the permit it returns BORROWS the
+                    // lock — so from here to the end of this arm the
+                    // compiler refuses to let anything reassign, move or
+                    // drop `_withdrawal_lock`.
+                    let permit = idempotency::BurnPermit::issue(
+                        &state_dir,
+                        &idempotency::key(&from, &to, &amount),
+                        _withdrawal_lock.as_ref(),
+                    )?;
+                    info!(
+                        locked = permit.holds_a_lock(),
+                        "stage 3/6: broadcasting the burn",
+                    );
+                    let receipt = burn::send(&context, &from, composed, &permit).await?;
                     // The receipt's own amount, not the requested one:
                     // this line is what an operator reconciles against,
                     // and it should say what went on the wire. It also
@@ -931,9 +947,20 @@ enum BurnDecision {
 /// run then walks into `burn::send` holding nothing, invisible to the
 /// liveness probe every recovery procedure in the runbook depends on.
 ///
-/// Writing through `hold` removes the slot. There is no value to discard:
-/// the only way to lose the lock now is to pass a temporary, which reads
-/// as the deliberate act it would be.
+/// Writing through `hold` removes that slot. It does NOT make the lock
+/// unloseable, and the previous version of this paragraph said it did:
+/// `&mut None` at the call site discards it just as quietly, and so does
+/// any `= None`, `.take()` or `drop()` further down the run. What the
+/// out-parameter buys is one specific evasion closed and a call site a
+/// grep can pin.
+///
+/// The send is defended by something stronger, because that is where the
+/// money is: [`idempotency::BurnPermit`] borrows the lock across
+/// `burn::send`, so between the check and the broadcast the compiler
+/// refuses every one of those. This path never sends — it exists because
+/// a burn is already on the wire — so it keeps the weaker guarantee, and
+/// what the lock still buys here is the liveness answer a concurrent run
+/// gets while this one finishes capture, prove and submit.
 ///
 /// It is stored before the first fallible step, so the caller holds it on
 /// the error paths too — on `Err` the run aborts and the kernel releases
@@ -1141,8 +1168,48 @@ fn reserve_and_decide(
     // filesystem has no flock, carry on unlocked".
     idempotency::ensure_state_dir(state_dir)?;
 
-    let (lock, flock_available) = match idempotency::WithdrawalLock::try_acquire(state_dir, &key)? {
-        idempotency::LockAttempt::Held(l) => (Some(l), true),
+    let attempt = idempotency::WithdrawalLock::try_acquire(state_dir, &key)?;
+    reserve_and_decide_holding(attempt, state_dir, from, to, amount, allow_retry)
+}
+
+/// The half of [`reserve_and_decide`] that runs once the lock attempt has
+/// been made, split out so a test can supply the attempt.
+///
+/// `Unsupported` is otherwise unreachable in a test: it needs a filesystem
+/// whose `flock` answers `ENOLCK`, and there is no way to conjure one in
+/// a `TempDir`. Splitting here is what makes the WIRING testable rather
+/// than only the mapping at the far end of it — the gap that let a
+/// lockless mount be told nobody held its withdrawal while every test
+/// passed.
+fn reserve_and_decide_holding(
+    attempt: idempotency::LockAttempt,
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+) -> CliResult<(
+    idempotency::Record,
+    BurnDecision,
+    Option<idempotency::WithdrawalLock>,
+)> {
+    let key = idempotency::key(from, to, amount);
+
+    // Asked BEFORE the attempt is taken apart, and asked of the attempt
+    // rather than restated here.
+    //
+    // What a refusal downstream is allowed to claim about other processes
+    // used to be re-derived from a hand-written `(lock, flock_available)`
+    // pair beside the one `LockAttempt::holder_verdict` already computes.
+    // Two mappings of the same three cases, one of them under test and one
+    // of them not: flipping this arm's `false` to `true` made a lockless
+    // mount print "the record was left by a run that has already exited",
+    // the row the runbook turns into permission to delete, with the whole
+    // suite green. There is now one mapping, and it is the tested one.
+    let holder = attempt.holder_verdict();
+
+    let lock = match attempt {
+        idempotency::LockAttempt::Held(l) => Some(l),
         // Another live process on this host owns this withdrawal. Refuse
         // before reserving: its outcome is that run's to record, and a
         // second run racing it through capture and submit gets a reverted
@@ -1158,8 +1225,9 @@ fn reserve_and_decide(
                 record_path: idempotency::record_path(state_dir, &key)
                     .display()
                     .to_string(),
-                // We just failed to take it, so somebody holds it.
-                liveness: idempotency::liveness_verdict(Some(true)).to_string(),
+                // We just failed to take it, so somebody holds it — which
+                // is what `holder_verdict` said of this same attempt.
+                liveness: idempotency::liveness_verdict(holder).to_string(),
             });
         },
         // `flock` unavailable — and now that means the filesystem cannot
@@ -1181,7 +1249,7 @@ fn reserve_and_decide(
                  A refusal from this run will say the liveness evidence is missing rather than \
                  claim nobody holds this withdrawal",
             );
-            (None, false)
+            None
         },
     };
 
@@ -1191,7 +1259,7 @@ fn reserve_and_decide(
     // the `peek` taken back in stage 1. See [`decide_burn`]: those two
     // disagree in two different ways, and both are a second irreversible
     // burn.
-    let decision = decide_burn(&r, how, state_dir, flock_available)?;
+    let decision = decide_burn(&r, how, state_dir, holder)?;
     Ok((r, decision, lock))
 }
 
@@ -1199,10 +1267,16 @@ fn decide_burn(
     reserved: &idempotency::Record,
     how: idempotency::Reservation,
     state_dir: &Path,
-    // Whether `flock` worked here at all. Only affects what the refusal
-    // is able to claim — a filesystem without it is a supported
-    // deployment, not a reason to stop.
-    flock_available: bool,
+    // What the lock attempt above said about OTHER processes, carried
+    // through unchanged: `Some(false)` this run took the lock so nobody
+    // else has it, `None` the filesystem could not answer. Only affects
+    // what the refusal is able to claim — a filesystem without `flock` is
+    // a supported deployment, not a reason to stop.
+    //
+    // The attempt's own verdict rather than a bool re-derived from it:
+    // `holder_verdict` is where the three cases are mapped, it is under
+    // test, and a second mapping beside it is a second thing to get wrong.
+    holder: Option<bool>,
 ) -> CliResult<BurnDecision> {
     match (reserved.an_tx_hash.as_deref(), how) {
         // Someone already broadcast for this identity. Resume at capture.
@@ -1225,15 +1299,13 @@ fn decide_burn(
             record_path: idempotency::record_path(state_dir, &reserved.key)
                 .display()
                 .to_string(),
-            // This run holds the withdrawal lock — it took it before
-            // reserving — so no OTHER process can be executing this
-            // withdrawal, whatever the record says. That is the half the
-            // record cannot supply, and without it the only escape an
-            // operator finds is deleting the guard.
-            // This run holds the lock, so the answer is "nobody else"
-            // — unless `flock` never worked here, in which case there is
-            // no answer to give.
-            liveness: idempotency::liveness_verdict(flock_available.then_some(false)).to_string(),
+            // The half the record cannot supply, and without which the
+            // only escape an operator finds is deleting the guard: this
+            // run took the lock before reserving, so no OTHER process can
+            // be executing this withdrawal, whatever the record says —
+            // unless `flock` never worked here, in which case there is no
+            // answer to give and the verdict says so.
+            liveness: idempotency::liveness_verdict(holder).to_string(),
         }),
     }
 }
@@ -1436,7 +1508,7 @@ mod tests {
             &reserved(None),
             idempotency::Reservation::Found,
             dir.path(),
-            false,
+            None,
         )
         .expect_err("a hash-less record another run owns must still refuse");
         let msg = format!("{err}");
@@ -1474,7 +1546,7 @@ mod tests {
             &reserved(None),
             idempotency::Reservation::Found,
             dir.path(),
-            true,
+            Some(false),
         )
         .expect_err("a record another run owns, with no hash yet, must refuse");
         assert!(
@@ -1515,7 +1587,7 @@ mod tests {
                 &reserved(Some("0xdead")),
                 idempotency::Reservation::Found,
                 Path::new("/nonexistent"),
-                true,
+                Some(false),
             )
             .unwrap(),
             BurnDecision::Reuse("0xdead".into()),
@@ -1530,7 +1602,7 @@ mod tests {
                 &reserved(None),
                 idempotency::Reservation::Created,
                 Path::new("/nonexistent"),
-                true,
+                Some(false),
             )
             .unwrap(),
             BurnDecision::Send,
@@ -2457,6 +2529,54 @@ mod tests {
         );
         assert_eq!(reread.eth_tx_hash.as_deref(), Some(eth.as_str()));
         assert_eq!(reread.an_tx_hash.as_deref(), Some(an.as_str()));
+    }
+
+    #[test]
+    fn a_lockless_filesystem_is_never_told_the_withdrawal_is_free() {
+        // The wiring, not the mapping. `holder_verdict` has had a test
+        // since the enum landed, and `decide_burn` has had one since last
+        // round — but nothing ran the path BETWEEN them, so the hand-
+        // written pair that fed `decide_burn` could be flipped from
+        // `false` to `true` with the whole suite green. A lockless mount
+        // then printed "the record was left by a run that has already
+        // exited", which is the row the runbook turns into permission to
+        // delete, about a record another run may be mid-send on.
+        let dir = tempfile::TempDir::new().unwrap();
+        // A reservation already on disk with no hash: the shape
+        // `decide_burn` refuses, and the one whose refusal carries the
+        // liveness line.
+        idempotency::reserve(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect("the first reservation is uncontested");
+
+        let err = reserve_and_decide_holding(
+            idempotency::LockAttempt::Unsupported {
+                why: "No locks available (os error 37)".into(),
+            },
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("a hash-less reservation must refuse whatever the lock could say");
+
+        let msg = format!("{err}");
+        assert_eq!(err.exit_code().as_i32(), 3, "{err}");
+        assert!(
+            msg.contains("could not be determined"),
+            "an attempt that could not be made says so: {msg}",
+        );
+        assert!(
+            !msg.contains("No other process"),
+            "the one sentence a run with no lock evidence may never produce — it is what \
+             authorises deleting the record: {msg}",
+        );
     }
 
     #[test]

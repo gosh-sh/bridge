@@ -910,6 +910,31 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`bridge-prover-lib`'s test suite stops reporting a moving number.**
+  Four tests in `paths::tests` mutate the process-wide environment
+  (`BRIDGE_CONFIG_DIR` / `BRIDGE_STATE_DIR` / `BRIDGE_PROOFS_DIR`) behind
+  a guard that saved and restored but did not serialise them, while the
+  harness ran them in parallel threads of one process. Measured on
+  `cargo test -p bridge-prover-lib --lib paths::tests`: 7 failures in 40
+  runs before, 0 in 40 after.
+
+  What to expect when you run it: **`108 passed; 2 failed; 16 ignored`**,
+  and the two are always
+  `keys::common::tests::load_srs_downsizes_{from_parent_ceremony_when_exact_missing,misnamed_larger_file}`,
+  which need a `params/kzg_bn254_17.srs` this repository does not ship.
+  Any other number is a real regression — before this change the line
+  moved between 106/4, 107/3 and 108/2 on its own, which is how one gets
+  waved through as "the usual two".
+
+  Neither the flake nor the two fixture failures were ever visible in CI:
+  every `-p bridge-prover-lib` invocation in `.gitlab-ci.yml` is filtered
+  to `keys::`, and no fmt or clippy job covers the crate at all. That gap
+  is tracked in
+  [NODE-4015](https://linear.app/acki-nacki/issue/NODE-4015/bridge-prover-lib-krejt-ne-pokryt-ni-odnim-gejtom-ci)
+  and is not addressed here. Until its fmt step lands, do not run
+  `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
+  at HEAD, and a sweep would bury unrelated diffs.
+
 - **`ackinacki-bridge withdraw`: the "could not be determined" liveness
   verdict no longer blames the filesystem for every cause.** The exit-3
   refusal's third verdict said `flock` was unavailable — "a network

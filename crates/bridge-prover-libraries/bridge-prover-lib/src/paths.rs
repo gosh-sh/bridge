@@ -106,15 +106,48 @@ pub fn ensure_proofs_dir() {
 mod tests {
     use super::*;
 
+    /// Serialises every test that touches the three env vars.
+    ///
+    /// Snapshot-and-restore is enough for one test at a time and for
+    /// nothing else, which is what the guard below used to claim: it
+    /// reasoned about `--test-threads=1`, and that is not how the harness
+    /// runs. These tests share ONE process and the environment is
+    /// process-global, so `defaults_match_legacy` clearing
+    /// `BRIDGE_CONFIG_DIR` to check the defaults and
+    /// `config_dir_derives_both` setting it are the same variable, and
+    /// which lands first is a race. Measured before this lock: two runs
+    /// in eight failed, on a different one of the four tests each time.
+    ///
+    /// A flaky suite is worse here than a failing one. `bridge-prover-lib`
+    /// already carries two environmental fixture failures, so its result
+    /// line is read by eye against a remembered baseline — and a count
+    /// that moves on its own is how a real regression gets waved through
+    /// as "the usual two".
+    ///
+    /// Held for the whole test rather than just the setup: the reads
+    /// under assertion are as much of the critical section as the writes.
+    ///
+    /// Poison is recovered, not propagated. These tests assert, so one of
+    /// them failing is an ordinary outcome; letting that poison the mutex
+    /// would turn a single real failure into three more that say nothing
+    /// about themselves.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A minimal env guard for tests that mutate `BRIDGE_STATE_DIR` /
     /// `BRIDGE_PROOFS_DIR` / `BRIDGE_CONFIG_DIR`. Snapshots the three vars
-    /// on drop so the test suite stays hermetic even under `--test-threads=1`.
+    /// and restores them on drop, holding [`ENV_LOCK`] for as long as it
+    /// lives so no sibling test observes the window in between.
     struct EnvGuard {
         saved: [(&'static str, Option<std::ffi::OsString>); 3],
+        /// Dropped after `Drop for EnvGuard` has restored the vars —
+        /// `Drop::drop` runs before any field is dropped, so the lock is
+        /// still held while the restore happens.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn new() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let vars = [ENV_CONFIG_DIR, ENV_STATE_DIR, ENV_PROOFS_DIR];
             let mut saved: [(&'static str, Option<std::ffi::OsString>); 3] = [
                 (ENV_CONFIG_DIR, None),
@@ -126,7 +159,10 @@ mod tests {
                 saved[i].1 = std::env::var_os(v);
                 std::env::remove_var(v);
             }
-            Self { saved }
+            Self {
+                saved,
+                _lock: lock,
+            }
         }
     }
 

@@ -337,7 +337,8 @@ establish them:
    ```
 
    Empty diff, or stop here. This is the same comparison
-   `deploy/shellnet-l2/scripts/preflight.sh:28` runs, and the CLI's own
+   `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   runs (`verify_verifier_lane`), and the CLI's own
    `check_bridge_deploy` runs it for you on every withdraw — the flag
    does **not** turn that off.
 3. The proving keys in `--params-dir` were generated for that same
@@ -511,7 +512,13 @@ the recovery gist; jump here for the diagnostic commands.
 bundle. Distinguish via:
 
 ```bash
-LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
+# `--work-dir` is required plumbing with no default, so substitute the
+# path this run was given. `./work_dir` is only what the smoke scripts
+# happen to pass; if you passed `--work-dir` on the command line rather
+# than exporting it, use that.
+WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
+
+LOG=$(ls -t "$WORK_DIR"/withdraw_*_*.log | head -1)
 
 # The capture stage logs exactly one line when it succeeds. Its absence
 # is the whole diagnosis.
@@ -771,8 +778,9 @@ df -h ../bridge-prover-libraries/params/
 
 - Free resources; re-run with the same tuple — `--allow-retry` if the
   first attempt left a `Reserved` state file. The witness under
-  `./work_dir/event_<seq>_witness.json` (relative to the CLI cwd) is
-  deterministic and reusable; do NOT delete it between attempts.
+  `<--work-dir>/event_<seq>_witness.json` — `$BRIDGE_WORK_DIR` if you
+  exported it — is deterministic and reusable; do NOT delete it between
+  attempts.
 - If cold-cache slowness is the real issue (not OOM), bump the
   timeout:
 
@@ -978,8 +986,9 @@ ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 jq . "$(ls -t "$STATE_DIR"/*.json | head -1)" 2>/dev/null
 
 # Latest captured witness + generated proof (written into --work-dir)
-ls -lt ./work_dir/event_*_witness.json 2>/dev/null | head -3
-ls -lt ./work_dir/proof_event_*.json   2>/dev/null | head -3
+WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
+ls -lt "$WORK_DIR"/event_*_witness.json 2>/dev/null | head -3
+ls -lt "$WORK_DIR"/proof_event_*.json   2>/dev/null | head -3
 
 # Circuit 4 PK cache (should exist after first successful run)
 ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null

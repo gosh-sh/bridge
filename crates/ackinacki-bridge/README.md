@@ -183,7 +183,14 @@ The published invocation is exactly:
 
     ackinacki-bridge withdraw --from <dapp_id::account_id> --from-keys <path> \
                               --to <0x…> --to-chain <chain-id> --amount <usdc> \
-                              [--dry-run] [--yes] [--json]
+                              [--dry-run] [--yes] [--non-interactive] [--json]
+
+`--yes` and `--non-interactive` are not the same flag and are not
+alternatives. `--yes` answers the confirmation; `--non-interactive`
+promises that nothing may ever wait for an answer, and a real run given
+it without `--yes` is refused with exit 2 rather than left to block —
+`--non-interactive requires --yes or --dry-run`. A wrapper that means "do
+not hang" wants both.
 
 For it to resolve, two things must be true, and neither is visible in the
 command itself:

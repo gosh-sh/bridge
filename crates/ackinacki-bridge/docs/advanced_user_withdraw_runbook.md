@@ -723,19 +723,27 @@ is a bare `--allow-retry`:
   |---|---|---|
   | "Another process on this host is executing this withdrawal **RIGHT NOW** (it holds the withdrawal lock)" | A live run owns this withdrawal and may be inside `burn::send`. | **Wait** for it and read its outcome. Do not touch the record. |
   | "**No other process** on this host holds this withdrawal, so the record was left by a run that has already exited" | Nobody is mid-send. This is *not* the same as "nothing was broadcast" — a run can exit between the send returning and the hash being written. | Delete the record **only** if the reconciliation above also found no `initiateWithdrawal`. |
-  | "Whether another process holds this withdrawal **could not be determined** here (`flock` is unavailable — a network mount, typically)" | The question was never answered. There is no evidence either way. | **Do not delete.** See below. |
+  | "Whether another process holds this withdrawal **could not be determined** here — the lock could neither be taken nor tested" | The question was never answered. There is no evidence either way. The `warn` line just above the refusal names the errno. | **Do not delete.** See below. |
 
   The third line is the one that catches people, because reading the
   procedure by elimination — "it is not the first case, and my
   reconciliation is clean" — lands on a deletion that the message never
   authorised.
 
-**When the liveness verdict is "could not be determined".** On a state
-directory that does not support `flock` — NFS without a lock daemon, some
-container overlay mounts — every run gets this verdict, including the one
-that may be mid-send. The lock is not protecting anything there, so the
-CLI cannot tell you whether another run holds the withdrawal, and it says
-so rather than guessing.
+**When the liveness verdict is "could not be determined".** Two different
+situations reach it, and the `warn` line the CLI prints just above the
+refusal says which:
+
+- **The filesystem cannot lock** — NFS without a lock daemon, some
+  container overlay mounts. `ENOLCK`, `EOPNOTSUPP` or `ENOSYS`. Every run
+  on that mount gets this verdict, including one that may be mid-send.
+- **The attempt itself failed** — `EACCES` on the state directory,
+  `EMFILE` when the process is out of file descriptors, anything else.
+  Here the lock would work; this run could not reach it. Fix the error
+  and re-run, and you get a real verdict.
+
+Either way the CLI cannot tell you whether another run holds the
+withdrawal, and it says so rather than guessing.
 
 The on-chain reconciliation is then your *only* evidence, and it is not
 sufficient on its own: it can only tell you what has already landed, and

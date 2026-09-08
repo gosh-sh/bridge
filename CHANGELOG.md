@@ -910,6 +910,21 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: the "could not be determined" liveness
+  verdict no longer blames the filesystem for every cause.** The exit-3
+  refusal's third verdict said `flock` was unavailable — "a network
+  mount, typically" — whenever the lock could not be tested. That is one
+  of the causes; `EACCES` on the state directory and `EMFILE` when the
+  process is out of file descriptors reach the same arm, and the errno
+  that would tell them apart was discarded. An operator out of file
+  handles was sent to check their mount.
+
+  The verdict now names no cause, and the reason is emitted as a `warn`
+  line immediately above the refusal, carrying the underlying error. The
+  runbook's "could not be determined" section splits the two situations
+  and says the second one is fixable — resolve the error, re-run, and you
+  get a real verdict.
+
 - **Advanced runbook: the delete-the-record procedure now covers all
   three liveness verdicts, not two.** The exit-3 refusal reports one of
   three things about whether another run holds the withdrawal — it holds

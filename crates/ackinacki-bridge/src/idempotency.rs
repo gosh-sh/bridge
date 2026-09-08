@@ -185,10 +185,20 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 ///   tx was broadcast but we did not observe the receipt; blindly
 ///   re-broadcasting is a double-spend risk. Reconcile the prior `eth_tx_hash`
 ///   on-chain, then either wait or mark the record `Failed` manually.
-/// - Any other active status (`Reserved`, `Burned`, `Captured`, `Proved`) →
-///   refused unless `--allow-retry` is set. With the flag, the **prior record
-///   is returned as-is** — `an_tx_hash`, `withdrawal_msg_id` and `block_seq_no`
-///   are all preserved so the orchestrator can skip stages that already
+/// - Any other active status (`Reserved`, `Burned`, `Captured`, `Proved`) → the
+///   record is handed back when `--allow-retry` is set **or when it carries no
+///   `an_tx_hash`**, and refused otherwise. The second half is not a relaxation
+///   and this doc used to omit it: a hash-less record is the one case this
+///   function cannot decide, because whether a burn is on the wire depends on
+///   whether another run holds the withdrawal lock, which only the caller
+///   knows. So it is returned as `(record, Found)` for `decide_burn` to refuse
+///   with the liveness verdict attached — naming `--allow-retry` from here
+///   instead would send the operator to a refusal whose own text is
+///   "--allow-retry does NOT override this".
+///
+///   When the flag IS what let it through, the **prior record is returned
+///   as-is** — `an_tx_hash`, `withdrawal_msg_id` and `block_seq_no` are
+///   all preserved so the orchestrator can skip stages that already
 ///   completed. This is v1's resume path (a `--resume` alias may be added
 ///   later).
 pub fn reserve(
@@ -925,9 +935,26 @@ impl WithdrawalLock {
         // verdict. This function is called while BUILDING a refusal, so it
         // has nowhere to propagate to; what it must never do is answer
         // "nobody holds it" because it could not ask.
-        Self::try_acquire(state_dir, key)
-            .ok()
-            .and_then(|a| a.holder_verdict())
+        //
+        // Collapsing is not the same as discarding. The verdict for `None`
+        // deliberately names no cause, because this arm covers a
+        // filesystem that cannot lock AND an attempt that failed —
+        // EACCES, EMFILE, an unrecognised errno — and only the error says
+        // which. It is logged here rather than folded away: this is the
+        // one place that has it, and an operator staring at "could not be
+        // determined" has no other way to learn why.
+        match Self::try_acquire(state_dir, key) {
+            Ok(attempt) => attempt.holder_verdict(),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "could not test the withdrawal lock, so this refusal cannot say whether \
+                     another run holds this withdrawal. Resolve the error above before acting \
+                     on the record",
+                );
+                None
+            },
+        }
     }
 }
 
@@ -954,9 +981,19 @@ pub fn liveness_verdict(holder: Option<bool>) -> &'static str {
              record you are looking at."
         },
         None => {
-            "Whether another process holds this withdrawal could not be determined here (`flock` \
-             is unavailable — a network mount, typically), so the on-chain reconciliation below is \
-             the only evidence available."
+            // Deliberately does not name a cause. This arm is reached both
+            // when the filesystem cannot lock — a network mount, the usual
+            // one — and when the attempt itself failed: EACCES on the
+            // state directory, EMFILE when the process is out of
+            // descriptors, an errno nobody has seen yet. Asserting the
+            // first while the truth was the second sends an operator to
+            // check their mount when they are out of file handles. The
+            // reason is logged as a warning by `probe_holder`, which is
+            // the one place that has it.
+            "Whether another process holds this withdrawal could not be determined here — the lock \
+             could neither be taken nor tested, and the log line above this refusal says why. \
+             Until that is resolved the on-chain reconciliation below is the only evidence \
+             available, and it cannot see a burn that is in flight right now."
         },
     }
 }

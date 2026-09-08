@@ -1002,9 +1002,20 @@ fn resume_recorded_burn(
             // disk exits 3. Deleting the file is not consent, and it is
             // the CLI's own message that tells operators to delete it.
             //
-            // Restore FIRST and ask second. Refusing before writing would
-            // leave behind the fresh hash-less reservation this arm was
-            // handed, which `read_record` rejects forever.
+            // Restore FIRST and ask second — and the reason given here
+            // used to be wrong. It said the fresh hash-less reservation
+            // left behind by refusing early is one `read_record` "rejects
+            // forever". It is not: that guard fires on a hash-less record
+            // whose status is `Burned` or later, and this one is
+            // `Reserved`, which reads back fine.
+            //
+            // The ordering is still right, for the reason the wrong
+            // sentence was standing in for. What refusing early leaves is
+            // a record that says no burn ever happened, sitting on an
+            // identity for which one did — so the next run reads it, sees
+            // no hash, and is one deleted file away from burning again.
+            // Restoring first means the evidence is on disk before
+            // anything can refuse, whatever the refusal turns out to be.
             //
             // `reserve` reports its own failures as pre-send refusals,
             // which is correct at its other call site and false at this

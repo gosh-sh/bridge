@@ -173,7 +173,8 @@ pub async fn run(
         // A dry run neither reads nor writes idempotency state (spec).
         None
     } else {
-        idempotency::peek(&state_dir, &from, &to, &amount)?
+        idempotency::peek(&state_dir, &from, &to, &amount)
+            .map_err(refusal_reading_a_record_that_exists)?
     };
 
     // A prior record carrying an an_tx_hash means the burn is already on
@@ -1223,6 +1224,52 @@ fn resume_recorded_burn(
 /// half of exit 2's contract holds — but the withdrawal it is refusing
 /// has a burn on chain and a record on disk, which is the half an
 /// operator acts on.
+/// Re-badge the refusal that ESTABLISHES the fact the helper below acts
+/// on.
+///
+/// `peek` is the one call in stage 1 that cannot be told whether a burn
+/// is recorded, because it is the call that finds out. It does not need
+/// to be told: it returns `Ok(None)` when the record file is absent, so
+/// every `Err` it produces is about a file that **demonstrably exists**
+/// — unreadable, torn, or failing a cross-field guard. That is a weaker
+/// fact than a hash, and it is enough.
+///
+/// The message was fixed last round to say "do NOT delete it on the
+/// strength of that … a torn record is not evidence that no burn
+/// happened". The exit code went on saying 2, whose published
+/// remediation is that no state file was written — about the very file
+/// whose existence is the reason the refusal fired. A human reading the
+/// text was protected and a wrapper reading the code was not.
+fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
+    // Same four variants, named for the same reason: a new one has to be
+    // considered here rather than escaping as exit 2.
+    let reason = match &e {
+        CliError::Preflight {
+            ..
+        }
+        | CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        } => format!("{e}"),
+        _ => return e,
+    };
+    CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "the record for this withdrawal could not be read: {reason}\n\x20 This run got no \
+             further than reading it, so it added nothing to either chain — but a record for this \
+             identity EXISTS, which is why this refusal fired, and no AN tx hash could be \
+             recovered from it. Whether a burn is on the wire cannot be answered locally at all. \
+             Reconcile on chain before touching that file: the advanced runbook, Case 3a.",
+        ),
+        source: None,
+    }
+}
+
 fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError {
     let Some(an_tx) = an_tx else {
         return e;
@@ -2549,18 +2596,107 @@ mod tests {
             "which is the sentence the exit-2 page contradicts: {msg}",
         );
 
-        // Exit 3 and everything past the send pass through: they carry
-        // remedies of their own and re-badging them would hide those.
-        let duplicate = refusal_before_a_recorded_burn(
+        // EXIT 3 is the one that had to be checked and was not: this
+        // assertion used to name `CaptureTimeout` while its comment
+        // talked about exit 3, so re-badging by exit code rather than by
+        // variant shipped green. What that costs is specific — a run
+        // refused because ANOTHER PROCESS holds the lock is told to
+        // reconcile a chain instead of to wait, and the liveness verdict
+        // it carries, the sentence that decides whether a record may be
+        // deleted, is dropped on the way.
+        let contended = refusal_before_a_recorded_burn(
+            CliError::ReservationInFlight {
+                prior_status: "reserved".into(),
+                prior_msg_id: None,
+                record_path: "/dev/null".into(),
+                liveness: idempotency::liveness_verdict(Some(true)).to_string(),
+            },
+            Some(&an),
+        );
+        assert_eq!(
+            contended.exit_code().as_i32(),
+            3,
+            "a refusal whose remedy is `wait` must not become one whose remedy is `reconcile`: \
+             {contended}",
+        );
+        assert!(
+            format!("{contended}").contains("RIGHT NOW"),
+            "and the liveness verdict has to survive, because it is what decides whether the \
+             record may be deleted: {contended}",
+        );
+
+        // Everything past the send passes through too, for the same
+        // reason: those codes name the stage that failed.
+        let captured = refusal_before_a_recorded_burn(
             CliError::CaptureTimeout {
                 an_tx: an.clone(),
             },
             Some(&an),
         );
         assert_eq!(
-            duplicate.exit_code().as_i32(),
+            captured.exit_code().as_i32(),
             11,
-            "only the exit-2 half moves: {duplicate}",
+            "only the exit-2 half moves: {captured}",
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_read_is_not_reported_as_a_record_that_is_not_there() {
+        // `peek` is the one stage-1 call that cannot be handed the fact,
+        // because it is the call that establishes it — and it does not
+        // need to be. It answers `Ok(None)` when the file is absent, so
+        // every `Err` it returns is about a file that demonstrably
+        // exists. That is weaker than a hash and it is enough: exit 2's
+        // remediation says no state file was written, about the very file
+        // whose existence made the refusal fire.
+        //
+        // The message was fixed a round ago to say "do NOT delete it on
+        // the strength of that". The exit code went on saying the
+        // opposite, so the operator reading the prose was protected and
+        // the wrapper reading the code was not.
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = idempotency::key(&seam_from(), &seam_to(), &UsdcAmount(1_000_000));
+        idempotency::ensure_state_dir(dir.path()).unwrap();
+        std::fs::write(idempotency::record_path(dir.path(), &key), b"{ not json").unwrap();
+
+        let torn = idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+            .expect_err("a torn record is a refusal, not an absent one");
+        assert_eq!(
+            torn.exit_code().as_i32(),
+            2,
+            "the raw refusal is still a pre-send one — the re-badge is the call site's job",
+        );
+
+        let rebadged = refusal_reading_a_record_that_exists(torn);
+        assert_eq!(
+            rebadged.exit_code().as_i32(),
+            10,
+            "a wrapper keying on 2 would read this as a clean slate: {rebadged}",
+        );
+        let msg = format!("{rebadged}");
+        assert!(
+            msg.contains("EXISTS") && msg.contains("cannot be answered locally"),
+            "the operator has to be told what is there and what cannot be known about it: {msg}",
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("nothing was sent"),
+            "the sentence a retry wrapper acts on, about an identity that may carry a burn: {msg}",
+        );
+
+        // An ABSENT record is not a refusal at all, so nothing to
+        // re-badge: the first run of a fresh withdrawal must not be told
+        // a record exists.
+        let empty = tempfile::TempDir::new().unwrap();
+        assert!(
+            idempotency::peek(
+                empty.path(),
+                &seam_from(),
+                &seam_to(),
+                &UsdcAmount(1_000_000)
+            )
+            .expect("an absent record is not an error")
+            .is_none(),
+            "which is what makes the re-badge above unconditional",
         );
     }
 
@@ -2573,9 +2709,12 @@ mod tests {
         // rather than the list.
         let src = include_str!("orchestrator.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        // From the PEEK, not from the predicate the peek feeds: the peek
+        // is itself a stage-1 refusal, and its `Err` is about a record
+        // file that exists.
         let from = production
-            .find(concat!("let burn_already", "_sent ="))
-            .expect("stage 1 begins where the predicate is computed");
+            .find(concat!("let prior = if dry", "_run {"))
+            .expect("stage 1 begins where the prior record is read");
         let to = production[from..]
             .find(concat!("burn::", "compose("))
             .map_or(production.len(), |i| from + i);
@@ -2583,7 +2722,9 @@ mod tests {
 
         let mut bare = Vec::new();
         for (n, line) in region.iter().enumerate() {
-            if line.trim_start().starts_with("//") || !line.contains("preflight::") {
+            let interesting =
+                line.contains("preflight::") || line.contains(concat!("idempotency::", "peek("));
+            if line.trim_start().starts_with("//") || !interesting {
                 continue;
             }
             // To the end of this statement, at depth zero.
@@ -2599,7 +2740,9 @@ mod tests {
             }
             let stmt = region[n..end].join("\n");
             // A `let` of a type, or a call that never fails, has no `?`.
-            if stmt.contains('?') && !stmt.contains(concat!("refusal_before_a_recorded", "_burn")) {
+            let rebadged = stmt.contains(concat!("refusal_before_a_recorded", "_burn"))
+                || stmt.contains(concat!("refusal_reading_a_record_that", "_exists"));
+            if stmt.contains('?') && !rebadged {
                 bare.push(stmt);
             }
         }

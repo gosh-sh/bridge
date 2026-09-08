@@ -959,9 +959,21 @@ assigns it when the release is tagged.
   burn. A first run's preflight refusal is unchanged — with no prior
   burn, exit 2 is exactly right.
 
+  **A record that cannot be READ moves too.** Stage 1 reads the prior
+  record before anything else, and that read is the call that finds out
+  whether a burn is recorded — so it cannot be told. It does not need to
+  be: an absent record is not an error, so every failure of that read is
+  about a file that demonstrably exists. A torn or unreadable record
+  exits 10, not 2. Its message already said "do NOT delete it on the
+  strength of that"; the exit code said no state file was written, about
+  the very file whose existence made the refusal fire.
+
   Scripts that pattern-match exit codes: this is the last of the exit-2
   reclassifications in this branch. Preflight refusals on a fresh
-  withdrawal stay 2; on a withdrawal with a recorded burn they become 10.
+  withdrawal stay 2; on a withdrawal with a recorded burn, or one whose
+  record cannot be read, they become 10. Exit 3 is untouched — a run
+  refused because another process holds the lock still gets the wait
+  remedy and the liveness verdict with it.
 
 - **CLI README and advanced runbook: `proof_event_<seq>.json` is not in
   `work_dir/`.** Both directory listings placed it there and the

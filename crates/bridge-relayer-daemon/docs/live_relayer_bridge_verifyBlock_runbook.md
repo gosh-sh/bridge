@@ -267,7 +267,11 @@ for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY \
 done
 ```
 
-All ten variables must print `ok`. `BRIDGE_BOOTSTRAP_SEQNO` must equal
+All ten variables must print `ok`. Optional: `BRIDGE_GQL_FAILOVER_ENDPOINTS`
+(comma-separated GraphQL endpoints tried after `BRIDGE_GQL_ENDPOINT` exhausts
+its three retries; the daemon cycles through the list until a request
+succeeds) and `RELAYER_METRICS_ADDR` (Prometheus `/metrics` bind address,
+e.g. `0.0.0.0:9464`). `BRIDGE_BOOTSTRAP_SEQNO` must equal
 the contract's `storedLastSeenBlockSeqNo` at construction — verify with
 `cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL`.
 

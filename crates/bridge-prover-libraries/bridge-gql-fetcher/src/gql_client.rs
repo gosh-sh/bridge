@@ -1,22 +1,259 @@
+use std::{
+    collections::BTreeMap,
+    sync::Once,
+    time::{Duration, Instant},
+};
+
 use anyhow::{bail, Context};
-use serde_json::{json, Value};
-
-use std::collections::BTreeMap;
-use crate::types::{AccountRouting, ThreadIdentifier};
-
 /// Canonical block-id Merkle leaf count (protocol-fixed = 16). Sourced from
 /// the circuits repo so the GraphQL projection stays in lock-step with the
 /// circuit witness layout — no local `= 16` literal to drift out of sync.
 pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
+use metrics::{counter, describe_counter, describe_histogram, histogram};
+use serde_json::{json, Value};
+use tracing::{error, warn};
+
+use crate::types::{AccountRouting, ThreadIdentifier};
 
 /// Largest height accepted by the live GraphQL schema. Although Rust-side
 /// block heights are `u64`, GraphQL exposes `height_end` as a signed `Int`.
 pub const GRAPHQL_SIGNED_INT_MAX: u64 = i64::MAX as u64;
 
 /// Lightweight GraphQL client for the acki-nacki node.
+///
+/// Holds an ordered endpoint list: `[0]` is the primary (the historical
+/// single `BRIDGE_GQL_ENDPOINT`), the rest are failover targets. Every
+/// request starts at the primary, retries it `retries_per_endpoint` times
+/// `retry_delay` apart, then moves to the next endpoint, and cycles through
+/// the whole list until one attempt succeeds (or `max_rounds` is reached).
+/// There is no stickiness: the next request starts from the primary again.
+///
+/// Every failure counts the same way — transport error, timeout, non-2xx
+/// status, undecodable body, a GraphQL `errors` array, or a `null` where the
+/// caller declared a required object (see [`GqlClient::query_op`]). The daemon
+/// cannot make progress without the data anyway, so a request that keeps
+/// failing is meant to be caught by the `relayer_gql_*` metrics, not by an
+/// error return.
 pub struct GqlClient {
     http: reqwest::Client,
-    url: String,
+    endpoints: Vec<String>,
+    cfg: GqlClientConfig,
+}
+
+/// Default whole-request timeout (connect + send + response body).
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default TCP connect timeout. Keeps a black-holed endpoint from eating the
+/// full request timeout on every attempt.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default attempts per endpoint before failing over to the next one.
+pub const DEFAULT_RETRIES_PER_ENDPOINT: u32 = 3;
+/// Default sleep between attempts and between endpoint switches.
+pub const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Environment overrides consumed by [`GqlClientConfig::from_env`].
+pub const ENV_REQUEST_TIMEOUT_SECS: &str = "BRIDGE_GQL_REQUEST_TIMEOUT_SECS";
+pub const ENV_CONNECT_TIMEOUT_SECS: &str = "BRIDGE_GQL_CONNECT_TIMEOUT_SECS";
+pub const ENV_RETRIES_PER_ENDPOINT: &str = "BRIDGE_GQL_RETRIES_PER_ENDPOINT";
+pub const ENV_RETRY_DELAY_MS: &str = "BRIDGE_GQL_RETRY_DELAY_MS";
+pub const ENV_MAX_ROUNDS: &str = "BRIDGE_GQL_MAX_ROUNDS";
+
+/// Retry / failover policy and HTTP timeouts for [`GqlClient`].
+#[derive(Debug, Clone)]
+pub struct GqlClientConfig {
+    /// Whole-request timeout (connect + send + response body).
+    pub request_timeout: Duration,
+    /// TCP connect timeout.
+    pub connect_timeout: Duration,
+    /// Attempts per endpoint before failing over to the next one. Minimum 1.
+    pub retries_per_endpoint: u32,
+    /// Sleep between attempts and between endpoint switches.
+    pub retry_delay: Duration,
+    /// How many full passes over the endpoint list to make before giving
+    /// up. `None` = loop forever (the daemon default).
+    pub max_rounds: Option<u32>,
+}
+
+impl Default for GqlClientConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            retries_per_endpoint: DEFAULT_RETRIES_PER_ENDPOINT,
+            retry_delay: DEFAULT_RETRY_DELAY,
+            max_rounds: None,
+        }
+    }
+}
+
+impl GqlClientConfig {
+    /// One attempt, no retry, error returned to the caller — the behaviour
+    /// [`create_client`] always had. Used by one-shot tools and the CLI,
+    /// where hanging on a bad endpoint is worse than failing.
+    pub fn single_attempt() -> Self {
+        Self {
+            retries_per_endpoint: 1,
+            max_rounds: Some(1),
+            ..Self::default()
+        }
+    }
+
+    /// Defaults overridden by `BRIDGE_GQL_REQUEST_TIMEOUT_SECS`,
+    /// `BRIDGE_GQL_CONNECT_TIMEOUT_SECS`, `BRIDGE_GQL_RETRIES_PER_ENDPOINT`,
+    /// `BRIDGE_GQL_RETRY_DELAY_MS` and `BRIDGE_GQL_MAX_ROUNDS` (`0` or unset
+    /// = loop forever) when they are set and non-empty.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let mut cfg = Self::default();
+        if let Some(secs) = env_parse::<u64>(ENV_REQUEST_TIMEOUT_SECS)? {
+            cfg.request_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = env_parse::<u64>(ENV_CONNECT_TIMEOUT_SECS)? {
+            cfg.connect_timeout = Duration::from_secs(secs);
+        }
+        if let Some(n) = env_parse::<u32>(ENV_RETRIES_PER_ENDPOINT)? {
+            cfg.retries_per_endpoint = n;
+        }
+        if let Some(ms) = env_parse::<u64>(ENV_RETRY_DELAY_MS)? {
+            cfg.retry_delay = Duration::from_millis(ms);
+        }
+        if let Some(rounds) = env_parse::<u32>(ENV_MAX_ROUNDS)? {
+            cfg.max_rounds = (rounds > 0).then_some(rounds);
+        }
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.retries_per_endpoint >= 1,
+            "{ENV_RETRIES_PER_ENDPOINT} must be >= 1"
+        );
+        anyhow::ensure!(
+            self.request_timeout > Duration::ZERO,
+            "{ENV_REQUEST_TIMEOUT_SECS} must be > 0"
+        );
+        anyhow::ensure!(
+            self.connect_timeout > Duration::ZERO,
+            "{ENV_CONNECT_TIMEOUT_SECS} must be > 0"
+        );
+        Ok(())
+    }
+}
+
+fn env_parse<T>(name: &str) -> anyhow::Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(name) {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<T>()
+            .map(Some)
+            .map_err(|e| anyhow::format_err!("{name}={raw:?}: {e}")),
+        _ => Ok(None),
+    }
+}
+
+/// One failed attempt against one endpoint. [`AttemptError::kind`] is the
+/// low-cardinality label used by `relayer_gql_errors_total`.
+#[derive(Debug)]
+enum AttemptError {
+    Transport(reqwest::Error),
+    HttpStatus(reqwest::StatusCode),
+    Decode(reqwest::Error),
+    GraphqlErrors(String),
+    MissingData,
+    NullData(String),
+}
+
+impl AttemptError {
+    fn kind(&self) -> &'static str {
+        match self {
+            AttemptError::Transport(e) if e.is_timeout() => "timeout",
+            AttemptError::Transport(_) => "transport",
+            AttemptError::HttpStatus(_) => "http_status",
+            AttemptError::Decode(_) => "decode",
+            AttemptError::GraphqlErrors(_) => "graphql_error",
+            AttemptError::MissingData | AttemptError::NullData(_) => "null_data",
+        }
+    }
+}
+
+impl std::fmt::Display for AttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttemptError::Transport(e) => write!(f, "transport: {e}"),
+            AttemptError::HttpStatus(s) => write!(f, "HTTP status {s}"),
+            AttemptError::Decode(e) => write!(f, "undecodable response body: {e}"),
+            AttemptError::GraphqlErrors(s) => write!(f, "GraphQL errors: {s}"),
+            AttemptError::MissingData => write!(f, "response has no `data` field"),
+            AttemptError::NullData(p) => write!(f, "required object `{p}` is null"),
+        }
+    }
+}
+
+/// Keep logged GraphQL error payloads bounded.
+const MAX_LOGGED_ERROR_CHARS: usize = 1000;
+
+fn truncate_for_log(s: &str) -> String {
+    if s.chars().count() <= MAX_LOGGED_ERROR_CHARS {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(MAX_LOGGED_ERROR_CHARS).collect();
+        format!("{head}…(truncated)")
+    }
+}
+
+fn describe_metrics_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        describe_counter!(
+            "relayer_gql_requests_total",
+            "GraphQL request attempts, by endpoint and operation."
+        );
+        describe_counter!(
+            "relayer_gql_errors_total",
+            "Failed GraphQL request attempts, by endpoint, operation and error kind."
+        );
+        describe_counter!(
+            "relayer_gql_failovers_total",
+            "Switches to the next GraphQL endpoint after the previous one exhausted its retries."
+        );
+        describe_counter!(
+            "relayer_gql_full_rounds_total",
+            "Full passes over every configured GraphQL endpoint without a successful attempt."
+        );
+        describe_histogram!(
+            "relayer_gql_request_duration_seconds",
+            "Wall time of one GraphQL request attempt."
+        );
+    });
+}
+
+/// Turn a bare `host[:port]`, a base URL or a full `/graphql` URL into the
+/// POST target the client uses.
+pub fn normalize_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.trim();
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        if endpoint.trim_end_matches('/').ends_with("/graphql") {
+            endpoint.to_string()
+        } else {
+            format!("{}/graphql", endpoint.trim_end_matches('/'))
+        }
+    } else {
+        format!("http://{}/graphql", endpoint)
+    }
+}
+
+/// Split a comma-separated endpoint list (`BRIDGE_GQL_FAILOVER_ENDPOINTS`).
+/// Surrounding whitespace is trimmed and empty items are dropped, so an
+/// unset or empty variable yields no failover endpoints.
+pub fn parse_endpoint_list(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Block metadata used for computing block leaf hashes.
@@ -74,39 +311,223 @@ pub struct GqlProofBlock {
     pub block_merkle_tree_leaves: Option<[[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT]>,
 }
 
+/// Single-endpoint client with the historical one-attempt semantics
+/// ([`GqlClientConfig::single_attempt`]): a failed request returns an error
+/// to the caller instead of retrying.
 pub fn create_client(endpoint: &str) -> anyhow::Result<GqlClient> {
-    let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        if endpoint.trim_end_matches('/').ends_with("/graphql") {
-            endpoint.to_string()
-        } else {
-            format!("{}/graphql", endpoint.trim_end_matches('/'))
+    create_client_with_failover(endpoint, &[], GqlClientConfig::single_attempt())
+}
+
+/// Client with a primary endpoint plus ordered failover endpoints and the
+/// retry policy in `cfg`. Duplicates of the primary (or of earlier failover
+/// entries) are dropped; empty entries are ignored.
+pub fn create_client_with_failover(
+    primary: &str,
+    failover: &[String],
+    cfg: GqlClientConfig,
+) -> anyhow::Result<GqlClient> {
+    anyhow::ensure!(
+        !primary.trim().is_empty(),
+        "primary GraphQL endpoint is empty"
+    );
+    cfg.validate()?;
+    let mut endpoints = vec![normalize_endpoint(primary)];
+    for candidate in failover {
+        if candidate.trim().is_empty() {
+            continue;
         }
-    } else {
-        format!("http://{}/graphql", endpoint)
-    };
+        let url = normalize_endpoint(candidate);
+        if !endpoints.contains(&url) {
+            endpoints.push(url);
+        }
+    }
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(cfg.request_timeout)
+        .connect_timeout(cfg.connect_timeout)
         .build()
         .context("failed to create HTTP client")?;
-    Ok(GqlClient { http, url })
+    describe_metrics_once();
+    Ok(GqlClient {
+        http,
+        endpoints,
+        cfg,
+    })
 }
 
 impl GqlClient {
+    /// Ordered endpoint list; `[0]` is the primary.
+    pub fn endpoints(&self) -> &[String] {
+        &self.endpoints
+    }
+
+    pub fn config(&self) -> &GqlClientConfig {
+        &self.cfg
+    }
+
+    /// Run a raw query with the client's retry/failover policy. Prefer
+    /// [`Self::query_op`] from typed helpers so metrics carry an operation
+    /// label and `null` results can be declared as failures.
     pub async fn query(&self, query: &str) -> anyhow::Result<Value> {
+        self.query_op("raw", query, &[]).await
+    }
+
+    /// Run `query` and return its `data` object. `op` is the low-cardinality
+    /// operation label for metrics and logs. Every JSON pointer in
+    /// `required_non_null` (e.g. `"/blockchain/blockByHeight"`) must resolve
+    /// to a non-null value, otherwise the attempt counts as a `null_data`
+    /// failure and the retry/failover loop continues — a block that one
+    /// endpoint does not have is exactly the case failover exists for.
+    ///
+    /// Returns `Err` only when [`GqlClientConfig::max_rounds`] is set and
+    /// exhausted; with the daemon default (`None`) this loops until an
+    /// attempt succeeds.
+    pub async fn query_op(
+        &self,
+        op: &'static str,
+        query: &str,
+        required_non_null: &[&str],
+    ) -> anyhow::Result<Value> {
+        let retries = self.cfg.retries_per_endpoint.max(1);
+        let count = self.endpoints.len();
+        let mut round: u32 = 0;
+        let mut last_error: Option<AttemptError> = None;
+        loop {
+            for (idx, endpoint) in self.endpoints.iter().enumerate() {
+                for attempt in 1..=retries {
+                    let started = Instant::now();
+                    let result = self.query_once(endpoint, query, required_non_null).await;
+                    let elapsed = started.elapsed().as_secs_f64();
+                    counter!(
+                        "relayer_gql_requests_total",
+                        "endpoint" => endpoint.clone(),
+                        "op" => op
+                    )
+                    .increment(1);
+                    match result {
+                        Ok(data) => {
+                            histogram!(
+                                "relayer_gql_request_duration_seconds",
+                                "endpoint" => endpoint.clone(),
+                                "op" => op,
+                                "outcome" => "ok"
+                            )
+                            .record(elapsed);
+                            return Ok(data);
+                        },
+                        Err(e) => {
+                            histogram!(
+                                "relayer_gql_request_duration_seconds",
+                                "endpoint" => endpoint.clone(),
+                                "op" => op,
+                                "outcome" => "error"
+                            )
+                            .record(elapsed);
+                            counter!(
+                                "relayer_gql_errors_total",
+                                "endpoint" => endpoint.clone(),
+                                "op" => op,
+                                "kind" => e.kind()
+                            )
+                            .increment(1);
+                            warn!(
+                                endpoint = %endpoint,
+                                op,
+                                attempt,
+                                retries,
+                                round,
+                                error = %e,
+                                "GraphQL request failed",
+                            );
+                            last_error = Some(e);
+                            if attempt < retries {
+                                tokio::time::sleep(self.cfg.retry_delay).await;
+                            }
+                        },
+                    }
+                }
+                if idx + 1 < count {
+                    let next = &self.endpoints[idx + 1];
+                    counter!(
+                        "relayer_gql_failovers_total",
+                        "from" => endpoint.clone(),
+                        "to" => next.clone()
+                    )
+                    .increment(1);
+                    warn!(
+                        from = %endpoint,
+                        to = %next,
+                        op,
+                        "GraphQL endpoint exhausted its retries; failing over",
+                    );
+                    tokio::time::sleep(self.cfg.retry_delay).await;
+                }
+            }
+            round += 1;
+            counter!("relayer_gql_full_rounds_total", "op" => op).increment(1);
+            if let Some(max_rounds) = self.cfg.max_rounds {
+                if round >= max_rounds {
+                    let reason = last_error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "no attempt was made".to_string());
+                    bail!(
+                        "GraphQL `{op}` failed on all {count} endpoint(s) after {round} round(s): \
+                         {reason}"
+                    );
+                }
+            }
+            error!(
+                op,
+                round,
+                endpoints = count,
+                "every GraphQL endpoint failed; retrying from the primary",
+            );
+            tokio::time::sleep(self.cfg.retry_delay).await;
+        }
+    }
+
+    async fn query_once(
+        &self,
+        endpoint: &str,
+        query: &str,
+        required_non_null: &[&str],
+    ) -> Result<Value, AttemptError> {
         let resp = self
             .http
-            .post(&self.url)
+            .post(endpoint)
             .json(&json!({ "query": query }))
             .send()
             .await
-            .context("GraphQL request failed")?;
-        let body: Value = resp.json().await.context("failed to decode GraphQL response")?;
-        if let Some(errors) = body.get("errors") {
-            bail!("GraphQL error: {}", errors);
+            .map_err(AttemptError::Transport)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(AttemptError::HttpStatus(status));
         }
-        body.get("data")
-            .cloned()
-            .ok_or_else(|| anyhow::format_err!("no 'data' field in GraphQL response"))
+        let body: Value = resp.json().await.map_err(|e| {
+            if e.is_decode() {
+                AttemptError::Decode(e)
+            } else {
+                AttemptError::Transport(e)
+            }
+        })?;
+        if let Some(errors) = body.get("errors") {
+            return Err(AttemptError::GraphqlErrors(truncate_for_log(
+                &errors.to_string(),
+            )));
+        }
+        let data = match body.get("data") {
+            Some(Value::Null) | None => return Err(AttemptError::MissingData),
+            Some(data) => data.clone(),
+        };
+        for pointer in required_non_null {
+            match data.pointer(pointer) {
+                Some(Value::Null) | None => {
+                    return Err(AttemptError::NullData((*pointer).to_string()));
+                },
+                Some(_) => {},
+            }
+        }
+        Ok(data)
     }
 
     /// Fetch the latest N blocks (hash + seq_no).
@@ -114,7 +535,9 @@ impl GqlClient {
         let q = format!(
             r#"{{ blockchain {{ blocks(last: {count}) {{ edges {{ node {{ hash seq_no }} }} }} }} }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self
+            .query_op("latest_blocks", &q, &["/blockchain/blocks"])
+            .await?;
         let edges = data
             .pointer("/blockchain/blocks/edges")
             .and_then(|v| v.as_array())
@@ -166,7 +589,9 @@ impl GqlClient {
               }}
             }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self
+            .query_op("bk_set_updates_light", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
         let edges = data
             .pointer("/blockchain/bkSetUpdates/edges")
             .and_then(|v| v.as_array())
@@ -225,7 +650,9 @@ impl GqlClient {
               }}
             }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self
+            .query_op("bk_set_updates_last", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
         let edges = data
             .pointer("/blockchain/bkSetUpdates/edges")
             .and_then(|v| v.as_array())
@@ -242,18 +669,17 @@ impl GqlClient {
 
     /// Fetch block metadata by seq_no: hash, envelope_hash, seq_no.
     /// Used for computing block leaf hashes in chain proof construction.
-    pub async fn query_block_metadata(
-        &self,
-        seq_no: u64,
-    ) -> anyhow::Result<BlockMetadata> {
+    pub async fn query_block_metadata(&self, seq_no: u64) -> anyhow::Result<BlockMetadata> {
         let tid = "00000000000000000000000000000000000000000000000000000000000000000000";
         let q = format!(
             r#"{{ blockchain {{ blockByHeight(thread_id: "{tid}", height: {seq_no}) {{ hash envelope_hash seq_no }} }} }}"#
         );
-        let data = self.query(&q).await?;
-        let block = data
-            .pointer("/blockchain/blockByHeight")
-            .ok_or_else(|| anyhow::format_err!("blockByHeight returned null for seq_no={}", seq_no))?;
+        let data = self
+            .query_op("block_metadata", &q, &["/blockchain/blockByHeight"])
+            .await?;
+        let block = data.pointer("/blockchain/blockByHeight").ok_or_else(|| {
+            anyhow::format_err!("blockByHeight returned null for seq_no={}", seq_no)
+        })?;
         if block.is_null() {
             anyhow::bail!("block at seq_no={} not found", seq_no);
         }
@@ -328,7 +754,9 @@ impl GqlClient {
               }}
             }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self
+            .query_op("bk_set_updates_paged", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
         let edges = data
             .pointer("/blockchain/bkSetUpdates/edges")
             .and_then(|v| v.as_array())
@@ -404,7 +832,9 @@ impl GqlClient {
               }}
             }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self
+            .query_op("bk_set_updates", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
         let edges = data
             .pointer("/blockchain/bkSetUpdates/edges")
             .and_then(|v| v.as_array())
@@ -551,10 +981,12 @@ impl GqlClient {
             }}"#,
         );
         let _ = PROOF_BLOCK_FRAGMENT; // keep fragment as documentation
-        let data = self.query(&q).await?;
-        let block = data
-            .pointer("/blockchain/blockByHeight")
-            .ok_or_else(|| anyhow::format_err!("blockByHeight returned no field for height={height}"))?;
+        let data = self
+            .query_op("proof_block", &q, &["/blockchain/blockByHeight"])
+            .await?;
+        let block = data.pointer("/blockchain/blockByHeight").ok_or_else(|| {
+            anyhow::format_err!("blockByHeight returned no field for height={height}")
+        })?;
         if block.is_null() {
             anyhow::bail!("block at thread_id={thread_id_hex} height={height} not found");
         }
@@ -588,7 +1020,7 @@ impl GqlClient {
             r#"{{ blockchain {{ blockByHeight(thread_id: "{DEFAULT_THREAD_ID_HEX}", height: {target_seq_no}) {{ seq_no attestations {{ block_id parent_block_id target_type envelope_hash aggregated_signature signature_occurrences }} }} }} }}"#
         );
         let data = self
-            .query(&q)
+            .query_op("attestations", &q, &["/blockchain/blockByHeight"])
             .await
             .with_context(|| format!("blockByHeight({target_seq_no})"))?;
         let block = data
@@ -650,7 +1082,7 @@ impl GqlClient {
               }}
             }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self.query_op("bridge_extouts", &q, &[]).await?;
         let edges = data
             .pointer("/blockchain/account/messages/edges")
             .and_then(|v| v.as_array())
@@ -702,7 +1134,7 @@ impl GqlClient {
         let q = format!(
             r#"{{ blockchain {{ account(account_id: "{account_id_hex}", dapp_id: "{dapp_id_hex}") {{ info {{ dapp_id }} }} }} }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self.query_op("account_dapp_id", &q, &[]).await?;
         Ok(data
             .pointer("/blockchain/account/info/dapp_id")
             .and_then(|v| v.as_str())
@@ -719,7 +1151,7 @@ impl GqlClient {
         let q = format!(
             r#"{{ blockchain {{ block(hash: "{block_hash}") {{ hash block_id seq_no height envelope_hash key_block }} }} }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self.query_op("block_by_hash", &q, &[]).await?;
         let block = data
             .pointer("/blockchain/block")
             .ok_or_else(|| anyhow::format_err!("block(hash:{block_hash}) returned no field"))?;
@@ -762,8 +1194,10 @@ impl GqlClient {
         let q = format!(
             r#"{{ blockchain {{ transaction(hash: "{tx_hash}") {{ out_messages {{ id dst }} }} }} }}"#
         );
-        let data = self.query(&q).await?;
-        let tx = data.pointer("/blockchain/transaction").unwrap_or(&Value::Null);
+        let data = self.query_op("tx_out_messages", &q, &[]).await?;
+        let tx = data
+            .pointer("/blockchain/transaction")
+            .unwrap_or(&Value::Null);
         if tx.is_null() {
             return Ok(None);
         }
@@ -800,7 +1234,7 @@ impl GqlClient {
         let q1 = format!(
             r#"{{ blockchain {{ message(hash: "{msg_id}") {{ dst_transaction {{ id }} }} }} }}"#
         );
-        let data = self.query(&q1).await?;
+        let data = self.query_op("msg_dst_transaction", &q1, &[]).await?;
         let msg = data.pointer("/blockchain/message").unwrap_or(&Value::Null);
         if msg.is_null() {
             return Ok(None);
@@ -830,7 +1264,7 @@ impl GqlClient {
         let q = format!(
             r#"{{ blockchain {{ message(hash: "{msg_id}") {{ id boc dst created_at block_id src_dapp_id src_transaction {{ block_id }} }} }} }}"#
         );
-        let data = self.query(&q).await?;
+        let data = self.query_op("bridge_extout_by_id", &q, &[]).await?;
         let m = data.pointer("/blockchain/message").unwrap_or(&Value::Null);
         if m.is_null() {
             return Ok(None);
@@ -1124,5 +1558,311 @@ mod height_end_tests {
     #[test]
     fn u64_max_does_not_fit_live_graphql_signed_int() {
         assert!(i64::try_from(u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod failover_tests {
+    //! Retry / failover behaviour against scripted local HTTP servers. No
+    //! network, no recorder: `metrics` macros are no-ops without one, so the
+    //! assertions count accepted connections instead.
+
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use super::*;
+
+    const OK_BLOCKS: &str =
+        r#"{"data":{"blockchain":{"blocks":{"edges":[{"node":{"hash":"aa","seq_no":7}}]}}}}"#;
+    const NULL_BLOCK: &str = r#"{"data":{"blockchain":{"blockByHeight":null}}}"#;
+    const SOME_BLOCK: &str = r#"{"data":{"blockchain":{"blockByHeight":{"seq_no":7}}}}"#;
+    const GQL_ERRORS: &str = r#"{"errors":[{"message":"boom"}],"data":null}"#;
+
+    #[derive(Clone)]
+    enum Reply {
+        Json(&'static str),
+        Status(u16),
+        Drop,
+    }
+
+    struct MockServer {
+        url: String,
+        hits: Arc<AtomicUsize>,
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Scripted HTTP/1.1 responder: each accepted connection consumes the
+    /// next script entry (the last one repeats forever). `Connection: close`
+    /// makes reqwest open a new connection per attempt, so `hits` counts
+    /// attempts exactly.
+    async fn spawn(script: Vec<Reply>) -> MockServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_in_task = Arc::clone(&hits);
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                hits_in_task.fetch_add(1, Ordering::SeqCst);
+                let reply = script[served.min(script.len() - 1)].clone();
+                served += 1;
+
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(head_end) = find(&buf, b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                        let content_length = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        while buf.len() < head_end + 4 + content_length {
+                            let n = sock.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        break;
+                    }
+                }
+
+                let response = match reply {
+                    Reply::Drop => None,
+                    Reply::Status(code) => Some(format!(
+                        "HTTP/1.1 {code} Scripted\r\nContent-Length: 0\r\nConnection: \
+                         close\r\n\r\n"
+                    )),
+                    Reply::Json(body) => Some(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )),
+                };
+                if let Some(response) = response {
+                    let _ = sock.write_all(response.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+        MockServer {
+            url: format!("http://{addr}/graphql"),
+            hits,
+        }
+    }
+
+    fn fast(max_rounds: Option<u32>) -> GqlClientConfig {
+        GqlClientConfig {
+            retry_delay: Duration::from_millis(5),
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            max_rounds,
+            ..GqlClientConfig::default()
+        }
+    }
+
+    fn client(primary: &MockServer, failover: &[&MockServer], cfg: GqlClientConfig) -> GqlClient {
+        let failover: Vec<String> = failover.iter().map(|s| s.url.clone()).collect();
+        create_client_with_failover(&primary.url, &failover, cfg).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fails_over_after_retries_on_http_500() {
+        let primary = spawn(vec![Reply::Status(500)]).await;
+        let backup = spawn(vec![Reply::Json(OK_BLOCKS)]).await;
+        let gql = client(&primary, &[&backup], fast(None));
+
+        let blocks = gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(blocks, vec![("aa".to_string(), 7)]);
+        assert_eq!(
+            primary.hits.load(Ordering::SeqCst),
+            3,
+            "3 attempts on the primary"
+        );
+        assert_eq!(
+            backup.hits.load(Ordering::SeqCst),
+            1,
+            "1 attempt on the failover"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_required_object_counts_as_failure_and_fails_over() {
+        let primary = spawn(vec![Reply::Json(NULL_BLOCK)]).await;
+        let backup = spawn(vec![Reply::Json(SOME_BLOCK)]).await;
+        let gql = client(&primary, &[&backup], fast(None));
+
+        let data = gql
+            .query_op("test", "{ x }", &["/blockchain/blockByHeight"])
+            .await
+            .unwrap();
+        assert_eq!(
+            data.pointer("/blockchain/blockByHeight/seq_no"),
+            Some(&json!(7))
+        );
+        assert_eq!(primary.hits.load(Ordering::SeqCst), 3);
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_and_dropped_connections_are_retried_on_the_same_endpoint() {
+        let primary = spawn(vec![
+            Reply::Json(GQL_ERRORS),
+            Reply::Drop,
+            Reply::Json(OK_BLOCKS),
+        ])
+        .await;
+        let backup = spawn(vec![Reply::Json(OK_BLOCKS)]).await;
+        let gql = client(&primary, &[&backup], fast(None));
+
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(
+            primary.hits.load(Ordering::SeqCst),
+            3,
+            "errors, drop, then success"
+        );
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 0, "no failover needed");
+    }
+
+    #[tokio::test]
+    async fn every_request_starts_from_the_primary_again() {
+        let primary = spawn(vec![
+            Reply::Status(503),
+            Reply::Status(503),
+            Reply::Status(503),
+            Reply::Json(OK_BLOCKS),
+        ])
+        .await;
+        let backup = spawn(vec![Reply::Json(OK_BLOCKS)]).await;
+        let gql = client(&primary, &[&backup], fast(None));
+
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(primary.hits.load(Ordering::SeqCst), 3);
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 1);
+
+        // Primary recovered: the next request must not stick to the backup.
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(primary.hits.load(Ordering::SeqCst), 4);
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn single_endpoint_loops_until_it_recovers() {
+        let only = spawn(vec![
+            Reply::Status(502),
+            Reply::Status(502),
+            Reply::Status(502),
+            Reply::Status(502),
+            Reply::Status(502),
+            Reply::Json(OK_BLOCKS),
+        ])
+        .await;
+        let gql = client(&only, &[], fast(None));
+
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(
+            only.hits.load(Ordering::SeqCst),
+            6,
+            "two rounds of 3, success on the 6th"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_primary_fails_over() {
+        // Bind then drop: the port is free again and connections are refused.
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_url = format!("http://{}/graphql", dead.local_addr().unwrap());
+        drop(dead);
+        let backup = spawn(vec![Reply::Json(OK_BLOCKS)]).await;
+        let gql =
+            create_client_with_failover(&dead_url, std::slice::from_ref(&backup.url), fast(None))
+                .unwrap();
+
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn max_rounds_returns_an_error_instead_of_looping() {
+        let primary = spawn(vec![Reply::Status(500)]).await;
+        let backup = spawn(vec![Reply::Status(500)]).await;
+        let gql = client(&primary, &[&backup], fast(Some(2)));
+
+        let err = gql.query_latest_blocks(1).await.unwrap_err().to_string();
+        assert!(err.contains("after 2 round(s)"), "{err}");
+        assert!(err.contains("HTTP status 500"), "{err}");
+        assert_eq!(primary.hits.load(Ordering::SeqCst), 6);
+        assert_eq!(backup.hits.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    async fn legacy_create_client_makes_exactly_one_attempt() {
+        let only = spawn(vec![Reply::Status(500), Reply::Json(OK_BLOCKS)]).await;
+        let gql = create_client(&only.url).unwrap();
+
+        assert!(gql.query_latest_blocks(1).await.is_err());
+        assert_eq!(only.hits.load(Ordering::SeqCst), 1);
+        gql.query_latest_blocks(1).await.unwrap();
+        assert_eq!(only.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn endpoint_normalization_and_list_parsing() {
+        assert_eq!(normalize_endpoint("bm1:8080"), "http://bm1:8080/graphql");
+        assert_eq!(
+            normalize_endpoint("https://x.example/"),
+            "https://x.example/graphql"
+        );
+        assert_eq!(
+            normalize_endpoint(" https://x.example/graphql "),
+            "https://x.example/graphql"
+        );
+        assert_eq!(parse_endpoint_list(" a , ,b,, "), vec![
+            "a".to_string(),
+            "b".to_string()
+        ]);
+        assert!(parse_endpoint_list("").is_empty());
+
+        let gql = create_client_with_failover(
+            "https://p.example",
+            &[
+                "https://p.example/graphql".to_string(),
+                "".to_string(),
+                "bm2".to_string(),
+            ],
+            GqlClientConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(gql.endpoints(), &[
+            "https://p.example/graphql".to_string(),
+            "http://bm2/graphql".to_string()
+        ]);
+    }
+
+    #[test]
+    fn config_from_env_rejects_zero_retries() {
+        std::env::set_var(ENV_RETRIES_PER_ENDPOINT, "0");
+        let err = GqlClientConfig::from_env().unwrap_err().to_string();
+        std::env::remove_var(ENV_RETRIES_PER_ENDPOINT);
+        assert!(err.contains(ENV_RETRIES_PER_ENDPOINT), "{err}");
     }
 }

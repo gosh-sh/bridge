@@ -83,6 +83,13 @@ services:
     <<: *relayer-runtime
     build: *relayer-build
     init: true
+    environment:
+      RELAYER_RUNTIME_ENV_FILE: /run/secrets/runtime-env
+      # Prometheus text exporter inside the container; published below.
+      RELAYER_METRICS_ADDR: 0.0.0.0:9464
+    ports:
+      # Bind to the scrape network address in `.env` (default: localhost only).
+      - "${RELAYER_METRICS_LISTEN:-127.0.0.1:9464}:9464"
     entrypoint:
       - /opt/gosh-relayer/bin/container-entrypoint.sh
       - run

@@ -29,7 +29,7 @@ impl FromStr for AccountRouting {
     /// Accepts both encodings the node may emit:
     ///   * `"hexdapp::hexaccount"` (64 hex chars `::` 64 hex chars)
     ///   * 128 hex chars without separator (dapp || account)
-    /// Also tolerates the redirect form `"::hexaccount"` (dapp = account).
+    ///     Also tolerates the redirect form `"::hexaccount"` (dapp = account).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some((dapp, account)) = s.split_once("::") {
             let account_id = decode_32(account)?;

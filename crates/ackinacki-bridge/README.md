@@ -740,8 +740,9 @@ crates/ackinacki-bridge/                       ← run cwd
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
     ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
-    ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
+    │                                             (proof_event_<seq>.json is NOT here — it is
+    │                                              written only under --prover-out-dir)
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr via the smoke wrappers
 
 $HOME/.bridge-withdraw-state/                  ← default idempotency state dir

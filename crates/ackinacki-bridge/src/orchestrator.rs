@@ -181,6 +181,9 @@ pub async fn run(
     // sufficiency would refuse every resume of a full-balance withdrawal —
     // the exact scenario the record exists to rescue.
     let burn_already_sent = prior.as_ref().is_some_and(|p| p.an_tx_hash.is_some());
+    // The same fact, carried as the hash itself, because a refusal below
+    // has to NAME the transaction an operator must not act around.
+    let recorded_an_tx: Option<&str> = prior.as_ref().and_then(|p| p.an_tx_hash.as_deref());
 
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
@@ -193,7 +196,8 @@ pub async fn run(
         &args.usdc_bridge_account,
         preflight::BalanceCheck::from_burn_sent(burn_already_sent),
     )
-    .await?;
+    .await
+    .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
     info!(
         multisig_ecc3 = preflight.multisig_ecc3_balance,
         usdc_bridge = %preflight.usdc_bridge_extended,
@@ -204,7 +208,9 @@ pub async fn run(
     // key, and "the RPC is not the chain you named" / "there is nothing at
     // that address" are exactly the irreversible mistakes a preflight
     // exists to catch.
-    preflight::check_destination_chain(&args.rpc_url, to.chain_id).await?;
+    preflight::check_destination_chain(&args.rpc_url, to.chain_id)
+        .await
+        .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
     info!(chain_id = to.chain_id, "destination chain ok");
 
     // The identity our proof will carry. Both ids come from the
@@ -232,7 +238,8 @@ pub async fn run(
         expected_identity,
         &amount,
     )
-    .await?;
+    .await
+    .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
     // Signer + prover artifacts — real runs only (a dry-run has no
@@ -244,7 +251,8 @@ pub async fn run(
     // [`crate::preflight::PkFingerprint`].
     let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
     if let Some(p) = plumbing.as_ref() {
-        crate::preflight::parse_eth_signer(&p.eth_private_key)?;
+        crate::preflight::parse_eth_signer(&p.eth_private_key)
+            .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
         info!("burner key ok");
         pk_fingerprint = crate::preflight::check_prover_artifacts(
             p,
@@ -252,7 +260,8 @@ pub async fn run(
             args.pk_cache_dir.as_deref(),
             args.allow_verifier_drift,
         )
-        .await?;
+        .await
+        .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
         info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
@@ -305,7 +314,8 @@ pub async fn run(
         // keeping a byte-identical copy that mapped the failure to exit 10
         // — "the USDC has left the source multisig regardless", about a
         // run that had not composed a message yet.
-        let context = preflight::build_client_context(&args.gql_endpoint)?;
+        let context = preflight::build_client_context(&args.gql_endpoint)
+            .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
 
         // Resume: a prior record carrying an an_tx_hash means the burn was
         // already broadcast at least once. Reuse it; never compose a second
@@ -514,12 +524,17 @@ pub async fn run(
     // holds will not change again. Say that to the compiler rather than
     // to the next reader.
     //
-    // Two statements, and both are needed. Rebinding immutably refuses
-    // `_withdrawal_lock = None` (E0384) and `.take()` (E0596). The hold
-    // borrows it for the rest of the function, so `drop(_withdrawal_lock)`
-    // is E0505 as well — a value with a `Drop` impl is live to the end of
-    // its scope, which is what pins the borrow open. Dropping the HOLD
+    // The HOLD is what does the work, and this comment claimed otherwise
+    // for two rounds. Measured: with the rebinding removed, the hold
+    // alone still refuses `= None` (E0506), `.take()` (E0502) and
+    // `drop(..)` (E0505) — a value with a `Drop` impl is live to the end
+    // of its scope, which is what pins the borrow open. Dropping the HOLD
     // does not release the lock, so there is no one-line way back out.
+    //
+    // The immutable rebinding is kept for the diagnostic, not the
+    // guarantee: `= None` then reports E0384, "cannot assign twice",
+    // which says what to do about it. The two holds above have no
+    // rebinding and are no weaker for it.
     //
     // The three of them were the escape this guard has been chasing for
     // four rounds: stages 4-6 run for up to ~101 minutes, and a second
@@ -1189,6 +1204,58 @@ fn resume_recorded_burn(
 /// on the wire and, two lines below, that nothing had been sent. An
 /// operator reconciling a live withdrawal reads whichever half they see
 /// first.
+/// Re-badge a STAGE 1 refusal when a burn for this identity is already on
+/// the wire.
+///
+/// Nine rounds of review circled this, one site at a time, and the
+/// project had already decided it: the resume arm re-badges on the
+/// ground that entry is "gated on a burn being on the wire", and a test
+/// pins an EISDIR failure there — one that writes nothing and leaves the
+/// record intact — at exit 10. `burn_already_sent` is literally the same
+/// predicate, computed before preflight and already used to relax the
+/// balance check, and six refusals below it kept reporting exit 2 under
+/// it.
+///
+/// The cost is not theoretical. The runbook attaches "do not delete the
+/// state file" to exit 10 and tells an exit-2 reader "no state file was
+/// written"; both sentences describe the same run, and one of them is
+/// wrong. Nothing NEW is broadcast or written by a stage-1 refusal — that
+/// half of exit 2's contract holds — but the withdrawal it is refusing
+/// has a burn on chain and a record on disk, which is the half an
+/// operator acts on.
+fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError {
+    let Some(an_tx) = an_tx else {
+        return e;
+    };
+    // Every variant that renders as exit 2. Naming them rather than
+    // matching `_` so a variant added later is a compile error here
+    // instead of a silent exit-2 escape.
+    let reason = match &e {
+        CliError::Preflight {
+            ..
+        }
+        | CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        } => format!("{e}"),
+        _ => return e,
+    };
+    CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "preflight refused this run: {reason}\n\x20 Nothing new was sent and nothing new was \
+             written — but the AN burn {an_tx} from an earlier run IS on the wire, and its record \
+             is on disk. Do not delete that record on the strength of this refusal; fix what \
+             preflight named and re-run, which resumes from the recorded burn.",
+        ),
+        source: None,
+    }
+}
+
 fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
     match e {
         CliError::Preflight {
@@ -2430,6 +2497,117 @@ mod tests {
             "the hash-less refusal is raised from three places — stage 1, the contended lock, and \
              `decide_burn`. If that changed, `errors.rs`'s description of where it comes from has \
              to change with it: {sites:#?}",
+        );
+    }
+
+    #[test]
+    fn a_stage_one_refusal_names_the_burn_it_is_refusing_around() {
+        // The nine-round thread, decided the way the project had already
+        // decided it once: entry to the resume arm is "gated on a burn
+        // being on the wire" and its refusals are exit 10, and
+        // `burn_already_sent` is the same predicate one stage earlier.
+        //
+        // Exit 2's contract has two halves. "Nothing new was broadcast or
+        // written" survives a stage-1 refusal. "There is no state file and
+        // no burn" does not, and that is the half the runbook turns into
+        // "no state file was written" — while the exit-10 page says "do
+        // not delete the state file" about the very same run.
+        let an = format!("0x{}", "1d".repeat(32));
+        let refused = CliError::Preflight {
+            reason: "multisig has 2 custodians, expected 1".into(),
+            source: None,
+        };
+
+        // With no recorded burn, exit 2 is the truth and nothing moves.
+        let untouched = refusal_before_a_recorded_burn(
+            CliError::Preflight {
+                reason: "multisig has 2 custodians, expected 1".into(),
+                source: None,
+            },
+            None,
+        );
+        assert_eq!(
+            untouched.exit_code().as_i32(),
+            2,
+            "a first run's preflight refusal is exactly what exit 2 is for: {untouched}",
+        );
+
+        let rebadged = refusal_before_a_recorded_burn(refused, Some(&an));
+        assert_eq!(
+            rebadged.exit_code().as_i32(),
+            10,
+            "with a burn on the wire, exit 2 tells a retry wrapper the state is clean: {rebadged}",
+        );
+        let msg = format!("{rebadged}");
+        assert!(
+            msg.contains(&an) && msg.contains("multisig has 2 custodians"),
+            "the operator needs both the reason they were refused and the transaction they must \
+             not act around: {msg}",
+        );
+        assert!(
+            msg.contains("Do not delete that record"),
+            "which is the sentence the exit-2 page contradicts: {msg}",
+        );
+
+        // Exit 3 and everything past the send pass through: they carry
+        // remedies of their own and re-badging them would hide those.
+        let duplicate = refusal_before_a_recorded_burn(
+            CliError::CaptureTimeout {
+                an_tx: an.clone(),
+            },
+            Some(&an),
+        );
+        assert_eq!(
+            duplicate.exit_code().as_i32(),
+            11,
+            "only the exit-2 half moves: {duplicate}",
+        );
+    }
+
+    #[test]
+    fn no_stage_one_refusal_hides_a_recorded_burn() {
+        // The class, not the six sites. Stage 1 is a run of `preflight::`
+        // calls, every one of which speaks exit 2, and each was fixed one
+        // review round at a time for nine rounds. A seventh added below
+        // this line inherits the same defect, so the region is checked
+        // rather than the list.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let from = production
+            .find(concat!("let burn_already", "_sent ="))
+            .expect("stage 1 begins where the predicate is computed");
+        let to = production[from..]
+            .find(concat!("burn::", "compose("))
+            .map_or(production.len(), |i| from + i);
+        let region: Vec<&str> = production[from..to].lines().collect();
+
+        let mut bare = Vec::new();
+        for (n, line) in region.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("preflight::") {
+                continue;
+            }
+            // To the end of this statement, at depth zero.
+            let mut depth = 0i32;
+            let mut end = region.len();
+            for (k, l) in region.iter().enumerate().skip(n) {
+                depth += l.chars().filter(|&c| c == '(' || c == '{').count() as i32;
+                depth -= l.chars().filter(|&c| c == ')' || c == '}').count() as i32;
+                if depth <= 0 && l.trim_end().ends_with(';') {
+                    end = k + 1;
+                    break;
+                }
+            }
+            let stmt = region[n..end].join("\n");
+            // A `let` of a type, or a call that never fails, has no `?`.
+            if stmt.contains('?') && !stmt.contains(concat!("refusal_before_a_recorded", "_burn")) {
+                bare.push(stmt);
+            }
+        }
+        assert!(
+            bare.is_empty(),
+            "a stage-1 refusal propagated bare reports exit 2 — \"nothing broadcast, no state \
+             file written\" — about a withdrawal whose burn may already be on the wire and whose \
+             record is on disk: {bare:#?}",
         );
     }
 

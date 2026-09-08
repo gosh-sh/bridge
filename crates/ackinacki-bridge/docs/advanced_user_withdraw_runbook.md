@@ -883,6 +883,8 @@ dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot)` — so the
 signature is a parenthesised tuple, not `uint256[13]`:
 
 ```bash
+# $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
+# --prover-out-dir and exports nothing.
 P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
 
 PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
@@ -1026,9 +1028,13 @@ WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
 ls -lt "$WORK_DIR"/event_*_witness.json 2>/dev/null | head -3
 
 # The proof JSON is written ONLY under --prover-out-dir, which has no
-# default: without that flag no such file is produced anywhere, and this
-# line printed nothing for every run that did not pass it.
-[ -n "${PROVER_OUT_DIR:-}" ] && ls -lt "$PROVER_OUT_DIR"/proof_event_*.json 2>/dev/null | head -3
+# default and no environment variable: without that flag no such file is
+# produced anywhere. Put the directory you passed here — the previous
+# version of this line keyed on $PROVER_OUT_DIR, which nothing sets, so
+# it could not fire either.
+PROOF_OUT=                       # ← the --prover-out-dir you passed, if any
+[ -n "$PROOF_OUT" ] && ls -lt "$PROOF_OUT"/proof_event_*.json 2>/dev/null | head -3 \
+  || echo "no --prover-out-dir was passed: the proof JSON was not written anywhere"
 
 # Circuit 4 PK cache (should exist after first successful run)
 ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null
@@ -1078,7 +1084,6 @@ crates/ackinacki-bridge/                       ← CLI run cwd
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
     ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
-    ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr
 

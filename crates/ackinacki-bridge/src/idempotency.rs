@@ -474,9 +474,9 @@ impl UpdateFailed {
 /// choose: `after_send` (exit 10, the burn is on the wire and the record
 /// is behind it) or `before_send` (exit 2, nothing left the machine).
 /// Getting that choice wrong is an exit code that lies about money, which
-/// is why the type refuses to choose for you. [`UpdateFailed`] carries
-/// the longer version; the rule is here so a caller does not have to go
-/// and find it.
+/// is why the type refuses to choose for you. That is the whole rule; the
+/// reasoning behind it, and the guard that keeps this pipeline's writes
+/// on the `after_send` side, are on [`UpdateFailed`] itself.
 ///
 /// Takes `create_missing_levels` and not the whole of
 /// [`ensure_state_dir`], which is a narrowing rather than a shortcut. The

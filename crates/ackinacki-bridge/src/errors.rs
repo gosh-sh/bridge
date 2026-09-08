@@ -164,10 +164,11 @@ pub enum CliError {
     // reserving, the contended-lock arm of `reserve_and_decide_holding`,
     // and `decide_burn` after the reservation. (This said two for several
     // rounds; `the_hash_less_refusal_is_raised_from_exactly_three_places`
-    // is what keeps the count honest now.) Independent of
-    // `--allow-retry` in both: the flag does not override it and the text
-    // says so. What it carries instead is the verdict `flock` can give
-    // (`idempotency::liveness_verdict`) and the record's path, because
+    // is what keeps the count honest now — the count only, so a reader
+    // who changes this prose without changing the code still has to be
+    // trusted.) Independent of `--allow-retry` in ALL THREE: the flag
+    // does not override it and the text says so. What it carries instead is the verdict `flock`
+    // can give (`idempotency::liveness_verdict`) and the record's path, because
     // deleting that record is the real remedy and doing it while another
     // run is mid-send is the second burn this whole refusal exists to
     // prevent.

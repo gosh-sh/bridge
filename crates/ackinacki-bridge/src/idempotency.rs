@@ -2361,26 +2361,57 @@ mod tests {
         // So: any block that sends a reader to the refusal for the
         // liveness answer has to admit the answer can be missing. The
         // canonical procedures do; the summaries did not.
-        const DOCS: [(&str, &str); 2] = [
+        const DOCS: [(&str, &str); 3] = [
             ("README.md", include_str!("../README.md")),
             (
                 "docs/advanced_user_withdraw_runbook.md",
                 include_str!("../docs/advanced_user_withdraw_runbook.md"),
             ),
+            // Read by operators deciding what a release changed, and it
+            // carried its own copy of the rule. Only the UNRELEASED
+            // section is scanned: a released section is frozen by the
+            // changelog policy, so guarding it would produce a failure
+            // nobody is allowed to fix.
+            ("CHANGELOG.md", include_str!("../../../CHANGELOG.md")),
         ];
         // Any of these means the block does not promise an answer it
-        // cannot give.
-        const HEDGES: [&str; 5] = [
+        // cannot give, or hands the reader to the procedure that does.
+        // Ways of acknowledging that the deletion is conditional on a
+        // verdict that may not exist. A list, because the documents
+        // legitimately say it in several registers — a table, a warning,
+        // a pointer to the procedure — and the rule is about the
+        // acknowledgement, not the wording.
+        // Every entry here was checked against the two copies this guard
+        // exists to catch. Two candidates were REMOVED after measuring:
+        // "case 3a", because the defective README pointed at Case 3a in
+        // one breath and gave the two-verdict rule in the next; and "no
+        // age makes this safe", which the defective RUNBOOK copy says
+        // verbatim. A link is not an acknowledgement, and neither is
+        // ruling out the wrong criterion.
+        const HEDGES: [&str; 8] = [
             "three",
             "could not be determined",
             "does not always",
             "only sometimes",
             "never does",
+            "do not delete",
+            "delete nothing",
+            "can be missing",
         ];
 
         let mut offenders = Vec::new();
         for (name, text) in DOCS {
-            for (i, block) in text.split("\n\n").enumerate() {
+            // The changelog's released sections are not editable.
+            let scanned = if name == "CHANGELOG.md" {
+                let start = text.find("## [Unreleased]").unwrap_or(0);
+                let end = text[start..]
+                    .find("\n## [0.")
+                    .map_or(text.len(), |i| start + i);
+                &text[start..end]
+            } else {
+                text
+            };
+            for (i, block) in scanned.split("\n\n").enumerate() {
                 // Whitespace collapsed first. These are hard-wrapped
                 // documents, so every phrase this looks for straddles a
                 // line break somewhere — the first version of this guard
@@ -2390,12 +2421,40 @@ mod tests {
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
-                let sends_them_there =
-                    lower.contains("exit-3 refusal") || lower.contains("liveness line");
-                let about_the_lock = lower.contains("holds the withdrawal")
-                    || lower.contains("holds this withdrawal")
-                    || lower.contains("liveness");
-                if !(sends_them_there && about_the_lock) {
+
+                // TWO triggers, because the first one alone was keyed on
+                // the vocabulary the CORRECTED text uses — a block became
+                // fully visible to it only once somebody had already
+                // rewritten it, which is the wrong way round.
+                //
+                // (a) it DIRECTS the reader to the refusal for the
+                //     answer. The third conjunct is what separates an
+                //     instruction from prose describing one: a changelog
+                //     entry may say a run was invisible to the liveness
+                //     check without telling anybody to go and read it.
+                let promises_an_answer = (lower.contains("exit-3 refusal")
+                    || lower.contains("liveness line"))
+                    && (lower.contains("holds the withdrawal")
+                        || lower.contains("holds this withdrawal")
+                        || lower.contains("liveness"))
+                    && (lower.contains("read the")
+                        || lower.contains("reports whether")
+                        || lower.contains("tells you")
+                        || lower.contains("answers this for you"));
+                // (b) or it authorises the deletion outright — the
+                // sentence that actually costs money, and the one the
+                // first version scored false on both conjuncts.
+                let authorises_a_deletion = [
+                    "delete the record and re-run",
+                    "delete the record, and re-run",
+                    "conditions for deleting it",
+                    "then delete the record",
+                    "safe to delete",
+                ]
+                .iter()
+                .any(|p| lower.contains(p));
+
+                if !(promises_an_answer || authorises_a_deletion) {
                     continue;
                 }
                 if !HEDGES.iter().any(|h| lower.contains(h)) {
@@ -2405,9 +2464,10 @@ mod tests {
         }
         assert!(
             offenders.is_empty(),
-            "these blocks send an operator to the exit-3 refusal for the liveness answer without \
-             saying it may not have one — which is every run on a mount without `flock`, and the \
-             reading that deletes a record mid-send: {offenders:#?}",
+            "these blocks either send an operator to the exit-3 refusal for a liveness answer it \
+             may not have, or authorise deleting the record without naming the verdict that \
+             permits it — which is every run on a mount without `flock`, and the reading that \
+             deletes a record mid-send: {offenders:#?}",
         );
     }
 

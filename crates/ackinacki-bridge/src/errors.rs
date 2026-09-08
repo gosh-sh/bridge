@@ -29,8 +29,23 @@ pub enum ExitCode {
     /// resolution failure.
     PreflightRefused = 2,
     /// Duplicate in-flight refusal from the idempotency layer. Nothing
-    /// broadcast. Use `--allow-retry` to override, or query the printed
-    /// prior identifier to reconcile.
+    /// broadcast.
+    ///
+    /// Two refusals share this code and they take DIFFERENT remedies —
+    /// this doc used to give only the first, which is the advice five
+    /// other places in the tree call a defect:
+    ///
+    /// * [`CliError::DuplicateInFlight`] — the record names an AN tx hash.
+    ///   `--allow-retry` resumes at capture for the active statuses, and is
+    ///   refused outright for `confirmed` and `submitted`; the refusal carries
+    ///   the per-status remedy.
+    /// * [`CliError::ReservationInFlight`] — the record has NO hash, so nothing
+    ///   on disk can say whether a burn is on the wire. `--allow-retry` does
+    ///   not override it and the message says so. The remedy is on-chain
+    ///   reconciliation, and then either writing the hash in or deleting the
+    ///   record — the second only under the liveness verdict that permits it.
+    ///
+    /// Read the refusal, not this list: both print what to do.
     DuplicateRefused = 3,
     /// AN burn was broadcast; final outcome unknown (network error mid-send,
     /// timeout waiting for account state to update). Idempotency record

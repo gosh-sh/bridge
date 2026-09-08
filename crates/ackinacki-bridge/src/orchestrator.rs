@@ -517,11 +517,20 @@ pub async fn run(
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
     // back into its two halves — the capture helper wants them separately.
+    //
+    // Exit 12 for an internal invariant, which reads oddly until you ask
+    // what exit 2 would mean here: nothing broadcast, nothing written.
+    // Both false — this line is downstream of `burn::send` and of the
+    // record that names its hash. The stage is what picks the code, never
+    // the kind of failure, and the same reasoning applies to every line
+    // below this one. `no_refusal_after_the_send_claims_to_be_pre_send`
+    // is what keeps it that way.
     let (bridge_dapp_id_hex, bridge_account_id_hex) =
-        split_extended(&preflight.usdc_bridge_extended).ok_or_else(|| CliError::Preflight {
+        split_extended(&preflight.usdc_bridge_extended).ok_or_else(|| CliError::ProofFailed {
             reason: format!(
-                "internal: usdc_bridge_extended {} is not `dapp_id::account_id`",
-                preflight.usdc_bridge_extended
+                "internal: usdc_bridge_extended {} is not `dapp_id::account_id`. The AN burn {} \
+                 IS on the wire — reconcile it before re-running.",
+                preflight.usdc_bridge_extended, an_tx_hash,
             ),
             source: None,
         })?;
@@ -899,15 +908,6 @@ enum BurnDecision {
     Reuse(String),
 }
 
-/// Take the reservation, then decide from what it returned.
-///
-/// A function rather than four lines inline, because the bug this branch
-/// exists to close was not in `reserve` and not in [`decide_burn`] — both
-/// were right on their own. It was in the WIRING: the caller decided from
-/// the stage-1 `peek` instead of from the reservation, and no test of
-/// either function could see that. This is the seam, and the tests below
-/// drive it against a real state directory, including from two threads at
-/// once.
 /// Claim the identity for a withdrawal whose burn is ALREADY on the wire,
 /// and hand back a record that says so.
 ///
@@ -935,6 +935,7 @@ enum BurnDecision {
 /// was carried through capture, prove and a SECOND `withdrawByProof`.
 /// `reserve` refuses that record; it just never saw it, because the file
 /// was gone.
+///
 /// `hold` receives the withdrawal lock, and is the reason it is a
 /// parameter rather than a third element of the return tuple.
 ///
@@ -1137,6 +1138,17 @@ fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
     }
 }
 
+/// Take the reservation, then decide from what it returned.
+///
+/// A function rather than four lines inline, because the bug this seam
+/// exists to close was not in `reserve` and not in [`decide_burn`] — both
+/// were right on their own. It was in the WIRING: the caller decided from
+/// the stage-1 `peek` instead of from the reservation, and no test of
+/// either function could see that. The tests below drive it against a
+/// real state directory, including from two threads at once.
+///
+/// (This paragraph spent several rounds stranded above
+/// `resume_recorded_burn`, describing a function two screens away.)
 fn reserve_and_decide(
     state_dir: &Path,
     from: &FromAddress,
@@ -2133,6 +2145,50 @@ mod tests {
             offenders.is_empty(),
             "every refusal in this pipeline is downstream of the burn, so none of them may say \
              that nothing was sent — not through `before_send`, and not in prose: {offenders:?}",
+        );
+    }
+
+    #[test]
+    fn no_refusal_after_the_send_claims_to_be_pre_send() {
+        // The class, rather than the two spellings the guard above knows.
+        // A `CliError::Preflight` IS the claim — exit 2's published
+        // contract is "nothing broadcast, no state file written" — and it
+        // makes that claim whether or not the words appear in its text.
+        // One had been sitting at stage 4 since before any of these
+        // rounds: `split_extended` on a string preflight had already
+        // parsed, rendered as exit 2 with the burn on the wire.
+        //
+        // Textual position stands in for pipeline position, and does so
+        // honestly here: `run` is written in stage order, every path that
+        // reaches stage 4 has passed the send or resumed a recorded one,
+        // and the resume arm sits above this line rather than below it.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let run_at = production
+            .find(concat!("pub async fn ", "run("))
+            .expect("run() is this module's entry point");
+        let body = &production[run_at..];
+        // Up to the next top-level item, the same cut the ordering guard
+        // uses: everything inside a function is indented.
+        let end = body
+            .match_indices("\nfn ")
+            .next()
+            .map_or(body.len(), |(i, _)| i);
+        let after_send = body[..end]
+            .find(concat!("burn::", "send("))
+            .expect("the burn branch calls the send by name");
+
+        let offenders: Vec<_> = body[after_send..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(concat!("CliError::", "Preflight")))
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "past the send the burn is on the wire, so exit 2 — whose contract is that nothing \
+             was broadcast and no state file was written — is a lie whatever the reason says. \
+             Pick the code for the STAGE: {offenders:?}",
         );
     }
 

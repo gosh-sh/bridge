@@ -145,7 +145,7 @@ assigns it when the release is tagged.
     set -e
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
-    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is
     # `from_path_override`, which it does not use), so a plain
     # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
     # explicit export. Harmless for a `df`; for `--repair` it means clearing
@@ -167,7 +167,7 @@ assigns it when the release is tagged.
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
     # blank line, which is the distinction that matters. Empty is never a
-    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs`)
     # makes clap refuse an exported-empty value at parse time — "a value is
     # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
     # is a different message from the missing-plumbing refusal an UNSET
@@ -179,7 +179,7 @@ assigns it when the release is tagged.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
         { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
     else
-      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `printenv` here too, and for the same reason: `main.rs` reads
       # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
       # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
       # then this block sources a profile the CLI will not load at all —
@@ -190,7 +190,7 @@ assigns it when the release is tagged.
         { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
           echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
           echo "at your prompt is a shell variable, not an environment one, and the" >&2
-          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "CLI reads the process environment — so it would load no profile" >&2
           echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
           echo "pass --params-dir explicitly and give this command the same path." >&2
           exit 1; }
@@ -265,7 +265,7 @@ assigns it when the release is tagged.
     #
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
-    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is
     # `from_path_override`, which it does not use), so a plain
     # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
     # explicit export. Harmless for a `df`; for `--repair` it means clearing
@@ -287,7 +287,7 @@ assigns it when the release is tagged.
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
     # blank line, which is the distinction that matters. Empty is never a
-    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs`)
     # makes clap refuse an exported-empty value at parse time — "a value is
     # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
     # is a different message from the missing-plumbing refusal an UNSET
@@ -299,7 +299,7 @@ assigns it when the release is tagged.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
         { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
     else
-      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `printenv` here too, and for the same reason: `main.rs` reads
       # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
       # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
       # then this block sources a profile the CLI will not load at all —
@@ -310,7 +310,7 @@ assigns it when the release is tagged.
         { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
           echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
           echo "at your prompt is a shell variable, not an environment one, and the" >&2
-          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "CLI reads the process environment — so it would load no profile" >&2
           echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
           echo "pass --params-dir explicitly and give this command the same path." >&2
           exit 1; }
@@ -379,7 +379,7 @@ assigns it when the release is tagged.
     set -e
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
-    # (`ackinacki-bridge/src/main.rs:33-37`; the overriding variant is
+    # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is
     # `from_path_override`, which it does not use), so a plain
     # `. "$BRIDGE_CONFIG"` inverts the precedence and lets the profile beat an
     # explicit export. Harmless for a `df`; for `--repair` it means clearing
@@ -401,7 +401,7 @@ assigns it when the release is tagged.
     #
     # `printenv NAME` exits 0 for an exported-but-EMPTY variable and prints a
     # blank line, which is the distinction that matters. Empty is never a
-    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs:210`)
+    # directory: `params_dir: Option<PathBuf>` with `env =` (`args.rs`)
     # makes clap refuse an exported-empty value at parse time — "a value is
     # required for '--params-dir <PARAMS_DIR>' but none was supplied" — which
     # is a different message from the missing-plumbing refusal an UNSET
@@ -413,7 +413,7 @@ assigns it when the release is tagged.
       [ -n "$BRIDGE_PARAMS_DIR" ] ||
         { echo "BRIDGE_PARAMS_DIR is exported but empty — unset it or give it a path" >&2; exit 1; }
     else
-      # `printenv` here too, and for the same reason: `main.rs:38` reads
+      # `printenv` here too, and for the same reason: `main.rs` reads
       # `std::env::var("BRIDGE_CONFIG")`, so a shell variable that was never
       # exported does not reach it. `${BRIDGE_CONFIG:?}` accepts one, and
       # then this block sources a profile the CLI will not load at all —
@@ -424,7 +424,7 @@ assigns it when the release is tagged.
         { echo "BRIDGE_CONFIG is not set to a path in the environment. A plain" >&2
           echo "  BRIDGE_CONFIG=./config/bridge_config" >&2
           echo "at your prompt is a shell variable, not an environment one, and the" >&2
-          echo "CLI reads the environment (main.rs:38) — so it would load no profile" >&2
+          echo "CLI reads the process environment — so it would load no profile" >&2
           echo "at all and fall back to its compiled default. Use \`export\`, or" >&2
           echo "pass --params-dir explicitly and give this command the same path." >&2
           exit 1; }

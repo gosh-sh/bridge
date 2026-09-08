@@ -706,11 +706,24 @@ pub(crate) fn record_path(state_dir: &Path, key: &str) -> PathBuf {
 ///
 /// `#[must_use]`, though not for the reason it is usually reached for:
 /// this type is only ever returned inside a `Result`, which already
-/// warns. What it buys is the day somebody returns one bare. It does NOT
-/// make the guard the compiler's business — `let _ = ..` silences
-/// `must_use` and is exactly the form that would drop the lock on the
-/// spot, which is why the binding in `run` is a named `_withdrawal_lock`
-/// rather than a `_`.
+/// warns. What it buys is the day somebody returns one bare.
+///
+/// How much of the guard the compiler actually owns, precisely, because
+/// the gap is where a released lock hides:
+///
+/// - `let _ = ..` IS caught. `main.rs` turns on
+///   `clippy::let_underscore_must_use` crate-wide, and CI runs clippy with `-D
+///   warnings`.
+/// - A `_` inside a PATTERN is not, by either the attribute or that lint. `let
+///   (a, b, _) = ..` compiles silently, and unlike a named `_lock` binding it
+///   drops on the spot rather than at the end of the scope.
+///
+/// Two things follow, and both are load-bearing rather than stylistic:
+/// `run` binds a named `_withdrawal_lock`, and `resume_recorded_burn`
+/// takes the lock as an out-parameter instead of returning it — there is
+/// no tuple slot to underscore. `orchestrator`'s
+/// `the_resume_hands_its_lock_to_a_binding_that_outlives_the_burn` pins
+/// the call site, which is the half no type can reach.
 #[must_use]
 #[derive(Debug)]
 pub struct WithdrawalLock {

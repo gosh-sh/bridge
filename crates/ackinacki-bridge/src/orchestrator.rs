@@ -318,9 +318,15 @@ pub async fn run(
             // one the reservation returned, not the one peeked above.
             // Carrying the peek's forward here put back the exact
             // disagreement this seam exists to eliminate, one call along.
-            let (r, an_tx, lock) =
-                resume_recorded_burn(&state_dir, &from, &to, &amount, args.allow_retry, p)?;
-            _withdrawal_lock = lock;
+            let (r, an_tx) = resume_recorded_burn(
+                &state_dir,
+                &from,
+                &to,
+                &amount,
+                args.allow_retry,
+                p,
+                &mut _withdrawal_lock,
+            )?;
             record = Some(r);
             (an_tx, bounce)
         } else {
@@ -913,6 +919,26 @@ enum BurnDecision {
 /// was carried through capture, prove and a SECOND `withdrawByProof`.
 /// `reserve` refuses that record; it just never saw it, because the file
 /// was gone.
+/// `hold` receives the withdrawal lock, and is the reason it is a
+/// parameter rather than a third element of the return tuple.
+///
+/// Returned, the lock sat in a slot a caller could write `_` into. That
+/// compiles, passes clippy, passes every test, and drops the guard on the
+/// spot — `_` is not a binding, so it does not live to the end of the
+/// scope the way `_withdrawal_lock` does. `#[must_use]` does not reach
+/// inside a tuple pattern, and neither does
+/// `clippy::let_underscore_must_use`, which only sees `let _ = expr`. The
+/// run then walks into `burn::send` holding nothing, invisible to the
+/// liveness probe every recovery procedure in the runbook depends on.
+///
+/// Writing through `hold` removes the slot. There is no value to discard:
+/// the only way to lose the lock now is to pass a temporary, which reads
+/// as the deliberate act it would be.
+///
+/// It is stored before the first fallible step, so the caller holds it on
+/// the error paths too — on `Err` the run aborts and the kernel releases
+/// it, which is what should happen, and the record-restoring writes below
+/// happen under it either way.
 fn resume_recorded_burn(
     state_dir: &Path,
     from: &FromAddress,
@@ -920,12 +946,10 @@ fn resume_recorded_burn(
     amount: &UsdcAmount,
     allow_retry: bool,
     observed: &idempotency::Record,
-) -> CliResult<(
-    idempotency::Record,
-    String,
-    Option<idempotency::WithdrawalLock>,
-)> {
+    hold: &mut Option<idempotency::WithdrawalLock>,
+) -> CliResult<(idempotency::Record, String)> {
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    *hold = lock;
     match decision {
         // The hash comes from the RESERVATION, not from `observed`. The
         // two are read minutes apart — the whole of preflight — and the
@@ -933,7 +957,7 @@ fn resume_recorded_burn(
         // operator who followed the exit-3 remedy and wrote the real hash
         // into the record in between is the case that makes them differ,
         // and it is the case the remedy exists for.
-        BurnDecision::Reuse(h) => Ok((r, h, lock)),
+        BurnDecision::Reuse(h) => Ok((r, h)),
         // A FRESH reservation for an identity this run has just seen a
         // burn recorded against: the record was removed in between.
         //
@@ -1010,7 +1034,7 @@ fn resume_recorded_burn(
                     source: None,
                 });
             };
-            Ok((reserved, an_tx, lock))
+            Ok((reserved, an_tx))
         },
     }
 }
@@ -1814,6 +1838,57 @@ mod tests {
     }
 
     #[test]
+    fn the_resume_hands_its_lock_to_a_binding_that_outlives_the_burn() {
+        // The other half of the same one-character family. Making the
+        // lock an out-parameter removed the tuple slot a `_` could
+        // swallow, but the call site can still pass a temporary: `&mut
+        // None` compiles, satisfies the type, keeps clippy quiet, and
+        // drops the guard at the end of the statement. The run then walks
+        // into `burn::send` holding nothing — invisible to the liveness
+        // probe every recovery procedure in the runbook leans on, and the
+        // exact state the lock was added to eliminate.
+        //
+        // `a_resume_takes_the_withdrawal_lock` proves the seam fills the
+        // slot it is handed. Nothing but this proves `run` hands it one
+        // that lives.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let lines: Vec<&str> = production.lines().collect();
+
+        let calls: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                t.contains(concat!("resume_recorded", "_burn("))
+                    && !t.starts_with("//")
+                    && !t.starts_with("fn ")
+            })
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "one call site, so one place to check; a second one needs its own argument checked \
+             here rather than inheriting this one's clean bill: {calls:?}",
+        );
+
+        // The argument list, not the whole function: a `_withdrawal_lock`
+        // mentioned anywhere else in the file must not vouch for this.
+        let start = calls[0];
+        let end = (start..lines.len())
+            .find(|&n| lines[n].contains(")?;"))
+            .map(|n| n + 1)
+            .unwrap_or(lines.len());
+        let args = lines[start..end].join("\n");
+        assert!(
+            args.contains(concat!("&mut _withdrawal", "_lock")),
+            "the resume must be handed the binding that lives to the end of `run`, not a \
+             temporary that releases the lock as the statement ends: {args}",
+        );
+    }
+
+    #[test]
     fn the_resume_branch_never_reads_the_peeked_hash_after_reserving() {
         // The defect a commit named after it did not close. The seam
         // returns the hash the RESERVATION read; a test pins the seam;
@@ -2034,13 +2109,15 @@ mod tests {
         let hash = format!("0x{}", "ab".repeat(32));
         let observed = burned_record(dir.path(), &hash);
 
-        let (r, _an_tx, lock) = resume_recorded_burn(
+        let mut lock = None;
+        let (r, _an_tx) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut lock,
         )
         .expect("a recorded burn resumes");
         assert_eq!(r.an_tx_hash.as_deref(), Some(hash.as_str()));
@@ -2055,6 +2132,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect_err("the first resume still holds this withdrawal");
         assert!(
@@ -2086,13 +2164,14 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
 
-        let (restored, _an_tx, _lock) = resume_recorded_burn(
+        let (restored, _an_tx) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &r,
+            &mut None,
         )
         .expect("the burn is known; the run must not be stranded");
 
@@ -2136,13 +2215,14 @@ mod tests {
         r.an_tx_hash = Some(real.clone());
         idempotency::update(dir.path(), &r).unwrap();
 
-        let (rec, an_tx, _lock) = resume_recorded_burn(
+        let (rec, an_tx) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect("a recorded burn resumes");
         assert_eq!(
@@ -2194,6 +2274,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             false,
             &observed,
+            &mut None,
         )
         .expect_err("deleting the file is not the consent the flag is");
         assert_eq!(
@@ -2230,13 +2311,14 @@ mod tests {
                 .unwrap();
         std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
 
-        let (rec, an_tx, _lock) = resume_recorded_burn(
+        let (rec, an_tx) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect("with the flag, a restored record resumes");
         assert_eq!(an_tx, hash);
@@ -2276,6 +2358,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect_err("a withdrawal that has already paid out must not resume");
         assert_eq!(err.exit_code().as_i32(), 3, "{err:?}");
@@ -2335,6 +2418,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect_err("a record read_record rejects cannot resume");
 
@@ -2385,6 +2469,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
+            &mut None,
         )
         .expect_err("a submitted withdrawal must not resume");
         assert_eq!(

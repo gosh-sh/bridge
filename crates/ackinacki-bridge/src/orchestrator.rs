@@ -1333,6 +1333,26 @@ fn reserve_and_decide_holding(
     Ok((r, decision, lock))
 }
 
+/// Whether this run broadcasts, decided from what the RESERVATION
+/// returned.
+///
+/// Three inputs and one question: does an `initiateWithdrawal` for this
+/// identity still need to go out? The record's `an_tx_hash` answers it
+/// when it is set. When it is not, the answer turns on which side of the
+/// atomic publish this run came down on — `Created` means the identity is
+/// ours and nothing is in flight; `Found` means somebody else's
+/// reservation is already there, and the hash it lacks is written only
+/// after their send returns, so the record cannot say whether their burn
+/// is on the wire. That is the refusal, and `holder` is what the
+/// withdrawal lock could add to it.
+///
+/// It has no doc comment for eight rounds of review, which is how the
+/// third liveness verdict got lost twice: the argument for `Option<bool>`
+/// over a bool lives in the parameter and nowhere a reader looks first.
+///
+/// Deliberately NOT given the stage-1 `peek`. The peek and the
+/// reservation are read minutes apart, and deciding from the older of the
+/// two is a second irreversible burn — see `reserve_and_decide`.
 fn decide_burn(
     reserved: &idempotency::Record,
     how: idempotency::Reservation,
@@ -2120,7 +2140,11 @@ mod tests {
             .enumerate()
             .filter(|(_, l)| {
                 let t = l.trim_start();
-                t.contains(concat!("reserve_and", "_decide(")) && !t.starts_with("//")
+                t.contains(concat!("reserve_and", "_decide("))
+                    && !t.starts_with("//")
+                    && !t.starts_with("///")
+                    // The definition, not a call.
+                    && !t.starts_with("fn ")
             })
             .map(|(n, _)| n)
             .collect();
@@ -2131,10 +2155,26 @@ mod tests {
             // The destructuring sits on the line before the call when
             // rustfmt has wrapped it, so look at both.
             let stmt = lines[n.saturating_sub(1)..=n].join(" ");
+            // Not just `, _)`. A tuple pattern has other ways to let go
+            // of the third element and all of them compile: `..` swallows
+            // it wholesale, and a `_`-prefixed BINDING lives only to the
+            // end of its statement unless the caller places it somewhere.
+            // The first version of this check knew one of them.
+            for evasion in [", _)", ", _ )", ", ..)", ", _lock)", ", _l)"] {
+                assert!(
+                    !stmt.contains(evasion),
+                    "the lock is the third element and `{evasion}` lets go of it: \
+                     orchestrator.rs:{}: {stmt}",
+                    n + 1,
+                );
+            }
+            // And the positive form, so a spelling nobody anticipated has
+            // to be named here rather than quietly discarded there.
             assert!(
-                !stmt.contains(", _)") && !stmt.contains(", _ )"),
-                "the lock is the third element and `_` drops it on the spot: orchestrator.rs:{}: \
-                 {stmt}",
+                stmt.contains(", lock)")
+                    || stmt.contains(concat!("reserve_and_decide", "_holding(")),
+                "the lock has to land in a named binding the caller then places: \
+                 orchestrator.rs:{}: {stmt}",
                 n + 1,
             );
         }

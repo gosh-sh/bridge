@@ -2154,6 +2154,49 @@ mod tests {
     }
 
     #[test]
+    fn the_reservation_is_durable_before_its_name_and_its_name_before_the_burn() {
+        // Two `fsync`s, and removing either leaves every test in this
+        // crate green: durability is not observable from userspace, so
+        // there is nothing to assert about behaviour. What CAN be asserted
+        // is the shape, and the shape is the whole content of the
+        // invariant — which call comes before `hard_link` and which comes
+        // after.
+        //
+        //   body first: the record's bytes have to be on the platter
+        //   before its name exists, or a crash publishes a name pointing
+        //   at nothing and the next run reserves cleanly and burns again.
+        //
+        //   entry second: `hard_link` added a directory entry, and an
+        //   entry is not durable because the file it names is. A crash
+        //   between the link and the burn then loses the reservation for a
+        //   burn that happened.
+        //
+        // A grep is the right instrument for a syntactic property of one
+        // closure. It is the wrong one for anything about what happens at
+        // runtime, which is why this test says only this much.
+        let src = include_str!("idempotency.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let start = production
+            .find(concat!("let publish = ", "|| -> std::io::Result<bool>"))
+            .expect("`reserve` publishes through a closure by that name");
+        let body = &production[start..];
+        let end = body.find("\n    };").unwrap_or(body.len());
+        let publish = &body[..end];
+
+        let link = publish
+            .find(concat!("std::fs::", "hard_link("))
+            .expect("the publish is a hard_link, and the fsyncs are placed around it");
+        assert!(
+            publish[..link].contains(concat!("tmp.as_file().sync", "_all()")),
+            "the record's bytes must be durable BEFORE its name exists: {publish}",
+        );
+        assert!(
+            publish[link..].contains(concat!("File::open(state_dir)?.sync", "_all()")),
+            "the directory entry the link created needs its own fsync, after the link: {publish}",
+        );
+    }
+
+    #[test]
     fn the_liveness_verdict_says_wait_only_when_somebody_is_holding_it() {
         let held = liveness_verdict(Some(true));
         let free = liveness_verdict(Some(false));

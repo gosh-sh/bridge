@@ -981,24 +981,72 @@ fn resume_recorded_burn(
             // Restore FIRST and ask second. Refusing before writing would
             // leave behind the fresh hash-less reservation this arm was
             // handed, which `read_record` rejects forever.
-            let (reserved, _) = idempotency::reserve(state_dir, from, to, amount, allow_retry)?;
+            //
+            // `reserve` reports its own failures as pre-send refusals,
+            // which is correct at its other call site and false at this
+            // one. See `resumed_refusal` for what that costs and what is
+            // remapped.
+            let (reserved, _) = idempotency::reserve(state_dir, from, to, amount, allow_retry)
+                .map_err(|e| resumed_refusal(e, observed))?;
             let Some(an_tx) = reserved.an_tx_hash.clone() else {
                 // Unreachable by construction — the record just written
                 // came from `peek`, so `read_record` has already accepted
                 // its shape, and an active status with no hash is one of
                 // the shapes it does not. Refuse rather than invent a
                 // hash: this is the field a second burn turns on.
-                return Err(CliError::Preflight {
+                //
+                // Exit 10, not 2, and it names the hash rather than the
+                // key: this branch is downstream of a burn like every
+                // other line in this arm, and the operator's next move is
+                // to reconcile that transaction, which they cannot do from
+                // a dedup digest.
+                return Err(CliError::BurnOutcomeUnknown {
                     reason: format!(
-                        "idempotency: resume restored {} but the record carries no AN tx hash, so \
-                         there is no burn to resume from. Nothing was sent.",
-                        reserved.key,
+                        "the AN burn {:?} is on the wire, but the restored record {} came back \
+                         from the reservation carrying no AN tx hash, so there is no burn to \
+                         resume from. Reconcile that transaction before re-running.",
+                        observed.an_tx_hash, reserved.key,
                     ),
                     source: None,
                 });
             };
             Ok((reserved, an_tx, lock))
         },
+    }
+}
+
+/// Re-badge a refusal raised inside the resume arm, where the pre-send
+/// half of `reserve`'s vocabulary is not available.
+///
+/// `resume_recorded_burn` is entered only through
+/// `.filter(|p| p.an_tx_hash.is_some())`, so a burn is on the wire for
+/// every line inside it, and by the time `reserve` is asked this run has
+/// written the record back itself. Exit 2's published contract is the
+/// conjunction of two things that are both false here — nothing was
+/// broadcast, and no state file was written — and a retry wrapper reading
+/// it fires the second burn.
+///
+/// Only the pre-send half moves. The exit-3 refusals out of the same call
+/// are the entire reason it is made: they carry the per-status remedy, and
+/// re-badging them would hide the duplicate this arm exists to catch.
+/// Anything else `reserve` might grow passes through untouched rather than
+/// being swept into exit 10 by a catch-all.
+fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
+    match e {
+        CliError::Preflight {
+            reason,
+            source,
+        } => CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "the AN burn {:?} is on the wire — it was recorded before this run started — but \
+                 the reservation covering it could not be completed: {reason}\n\x20 The local \
+                 record may be behind the chain. Do not re-run without reconciling — see the \
+                 runbook's Case 3a.",
+                observed.an_tx_hash,
+            ),
+            source,
+        },
+        other => other,
     }
 }
 
@@ -1836,19 +1884,33 @@ mod tests {
         // that genuinely precedes the send is ever added, this guard is
         // where that gets recorded — deliberately, and read by a
         // reviewer, rather than slipping in as one more call site.
+        // Watching the constructor alone was not enough, and the gap was
+        // not hypothetical: `resume_recorded_burn` grew a hand-built
+        // `CliError::Preflight` whose text ended "Nothing was sent." on a
+        // path entered only when the peeked record carries an
+        // `an_tx_hash`. It never touched `before_send`, so this guard
+        // stayed green over the exact sentence it was written to forbid.
+        //
+        // So watch the CLAIM as well as the constructor. The sentence is
+        // the thing that costs money — a retry wrapper reads it and fires
+        // a second burn — and it does not become safe by being spelled out
+        // by hand instead of reached through the type.
         let src = include_str!("orchestrator.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let claim = concat!("nothing was ", "sent");
         let offenders: Vec<_> = production
             .lines()
             .enumerate()
             .filter(|(_, l)| !l.trim_start().starts_with("//"))
-            .filter(|(_, l)| l.contains(concat!("before", "_send(")))
+            .filter(|(_, l)| {
+                l.contains(concat!("before", "_send(")) || l.to_ascii_lowercase().contains(claim)
+            })
             .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
             .collect();
         assert!(
             offenders.is_empty(),
-            "these writes all happen after the burn is on the wire, so none of them may report \
-             itself as a refusal that sent nothing: {offenders:?}",
+            "every refusal in this pipeline is downstream of the burn, so none of them may say \
+             that nothing was sent — not through `before_send`, and not in prose: {offenders:?}",
         );
     }
 
@@ -2237,6 +2299,99 @@ mod tests {
         );
         assert_eq!(reread.eth_tx_hash.as_deref(), Some(eth.as_str()));
         assert_eq!(reread.an_tx_hash.as_deref(), Some(an.as_str()));
+    }
+
+    #[test]
+    fn a_reservation_that_fails_while_resuming_is_not_reported_as_having_sent_nothing() {
+        // The escape this arm shipped with. `reserve` renders its own
+        // failures as pre-send refusals — correct at its other call site,
+        // and a lie at this one, where entry is gated on a peeked
+        // `an_tx_hash` and this run has already written the record back.
+        //
+        // Reaching `reserve`'s refusal from in here needs the restored
+        // record to be a shape `read_record` rejects, and the only such
+        // shape is an active status with no hash — so this hands
+        // `resume_recorded_burn` an `observed` the caller's own filter
+        // would never produce. That is the point: the branch is
+        // unreachable by construction TODAY, and the exit code it carries
+        // is what a future caller inherits. Two is the answer that gets a
+        // second burn fired by a retry wrapper.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "ab".repeat(32));
+        let r = burned_record(dir.path(), &an);
+
+        let mut observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees the record");
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+        // Restored verbatim, so this is what `reserve` will read back.
+        observed.an_tx_hash = None;
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+        )
+        .expect_err("a record read_record rejects cannot resume");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "every line in this arm is downstream of a burn: {err}",
+        );
+        let msg = format!("{err}").to_ascii_lowercase();
+        assert!(
+            !msg.contains("nothing was sent"),
+            "the sentence a retry wrapper acts on: {msg}",
+        );
+        assert!(
+            msg.contains("case 3a"),
+            "exit 10's remedy is reconciliation, and the message has to say where: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_duplicate_refusal_still_comes_out_of_the_resume_path_unchanged() {
+        // The other half of the same mapping, and the reason it is not a
+        // catch-all: `reserve`'s exit-3 refusals are the entire purpose of
+        // asking it here. Re-badging them as exit 10 would hide the
+        // duplicate and hand the operator a reconciliation task instead of
+        // the per-status remedy.
+        //
+        // `a_terminal_record_deleted_mid_preflight_still_refuses` drives
+        // the same seam for the confirmed case; this one pins that the
+        // pass-through survives the `map_err` added beside it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "cd".repeat(32));
+        let mut r = burned_record(dir.path(), &an);
+        r.status = Status::Submitted;
+        r.eth_tx_hash = Some(format!("0x{}", "34".repeat(32)));
+        idempotency::update(dir.path(), &r).unwrap();
+
+        let observed =
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+                .unwrap()
+                .expect("stage 1 sees the record");
+        std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
+
+        let err = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+        )
+        .expect_err("a submitted withdrawal must not resume");
+        assert_eq!(
+            err.exit_code().as_i32(),
+            3,
+            "the duplicate refusal must reach the operator as itself: {err}",
+        );
     }
 
     #[test]

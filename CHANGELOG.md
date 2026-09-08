@@ -910,6 +910,26 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: a failed reservation while resuming a
+  recorded burn now exits 10, not 2.** The resume path is entered only
+  when the record read at stage 1 carries an AN tx hash, so a burn is on
+  the wire for every line inside it, and the run has already written the
+  record back before it re-asks the reservation. Two of that path's
+  failures still reported themselves as exit 2, whose documented contract
+  is "nothing broadcast, no state file written" — both false there. A
+  wrapper that retries on 2, which the exit-code table invites, would have
+  broadcast a second `initiateWithdrawal` against a multisig with no
+  replay guard.
+
+  Those failures are now exit 10 and name the AN transaction to reconcile
+  instead of the dedup digest. The exit-3 duplicate refusals raised by the
+  same reservation are unchanged and still reach the operator as
+  themselves, with their per-status remedy — only the pre-send half moved.
+
+  Scripts that pattern-match exit codes: a resumed withdrawal that fails
+  to re-reserve changes from 2 to 10. Nothing that previously exited 0, 3,
+  11, 12 or 13 is affected.
+
 - **`ackinacki-bridge withdraw`: the state record drops its unused
   `proof_json_path` field.** It was written as `null` on every record and
   read by nothing; the comment beside the `withdrawByProof` revert path

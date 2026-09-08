@@ -143,6 +143,12 @@ assigns it when the release is tagged.
   # session — a rough way to learn your config is wrong.
   (
     set -e
+    # NOTE: everything from here to the `BRIDGE_PARAMS_DIR ->` echo is
+    # repeated verbatim in the two other upgrade blocks in this release.
+    # Each block is pasted on its own, so it carries its own copy — but a
+    # correction to one of them belongs in all three. The last one was a
+    # source citation that was wrong in each.
+    #
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
     # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is
@@ -263,6 +269,12 @@ assigns it when the release is tagged.
     # there: the profile is read by the Rust CLI at startup, not by your
     # shell, and the README only asks you to export BRIDGE_CONFIG.
     #
+    # NOTE: everything from here to the `BRIDGE_PARAMS_DIR ->` echo is
+    # repeated verbatim in the two other upgrade blocks in this release.
+    # Each block is pasted on its own, so it carries its own copy — but a
+    # correction to one of them belongs in all three. The last one was a
+    # source citation that was wrong in each.
+    #
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
     # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is
@@ -377,6 +389,12 @@ assigns it when the release is tagged.
   # session — a rough way to learn your config is wrong.
   (
     set -e
+    # NOTE: everything from here to the `BRIDGE_PARAMS_DIR ->` echo is
+    # repeated verbatim in the two other upgrade blocks in this release.
+    # Each block is pasted on its own, so it carries its own copy — but a
+    # correction to one of them belongs in all three. The last one was a
+    # source citation that was wrong in each.
+    #
     # Resolve BRIDGE_PARAMS_DIR the way the CLI does — `shell env > profile`.
     # `dotenvy::from_path` does NOT overwrite what the shell already set
     # (`dotenvy::from_path` in `ackinacki-bridge/src/main.rs`; the overriding variant is

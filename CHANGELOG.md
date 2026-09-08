@@ -943,6 +943,25 @@ assigns it when the release is tagged.
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
 
+- **`ackinacki-bridge withdraw`: the refusal that says "do not delete"
+  can no longer be mistaken for the one that says "delete".** When the
+  pre-send ownership check refuses, its remedy depends on what the kernel
+  reported. In the one case where another process holds the withdrawal —
+  and may be inside its send — the record must not be touched. That
+  remedy was free to be replaced with either of the other two, which
+  correctly authorise a deletion, and nothing objected. No operator-facing
+  behaviour changes; what changes is that the wrong version of this
+  message can no longer ship.
+
+- **Advanced runbook: the CLI-lane snapshot looked for the proof JSON in
+  the wrong directory.** `ls "$WORK_DIR"/proof_event_*.json` printed
+  nothing for every run, because that file is written only under
+  `--prover-out-dir`, which has no default. A diagnostic that cannot find
+  anything reads as one that found nothing wrong. It now looks where the
+  file is actually written, and says the flag is required for it to
+  exist. The witness file listed beside it does live under `--work-dir`
+  and is unchanged.
+
 - **`ackinacki-bridge withdraw`: two more refusals stop claiming nothing
   was broadcast.** Both fire after the AN burn is on the wire and the
   record is written, and both reported exit 2 — whose published contract
@@ -1008,7 +1027,15 @@ assigns it when the release is tagged.
   and the broadcast; everything after — the write that records the AN tx
   hash, then capture, prove and submit, up to ~101 minutes — was back to
   convention, and one line anywhere in there released the lock with the
-  build green. A concurrent run's liveness probe covers all of it now.
+  build green.
+
+  That was still narrower than this entry first claimed. The check runs
+  in one arm of one branch, so the resume path, the "another run
+  broadcast while this one preflighted" path, and the tail of the burn
+  branch were all uncovered — the second of those being exactly when two
+  runs are working the same identity. The lock is now held from the
+  moment it is taken, on every path, and releasing it anywhere in
+  between fails to compile.
 
 - **`ackinacki-bridge withdraw`: the "could not be determined" liveness
   verdict no longer blames the filesystem for every cause.** The exit-3

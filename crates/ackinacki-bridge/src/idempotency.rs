@@ -1067,22 +1067,28 @@ impl Drop for BurnPermit<'_> {
     fn drop(&mut self) {}
 }
 
-/// The `Drop` above is the whole of that guarantee, and an empty `Drop`
-/// reads as removable to everyone who meets it — including
-/// `clippy::empty_drop`, whose own documentation says such an impl "has
-/// no effect". It has one effect, and it is the only one asked of it:
-/// `needs_drop` becomes true, so the value lives to the end of its scope
-/// and the borrow it holds lives with it.
+/// Requires an explicit `impl Drop`, and nothing weaker.
 ///
-/// Deleting the impl compiles, passes clippy and passes every test — the
-/// protection just stops existing. So the property is asserted at compile
-/// time, where a dead-code sweep meets it instead of a runbook does.
-const _: () = assert!(
-    std::mem::needs_drop::<BurnPermit<'static>>(),
-    "BurnPermit must need dropping: that is what keeps its borrow of the withdrawal lock alive \
-     past the send, across the write that records the AN tx hash. Removing `impl Drop` silently \
-     shortens the borrow to the permit's last use.",
-);
+/// The first version of this check asked `std::mem::needs_drop`, which is
+/// a PROXY: it also becomes true the moment the type gains any field that
+/// needs dropping. Give `LockHold` a `String`, delete its `impl Drop`,
+/// and the assertion passes while the release it exists to forbid
+/// compiles — the message then describes something it is not checking.
+///
+/// `T: Drop` is the property itself. A type satisfies it only by having
+/// an explicit impl, so removing one is `E0277` at this line rather than
+/// a silent loss two files away. Both directions were measured: without
+/// the impl it fails, with it it compiles clean.
+#[expect(
+    drop_bounds,
+    reason = "the lint's advice is `std::mem::needs_drop`, which is exactly the proxy this \
+              replaced: it is also true of a type that merely gained a `String` field, and an \
+              assertion that passes for that reason forbids nothing. `T: Drop` is satisfied only \
+              by an explicit impl, which is the property being pinned."
+)]
+const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
+
+const _: () = pins_its_borrow_to_the_end_of_scope::<BurnPermit<'static>>();
 
 /// A borrow of the withdrawal lock that lasts to the end of its scope.
 ///
@@ -1105,15 +1111,11 @@ impl Drop for LockHold<'_> {
     fn drop(&mut self) {}
 }
 
-/// Same trick, same silence, same assertion. `LockHold` carries only
-/// `PhantomData`, so without the impl it needs no drop at all, the borrow
-/// ends at its last use — which is never, since nothing reads it — and
-/// `drop(_withdrawal_lock)` through stages 4-6 compiles again.
-const _: () = assert!(
-    std::mem::needs_drop::<LockHold<'static>>(),
-    "LockHold must need dropping: it holds no data, so `impl Drop` is the ONLY thing keeping its \
-     borrow of the withdrawal lock open for the rest of the run.",
-);
+/// Same requirement, same reason. `LockHold` carries only `PhantomData`,
+/// so `impl Drop` is the only thing keeping its borrow of the withdrawal
+/// lock open — remove it and `drop(_withdrawal_lock)` through stages 4-6
+/// compiles again.
+const _: () = pins_its_borrow_to_the_end_of_scope::<LockHold<'static>>();
 
 impl<'a> BurnPermit<'a> {
     /// Check that this run still owns `key`, and issue the permission to

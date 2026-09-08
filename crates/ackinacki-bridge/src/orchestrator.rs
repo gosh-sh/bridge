@@ -2180,9 +2180,22 @@ mod tests {
         // inside `reserve_and_decide_holding`, whose lock goes on to the
         // out-parameter checked above.
         for n in reserves {
-            // The destructuring sits on the line before the call when
-            // rustfmt has wrapped it, so look at both.
-            let stmt = lines[n.saturating_sub(1)..=n].join(" ");
+            // The WHOLE statement, found by walking back to the previous
+            // one, not a fixed two-line window. A window cannot tell a
+            // wrapped destructuring from a tail call that happens to sit
+            // under an unrelated `let`, and judging tail-ness by "does
+            // this text contain `let (`" exempted every non-tuple
+            // binding — `let x = reserve_and_decide(..)?;` places no lock
+            // at all and passed.
+            let mut start = n;
+            while start > 0 {
+                let prev = lines[start - 1].trim_end();
+                if prev.ends_with(';') || prev.ends_with('{') || prev.ends_with('}') {
+                    break;
+                }
+                start -= 1;
+            }
+            let stmt = lines[start..=n].join(" ");
             // Not just `, _)`. A tuple pattern has other ways to let go
             // of the third element and all of them compile: `..` swallows
             // it wholesale, and a `_`-prefixed BINDING lives only to the
@@ -2200,10 +2213,13 @@ mod tests {
             // to be named here rather than quietly discarded there. A
             // tail-position call returns the tuple onward and destructures
             // nothing, which is the one shape with no slot to check.
-            // `let (` rather than `let `: the tail call sits one line
-            // below an unrelated `let attempt = …`, which the joined
-            // statement picks up.
-            let is_tail_call = !stmt.contains("let (");
+            // A tail expression BINDS NOTHING — it hands the tuple, lock
+            // included, to its own caller. Anything that binds must name
+            // the lock. Keyed on `let ` rather than `let (`, because
+            // `let whatever = reserve_and_decide(..)` binds too, and
+            // exempting it left the third element to be dropped at the
+            // end of the statement with the suite green.
+            let is_tail_call = !stmt.contains("let ");
             assert!(
                 is_tail_call || stmt.contains(", lock)"),
                 "the lock has to land in a named binding the caller then places: \
@@ -2324,6 +2340,70 @@ mod tests {
             "every refusal in this pipeline is downstream of the burn, so none of them may say \
              that nothing was sent — not through `before_send`, and not in prose: {offenders:?}",
         );
+    }
+
+    #[test]
+    fn every_place_the_lock_is_installed_takes_a_hold_of_it() {
+        // The holds ARE the protection, and nothing referenced them.
+        // Deleting one or two ships green — silently reverting to round
+        // 8's coverage, or round 9's — because the borrow they open is
+        // the only thing that fails, and it fails only where somebody
+        // later releases the lock. Deleting all three is caught by
+        // dead_code, which is the harmless edit; the damaging one was
+        // invisible.
+        //
+        // Three sites, one per place the lock becomes this run's:
+        //   * after the resume seam fills the out-parameter,
+        //   * after the burn branch's reservation, before the `match` so the `Reuse`
+        //     arm is covered too,
+        //   * once the branch has closed, above the dry-run return.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let lines: Vec<&str> = production.lines().collect();
+
+        let holds: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                t.contains(concat!("WithdrawalLock::", "hold")) && !t.starts_with("//")
+            })
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            holds.len(),
+            3,
+            "one hold per place the lock is installed; fewer means a stretch of the run is back \
+             on convention, and the compiler will not say which: {holds:?}",
+        );
+
+        // And each one is where it is for a reason, so a hold that
+        // survives the count while moving somewhere useless still fails.
+        let installs = [
+            (concat!("&mut _withdrawal", "_lock,"), "the resume seam"),
+            (
+                concat!("_withdrawal_lock = ", "lock;"),
+                "the burn branch's reservation",
+            ),
+            (
+                concat!("let _withdrawal_lock = _withdrawal", "_lock;"),
+                "the settled rebinding",
+            ),
+        ];
+        for (anchor, what) in installs {
+            let at = lines
+                .iter()
+                .position(|l| l.contains(anchor))
+                .unwrap_or_else(|| panic!("{what} is gone: {anchor}"));
+            assert!(
+                // Twelve, not three: each hold carries the paragraph
+                // explaining why it is there, and rustfmt wraps the
+                // `.as_ref().map(..)` across three lines of its own.
+                holds.iter().any(|&h| h > at && h - at <= 12),
+                "{what} installs the lock and nothing takes a hold of it within twelve lines, so \
+                 everything after it is unprotected",
+            );
+        }
     }
 
     #[test]

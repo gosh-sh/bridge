@@ -393,9 +393,6 @@ pub fn reserve(
     }
 }
 
-/// Persist a status/field update to the record's file. Overwrite-in-place
-/// via write-temp + rename so a mid-write crash never leaves a torn file.
-/// No history preserved — we only need the latest for refuse-duplicate.
 /// A state-file write that did not land.
 ///
 /// **Deliberately not convertible into [`CliError`].** There is no `From`
@@ -468,6 +465,10 @@ impl UpdateFailed {
 }
 
 /// Persist a status/field update to the record's file.
+///
+/// Overwrite-in-place through write-temp + rename, so a crash mid-write
+/// never leaves a torn record for the next run to read. No history is
+/// kept — refuse-duplicate only ever asks about the latest state.
 ///
 /// Returns [`UpdateFailed`], which deliberately has no `From` impl for
 /// `CliError`, so `?` does not compile here and every caller has to
@@ -945,6 +946,14 @@ impl WithdrawalLock {
         LockHold(std::marker::PhantomData)
     }
 
+    /// Wrap an acquisition on its way to a [`LockSlot`]. The only way to
+    /// obtain an [`AcquiredLock`], and `pub(crate)` so the orchestrator's
+    /// reservation seam can call it and nothing else has occasion to.
+    #[must_use]
+    pub(crate) fn acquired(lock: Option<Self>) -> AcquiredLock {
+        AcquiredLock(lock)
+    }
+
     /// Whether a live process on this host is executing `key` right now.
     ///
     /// The question the record cannot answer, asked by a run that does
@@ -1050,45 +1059,21 @@ impl WithdrawalLock {
 #[derive(Debug)]
 pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
 
-/// Empty, and load-bearing.
-///
-/// Without it the borrow ends at the permit's LAST USE — the
-/// `burn::send` call — and everything after that line is unprotected
-/// again: roughly nine lines of compiler guarantee, then convention. The
-/// window that matters most is just past the send, where the run writes
-/// the AN tx hash into the record; releasing the lock there is precisely
-/// the state a concurrent run's liveness probe is asked about.
-///
-/// A type that implements `Drop` is live until the end of its scope,
-/// because its `drop` is a use. So this turns "protected to the send"
-/// into "protected to the end of the arm the send is in", with no
-/// runtime cost and nothing to remember.
-impl Drop for BurnPermit<'_> {
-    fn drop(&mut self) {}
-}
-
-/// Requires an explicit `impl Drop`, and nothing weaker.
-///
-/// The first version of this check asked `std::mem::needs_drop`, which is
-/// a PROXY: it also becomes true the moment the type gains any field that
-/// needs dropping. Give `LockHold` a `String`, delete its `impl Drop`,
-/// and the assertion passes while the release it exists to forbid
-/// compiles — the message then describes something it is not checking.
-///
-/// `T: Drop` is the property itself. A type satisfies it only by having
-/// an explicit impl, so removing one is `E0277` at this line rather than
-/// a silent loss two files away. Both directions were measured: without
-/// the impl it fails, with it it compiles clean.
-#[expect(
-    drop_bounds,
-    reason = "the lint's advice is `std::mem::needs_drop`, which is exactly the proxy this \
-              replaced: it is also true of a type that merely gained a `String` field, and an \
-              assertion that passes for that reason forbids nothing. `T: Drop` is satisfied only \
-              by an explicit impl, which is the property being pinned."
-)]
-const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
-
-const _: () = pins_its_borrow_to_the_end_of_scope::<BurnPermit<'static>>();
+// `BurnPermit` has NO `Drop`, and that is a measurement rather than an
+// oversight.
+//
+// It had one for three rounds, to stretch its borrow of the lock past
+// the permit's last use — the `burn::send` call — and cover the record
+// write just below it. That window now sits inside a `LockHold` taken
+// where the branch installs the lock, and
+// `every_place_the_lock_is_installed_takes_a_hold_of_it` is what keeps
+// that hold there.
+//
+// Measured before deleting: with the impl and its assertion removed, the
+// evasion they forbade still fails to compile, and the borrow is
+// reported at the enclosing hold. A guard that forbids nothing is worse
+// than no guard — the next reader takes it for the thing protecting the
+// send and stops looking for what actually does.
 
 /// A borrow of the withdrawal lock that lasts to the end of its scope.
 ///
@@ -1105,6 +1090,85 @@ const _: () = pins_its_borrow_to_the_end_of_scope::<BurnPermit<'static>>();
 /// That is deliberate: the one-line evasions (`= None`, `.take()`,
 /// `drop(..)`) all stop compiling, and undoing it takes two statements
 /// that no one writes by accident.
+/// What a reservation acquired, on its way to a [`LockSlot`].
+///
+/// A private field, and no constructor outside this module: the only
+/// value of this type in the tree comes back from
+/// `orchestrator::reserve_and_decide`. That is the whole design. The
+/// orchestrator used to receive `&mut Option<WithdrawalLock>` and write
+/// it, which meant `*hold = None;` — one statement, anywhere in the
+/// callee, releasing the lock for the rest of the run with the build
+/// green and 219 tests passing. There is no longer an expression that
+/// says it: `None` is not an `AcquiredLock`, and an `AcquiredLock`
+/// cannot be built.
+///
+/// It can be EMPTY — a filesystem without `flock` is a supported
+/// deployment — but only `try_acquire` can decide that.
+#[derive(Debug)]
+pub struct AcquiredLock(Option<WithdrawalLock>);
+
+impl AcquiredLock {
+    /// Whether the reservation came away holding the identity.
+    ///
+    /// `cfg(test)`: production reads the slot, not the acquisition on its
+    /// way in. The tests that drive the reservation seam directly need to
+    /// see what it came back with.
+    #[cfg(test)]
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// Where a run keeps the withdrawal lock for its whole life.
+///
+/// Starts empty, is filled once by [`install`](Self::install), and after
+/// that offers only borrows. Nothing can take the lock back out, so the
+/// question "is it still held?" has one answer for the rest of the run.
+#[derive(Debug)]
+pub struct LockSlot(Option<WithdrawalLock>);
+
+impl LockSlot {
+    /// A run that has not reserved yet.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(None)
+    }
+
+    /// Take ownership of what the reservation acquired.
+    ///
+    /// Consumes the [`AcquiredLock`], so a caller cannot install the same
+    /// acquisition twice, and cannot install anything it did not get from
+    /// a reservation.
+    pub fn install(&mut self, acquired: AcquiredLock) {
+        // A second install would drop the first lock. It cannot happen
+        // through an honest path — `try_acquire` answers `Contended` to a
+        // process that already holds this identity, so a second
+        // `AcquiredLock` for it is never `Some` — and if it ever does,
+        // losing the lock silently is the outcome this type exists to
+        // prevent.
+        debug_assert!(
+            self.0.is_none(),
+            "the withdrawal lock is installed once per run; a second install drops the first",
+        );
+        self.0 = acquired.0;
+    }
+
+    /// The lock this run holds, if the filesystem gave it one.
+    #[must_use]
+    pub fn as_ref(&self) -> Option<&WithdrawalLock> {
+        self.0.as_ref()
+    }
+
+    /// Hold whatever is in the slot for the rest of the caller's scope.
+    /// `None` when there is nothing to hold, which is the lockless
+    /// deployment and needs no protecting.
+    #[must_use]
+    pub fn hold(&self) -> Option<LockHold<'_>> {
+        self.0.as_ref().map(WithdrawalLock::hold)
+    }
+}
+
 pub struct LockHold<'a>(std::marker::PhantomData<&'a WithdrawalLock>);
 
 impl Drop for LockHold<'_> {
@@ -1115,6 +1179,22 @@ impl Drop for LockHold<'_> {
 /// so `impl Drop` is the only thing keeping its borrow of the withdrawal
 /// lock open — remove it and `drop(_withdrawal_lock)` through stages 4-6
 /// compiles again.
+/// Requires an explicit `impl Drop`, and nothing weaker.
+///
+/// `std::mem::needs_drop` — which rustc's `drop_bounds` lint recommends
+/// instead — is a PROXY: it also becomes true the moment the type gains
+/// any field that needs dropping, so an assertion built on it passes
+/// while the release it exists to forbid compiles. `T: Drop` is
+/// satisfied only by an explicit impl.
+#[expect(
+    drop_bounds,
+    reason = "the lint's advice is `std::mem::needs_drop`, which is exactly the proxy this \
+              replaced: it is also true of a type that merely gained a `String` field, and an \
+              assertion that passes for that reason forbids nothing. `T: Drop` is satisfied only \
+              by an explicit impl, which is the property being pinned."
+)]
+const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
+
 const _: () = pins_its_borrow_to_the_end_of_scope::<LockHold<'static>>();
 
 impl<'a> BurnPermit<'a> {

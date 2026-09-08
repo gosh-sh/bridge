@@ -300,7 +300,7 @@ pub async fn run(
     //
     // `_`-prefixed but a real binding — `let _ = ..` would drop the guard
     // on the spot and the exclusion would silently disappear.
-    let mut _withdrawal_lock: Option<idempotency::WithdrawalLock> = None;
+    let mut _withdrawal_lock = idempotency::LockSlot::empty();
     let (an_tx_hash, bounce) = if dry_run {
         info!("stage 2/6: idempotency (skipped for --dry-run)");
         // Unreachable past the early return below; present only so both
@@ -346,9 +346,7 @@ pub async fn run(
             // so there is no permit to carry it — but everything below
             // still runs for up to ~101 minutes with a concurrent run's
             // liveness probe asking whether this one is alive.
-            let _held = _withdrawal_lock
-                .as_ref()
-                .map(idempotency::WithdrawalLock::hold);
+            let _held = _withdrawal_lock.hold();
             record = Some(r);
             (an_tx, bounce)
         } else {
@@ -430,16 +428,14 @@ pub async fn run(
             info!("stage 2/6: idempotency reserve");
             let (r, decision, lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
-            _withdrawal_lock = lock;
+            _withdrawal_lock.install(lock);
             // Before the match, so BOTH arms are covered. `Reuse` issues
             // no permit — it is the "another run broadcast while this one
             // preflighted, resume at capture" case, which is exactly when
             // two runs are working the same identity — and `Send`'s
             // permit borrow ends with its arm, leaving the tail of this
             // branch on convention alone.
-            let _held = _withdrawal_lock
-                .as_ref()
-                .map(idempotency::WithdrawalLock::hold);
+            let _held = _withdrawal_lock.hold();
             record = Some(r);
 
             match decision {
@@ -522,38 +518,28 @@ pub async fn run(
     };
 
     // The lock is settled: whichever branch above ran, what this process
-    // holds will not change again. Say that to the compiler rather than
-    // to the next reader.
+    // holds will not change again, and stages 4-6 run for up to ~101
+    // minutes on that fact. A second run asking "is anybody executing
+    // this withdrawal?" is answered by the kernel holding this
+    // descriptor, not by anything on disk; lose it here and that run is
+    // told the record was left by one that already exited, which the
+    // runbook turns into permission to delete it.
     //
-    // The HOLD is what does the work, and this comment claimed otherwise
-    // for two rounds. Measured: with the rebinding removed, the hold
-    // alone still refuses `= None` (E0506), `.take()` (E0502) and
-    // `drop(..)` (E0505) — a value with a `Drop` impl is live to the end
-    // of its scope, which is what pins the borrow open. Dropping the HOLD
-    // does not release the lock, so there is no one-line way back out.
-    //
-    // The immutable rebinding is kept for the diagnostic, not the
-    // guarantee: `= None` then reports E0384, "cannot assign twice",
-    // which says what to do about it. The two holds above have no
-    // rebinding and are no weaker for it.
-    //
-    // The three of them were the escape this guard has been chasing for
-    // four rounds: stages 4-6 run for up to ~101 minutes, and a second
-    // run asking "is anybody executing this withdrawal?" is answered by
-    // the kernel holding this descriptor, not by anything on disk. Lose
-    // it here and the concurrent run is told the record was left by a run
-    // that already exited — which the runbook turns into permission to
-    // delete it.
+    // ONE statement. An immutable rebinding stood here for two rounds
+    // with an explanation that was measured and found false both times:
+    // it was said to be necessary, then said to buy the clearer E0384
+    // diagnostic. Neither holds — `LockSlot` owns a `File`, so assigning
+    // over it emits an implicit drop that meets the hold's borrow first,
+    // and the error is E0506 either way. A line whose only stated reason
+    // is false is a line to delete, not to re-describe; that block had
+    // overstated the compiler five rounds running.
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
     // nothing — the permit's borrow ends with its own arm. A dry run
-    // holds no lock, so the `map` yields `None` and the early return is
+    // holds no lock, so `hold()` yields `None` and the early return is
     // unaffected.
-    let _withdrawal_lock = _withdrawal_lock;
-    let _lock_held_to_the_end = _withdrawal_lock
-        .as_ref()
-        .map(idempotency::WithdrawalLock::hold);
+    let _lock_held_to_the_end = _withdrawal_lock.hold();
 
     // Full `--dry-run`: stop before touching either chain. Returning a
     // stub success record keeps the output path uniform.
@@ -1068,7 +1054,7 @@ fn resume_recorded_burn(
     amount: &UsdcAmount,
     allow_retry: bool,
     observed: &idempotency::Record,
-    hold: &mut Option<idempotency::WithdrawalLock>,
+    hold: &mut idempotency::LockSlot,
 ) -> CliResult<(idempotency::Record, String)> {
     // Every refusal raised anywhere inside this function is a post-send
     // refusal, and this is the FIRST line of it — not just the `reserve`
@@ -1080,7 +1066,13 @@ fn resume_recorded_burn(
     // wire.
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
         .map_err(|e| resumed_refusal(e, observed))?;
-    *hold = lock;
+    hold.install(lock);
+    // Held for the rest of THIS function too, not only by the caller
+    // once it returns. Everything below — the restoring write, the
+    // second reservation — runs on an identity whose burn is already on
+    // the wire, and a run that lost the lock here would reach stages 4-6
+    // invisible to a concurrent run's liveness probe.
+    let _held = hold.hold();
     match decision {
         // The hash comes from the RESERVATION, not from `observed`. The
         // two are read minutes apart — the whole of preflight — and the
@@ -1182,6 +1174,150 @@ fn resume_recorded_burn(
     }
 }
 
+/// Re-badge the refusal that ESTABLISHES the fact
+/// [`refusal_before_a_recorded_burn`] acts on.
+///
+/// `peek` is the one call in stage 1 that cannot be told whether a burn
+/// is recorded, because it is the call that finds out. It does not need
+/// to be told: it returns `Ok(None)` when the record file is absent, so
+/// every `Err` it produces is about a file that **demonstrably exists**
+/// — unreadable, torn, or failing a cross-field guard. That is a weaker
+/// fact than a hash, and it is enough.
+///
+/// The message was fixed last round to say "do NOT delete it on the
+/// strength of that … a torn record is not evidence that no burn
+/// happened". The exit code went on saying 2, whose published
+/// remediation is that no state file was written — about the very file
+/// whose existence is the reason the refusal fired. A human reading the
+/// text was protected and a wrapper reading the code was not.
+fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
+    // Same four variants and the same exhaustive tail, for the same
+    // reason: a new variant has to be considered here rather than
+    // escaping as exit 2 through a `_`.
+    let reason = match &e {
+        CliError::Preflight {
+            ..
+        }
+        | CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        } => format!("{e}"),
+        // Spelled out, all six of them, because a catch-all is what made
+        // the claim above false: `_` satisfies exhaustiveness, so a fifth
+        // exit-2 variant would have taken it and returned unchanged —
+        // the silent escape the comment promised could not happen.
+        CliError::DuplicateInFlight {
+            ..
+        }
+        | CliError::ReservationInFlight {
+            ..
+        }
+        | CliError::BurnOutcomeUnknown {
+            ..
+        }
+        | CliError::CaptureTimeout {
+            ..
+        }
+        | CliError::ProofFailed {
+            ..
+        }
+        | CliError::EthSubmitFailed {
+            ..
+        } => return e,
+    };
+    CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "the record for this withdrawal could not be read: {reason}\n\x20 This run got no \
+             further than reading it, so it added nothing to either chain — but a record for this \
+             identity EXISTS, which is why this refusal fired, and no AN tx hash could be \
+             recovered from it. Whether a burn is on the wire cannot be answered locally at all. \
+             Reconcile on chain before touching that file: the advanced runbook, Case 3a.",
+        ),
+        source: None,
+    }
+}
+
+/// Re-badge a STAGE 1 refusal when a burn for this identity is already on
+/// the wire.
+///
+/// Nine rounds of review circled this, one site at a time, and the
+/// project had already decided it: the resume arm re-badges on the
+/// ground that entry is "gated on a burn being on the wire", and a test
+/// pins an EISDIR failure there — one that writes nothing and leaves the
+/// record intact — at exit 10. `burn_already_sent` is literally the same
+/// predicate, computed before preflight and already used to relax the
+/// balance check, and six refusals below it kept reporting exit 2 under
+/// it.
+///
+/// The cost is not theoretical. The runbook attaches "do not delete the
+/// state file" to exit 10 and tells an exit-2 reader "no state file was
+/// written"; both sentences describe the same run, and one of them is
+/// wrong. Nothing NEW is broadcast or written by a stage-1 refusal — that
+/// half of exit 2's contract holds — but the withdrawal it is refusing
+/// has a burn on chain and a record on disk, which is the half an
+/// operator acts on.
+fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError {
+    let Some(an_tx) = an_tx else {
+        return e;
+    };
+    // Every variant, on both sides, and NO catch-all. Naming the exit-2
+    // four while leaving `_ => return e` underneath was the shape this
+    // comment described and did not have: `_` satisfies exhaustiveness,
+    // so a fifth exit-2 variant took it and escaped unchanged. Now a new
+    // variant is a non-exhaustive-match error here, which is a compile
+    // error at the one place that has to decide what it means.
+    let reason = match &e {
+        CliError::Preflight {
+            ..
+        }
+        | CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        } => format!("{e}"),
+        // Spelled out, all six of them, because a catch-all is what made
+        // the claim above false: `_` satisfies exhaustiveness, so a fifth
+        // exit-2 variant would have taken it and returned unchanged —
+        // the silent escape the comment promised could not happen.
+        CliError::DuplicateInFlight {
+            ..
+        }
+        | CliError::ReservationInFlight {
+            ..
+        }
+        | CliError::BurnOutcomeUnknown {
+            ..
+        }
+        | CliError::CaptureTimeout {
+            ..
+        }
+        | CliError::ProofFailed {
+            ..
+        }
+        | CliError::EthSubmitFailed {
+            ..
+        } => return e,
+    };
+    CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "preflight refused this run: {reason}\n\x20 Nothing new was sent and nothing new was \
+             written — but the AN burn {an_tx} from an earlier run IS on the wire, and its record \
+             is on disk. Do not delete that record on the strength of this refusal; fix what \
+             preflight named and re-run, which resumes from the recorded burn.",
+        ),
+        source: None,
+    }
+}
+
 /// Re-badge a refusal raised inside the resume arm, where the pre-send
 /// half of `reserve`'s vocabulary is not available.
 ///
@@ -1205,104 +1341,6 @@ fn resume_recorded_burn(
 /// on the wire and, two lines below, that nothing had been sent. An
 /// operator reconciling a live withdrawal reads whichever half they see
 /// first.
-/// Re-badge a STAGE 1 refusal when a burn for this identity is already on
-/// the wire.
-///
-/// Nine rounds of review circled this, one site at a time, and the
-/// project had already decided it: the resume arm re-badges on the
-/// ground that entry is "gated on a burn being on the wire", and a test
-/// pins an EISDIR failure there — one that writes nothing and leaves the
-/// record intact — at exit 10. `burn_already_sent` is literally the same
-/// predicate, computed before preflight and already used to relax the
-/// balance check, and six refusals below it kept reporting exit 2 under
-/// it.
-///
-/// The cost is not theoretical. The runbook attaches "do not delete the
-/// state file" to exit 10 and tells an exit-2 reader "no state file was
-/// written"; both sentences describe the same run, and one of them is
-/// wrong. Nothing NEW is broadcast or written by a stage-1 refusal — that
-/// half of exit 2's contract holds — but the withdrawal it is refusing
-/// has a burn on chain and a record on disk, which is the half an
-/// operator acts on.
-/// Re-badge the refusal that ESTABLISHES the fact the helper below acts
-/// on.
-///
-/// `peek` is the one call in stage 1 that cannot be told whether a burn
-/// is recorded, because it is the call that finds out. It does not need
-/// to be told: it returns `Ok(None)` when the record file is absent, so
-/// every `Err` it produces is about a file that **demonstrably exists**
-/// — unreadable, torn, or failing a cross-field guard. That is a weaker
-/// fact than a hash, and it is enough.
-///
-/// The message was fixed last round to say "do NOT delete it on the
-/// strength of that … a torn record is not evidence that no burn
-/// happened". The exit code went on saying 2, whose published
-/// remediation is that no state file was written — about the very file
-/// whose existence is the reason the refusal fired. A human reading the
-/// text was protected and a wrapper reading the code was not.
-fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
-    // Same four variants, named for the same reason: a new one has to be
-    // considered here rather than escaping as exit 2.
-    let reason = match &e {
-        CliError::Preflight {
-            ..
-        }
-        | CliError::ArgInvalid {
-            ..
-        }
-        | CliError::KeyFilePerms {
-            ..
-        }
-        | CliError::Usage {
-            ..
-        } => format!("{e}"),
-        _ => return e,
-    };
-    CliError::BurnOutcomeUnknown {
-        reason: format!(
-            "the record for this withdrawal could not be read: {reason}\n\x20 This run got no \
-             further than reading it, so it added nothing to either chain — but a record for this \
-             identity EXISTS, which is why this refusal fired, and no AN tx hash could be \
-             recovered from it. Whether a burn is on the wire cannot be answered locally at all. \
-             Reconcile on chain before touching that file: the advanced runbook, Case 3a.",
-        ),
-        source: None,
-    }
-}
-
-fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError {
-    let Some(an_tx) = an_tx else {
-        return e;
-    };
-    // Every variant that renders as exit 2. Naming them rather than
-    // matching `_` so a variant added later is a compile error here
-    // instead of a silent exit-2 escape.
-    let reason = match &e {
-        CliError::Preflight {
-            ..
-        }
-        | CliError::ArgInvalid {
-            ..
-        }
-        | CliError::KeyFilePerms {
-            ..
-        }
-        | CliError::Usage {
-            ..
-        } => format!("{e}"),
-        _ => return e,
-    };
-    CliError::BurnOutcomeUnknown {
-        reason: format!(
-            "preflight refused this run: {reason}\n\x20 Nothing new was sent and nothing new was \
-             written — but the AN burn {an_tx} from an earlier run IS on the wire, and its record \
-             is on disk. Do not delete that record on the strength of this refusal; fix what \
-             preflight named and re-run, which resumes from the recorded burn.",
-        ),
-        source: None,
-    }
-}
-
 fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
     match e {
         CliError::Preflight {
@@ -1348,11 +1386,7 @@ fn reserve_and_decide(
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-) -> CliResult<(
-    idempotency::Record,
-    BurnDecision,
-    Option<idempotency::WithdrawalLock>,
-)> {
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
     // The lock comes FIRST — before the reservation, long before the send.
     //
     // A lock TAKEN between the reserve and `burn::send` would be a new way
@@ -1395,11 +1429,7 @@ fn reserve_and_decide_holding(
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-) -> CliResult<(
-    idempotency::Record,
-    BurnDecision,
-    Option<idempotency::WithdrawalLock>,
-)> {
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
     let key = idempotency::key(from, to, amount);
 
     // Asked BEFORE the attempt is taken apart, and asked of the attempt
@@ -1467,7 +1497,7 @@ fn reserve_and_decide_holding(
     // disagree in two different ways, and both are a second irreversible
     // burn.
     let decision = decide_burn(&r, how, state_dir, holder)?;
-    Ok((r, decision, lock))
+    Ok((r, decision, idempotency::WithdrawalLock::acquired(lock)))
 }
 
 /// Whether this run broadcasts, decided from what the RESERVATION
@@ -2038,7 +2068,7 @@ mod tests {
         .expect("a first withdrawal in a fresh state dir is ordinary");
         assert_eq!(d, BurnDecision::Send);
         assert!(
-            lock.is_some(),
+            lock.is_held(),
             "the very first run must own its withdrawal too, or nothing can tell a later run that \
              it is still alive",
         );
@@ -2475,49 +2505,71 @@ mod tests {
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
         let lines: Vec<&str> = production.lines().collect();
 
-        let holds: Vec<usize> = lines
+        // Keyed on the INSTALL, not on the hold, because the risk is
+        // asymmetric and the previous version had it backwards: it
+        // asserted `holds.len() == 3`, so a fourth place that installs
+        // the lock and takes no hold left the count at three and passed,
+        // while one that DID take a hold pushed the count to four and
+        // failed. The dangerous edit was invisible and the safe one was
+        // rejected.
+        //
+        // Now every install has to be followed by a hold, and a fifth
+        // install is as covered as the first. `LockSlot::install` is the
+        // only way a lock enters the run, so the set is closed by the
+        // type rather than by this list.
+        let installs: Vec<usize> = lines
             .iter()
             .enumerate()
             .filter(|(_, l)| {
                 let t = l.trim_start();
-                t.contains(concat!("WithdrawalLock::", "hold")) && !t.starts_with("//")
+                t.contains(concat!(".install", "(")) && !t.starts_with("//")
             })
             .map(|(n, _)| n)
             .collect();
-        assert_eq!(
-            holds.len(),
-            3,
-            "one hold per place the lock is installed; fewer means a stretch of the run is back \
-             on convention, and the compiler will not say which: {holds:?}",
+        assert!(
+            !installs.is_empty(),
+            "the lock has to be installed somewhere; if this is empty the scan is looking for the \
+             wrong thing rather than the code having stopped locking",
         );
-
-        // And each one is where it is for a reason, so a hold that
-        // survives the count while moving somewhere useless still fails.
-        let installs = [
-            (concat!("&mut _withdrawal", "_lock,"), "the resume seam"),
-            (
-                concat!("_withdrawal_lock = ", "lock;"),
-                "the burn branch's reservation",
-            ),
-            (
-                concat!("let _withdrawal_lock = _withdrawal", "_lock;"),
-                "the settled rebinding",
-            ),
-        ];
-        for (anchor, what) in installs {
-            let at = lines
-                .iter()
-                .position(|l| l.contains(anchor))
-                .unwrap_or_else(|| panic!("{what} is gone: {anchor}"));
+        for at in installs {
+            // Twelve lines: each hold carries the paragraph explaining
+            // why it is there.
             assert!(
-                // Twelve, not three: each hold carries the paragraph
-                // explaining why it is there, and rustfmt wraps the
-                // `.as_ref().map(..)` across three lines of its own.
-                holds.iter().any(|&h| h > at && h - at <= 12),
-                "{what} installs the lock and nothing takes a hold of it within twelve lines, so \
-                 everything after it is unprotected",
+                lines
+                    .iter()
+                    .enumerate()
+                    .any(|(h, l)| h > at && h - at <= 12 && l.contains(concat!(".hold", "()"))),
+                "orchestrator.rs:{}: the lock is installed here and nothing takes a hold of it \
+                 within twelve lines, so everything after it runs unprotected — and the compiler \
+                 will not say which stretch",
+                at + 1,
             );
         }
+    }
+
+    /// Line numbers where `variant` is CONSTRUCTED, ignoring the places
+    /// it is merely matched.
+    ///
+    /// The two are the same text — `CliError::X {` — and the guards that
+    /// count constructions started tripping over patterns the moment the
+    /// re-badge helpers were made exhaustive. What separates them is what
+    /// comes next: a construction supplies fields, a pattern here binds
+    /// nothing and says `..`.
+    fn construction_sites(production: &str, variant: &str) -> Vec<String> {
+        let lines: Vec<&str> = production.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| l.contains(variant))
+            .filter(|(n, _)| {
+                lines[n + 1..]
+                    .iter()
+                    .find(|l| !l.trim().is_empty())
+                    .is_none_or(|next| next.trim() != "..")
+            })
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
+            .collect()
     }
 
     #[test]
@@ -2533,11 +2585,7 @@ mod tests {
         // when the set changes at all.
         let src = include_str!("orchestrator.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
-        let sites: Vec<&str> = production
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .filter(|l| l.contains(concat!("CliError::", "ReservationInFlight")))
-            .collect();
+        let sites = construction_sites(production, concat!("CliError::", "ReservationInFlight"));
         assert_eq!(
             sites.len(),
             3,
@@ -2903,14 +2951,8 @@ mod tests {
         // neighbours trip over gets loosened until it means nothing.
         let src = include_str!("orchestrator.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
-        let wrong = concat!("CliError::Duplicate", "InFlight {");
-        let offenders: Vec<_> = production
-            .lines()
-            .enumerate()
-            .filter(|(_, l)| !l.trim_start().starts_with("//"))
-            .filter(|(_, l)| l.contains(wrong))
-            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
-            .collect();
+        let offenders =
+            construction_sites(production, concat!("CliError::Duplicate", "InFlight {"));
         assert!(
             offenders.is_empty(),
             "build it through `idempotency::terminal_refusal`, which owns the per-status remedy; \
@@ -2992,7 +3034,7 @@ mod tests {
         let hash = format!("0x{}", "ab".repeat(32));
         let observed = burned_record(dir.path(), &hash);
 
-        let mut lock = None;
+        let mut lock = idempotency::LockSlot::empty();
         let (r, _an_tx) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
@@ -3004,7 +3046,10 @@ mod tests {
         )
         .expect("a recorded burn resumes");
         assert_eq!(r.an_tx_hash.as_deref(), Some(hash.as_str()));
-        assert!(lock.is_some(), "a resume must own the withdrawal too");
+        assert!(
+            lock.as_ref().is_some(),
+            "a resume must own the withdrawal too"
+        );
 
         // And a second resume, concurrent with the first, is refused
         // rather than racing it to stage 6.
@@ -3015,7 +3060,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("the first resume still holds this withdrawal");
         assert!(
@@ -3054,7 +3099,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &r,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect("the burn is known; the run must not be stranded");
 
@@ -3105,7 +3150,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect("a recorded burn resumes");
         assert_eq!(
@@ -3157,7 +3202,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             false,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("deleting the file is not the consent the flag is");
         assert_eq!(
@@ -3201,7 +3246,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect("with the flag, a restored record resumes");
         assert_eq!(an_tx, hash);
@@ -3241,7 +3286,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("a withdrawal that has already paid out must not resume");
         assert_eq!(err.exit_code().as_i32(), 3, "{err:?}");
@@ -3346,7 +3391,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("a lock that cannot be opened is still a refusal");
 
@@ -3399,7 +3444,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("a lock that cannot be opened is still a refusal");
 
@@ -3465,7 +3510,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("a record read_record rejects cannot resume");
 
@@ -3520,7 +3565,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("there is no burn to resume from");
 
@@ -3571,7 +3616,7 @@ mod tests {
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut None,
+            &mut idempotency::LockSlot::empty(),
         )
         .expect_err("a submitted withdrawal must not resume");
         assert_eq!(

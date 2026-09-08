@@ -484,14 +484,23 @@ unreachable under it.
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|
 | 0    | Success (or `--dry-run` returned OK) | — | — |
-| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing | Error scenarios § "Preflight refused" |
-| 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing | § Idempotency semantics |
-| 10   | AN burn broadcast, capture failed to observe outcome | ✗ AN burn WAS broadcast | § "Burn broadcast, outcome unknown" |
+| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing, **and no record on disk** | Error scenarios § "Preflight refused" |
+| 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing by this run | § Idempotency semantics |
+| 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-Exit codes 10–13 all leave the AN burn broadcast: the USDC has left
+**Exit 10 covers three situations, and only the first is "this run
+broadcast a burn".** The other two are refusals: a preflight check that
+failed on a withdrawal whose burn a PREVIOUS run already recorded, and a
+state record that exists and could not be read. Neither broadcasts or
+writes anything — but in both, a burn may be on the wire and the record
+must not be deleted, which is the thing exit 2 would have said the
+opposite of. What the three share, and what a script should key on, is
+"do not treat this identity as untouched".
+
+Exit codes 11–13 all leave the AN burn broadcast: the USDC has left
 the source multisig regardless. The question is whether the EVM side
 saw the withdrawal.
 
@@ -527,8 +536,16 @@ shellnet deploy: the bundled `USDCBridge.shellnet.keys.json` in
 `bridge-prover-libraries/python/contracts/` has drifted from the
 current on-chain owner pubkey — the deploy script would have refused
 in this case, so if you see this you likely bypassed the deploy step.
-Re-run `scripts/deploy_msig_and_mint.sh` (it validates the key against
-`getOwnerPubkey` before minting) and start over.
+Fix the key and re-run the SAME withdrawal command: it resumes from the
+recorded burn.
+
+**Do not re-run `scripts/deploy_msig_and_mint.sh` here.** It deploys a
+fresh multisig, which is a different `--from`, which is a different dedup
+identity — the record for the burn already on the wire is orphaned, and
+nothing will ever resume it. That script is for standing up a new test
+withdrawal, not for recovering one. If the bundled
+`USDCBridge.shellnet.keys.json` has drifted from the current on-chain
+owner pubkey, correct the key file itself.
 
 ### Capture timeout (exit 11)
 

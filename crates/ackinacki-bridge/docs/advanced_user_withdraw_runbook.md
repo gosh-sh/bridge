@@ -929,13 +929,36 @@ the CLI prints:
 - `preflight: multisig ECC[3] balance = X, need Y` (insufficient USDC)
 - `preflight: USDCBridge account_id does not resolve via GQL`
 
-**Remediation:** Fix the specific issue. Preflight is side-effect
-free — no state file was written, no burn attempted.
+**Remediation:** Fix the specific issue and re-run. Preflight is
+side-effect free: this run wrote no state file and attempted no burn.
 
-#### 3d-ii — Burn broadcast, outcome unknown (exit 10)
+**That is a statement about the RUN, not about the withdrawal.** If a
+previous run had already recorded a burn for this identity, the same
+preflight failure comes out as **exit 10**, not exit 2 — the checks and
+the message are identical, and the code differs because the remedy does.
+Seeing exit 2 here means there is no record and no burn; if you have a
+record, you will not see exit 2. See 3d-ii.
 
-`sendTransaction` broadcast but the CLI could not observe the
-resulting message on GQL within its budget. Typical root cause:
+#### 3d-ii — This run must not act as if the withdrawal were untouched (exit 10)
+
+Three situations share this code, and only the first is "this run
+broadcast a burn":
+
+1. `sendTransaction` broadcast but the CLI could not observe the
+   resulting message on GQL within its budget.
+2. A **preflight check refused** a withdrawal whose burn a previous run
+   already recorded. Nothing was broadcast or written by this run.
+3. The **state record exists and could not be read** — torn, or failing
+   a cross-field check. No AN tx hash could be recovered from it, so
+   whether a burn is on the wire cannot be answered locally at all.
+
+In all three the record must not be deleted and the withdrawal must not
+be re-started under a fresh identity. In 2 and 3 the remedy is to fix
+what the message names and re-run the SAME command, which resumes from
+the recorded burn.
+
+For situation 1: `sendTransaction` broadcast but the CLI could not
+observe the resulting message on GQL within its budget. Typical root cause:
 local `USDCBridge.shellnet.keys.json` public key ≠ on-chain
 `getOwnerPubkey`, so the USDCBridge internally rejected the
 `initiateWithdrawal` call (TVM exit_code=209 signature error).
@@ -980,6 +1003,12 @@ exit 13.)
 Note that `scripts/deploy_msig_and_mint.sh` validates the key against
 `getOwnerPubkey` before minting, so if you always deploy via that
 wrapper you should not hit this path.
+
+**It is not a recovery step, though.** Running it here deploys a fresh
+multisig, which is a different `--from`, which is a different dedup
+identity: the record for the burn already on the wire is orphaned and
+nothing will ever resume it. Correct the key file and re-run the same
+withdrawal command instead.
 
 ---
 

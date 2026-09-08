@@ -923,6 +923,13 @@ impl WithdrawalLock {
         }
     }
 
+    /// Keep this lock held for the rest of the caller's scope, and make
+    /// the compiler enforce it. See [`LockHold`].
+    #[must_use]
+    pub fn hold(&self) -> LockHold<'_> {
+        LockHold(std::marker::PhantomData)
+    }
+
     /// Whether a live process on this host is executing `key` right now.
     ///
     /// The question the record cannot answer, asked by a run that does
@@ -1027,6 +1034,44 @@ impl WithdrawalLock {
 /// private field cannot be built outside this module at all.
 #[derive(Debug)]
 pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
+
+/// Empty, and load-bearing.
+///
+/// Without it the borrow ends at the permit's LAST USE — the
+/// `burn::send` call — and everything after that line is unprotected
+/// again: roughly nine lines of compiler guarantee, then convention. The
+/// window that matters most is just past the send, where the run writes
+/// the AN tx hash into the record; releasing the lock there is precisely
+/// the state a concurrent run's liveness probe is asked about.
+///
+/// A type that implements `Drop` is live until the end of its scope,
+/// because its `drop` is a use. So this turns "protected to the send"
+/// into "protected to the end of the arm the send is in", with no
+/// runtime cost and nothing to remember.
+impl Drop for BurnPermit<'_> {
+    fn drop(&mut self) {}
+}
+
+/// A borrow of the withdrawal lock that lasts to the end of its scope.
+///
+/// [`BurnPermit`] covers the send. This covers everything after it —
+/// capture, prove and submit, which is up to ~101 minutes during which a
+/// second run asking "is anybody executing this withdrawal?" must be told
+/// yes. Nothing enforced that: the lock sat in a `mut` binding and one
+/// line anywhere below the burn released it, compiled, and left the suite
+/// green.
+///
+/// Held by the same trick and for the same reason as `BurnPermit`'s
+/// `Drop`. It carries no data — `PhantomData` is what ties the lifetime —
+/// so dropping the hold does not drop the lock; it only ends the borrow.
+/// That is deliberate: the one-line evasions (`= None`, `.take()`,
+/// `drop(..)`) all stop compiling, and undoing it takes two statements
+/// that no one writes by accident.
+pub struct LockHold<'a>(std::marker::PhantomData<&'a WithdrawalLock>);
+
+impl Drop for LockHold<'_> {
+    fn drop(&mut self) {}
+}
 
 impl<'a> BurnPermit<'a> {
     /// Check that this run still owns `key`, and issue the permission to

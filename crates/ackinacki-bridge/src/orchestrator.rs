@@ -432,6 +432,14 @@ pub async fn run(
                     // lock — so from here to the end of this arm the
                     // compiler refuses to let anything reassign, move or
                     // drop `_withdrawal_lock`.
+                    //
+                    // "To the end of this arm" is true only because
+                    // `BurnPermit` implements `Drop`. Without it the
+                    // borrow would end at the permit's last use, the
+                    // `send` call below — and the `update` a few lines
+                    // down, which writes the AN tx hash to disk, would be
+                    // outside it. That write is the exact window a
+                    // concurrent run's liveness probe asks about.
                     let permit = idempotency::BurnPermit::issue(
                         &state_dir,
                         &idempotency::key(&from, &to, &amount),
@@ -509,6 +517,29 @@ pub async fn run(
             },
         });
     }
+
+    // The lock is settled: whichever branch above ran, what this process
+    // holds will not change again. Say that to the compiler rather than
+    // to the next reader.
+    //
+    // Two statements, and both are needed. Rebinding immutably refuses
+    // `_withdrawal_lock = None` (E0384) and `.take()` (E0596). The hold
+    // borrows it for the rest of the function, so `drop(_withdrawal_lock)`
+    // is E0505 as well — a value with a `Drop` impl is live to the end of
+    // its scope, which is what pins the borrow open. Dropping the HOLD
+    // does not release the lock, so there is no one-line way back out.
+    //
+    // The three of them were the escape this guard has been chasing for
+    // four rounds: stages 4-6 run for up to ~101 minutes, and a second
+    // run asking "is anybody executing this withdrawal?" is answered by
+    // the kernel holding this descriptor, not by anything on disk. Lose
+    // it here and the concurrent run is told the record was left by a run
+    // that already exited — which the runbook turns into permission to
+    // delete it.
+    let _withdrawal_lock = _withdrawal_lock;
+    let _lock_held_to_the_end = _withdrawal_lock
+        .as_ref()
+        .map(idempotency::WithdrawalLock::hold);
 
     // Past the dry-run return, so `plumbing` is `Some` by construction —
     // it is resolved unconditionally for every non-dry run above.

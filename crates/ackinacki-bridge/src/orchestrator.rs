@@ -1080,9 +1080,9 @@ fn resume_recorded_burn(
             };
             idempotency::update(state_dir, &restored).map_err(|e| {
                 e.after_send(&format!(
-                    "the AN burn {:?} is on the wire — it was recorded before this run started, \
-                     and its record has since been deleted",
-                    restored.an_tx_hash,
+                    "the AN burn {} is on the wire — it was recorded before this run started, and \
+                     its record has since been deleted",
+                    restored.an_tx_hash.as_deref().unwrap_or("<none recorded>"),
                 ))
             })?;
 
@@ -1129,10 +1129,11 @@ fn resume_recorded_burn(
                 // a dedup digest.
                 return Err(CliError::BurnOutcomeUnknown {
                     reason: format!(
-                        "the AN burn {:?} is on the wire, but the restored record {} came back \
-                         from the reservation carrying no AN tx hash, so there is no burn to \
-                         resume from. Reconcile that transaction before re-running.",
-                        observed.an_tx_hash, reserved.key,
+                        "the AN burn {} is on the wire, but the restored record {} came back from \
+                         the reservation carrying no AN tx hash, so there is no burn to resume \
+                         from. Reconcile that transaction before re-running.",
+                        observed.an_tx_hash.as_deref().unwrap_or("<none recorded>"),
+                        reserved.key,
                     ),
                     source: None,
                 });
@@ -2837,6 +2838,68 @@ mod tests {
             "the hash is what the operator pastes into an explorer; `{{:?}}` on the Option \
              wrapped it in `Some(\"…\")`: {msg}",
         );
+    }
+
+    #[test]
+    fn no_pre_send_advice_survives_the_resume_arm() {
+        // `resumed_refusal` strips ONE clause, and stripping is the wrong
+        // shape for the problem: `reserve`, `try_acquire` and
+        // `read_record` are all reachable from a caller whose burn is on
+        // the wire, and any pre-send advice any of them grows rides
+        // straight into an exit-10 message. `read_record`'s corrupt-record
+        // refusal used to end "delete it manually if you know it's stale",
+        // which on this path is an instruction to delete the only record
+        // of a live withdrawal.
+        //
+        // So this is the invariant, checked against the real messages
+        // rather than a list of phrases to remove: nothing an operator can
+        // be told by these refusals may read as permission to delete.
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "ef".repeat(32));
+        let observed = burned_record(dir.path(), &an);
+
+        // A lock that cannot be opened — the reachable Preflight source
+        // behind the resume arm's first statement.
+        let lock_path = dir.path().join(format!("{}.lock", observed.key));
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        let from_the_lock = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            true,
+            &observed,
+            &mut None,
+        )
+        .expect_err("a lock that cannot be opened is still a refusal");
+
+        // And the corrupt-record refusal, reached the way the pipeline
+        // reaches it — `peek` reads the file — then re-badged through the
+        // same function, which is how it would land on an operator here.
+        std::fs::write(
+            idempotency::record_path(dir.path(), &observed.key),
+            b"{ this is not json",
+        )
+        .unwrap();
+        let torn = idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))
+            .expect_err("a torn record is a refusal, not an absent one");
+        let from_the_record = resumed_refusal(torn, &observed);
+
+        for err in [from_the_lock, from_the_record] {
+            let msg = format!("{err}").to_ascii_lowercase();
+            assert_eq!(err.exit_code().as_i32(), 10, "{err}");
+            for advice in [
+                "delete it manually",
+                "if you know it's stale",
+                "nothing was sent",
+            ] {
+                assert!(
+                    !msg.contains(advice),
+                    "a refusal about a live burn told the operator {advice:?}: {msg}",
+                );
+            }
+        }
     }
 
     #[test]

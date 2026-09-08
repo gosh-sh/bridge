@@ -47,9 +47,22 @@ pub enum ExitCode {
     ///
     /// Read the refusal, not this list: both print what to do.
     DuplicateRefused = 3,
-    /// AN burn was broadcast; final outcome unknown (network error mid-send,
-    /// timeout waiting for account state to update). Idempotency record
-    /// persisted with the AN tx hash — operator must reconcile via GQL.
+    /// AN burn was broadcast; final outcome unknown (network error
+    /// mid-send, timeout waiting for account state to update).
+    ///
+    /// **The record usually does NOT carry the hash.** This doc claimed
+    /// the opposite, which is the reverse of the dominant case: every
+    /// failure inside `burn::send` propagates before the block that
+    /// writes `an_tx_hash`, so what an exit 10 leaves is a `Reserved`
+    /// record with `an_tx_hash: null` — and the CLI cannot write a hash
+    /// it never learned. The hash is on the record only for the two exit
+    /// 10s raised AFTER the send returned: a failed post-burn `update`,
+    /// and a refusal on the resume path.
+    ///
+    /// So reconciliation is the remedy in every case, and where the hash
+    /// is not on the record it is not in the CLI either: look for a
+    /// `sendTransaction` from this multisig around the record's
+    /// `reserved_at`. The advanced runbook's Case 3a is the procedure.
     BurnOutcomeUnknown = 10,
     /// AN burn confirmed but `WithdrawalInitiated` capture timed out. The
     /// event is durable in GQL; re-run with `--allow-retry` (v1) or
@@ -179,7 +192,10 @@ pub enum CliError {
 
     /// The reservation was found rather than created and carries no AN tx
     /// hash. Nothing can tell from the record whether a burn is on the
-    /// wire; `another_run_is_live` is what the lock could tell us.
+    /// wire; `liveness` is the rendered verdict of what the lock could
+    /// tell us. (This line named a field `another_run_is_live` for several
+    /// rounds. There has never been one — and a bool is exactly the shape
+    /// the verdict must not have.)
     #[error(
         "refuse: this withdrawal is already reserved ({prior_status}) and the record carries no \
          AN tx hash, so whether a burn is on the wire cannot be read from it — the hash is \
@@ -200,8 +216,11 @@ pub enum CliError {
         prior_msg_id: Option<String>,
         record_path: String,
         /// Rendered sentence about whether another process holds the
-        /// withdrawal lock. A field rather than a bool so the two cases
-        /// can say different things — including "could not tell".
+        /// withdrawal lock. A `String` rather than a bool because the
+        /// verdict has THREE values, not two: somebody holds it, nobody
+        /// does, or it could not be determined — and the third is the one
+        /// a bool would have to fold into one of the others. See
+        /// [`crate::idempotency::liveness_verdict`].
         liveness: String,
     },
 

@@ -231,9 +231,11 @@ pub fn reserve(
     // `create_new` alone gives exclusion but NOT atomicity of content: it
     // makes the file exist, empty, and only then does the write land. A
     // racing run that hits EEXIST inside that window reads zero bytes and
-    // is told "prior record is corrupt … delete it manually if you know
-    // it's stale" — advice which, followed, deletes the only guard against
-    // a second burn while the first run is still inside `burn::send`.
+    // is told the prior record is corrupt. That refusal used to end
+    // "delete it manually if you know it's stale" — advice which,
+    // followed, deletes the only guard against a second burn while the
+    // first run is still inside `burn::send`. It now says the opposite,
+    // but the window is closed here rather than papered over there.
     // (Found by `only_one_of_many_racing_reservations_creates`; every
     // earlier test called `reserve` sequentially, where the window cannot
     // be observed.)
@@ -1254,8 +1256,10 @@ fn read_record(path: &Path) -> CliResult<Record> {
     })?;
     let record: Record = serde_json::from_slice(&bytes).map_err(|e| CliError::Preflight {
         reason: format!(
-            "idempotency: prior record at {} is corrupt: {e} (delete it manually if you know it's \
-             stale)",
+            "idempotency: prior record at {} is corrupt: {e}\n\x20 Do NOT delete it on the \
+             strength of that. A torn or unreadable record is not evidence that no burn happened, \
+             and this refusal is reached by a resuming run too, where one already has. Reconcile \
+             on chain first — the advanced runbook, Case 3a.",
             path.display()
         ),
         source: None,
@@ -1844,11 +1848,10 @@ mod tests {
         // reading a NEW record must not choke on its absence — which is
         // what a rollback in the middle of an in-flight withdrawal does.
         //
-        // If it did choke, the message it would give is
-        // "prior record is corrupt … delete it manually if you know it's
-        // stale", and deleting a record mid-withdrawal is the one action
-        // every guard in this module exists to prevent. That is why this
-        // is asserted rather than assumed.
+        // If it did choke, the message it would give is the corrupt-record
+        // refusal — which no longer invites a deletion, but still leaves an
+        // operator staring at a withdrawal they cannot resume. That is why
+        // this is asserted rather than assumed.
         let base = r#""key":"k","status":"burned","from_extended":"a::b","to_hex":"0x00",
             "to_chain":1,"amount_micro":1,"reserved_at":"now",
             "an_tx_hash":"0xab","withdrawal_msg_id":null,"block_seq_no":null,

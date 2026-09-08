@@ -662,12 +662,27 @@ Two conditions, both required, before deleting one:
    multisig for this identity (advanced runbook, [Case
    3a](docs/advanced_user_withdraw_runbook.md)).
 2. **No process holds the withdrawal.** The CLI answers this for you: run
-   the identical command again and read the exit-3 refusal. It says
-   either "Another process on this host is executing this withdrawal
-   RIGHT NOW" — in which case wait — or "the record was left by a run
-   that has already exited", which is the condition you need. The check
-   is a `flock` the running command holds across the burn, so the kernel
-   releases it when that process dies, however it dies.
+   the identical command again and read the liveness line in the exit-3
+   refusal. It says one of **three** things, and only the middle one is
+   the condition you need:
+
+   | The refusal says | What you do |
+   |---|---|
+   | "Another process on this host is executing this withdrawal **RIGHT NOW**" | **Wait** for that run and read its outcome. |
+   | "**No other process** on this host holds this withdrawal, so the record was left by a run that has already exited" | This condition is met. |
+   | "Whether another process holds this withdrawal **could not be determined**" | **Do not delete.** The question was never answered. |
+
+   The check is a `flock` the running command holds across the burn, so
+   the kernel releases it when that process dies, however it dies — but
+   `flock` is not available everywhere. On a filesystem that cannot do it
+   (NFS without a lock daemon, some container overlay mounts) every run
+   gets the third line, including one that is mid-send. The `warn` line
+   the CLI prints just above the refusal says why the verdict is missing;
+   the advanced runbook's Case 3a says what to do about it.
+
+   Do not read this list by elimination. "Not the first line, and my
+   reconciliation is clean" lands on a deletion that the third line never
+   authorised.
 
 With both satisfied, delete the record and re-run. With a burn found in
 step 1, do not delete: write its hash into `an_tx_hash`, set `status` to

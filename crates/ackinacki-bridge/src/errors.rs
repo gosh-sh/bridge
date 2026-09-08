@@ -173,10 +173,12 @@ pub enum CliError {
          Reconcile on chain (advanced runbook, Case 3a): look for a sendTransaction from this \
          multisig to USDCBridge around the record's reserved_at.\n\x20 2. If a burn DID land, \
          write its hash into an_tx_hash and set status to \"burned\", then re-run with \
-         --allow-retry — the run resumes at capture.\n\x20 3. If nothing was broadcast AND the \
-         line above says no other run holds this withdrawal, delete the record and re-run. \
-         Deleting it while another run is mid-send is what causes the second burn this refusal \
-         exists to prevent."
+         --allow-retry — the run resumes at capture.\n\x20 3. Delete the record ONLY if step 1 \
+         found no burn AND the line above said no other run holds this withdrawal. \"Could not be \
+         determined\" is not that answer: it is what EVERY run gets on a filesystem without \
+         flock, including one that is mid-send. Read this step by elimination — not the first \
+         case, reconciliation clean — and you delete the record while another run is mid-send, \
+         which is the second burn this refusal exists to prevent."
     )]
     ReservationInFlight {
         prior_status: String,

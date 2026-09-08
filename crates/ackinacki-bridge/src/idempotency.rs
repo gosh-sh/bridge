@@ -1712,6 +1712,47 @@ mod tests {
     }
 
     #[test]
+    fn the_refusal_rules_out_the_third_verdict_by_name() {
+        // The refusal's step 3 used to gate the deletion on "the line
+        // above says no other run holds this withdrawal" and stop there.
+        // That is a description an operator satisfies BY ELIMINATION on a
+        // lockless mount: the line does not say another run holds it, so
+        // they delete — while a run may be inside `burn::send`.
+        //
+        // The third verdict is now ruled out by name in the refusal
+        // itself, which is the document an operator actually has in front
+        // of them. The name has to be the one the verdict uses, and the
+        // two live in different files, so this is what keeps them from
+        // drifting apart.
+        const THIRD: &str = "could not be determined";
+        assert!(
+            liveness_verdict(None).contains(THIRD),
+            "the refusal in errors.rs rules this verdict out by this phrase",
+        );
+        for answered in [liveness_verdict(Some(true)), liveness_verdict(Some(false))] {
+            assert!(
+                !answered.contains(THIRD),
+                "a verdict that answered the question must not match the phrase for one that did \
+                 not: {answered}",
+            );
+        }
+
+        // Rendered with the verdict that DID authorise a deletion, so a
+        // hit on the phrase can only come from the refusal's own prose.
+        let refusal = CliError::ReservationInFlight {
+            prior_status: "reserved".into(),
+            prior_msg_id: None,
+            record_path: "/dev/null".into(),
+            liveness: liveness_verdict(Some(false)).to_string(),
+        };
+        let msg = format!("{refusal}");
+        assert!(
+            msg.to_ascii_lowercase().contains(THIRD),
+            "step 3 has to name the verdict it is ruling out, not leave it to elimination: {msg}",
+        );
+    }
+
+    #[test]
     fn only_confirmed_and_submitted_are_terminal_everywhere_that_asks() {
         // Three places have to agree and two of them are match patterns,
         // which no compiler compares: `Status::is_terminal`, the arm in

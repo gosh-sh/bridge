@@ -737,14 +737,35 @@ pub async fn run(
     }
 
     // Real submit: build a wallet-filled provider and send.
+    //
     // Both the key shape and the chain id were settled in stage 1, before
     // the burn — `preflight::parse_eth_signer` and
-    // `preflight::check_destination_chain`. Re-parsing here would be the
-    // same work with a worse error (exit 13 "submit failed" for something
-    // that never reached the wire), and re-asking the RPC for its chain id
-    // would only let a load-balanced endpoint disagree with itself between
-    // stage 1 and stage 6.
-    let signer = preflight::parse_eth_signer(&plumbing_ref.eth_private_key)?;
+    // `preflight::check_destination_chain` — and re-asking the RPC for its
+    // chain id would only let a load-balanced endpoint disagree with
+    // itself between stage 1 and stage 6.
+    //
+    // The paragraph that stood here argued against re-parsing the key,
+    // and the line below it re-parsed the key. Worth keeping the reason
+    // it was wrong: it said the cost would be "exit 13 for something that
+    // never reached the wire", while what it actually shipped was exit 2
+    // — nothing broadcast, no state file written — for a run whose AN
+    // burn is on the wire and whose record is on disk. Exit 13 names the
+    // stage that could not complete, which is the truth here; exit 2
+    // names a state this run left behind an hour ago.
+    //
+    // The parse itself stays. It cannot fail — stage 1 parsed the same
+    // string — and the point is what it costs WHEN THE IMPOSSIBLE
+    // HAPPENS, which is the only thing an exit code is read for.
+    let signer = preflight::parse_eth_signer(&plumbing_ref.eth_private_key).map_err(|e| {
+        CliError::EthSubmitFailed {
+            reason: format!(
+                "internal: --eth-private-key parsed in stage 1 and not in stage 6: {e}\n\x20 The \
+                 AN burn IS on the wire and the proof is built. Nothing was submitted to the EVM \
+                 chain; re-running with --allow-retry resumes from the recorded burn.",
+            ),
+            source: None,
+        }
+    })?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(to.chain_id)));
     let provider =
         ProviderBuilder::new()
@@ -2213,12 +2234,70 @@ mod tests {
             .find(concat!("burn::", "send("))
             .expect("the burn branch calls the send by name");
 
-        let offenders: Vec<_> = body[after_send..end]
+        // ALL FOUR variants that map to `ExitCode::PreflightRefused`, not
+        // just the one this guard was written around. `parse_eth_signer`
+        // returns `ArgInvalid`, which is the same exit 2 by a different
+        // name, and the first version of this guard could not see it.
+        let post_send = &body[after_send..end];
+        let mut offenders: Vec<String> = post_send
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
-            .filter(|l| l.contains(concat!("CliError::", "Preflight")))
+            .filter(|l| {
+                [
+                    concat!("CliError::", "Preflight"),
+                    concat!("CliError::", "ArgInvalid"),
+                    concat!("CliError::", "KeyFilePerms"),
+                    concat!("CliError::", "Usage"),
+                ]
+                .iter()
+                .any(|v| l.contains(v))
+            })
             .map(|l| l.trim().to_string())
             .collect();
+
+        // And the hole a variant grep cannot close: a call into
+        // `preflight`, whose whole vocabulary is pre-send, propagated with
+        // a bare `?`. No grep can see what a function returns, so the set
+        // of such calls is pinned instead — adding one means coming here
+        // and recording what its error maps to.
+        //
+        //   `recheck_proving_key` → `ProofFailed`, exit 12. Correct on its
+        //   own: it runs at stage 5 and its message says the burn is on
+        //   the wire. Propagating it bare is fine.
+        //   `parse_eth_signer` → `ArgInvalid`, which is exit 2 by another
+        //   name. It MUST be re-badged at the call site, so the entry
+        //   below carries that requirement and the check enforces it —
+        //   an allowlist that only asked "is this call known?" let the
+        //   `map_err` be deleted again with everything green.
+        let known: &[(&str, bool)] = &[("recheck_proving_key", false), ("parse_eth_signer", true)];
+        let post_send_lines: Vec<&str> = post_send.lines().collect();
+        for (n, line) in post_send_lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("preflight::") {
+                continue;
+            }
+            let Some((name, needs_rebadge)) = known.iter().find(|(k, _)| line.contains(k)) else {
+                offenders.push(format!(
+                    "unreviewed preflight:: call past the send — record what its error maps to: {}",
+                    line.trim(),
+                ));
+                continue;
+            };
+            if !needs_rebadge {
+                continue;
+            }
+            // The whole statement, which rustfmt may have wrapped: from
+            // this line to the one that ends it.
+            let end_of_stmt = (n..post_send_lines.len())
+                .find(|&i| post_send_lines[i].contains("?;"))
+                .map_or(post_send_lines.len(), |i| i + 1);
+            let stmt = post_send_lines[n..end_of_stmt].join("\n");
+            if !stmt.contains("map_err") {
+                offenders.push(format!(
+                    "`{name}` returns a pre-send error and is propagated bare past the send: \
+                     {stmt}",
+                ));
+            }
+        }
         assert!(
             offenders.is_empty(),
             "past the send the burn is on the wire, so exit 2 — whose contract is that nothing \

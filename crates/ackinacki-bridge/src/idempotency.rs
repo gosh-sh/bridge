@@ -446,13 +446,36 @@ impl UpdateFailed {
 /// Returns [`UpdateFailed`], which does not convert into `CliError` — see
 /// that type for why. Every caller must say whether anything has been
 /// broadcast yet.
+///
+/// Takes `create_missing_levels` and not the whole of
+/// [`ensure_state_dir`], which is a narrowing rather than a shortcut. The
+/// other two steps belong to the call that precedes the send, and both
+/// misfire here:
+///
+/// - `sync_entry_of` fsyncs the state directory's PARENT — `$HOME` under the
+///   default — which is the right target exactly once, when this run created
+///   the directory and its entry is not yet durable. `reserve` does that. The
+///   record's own entry lives inside `state_dir` and is fsynced by
+///   `write_record_atomic` below, so on this path the syscall makes nothing
+///   durable that is not already. What it can still do is fail, and a failure
+///   here reaches the operator through `after_send` as exit 10 — "the local
+///   record is BEHIND the chain" — about a record whose write was never
+///   attempted.
+/// - `report_permissive_mode` reports a condition that cannot change between
+///   stage transitions, so it warned about the same directory once per stage:
+///   seven or eight identical lines in a successful run, which is how a real
+///   warning gets read as noise.
+///
+/// What remains is the part `update` genuinely needs — the directory has
+/// to exist for the temp file — and it is a single `exists()` when it
+/// does.
 pub fn update(state_dir: &Path, record: &Record) -> Result<(), UpdateFailed> {
     let path = record_path(state_dir, &record.key);
     let fail = |e: CliError| UpdateFailed {
         record_path: path.clone(),
         reason: format!("{e}"),
     };
-    ensure_state_dir(state_dir).map_err(fail)?;
+    create_missing_levels(state_dir).map_err(fail)?;
     write_record_atomic(state_dir, &path, record).map_err(fail)
 }
 
@@ -1395,6 +1418,74 @@ mod tests {
             format!("{err}").contains("durable"),
             "must name what was lost: {err}",
         );
+    }
+
+    #[test]
+    fn a_stage_transition_does_not_depend_on_the_parent_directory() {
+        // `update` runs seven or eight times in a successful withdrawal,
+        // all of them after the burn. Routing it through the whole of
+        // `ensure_state_dir` made every one of them fsync the state
+        // directory's PARENT — `$HOME` under the default — and a failure
+        // there is rendered by `after_send` as exit 10, "the local record
+        // is BEHIND the chain", about a record whose write was never
+        // attempted. The record's own entry is fsynced by
+        // `write_record_atomic`, inside `state_dir`, so the parent open
+        // bought nothing on this path.
+        //
+        // The lever is a parent that cannot be opened but can still be
+        // traversed: 0o311 is write+execute for the owner and no read, so
+        // `File::open(parent)` is EACCES while reaching `state_dir`
+        // through it still works. That is uid-dependent — root ignores the
+        // mode — so the precondition is asserted rather than assumed. A
+        // test that quietly passes because it could not set up its own
+        // premise is worse than no test.
+        //
+        // (The second removed step, `report_permissive_mode`, is not
+        // pinned here: it emits a `warn!` and this module has no tracing
+        // capture. Its effect was noise — the same line once per stage
+        // about a condition that cannot change mid-run.)
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempDir::new().unwrap();
+        let parent = root.path().join("holder");
+        let state = parent.join("withdraw-state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        // Reserve while the parent is still readable: that call is the one
+        // with a genuine reason to sync it.
+        let (r, _) = reserve(
+            &state,
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect("a fresh identity reserves");
+
+        std::fs::set_permissions(&parent, fs::Permissions::from_mode(0o311)).unwrap();
+        let premise = std::fs::File::open(&parent).is_err();
+        // Restore before asserting anything, so a failure still cleans up.
+        let restore = |p: &std::path::Path| {
+            std::fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        if !premise {
+            restore(&parent);
+            panic!(
+                "this test's premise did not hold: an unreadable directory still opened. Running \
+                 as root ignores the mode, and then nothing here is being tested."
+            );
+        }
+
+        let mut burned = r.clone();
+        burned.status = Status::Burned;
+        burned.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        let outcome = update(&state, &burned);
+        restore(&parent);
+        outcome
+            .map_err(|e| e.after_send("the burn is on the wire"))
+            .expect(
+                "a stage transition writes into the state directory and has no business opening \
+                 its parent",
+            );
     }
 
     #[test]

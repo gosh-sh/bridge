@@ -854,6 +854,7 @@ pub async fn check_prover_artifacts(
 /// The digest compared against is the one recorded HERE, not the manifest
 /// read again at stage 5 — replacing the key and its manifest together is
 /// a case the second form would wave through.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkFingerprint {
     path: PathBuf,

@@ -70,6 +70,7 @@ const KEYGEN_LOCK_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 /// name is already gone, and the next arrival would create a fresh file
 /// and lock that instead — two "exclusive" holders, which is the whole
 /// failure this exists to prevent.
+#[must_use]
 struct KeygenLock {
     /// Held open for the guard's lifetime; dropping it releases the lock.
     _file: std::fs::File,

@@ -492,6 +492,7 @@ fn write_atomic(
 }
 
 /// One temp file a killed keygen left behind: its path and its size.
+#[must_use]
 pub struct LeakedTemp {
     pub path: PathBuf,
     pub bytes: u64,
@@ -522,6 +523,7 @@ pub struct LeakedTemp {
 /// `metadata`, so a symlink that happens to match the pattern is left
 /// alone rather than followed to whatever it points at — the caller may
 /// delete what this returns.
+#[must_use]
 pub fn leaked_keygen_temp_files(params_dir: &Path) -> Vec<LeakedTemp> {
     fn is_temp_name(name: &str) -> bool {
         match name.strip_prefix(".tmp") {

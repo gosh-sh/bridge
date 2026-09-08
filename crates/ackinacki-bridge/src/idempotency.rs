@@ -80,6 +80,7 @@ impl Status {
 /// Exit 3. `--allow-retry` does NOT reach these, so the shared "re-run with
 /// --allow-retry to override" the message used to end on was wrong here: it
 /// named the one flag that changes nothing about a terminal record.
+#[must_use]
 fn terminal_refusal(record: &Record) -> Option<CliError> {
     if !record.status.is_terminal() {
         return None;
@@ -700,6 +701,15 @@ pub(crate) fn record_path(state_dir: &Path, key: &str) -> PathBuf {
 /// reserve and the send is supposed to be infallible, and a lock taken
 /// there would be a new way to fail with the identity already claimed.
 /// Taken first, its only failure is a pre-send refusal like any other.
+///
+/// `#[must_use]`, though not for the reason it is usually reached for:
+/// this type is only ever returned inside a `Result`, which already
+/// warns. What it buys is the day somebody returns one bare. It does NOT
+/// make the guard the compiler's business — `let _ = ..` silences
+/// `must_use` and is exactly the form that would drop the lock on the
+/// spot, which is why the binding in `run` is a named `_withdrawal_lock`
+/// rather than a `_`.
+#[must_use]
 #[derive(Debug)]
 pub struct WithdrawalLock {
     /// Dropping this releases the lock; so does the process dying.
@@ -724,6 +734,7 @@ pub struct WithdrawalLock {
 /// other: `EMFILE` is per-process, and a state directory left half-prepared
 /// by a run that died mid-setup is finished for everyone but the run that
 /// hit it.
+#[must_use]
 #[derive(Debug)]
 pub enum LockAttempt {
     /// This process owns the identity until the guard is dropped.
@@ -744,6 +755,7 @@ impl LockAttempt {
     /// `Unsupported` is `None` and never `Some(false)`. That distinction is
     /// the whole point: `Some(false)` is what the runbook turns into
     /// permission to delete the record.
+    #[must_use]
     pub fn holder_verdict(&self) -> Option<bool> {
         match self {
             LockAttempt::Held(_) => Some(false),
@@ -866,6 +878,7 @@ impl WithdrawalLock {
     /// stage-1 refusal — the one an operator reaches by re-running the
     /// identical command, which is what the recovery procedure tells
     /// them to do — has no acquisition to learn from.)
+    #[must_use]
     pub fn probe_holder(state_dir: &Path, key: &str) -> Option<bool> {
         // `Held` is dropped at the end of this expression, which is the
         // point: asking must not keep anybody out.
@@ -888,6 +901,7 @@ impl WithdrawalLock {
 /// have to agree: it is the line that decides whether an operator deletes
 /// a record, and deleting one while a burn is mid-send is the second burn
 /// the whole guard exists to prevent.
+#[must_use]
 pub fn liveness_verdict(holder: Option<bool>) -> &'static str {
     match holder {
         Some(true) => {

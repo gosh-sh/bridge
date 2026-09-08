@@ -15,11 +15,14 @@
 //! never contain key material, key paths, or ETH private keys — only
 //! chain-observable identifiers.
 //!
-//! File acquisition uses `OpenOptions::create_new()` for the first write
-//! (atomic "no prior record" check), then plain overwrite for updates.
-//! This is not a distributed lock — two concurrent CLI invocations
-//! against the same key on different hosts could still race — but for
-//! the "single user re-running my broken script" case it does the job.
+//! The first write publishes a complete temp file into the identity's
+//! name with `hard_link`, which fails `EEXIST` when somebody else got
+//! there first; updates go through write-temp + `rename`. `create_new`
+//! was the original choice and is not enough on its own — see `reserve`,
+//! where the reason is spelled out. This is not a distributed lock — two
+//! concurrent CLI invocations against the same key on different hosts
+//! could still race — but for the "single user re-running my broken
+//! script" case it does the job.
 
 use std::{
     fs,
@@ -118,12 +121,12 @@ pub struct Record {
     pub eth_tx_hash: Option<String>,
 }
 
-/// Which side of the atomic `create_new` this run came out on.
+/// Which side of the atomic publish this run came out on.
 ///
 /// `reserve` used to return a bare `Record` for both, and the caller could
 /// not tell them apart. That is the concurrent double-burn: two runs with
 /// `--allow-retry`, no prior record, both `peek` → `None`. A wins the
-/// `create_new` and enters the multi-second `burn::send`; B gets EEXIST,
+/// publish and enters the multi-second `burn::send`; B gets EEXIST,
 /// reads A's record — `Reserved`, `an_tx_hash` still `None` because A has
 /// not returned yet — and, seeing no hash, decides to send. A second
 /// `initiateWithdrawal` against a multisig with no replay guard.
@@ -134,7 +137,7 @@ pub struct Record {
 /// syscall that knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reservation {
-    /// This run won `create_new`: the identity is ours and nothing else
+    /// This run won the publish: the identity is ours and nothing else
     /// holds it.
     Created,
     /// The record already existed. Another run owns this identity — either
@@ -1145,7 +1148,7 @@ mod tests {
     /// `reserve` keeping only the record.
     ///
     /// Most tests here predate `Reservation` and are about the record's
-    /// contents, not about which side of `create_new` produced it. The
+    /// contents, not about which side of the publish produced it. The
     /// provenance has its own test below, so widening the return type did
     /// not quietly stop anything from being checked.
     fn reserve_rec(
@@ -1228,7 +1231,7 @@ mod tests {
     #[test]
     fn reserve_reports_whether_it_created_the_record() {
         // The distinction the concurrent double-burn turned on. `Created`
-        // means this run won `create_new` and owns the identity; `Found`
+        // means this run won the publish and owns the identity; `Found`
         // means someone else does — possibly a run that is inside
         // `burn::send` right now and has not written its hash yet.
         let dir = TempDir::new().unwrap();
@@ -1240,7 +1243,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(how, Reservation::Created, "first writer wins create_new");
+        assert_eq!(how, Reservation::Created, "first writer wins the publish");
 
         let (rec, how) = reserve(
             dir.path(),
@@ -1265,7 +1268,7 @@ mod tests {
         // existing test calls `reserve` sequentially, and sequentially the
         // second call always sees a record whose fields have settled.
         //
-        // Eight threads, one identity, all with --allow-retry. `create_new`
+        // Eight threads, one identity, all with --allow-retry. `hard_link`
         // is atomic, so exactly one must come back `Created`; the rest are
         // `Found` and, having no hash to reuse, must refuse rather than
         // send.

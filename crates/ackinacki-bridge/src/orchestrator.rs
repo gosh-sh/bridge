@@ -835,7 +835,7 @@ pub async fn run(
 /// the `peek` taken back in stage 1. Those are different answers, and the
 /// gap between them is a second irreversible burn.
 ///
-/// `reserve` is the atomic point: it is the `create_new` that either wins
+/// `reserve` is the atomic point: it is the `hard_link` that either wins
 /// the identity or reads whatever is already there. `peek` happens much
 /// earlier — before the whole EVM preflight, before the confirmation
 /// prompt, before `compose` — and with an interactive prompt that window is
@@ -1085,7 +1085,7 @@ fn decide_burn(
     match (reserved.an_tx_hash.as_deref(), how) {
         // Someone already broadcast for this identity. Resume at capture.
         (Some(h), _) => Ok(BurnDecision::Reuse(h.to_string())),
-        // We won `create_new`: the identity is ours, nothing is in flight.
+        // We won the publish: the identity is ours, nothing is in flight.
         (None, idempotency::Reservation::Created) => Ok(BurnDecision::Send),
         // The record was already there and carries no hash. Two states look
         // identical from here and both forbid sending:
@@ -1299,7 +1299,7 @@ mod tests {
     #[test]
     fn a_record_we_did_not_create_and_that_has_no_hash_refuses() {
         // The concurrent half. Two runs, same identity, both --allow-retry,
-        // no prior record: both `peek` → None, A wins `create_new` and
+        // no prior record: both `peek` → None, A wins the publish and
         // enters the multi-second `burn::send`, B gets EEXIST and reads A's
         // record — `Reserved`, `an_tx_hash` still None, because A has not
         // returned yet. Deciding on the fields alone says Send, and that is

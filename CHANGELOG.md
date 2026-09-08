@@ -910,6 +910,24 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **Advanced runbook: the delete-the-record procedure now covers all
+  three liveness verdicts, not two.** The exit-3 refusal reports one of
+  three things about whether another run holds the withdrawal — it holds
+  it RIGHT NOW, nobody holds it, or the question could not be answered
+  (`flock` unavailable, which is every run on an NFS or overlay mount).
+  The procedure listed the first two and said "only in the second case…
+  delete the record", so an operator on a lockless mount reading by
+  elimination — not the first case, reconciliation clean — deleted a
+  record while another run may have been inside `burn::send`. That is the
+  second burn the whole refusal exists to prevent.
+
+  The three verdicts are now a table, the third routed to "do not delete"
+  with the two ways out: move `BRIDGE_WITHDRAW_STATE_DIR` to a filesystem
+  that implements `flock` and re-run, or establish by other means — `ps`
+  on every host sharing the mount — that no run is executing this
+  withdrawal. No CLI behaviour changed; the message always said this and
+  the procedure did not.
+
 - **`ackinacki-bridge withdraw`: a failed reservation while resuming a
   recorded burn now exits 10, not 2.** The resume path is entered only
   when the record read at stage 1 carries an AN tx hash, so a burn is on

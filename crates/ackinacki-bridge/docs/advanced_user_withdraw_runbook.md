@@ -714,22 +714,50 @@ is a bare `--allow-retry`:
 - **A burn landed** → write its multisig tx hash into `an_tx_hash`, set
   `status` to `"burned"`, then re-run with `--allow-retry`. The run
   resumes at capture and never re-burns.
-- **Nothing was broadcast** → the record has to go, and the exit-3
-  refusal tells you when that is safe. Re-run the identical command and
-  read it: it reports either "Another process on this host is executing
-  this withdrawal RIGHT NOW" — wait — or "the record was left by a run
-  that has already exited". Only in the second case, and only with the
-  reconciliation above showing no `initiateWithdrawal`, delete the record
-  named in the message and re-run.
+- **Nothing was broadcast** → the record may have to go, and the exit-3
+  refusal tells you whether that is safe. Re-run the identical command
+  and read the liveness line it prints. It says one of **three** things,
+  and only one of them permits a deletion:
 
-Deleting the record belongs to the second bullet and only to the second
-bullet. It is the only local trace that a burn may have been authorised,
-so it goes **after** both conditions above have been met — the on-chain
+  | The refusal says | What it means | What you do |
+  |---|---|---|
+  | "Another process on this host is executing this withdrawal **RIGHT NOW** (it holds the withdrawal lock)" | A live run owns this withdrawal and may be inside `burn::send`. | **Wait** for it and read its outcome. Do not touch the record. |
+  | "**No other process** on this host holds this withdrawal, so the record was left by a run that has already exited" | Nobody is mid-send. This is *not* the same as "nothing was broadcast" — a run can exit between the send returning and the hash being written. | Delete the record **only** if the reconciliation above also found no `initiateWithdrawal`. |
+  | "Whether another process holds this withdrawal **could not be determined** here (`flock` is unavailable — a network mount, typically)" | The question was never answered. There is no evidence either way. | **Do not delete.** See below. |
+
+  The third line is the one that catches people, because reading the
+  procedure by elimination — "it is not the first case, and my
+  reconciliation is clean" — lands on a deletion that the message never
+  authorised.
+
+**When the liveness verdict is "could not be determined".** On a state
+directory that does not support `flock` — NFS without a lock daemon, some
+container overlay mounts — every run gets this verdict, including the one
+that may be mid-send. The lock is not protecting anything there, so the
+CLI cannot tell you whether another run holds the withdrawal, and it says
+so rather than guessing.
+
+The on-chain reconciliation is then your *only* evidence, and it is not
+sufficient on its own: it can only tell you what has already landed, and
+a burn that is in flight right now has landed nowhere yet. So:
+
+1. Move the state directory to local disk
+   (`BRIDGE_WITHDRAW_STATE_DIR=$HOME/.bridge-withdraw-state` on a real
+   filesystem) and re-run. The verdict becomes answerable, and you are
+   back in one of the first two rows. This is the fix, not a workaround —
+   the CLI's whole duplicate-burn defence is a `flock` on that directory.
+2. If you cannot move it, establish by other means that no run is
+   executing this withdrawal — `ps` on every host that shares the mount,
+   not just this one — and only then apply the second row's rule.
+
+Deleting the record belongs to the second row and only to the second row.
+It is the only local trace that a burn may have been authorised, so it
+goes **after** both conditions have been met — the on-chain
 reconciliation found no `initiateWithdrawal`, and the refusal said no
-other run is executing this withdrawal — and never before. In the first
-case the record is edited, not deleted. Deleting it while another run is
-mid-send is the second burn that every refusal on this page exists to
-prevent.
+other run is executing this withdrawal — and never before. "Could not be
+determined" is not that sentence. In the "burn landed" case the record is
+edited, not deleted. Deleting it while another run is mid-send is the
+second burn that every refusal on this page exists to prevent.
 
 ---
 

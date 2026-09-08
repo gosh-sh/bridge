@@ -1383,6 +1383,45 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_on_a_lockless_filesystem_declares_the_evidence_missing() {
+        // The third liveness verdict, and until now the only one no test
+        // reached: every call here passed `flock_available: true`, so the
+        // arm that a state directory on NFS or an overlay mount takes was
+        // production-only.
+        //
+        // What must NOT come out of it is the second verdict. "No other
+        // process holds this withdrawal" is the sentence the runbook turns
+        // into permission to delete the record, and on a mount where the
+        // question cannot be asked, both racing runs would read it — one
+        // of them possibly inside `burn::send`. Deleting there is the
+        // second burn.
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = decide_burn(
+            &reserved(None),
+            idempotency::Reservation::Found,
+            dir.path(),
+            false,
+        )
+        .expect_err("a hash-less record another run owns must still refuse");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("could not be determined"),
+            "the verdict has to say the question went unanswered: {msg}",
+        );
+        assert!(
+            !msg.contains("No other process"),
+            "the one sentence this arm may never produce — it is what authorises a deletion: {msg}",
+        );
+        // Same refusal, same remedy: only the evidence line differs.
+        assert_eq!(err.exit_code().as_i32(), 3, "{err:?}");
+        assert!(
+            msg.contains("Reconcile on chain"),
+            "with no lock evidence the on-chain check is all there is, so it must still be named: \
+             {msg}",
+        );
+    }
+
+    #[test]
     fn a_record_we_did_not_create_and_that_has_no_hash_refuses() {
         // The concurrent half. Two runs, same identity, both --allow-retry,
         // no prior record: both `peek` → None, A wins the publish and

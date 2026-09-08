@@ -2045,6 +2045,41 @@ mod tests {
             "the resume must be handed the binding that lives to the end of `run`, not a \
              temporary that releases the lock as the statement ends: {args}",
         );
+
+        // The OTHER path out of `run`, which still takes the lock from a
+        // tuple. `let (r, decision, _)` there compiles, passes clippy and
+        // leaves the whole suite green — measured, not assumed — because
+        // no test drives `run`'s burn branch: it needs a chain.
+        //
+        // `BurnPermit::issue` catches it at runtime and refuses before
+        // broadcasting, which is the defence that matters. This is the
+        // one that fails in CI instead of on somebody's withdrawal. A
+        // syntactic property of one line is what grep is actually good
+        // for; what it must not be asked is whether the lock is still
+        // held ninety lines later, which is why the permit exists.
+        let reserves: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                t.contains(concat!("reserve_and", "_decide(")) && !t.starts_with("//")
+            })
+            .map(|(n, _)| n)
+            .collect();
+        // Two: `run`'s burn branch and the resume seam. The seam's is
+        // inside `reserve_and_decide_holding`, whose lock goes on to the
+        // out-parameter checked above.
+        for n in reserves {
+            // The destructuring sits on the line before the call when
+            // rustfmt has wrapped it, so look at both.
+            let stmt = lines[n.saturating_sub(1)..=n].join(" ");
+            assert!(
+                !stmt.contains(", _)") && !stmt.contains(", _ )"),
+                "the lock is the third element and `_` drops it on the spot: orchestrator.rs:{}: \
+                 {stmt}",
+                n + 1,
+            );
+        }
     }
 
     #[test]

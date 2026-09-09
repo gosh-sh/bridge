@@ -182,9 +182,6 @@ pub async fn run(
     // sufficiency would refuse every resume of a full-balance withdrawal —
     // the exact scenario the record exists to rescue.
     let burn_already_sent = prior.as_ref().is_some_and(|p| p.an_tx_hash.is_some());
-    // The same fact, carried as the hash itself, because a refusal below
-    // has to NAME the transaction an operator must not act around.
-    let recorded_an_tx: Option<&str> = prior.as_ref().and_then(|p| p.an_tx_hash.as_deref());
 
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
@@ -198,7 +195,7 @@ pub async fn run(
         preflight::BalanceCheck::from_burn_sent(burn_already_sent),
     )
     .await
-    .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
     info!(
         multisig_ecc3 = preflight.multisig_ecc3_balance,
         usdc_bridge = %preflight.usdc_bridge_extended,
@@ -211,7 +208,7 @@ pub async fn run(
     // exists to catch.
     preflight::check_destination_chain(&args.rpc_url, to.chain_id)
         .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
     info!(chain_id = to.chain_id, "destination chain ok");
 
     // The identity our proof will carry. Both ids come from the
@@ -240,7 +237,7 @@ pub async fn run(
         &amount,
     )
     .await
-    .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
     // Signer + prover artifacts — real runs only (a dry-run has no
@@ -253,7 +250,7 @@ pub async fn run(
     let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)
-            .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
         info!("burner key ok");
         pk_fingerprint = crate::preflight::check_prover_artifacts(
             p,
@@ -262,7 +259,7 @@ pub async fn run(
             args.allow_verifier_drift,
         )
         .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
         info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
@@ -316,7 +313,7 @@ pub async fn run(
         // — "the USDC has left the source multisig regardless", about a
         // run that had not composed a message yet.
         let context = preflight::build_client_context(&args.gql_endpoint)
-            .map_err(|e| refusal_before_a_recorded_burn(e, recorded_an_tx))?;
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
 
         // Resume: a prior record carrying an an_tx_hash means the burn was
         // already broadcast at least once. Reuse it; never compose a second
@@ -1261,8 +1258,26 @@ fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
 /// half of exit 2's contract holds — but the withdrawal it is refusing
 /// has a burn on chain and a record on disk, which is the half an
 /// operator acts on.
-fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError {
-    let Some(an_tx) = an_tx else {
+fn refusal_before_a_recorded_burn(
+    e: CliError,
+    state_dir: &Path,
+    prior: Option<&idempotency::Record>,
+) -> CliError {
+    // RECORD EXISTENCE, not the hash. Gating on the hash left the worst
+    // population out, and the way it did so is the branch's own failure
+    // mode: `burn::send` broadcasts and then cannot observe the outcome,
+    // so it returns before a receipt and no hash is ever written. The
+    // next run sees a record with `an_tx_hash: null`, computes
+    // `burn_already_sent = false`, requires the balance — which is
+    // genuinely spent — and refuses. The missing hash hides the burn,
+    // causes the refusal, and suppressed the re-badge, all three.
+    //
+    // A `Reserved` record with no hash is exactly the shape
+    // `ReservationInFlight` refuses to act on, for exactly this reason:
+    // the hash is written only after the send returns, so the record
+    // cannot say whether a burn is on the wire. Treating it as "no burn"
+    // here would contradict the rest of the file.
+    let Some(prior) = prior else {
         return e;
     };
     // Every variant, on both sides, and NO catch-all. Naming the exit-2
@@ -1307,12 +1322,25 @@ fn refusal_before_a_recorded_burn(e: CliError, an_tx: Option<&str>) -> CliError 
             ..
         } => return e,
     };
+    let standing = match prior.an_tx_hash.as_deref() {
+        Some(an_tx) => format!(
+            "the AN burn {an_tx} from an earlier run IS on the wire. Fix what preflight named and \
+             re-run: the run resumes from that burn."
+        ),
+        // The one an operator most needs and is least able to work out.
+        None => format!(
+            "a record for this identity exists at {} and carries NO AN tx hash, so whether a burn \
+             is on the wire cannot be read from it — the hash is written only after the send \
+             returns. Re-running will refuse with exit 3 rather than resume; reconcile on chain \
+             first (the advanced runbook, Case 3a), then follow that refusal.",
+            idempotency::record_path(state_dir, &prior.key).display(),
+        ),
+    };
     CliError::BurnOutcomeUnknown {
         reason: format!(
             "preflight refused this run: {reason}\n\x20 Nothing new was sent and nothing new was \
-             written — but the AN burn {an_tx} from an earlier run IS on the wire, and its record \
-             is on disk. Do not delete that record on the strength of this refusal; fix what \
-             preflight named and re-run, which resumes from the recorded burn.",
+             written, but this withdrawal is not untouched: {standing}\n\x20 Do not delete that \
+             record on the strength of this refusal.",
         ),
         source: None,
     }
@@ -2505,44 +2533,77 @@ mod tests {
         let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
         let lines: Vec<&str> = production.lines().collect();
 
-        // Keyed on the INSTALL, not on the hold, because the risk is
-        // asymmetric and the previous version had it backwards: it
-        // asserted `holds.len() == 3`, so a fourth place that installs
-        // the lock and takes no hold left the count at three and passed,
-        // while one that DID take a hold pushed the count to four and
-        // failed. The dangerous edit was invisible and the safe one was
+        // THREE properties, because keying on either construct alone has
+        // now been wrong in both directions.
+        //
+        // Counting holds was wrong: a fourth install taking NO hold left
+        // the count unchanged and passed, while one taking a hold pushed
+        // it over and failed — the dangerous edit invisible, the safe one
         // rejected.
         //
-        // Now every install has to be followed by a hold, and a fifth
-        // install is as covered as the first. `LockSlot::install` is the
-        // only way a lock enters the run, so the set is closed by the
-        // type rather than by this list.
+        // Keying on installs was wrong the other way: deleting an install
+        // deletes its own check. `let _ = lock;` at the burn branch
+        // removed the install, the hold, and the guard together, and
+        // 219 + 16 stayed green. (`AcquiredLock` is `#[must_use]` now, so
+        // clippy catches that one first — this is the second line of
+        // defence, not the first.)
+        //
+        // So: every install is followed by a hold, every hold is real
+        // code rather than prose, and the two holds covering windows with
+        // no install above them are named. That last list is the part
+        // that rots; it is checked by ANCHOR TEXT below, so a rename
+        // fails here rather than silently emptying the list.
+        let is_code = |l: &&str| !l.trim_start().starts_with("//");
+        let holds: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_code(l) && l.contains(concat!(".hold", "()")))
+            .map(|(n, _)| n)
+            .collect();
+
         let installs: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| {
-                let t = l.trim_start();
-                t.contains(concat!(".install", "(")) && !t.starts_with("//")
-            })
+            .filter(|(_, l)| is_code(l) && l.contains(concat!(".install", "(")))
             .map(|(n, _)| n)
             .collect();
-        assert!(
-            !installs.is_empty(),
-            "the lock has to be installed somewhere; if this is empty the scan is looking for the \
-             wrong thing rather than the code having stopped locking",
-        );
-        for at in installs {
+        for at in &installs {
             // Twelve lines: each hold carries the paragraph explaining
             // why it is there.
             assert!(
-                lines
-                    .iter()
-                    .enumerate()
-                    .any(|(h, l)| h > at && h - at <= 12 && l.contains(concat!(".hold", "()"))),
+                holds.iter().any(|&h| h > *at && h - *at <= 12),
                 "orchestrator.rs:{}: the lock is installed here and nothing takes a hold of it \
                  within twelve lines, so everything after it runs unprotected — and the compiler \
                  will not say which stretch",
                 at + 1,
+            );
+        }
+
+        // The windows that no install sits above: the stretch from the
+        // burn branch closing to the end of `run`, and the seam's own
+        // body. Deleting either hold was green, because a guard that only
+        // walks installs never looks at them.
+        for (below, what) in [
+            (
+                concat!(
+                    "// Full `--dry",
+                    "-run`: stop before touching either chain."
+                ),
+                "stages 4-6",
+            ),
+            (
+                concat!("fn resume_recorded", "_burn("),
+                "the resume seam's own body",
+            ),
+        ] {
+            let anchor = lines
+                .iter()
+                .position(|l| l.contains(below))
+                .unwrap_or_else(|| panic!("the anchor for {what} is gone: {below}"));
+            assert!(
+                holds.iter().any(|&h| h.abs_diff(anchor) <= 40),
+                "{what} has no hold near `{below}`, so that stretch of the run is back on \
+                 convention",
             );
         }
     }
@@ -2607,27 +2668,49 @@ mod tests {
         // no burn" does not, and that is the half the runbook turns into
         // "no state file was written" — while the exit-10 page says "do
         // not delete the state file" about the very same run.
+        let dir = tempfile::TempDir::new().unwrap();
         let an = format!("0x{}", "1d".repeat(32));
-        let refused = CliError::Preflight {
+        let refused = || CliError::Preflight {
             reason: "multisig has 2 custodians, expected 1".into(),
             source: None,
         };
 
-        // With no recorded burn, exit 2 is the truth and nothing moves.
-        let untouched = refusal_before_a_recorded_burn(
-            CliError::Preflight {
-                reason: "multisig has 2 custodians, expected 1".into(),
-                source: None,
-            },
-            None,
-        );
+        // With NO RECORD AT ALL, exit 2 is the truth and nothing moves.
+        let untouched = refusal_before_a_recorded_burn(refused(), dir.path(), None);
         assert_eq!(
             untouched.exit_code().as_i32(),
             2,
             "a first run's preflight refusal is exactly what exit 2 is for: {untouched}",
         );
 
-        let rebadged = refusal_before_a_recorded_burn(refused, Some(&an));
+        // A record with NO HASH is the population the hash gate missed,
+        // and the one the branch's own failure mode produces: `burn::send`
+        // broadcasts, cannot observe the outcome, and returns before a
+        // receipt, so the hash is never written. The next run sees no
+        // hash, requires the balance, finds it spent, and refuses — and
+        // under the old gate came out as exit 2 with a record on disk and
+        // a burn possibly on chain.
+        // One reservation, two shapes of the same record: a second
+        // `burned_record` in the same state dir is a duplicate refusal.
+        let with_hash = burned_record(dir.path(), &an);
+        let mut hash_less = with_hash.clone();
+        hash_less.an_tx_hash = None;
+        hash_less.status = Status::Reserved;
+        let ambiguous = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&hash_less));
+        assert_eq!(
+            ambiguous.exit_code().as_i32(),
+            10,
+            "a record with no hash cannot say a burn did NOT happen, which is the whole reason \
+             `ReservationInFlight` exists: {ambiguous}",
+        );
+        let amsg = format!("{ambiguous}");
+        assert!(
+            amsg.contains("NO AN tx hash") && amsg.contains("exit 3"),
+            "and the operator has to be told that a plain re-run refuses rather than resumes: \
+             {amsg}",
+        );
+
+        let rebadged = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash));
         assert_eq!(
             rebadged.exit_code().as_i32(),
             10,
@@ -2659,7 +2742,8 @@ mod tests {
                 record_path: "/dev/null".into(),
                 liveness: idempotency::liveness_verdict(Some(true)).to_string(),
             },
-            Some(&an),
+            dir.path(),
+            Some(&with_hash),
         );
         assert_eq!(
             contended.exit_code().as_i32(),
@@ -2679,7 +2763,8 @@ mod tests {
             CliError::CaptureTimeout {
                 an_tx: an.clone(),
             },
-            Some(&an),
+            dir.path(),
+            Some(&with_hash),
         );
         assert_eq!(
             captured.exit_code().as_i32(),

@@ -949,7 +949,9 @@ impl WithdrawalLock {
     /// Wrap an acquisition on its way to a [`LockSlot`]. The only way to
     /// obtain an [`AcquiredLock`], and `pub(crate)` so the orchestrator's
     /// reservation seam can call it and nothing else has occasion to.
-    #[must_use]
+    ///
+    /// The `#[must_use]` that belongs here is on [`AcquiredLock`] itself,
+    /// where it also covers the value once it has been passed around.
     pub(crate) fn acquired(lock: Option<Self>) -> AcquiredLock {
         AcquiredLock(lock)
     }
@@ -1104,6 +1106,15 @@ pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
 ///
 /// It can be EMPTY — a filesystem without `flock` is a supported
 /// deployment — but only `try_acquire` can decide that.
+/// `#[must_use]` on the TYPE, not on the function that builds one.
+///
+/// Wrapping `Option<WithdrawalLock>` in this newtype quietly took the
+/// acquisition outside `clippy::let_underscore_must_use`, which had been
+/// covering it: `let _ = lock;` at the burn branch's reservation — never
+/// installing the lock at all — went from a CI failure to clippy exit 0
+/// with 219 tests green. An attribute on `acquired()` does not travel
+/// with the value it returns; one on the type does.
+#[must_use]
 #[derive(Debug)]
 pub struct AcquiredLock(Option<WithdrawalLock>);
 

@@ -936,8 +936,10 @@ side-effect free: this run wrote no state file and attempted no burn.
 previous run had already recorded a burn for this identity, the same
 preflight failure comes out as **exit 10**, not exit 2 — the checks and
 the message are identical, and the code differs because the remedy does.
-Seeing exit 2 here means there is no record and no burn; if you have a
-record, you will not see exit 2. See 3d-ii.
+Seeing exit 2 here means there is no record for this identity at all —
+not merely that no hash is on file. A record with `an_tx_hash: null`
+counts: it cannot say whether a burn happened, so the same refusal comes
+out as exit 10. See 3d-ii.
 
 #### 3d-ii — This run must not act as if the withdrawal were untouched (exit 10)
 
@@ -954,8 +956,9 @@ broadcast a burn":
 
 In all three the record must not be deleted and the withdrawal must not
 be re-started under a fresh identity. In 2 and 3 the remedy is to fix
-what the message names and re-run the SAME command, which resumes from
-the recorded burn.
+what the message names and re-run the SAME command — which resumes from
+the recorded burn if the record carries an `an_tx_hash`, and otherwise
+refuses with exit 3, whose text is then the procedure to follow.
 
 For situation 1: `sendTransaction` broadcast but the CLI could not
 observe the resulting message on GQL within its budget. Typical root cause:

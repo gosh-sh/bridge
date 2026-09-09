@@ -1639,7 +1639,7 @@ pub fn parse_eth_signer(raw: &str) -> CliResult<PrivateKeySigner> {
             // describe a rule this code does not enforce — and the next
             // reader would either add the rule or trust the message.
             expected: "32-byte hex EVM private key, 64 hex chars, `0x` prefix optional".into(),
-            got: format!("<redacted {} chars>", raw.len()),
+            got: crate::errors::Redacted::rendered(format!("<redacted {} chars>", raw.len())),
         })
 }
 
@@ -1656,7 +1656,7 @@ pub async fn check_destination_chain(rpc_url: &str, expected_chain_id: u64) -> C
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
         expected: "an http(s) JSON-RPC URL".into(),
-        got: format!("{rpc_url} ({e})"),
+        got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
     })?;
     let provider = ProviderBuilder::new().connect_http(url);
     let chain_id = provider
@@ -1784,7 +1784,7 @@ pub async fn check_bridge_deploy(
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
         expected: "an http(s) JSON-RPC URL".into(),
-        got: format!("{rpc_url} ({e})"),
+        got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
     })?;
     let provider = ProviderBuilder::new().connect_http(url);
 

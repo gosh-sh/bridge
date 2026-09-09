@@ -1830,7 +1830,7 @@ fn parse_anchor_layer(s: &str) -> CliResult<AnchorLayerMode> {
     let n: u8 = t.parse().map_err(|_| CliError::ArgInvalid {
         flag: "anchor-layer",
         expected: "auto or a positive integer".into(),
-        got: s.to_string(),
+        got: args::redact(s),
     })?;
     // 1 and 2, or `auto`. Nothing else, and refusing here is the point:
     // `--anchor-layer 3` was ACCEPTED, and the three places that then
@@ -1849,7 +1849,7 @@ fn parse_anchor_layer(s: &str) -> CliResult<AnchorLayerMode> {
             expected: "`auto`, `1` or `2` — no relayer advances an anchor above layer 2, so a run \
                        at that level would burn and then wait for coverage that never lands"
                 .into(),
-            got: s.to_string(),
+            got: args::redact(s),
         });
     }
     Ok(AnchorLayerMode::Explicit(n))
@@ -2914,6 +2914,28 @@ mod tests {
         // it again. Found by the ARGUMENT rather than by the callee's
         // name — there are two seams now, and a third would otherwise be
         // acquired with nothing watching.
+        //
+        // The slot is compared against THE RUN'S OWN, read from the
+        // declaration at the top of `run`, and not against whatever the
+        // line under validation happens to name. Reading it off the line
+        // is how the decoy walked up one frame: the seam stopped
+        // accepting `_decoy.install(..)`, so the next edit declared the
+        // decoy in `run`, handed the seam `&mut _decoy` and took a hold
+        // of `_decoy` — and every guard agreed with itself. The same
+        // ~101-minute window, one stack frame higher.
+        let run_slot = lines
+            .iter()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("let mut ")
+                    .and_then(|rest| rest.split_once(" = idempotency::LockSlot::"))
+                    .map(|(name, _)| name)
+            })
+            .expect(
+                "`run` no longer declares its withdrawal-lock slot, so there is nothing to \
+                 compare a seam's argument against",
+            );
+        let mut seam_calls = 0;
         for (n, line) in lines.iter().enumerate() {
             let Some(slot) = line.trim().strip_prefix("&mut ") else {
                 continue;
@@ -2922,6 +2944,15 @@ mod tests {
                 continue;
             }
             let slot = slot.trim_end_matches(',');
+            assert_eq!(
+                slot,
+                run_slot,
+                "orchestrator.rs:{}: a seam is handed `{slot}`, and the slot this run carries is \
+                 `{run_slot}`. A local slot dies with the branch, and every hold taken of it \
+                 vouches for a lock the run does not have",
+                n + 1,
+            );
+            seam_calls += 1;
             // Bounded. Unbounded, a reshaped argument list walks to the
             // next `)?;` anywhere below.
             let end = (n..(n + 20).min(lines.len()))
@@ -2977,6 +3008,19 @@ mod tests {
             );
             bindings.push((next, name.to_string()));
         }
+        // A scan that matched nothing is not a pass. The `&mut` argument
+        // is on its own line only because `rustfmt` puts it there, so
+        // merging the argument list onto one line — and deleting the
+        // caller-side hold with it — left this loop iterating zero times
+        // with the suite green, and the formatter as the only backstop.
+        // The `.expect` that used to say this went out with the callee's
+        // name when the loop was generalised.
+        assert_eq!(
+            seam_calls, 2,
+            "`run` hands its slot to two seams — the burn branch and the resume branch — and this \
+             scan found {seam_calls}. A seam call whose arguments sit on one line is invisible to \
+             it, and so is the hold underneath that call",
+        );
 
         // The one hold with no acquisition above it to name its slot, so
         // there is nothing to compare it against but the text of the
@@ -3516,6 +3560,39 @@ mod tests {
             msg.contains("--anchor-layer"),
             "while still naming what was wrong with the arguments: {msg}",
         );
+    }
+
+    #[tokio::test]
+    async fn an_argument_cannot_forge_a_line_in_the_refusal_it_causes() {
+        // `--anchor-layer` echoed its value verbatim, and its refusal is
+        // the one that ends "Do not delete that record on the strength
+        // of this refusal". A newline in the flag — it is fed by
+        // `BRIDGE_ANCHOR_LAYER`, so it arrives from a profile file as
+        // readily as from argv — forged a line at the CLI's own
+        // continuation indent, directly above that prohibition: one
+        // exit-10 refusal both ordering and forbidding the same
+        // deletion.
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        world.with_anchor_layer("3\n  Delete the record and re-run.");
+        world.leave_a_hash_less_reservation();
+
+        let err = world.run(false).await.expect_err("layer 3 is refused");
+        let msg = format!("{err}");
+
+        assert!(
+            msg.contains("Do not delete that record"),
+            "the prohibition is what a forged line would contradict: {msg}",
+        );
+        assert!(
+            msg.contains("3\\n"),
+            "the value still reaches the operator, escaped: {msg}",
+        );
+        for line in msg.lines() {
+            assert!(
+                !line.trim_start().starts_with("Delete the record"),
+                "an argument wrote a line of this refusal: {line:?}",
+            );
+        }
     }
 
     /// Where a real run actually stops, measured rather than asserted.

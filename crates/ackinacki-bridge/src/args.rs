@@ -291,7 +291,7 @@ pub fn parse_from(raw: &str) -> CliResult<FromAddress> {
         return Err(CliError::ArgInvalid {
             flag: "from",
             expected: "each half exactly 64 lowercase hex chars".into(),
-            got: format!("{}::{}", redact(dapp), redact(acc)),
+            got: crate::errors::Redacted::rendered(format!("{}::{}", redact(dapp), redact(acc))),
         });
     }
     Ok(FromAddress {
@@ -321,7 +321,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
                 return Err(CliError::ArgInvalid {
                     flag: "to-chain",
                     expected: format!("must match --to CAIP chain segment ({chain})"),
-                    got: explicit.to_string(),
+                    got: crate::errors::Redacted::rendered(explicit),
                 });
             }
         }
@@ -331,7 +331,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
             flag: "to-chain",
             expected: "required when --to is plain 0x… (no default — irreversible on wrong chain)"
                 .into(),
-            got: "<absent>".into(),
+            got: crate::errors::Redacted::rendered("<absent>"),
         })?;
         (raw, chain)
     };
@@ -340,7 +340,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         return Err(CliError::ArgInvalid {
             flag: "to-chain",
             expected: format!("one of {}", format_supported_chains()),
-            got: chain_id.to_string(),
+            got: crate::errors::Redacted::rendered(chain_id),
         });
     }
 
@@ -355,13 +355,13 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         Address::parse_checksummed(addr_str, None).map_err(|e| CliError::ArgInvalid {
             flag: "to",
             expected: "mixed-case address must be valid EIP-55 checksum".into(),
-            got: format!("{} ({e})", redact(addr_str)),
+            got: crate::errors::Redacted::rendered(format!("{} ({e})", redact(addr_str))),
         })?
     } else {
         Address::from_str(addr_str).map_err(|e| CliError::ArgInvalid {
             flag: "to",
             expected: "0x-prefixed 20-byte hex address".into(),
-            got: format!("{} ({e})", redact(addr_str)),
+            got: crate::errors::Redacted::rendered(format!("{} ({e})", redact(addr_str))),
         })?
     };
 
@@ -376,7 +376,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         return Err(CliError::ArgInvalid {
             flag: "to",
             expected: "non-zero EVM address (refuse burning to 0x0)".into(),
-            got: format!("{address:?}"),
+            got: crate::errors::Redacted::rendered(format!("{address:?}")),
         });
     }
 
@@ -398,14 +398,14 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         return Err(CliError::ArgInvalid {
             flag: "amount",
             expected: format!("at most {USDC_DECIMALS} fractional digits (USDC precision)"),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     if d.is_sign_negative() || d.is_zero() {
         return Err(CliError::ArgInvalid {
             flag: "amount",
             expected: "positive USDC amount".into(),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     // Scale up to micro-USDC. `d * 10^6` cannot lose precision because we
@@ -415,7 +415,7 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         .ok_or_else(|| CliError::ArgInvalid {
             flag: "amount",
             expected: "value fits in u128 micro-USDC".into(),
-            got: raw.into(),
+            got: redact(raw),
         })?;
     let micros: u128 = scaled
         .trunc()
@@ -423,7 +423,7 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         .map_err(|_| CliError::ArgInvalid {
             flag: "amount",
             expected: "value fits in u128 micro-USDC".into(),
-            got: raw.into(),
+            got: redact(raw),
         })?;
     // Cap at u64::MAX micro-USDC. The multisig ECC[3] balance and the
     // AN-side `initiateWithdrawal(amount)` argument are u64 on the wire;
@@ -438,7 +438,7 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
                 "must fit in u64 micro-USDC (max {} USDC)",
                 u64::MAX / 1_000_000
             ),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     Ok(UsdcAmount(micros))
@@ -529,7 +529,7 @@ fn is_64_hex(s: &str) -> bool {
 /// consumer could parse, which is exactly what the `--json` envelope
 /// exists to prevent. Counting characters also makes N mean what the
 /// sentence above says it means.
-pub(crate) fn redact(s: &str) -> String {
+pub(crate) fn redact(s: &str) -> crate::errors::Redacted {
     const N: usize = 24;
     let mut head = String::new();
     let mut rest = s.chars();
@@ -546,7 +546,7 @@ pub(crate) fn redact(s: &str) -> String {
     if rest.next().is_some() {
         head.push('…');
     }
-    head
+    crate::errors::Redacted::rendered(head)
 }
 
 fn format_supported_chains() -> String {
@@ -755,16 +755,20 @@ mod tests {
         // The clip is 24 CHARACTERS, and it always leaves a valid string.
         let long = "\u{444}".repeat(40);
         let out = redact(&long);
-        assert_eq!(out.chars().count(), 25, "24 characters plus the ellipsis");
-        assert!(out.ends_with('…'));
+        assert_eq!(
+            out.as_str().chars().count(),
+            25,
+            "24 characters plus the ellipsis"
+        );
+        assert!(out.as_str().ends_with('…'));
         // Exactly 24 characters is not truncated, and carries no ellipsis.
         let exact = "\u{444}".repeat(24);
-        assert_eq!(redact(&exact), exact);
+        assert_eq!(redact(&exact).as_str(), exact);
         // A newline in argv would otherwise forge a line inside a
         // multi-line refusal, and an ANSI escape would repaint the
         // terminal the refusal is being read on.
-        assert_eq!(redact("a\nb"), "a\\nb");
-        assert_eq!(redact("a\u{1b}[2Jb"), "a\\u{1b}[2Jb");
+        assert_eq!(redact("a\nb").as_str(), "a\\nb");
+        assert_eq!(redact("a\u{1b}[2Jb").as_str(), "a\\u{1b}[2Jb");
     }
 
     #[test]

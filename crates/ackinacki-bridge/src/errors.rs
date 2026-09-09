@@ -110,12 +110,18 @@ pub enum CliError {
     // -- Preflight (exit 2) --
     /// Argument shape/format violation. `flag` is the offending flag as
     /// spelled on the CLI (e.g. `--to`); `expected` describes the valid
-    /// shape; `got` is a redacted, safe echo of what we saw.
+    /// shape; `got` is a redacted, safe echo of what we saw — and the
+    /// TYPE is what says so. It was a `String` with that sentence in
+    /// this comment, twenty-odd constructions honoured it, and one did
+    /// not: `--anchor-layer` echoed its value verbatim into a refusal
+    /// that carries "Do not delete that record on the strength of this
+    /// refusal", so a newline in the flag forged a line ordering the
+    /// deletion directly above the line forbidding it.
     #[error("--{flag}: expected {expected}, got {got}")]
     ArgInvalid {
         flag: &'static str,
         expected: String,
-        got: String,
+        got: Redacted,
     },
 
     /// Key file rejection. `problem` names which check failed so the
@@ -257,6 +263,52 @@ pub enum CliError {
     },
 }
 
+/// Text on its way into a refusal, already made safe to print.
+///
+/// Constructed two ways and no others: [`crate::args::redact`], for
+/// anything an operator supplied, and [`Redacted::rendered`], for text
+/// this CLI produced itself. The point is not that one of them escapes
+/// and the other does not — it is that an author has to say which case
+/// this is, in a word a reader can grep.
+///
+/// Refusals are multi-line and are read in a terminal. A control
+/// character that survives `argv` forges a line the CLI never wrote,
+/// and an ANSI escape repaints the screen the refusal is read on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// Text this CLI produced: a number it parsed, a placeholder like
+    /// `<absent>`, a value it has already redacted and is wrapping in a
+    /// sentence.
+    ///
+    /// NEVER raw operator input. That is [`crate::args::redact`]'s job,
+    /// and the difference between the two calls is the whole content of
+    /// this type.
+    #[must_use]
+    pub fn rendered(what: impl std::fmt::Display) -> Self {
+        Self(what.to_string())
+    }
+
+    /// The escaped text.
+    ///
+    /// `#[cfg(test)]`: production never unwraps one. A message that
+    /// wraps a redacted value in a larger sentence goes through
+    /// [`Redacted::rendered`], which is where a reader looks to see that
+    /// the inner part was redacted first.
+    #[cfg(test)]
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl CliError {
     /// Deterministic mapping to a process exit code. `main` calls this on
     /// `Err(e)` before returning.
@@ -348,7 +400,7 @@ mod tests {
             CliError::ArgInvalid {
                 flag: "to",
                 expected: "0x-prefixed 20-byte hex".into(),
-                got: "…".into()
+                got: Redacted::rendered("…")
             }
             .exit_code(),
             ExitCode::PreflightRefused

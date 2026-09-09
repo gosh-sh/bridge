@@ -63,8 +63,9 @@ pub(crate) const NOTHING_SENT_CLAUSE: &str = " (nothing was sent)";
 /// that looks safe to act on and is not comes from that ambiguity; see
 /// [`liveness_verdict`] for the half `flock` can answer.
 ///
-/// `Confirmed` and `Submitted` are terminal: see [`Status::is_terminal`],
-/// whose three readers have to agree.
+/// `Confirmed` and `Submitted` are terminal: see
+/// [`Status::terminal_remedy`], which is where a new status gets
+/// classified and where the refusal it earns is written.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -86,43 +87,63 @@ pub enum Status {
 }
 
 impl Status {
-    /// Statuses that forbid any further work on this identity, whatever
-    /// flags the run passes. `Confirmed` has already paid out; `Submitted`
-    /// has a broadcast EVM transaction whose receipt nobody has seen, so
-    /// re-broadcasting risks a double payout.
+    /// What an operator is told about a status that forbids further work
+    /// on this identity, whatever flags the run passes — and `None` for
+    /// every status that permits it.
     ///
-    /// One list, because two places need it: [`reserve`], and the resume
-    /// path — which restores a record deleted mid-preflight and must then
-    /// answer exactly as `reserve` would have if the file had survived.
-    /// Hardcoding a status in the second of those turned a paid-out
-    /// withdrawal into a `burned` one and carried it through a second
-    /// `withdrawByProof`.
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Status::Confirmed | Status::Submitted)
+    /// EXHAUSTIVE over `Status`, and that is the whole point of it. This
+    /// used to be two decisions in two places: a `matches!` list naming
+    /// the terminal statuses, and an `if == Confirmed { … } else { … }`
+    /// picking the remedy. An eighth status could be added to either one
+    /// alone, and both ways were measured green:
+    ///
+    /// * added to the terminal list only, it inherited `Submitted`'s remedy —
+    ///   "there is a broadcast EVM transaction", about a record that may have
+    ///   none;
+    /// * added to [`reserve`]'s terminal arm only, it reached that arm's
+    ///   `expect` and exited 101 on a refusal path.
+    ///
+    /// Now a new status is a non-exhaustive-match error here, at the one
+    /// place that has to decide both halves at once.
+    fn terminal_remedy(self) -> Option<&'static str> {
+        match self {
+            // Already paid out.
+            Status::Confirmed => Some(
+                "This withdrawal already paid out. `--allow-retry` does not reopen it. To move \
+                 funds again, use a different (amount, recipient, chain) — the identity is what \
+                 the record is keyed on.",
+            ),
+            // A broadcast EVM transaction whose receipt nobody has seen,
+            // so re-broadcasting risks a double payout.
+            Status::Submitted => Some(
+                "There is a broadcast EVM transaction whose receipt was never observed, and \
+                 `--allow-retry` does not override that: re-broadcasting risks a double payout. \
+                 Reconcile eth_tx_hash on chain first, then either wait for a run to see the \
+                 receipt or set the record to \"failed\" by hand.",
+            ),
+            Status::Reserved
+            | Status::Burned
+            | Status::Captured
+            | Status::Proved
+            | Status::Failed => None,
+        }
     }
 }
 
 /// The refusal a record in a terminal status earns, and `None` for every
-/// other status — so this and [`Status::is_terminal`] cannot drift apart.
+/// other status. [`Status::terminal_remedy`] decides which is which and
+/// supplies the text, so there is no second list to drift from.
+///
+/// A `Status::is_terminal` predicate stood beside it, derived from the
+/// same call and read by nothing once the remedy moved — deleted rather
+/// than kept as a synonym.
 ///
 /// Exit 3. `--allow-retry` does NOT reach these, so the shared "re-run with
 /// --allow-retry to override" the message used to end on was wrong here: it
 /// named the one flag that changes nothing about a terminal record.
 #[must_use]
 fn terminal_refusal(record: &Record) -> Option<CliError> {
-    if !record.status.is_terminal() {
-        return None;
-    }
-    let remedy = if record.status == Status::Confirmed {
-        "This withdrawal already paid out. `--allow-retry` does not reopen it. To move funds \
-         again, use a different (amount, recipient, chain) — the identity is what the record is \
-         keyed on."
-    } else {
-        "There is a broadcast EVM transaction whose receipt was never observed, and \
-         `--allow-retry` does not override that: re-broadcasting risks a double payout. Reconcile \
-         eth_tx_hash on chain first, then either wait for a run to see the receipt or set the \
-         record to \"failed\" by hand."
-    };
+    let remedy = record.status.terminal_remedy()?;
     Some(CliError::DuplicateInFlight {
         prior_status: format!("{:?}", record.status).to_ascii_lowercase(),
         prior_tx: record.an_tx_hash.clone(),
@@ -344,8 +365,12 @@ pub fn reserve(
         // Terminal states — refuse regardless of --allow-retry.
         // Confirmed already paid out; Submitted has an unresolved
         // in-flight tx and re-broadcasting is a double-spend risk.
-        Status::Confirmed | Status::Submitted => Err(terminal_refusal(&prior)
-            .expect("Status::is_terminal names exactly the statuses in this arm")),
+        Status::Confirmed | Status::Submitted => Err(terminal_refusal(&prior).expect(
+            "`Status::terminal_remedy` answers `Some` for exactly the statuses in this arm. A \
+             status named here and classified non-terminal there is a contradiction between two \
+             deliberate edits, not a slip, and a record whose status nobody has decided is safe \
+             to work on does not get worked on",
+        )),
         // Failed → the only production writer sets this after
         // `withdrawByProof` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
@@ -2782,26 +2807,44 @@ mod tests {
 
     #[test]
     fn only_confirmed_and_submitted_are_terminal_everywhere_that_asks() {
-        // Three places have to agree and two of them are match patterns,
-        // which no compiler compares: `Status::is_terminal`, the arm in
-        // `reserve` that builds the refusal behind an `expect`, and the
-        // resume path, which asks by status after restoring a record that
-        // was deleted mid-preflight. Drift between them is a paid-out
-        // withdrawal carried through a second `withdrawByProof`.
+        // `Status::terminal_remedy` decides terminality and the remedy
+        // together now, so the two can no longer disagree with each
+        // other. What no compiler compares is either of them against
+        // `reserve`'s arm and against the resume path, which asks by
+        // status after restoring a record deleted mid-preflight. Drift
+        // there is a paid-out withdrawal carried through a second
+        // `withdrawByProof`.
         //
-        // The list is written out rather than derived, so changing
-        // `is_terminal` fails here instead of quietly agreeing with
-        // itself.
-        for (status, terminal) in [
-            (Status::Reserved, false),
-            (Status::Burned, false),
-            (Status::Captured, false),
-            (Status::Proved, false),
-            (Status::Failed, false),
-            (Status::Submitted, true),
-            (Status::Confirmed, true),
+        // The expectation is written out rather than read from
+        // production, so changing `terminal_remedy` fails here instead of
+        // quietly agreeing with itself — but the `match` is exhaustive,
+        // so an eighth status cannot be added to production without
+        // someone saying here what it is. The array below still has to be
+        // extended by hand; the compile error is what sends them to it.
+        let expected = |status: Status| match status {
+            Status::Confirmed | Status::Submitted => true,
+            Status::Reserved
+            | Status::Burned
+            | Status::Captured
+            | Status::Proved
+            | Status::Failed => false,
+        };
+        for status in [
+            Status::Reserved,
+            Status::Burned,
+            Status::Captured,
+            Status::Proved,
+            Status::Failed,
+            Status::Submitted,
+            Status::Confirmed,
         ] {
-            assert_eq!(status.is_terminal(), terminal, "{status:?}");
+            let terminal = expected(status);
+            assert_eq!(
+                status.terminal_remedy().is_some(),
+                terminal,
+                "{status:?}: terminality and the remedy are one decision now, so this is the \
+                 whole of what production says about it",
+            );
 
             // And `reserve`'s own arm, driven against a real state
             // directory. Every planted record carries a hash, so
@@ -2828,7 +2871,7 @@ mod tests {
             assert_eq!(
                 got.is_err(),
                 terminal,
-                "{status:?}: reserve's arm and is_terminal must name the same statuses",
+                "{status:?}: reserve's arm and `terminal_remedy` must name the same statuses",
             );
             if let Err(e) = got {
                 assert_eq!(e.exit_code().as_i32(), 3, "{status:?}: {e}");

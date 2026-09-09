@@ -1881,6 +1881,44 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_exists_and_will_not_parse_is_not_reported_as_nothing_on_disk() {
+        // The exit code, by behaviour rather than by a guard reading this
+        // file. Flipping this refusal from `BurnOutcomeUnknown` back to
+        // `Preflight` — one token — left the whole suite green for three
+        // rounds, and what it publishes is exit 2's contract: "nothing
+        // was broadcast on either chain, and there is no record for this
+        // identity on disk". Getting here means `hard_link` answered
+        // EEXIST, so the record demonstrably exists; whoever owns it may
+        // be inside `burn::send`.
+        //
+        // The window is human-scale, not a race: `confirm_before_burn`
+        // waits for a person between the peek at stage 1 and this read.
+        let dir = TempDir::new().unwrap();
+        let k = key(&sample_from(), &sample_to(), &UsdcAmount(500_000));
+        std::fs::write(record_path(dir.path(), &k), b"{\"key\": ").unwrap();
+
+        let err = reserve_rec(
+            dir.path(),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(500_000),
+            true,
+        )
+        .expect_err("a record that will not parse cannot be reserved over");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "the record is on disk and unreadable, which is exit 10's third population: {err}",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("could not be read"),
+            "the refusal has to say what it could not do: {msg}",
+        );
+    }
+
+    #[test]
     fn a_record_copied_into_another_identitys_slot_is_refused() {
         // The filename IS the identity — a SHA-256 over (from, to, chain,
         // amount). A record carrying a different key in that slot would let

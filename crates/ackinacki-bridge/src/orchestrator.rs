@@ -4141,6 +4141,41 @@ mod tests {
     }
 
     #[test]
+    fn a_contended_lock_over_an_unreadable_record_is_not_reported_as_nothing_on_disk() {
+        // The other half of the same class, and the one moment a burn is
+        // most likely to be in flight: another live process on this host
+        // holds the withdrawal lock. Removing the re-badge on the peek —
+        // one call — publishes exit 2 about it, and exit 2's contract
+        // says there is no record for this identity on disk.
+        //
+        // Reached by handing the function the verdict rather than by
+        // racing for it: `LockAttempt` is what `try_acquire` returns, and
+        // `Contended` is the answer a second `flock` gets. The record is
+        // unreadable rather than absent, which is what makes the peek
+        // fail rather than answer `None`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = idempotency::key(&seam_from(), &seam_to(), &UsdcAmount(1_000_000));
+        std::fs::write(idempotency::record_path(dir.path(), &key), b"{ not json").unwrap();
+
+        let err = reserve_and_decide_holding(
+            idempotency::LockAttempt::Contended,
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+        )
+        .expect_err("another live process owns this withdrawal");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "a record somebody else is holding, and which will not parse, is not `nothing on \
+             disk`: {err}",
+        );
+    }
+
+    #[test]
     fn a_lockless_filesystem_is_never_told_the_withdrawal_is_free() {
         // The wiring, not the mapping. `holder_verdict` has had a test
         // since the enum landed, and `decide_burn` has had one since last

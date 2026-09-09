@@ -15,6 +15,10 @@
 //!
 //! So: one anchor, one definition, and a miss is a failed test naming the
 //! file rather than a wider scan nobody sees.
+//!
+//! It also holds [`sentences_authorising_a_deletion`], for the same
+//! reason: the shipped documents and the refusal messages both have to
+//! be held to the deletion gate, and only the documents were.
 
 /// Everything above `#[cfg(test)] mod tests {` — the module's shipped
 /// code.
@@ -34,4 +38,41 @@ pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
             )
         });
     &src[..cut]
+}
+
+/// Sentences in `text` that hand somebody permission to delete the
+/// record, without naming the verdict that permits it.
+///
+/// SENTENCE-scoped, not block-scoped: a "do not delete" three bullets
+/// away in an adjacent branch of the same procedure satisfied a
+/// block-wide search while the sentence in front of the reader said the
+/// opposite. Whitespace is collapsed first — these are hard-wrapped
+/// documents and multi-line format strings, so every phrase worth
+/// looking for straddles a line break somewhere, and the first version
+/// of this scan matched nothing at all and looked like a pass.
+///
+/// `authorises` and `hedges` are the CALLER's, because the two surfaces
+/// are held to different rules and saying so is the point. A procedure
+/// may give conditional permission — the runbook's gate does, in a
+/// sentence naming the verdict — so its list is narrow and tuned to the
+/// copies that got it wrong. A refusal message may not: it has no room
+/// for a condition, and the wrapper around it forbids the deletion two
+/// sentences later, so any imperative at all is a contradiction the
+/// operator reads as a whole.
+pub(crate) fn sentences_authorising_a_deletion(
+    text: &str,
+    authorises: &[&str],
+    hedges: &[&str],
+) -> Vec<String> {
+    let lower = text
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    lower
+        .split(". ")
+        .filter(|s| authorises.iter().any(|p| s.contains(p)))
+        .filter(|s| !hedges.iter().any(|h| s.contains(h)))
+        .map(|s| s.trim().to_string())
+        .collect()
 }

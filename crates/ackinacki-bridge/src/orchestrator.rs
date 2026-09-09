@@ -1365,27 +1365,34 @@ fn refusal_before_a_recorded_burn(
         } => return e,
     };
     let standing = match prior.an_tx_hash.as_deref() {
+        // `--allow-retry` named, because without it this is false. A
+        // record with a hash reaches `reserve`'s resumable arm, which
+        // refuses with exit 3 unless the flag is passed — so "re-run and
+        // it resumes" sent an operator to a refusal whose remedy is the
+        // flag this sentence had left out.
         Some(an_tx) => format!(
             "the AN burn {an_tx} from an earlier run IS on the wire. Fix what preflight named and \
-             re-run: the run resumes from that burn."
+             re-run with --allow-retry: the flag is what lets the reservation hand the recorded \
+             burn back, and the run then skips the burn and resumes at capture."
         ),
         // The one an operator most needs and is least able to work out.
         //
-        // Both outcomes, not one. This said "re-running will refuse with
-        // exit 3 rather than resume; reconcile first, then follow that
-        // refusal", which is wrong at both ends. A plain re-run does not
-        // reach exit 3: stage 1 runs first and repeats the refusal this
-        // message is reporting. And the reconciliation it asks for is
-        // what decides which outcome there is — write the hash and the
-        // next run resumes, so the refusal an operator was told to follow
-        // never appears.
+        // NO exit code is promised here, and two rounds of trying to
+        // promise one is why. "Re-running will refuse with exit 3" was
+        // wrong because stage 1 runs first and repeats this refusal.
+        // "If none landed, the next run refuses with exit 3" was wrong
+        // in the other direction: it is true only once preflight passes,
+        // which this run has just failed to do. What is actually known
+        // here is what the record cannot say and where to find out — so
+        // that is what it says, and the branch that leads to a deletion
+        // is left to the runbook, which owns the three-verdict gate.
         None => format!(
             "a record for this identity exists at {} and carries NO AN tx hash, so it cannot say \
-             whether a burn is on the wire — the hash is written only after the send returns. Fix \
-             what preflight named above, and reconcile on chain per the advanced runbook, Case \
-             3a; the two answers part there. A burn that landed gets its hash written into the \
-             record, and the next run resumes from it. If none landed, the next run refuses with \
-             exit 3, and that refusal's liveness line is what says whether the record may go.",
+             whether a burn is on the wire — the hash is written only after the send returns. \
+             Reconcile on chain before anything else: the advanced runbook, Case 3a. If a burn \
+             landed, write its hash into the record and re-run with --allow-retry, which resumes \
+             at capture. If none landed, this record is the stale half of a reservation and the \
+             runbook's liveness gate is what says what may be done with it.",
             idempotency::record_path(state_dir, &prior.key).display(),
         ),
     };
@@ -2752,6 +2759,128 @@ mod tests {
     }
 
     #[test]
+    fn no_refusal_this_module_raises_tells_an_operator_to_delete_the_record() {
+        // The third attempt at holding this text to anything, and the
+        // first that is not a substring list.
+        //
+        // Round 13 pinned "exit 3". f3c7a8a widened that to four
+        // substrings — "NO AN tx hash", "Case 3a", "resumes from it",
+        // "exit 3" — and widened the hole with it: a message keeping all
+        // four and inverting every claim around them passed. The one the
+        // test agent wrote said the missing hash "is proof that no burn
+        // was ever broadcast", ordered "Delete that record now", declared
+        // Case 3a inapplicable, and promised an automatic resume; 221 +
+        // 16 green. An operator would have read it glued to the
+        // wrapper's "Do not delete that record on the strength of this
+        // refusal" — one message ordering and forbidding the same
+        // deletion, and nothing checking either half.
+        //
+        // Substrings cannot be made to work here. Prose that contains a
+        // word can mean its opposite, and every round of tightening the
+        // list has been a round of pinning the wording of whatever was
+        // written last. So the properties, on the RENDERED refusals:
+        //
+        //   1. no sentence tells anybody to delete the record,
+        //   2. the wrapper's prohibition survives composition,
+        //   3. a refusal about a hash-less record admits the record cannot answer.
+        //
+        // STRICTER than the shipped-document gate on purpose, and
+        // `sentences_authorising_a_deletion`'s parameters are where that
+        // is said out loud. The runbook may give conditional permission
+        // in a sentence naming the verdict — that is what it is for. A
+        // refusal has no room for a condition and already carries the
+        // prohibition, so any imperative in it is a contradiction.
+        const AUTHORISES: [&str; 6] = [
+            "delete the record",
+            "delete that record",
+            "delete the state file",
+            "delete that file",
+            "remove the record",
+            "safe to delete",
+        ];
+        // Only prohibitions. Not "only if", not "once you have
+        // reconciled": a refusal that starts qualifying a deletion is
+        // the runbook's job being done in the wrong place.
+        const HEDGES: [&str; 4] = [
+            "do not delete",
+            "never delete",
+            "must not delete",
+            "not to delete",
+        ];
+        const PROHIBITION: &str = "do not delete that record on the strength of this refusal";
+        const ADMITS: [&str; 4] = [
+            "cannot say",
+            "cannot be answered",
+            "cannot tell",
+            "could not be determined",
+        ];
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let an = format!("0x{}", "2e".repeat(32));
+        let refused = || CliError::Preflight {
+            reason: "multisig has 2 custodians, expected 1".into(),
+            source: None,
+        };
+        let with_hash = burned_record(dir.path(), &an);
+        let mut hash_less = with_hash.clone();
+        hash_less.an_tx_hash = None;
+        hash_less.status = Status::Reserved;
+
+        let hash_less_msg = format!(
+            "{}",
+            refusal_before_a_recorded_burn(refused(), dir.path(), Some(&hash_less))
+        );
+        let unreadable = format!("{}", refusal_reading_a_record_that_exists(refused()));
+        let messages = [
+            (
+                "a stage-1 refusal with a recorded burn",
+                format!(
+                    "{}",
+                    refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash))
+                ),
+            ),
+            (
+                "a stage-1 refusal with a hash-less record",
+                hash_less_msg.clone(),
+            ),
+            ("a record that cannot be read", unreadable),
+        ];
+
+        for (what, msg) in &messages {
+            let orders =
+                crate::source_guard::sentences_authorising_a_deletion(msg, &AUTHORISES, &HEDGES);
+            assert!(
+                orders.is_empty(),
+                "{what}: this refusal tells an operator to delete a record that may hold a burn \
+                 in flight, in a message whose own last sentence forbids it: {orders:#?}",
+            );
+        }
+
+        assert!(
+            format!(
+                "{}",
+                refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash))
+            )
+            .to_ascii_lowercase()
+            .contains(PROHIBITION),
+            "the wrapper's prohibition is the sentence an operator acts on, and a `standing` that \
+             swallows or contradicts it is invisible to any check on the arm alone",
+        );
+        assert!(
+            hash_less_msg.to_ascii_lowercase().contains(PROHIBITION),
+            "and it has to survive the hash-less arm too — the one population where deleting the \
+             record destroys the only local trace of a possible burn",
+        );
+
+        let lower = hash_less_msg.to_ascii_lowercase();
+        assert!(
+            ADMITS.iter().any(|a| lower.contains(a)),
+            "a hash-less record cannot say whether a burn is on the wire, and the refusal has to \
+             say so rather than assert either answer: {hash_less_msg}",
+        );
+    }
+
+    #[test]
     fn the_settled_lock_is_rebound_before_anything_else_can_run() {
         // The gap between the burn/resume choice closing and the first
         // statement under it is the one stretch of `run` where the
@@ -2929,16 +3058,9 @@ mod tests {
         );
         let amsg = format!("{ambiguous}");
         assert!(
-            amsg.contains("NO AN tx hash")
-                && amsg.contains("Case 3a")
-                && amsg.contains("resumes from it")
-                && amsg.contains("exit 3"),
-            "the record cannot answer the question, so this message sends the operator to the \
-             chain and names BOTH outcomes. Naming only the refusal — \"re-running will refuse \
-             with exit 3 rather than resume\", which stood here with an assertion that looked for \
-             the string and nothing else — is wrong twice over: a plain re-run repeats the \
-             preflight refusal it has just been given, and a reconciliation that finds a burn \
-             resumes and never reaches exit 3 at all: {amsg}",
+            amsg.contains("NO AN tx hash") && amsg.contains("Case 3a"),
+            "the message has to name the field that is missing and send the operator to the \
+             chain: {amsg}",
         );
 
         let rebadged = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash));

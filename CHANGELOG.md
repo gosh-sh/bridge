@@ -992,10 +992,13 @@ assigns it when the release is tagged.
   and it does not reach exit 3 by being re-run either, because stage 1
   goes first and a record showing no burn puts the ECC[3] balance check
   back in force. Reconciling on chain is what decides: a burn that
-  landed gets its hash written into the record and the next run resumes,
-  and if none landed the next run refuses with exit 3, whose text is
-  then the procedure. Both documents said "it resumes" unconditionally,
-  which was the wrong half of that pair.
+  landed gets its hash written into the record and the next run resumes
+  with `--allow-retry`, and if none landed the reservation refuses with
+  exit 3 once preflight passes, whose text is then the procedure. Both
+  documents said "it resumes" unconditionally, which was the wrong half
+  of that pair; the refusal message itself now promises no exit code at
+  all, because which one a re-run reaches is decided on chain and not by
+  this run.
 
   **A record that cannot be READ moves too.** Stage 1 reads the prior
   record before anything else, and that read is the call that finds out

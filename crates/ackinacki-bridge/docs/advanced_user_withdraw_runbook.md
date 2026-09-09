@@ -613,9 +613,14 @@ either never sent, or sent and failed before returning a hash; the
 record cannot tell you which, because the hash is written only after the
 send returns.
 
-`--allow-retry` neither resumes nor overrides this: the run refuses with
-exit 3. (It used to compose and broadcast a **second** burn here. That is
-fixed, and the refusal is now the documented behaviour rather than a
+`--allow-retry` neither resumes a hash-less record nor overrides it. It
+does not follow that a re-run refuses with exit 3, and this page said it
+did: stage 1 runs first, and with no hash on file the ECC[3] balance
+check is back in force — so if the burn *did* land, the balance is spent
+and the run repeats the same exit-10 refusal, never reaching the
+reservation. Exit 3 is what the reservation answers **once preflight
+passes**. (It used to compose and broadcast a **second** burn here. That
+is fixed, and the refusal is now the documented behaviour rather than a
 hazard to warn about.) Reconcile on-chain before doing anything:
 
 ```bash
@@ -703,10 +708,13 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
 
 **What "re-run" means once a record exists.** `--allow-retry` resumes a
 withdrawal; it does **not** clear one. A record that is `Reserved` with
-no `an_tx_hash` — which is what an exit 10 leaves — refuses with exit 3
-under `--allow-retry` too, and that is deliberate: the hash is written
+no `an_tx_hash` — which is what an exit 10 leaves — is not resumable
+with or without the flag, and that is deliberate: the hash is written
 only after the send returns, so the record cannot say whether a burn is
-on the wire, and re-running would broadcast a second one.
+on the wire, and re-running would broadcast a second one. What such a
+re-run actually returns depends on stage 1, which runs first: while the
+ECC[3] balance is short the answer is the same exit 10 again, and only
+once preflight passes does the reservation refuse with exit 3.
 
 So the two outcomes below lead to different actions, and neither of them
 is a bare `--allow-retry`:

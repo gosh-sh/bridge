@@ -542,9 +542,12 @@ Fix the key and re-run the SAME withdrawal command.
 `an_tx_hash`, the re-run skips the burn and picks up at capture. If it
 does not — which is what an exit 10 out of the send itself leaves,
 because the hash is written only after the send returns — the re-run
-refuses with exit 3 instead, and that refusal is the procedure: reconcile
-on chain first (advanced runbook, Case 3a), then follow what it says.
-Either way the record stays.
+neither resumes nor goes straight to exit 3: preflight runs first, a
+record showing no burn puts the ECC[3] balance check back in force, and
+the balance is genuinely spent. Reconcile on chain first (advanced
+runbook, Case 3a). If a burn landed, write its hash into the record and
+the next run resumes from it; if none landed, the next run refuses with
+exit 3 and that refusal is the procedure. Either way the record stays.
 
 **Do not re-run `scripts/deploy_msig_and_mint.sh` here.** It deploys a
 fresh multisig, which is a different `--from`, which is a different dedup

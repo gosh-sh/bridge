@@ -1359,11 +1359,22 @@ fn refusal_before_a_recorded_burn(
              re-run: the run resumes from that burn."
         ),
         // The one an operator most needs and is least able to work out.
+        //
+        // Both outcomes, not one. This said "re-running will refuse with
+        // exit 3 rather than resume; reconcile first, then follow that
+        // refusal", which is wrong at both ends. A plain re-run does not
+        // reach exit 3: stage 1 runs first and repeats the refusal this
+        // message is reporting. And the reconciliation it asks for is
+        // what decides which outcome there is — write the hash and the
+        // next run resumes, so the refusal an operator was told to follow
+        // never appears.
         None => format!(
-            "a record for this identity exists at {} and carries NO AN tx hash, so whether a burn \
-             is on the wire cannot be read from it — the hash is written only after the send \
-             returns. Re-running will refuse with exit 3 rather than resume; reconcile on chain \
-             first (the advanced runbook, Case 3a), then follow that refusal.",
+            "a record for this identity exists at {} and carries NO AN tx hash, so it cannot say \
+             whether a burn is on the wire — the hash is written only after the send returns. Fix \
+             what preflight named above, and reconcile on chain per the advanced runbook, Case \
+             3a; the two answers part there. A burn that landed gets its hash written into the \
+             record, and the next run resumes from it. If none landed, the next run refuses with \
+             exit 3, and that refusal's liveness line is what says whether the record may go.",
             idempotency::record_path(state_dir, &prior.key).display(),
         ),
     };
@@ -2863,9 +2874,16 @@ mod tests {
         );
         let amsg = format!("{ambiguous}");
         assert!(
-            amsg.contains("NO AN tx hash") && amsg.contains("exit 3"),
-            "and the operator has to be told that a plain re-run refuses rather than resumes: \
-             {amsg}",
+            amsg.contains("NO AN tx hash")
+                && amsg.contains("Case 3a")
+                && amsg.contains("resumes from it")
+                && amsg.contains("exit 3"),
+            "the record cannot answer the question, so this message sends the operator to the \
+             chain and names BOTH outcomes. Naming only the refusal — \"re-running will refuse \
+             with exit 3 rather than resume\", which stood here with an assertion that looked for \
+             the string and nothing else — is wrong twice over: a plain re-run repeats the \
+             preflight refusal it has just been given, and a reconciliation that finds a burn \
+             resumes and never reaches exit 3 at all: {amsg}",
         );
 
         let rebadged = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash));

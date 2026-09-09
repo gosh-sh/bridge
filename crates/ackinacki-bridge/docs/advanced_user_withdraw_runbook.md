@@ -956,9 +956,15 @@ broadcast a burn":
 
 In all three the record must not be deleted and the withdrawal must not
 be re-started under a fresh identity. In 2 and 3 the remedy is to fix
-what the message names and re-run the SAME command — which resumes from
-the recorded burn if the record carries an `an_tx_hash`, and otherwise
-refuses with exit 3, whose text is then the procedure to follow.
+what the message names and re-run the SAME command, and what that run
+does depends on the record. With an `an_tx_hash` it resumes from the
+recorded burn. Without one it does not — and it does not reach exit 3
+merely by being re-run either: stage 1 goes first, and a record showing
+no burn puts the ECC[3] balance check back in force. Reconcile on chain
+before re-running (Case 3a below). A burn that landed gets its hash
+written into the record and the next run resumes from it; if none
+landed, the next run refuses with exit 3, whose text is then the
+procedure to follow.
 
 For situation 1: `sendTransaction` broadcast but the CLI could not
 observe the resulting message on GQL within its budget. Typical root cause:

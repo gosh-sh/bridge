@@ -988,10 +988,14 @@ assigns it when the release is tagged.
 
   The gate is now the existence of a record, not the hash on it. What
   the refusal says differs: with a hash, re-running resumes from the
-  recorded burn; without one, re-running refuses with exit 3 instead —
-  resume is gated on the hash — and that refusal is the procedure to
-  follow, after reconciling on chain. Both documents said "it resumes"
-  unconditionally, which was the wrong half of that pair.
+  recorded burn; without one it does not — resume is gated on the hash —
+  and it does not reach exit 3 by being re-run either, because stage 1
+  goes first and a record showing no burn puts the ECC[3] balance check
+  back in force. Reconciling on chain is what decides: a burn that
+  landed gets its hash written into the record and the next run resumes,
+  and if none landed the next run refuses with exit 3, whose text is
+  then the procedure. Both documents said "it resumes" unconditionally,
+  which was the wrong half of that pair.
 
   **A record that cannot be READ moves too.** Stage 1 reads the prior
   record before anything else, and that read is the call that finds out

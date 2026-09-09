@@ -910,6 +910,23 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw --dry-run` reads the idempotency store
+  before it reports a refusal.** It still reserves nothing and writes
+  nothing — exit 3 remains unreachable under it — but it used not to
+  LOOK, so all eight refusals it can raise came out as exit 2, whose
+  published contract is "nothing broadcast, **and** no record for this
+  identity on disk". A dry run over a `burned` record with a hash on
+  file said exactly that about a withdrawal whose burn is on the wire.
+
+  A dry run that finds a record now reports its refusals as **exit 10**,
+  names the record, and forbids deleting it — and `--dry-run` can
+  therefore produce 0, 2 or 10 rather than 0 or 2. It skips the ECC[3]
+  balance check over a recorded burn for the same reason a real run
+  does: its job is to say what a real run would do.
+
+  With `HOME` unset and no `--state-dir` it has no directory to read and
+  is unchanged: still safe to run anywhere, still exit 0 or 2.
+
 - **`ackinacki-bridge withdraw`: a missing `--eth-private-key`,
   `--work-dir`, `--params-dir`, `--aggregator-dir` or `--verifiers-dir`
   is exit 10, not exit 2, when a record for the withdrawal is on disk.**
@@ -957,8 +974,11 @@ assigns it when the release is tagged.
   relayer for L≥3)". The run therefore burned, then waited against a
   stride that does not correspond to the level it recorded — and no
   relayer advances an anchor above layer 2, so that wait never ends.
-  `auto`, `1` and `2` are the accepted values; the refusal is exit 2,
-  before the prompt and before anything is broadcast.
+  `auto`, `1` and `2` are the accepted values, and the refusal comes
+  before the prompt and before anything is broadcast. Its exit code
+  depends on what is on disk, like every other stage-1 refusal: **2**
+  with no record for this identity, **10** with one — the value is
+  parsed after the record is read for exactly that reason.
 
 - **A broken invariant after the burn is a refusal, not a panic.** The
   submit plumbing was unwrapped with `expect` three hundred lines below

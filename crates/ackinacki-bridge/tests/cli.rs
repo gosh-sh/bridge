@@ -388,9 +388,12 @@ fn non_interactive_with_dry_run_gets_past_the_policy() {
 
 #[test]
 fn a_dry_run_never_reports_a_duplicate() {
-    // README: `--dry-run` can produce only 0 or 2. It neither reads nor
-    // writes the idempotency store, so exit 3 is unreachable under it —
-    // and a state directory full of records must not change that.
+    // README: `--dry-run` can produce 0, 2 or 10. It never reserves and
+    // never writes, so exit 3 is unreachable under it — and a state
+    // directory full of records must not change that. It does read: a
+    // dry run that finds a record for THIS identity refuses with 10
+    // rather than claiming there is none, which is what the planted
+    // record below is not (its name is not this run's key).
     // The state dir has to contain a record for this to test anything —
     // and BASE's `--from-keys /nonexistent/keys.json` refuses at the
     // perms check, which is step 1 of preflight, so the run never reaches
@@ -437,8 +440,8 @@ fn a_dry_run_never_reports_a_duplicate() {
         "the run must reach past the key-perms check to say anything about idempotency: {msg}",
     );
     assert!(
-        code(&out) == 0 || code(&out) == 2,
-        "a dry run exits 0 or 2, got {}",
+        code(&out) == 0 || code(&out) == 2 || code(&out) == 10,
+        "a dry run exits 0, 2 or 10, got {}",
         code(&out)
     );
     assert_eq!(

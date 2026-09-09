@@ -477,9 +477,10 @@ grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 Distinguishing "nothing broadcast" from "broadcast, unknown outcome"
 is the whole point of the exit-code discipline — scripts that
 pattern-match on a single non-zero would blind an operator to the
-difference that matters for money. `--dry-run` can only produce 0 or
-2 — it neither reads nor writes the idempotency store, so exit 3 is
-unreachable under it.
+difference that matters for money. `--dry-run` can produce 0, 2 or 10 —
+it never reserves and never writes, so exit 3 is unreachable under it,
+but it does READ the store, and a dry run that finds a record for this
+identity reports its refusals as 10 rather than claiming there is none.
 
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|

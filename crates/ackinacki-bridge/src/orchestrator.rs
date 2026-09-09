@@ -193,15 +193,31 @@ pub async fn run(
     let state_dir = match (&args.state_dir, dry_run) {
         (Some(d), _) => d.clone(),
         (None, false) => default_state_dir()?,
-        (None, true) => PathBuf::from("/nonexistent/dry-run-uses-no-state-dir"),
+        // A dry run that CAN name a state directory does. It still never
+        // writes one — every write is behind `record.as_mut()`, which
+        // stays `None` for a dry run, and the reservation lives inside
+        // the `else` of `if dry_run` — but it reads, for the reason
+        // below. When `HOME` is unset it has no directory to name, and
+        // the path it gets instead is one that cannot exist: joining a
+        // filename onto an empty `PathBuf` would yield a cwd-relative
+        // one, which is the state directory this refusal exists to
+        // prevent.
+        (None, true) => default_state_dir()
+            .unwrap_or_else(|_| PathBuf::from("/nonexistent/dry-run-uses-no-state-dir")),
     };
-    let prior = if dry_run {
-        // A dry run neither reads nor writes idempotency state (spec).
-        None
-    } else {
-        idempotency::peek(&state_dir, &from, &to, &amount)
-            .map_err(refusal_reading_a_record_that_exists)?
-    };
+    // Read for a DRY run too, and this is the fix for the last site of a
+    // class the rest of stage 1 was cleared of. A dry run neither
+    // reserves nor writes — but eight refusals it can raise were bare
+    // `CliError::Preflight`, exit 2, whose published contract is
+    // "nothing broadcast, and no record for this identity on disk". A
+    // dry run over a `burned` record with a hash on file answered
+    // exactly that, about a withdrawal whose burn IS on the wire.
+    //
+    // `peek` creates nothing, so this cannot poison a run that is about
+    // to be refused; and a dry run's whole job is to say what a real run
+    // would do, which it cannot do without looking.
+    let prior = idempotency::peek(&state_dir, &from, &to, &amount)
+        .map_err(refusal_reading_a_record_that_exists)?;
 
     // BELOW the peek, for the reason the plumbing check is: the
     // identity is `key(from, to, amount)` and all three are parsed three
@@ -243,9 +259,12 @@ pub async fn run(
     };
 
     // A prior record carrying an an_tx_hash means the burn is already on
-    // the wire. Its ECC[3] is spent by definition, and re-checking
-    // sufficiency would refuse every resume of a full-balance withdrawal —
-    // the exact scenario the record exists to rescue.
+    // the wire — for a dry run as much as for a real one, which is why a
+    // dry run over a recorded burn now skips the balance check too: it
+    // reports what a real run would do, and a real run would resume. Its ECC[3] is
+    // spent by definition, and re-checking sufficiency would refuse every
+    // resume of a full-balance withdrawal — the exact scenario the record
+    // exists to rescue.
     let burn_already_sent = prior.as_ref().is_some_and(|p| p.an_tx_hash.is_some());
 
     // ---- 1. Preflight ----
@@ -3533,6 +3552,40 @@ mod tests {
                 "an argument wrote a line of this refusal: {line:?}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_over_a_record_does_not_report_a_clean_slate_either() {
+        // The last site of the class the rest of stage 1 was cleared of.
+        // A dry run reserves nothing and writes nothing, and it used to
+        // read nothing either — so all eight refusals it can raise came
+        // out as bare exit 2, whose contract is "nothing broadcast, and
+        // no record for this identity on disk", over a withdrawal whose
+        // record was sitting in the directory it had been handed.
+        //
+        // It looks now. It still writes nothing, and this test checks
+        // that too.
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        world.with_anchor_layer("3");
+        let record = world.leave_a_hash_less_reservation();
+        let before = std::fs::read_to_string(&record).expect("the reservation is on disk");
+
+        let err = world.run(true).await.expect_err("layer 3 is refused");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "a dry run that found a record may not answer 2: {err}",
+        );
+        assert!(
+            format!("{err}").contains(&record.display().to_string()),
+            "and it names the record it found: {err}",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            before,
+            "reading is all it did",
+        );
     }
 
     /// Where a real run actually stops, measured rather than asserted.

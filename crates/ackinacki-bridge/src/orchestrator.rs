@@ -2714,20 +2714,78 @@ mod tests {
         // Both gaps were measured — a release in either left 221 + 16
         // green and clippy clean — so the prose moved below the hold and
         // the tolerance went to zero.
+        // "Contains `.hold()`" is not the property; a LIVE BORROW is. The
+        // three cheap ways to write a hold whose borrow is dead on the
+        // next line all contain `.hold()` and all passed:
+        //
+        //   { let _held = slot.hold(); }      dies at the closing brace
+        //   drop(slot.hold());                dies at the semicolon
+        //   debug_assert!(slot.hold().is_some(), …)   a temporary
+        //
+        // Measured on the tree: the braced one left 222 + 16 green and
+        // clippy clean. So the shape is pinned — a `let` binding to a
+        // NAMED variable, at the acquisition's own indent, nothing before
+        // it on the line.
+        let mut bindings = Vec::new();
         for at in &acquisitions {
             let next = (at + 1..lines.len())
                 .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
                 .expect("something follows the acquisition");
+            let line = lines[next];
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let name = line
+                .trim()
+                .strip_prefix("let ")
+                .and_then(|rest| rest.split_once(" = "))
+                .filter(|(_, expr)| expr.contains(concat!(".hold", "()")))
+                .map(|(name, _)| name.trim())
+                .filter(|name| *name != "_" && !name.starts_with('(') && !name.contains(':'));
             assert!(
-                holds.contains(&next),
+                holds.contains(&next) && indent(line) == indent(lines[*at]),
                 "orchestrator.rs:{}: the lock becomes this run's here and the next statement is \
-                 not a hold — orchestrator.rs:{}: {}. Everything between the two compiles with \
-                 the lock released and nothing to say so",
+                 not a hold at the same indent — orchestrator.rs:{}: {}. Everything between the \
+                 two compiles with the lock released and nothing to say so",
                 at + 1,
                 next + 1,
-                lines[next].trim(),
+                line.trim(),
             );
+            let name = name.unwrap_or_else(|| {
+                panic!(
+                    "orchestrator.rs:{}: `{}` mentions `.hold()` but does not BIND it to a name. \
+                     A hold inside braces, inside `drop(…)` or inside an assertion is a borrow \
+                     that ends on the same line, and the lock is released for everything after it \
+                     — measured green, all three",
+                    next + 1,
+                    line.trim(),
+                )
+            });
+            bindings.push(name);
         }
+
+        // And nothing ends those borrows by hand. `drop(_held)` is a
+        // MOVE, not an assignment, so neither the rebinding's E0384 nor
+        // any borrow rule stops it, and the settled-window guard looks
+        // only above the hold. Two lines that read as tidying —
+        // `drop(_lock_held_to_the_end); drop(_withdrawal_lock);` — took
+        // the flock off for the whole of stages 4-6 with 222 + 16 green.
+        bindings.push(concat!("_lock_held_to", "_the_end"));
+        bindings.push(concat!("_withdrawal", "_lock"));
+        let dropped: Vec<String> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_code(l))
+            .filter(|(_, l)| {
+                bindings
+                    .iter()
+                    .any(|b| l.contains(&format!("drop({b})")) || l.contains(&format!("drop({b},")))
+            })
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "dropping the hold, or the slot, ends the protection for everything below it — and \
+             the compiler has nothing to say, because a move is not an assignment: {dropped:#?}",
+        );
 
         // The windows that no install sits above: the stretch from the
         // burn branch closing to the end of `run`, and the seam's own

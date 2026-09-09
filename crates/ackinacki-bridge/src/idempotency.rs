@@ -53,6 +53,18 @@ use crate::{
 /// is not, which is why they are no longer hand-written.
 pub(crate) const NOTHING_SENT_CLAUSE: &str = " (nothing was sent)";
 
+/// How far a withdrawal got, as the record on disk remembers it.
+///
+/// Written at every stage transition, so a crash leaves a resumable
+/// trail. It is NOT sufficient on its own to decide whether a burn is on
+/// the wire — `an_tx_hash` is written only after the send RETURNS, so a
+/// `Reserved` record with no hash covers both "nothing was broadcast"
+/// and "a burn is in flight right now". Every refusal in this module
+/// that looks safe to act on and is not comes from that ambiguity; see
+/// [`liveness_verdict`] for the half `flock` can answer.
+///
+/// `Confirmed` and `Submitted` are terminal: see [`Status::is_terminal`],
+/// whose three readers have to agree.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -119,6 +131,19 @@ fn terminal_refusal(record: &Record) -> Option<CliError> {
     })
 }
 
+/// One withdrawal identity's state file, as JSON under the state dir.
+///
+/// Named by [`key`] — a SHA-256 over `(from, to, to_chain, amount)` — so
+/// the same withdrawal always lands on the same file and a second run
+/// finds it. Holds only chain-observable identifiers: no key material,
+/// no key paths, no ETH private key.
+///
+/// Field types are chosen for ROLLBACK as much as for use: every field
+/// an older build might not know is `Option`, and serde treats a missing
+/// one as `None`, so a build that predates a field still reads a record
+/// written by one that has it.
+/// `a_record_survives_a_rollback_across_the_dropped_proof_path_field`
+/// is what keeps that true.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub key: String,
@@ -1077,21 +1102,6 @@ pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
 // than no guard — the next reader takes it for the thing protecting the
 // send and stops looking for what actually does.
 
-/// A borrow of the withdrawal lock that lasts to the end of its scope.
-///
-/// [`BurnPermit`] covers the send. This covers everything after it —
-/// capture, prove and submit, which is up to ~101 minutes during which a
-/// second run asking "is anybody executing this withdrawal?" must be told
-/// yes. Nothing enforced that: the lock sat in a `mut` binding and one
-/// line anywhere below the burn released it, compiled, and left the suite
-/// green.
-///
-/// Held by the same trick and for the same reason as `BurnPermit`'s
-/// `Drop`. It carries no data — `PhantomData` is what ties the lifetime —
-/// so dropping the hold does not drop the lock; it only ends the borrow.
-/// That is deliberate: the one-line evasions (`= None`, `.take()`,
-/// `drop(..)`) all stop compiling, and undoing it takes two statements
-/// that no one writes by accident.
 /// What a reservation acquired, on its way to a [`LockSlot`].
 ///
 /// A private field, and no constructor outside this module: the only
@@ -1180,16 +1190,31 @@ impl LockSlot {
     }
 }
 
+/// A borrow of the withdrawal lock that lasts to the end of its scope,
+/// and the whole of what protects the run past the reservation.
+///
+/// A run holds the lock for up to ~101 minutes across capture, prove and
+/// submit, during which a second run asking "is anybody executing this
+/// withdrawal?" must be told yes. Nothing enforced that: the lock sat in
+/// a `mut` binding and one line anywhere below the burn released it,
+/// compiled, and left the suite green.
+///
+/// It carries no data — `PhantomData` ties the lifetime — and its empty
+/// `Drop` is what keeps the borrow open to the end of the scope rather
+/// than to the value's last use. Dropping the HOLD does not drop the
+/// lock; it only ends the borrow. That is deliberate: the one-line
+/// evasions all stop compiling, and undoing it takes two statements that
+/// nobody writes by accident.
+///
+/// The `Drop` is required by
+/// `pins_its_borrow_to_the_end_of_scope::<LockHold>` below, because
+/// deleting it compiles and silently gives all of that up.
 pub struct LockHold<'a>(std::marker::PhantomData<&'a WithdrawalLock>);
 
 impl Drop for LockHold<'_> {
     fn drop(&mut self) {}
 }
 
-/// Same requirement, same reason. `LockHold` carries only `PhantomData`,
-/// so `impl Drop` is the only thing keeping its borrow of the withdrawal
-/// lock open — remove it and `drop(_withdrawal_lock)` through stages 4-6
-/// compiles again.
 /// Requires an explicit `impl Drop`, and nothing weaker.
 ///
 /// `std::mem::needs_drop` — which rustc's `drop_bounds` lint recommends
@@ -1206,6 +1231,9 @@ impl Drop for LockHold<'_> {
 )]
 const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
 
+/// `LockHold` carries only `PhantomData`, so `impl Drop` is the only
+/// thing keeping its borrow of the withdrawal lock open — remove it and
+/// `drop(_withdrawal_lock)` through stages 4-6 compiles again.
 const _: () = pins_its_borrow_to_the_end_of_scope::<LockHold<'static>>();
 
 impl<'a> BurnPermit<'a> {
@@ -2399,6 +2427,66 @@ mod tests {
     }
 
     #[test]
+    fn every_public_item_in_this_module_has_its_own_doc_comment() {
+        // Three rounds running, the same mistake, always the same way: a
+        // new item is inserted above an existing one, inherits its doc
+        // comment, and leaves the original with none. `cargo doc` then
+        // rendered `AcquiredLock` — which OWNS a lock — as "a borrow …
+        // PhantomData ties the lifetime", and `LockHold`, whose `Drop` IS
+        // the guarantee, with nothing at all.
+        //
+        // Detecting the theft directly does not work: two stacked blocks
+        // are textually identical to one long block, which is exactly why
+        // it keeps going unnoticed. What IS checkable is the other half —
+        // the item left behind has no doc — and that is the half that
+        // always accompanies it, because the doc did not multiply.
+        let src = include_str!("idempotency.rs");
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
+        let lines: Vec<&str> = production.lines().collect();
+
+        let mut undocumented = Vec::new();
+        for (n, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            let is_item = [
+                "pub struct ",
+                "pub enum ",
+                "pub fn ",
+                "pub(crate) fn ",
+                "pub const ",
+            ]
+            .iter()
+            .any(|k| t.starts_with(k));
+            if !is_item {
+                continue;
+            }
+            // Walk back over attributes to whatever precedes the item.
+            let mut above = n;
+            while above > 0 {
+                let prev = lines[above - 1].trim_start();
+                if prev.starts_with("#[") || prev.starts_with(')') || prev.ends_with(',') {
+                    above -= 1;
+                    continue;
+                }
+                break;
+            }
+            if !lines[above.saturating_sub(1)]
+                .trim_start()
+                .starts_with("///")
+            {
+                undocumented.push(format!("idempotency.rs:{}: {t}", n + 1));
+            }
+        }
+        assert!(
+            undocumented.is_empty(),
+            "a public item with no doc comment is usually one whose doc was stolen by something \
+             inserted above it — check what the block above the NEW item is describing: \
+             {undocumented:#?}",
+        );
+    }
+
+    #[test]
     fn the_reservation_is_durable_before_its_name_and_its_name_before_the_burn() {
         // Two `fsync`s, and removing either leaves every test in this
         // crate green: durability is not observable from userspace, so
@@ -2420,7 +2508,9 @@ mod tests {
         // closure. It is the wrong one for anything about what happens at
         // runtime, which is why this test says only this much.
         let src = include_str!("idempotency.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let start = production
             .find(concat!("let publish = ", "|| -> std::io::Result<bool>"))
             .expect("`reserve` publishes through a closure by that name");

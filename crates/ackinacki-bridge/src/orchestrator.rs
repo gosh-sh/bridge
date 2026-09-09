@@ -450,20 +450,18 @@ pub async fn run(
                 },
                 BurnDecision::Send => {
                     // The last reversible moment, and the only one that
-                    // checks rather than assumes. `issue` asks the kernel
+                    // checks rather than assumes: `issue` asks the kernel
                     // whether this run still owns the identity it
-                    // reserved, and the permit it returns BORROWS the
-                    // lock — so from here to the end of this arm the
-                    // compiler refuses to let anything reassign, move or
-                    // drop `_withdrawal_lock`.
+                    // reserved.
                     //
-                    // "To the end of this arm" is true only because
-                    // `BurnPermit` implements `Drop`. Without it the
-                    // borrow would end at the permit's last use, the
-                    // `send` call below — and the `update` a few lines
-                    // down, which writes the AN tx hash to disk, would be
-                    // outside it. That write is the exact window a
-                    // concurrent run's liveness probe asks about.
+                    // What keeps the lock held from here through the
+                    // `update` below — the write that records the AN tx
+                    // hash, and the window a concurrent run's liveness
+                    // probe asks about — is the branch's own `_held`,
+                    // taken where the lock was installed. `BurnPermit`
+                    // had a `Drop` for that and it was measured
+                    // redundant; the permit borrows the slot, but the
+                    // borrow that matters here is the outer one.
                     let permit = idempotency::BurnPermit::issue(
                         &state_dir,
                         &idempotency::key(&from, &to, &amount),
@@ -533,7 +531,7 @@ pub async fn run(
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
-    // nothing — the permit's borrow ends with its own arm. A dry run
+    // nothing: the branch's `_held` ends with the branch. A dry run
     // holds no lock, so `hold()` yields `None` and the early return is
     // unaffected.
     let _lock_held_to_the_end = _withdrawal_lock.hold();
@@ -1393,7 +1391,47 @@ fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
             ),
             source,
         },
-        other => other,
+        // Exhaustive, like the two helpers beside it. `other => other`
+        // stood here while three of the four exit-2 variants took it and
+        // came out saying nothing was broadcast, on a path whose entry
+        // condition is a burn already on the wire. Latent — `reserve`
+        // raises only `Preflight` today — and latent is how the other
+        // two got there too.
+        CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        } => CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "the AN burn {} is on the wire — it was recorded before this run started — but \
+                 the resume was refused: {e}\n\x20 The local record may be behind the chain. Do \
+                 not re-run without reconciling — see the runbook's Case 3a.",
+                observed.an_tx_hash.as_deref().unwrap_or("<none recorded>"),
+            ),
+            source: None,
+        },
+        CliError::DuplicateInFlight {
+            ..
+        }
+        | CliError::ReservationInFlight {
+            ..
+        }
+        | CliError::BurnOutcomeUnknown {
+            ..
+        }
+        | CliError::CaptureTimeout {
+            ..
+        }
+        | CliError::ProofFailed {
+            ..
+        }
+        | CliError::EthSubmitFailed {
+            ..
+        } => e,
     }
 }
 
@@ -2284,7 +2322,9 @@ mod tests {
         // slot it is handed. Nothing but this proves `run` hands it one
         // that lives.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let lines: Vec<&str> = production.lines().collect();
 
         let calls: Vec<usize> = lines
@@ -2496,7 +2536,9 @@ mod tests {
         // a second burn — and it does not become safe by being spelled out
         // by hand instead of reached through the type.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let claim = concat!("nothing was ", "sent");
         let offenders: Vec<_> = production
             .lines()
@@ -2530,7 +2572,9 @@ mod tests {
         //     arm is covered too,
         //   * once the branch has closed, above the dry-run return.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let lines: Vec<&str> = production.lines().collect();
 
         // THREE properties, because keying on either construct alone has
@@ -2645,7 +2689,9 @@ mod tests {
         // every commit, and what a reader needs is to be sent back here
         // when the set changes at all.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let sites = construction_sites(production, concat!("CliError::", "ReservationInFlight"));
         assert_eq!(
             sites.len(),
@@ -2841,7 +2887,9 @@ mod tests {
         // this line inherits the same defect, so the region is checked
         // rather than the list.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         // From the PEEK, not from the predicate the peek feeds: the peek
         // is itself a stage-1 refusal, and its `Err` is about a record
         // file that exists.
@@ -2902,7 +2950,9 @@ mod tests {
         // reaches stage 4 has passed the send or resumed a recorded one,
         // and the resume arm sits above this line rather than below it.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let run_at = production
             .find(concat!("pub async fn ", "run("))
             .expect("run() is this module's entry point");
@@ -3035,7 +3085,9 @@ mod tests {
         // to assert which refusal comes back, and a guard its own
         // neighbours trip over gets loosened until it means nothing.
         let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let production = &src[..src
+            .find(concat!("#[cfg(test)]\n", "mod tests {"))
+            .unwrap_or(src.len())];
         let offenders =
             construction_sites(production, concat!("CliError::Duplicate", "InFlight {"));
         assert!(

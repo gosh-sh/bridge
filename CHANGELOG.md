@@ -910,6 +910,26 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`--anchor-layer` above 2 is refused instead of accepted and then
+  read three different ways.** `--anchor-layer 3` parsed, and the three
+  places that consumed it disagreed: the coverage wait used the **L1**
+  stride, the resurrected `BridgeState` was stamped with anchor level
+  **3**, and the confirmation prompt printed "unbounded (no shipped
+  relayer for L≥3)". The run therefore burned, then waited against a
+  stride that does not correspond to the level it recorded — and no
+  relayer advances an anchor above layer 2, so that wait never ends.
+  `auto`, `1` and `2` are the accepted values; the refusal is exit 2,
+  before the prompt and before anything is broadcast.
+
+- **A broken invariant after the burn is a refusal, not a panic.** The
+  submit plumbing was unwrapped with `expect` three hundred lines below
+  where it is established, and past `burn::send`. Exit 101 is not one of
+  this CLI's exit codes — no consumer maps it and `--json` emits no
+  envelope for it — so a future edit breaking that invariant would have
+  aborted with nothing parseable, about a withdrawal whose USDC had
+  already left the multisig. It is exit 12 now, the code the stage
+  already uses for internal invariants downstream of the send.
+
 - **`peek` stops reporting an unreadable state directory as an empty
   one.** It asked `Path::exists()`, which answers `bool` and folds every
   `stat` failure into `false`. A state directory this process cannot

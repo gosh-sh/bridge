@@ -103,12 +103,23 @@ pub(crate) fn clauses(text: &str) -> Vec<String> {
 /// down. A hedge earns an exemption only in the clause it is in.
 ///
 /// `authorises` and `hedges` are the CALLER's, because the two surfaces
-/// are held to different rules and saying so is the point. A procedure
-/// may give conditional permission — the runbook's gate does, in a
-/// clause naming the verdict. A refusal message may not: it has no room
-/// for a condition, and the wrapper around it forbids the deletion two
-/// sentences later, so any imperative at all is a contradiction the
-/// operator reads as a whole.
+/// are held to different rules and saying so is the point.
+///
+/// A procedure may give conditional permission — the runbook's gate
+/// does, in a clause naming the verdict. So may a refusal, and the
+/// stricter rule this used to state — "a refusal message may not" — is
+/// false of this codebase: `ReservationInFlight`'s third step is a
+/// refusal whose whole job is to hand out a conditional verdict, and
+/// `BurnPermit::issue` names which of three cases it is and what each
+/// one permits.
+///
+/// What the STAGE-1 re-badges are held to is narrower, and for a reason
+/// that is about them rather than about refusals in general: their
+/// population is precisely the one that cannot be resolved locally — no
+/// hash, no liveness verdict, nothing on the machine that settles it —
+/// so a condition stated there could not be checked by the operator
+/// reading it. That is why `orchestrator`'s list is the verb and its
+/// object with prohibitions as the only hedges.
 /// The hedge also has to come BEFORE the order it qualifies. Clause
 /// scoping alone was not enough: "Delete the record and re-run do not
 /// delete it if another run holds it" — one dropped full stop — is a

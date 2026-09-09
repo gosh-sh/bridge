@@ -560,16 +560,22 @@ pub async fn run(
     // told the record was left by one that already exited, which the
     // runbook turns into permission to delete it.
     //
-    // What the rebinding is, measured rather than argued: INSURANCE
-    // AGAINST THE HOLD BEING DELETED, and insurance against assignment
-    // only. While the hold on the next line is there, every release
-    // below it is already E0506 and the rebinding adds nothing; delete
-    // the hold — one line, which is how three holds have been lost so
-    // far — and E0384 is what is left. It does nothing about a release
-    // ABOVE it, and nothing about any evasion that is not an assignment.
-    // Round 12 deleted it after measuring E0506 in a position where a
-    // hold was live, which is the one position where it cannot be seen
-    // to do anything.
+    // What the rebinding is, measured rather than argued: insurance
+    // against the borrow below it ENDING, and insurance against
+    // assignment only.
+    //
+    // "The rebinding adds nothing while the hold is there" stood here and
+    // is false. The borrow ends two ways, not one: delete the hold — a
+    // line, which is how three holds have been lost so far — or drop it,
+    // `drop(_lock_held_to_the_end);`, which is a MOVE and which no
+    // borrow rule refuses. After either, every release below is E0384
+    // and nothing else is left to say so.
+    //
+    // What it does NOT do: a release ABOVE it still compiles, and no
+    // evasion that is not an assignment is touched — `drop(slot)` is
+    // caught by the borrow, not by this. Round 12 deleted it after
+    // measuring E0506 in a position where a hold was live, which is the
+    // one position where it cannot be seen to do anything.
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
@@ -607,7 +613,22 @@ pub async fn run(
 
     // Past the dry-run return, so `plumbing` is `Some` by construction —
     // it is resolved unconditionally for every non-dry run above.
-    let plumbing_ref = plumbing.as_ref().expect("non-dry-run resolves plumbing");
+    //
+    // And an `ok_or_else`, not an `expect`. This was the last panic left
+    // in production and it sat AFTER the burn: an invariant that holds
+    // today, three hundred lines from where it is established, and if a
+    // future edit ever breaks it the run aborts with exit 101 and a
+    // message no consumer parses, about a withdrawal whose USDC has
+    // already left the multisig. The same reasoning as the line below —
+    // the STAGE picks the code, not the kind of failure — and here the
+    // stage is past the send.
+    let plumbing_ref = plumbing.as_ref().ok_or_else(|| CliError::ProofFailed {
+        reason: format!(
+            "internal: submit plumbing is missing on a non-dry run. The AN burn {an_tx_hash} IS \
+             on the wire — reconcile it before re-running.",
+        ),
+        source: None,
+    })?;
 
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
@@ -1715,10 +1736,23 @@ fn parse_anchor_layer(s: &str) -> CliResult<AnchorLayerMode> {
         expected: "auto or a positive integer".into(),
         got: s.to_string(),
     })?;
-    if n == 0 {
+    // 1 and 2, or `auto`. Nothing else, and refusing here is the point:
+    // `--anchor-layer 3` was ACCEPTED, and the three places that then
+    // read it disagreed about what it meant. `stride_for` fell back to
+    // the L1 stride, `anchor_level_for` passed the 3 through into the
+    // state mirror, and the confirmation prompt printed "unbounded (no
+    // shipped relayer for L≥3)". The run burned first and waited against
+    // a stride that does not correspond to the level it stamped —
+    // forever, since no relayer advances that anchor.
+    //
+    // A flag value nothing implements is a refusal, not a warning
+    // attached to an irreversible transfer.
+    if !(1..=2).contains(&n) {
         return Err(CliError::ArgInvalid {
             flag: "anchor-layer",
-            expected: "positive integer or `auto`".into(),
+            expected: "`auto`, `1` or `2` — no relayer advances an anchor above layer 2, so a run \
+                       at that level would burn and then wait for coverage that never lands"
+                .into(),
             got: s.to_string(),
         });
     }
@@ -1783,12 +1817,11 @@ fn confirm_before_burn(
         AnchorLayerMode::Auto => "auto (~6-15 min on L1)",
         AnchorLayerMode::Explicit(1) => "~6-15 min (L1 stride)",
         AnchorLayerMode::Explicit(2) => "~91 min chain-time + prover (L2 stride)",
-        AnchorLayerMode::Explicit(n) => {
-            // For L≥3, no shipped relayer advances the anchor — user is on
-            // their own. Say so out loud.
-            let _ = n;
-            "unbounded (no shipped relayer for L≥3)"
-        },
+        // Unreachable through the CLI: `parse_anchor_layer` refuses
+        // anything but `auto`, 1 and 2, which is where that refusal
+        // belongs — before the prompt and before the burn, not as a
+        // hint printed beside one.
+        AnchorLayerMode::Explicit(_) => "unknown (no relayer advances an anchor above layer 2)",
     };
 
     // One string, one write, one result to check. It used to be sixteen
@@ -2650,11 +2683,13 @@ mod tests {
         //   * once the branch has closed, above the dry-run return — the ~101 minutes
         //     of stages 4-6.
         //
-        // A fourth stood at the resume branch's tail and covered two
-        // infallible statements while its comment claimed the stretch the
-        // third one actually covers. Deleted rather than re-worded: a
-        // hold that guards nothing teaches the next reader that holds are
-        // decoration.
+        // The resume branch's hold is one of the three. Round 13 deleted
+        // it, on the argument that the two statements under it are
+        // infallible and so nothing there could exit holding nothing —
+        // the wrong question. A hold does not defend against the
+        // statements that ARE in its region; it makes the ones that
+        // could be ADDED there fail to compile. A release on the next
+        // line compiled, with 221 + 16 green, and round 14 put it back.
         let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let lines: Vec<&str> = production.lines().collect();
 
@@ -2701,10 +2736,21 @@ mod tests {
             .iter()
             .position(|l| is_code(l) && l.contains(concat!("resume_recorded", "_burn(")))
             .expect("the resume branch no longer goes through the seam");
+        // Bounded. Unbounded, a reshaped argument list walks to the next
+        // `)?;` anywhere below — the same disease this file's settled
+        // guard was cured of, twenty lines further down and in the same
+        // commit that introduced this.
         acquisitions.push(
-            (seam_call..lines.len())
+            (seam_call..(seam_call + 20).min(lines.len()))
                 .find(|&n| lines[n].trim() == ")?;")
-                .expect("the seam is called with `?` and its argument list closes on its own line"),
+                .unwrap_or_else(|| {
+                    panic!(
+                        "orchestrator.rs:{}: the seam call does not close with `)?;` within \
+                         twenty lines. Its argument list was reshaped, and this guard cannot tell \
+                         where the acquisition ends",
+                        seam_call + 1,
+                    )
+                }),
         );
         acquisitions.sort_unstable();
 
@@ -2936,6 +2982,44 @@ mod tests {
             ADMITS.iter().any(|a| lower.contains(a)),
             "a hash-less record cannot say whether a burn is on the wire, and the refusal has to \
              say so rather than assert either answer: {hash_less_msg}",
+        );
+    }
+
+    #[test]
+    fn nothing_in_this_pipeline_aborts_the_process_instead_of_refusing() {
+        // A panic is exit 101, which is not in the wire contract at all:
+        // no consumer maps it, `--json` emits no envelope for it, and
+        // every recovery procedure keys on 0/2/3/10/11/12/13.
+        //
+        // The last one here was `plumbing.as_ref().expect(…)`, on an
+        // invariant established three hundred lines above it and read
+        // AFTER the burn. If a future edit ever broke that invariant the
+        // run aborted with no parseable output, about a withdrawal whose
+        // USDC had already left the multisig.
+        //
+        // Refusals downstream of the send pick their code from the STAGE,
+        // never from the kind of failure — `ProofFailed` there — which is
+        // the rule `no_refusal_after_the_send_claims_to_be_pre_send`
+        // keeps. This one keeps the weaker property that there is
+        // something to classify at all.
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
+        let aborts: Vec<String> = production
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| {
+                l.contains(concat!(".exp", "ect("))
+                    || l.contains(concat!(".unw", "rap()"))
+                    || l.contains(concat!("pan", "ic!("))
+                    || l.contains(concat!("unreach", "able!("))
+                    || l.contains(concat!("tod", "o!("))
+            })
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
+            .collect();
+        assert!(
+            aborts.is_empty(),
+            "exit 101 is not one of this CLI's exit codes, and half of this file runs after the \
+             USDC has left the multisig: {aborts:#?}",
         );
     }
 
@@ -4302,6 +4386,30 @@ mod tests {
     #[test]
     fn parse_anchor_layer_junk_rejects() {
         assert!(parse_anchor_layer("nope").is_err());
+    }
+
+    #[test]
+    fn parse_anchor_layer_rejects_a_level_nothing_implements() {
+        // `--anchor-layer 3` used to be accepted, and the three readers
+        // of it then disagreed: the stride fell back to L1, the state
+        // mirror was stamped with 3, and the confirmation prompt printed
+        // "unbounded". The run burned first and waited for coverage that
+        // never lands. A flag value nothing implements is a refusal, and
+        // it belongs before the prompt.
+        for level in ["3", "4", "255"] {
+            let err =
+                parse_anchor_layer(level).expect_err("no relayer advances an anchor above layer 2");
+            assert_eq!(
+                err.exit_code().as_i32(),
+                2,
+                "argument validation, before anything is broadcast: {err}",
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("never lands"),
+                "the refusal has to say what accepting it would have cost: {msg}",
+            );
+        }
     }
 
     #[test]

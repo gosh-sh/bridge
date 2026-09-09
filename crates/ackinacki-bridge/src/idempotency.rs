@@ -64,7 +64,7 @@ pub(crate) const NOTHING_SENT_CLAUSE: &str = " (nothing was sent)";
 /// [`liveness_verdict`] for the half `flock` can answer.
 ///
 /// `Confirmed` and `Submitted` are terminal: see
-/// [`Status::terminal_remedy`], which is where a new status gets
+/// [`Status::disposition`], which is where a new status gets
 /// classified and where the refusal it earns is written.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +91,7 @@ pub enum Status {
 ///
 /// The partition is the point. `reserve` matched on `Status` directly,
 /// with a terminal arm that re-listed `Confirmed | Submitted` and then
-/// asked [`Status::terminal_remedy`] for the text behind an `expect`.
+/// asked `Status::terminal_remedy` for the text behind an `expect`.
 /// Two lists again, one level up: a status named in the arm and
 /// classified non-terminal by the remedy reached that `expect` and
 /// exited 101 — on a refusal path, where an operator is being told what
@@ -2837,12 +2837,23 @@ mod tests {
             .find(|l| l.starts_with("## "))
             .expect("CHANGELOG.md has no `## ` heading at all");
         assert!(
-            first_heading == "## [Unreleased]" || first_heading.starts_with("## [0."),
+            first_heading == "## [Unreleased]" || is_a_release_heading(first_heading),
             "CHANGELOG.md's first heading is `{first_heading}`. This guard scans the unreleased \
              section and nothing else, so it has to be able to tell \"there is nothing unreleased \
              yet\" from \"the heading it looks for was renamed\", and that is the only thing that \
              tells them apart",
         );
+
+        // ANY version, not `0.`. Both places that found the end of the
+        // unreleased section spelled it `## [0.`, so the day a human
+        // tags 1.0.0 the slice runs to the end of the file and every
+        // released section — frozen history this guard may not act on —
+        // becomes an offender. A guard that turns red on a release
+        // nobody is allowed to fix is a guard that gets deleted.
+        fn is_a_release_heading(line: &str) -> bool {
+            line.strip_prefix("## [")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        }
 
         let mut offenders = Vec::new();
         for (name, text) in DOCS {
@@ -2870,8 +2881,14 @@ mod tests {
                 match text.find("## [Unreleased]") {
                     Some(start) => {
                         let end = text[start..]
-                            .find("\n## [0.")
-                            .map_or(text.len(), |i| start + i);
+                            .lines()
+                            .scan(0usize, |at, l| {
+                                let here = *at;
+                                *at += l.len() + 1;
+                                Some((here, l))
+                            })
+                            .find(|(_, l)| is_a_release_heading(l))
+                            .map_or(text.len(), |(i, _)| start + i);
                         &text[start..end]
                     },
                     None => "",
@@ -2996,7 +3013,7 @@ mod tests {
 
     #[test]
     fn only_confirmed_and_submitted_are_terminal_everywhere_that_asks() {
-        // `Status::terminal_remedy` decides terminality and the remedy
+        // `Status::disposition` decides terminality and the remedy
         // together now, so the two can no longer disagree with each
         // other. What no compiler compares is either of them against
         // `reserve`'s arm and against the resume path, which asks by
@@ -3005,7 +3022,7 @@ mod tests {
         // `withdrawByProof`.
         //
         // The expectation is written out rather than read from
-        // production, so changing `terminal_remedy` fails here instead of
+        // production, so changing `disposition` fails here instead of
         // quietly agreeing with itself — but the `match` is exhaustive,
         // so an eighth status cannot be added to production without
         // someone saying here what it is. The array below still has to be
@@ -3067,7 +3084,7 @@ mod tests {
             assert_eq!(
                 got.is_err(),
                 terminal == Some(true),
-                "{status:?}: reserve's arm and `terminal_remedy` must name the same statuses",
+                "{status:?}: reserve's arm and `disposition` must name the same statuses",
             );
             if let Err(e) = got {
                 assert_eq!(e.exit_code().as_i32(), 3, "{status:?}: {e}");

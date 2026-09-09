@@ -3170,73 +3170,6 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_is_stricter_than_a_document_in_both_directions() {
-        // The relation the comment on the gate asserts, checked against
-        // what the gate READS rather than against a copy of it. Both
-        // halves have been false here, and both were found by reverting
-        // a list that no test was looking at:
-        //
-        //   * the orders were an INTERSECTION for two rounds — the document list grew
-        //     `prune the record` and this one did not — and `Prune the record and
-        //     re-run.` in the hash-less refusal passed;
-        //   * the hedges were a second copy holding `never delete` and `must not
-        //     delete`, which the documents did not have, so on those two spellings a
-        //     refusal was the LAXER of the pair.
-        //
-        // There is nothing to pass now: a caller names its surface, and
-        // this reads the same two functions the gates read. A list can
-        // only drift by being edited where these are, and then this
-        // fails.
-        use crate::source_guard::{
-            hedges, orders, Surface, ORDERS_A_DELETION, PROHIBITS_A_DELETION,
-        };
-
-        // Anchored to the NAMED lists first. Comparing the two surfaces
-        // with each other is not enough on its own: a list that shrinks
-        // for both of them keeps every relation below true, and shrinking
-        // is exactly how this broke — measured, with `prune the record`
-        // taken out of the base and the suite green.
-        assert_eq!(
-            orders(Surface::Document),
-            ORDERS_A_DELETION.to_vec(),
-            "a document is held to the whole of `ORDERS_A_DELETION` and to nothing else: the \
-             constant and its reasons are in one place, and a surface that quietly holds a \
-             shorter list is that place being bypassed",
-        );
-        for prohibition in PROHIBITS_A_DELETION {
-            for surface in [Surface::Document, Surface::Refusal] {
-                assert!(
-                    hedges(surface).contains(&prohibition),
-                    "`{prohibition}` is a prohibition and {surface:?} is not exempted by it",
-                );
-            }
-        }
-
-        for order in orders(Surface::Document) {
-            assert!(
-                orders(Surface::Refusal).contains(&order),
-                "the shipped documents are held to `{order}` and the refusal texts are not. A \
-                 refusal may be stricter than a document and may not be laxer: an imperative in \
-                 one contradicts the prohibition the same message ends with",
-            );
-        }
-        for hedge in hedges(Surface::Refusal) {
-            assert!(
-                hedges(Surface::Document).contains(&hedge),
-                "a refusal is exempted by `{hedge}` and a document is not. Fewer hedges is what \
-                 stricter MEANS here; a hedge a refusal has and a document does not makes it the \
-                 laxer of the two",
-            );
-        }
-        assert!(
-            orders(Surface::Refusal).len() > orders(Surface::Document).len()
-                || hedges(Surface::Refusal).len() < hedges(Surface::Document).len(),
-            "the two surfaces are held to identical rules, so one of them is wrong: a document \
-             may give conditional permission and a refusal may not",
-        );
-    }
-
-    #[test]
     fn no_refusal_this_module_raises_tells_an_operator_to_delete_the_record() {
         // The third attempt at holding this text to anything, and the
         // first that is not a substring list.
@@ -3332,10 +3265,7 @@ mod tests {
         ];
 
         for (what, msg) in &messages {
-            let orders = crate::source_guard::clauses_ordering_a_deletion(
-                msg,
-                crate::source_guard::Surface::Refusal,
-            );
+            let orders = crate::source_guard::orders_a_refusal_may_not_give(msg);
             assert!(
                 orders.is_empty(),
                 "{what}: this refusal tells an operator to delete a record that may hold a burn \

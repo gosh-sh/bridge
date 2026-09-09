@@ -2547,10 +2547,7 @@ mod tests {
         // refusals: this arm has no condition to offer. The other two
         // arms DO give conditional permission and are checked below,
         // where the condition is the point.
-        let orders = crate::source_guard::clauses_ordering_a_deletion(
-            &msg,
-            crate::source_guard::Surface::Refusal,
-        );
+        let orders = crate::source_guard::orders_a_refusal_may_not_give(&msg);
         assert!(
             orders.is_empty(),
             "swapping this arm's remedy for one of the others ships the double-burn instruction \
@@ -2965,7 +2962,7 @@ mod tests {
         // They were passed in as parameters, and a copy of this list
         // that dropped the shared prohibitions was green under a test
         // that promised to forbid exactly that.
-        let hedges = crate::source_guard::hedges(crate::source_guard::Surface::Document);
+
         // Sentences that hand somebody permission. The state-file
         // spelling is here because the documents call the same object two
         // things and only one of them was watched.
@@ -3097,7 +3094,10 @@ mod tests {
                 // telling somebody to delete the record is dangerous
                 // wherever it is written.
                 let instructs = name != "CHANGELOG.md";
-                if instructs && promises_an_answer && !hedges.iter().any(|h| lower.contains(h)) {
+                if instructs
+                    && promises_an_answer
+                    && !crate::source_guard::a_document_admits_the_verdict_may_be_missing(&lower)
+                {
                     offenders.push(format!(
                         "{name} block {i} (promises an answer): {}",
                         block.trim()
@@ -3112,10 +3112,7 @@ mod tests {
                 //     `split(". ")` handed a dropped full stop or a line
                 //     break an exemption, by gluing an order to the
                 //     prohibition after it and finding the prohibition.
-                for clause in crate::source_guard::clauses_ordering_a_deletion(
-                    block,
-                    crate::source_guard::Surface::Document,
-                ) {
+                for clause in crate::source_guard::orders_a_document_may_not_give(block) {
                     offenders.push(format!(
                         "{name} block {i} (authorises a deletion): {clause}"
                     ));

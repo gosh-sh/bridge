@@ -229,8 +229,16 @@ pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
 /// difference between the two is stated here, once, and
 /// [`the vocabularies`](orders) are read from the same place the gates
 /// read them.
+///
+/// PRIVATE, and reached only through the two functions below. As a
+/// `pub(crate)` argument it was data: swapping `Refusal` for `Document`
+/// at the refusal gate's call site handed that gate thirteen document
+/// hedges — every conditional a runbook is allowed to use — and the test
+/// comparing the two arms stayed green, because it never looked at a
+/// call site. A caller now names the surface by calling its function,
+/// and there is no other name for it to pass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Surface {
+enum Surface {
     /// A shipped document. May give conditional permission — the
     /// runbook's gate does, in a clause naming the verdict — so its
     /// hedges include the conditionals.
@@ -242,7 +250,7 @@ pub(crate) enum Surface {
 }
 
 /// Ways of ordering a deletion that `surface` may not contain.
-pub(crate) fn orders(surface: Surface) -> Vec<&'static str> {
+fn orders(surface: Surface) -> Vec<&'static str> {
     let mut orders = ORDERS_A_DELETION.to_vec();
     if surface == Surface::Refusal {
         // Refusal-only: in a refusal the only file in scope is the
@@ -253,35 +261,76 @@ pub(crate) fn orders(surface: Surface) -> Vec<&'static str> {
     orders
 }
 
+/// What a DOCUMENT may say instead of a prohibition.
+///
+/// A named constant for the same reason [`ORDERS_A_DELETION`] is one,
+/// and it was written inline for one round: an entry added beside `only
+/// if` — `if none` — let "If none landed, prune the record and re-run."
+/// back into the shipped runbook with the suite green, because the only
+/// thing watching this list was a superset relation against the
+/// prohibitions.
+///
+/// Every entry marks the permission as CONDITIONAL, in the clause that
+/// grants it. A refusal has none of these: it has no room for a
+/// condition and already carries the prohibition.
+const A_DOCUMENT_MAY_CONDITION_ON: [&str; 13] = [
+    // References to the three-verdict gate itself.
+    "one of three",
+    "three-verdict",
+    "three verdicts",
+    "three liveness",
+    "three cases",
+    // Conditionals.
+    "only if",
+    "only then",
+    "only in the second case",
+    "only sometimes",
+    // A prohibition that forbids without naming the verb.
+    "delete nothing",
+    // Statements that the verdict may not exist.
+    "could not be determined",
+    "does not always",
+    "never does",
+];
+
 /// What exempts a clause on `surface`.
-pub(crate) fn hedges(surface: Surface) -> Vec<&'static str> {
+fn hedges(surface: Surface) -> Vec<&'static str> {
     let mut hedges = PROHIBITS_A_DELETION.to_vec();
     if surface == Surface::Document {
-        hedges.extend([
-            // References to the three-verdict gate itself.
-            "one of three",
-            "three-verdict",
-            "three verdicts",
-            "three liveness",
-            "three cases",
-            // Conditionals.
-            "only if",
-            "only then",
-            "only in the second case",
-            "only sometimes",
-            // A prohibition that forbids without naming the verb.
-            "delete nothing",
-            // Statements that the verdict may not exist.
-            "could not be determined",
-            "does not always",
-            "never does",
-        ]);
+        hedges.extend(A_DOCUMENT_MAY_CONDITION_ON);
     }
     hedges
 }
 
-/// Clauses in `text` that order a deletion under `surface`'s rules.
-pub(crate) fn clauses_ordering_a_deletion(text: &str, surface: Surface) -> Vec<String> {
+/// Clauses in a SHIPPED DOCUMENT that order a deletion without naming
+/// the verdict that permits it.
+pub(crate) fn orders_a_document_may_not_give(text: &str) -> Vec<String> {
+    clauses_ordering_a_deletion(text, Surface::Document)
+}
+
+/// Clauses in a REFUSAL THIS CLI RAISES that order a deletion.
+///
+/// Stricter than the document rule in both directions, and both are
+/// checked: one more order (in a refusal the only file in scope is the
+/// record it names) and none of the conditionals (a refusal has no room
+/// for a condition and already carries the prohibition).
+pub(crate) fn orders_a_refusal_may_not_give(text: &str) -> Vec<String> {
+    clauses_ordering_a_deletion(text, Surface::Refusal)
+}
+
+/// Whether `text` acknowledges that the verdict permitting a deletion
+/// may not exist.
+///
+/// The documents' other trigger asks this of a whole block: a passage
+/// that sends a reader to the exit-3 refusal FOR the liveness answer has
+/// to admit the answer can be missing. Same vocabulary as the hedges,
+/// asked block-wide rather than per clause, and asked here so that the
+/// list has one home.
+pub(crate) fn a_document_admits_the_verdict_may_be_missing(text: &str) -> bool {
+    hedges(Surface::Document).iter().any(|h| text.contains(h))
+}
+
+fn clauses_ordering_a_deletion(text: &str, surface: Surface) -> Vec<String> {
     sentences_authorising_a_deletion(text, &orders(surface), &hedges(surface))
 }
 
@@ -343,6 +392,108 @@ fn sentences_authorising_a_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_is_stricter_than_a_document_in_both_directions() {
+        // In THIS module, because everything it reads is private to it
+        // now. It lived in `orchestrator` while the vocabularies were
+        // arguments, and it could then only compare the two arms with
+        // each other — which is why swapping a call site's `Surface` was
+        // green, and why a list that shrank for both surfaces was too.
+        //
+        // Anchored to the named constants first, then to the relation.
+        assert_eq!(
+            orders(Surface::Document),
+            ORDERS_A_DELETION.to_vec(),
+            "a document is held to the whole of `ORDERS_A_DELETION` and to nothing else",
+        );
+        let mut document_hedges = PROHIBITS_A_DELETION.to_vec();
+        document_hedges.extend(A_DOCUMENT_MAY_CONDITION_ON);
+        assert_eq!(
+            hedges(Surface::Document),
+            document_hedges,
+            "a document is exempted by the prohibitions and by the conditionals it is allowed to \
+             use, and by nothing else: `if none` added here let \"If none landed, prune the \
+             record and re-run.\" back into the runbook",
+        );
+        assert_eq!(
+            hedges(Surface::Refusal),
+            PROHIBITS_A_DELETION.to_vec(),
+            "a refusal is exempted by prohibitions alone",
+        );
+
+        for order in orders(Surface::Document) {
+            assert!(
+                orders(Surface::Refusal).contains(&order),
+                "the documents are held to `{order}` and the refusals are not. A refusal may be \
+                 stricter than a document and may not be laxer",
+            );
+        }
+        for hedge in hedges(Surface::Refusal) {
+            assert!(
+                hedges(Surface::Document).contains(&hedge),
+                "a refusal is exempted by `{hedge}` and a document is not, which makes it the \
+                 laxer of the two",
+            );
+        }
+    }
+
+    #[test]
+    fn the_sentences_this_gate_exists_for_are_caught_and_the_others_are_not() {
+        // The behaviour, on fixed text, so that a vocabulary edit is
+        // measured by what it lets through rather than by its shape.
+        // Every ORDER here is one that has actually been written into
+        // this tree or planted in it during a review.
+        for (surface, text) in [
+            (
+                Surface::Document,
+                "If none landed, prune the record and re-run.",
+            ),
+            (Surface::Document, "Delete the record and re-run."),
+            (Surface::Document, "The stale files are safe to delete."),
+            (
+                Surface::Refusal,
+                "If it has clearly died, prune the record and re-run.",
+            ),
+            (Surface::Refusal, "Delete that record now and re-run."),
+            // Refusal-only: in a refusal the only file in scope is the
+            // record it names.
+            (Surface::Refusal, "Delete that file and try again."),
+        ] {
+            assert!(
+                !clauses_ordering_a_deletion(text, surface).is_empty(),
+                "{surface:?} must not be allowed to say: {text}",
+            );
+        }
+
+        for (surface, text) in [
+            (Surface::Document, "Do not delete the record."),
+            (
+                Surface::Document,
+                "Only if the liveness line says another run has exited, delete the record.",
+            ),
+            (
+                Surface::Document,
+                "It says one of three things, and only one of them permits deleting the record.",
+            ),
+            (
+                Surface::Refusal,
+                "Do not delete that record on the strength of this refusal.",
+            ),
+            // A description of a hazard is not an order.
+            (
+                Surface::Document,
+                "Deleting the record destroys the only local trace.",
+            ),
+            // A document may say this about a file that is not the record.
+            (Surface::Document, "Delete that file and re-provision it."),
+        ] {
+            assert!(
+                clauses_ordering_a_deletion(text, surface).is_empty(),
+                "{surface:?} is allowed to say this, and the gate flagged it: {text}",
+            );
+        }
+    }
 
     /// A file, assembled from lines so that no line of this test's own
     /// source is an anchor. `production_source` matches whole lines at

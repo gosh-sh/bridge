@@ -1573,7 +1573,15 @@ fn reserve_and_decide_holding(
         // second run racing it through capture and submit gets a reverted
         // `withdrawByProof` at best.
         idempotency::LockAttempt::Contended => {
-            let prior = idempotency::peek(state_dir, from, to, amount)?;
+            // Re-badged, like every other read of a record that
+            // exists. Bare, this reports `CliError::Preflight` — exit 2,
+            // "refused before sending, nothing left the machine, no
+            // record on disk" — about a withdrawal whose lock ANOTHER
+            // live process is holding, which is the one moment a burn is
+            // most likely to be in flight. The record is unreadable
+            // rather than absent, which is exit 10's third population.
+            let prior = idempotency::peek(state_dir, from, to, amount)
+                .map_err(refusal_reading_a_record_that_exists)?;
             return Err(CliError::ReservationInFlight {
                 prior_status: prior
                     .as_ref()
@@ -3064,16 +3072,42 @@ mod tests {
         // this line inherits the same defect, so the region is checked
         // rather than the list.
         let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
-        // From the PEEK, not from the predicate the peek feeds: the peek
-        // is itself a stage-1 refusal, and its `Err` is about a record
-        // file that exists.
-        let from = production
-            .find(concat!("let prior = if dry", "_run {"))
-            .expect("stage 1 begins where the prior record is read");
-        let to = production[from..]
-            .find(concat!("burn::", "compose("))
-            .map_or(production.len(), |i| from + i);
-        let region: Vec<&str> = production[from..to].lines().collect();
+        // TWO regions, because the second one was outside this guard and
+        // had exactly the defect the guard is named for.
+        //
+        // Stage 1 starts at the PEEK, not at the predicate the peek
+        // feeds: the peek is itself a stage-1 refusal, and its `Err` is
+        // about a record file that exists.
+        //
+        // `reserve_and_decide_holding` is the other. It peeks behind a
+        // CONTENDED lock — another live process on this host owns the
+        // withdrawal, which is the moment a burn is most likely to be in
+        // flight — and its bare `?` reported that as exit 2. Reached from
+        // the burn branch it escaped entirely; reached from the seam,
+        // `resumed_refusal` caught it, which is why only one of the two
+        // callers was ever wrong and neither test noticed.
+        let region_of = |opens: &str, closes: &str, what: &str| {
+            let from = production
+                .find(opens)
+                .unwrap_or_else(|| panic!("{what}: the region no longer opens at `{opens}`"));
+            let to = production[from..]
+                .find(closes)
+                .map_or(production.len(), |i| from + i);
+            production[from..to].lines().collect::<Vec<&str>>()
+        };
+        let region: Vec<&str> = [
+            region_of(
+                concat!("let prior = if dry", "_run {"),
+                concat!("burn::", "compose("),
+                "stage 1",
+            ),
+            region_of(
+                concat!("fn reserve_and_decide", "_holding("),
+                "\n}\n",
+                "the reservation behind a contended lock",
+            ),
+        ]
+        .concat();
 
         let mut bare = Vec::new();
         for (n, line) in region.iter().enumerate() {
@@ -3103,9 +3137,9 @@ mod tests {
         }
         assert!(
             bare.is_empty(),
-            "a stage-1 refusal propagated bare reports exit 2 — \"nothing broadcast, no state \
-             file written\" — about a withdrawal whose burn may already be on the wire and whose \
-             record is on disk: {bare:#?}",
+            "a refusal from before the send propagated bare reports exit 2 — \"nothing broadcast, \
+             no state file written\" — about a withdrawal whose burn may already be on the wire \
+             and whose record is on disk: {bare:#?}",
         );
     }
 

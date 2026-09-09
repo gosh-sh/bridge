@@ -1006,12 +1006,22 @@ assigns it when the release is tagged.
   strength of that"; the exit code said no state file was written, about
   the very file whose existence made the refusal fire.
 
+  **So does the read taken behind a contended lock.** When the
+  withdrawal lock is held by another live process, the run reads the
+  record to name what that process is doing. That read propagated its
+  failure bare — exit 2, "nothing broadcast, no state file written" —
+  at the one moment a burn is most likely to be in flight, and it did so
+  only for runs that reached it through the burn branch; the resume path
+  reclassified it and hid the asymmetry. It is exit 10 now, with the
+  same "reconcile before touching that file" text as the stage-1 read.
+
   Scripts that pattern-match exit codes: this is the last of the exit-2
   reclassifications in this branch. Preflight refusals on a fresh
   withdrawal stay 2; on a withdrawal with a recorded burn, or one whose
-  record cannot be read, they become 10. Exit 3 is untouched — a run
-  refused because another process holds the lock still gets the wait
-  remedy and the liveness verdict with it.
+  record cannot be read — including the read behind a contended lock —
+  they become 10. Exit 3 is untouched — a run refused because another
+  process holds the lock still gets the wait remedy and the liveness
+  verdict with it.
 
 - **CLI README and advanced runbook: `proof_event_<seq>.json` is not in
   `work_dir/`.** Both directory listings placed it there and the

@@ -147,6 +147,38 @@ pub(crate) fn clauses(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every way this tree writes "delete the state record", as the VERB and
+/// its object.
+///
+/// Shared, and that is the whole point of it being here. Two copies of
+/// this list existed — one for the shipped documents, one for the
+/// refusal messages — and the comment over the second said it was
+/// STRICTER than the first. It was true when it was written and false
+/// two commits later: the document list grew `prune the record`, `prune
+/// the state file` and `delete that state file`, the refusal list did
+/// not, and the relation the comment asserted was expressed nowhere, so
+/// nothing went red. `Prune the record and re-run.`, planted in the one
+/// refusal about a record that cannot say whether a burn is on the wire,
+/// passed the gate built to forbid exactly that sentence — measured.
+///
+/// `prune` is not a hypothetical word here: this repository shipped
+/// "records older than N hours with no `an_tx_hash` are safe to prune",
+/// and the changelog carries the entry that took it back out.
+///
+/// This is the FLOOR. A surface may hold itself to more — the refusal
+/// gate adds one — but no surface may know fewer orders than the
+/// documents are held to.
+pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
+    "delete the record",
+    "delete that record",
+    "delete the state file",
+    "delete that state file",
+    "remove the record",
+    "prune the record",
+    "prune the state file",
+    "safe to delete",
+];
+
 /// Clauses in `text` that hand somebody permission to delete the record,
 /// without naming the verdict that permits it.
 ///

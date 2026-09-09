@@ -2873,16 +2873,11 @@ mod tests {
         // invisible — "delete that record now", "remove the record",
         // "prune the state file", and the two the messages themselves
         // use.
-        const AUTHORISES: [&str; 8] = [
-            "delete the record",
-            "delete that record",
-            "delete the state file",
-            "delete that state file",
-            "remove the record",
-            "prune the record",
-            "prune the state file",
-            "safe to delete",
-        ];
+        //
+        // It lives in `source_guard` now, with the scanner, because the
+        // refusal gate has to know every order this one does and a
+        // second copy is what silently stopped it knowing three of them.
+        const AUTHORISES: [&str; 8] = crate::source_guard::ORDERS_A_DELETION;
 
         // An absent unreleased section is only legitimate in ONE state:
         // straight after a release, where the first heading in the file

@@ -2955,6 +2955,37 @@ mod tests {
         );
     }
 
+    /// Every imperative a refusal raised in this module may not contain.
+    ///
+    /// The shared floor, plus the one order that means something here
+    /// and does not in a shipped document: in a refusal the only file in
+    /// scope is the record it names, while a document says "delete that
+    /// file" about a key file, a log or a stale artifact.
+    fn orders_a_refusal_may_not_give() -> Vec<&'static str> {
+        crate::source_guard::ORDERS_A_DELETION
+            .iter()
+            .copied()
+            .chain(["delete that file"])
+            .collect()
+    }
+
+    #[test]
+    fn the_refusal_gate_knows_every_order_the_documents_are_held_to() {
+        // The relation the comment below used to assert and nothing
+        // checked. It is true by construction above, so what this
+        // catches is the construction being replaced by a literal list
+        // again — which is how it was false for two rounds, silently,
+        // from a commit in another module.
+        for order in crate::source_guard::ORDERS_A_DELETION {
+            assert!(
+                orders_a_refusal_may_not_give().contains(&order),
+                "the shipped documents are held to `{order}` and the refusal texts are not. A \
+                 refusal may be stricter than a document and may not be laxer: an imperative in \
+                 one contradicts the prohibition the same message ends with",
+            );
+        }
+    }
+
     #[test]
     fn no_refusal_this_module_raises_tells_an_operator_to_delete_the_record() {
         // The third attempt at holding this text to anything, and the
@@ -2981,20 +3012,26 @@ mod tests {
         //   2. the wrapper's prohibition survives composition,
         //   3. a refusal about a hash-less record admits the record cannot answer.
         //
-        // STRICTER than the shipped-document gate on purpose, and
-        // `sentences_authorising_a_deletion`'s parameters are where that
-        // is said out loud. The runbook may give conditional permission
-        // in a sentence naming the verdict — that is what it is for. A
+        // STRICTER than the shipped-document gate, in the HEDGES and
+        // only there: the runbook may give conditional permission in a
+        // sentence naming the verdict — that is what it is for — while a
         // refusal has no room for a condition and already carries the
         // prohibition, so any imperative in it is a contradiction.
-        const AUTHORISES: [&str; 6] = [
-            "delete the record",
-            "delete that record",
-            "delete the state file",
-            "delete that file",
-            "remove the record",
-            "safe to delete",
-        ];
+        //
+        // In the VERBS it was strictly weaker, for two rounds, while the
+        // sentence above said the opposite. The two lists were separate
+        // copies; this one was written as verb-and-object first and was
+        // a superset on the day it was written, then the document list
+        // grew three orders and this one did not. `Prune the record and
+        // re-run.` in the hash-less refusal — the one population an
+        // operator cannot resolve locally — passed this gate, and
+        // `Delete the record and re-run.` in the same position failed
+        // it. Measured, both.
+        //
+        // So the floor is shared and the addition is explicit. Nothing
+        // here is a list of everything; it is `ORDERS_A_DELETION` plus
+        // what only a refusal can mean.
+        let authorises = orders_a_refusal_may_not_give();
         // Only prohibitions. Not "only if", not "once you have
         // reconciled": a refusal that starts qualifying a deletion is
         // the runbook's job being done in the wrong place.
@@ -3045,7 +3082,7 @@ mod tests {
 
         for (what, msg) in &messages {
             let orders =
-                crate::source_guard::sentences_authorising_a_deletion(msg, &AUTHORISES, &HEDGES);
+                crate::source_guard::sentences_authorising_a_deletion(msg, &authorises, &HEDGES);
             assert!(
                 orders.is_empty(),
                 "{what}: this refusal tells an operator to delete a record that may hold a burn \

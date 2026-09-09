@@ -910,6 +910,35 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`peek` stops reporting an unreadable state directory as an empty
+  one.** It asked `Path::exists()`, which answers `bool` and folds every
+  `stat` failure into `false`. A state directory this process cannot
+  traverse — wrong mode, wrong owner, a half-restored backup — therefore
+  read as "no record for this withdrawal", and the run reserved, found
+  nothing, and broadcast a second `initiateWithdrawal` for an identity
+  whose record was in that directory. Only `NotFound` means there is no
+  record now; anything else is a refusal that says the CHECK failed.
+
+- **Four refusals that happen with a record on disk stop reporting exit
+  2.** Exit 2's published contract has two halves — nothing was
+  broadcast, and there is no record for this identity — and these
+  satisfied only the first:
+
+  - the read of a competing record after `hard_link` answered EEXIST,
+    where the file exists by construction;
+  - the reservation whose record was published and whose directory entry
+    could not be made durable, in a message that says "the record IS on
+    disk and complete" itself;
+  - `BurnPermit::issue`, which runs after `reserve` has published and
+    whose message says "A reservation for this identity IS on disk";
+  - the read taken behind a contended lock, in the previous entry.
+
+  All four are exit 10 now. Nothing was broadcast by the run in any of
+  them, and exit 10 does not claim otherwise — since the re-badge gate
+  became record existence, it means "this run must not act as if the
+  withdrawal were untouched". Scripts keying on 2 to mean "clean slate,
+  safe to retry" would have retried into a live reservation.
+
 - **A `BRIDGE_CONFIG` that is not valid UTF-8 is refused instead of
   silently ignored.** `std::env::var` answers three ways and the profile
   loader read the third as the first: a variable whose bytes are not

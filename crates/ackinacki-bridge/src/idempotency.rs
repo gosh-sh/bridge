@@ -347,34 +347,46 @@ pub fn reserve(
         std::fs::File::open(state_dir)?.sync_all()?;
         Ok(true)
     };
-    let won = publish().map_err(|e| CliError::Preflight {
-        // "No partial record was left behind" was true of a torn file and
-        // false of the case that actually reaches here: the `hard_link`
-        // succeeded and the directory fsync did not. An operator read that
-        // as "nothing is on disk", and the next run then refused with exit
-        // 3 about a record they had been told did not exist — straight
-        // into deleting it.
-        //
-        // The record is NOT removed in that case, and deliberately. It is
-        // complete and already visible to other processes; unlinking a
-        // published reservation is the double-burn this file exists to
-        // prevent. Say what is there instead.
-        reason: if published.get() {
-            format!(
-                "idempotency: reserve {}: {e}{NOTHING_SENT_CLAUSE}\n\x20 The record IS on disk \
-                 and complete — the failure was making its directory entry durable, which means \
-                 it may not survive a power loss.\n\x20 It is not stale: a later run refusing \
-                 this identity with exit 3 is correct, and that refusal explains what to do with \
-                 it.",
-                path.display()
-            )
+    // The variant is chosen per case, and that is the whole point of
+    // this closure returning to here rather than propagating: with the
+    // record published the run is NOT in the state exit 2 describes.
+    let won = publish().map_err(|e| {
+        if published.get() {
+            // Published and complete, only its directory entry not durable.
+            // `Preflight` said "no record for this identity on disk" three
+            // lines above a sentence of its own saying the record IS on disk
+            // and complete.
+            CliError::BurnOutcomeUnknown {
+                reason: format!(
+                    "idempotency: reserve {}: {e}\n\x20 Nothing was broadcast by this run, and \
+                     the record IS on disk and complete — the failure was making its directory \
+                     entry durable, which means it may not survive a power loss.\n\x20 It is not \
+                     stale: a later run refusing this identity with exit 3 is correct, and that \
+                     refusal explains what to do with it.",
+                    path.display(),
+                ),
+                source: None,
+            }
         } else {
-            format!(
-                "idempotency: reserve {}: {e}{NOTHING_SENT_CLAUSE} No record was left behind.",
-                path.display()
-            )
-        },
-        source: None,
+            CliError::Preflight {
+                // "No partial record was left behind" was true of a torn file and
+                // false of the case that actually reaches here: the `hard_link`
+                // succeeded and the directory fsync did not. An operator read that
+                // as "nothing is on disk", and the next run then refused with exit
+                // 3 about a record they had been told did not exist — straight
+                // into deleting it.
+                //
+                // The record is NOT removed in that case, and deliberately. It is
+                // complete and already visible to other processes; unlinking a
+                // published reservation is the double-burn this file exists to
+                // prevent. Say what is there instead.
+                reason: format!(
+                    "idempotency: reserve {}: {e}{NOTHING_SENT_CLAUSE} No record was left behind.",
+                    path.display()
+                ),
+                source: None,
+            }
+        }
     })?;
 
     if won {
@@ -384,7 +396,26 @@ pub fn reserve(
     // EEXIST: inspect whoever got there first. Their record is complete by
     // construction — `hard_link` only publishes a fully written file — so
     // this read cannot see a torn one.
-    let prior = read_record(&path)?;
+    //
+    // And when it fails anyway, that is NOT exit 2. Getting here means
+    // `hard_link` answered EEXIST, so the file demonstrably exists; a
+    // read that fails on it — permissions, a cross-field check, a
+    // hand-edit — leaves this run unable to say whether a burn is on the
+    // wire for an identity somebody has already reserved. `Preflight`
+    // would publish that as "nothing broadcast, no record for this
+    // identity on disk", with a human-scale window under it: this runs
+    // after `confirm_before_burn`, which waits for a person.
+    let prior = read_record(&path).map_err(|e| CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "idempotency: a record for this identity exists at {} and could not be read: \
+             {e}\n\x20 This run reserved nothing and broadcast nothing — the reservation it found \
+             is somebody's, and it is the reason this refusal fired. Whether a burn is on the \
+             wire cannot be answered from a record that will not parse: reconcile on chain before \
+             touching that file, and see the advanced runbook, Case 3a.",
+            path.display(),
+        ),
+        source: None,
+    })?;
     // On the DISPOSITION, not on the status. Re-listing `Confirmed |
     // Submitted` here was a second copy of the terminal set, and the
     // remedy behind it had to be fetched with an `expect`: a status named
@@ -599,10 +630,32 @@ pub fn peek(
     amount: &UsdcAmount,
 ) -> CliResult<Option<Record>> {
     let path = record_path(state_dir, &key(from, to, amount));
-    if !path.exists() {
-        return Ok(None);
+    // `metadata`, not `exists()`. `Path::exists()` answers a `bool` and
+    // folds EVERY `stat` failure into `false`: a state directory this
+    // process cannot traverse — mode 0600, a different owner, a
+    // half-restored backup — reads as "no record for this withdrawal",
+    // and the run goes on to reserve, find nothing, and broadcast a
+    // second `initiateWithdrawal` for one that already has a record two
+    // inches away. Measured on errno: a 0600 directory gives
+    // `PermissionDenied` and `exists()` returns `false`.
+    //
+    // Only `NotFound` means there is no record. Anything else means this
+    // run could not find out, which is not the same answer and must not
+    // be reported as one.
+    match std::fs::metadata(&path) {
+        Ok(_) => read_record(&path).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(CliError::Preflight {
+            reason: format!(
+                "idempotency: cannot tell whether a record for this withdrawal exists at {}: \
+                 {e}\n\x20 This is not \"there is no record\": the check itself failed, and a run \
+                 that treats it as one reserves an identity that may already have a burn against \
+                 it. Fix the state directory's permissions or ownership and re-run.",
+                path.display(),
+            ),
+            source: None,
+        }),
     }
-    read_record(&path).map(Some)
 }
 
 // -- helpers ------------------------------------------------------------
@@ -1384,7 +1437,21 @@ impl<'a> BurnPermit<'a> {
                          please report it.",
                     ),
                 };
-                Err(CliError::Preflight {
+                // Exit 10, not 2, and the message next to it is why:
+                // exit 2's published contract includes "no record for
+                // this identity on disk", and this sentence says one IS
+                // on disk. `issue` runs after `reserve` has published, so
+                // that is true of EVERY refusal it raises — there is no
+                // arm of this match reachable with a clean directory
+                // behind it.
+                //
+                // Nothing was broadcast by this run, and exit 10 does not
+                // claim otherwise: since the re-badge gate became record
+                // existence, its meaning is "this run must not act as if
+                // the withdrawal were untouched", which is exactly the
+                // situation. One of the three arms is a run that may be
+                // inside its own send right now.
+                Err(CliError::BurnOutcomeUnknown {
                     reason: format!(
                         "idempotency: this run does not own {}, so it must not broadcast: it {} \
                          the withdrawal lock and the kernel says {}.{NOTHING_SENT_CLAUSE}\n\x20 \
@@ -2313,10 +2380,16 @@ mod tests {
         // second burn every guard in this file exists to prevent.
         let err = BurnPermit::issue(dir.path(), key, None)
             .expect_err("a run with no lock on a locking filesystem must not broadcast");
+        // Pre-send, and NOT exit 2. Both halves of exit 2's contract have
+        // to hold and only one of them does: nothing was broadcast, and a
+        // record for this identity is on disk — `issue` runs after
+        // `reserve` has published one. The message says so itself, three
+        // lines below the code that used to contradict it.
         assert_eq!(
             err.exit_code(),
-            crate::errors::ExitCode::PreflightRefused,
-            "the check is BEFORE the send, so its refusal is a pre-send one: {err}",
+            crate::errors::ExitCode::BurnOutcomeUnknown,
+            "a reservation is on disk by the time `issue` can refuse, so exit 2's \"no record for \
+             this identity\" is false and a retry wrapper reading it sees a clean state: {err}",
         );
         let msg = format!("{err}");
         assert!(
@@ -2470,8 +2543,9 @@ mod tests {
         let msg = format!("{err}");
         assert_eq!(
             err.exit_code(),
-            crate::errors::ExitCode::PreflightRefused,
-            "the check runs before the send, so its refusal is a pre-send one: {err}",
+            crate::errors::ExitCode::BurnOutcomeUnknown,
+            "same as the sibling case: pre-send is only half of exit 2, and the other half — no \
+             record on disk — is false for every refusal `issue` can raise: {err}",
         );
         assert!(
             msg.contains("unlinked or replaced"),
@@ -3500,6 +3574,57 @@ mod tests {
                 "--allow-retry={allow_retry}: a record somebody else published is never this \
                  run's to burn against",
             );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn peek_does_not_report_an_unreadable_directory_as_an_empty_one() {
+        // `Path::exists()` folds every `stat` failure into `false`, so a
+        // state directory this process cannot traverse answered "no
+        // record for this withdrawal" — and the run went on to reserve,
+        // find nothing, and broadcast a second `initiateWithdrawal` for
+        // an identity whose record was two inches away.
+        //
+        // Root ignores the mode, so this asserts on what actually
+        // happened rather than skipping: under root the directory is
+        // readable and the answer is legitimately `None`.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let rec = fresh_reserved_record(
+            &key(&sample_from(), &sample_to(), &UsdcAmount(1)),
+            &sample_from(),
+            &sample_to(),
+            &UsdcAmount(1),
+        );
+        update(dir.path(), &rec).unwrap();
+
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o600); // readable, NOT traversable
+        std::fs::set_permissions(dir.path(), perms).unwrap();
+
+        let got = peek(dir.path(), &sample_from(), &sample_to(), &UsdcAmount(1));
+
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir.path(), perms).unwrap();
+
+        match got {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("cannot tell whether a record"),
+                    "the refusal has to say the CHECK failed, not that there is nothing: {msg}",
+                );
+            },
+            // Running as root: the mode is advisory and the read
+            // succeeds, so `Some` is the honest answer.
+            Ok(Some(_)) => {},
+            Ok(None) => panic!(
+                "a directory that cannot be traversed reported as an empty one, which is the \
+                 answer that reserves an identity that already has a record",
+            ),
         }
     }
 

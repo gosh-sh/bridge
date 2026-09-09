@@ -491,14 +491,18 @@ unreachable under it.
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-**Exit 10 covers three situations, and only the first is "this run
-broadcast a burn".** The other two are refusals: a preflight check that
-failed on a withdrawal whose burn a PREVIOUS run already recorded, and a
-state record that exists and could not be read. Neither broadcasts or
-writes anything — but in both, a burn may be on the wire and the record
-must not be deleted, which is the thing exit 2 would have said the
-opposite of. What the three share, and what a script should key on, is
-"do not treat this identity as untouched".
+**Exit 10 covers four situations, and only the first is "this run
+broadcast a burn".** The other three are refusals: a preflight check
+that failed on a withdrawal whose burn a PREVIOUS run already recorded;
+a state record that exists and could not be read (torn, or in a
+directory this process cannot traverse); and a reservation on disk this
+run may not act on — published but not durable, or reached without
+owning the withdrawal lock. None of the three broadcasts or writes
+anything — but in all of them a record for this identity is on disk, a
+burn may be on the wire, and the record must not be deleted, which is
+the thing exit 2 would have said the opposite of. What the four share,
+and what a script should key on, is "do not treat this identity as
+untouched".
 
 Exit codes 11–13 all leave the AN burn broadcast: the USDC has left
 the source multisig regardless. The question is whether the EVM side

@@ -1272,10 +1272,11 @@ fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
     CliError::BurnOutcomeUnknown {
         reason: format!(
             "the record for this withdrawal could not be read: {reason}\n\x20 This run got no \
-             further than reading it, so it added nothing to either chain — but a record for this \
-             identity EXISTS, which is why this refusal fired, and no AN tx hash could be \
-             recovered from it. Whether a burn is on the wire cannot be answered locally at all. \
-             Reconcile on chain before touching that file: the advanced runbook, Case 3a.",
+             further than trying to read it, so it added nothing to either chain — and it could \
+             not establish that there is NO record for this identity, which is why this refusal \
+             fired. No AN tx hash was recovered, so whether a burn is on the wire cannot be \
+             answered locally at all. Reconcile on chain before touching that file: the advanced \
+             runbook, Case 3a.",
         ),
         source: None,
     }
@@ -3219,8 +3220,12 @@ mod tests {
         );
         let msg = format!("{rebadged}");
         assert!(
-            msg.contains("EXISTS") && msg.contains("cannot be answered locally"),
-            "the operator has to be told what is there and what cannot be known about it: {msg}",
+            msg.contains("could not establish that there is NO record")
+                && msg.contains("cannot be answered locally"),
+            "the operator has to be told what could not be established and what cannot be known \
+             about it. It said \"a record for this identity EXISTS\", which is one case of two: \
+             `peek` now also refuses when the CHECK failed — an unreadable state directory — and \
+             there the existence of a record is exactly what is unknown: {msg}",
         );
         assert!(
             !msg.to_ascii_lowercase().contains("nothing was sent"),
@@ -3281,6 +3286,16 @@ mod tests {
                 concat!("burn::", "compose("),
                 "stage 1",
             ),
+            // BOTH halves of the reservation, because the split put two
+            // fallible calls outside every region there was:
+            // `ensure_state_dir(…)?` and `try_acquire(…)?` live in
+            // `reserve_and_decide`, above `_holding`'s anchor, and a
+            // guard scoped to `_holding` never saw either of them.
+            region_of(
+                concat!("fn reserve_and", "_decide(\n"),
+                "\n}\n",
+                "the reservation, before the lock attempt",
+            ),
             region_of(
                 concat!("fn reserve_and_decide", "_holding("),
                 "\n}\n",
@@ -3289,31 +3304,85 @@ mod tests {
         ]
         .concat();
 
+        // INVERTED. This was an allow-list of two spellings — `preflight::`
+        // and `idempotency::peek(` — so widening the region in 53cdbec
+        // widened nothing: every other fallible call in it was invisible
+        // by construction, and `ensure_state_dir(…)?` and
+        // `try_acquire(…)?` sat there propagating with nobody looking.
+        //
+        // Now every `?` in the region is a candidate and the EXEMPTIONS
+        // are the list. That is the right way round: a new fallible call
+        // is flagged until somebody writes down why its failure cannot be
+        // about a record that exists, and writing that down is one line
+        // here rather than a silence nobody can see.
+        //
+        // Each exemption is a claim, and the claim is the same shape
+        // every time: reaching this failure means there is nothing on
+        // disk for this identity, OR the call has already chosen its own
+        // exit code per case.
+        const EXEMPT: [(&str, &str); 7] = [
+            (
+                "require_submit_plumbing(",
+                "argument policy, before any path is resolved",
+            ),
+            (
+                "default_state_dir(",
+                "resolving the directory: no directory, nothing in it",
+            ),
+            (
+                "ensure_state_dir(",
+                "creating the directory: no directory, nothing in it",
+            ),
+            (
+                "confirm_before_burn(",
+                "the prompt, and it is reached only with `prior == None` — a prior WITH a hash \
+                 went to the resume branch and a hash-less one was refused with exit 3 above it",
+            ),
+            (
+                concat!("idempotency::", "reserve("),
+                "chooses its own variant per case, and the classification lives there: a torn \
+                 record and an unfsynced-but-published one are exit 10 inside `reserve`",
+            ),
+            (
+                "decide_burn(",
+                "answers `ReservationInFlight`, which is exit 3 and carries the liveness verdict",
+            ),
+            (
+                concat!("WithdrawalLock::try", "_acquire("),
+                "opening the lock file, which happens before the reservation is read or written; \
+                 a contended lock is `Contended`, not an `Err`",
+            ),
+        ];
+
         let mut bare = Vec::new();
         for (n, line) in region.iter().enumerate() {
-            let interesting =
-                line.contains("preflight::") || line.contains(concat!("idempotency::", "peek("));
-            if line.trim_start().starts_with("//") || !interesting {
+            // The `?` OPERATOR, not the character: `{:?}` in a format
+            // string and tracing's `?field` sigil are neither.
+            if !line.trim_end().ends_with("?;") {
                 continue;
             }
-            // To the end of this statement, at depth zero.
-            let mut depth = 0i32;
-            let mut end = region.len();
-            for (k, l) in region.iter().enumerate().skip(n) {
-                depth += l.chars().filter(|&c| c == '(' || c == '{').count() as i32;
-                depth -= l.chars().filter(|&c| c == ')' || c == '}').count() as i32;
-                if depth <= 0 && l.trim_end().ends_with(';') {
-                    end = k + 1;
+            // Back to the start of the statement.
+            let mut from = n;
+            while from > 0 {
+                let prev = region[from - 1].trim_end();
+                if prev.ends_with(';') || prev.ends_with('{') || prev.ends_with('}') {
                     break;
                 }
+                from -= 1;
             }
+            let end = n + 1;
+            let n = from;
             let stmt = region[n..end].join("\n");
-            // A `let` of a type, or a call that never fails, has no `?`.
-            let rebadged = stmt.contains(concat!("refusal_before_a_recorded", "_burn"))
-                || stmt.contains(concat!("refusal_reading_a_record_that", "_exists"));
-            if stmt.contains('?') && !rebadged {
-                bare.push(stmt);
+            if stmt.trim_start().starts_with("//") {
+                continue;
             }
+            let rebadged = stmt.contains(concat!("refusal_before_a_recorded", "_burn"))
+                || stmt.contains(concat!("refusal_reading_a_record_that", "_exists"))
+                || stmt.contains(concat!("resumed", "_refusal"));
+            if rebadged || EXEMPT.iter().any(|(call, _)| stmt.contains(call)) {
+                continue;
+            }
+            bare.push(stmt);
         }
         assert!(
             bare.is_empty(),

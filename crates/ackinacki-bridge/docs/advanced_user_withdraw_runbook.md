@@ -945,25 +945,34 @@ previous run had already recorded a burn for this identity, the same
 preflight failure comes out as **exit 10**, not exit 2 — the checks and
 the message are identical, and the code differs because the remedy does.
 Seeing exit 2 here means there is no record for this identity at all —
-not merely that no hash is on file. A record with `an_tx_hash: null`
+not merely that no hash is on file. Every refusal that happens with a
+reservation on disk is exit 10, including the ones that broadcast
+nothing. A record with `an_tx_hash: null`
 counts: it cannot say whether a burn happened, so the same refusal comes
 out as exit 10. See 3d-ii.
 
 #### 3d-ii — This run must not act as if the withdrawal were untouched (exit 10)
 
-Three situations share this code, and only the first is "this run
+Four situations share this code, and only the first is "this run
 broadcast a burn":
 
 1. `sendTransaction` broadcast but the CLI could not observe the
    resulting message on GQL within its budget.
 2. A **preflight check refused** a withdrawal whose burn a previous run
    already recorded. Nothing was broadcast or written by this run.
-3. The **state record exists and could not be read** — torn, or failing
-   a cross-field check. No AN tx hash could be recovered from it, so
-   whether a burn is on the wire cannot be answered locally at all.
+3. The **state record exists and could not be read** — torn, failing a
+   cross-field check, or in a directory this process cannot traverse. No
+   AN tx hash could be recovered from it, so whether a burn is on the
+   wire cannot be answered locally at all.
+4. **A reservation is on disk and this run may not act on it.** The
+   record was published but its directory entry could not be made
+   durable; or the run reached the point of sending without owning the
+   withdrawal lock (`BurnPermit::issue`, which names which of three
+   cases it is). Nothing was broadcast by this run, and in one of those
+   cases another run may be inside its own send right now.
 
-In all three the record must not be deleted and the withdrawal must not
-be re-started under a fresh identity. In 2 and 3 the remedy is to fix
+In all four the record must not be deleted and the withdrawal must not
+be re-started under a fresh identity. In 2, 3 and 4 the remedy is to fix
 what the message names and re-run the SAME command, and what that run
 does depends on the record. With an `an_tx_hash` it resumes from the
 recorded burn. Without one it does not — and it does not reach exit 3

@@ -1263,12 +1263,28 @@ impl LockSlot {
         Self(None)
     }
 
-    /// Take ownership of what the reservation acquired.
+    /// Take ownership of what the reservation acquired, and hand back the
+    /// hold over it.
     ///
     /// Consumes the [`AcquiredLock`], so a caller cannot install the same
     /// acquisition twice, and cannot install anything it did not get from
     /// a reservation.
-    pub fn install(&mut self, acquired: AcquiredLock) {
+    ///
+    /// RETURNING the hold is what removes two rules from
+    /// `every_place_the_lock_is_installed_takes_a_hold_of_it`. There is
+    /// no gap between an install and its hold to police, because there
+    /// is no second statement; and there is no receiver to check,
+    /// because the hold is this install's own result rather than a
+    /// second expression naming a slot — `let _held = _decoy.hold();`
+    /// under an install was green for a round.
+    ///
+    /// The borrow is a reborrow of `&mut self`, so the slot is
+    /// exclusively borrowed for as long as the hold lives. That is
+    /// stricter than the shared borrow `hold()` gives and it costs
+    /// nothing here: between the install and the end of its branch,
+    /// nothing else in `run` touches the slot.
+    #[must_use = "the hold IS the protection: an install whose hold is dropped on the spot leaves                   the slot free for every statement after it"]
+    pub fn install(&mut self, acquired: AcquiredLock) -> LockHold<'_> {
         // A second install would drop the first lock. It cannot happen
         // through an honest path — `try_acquire` answers `Contended` to a
         // process that already holds this identity, so a second
@@ -1280,12 +1296,7 @@ impl LockSlot {
             "the withdrawal lock is installed once per run; a second install drops the first",
         );
         self.0 = acquired.0;
-    }
-
-    /// The lock this run holds, if the filesystem gave it one.
-    #[must_use]
-    pub fn as_ref(&self) -> Option<&WithdrawalLock> {
-        self.0.as_ref()
+        LockHold(self.0.as_ref())
     }
 
     /// Hold the SLOT for the rest of the caller's scope.
@@ -1312,7 +1323,19 @@ impl LockSlot {
     /// of this signature would think to check.
     #[must_use]
     pub fn hold(&self) -> LockHold<'_> {
-        LockHold(std::marker::PhantomData)
+        LockHold(self.0.as_ref())
+    }
+
+    /// Whether the reservation gave this run a lock.
+    ///
+    /// `#[cfg(test)]`, and that is the difference between it and the
+    /// `as_ref` it replaces: production has no expression that reads the
+    /// lock out of the slot, and asking whether one is in there is not
+    /// the same as being handed it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn is_held(&self) -> bool {
+        self.0.is_some()
     }
 }
 
@@ -1332,10 +1355,13 @@ impl LockSlot {
 /// a `mut` binding and one line anywhere below the burn released it,
 /// compiled, and left the suite green.
 ///
-/// It carries no data — `PhantomData` ties the lifetime — and its empty
-/// `Drop` is what keeps the borrow open to the end of the scope rather
-/// than to the value's last use. Dropping the HOLD does not drop the
-/// lock; it only ends the borrow.
+/// It carries the lock the slot held when it was taken, and that is what
+/// removed `LockSlot::as_ref` — the one expression in the tree that read
+/// the lock back out of the slot. A caller that needs to know whether
+/// this run holds a lock asks the HOLD, which it can only have by
+/// holding one. Its empty `Drop` is what keeps the borrow open to the
+/// end of the scope rather than to the value's last use. Dropping the HOLD does
+/// not drop the lock; it only ends the borrow.
 ///
 /// It is also deliberately bare of methods. `hold()` used to answer
 /// `Option<LockHold>`, and `let _held = slot.hold().is_some();` bound a
@@ -1356,7 +1382,21 @@ impl LockSlot {
 /// The `Drop` is required by
 /// `pins_its_borrow_to_the_end_of_scope::<LockHold>` below, because
 /// deleting it compiles and silently gives all of that up.
-pub struct LockHold<'a>(std::marker::PhantomData<&'a WithdrawalLock>);
+pub struct LockHold<'a>(Option<&'a WithdrawalLock>);
+
+impl<'a> LockHold<'a> {
+    /// A hold made straight from a lock, for the tests that are about
+    /// `BurnPermit::issue`'s arms rather than about the slot.
+    ///
+    /// `#[cfg(test)]`: production takes holds from a `LockSlot`, which
+    /// is what ties one to a run's own reservation. A constructor that
+    /// skipped the slot would be a way to produce the witness `issue`
+    /// demands without holding anything.
+    #[cfg(test)]
+    pub(crate) fn of(lock: Option<&'a WithdrawalLock>) -> Self {
+        Self(lock)
+    }
+}
 
 impl Drop for LockHold<'_> {
     fn drop(&mut self) {}
@@ -1435,9 +1475,9 @@ impl<'a> BurnPermit<'a> {
     /// and `only_the_arms_that_know_nobody_is_executing_the_withdrawal_
     /// permit_a_deletion` requires exactly that. "Only one of them
     /// permits deleting it" stood here and was the wrong way round.
-    pub fn issue(state_dir: &Path, key: &str, held: Option<&'a WithdrawalLock>) -> CliResult<Self> {
+    pub fn issue(state_dir: &Path, key: &str, held: &'a LockHold<'a>) -> CliResult<BurnPermit<'a>> {
         let probe = WithdrawalLock::probe_holder(state_dir, key);
-        match (held, probe) {
+        match (held.0, probe) {
             (Some(l), Some(true)) => Ok(Self(Some(l))),
             (Some(l), None) => {
                 warn!(
@@ -1447,7 +1487,7 @@ impl<'a> BurnPermit<'a> {
                 Ok(Self(Some(l)))
             },
             (None, None) => Ok(Self(None)),
-            (held, _) => {
+            (_, _) => {
                 // What this run leaves behind, said plainly, because the
                 // next run cannot work it out: `reserve` has already
                 // published a `Reserved` record with no hash, which stage
@@ -1455,7 +1495,7 @@ impl<'a> BurnPermit<'a> {
                 // that might be in flight. The operator needs to know
                 // that THIS message is the evidence no burn happened —
                 // and in one of the three cases, that it is not.
-                let (what_we_hold, what_the_kernel_says, remedy) = match (held.is_some(), probe) {
+                let (what_we_hold, what_the_kernel_says, remedy) = match (held.0.is_some(), probe) {
                     (false, Some(true)) => (
                         "never took",
                         "another process holds it",
@@ -2452,7 +2492,7 @@ mod tests {
             panic!("an uncontested lock in a fresh TempDir must be taken");
         };
         assert!(
-            BurnPermit::issue(dir.path(), key, Some(&lock))
+            BurnPermit::issue(dir.path(), key, &LockHold::of(Some(&lock)))
                 .expect("a run holding its own lock may send")
                 .holds_a_lock(),
             "and the permit it gets rests on that lock",
@@ -2470,7 +2510,7 @@ mod tests {
         // is the one that must never say "delete" — the holder may be
         // inside `burn::send`, and deleting the record there is the
         // second burn every guard in this file exists to prevent.
-        let err = BurnPermit::issue(dir.path(), key, None)
+        let err = BurnPermit::issue(dir.path(), key, &LockHold::of(None))
             .expect_err("a run with no lock on a locking filesystem must not broadcast");
         // Pre-send, and NOT exit 2. Both halves of exit 2's contract have
         // to hold and only one of them does: nothing was broadcast, and a
@@ -2524,7 +2564,7 @@ mod tests {
         // about to broadcast should have been holding one — and HERE
         // deleting is right, because nothing was sent and nobody is
         // executing this identity.
-        let err = BurnPermit::issue(dir.path(), key, None)
+        let err = BurnPermit::issue(dir.path(), key, &LockHold::of(None))
             .expect_err("an unheld lock on a filesystem that locks is not permission to send");
         let msg = format!("{err}");
         assert!(
@@ -2561,8 +2601,14 @@ mod tests {
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
 
+        // The hold is NAMED, and it has to be: the permit borrows it, so
+        // a `&LockHold::of(..)` written inline in the argument is a
+        // temporary the permit outlives — E0515 here, E0716 at a `let`.
+        // That is the signature doing the work the adjacency rule used
+        // to do by reading this file.
+        let held = LockHold::of(Some(&lock));
         let (permit, logged) = captured_logs(|| {
-            BurnPermit::issue(&blocker, key, Some(&lock))
+            BurnPermit::issue(&blocker, key, &held)
                 .expect("a lock in hand outweighs a probe that could not be made")
         });
         assert!(
@@ -2592,14 +2638,14 @@ mod tests {
         };
         let contended = format!(
             "{}",
-            BurnPermit::issue(dir.path(), key, None).expect_err("somebody holds it"),
+            BurnPermit::issue(dir.path(), key, &LockHold::of(None)).expect_err("somebody holds it"),
         );
 
         // (holds, nobody does) — the lock file was replaced under us.
         std::fs::remove_file(WithdrawalLock::path(dir.path(), key)).unwrap();
         let replaced = format!(
             "{}",
-            BurnPermit::issue(dir.path(), key, Some(&other))
+            BurnPermit::issue(dir.path(), key, &LockHold::of(Some(&other)))
                 .expect_err("an unnamed inode guards nothing"),
         );
         drop(other);
@@ -2607,7 +2653,8 @@ mod tests {
         // (never took, nobody does) — the internal defect.
         let unheld = format!(
             "{}",
-            BurnPermit::issue(dir.path(), key, None).expect_err("no lock, and flock works here"),
+            BurnPermit::issue(dir.path(), key, &LockHold::of(None))
+                .expect_err("no lock, and flock works here"),
         );
 
         assert!(
@@ -2645,7 +2692,7 @@ mod tests {
         };
         std::fs::remove_file(WithdrawalLock::path(dir.path(), key)).unwrap();
 
-        let err = BurnPermit::issue(dir.path(), key, Some(&lock))
+        let err = BurnPermit::issue(dir.path(), key, &LockHold::of(Some(&lock)))
             .expect_err("a lock on an unlinked inode guards nothing");
         let msg = format!("{err}");
         assert_eq!(
@@ -2679,7 +2726,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
-        let permit = BurnPermit::issue(&blocker, "0123456789abcdef", None)
+        let held = LockHold::of(None);
+        let permit = BurnPermit::issue(&blocker, "0123456789abcdef", &held)
             .expect("a run that could not ask is not a run that must stop");
         assert!(
             !permit.holds_a_lock(),

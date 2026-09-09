@@ -468,8 +468,7 @@ pub async fn run(
             info!("stage 2/6: idempotency reserve");
             let (r, decision, lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
-            _withdrawal_lock.install(lock);
-            let _held = _withdrawal_lock.hold();
+            let _held = _withdrawal_lock.install(lock);
             // On the very next line, and the seven-line paragraph that
             // used to sit between them is why: an assignment placed in
             // that gap released the lock with 221 + 16 green. Between an
@@ -511,12 +510,22 @@ pub async fn run(
                     // probe asks about — is the branch's own `_held`,
                     // taken where the lock was installed. `BurnPermit`
                     // had a `Drop` for that and it was measured
-                    // redundant; the permit borrows the slot, but the
-                    // borrow that matters here is the outer one.
+                    // redundant; the permit borrows the branch's hold,
+                    // and the borrow that matters here is the outer one.
+                    //
+                    // The permit is issued AGAINST the hold, which is
+                    // the only way to ask what this run holds now that
+                    // `LockSlot::as_ref` is gone. So the send cannot be
+                    // reached without a live hold — not by convention
+                    // and not by a guard reading this file, but because
+                    // `issue` has nothing else to take — and a
+                    // `&slot.hold()` written inline in this argument is
+                    // E0716: the permit outlives the statement, so the
+                    // temporary cannot.
                     let permit = idempotency::BurnPermit::issue(
                         &state_dir,
                         &idempotency::key(&from, &to, &amount),
-                        _withdrawal_lock.as_ref(),
+                        &_held,
                     )?;
                     info!(
                         locked = permit.holds_a_lock(),
@@ -1144,8 +1153,7 @@ fn resume_recorded_burn(
     // wire.
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
         .map_err(|e| resumed_refusal(e, observed))?;
-    hold.install(lock);
-    let _held = hold.hold();
+    let _held = hold.install(lock);
     // Held for the rest of THIS function too, not only by the caller
     // once it returns. Everything below — the restoring write, the
     // second reservation — runs on an identity whose burn is already on
@@ -2811,66 +2819,100 @@ mod tests {
         // green and clippy clean — so the prose moved below the hold and
         // the tolerance went to zero.
         //
-        // The STATEMENT is pinned whole: `let <name> = <that slot>.hold();`
-        // at the acquisition's own indent. Not "a line containing
-        // `.hold()`", which four separate spellings satisfied while the
-        // borrow died on the same line —
+        // Four spellings once satisfied "a line containing `.hold()`"
+        // while the borrow died on the same line, and every one of them
+        // was measured green here:
         //
         //   { let _held = slot.hold(); }   dies at the closing brace
         //   drop(slot.hold());             dies at the semicolon
         //   debug_assert!(slot.hold().is_some(), …)   a temporary
         //   let _held = _decoy.hold();     holds something else
         //
-        // — the first three of them measured green here, and the fourth
-        // measured green a round later. Two of the four are gone at the
-        // type level now (`LockSlot::hold` returns a `LockHold`, so
-        // `.is_some()` and `.map(…)` are E0599); the pin is what is left
-        // for the rest, and it is cheap because there are three of these
-        // lines in the file and they are all one shape.
+        // ALL FOUR are compile errors now, and none of them by this
+        // test. `LockSlot::hold` returns a `LockHold` rather than an
+        // `Option`, so `.is_some()` and `.map(…)` are E0599. The hold is
+        // CONSUMED downstream — `BurnPermit::issue` takes `&LockHold`
+        // and so does `idempotency::update` — so a hold that dies at a
+        // closing brace, at a semicolon or inside an assertion is E0425
+        // where the send or the record write asks for it, and a hold of
+        // a decoy is not the one those calls name. Measured, each.
+        //
+        // What is left for this test is what a type cannot say: that
+        // every acquisition has one, that the settled window has one
+        // above the dry-run return, and that no line moves one.
+        // A binding per acquisition, and TWO shapes rather than one
+        // rule, because the two acquisitions are no longer the same
+        // thing.
+        //
+        // An `.install(` hands the hold back, so the statement IS the
+        // hold: `let <name> = <slot>.install(<..>);`. There is no gap to
+        // police and no receiver to compare — the previous version of
+        // this test needed both, and a decoy receiver under an install
+        // was green for a round.
+        //
+        // The seam's acquisition is still two statements: the caller
+        // hands its slot over by `&mut`, and what comes back is a
+        // `Result`, so the branch takes its own hold on the line below.
         let mut bindings: Vec<(usize, String)> = Vec::new();
         for (at, slot) in &acquisitions {
-            let next = (at + 1..lines.len())
-                .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
-                .expect("something follows the acquisition");
-            let line = lines[next];
-            let (name, expr) = line
+            let (line_at, statement) = if lines[*at].contains(concat!(".ins", "tall(")) {
+                (*at, lines[*at])
+            } else {
+                let next = (at + 1..lines.len())
+                    .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
+                    .expect("something follows the acquisition");
+                assert!(
+                    indent(lines[next]) == indent(lines[*at]),
+                    "orchestrator.rs:{}: the seam hands the lock back here and the next statement \
+                     is at another indent — orchestrator.rs:{}: {}. Everything between the two \
+                     compiles with the lock released and nothing to say so",
+                    at + 1,
+                    next + 1,
+                    lines[next].trim(),
+                );
+                (next, lines[next])
+            };
+            let (name, expr) = statement
                 .trim()
                 .strip_prefix("let ")
                 .and_then(|rest| rest.split_once(" = "))
                 .unwrap_or_else(|| {
                     panic!(
-                        "orchestrator.rs:{}: the lock becomes this run's here and the next \
-                         statement does not BIND a hold — orchestrator.rs:{}: {}. A hold inside \
-                         braces, inside `drop(…)` or inside an assertion is a borrow that ends on \
-                         the same line, and the lock is released for everything after it — \
-                         measured green, all three",
+                        "orchestrator.rs:{}: the lock becomes this run's here and nothing BINDS \
+                         the hold — orchestrator.rs:{}: {}. A hold inside braces, inside \
+                         `drop(…)` or inside an assertion is a borrow that ends on the same line, \
+                         and the lock is released for everything after it — measured green, all \
+                         three",
                         at + 1,
-                        next + 1,
-                        line.trim(),
+                        line_at + 1,
+                        statement.trim(),
                     )
                 });
-            assert_eq!(
-                expr,
-                format!("{slot}.{}", concat!("hold", "();")),
-                "orchestrator.rs:{}: this hold is not a hold OF THE SLOT acquired on \
-                 orchestrator.rs:{}. A hold of anything else leaves that slot free for the whole \
-                 stretch this line appears to cover",
-                next + 1,
-                at + 1,
-            );
+            // The receiver, for the seam's hold only: an install's hold
+            // is its own result and cannot be a hold of anything else.
+            if line_at != *at {
+                assert_eq!(
+                    expr,
+                    format!("{slot}.{}", concat!("hold", "();")),
+                    "orchestrator.rs:{}: this hold is not a hold OF THE SLOT the seam filled on \
+                     orchestrator.rs:{}. A hold of anything else leaves that slot free for the \
+                     whole stretch this line appears to cover",
+                    line_at + 1,
+                    at + 1,
+                );
+            }
             assert!(
                 !name.starts_with("mut ")
                     && name != "_"
                     && !name.starts_with('(')
-                    && !name.contains(':')
-                    && indent(line) == indent(lines[*at]),
-                "orchestrator.rs:{}: `{}` is not a plain named binding at the acquisition's own \
-                 indent. `_` drops on the spot, a pattern may bind nothing, and `mut` lets a \
-                 later assignment drop the hold and take another",
-                next + 1,
-                line.trim(),
+                    && !name.contains(':'),
+                "orchestrator.rs:{}: `{}` is not a plain named binding. `_` drops on the spot, a \
+                 pattern may bind nothing, and `mut` lets a later assignment drop the hold and \
+                 take another",
+                line_at + 1,
+                statement.trim(),
             );
-            bindings.push((next, name.to_string()));
+            bindings.push((line_at, name.to_string()));
         }
 
         // The one hold with no acquisition above it to name its slot, so
@@ -4189,10 +4231,7 @@ mod tests {
         )
         .expect("a recorded burn resumes");
         assert_eq!(r.an_tx_hash.as_deref(), Some(hash.as_str()));
-        assert!(
-            lock.as_ref().is_some(),
-            "a resume must own the withdrawal too"
-        );
+        assert!(lock.is_held(), "a resume must own the withdrawal too");
 
         // And a second resume, concurrent with the first, is refused
         // rather than racing it to stage 6.

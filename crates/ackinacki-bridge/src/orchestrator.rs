@@ -115,6 +115,21 @@ pub enum SubmitStatus {
     Confirmed,
 }
 
+/// `LockHold` carries only `PhantomData`, so its `impl Drop` is the only
+/// thing keeping the withdrawal lock borrowed to the end of the scope
+/// rather than to the binding's last use — and the last use of
+/// `_lock_held_to_the_end` is the line that creates it. Remove that
+/// `impl` and `drop(_withdrawal_lock)` anywhere in stages 4-6 compiles
+/// again, silently, with the whole suite green.
+///
+/// Asserted HERE and not next to the `impl` it is about. It sat three
+/// lines below it, and deleting the two together — one selection — was
+/// green: pairwise they held each other, as a unit they held nothing. A
+/// deletion in `idempotency.rs` now fails to compile `orchestrator.rs`,
+/// which is the file that actually spends ~101 minutes relying on the
+/// answer.
+const _: () = idempotency::pins_its_borrow_to_the_end_of_scope::<idempotency::LockHold<'static>>();
+
 /// Full pipeline. `main` handles arg parsing, tracing setup, exit-code
 /// mapping, and JSON vs. human output — this fn just runs the ballet.
 ///
@@ -338,12 +353,15 @@ pub async fn run(
                 p,
                 &mut _withdrawal_lock,
             )?;
-            // From here to the end of this branch, same guarantee as the
-            // burn arm gets from its permit. The resume path never sends,
-            // so there is no permit to carry it — but everything below
-            // still runs for up to ~101 minutes with a concurrent run's
-            // liveness probe asking whether this one is alive.
-            let _held = _withdrawal_lock.hold();
+            // No hold here. One stood on this line saying it covered
+            // "everything below, for up to ~101 minutes" — it did not: a
+            // branch-local hold ends with the branch, and what it
+            // actually covered was the two infallible statements under
+            // it, neither of which can lose a lock. The ~101 minutes it
+            // claimed belong to the rebinding and hold below the `};`,
+            // 190 lines further down. The seam takes its own hold across
+            // its own body, which is the part of this path that has
+            // fallible steps in it.
             record = Some(r);
             (an_tx, bounce)
         } else {
@@ -512,6 +530,15 @@ pub async fn run(
         }
     };
 
+    let _withdrawal_lock = _withdrawal_lock;
+    let _lock_held_to_the_end = _withdrawal_lock.hold();
+    // Both on the two lines directly under the branch, and the placement
+    // is the point: everything between the `};` above and the rebinding
+    // is a stretch where `_withdrawal_lock = LockSlot::empty()` still
+    // compiles, so that stretch is kept empty rather than explained.
+    // `the_settled_lock_is_rebound_before_anything_else_can_run` fails if
+    // a statement is ever put there.
+    //
     // The lock is settled: whichever branch above ran, what this process
     // holds will not change again, and stages 4-6 run for up to ~101
     // minutes on that fact. A second run asking "is anybody executing
@@ -520,21 +547,27 @@ pub async fn run(
     // told the record was left by one that already exited, which the
     // runbook turns into permission to delete it.
     //
-    // ONE statement. An immutable rebinding stood here for two rounds
-    // with an explanation that was measured and found false both times:
-    // it was said to be necessary, then said to buy the clearer E0384
-    // diagnostic. Neither holds — `LockSlot` owns a `File`, so assigning
-    // over it emits an implicit drop that meets the hold's borrow first,
-    // and the error is E0506 either way. A line whose only stated reason
-    // is false is a line to delete, not to re-describe; that block had
-    // overstated the compiler five rounds running.
+    // TWO statements, and they defend different halves of the same line.
+    // The hold opens a borrow that runs to the end of `run`, so a release
+    // BELOW it is E0506. The rebinding makes the binding immutable, so a
+    // release below it is E0384. Round 12 deleted the rebinding on a
+    // measurement taken where a hold was already live — E0506 does fire
+    // there, and swallows E0384 — and generalised it to the whole
+    // function. Above the first hold there is no borrow at all, so E0506
+    // cannot fire, and for the 23 lines that comment then occupied one
+    // assignment released the lock for the rest of the run with 220 + 16
+    // green and clippy at zero. Measured again, both directions, before
+    // this went back.
+    //
+    // What it does NOT buy: an assignment placed ABOVE the rebinding
+    // still compiles. The window is emptied, not abolished — which is why
+    // the guard checks the gap rather than the presence of the line.
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
     // nothing: the branch's `_held` ends with the branch. A dry run
     // holds no lock, so `hold()` yields `None` and the early return is
     // unaffected.
-    let _lock_held_to_the_end = _withdrawal_lock.hold();
 
     // Full `--dry-run`: stop before touching either chain. Returning a
     // stub success record keeps the output path uniform.
@@ -2566,11 +2599,19 @@ mod tests {
         // dead_code, which is the harmless edit; the damaging one was
         // invisible.
         //
-        // Three sites, one per place the lock becomes this run's:
-        //   * after the resume seam fills the out-parameter,
+        // Three holds, and each one covers a stretch with something
+        // fallible in it:
         //   * after the burn branch's reservation, before the `match` so the `Reuse`
         //     arm is covered too,
-        //   * once the branch has closed, above the dry-run return.
+        //   * inside the resume seam, across its own body,
+        //   * once the branch has closed, above the dry-run return — the ~101 minutes
+        //     of stages 4-6.
+        //
+        // A fourth stood at the resume branch's tail and covered two
+        // infallible statements while its comment claimed the stretch the
+        // third one actually covers. Deleted rather than re-worded: a
+        // hold that guards nothing teaches the next reader that holds are
+        // decoration.
         let src = include_str!("orchestrator.rs");
         let production = &src[..src
             .find(concat!("#[cfg(test)]\n", "mod tests {"))
@@ -2650,6 +2691,82 @@ mod tests {
                  convention",
             );
         }
+    }
+
+    #[test]
+    fn the_settled_lock_is_rebound_before_anything_else_can_run() {
+        // The gap between the burn/resume choice closing and the first
+        // statement under it is the one stretch of `run` where the
+        // withdrawal lock has an owner and no defender: the branches'
+        // holds have ended with their branches, and the settled hold has
+        // not been taken yet. One assignment there —
+        // `_withdrawal_lock = LockSlot::empty()` — released it for the
+        // remaining ~101 minutes with 220 + 16 green and clippy at zero.
+        //
+        // The rebinding closes everything BELOW it (E0384). Nothing
+        // closes what is above it, so what has to be true is that there
+        // is nothing above it: no code between the `};` and the
+        // rebinding. That is the property checked here, rather than the
+        // rebinding's mere presence — a rebinding pushed twenty lines
+        // down by a plausible-looking statement is the failure this is
+        // for.
+        let src = include_str!("orchestrator.rs");
+        let production = &src[..src.find(concat!("#[cfg(test)]\n", "mod tests {")).expect(
+            "the production/test cut moved; every guard in this file scans the wrong text until \
+             it is fixed",
+        )];
+        let lines: Vec<&str> = production.lines().collect();
+
+        let choice = lines
+            .iter()
+            .position(|l| l.contains(concat!("let (an_tx_hash, bounce) = ", "if dry_run {")))
+            .expect("`run` no longer opens the burn/resume choice — this guard cannot be verified");
+        let closes = (choice..lines.len())
+            .find(|&n| lines[n] == "    };")
+            .expect("the burn/resume choice is a `let` and closes with `};` at `run`'s indent");
+        let rebinding = lines
+            .iter()
+            .position(|l| l.trim() == concat!("let _withdrawal_lock = _", "withdrawal_lock;"))
+            .expect(
+                "the immutable rebinding is gone, and with it the only thing that refuses an \
+                 assignment above the settled hold: E0506 needs a live borrow and there is none \
+                 there",
+            );
+        assert!(
+            rebinding > closes,
+            "the rebinding has to come AFTER the choice closes; before it, the branches cannot \
+             install anything",
+        );
+
+        let between: Vec<String> = lines[closes + 1..rebinding]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+            .map(|(n, l)| format!("orchestrator.rs:{}: {}", closes + 2 + n, l.trim()))
+            .collect();
+        assert!(
+            between.is_empty(),
+            "every one of these runs while the withdrawal lock is undefended, and an assignment \
+             among them releases it for the rest of the run without a compiler error: {between:?}",
+        );
+
+        // And the hold has to follow the rebinding, not precede it: taken
+        // first, its borrow makes the rebinding a move-out-of-borrowed
+        // error, which is the shape that got the rebinding deleted the
+        // last time.
+        let settled = lines
+            .iter()
+            .position(|l| {
+                l.trim()
+                    .starts_with(concat!("let _lock_held", "_to_the_end = "))
+            })
+            .expect("stages 4-6 no longer take a hold at all");
+        assert_eq!(
+            settled,
+            rebinding + 1,
+            "the settled hold sits on the line directly under the rebinding; anything between \
+             them is back inside the window this guard exists to keep empty",
+        );
     }
 
     /// Line numbers where `variant` is CONSTRUCTED, ignoring the places

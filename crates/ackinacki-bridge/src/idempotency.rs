@@ -1144,8 +1144,18 @@ impl AcquiredLock {
 /// Where a run keeps the withdrawal lock for its whole life.
 ///
 /// Starts empty, is filled once by [`install`](Self::install), and after
-/// that offers only borrows. Nothing can take the lock back out, so the
-/// question "is it still held?" has one answer for the rest of the run.
+/// that offers only borrows: there is no `take`, no `into_inner`, and the
+/// field is private, so no expression READS the lock back out.
+///
+/// It does not follow that the slot cannot be emptied, and the previous
+/// version of this paragraph said it did. `slot = LockSlot::empty()`
+/// assigns over it and drops the lock, and so does a second `install`.
+/// Both are refused wherever a [`LockHold`] is live — the borrow makes
+/// them E0506 and E0502 — which covers the run from each install onward
+/// and covers NOTHING above the first one. What closes that stretch is
+/// the immutable rebinding in `orchestrator::run`, whose whole job is to
+/// turn the same assignment into E0384; the two are complements, not
+/// spares for each other.
 #[derive(Debug)]
 pub struct LockSlot(Option<WithdrawalLock>);
 
@@ -1202,9 +1212,16 @@ impl LockSlot {
 /// It carries no data — `PhantomData` ties the lifetime — and its empty
 /// `Drop` is what keeps the borrow open to the end of the scope rather
 /// than to the value's last use. Dropping the HOLD does not drop the
-/// lock; it only ends the borrow. That is deliberate: the one-line
-/// evasions all stop compiling, and undoing it takes two statements that
-/// nobody writes by accident.
+/// lock; it only ends the borrow.
+///
+/// What that buys, stated no wider than it is: inside the borrow, every
+/// one-line release stops compiling. Outside it, nothing does — and
+/// "undoing this takes two statements nobody writes by accident", which
+/// stood here, was false in the direction that costs money. Deleting the
+/// hold is ONE line, it compiles, and the run then releases the lock on
+/// the next assignment. That is why the holds are pinned by
+/// `every_place_the_lock_is_installed_takes_a_hold_of_it` rather than
+/// left to the compiler.
 ///
 /// The `Drop` is required by
 /// `pins_its_borrow_to_the_end_of_scope::<LockHold>` below, because
@@ -1222,6 +1239,15 @@ impl Drop for LockHold<'_> {
 /// any field that needs dropping, so an assertion built on it passes
 /// while the release it exists to forbid compiles. `T: Drop` is
 /// satisfied only by an explicit impl.
+///
+/// INSTANTIATED IN `orchestrator.rs`, not here, and that placement is the
+/// assertion's whole strength. It stood three lines under
+/// [`LockHold`]'s `impl Drop`, which put both inside one selection:
+/// deleting the pair together compiled, and stages 4-6 went back to
+/// releasing the lock on any line that felt like it. Pairwise each holds
+/// the other; as a unit they held nothing. From another module a single
+/// deletion cannot take both, and the assertion now sits in the file
+/// whose ~101-minute stretch depends on the answer.
 #[expect(
     drop_bounds,
     reason = "the lint's advice is `std::mem::needs_drop`, which is exactly the proxy this \
@@ -1229,12 +1255,7 @@ impl Drop for LockHold<'_> {
               assertion that passes for that reason forbids nothing. `T: Drop` is satisfied only \
               by an explicit impl, which is the property being pinned."
 )]
-const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
-
-/// `LockHold` carries only `PhantomData`, so `impl Drop` is the only
-/// thing keeping its borrow of the withdrawal lock open — remove it and
-/// `drop(_withdrawal_lock)` through stages 4-6 compiles again.
-const _: () = pins_its_borrow_to_the_end_of_scope::<LockHold<'static>>();
+pub(crate) const fn pins_its_borrow_to_the_end_of_scope<T: Drop>() {}
 
 impl<'a> BurnPermit<'a> {
     /// Check that this run still owns `key`, and issue the permission to

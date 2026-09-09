@@ -1936,6 +1936,37 @@ mod tests {
     use super::*;
     use crate::source_guard::production_source;
 
+    /// The check no hand-written fixture can pass: `getCustodians` is
+    /// not a field read off a JSON blob, it is TVM executed against the
+    /// account's own code. If this passes, the offline fixture is a real
+    /// multisig and everything downstream of preflight can be driven
+    /// from it.
+    #[tokio::test]
+    async fn the_offline_fixture_answers_getcustodians_with_the_test_key() {
+        let (account_id, boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let ctx = build_client_context("http://127.0.0.1:1/graphql")
+            .expect("a context needs no reachable endpoint to run TVM locally");
+
+        let custodians = call_get_custodians(&ctx, &format!("0:{account_id}"), &boc)
+            .await
+            .expect("getCustodians runs on the deployed account");
+
+        assert_eq!(
+            custodians.len(),
+            1,
+            "single-custodian is the only shape this CLI can sign for: {custodians:?}",
+        );
+        let owner = custodians[0]
+            .owner_pubkey_hex
+            .as_deref()
+            .expect("a pubkey-owned custodian");
+        assert!(
+            pubkeys_equal(PAIR_PUBLIC, owner),
+            "the fixture has to be owned by the key the tests sign with, or every run built on it \
+             fails at the owner match instead of where the test is aiming: {owner}",
+        );
+    }
+
     #[test]
     fn normalize_accepts_0x_prefix() {
         assert_eq!(

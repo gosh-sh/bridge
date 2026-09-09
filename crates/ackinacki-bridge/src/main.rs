@@ -37,6 +37,8 @@ mod resurrect;
 #[cfg(test)]
 mod source_guard;
 #[cfg(test)]
+mod test_chain;
+#[cfg(test)]
 mod test_keys;
 
 use std::{io::IsTerminal, process::ExitCode as ProcExitCode};

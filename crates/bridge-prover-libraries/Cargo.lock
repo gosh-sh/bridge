@@ -44,6 +44,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "tvm_block 3.0.5 (git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.5.an)",
  "tvm_client",
+ "tvm_types 3.0.5 (git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.5.an)",
 ]
 
 [[package]]

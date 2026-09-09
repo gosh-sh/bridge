@@ -353,15 +353,20 @@ pub async fn run(
                 p,
                 &mut _withdrawal_lock,
             )?;
-            // No hold here. One stood on this line saying it covered
-            // "everything below, for up to ~101 minutes" — it did not: a
-            // branch-local hold ends with the branch, and what it
-            // actually covered was the two infallible statements under
-            // it, neither of which can lose a lock. The ~101 minutes it
-            // claimed belong to the rebinding and hold below the `};`,
-            // 190 lines further down. The seam takes its own hold across
-            // its own body, which is the part of this path that has
-            // fallible steps in it.
+            let _held = _withdrawal_lock.hold();
+            // On the line under the call, not under the paragraph. What
+            // this covers is the rest of the branch, and what "covers"
+            // means is that no statement in it can release the lock: the
+            // borrow makes an assignment E0506.
+            //
+            // Round 13 deleted this hold, on the argument that the two
+            // statements below it are infallible and so nothing here can
+            // exit holding nothing. That is the wrong question. A hold
+            // does not defend against the statements that ARE here; it
+            // makes the ones that could be ADDED here not compile.
+            // Without it, `_withdrawal_lock = LockSlot::empty()` on the
+            // next line compiled, and 221 + 16 stayed green — measured,
+            // twice, before it went back.
             record = Some(r);
             (an_tx, bounce)
         } else {
@@ -444,13 +449,21 @@ pub async fn run(
             let (r, decision, lock) =
                 reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
             _withdrawal_lock.install(lock);
+            let _held = _withdrawal_lock.hold();
+            // On the very next line, and the seven-line paragraph that
+            // used to sit between them is why: an assignment placed in
+            // that gap released the lock with 221 + 16 green. Between an
+            // install and its hold the lock is this run's and nothing
+            // refuses to let go of it, so the gap is kept at zero rather
+            // than explained. `every_place_the_lock_is_installed_takes_
+            // a_hold_of_it` fails if a statement is ever put there.
+            //
             // Before the match, so BOTH arms are covered. `Reuse` issues
             // no permit — it is the "another run broadcast while this one
             // preflighted, resume at capture" case, which is exactly when
             // two runs are working the same identity — and `Send`'s
             // permit borrow ends with its arm, leaving the tail of this
             // branch on convention alone.
-            let _held = _withdrawal_lock.hold();
             record = Some(r);
 
             match decision {
@@ -547,21 +560,16 @@ pub async fn run(
     // told the record was left by one that already exited, which the
     // runbook turns into permission to delete it.
     //
-    // TWO statements, and they defend different halves of the same line.
-    // The hold opens a borrow that runs to the end of `run`, so a release
-    // BELOW it is E0506. The rebinding makes the binding immutable, so a
-    // release below it is E0384. Round 12 deleted the rebinding on a
-    // measurement taken where a hold was already live — E0506 does fire
-    // there, and swallows E0384 — and generalised it to the whole
-    // function. Above the first hold there is no borrow at all, so E0506
-    // cannot fire, and for the 23 lines that comment then occupied one
-    // assignment released the lock for the rest of the run with 220 + 16
-    // green and clippy at zero. Measured again, both directions, before
-    // this went back.
-    //
-    // What it does NOT buy: an assignment placed ABOVE the rebinding
-    // still compiles. The window is emptied, not abolished — which is why
-    // the guard checks the gap rather than the presence of the line.
+    // What the rebinding is, measured rather than argued: INSURANCE
+    // AGAINST THE HOLD BEING DELETED, and insurance against assignment
+    // only. While the hold on the next line is there, every release
+    // below it is already E0506 and the rebinding adds nothing; delete
+    // the hold — one line, which is how three holds have been lost so
+    // far — and E0384 is what is left. It does nothing about a release
+    // ABOVE it, and nothing about any evasion that is not an assignment.
+    // Round 12 deleted it after measuring E0506 in a position where a
+    // hold was live, which is the one position where it cannot be seen
+    // to do anything.
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
@@ -1095,12 +1103,15 @@ fn resume_recorded_burn(
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
         .map_err(|e| resumed_refusal(e, observed))?;
     hold.install(lock);
+    let _held = hold.hold();
     // Held for the rest of THIS function too, not only by the caller
     // once it returns. Everything below — the restoring write, the
     // second reservation — runs on an identity whose burn is already on
     // the wire, and a run that lost the lock here would reach stages 4-6
     // invisible to a concurrent run's liveness probe.
-    let _held = hold.hold();
+    //
+    // Adjacent to the install, like the other two: a paragraph between
+    // them is a stretch where an assignment compiles.
     match decision {
         // The hash comes from the RESERVATION, not from `observed`. The
         // two are read minutes apart — the whole of preflight — and the
@@ -2646,11 +2657,11 @@ mod tests {
         // clippy catches that one first — this is the second line of
         // defence, not the first.)
         //
-        // So: every install is followed by a hold, every hold is real
-        // code rather than prose, and the two holds covering windows with
-        // no install above them are named. That last list is the part
-        // that rots; it is checked by ANCHOR TEXT below, so a rename
-        // fails here rather than silently emptying the list.
+        // So: every acquisition is followed IMMEDIATELY by a hold, every
+        // hold is real code rather than prose, and the two holds covering
+        // windows with no acquisition above them are named. That last
+        // list is the part that rots; it is checked by ANCHOR TEXT below,
+        // so a rename fails here rather than silently emptying the list.
         let is_code = |l: &&str| !l.trim_start().starts_with("//");
         let holds: Vec<usize> = lines
             .iter()
@@ -2659,21 +2670,47 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        let installs: Vec<usize> = lines
+        // Every line after which the lock is this run's: the two
+        // `.install(` calls, and the statement that hands the seam the
+        // slot it fills — the resume branch acquires through the seam and
+        // has no `.install(` of its own, which is how its hold came to be
+        // deleted as a passenger.
+        let mut acquisitions: Vec<usize> = lines
             .iter()
             .enumerate()
             .filter(|(_, l)| is_code(l) && l.contains(concat!(".install", "(")))
             .map(|(n, _)| n)
             .collect();
-        for at in &installs {
-            // Twelve lines: each hold carries the paragraph explaining
-            // why it is there.
+        let seam_call = lines
+            .iter()
+            .position(|l| is_code(l) && l.contains(concat!("resume_recorded", "_burn(")))
+            .expect("the resume branch no longer goes through the seam");
+        acquisitions.push(
+            (seam_call..lines.len())
+                .find(|&n| lines[n].trim() == ")?;")
+                .expect("the seam is called with `?` and its argument list closes on its own line"),
+        );
+        acquisitions.sort_unstable();
+
+        // ADJACENT, not "within twelve lines". Twelve was room for the
+        // paragraph explaining each hold, and the paragraph is exactly
+        // what an assignment hides in: between an install and its hold
+        // the lock is this run's and nothing refuses to let go of it.
+        // Both gaps were measured — a release in either left 221 + 16
+        // green and clippy clean — so the prose moved below the hold and
+        // the tolerance went to zero.
+        for at in &acquisitions {
+            let next = (at + 1..lines.len())
+                .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
+                .expect("something follows the acquisition");
             assert!(
-                holds.iter().any(|&h| h > *at && h - *at <= 12),
-                "orchestrator.rs:{}: the lock is installed here and nothing takes a hold of it \
-                 within twelve lines, so everything after it runs unprotected — and the compiler \
-                 will not say which stretch",
+                holds.contains(&next),
+                "orchestrator.rs:{}: the lock becomes this run's here and the next statement is \
+                 not a hold — orchestrator.rs:{}: {}. Everything between the two compiles with \
+                 the lock released and nothing to say so",
                 at + 1,
+                next + 1,
+                lines[next].trim(),
             );
         }
 
@@ -2730,22 +2767,32 @@ mod tests {
             .iter()
             .position(|l| l.contains(concat!("let (an_tx_hash, bounce) = ", "if dry_run {")))
             .expect("`run` no longer opens the burn/resume choice — this guard cannot be verified");
-        let closes = (choice..lines.len())
-            .find(|&n| lines[n] == "    };")
-            .expect("the burn/resume choice is a `let` and closes with `};` at `run`'s indent");
         let rebinding = lines
             .iter()
             .position(|l| l.trim() == concat!("let _withdrawal_lock = _", "withdrawal_lock;"))
             .expect(
-                "the immutable rebinding is gone, and with it the only thing that refuses an \
-                 assignment above the settled hold: E0506 needs a live borrow and there is none \
-                 there",
+                "the immutable rebinding is gone, and with it the insurance against the settled \
+                 hold below it being deleted: E0506 needs a live borrow, and deleting the hold is \
+                 what removes it",
             );
-        assert!(
-            rebinding > closes,
-            "the rebinding has to come AFTER the choice closes; before it, the branches cannot \
-             install anything",
-        );
+        // Searched only as far as the rebinding, and reported as a brace
+        // problem when it is one. Unbounded, `find` walked past a
+        // reshaped `};` to the next exact match — 200 lines further down
+        // — and the run then failed on `rebinding > closes` with a
+        // sentence about the rebinding, sending the reader to the one
+        // thing that had not been touched.
+        let closes = (choice..rebinding)
+            .find(|&n| lines[n] == "    };")
+            .unwrap_or_else(|| {
+                panic!(
+                    "no `    }};` between orchestrator.rs:{} and the rebinding at \
+                     orchestrator.rs:{}. The burn/resume choice still has to close somewhere in \
+                     there; if its brace was reshaped or re-indented, this guard cannot tell \
+                     where the window begins",
+                    choice + 1,
+                    rebinding + 1,
+                )
+            });
 
         let between: Vec<String> = lines[closes + 1..rebinding]
             .iter()

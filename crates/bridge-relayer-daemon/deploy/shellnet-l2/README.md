@@ -139,11 +139,42 @@ sudo docker stats --no-stream "$(sudo docker compose ps -q relayer)"
 sudo docker compose run --rm preflight
 ```
 
-`status.sh` combines Docker inspection, Foundry `cast`, shellnet GraphQL and
-compact `jq` views of both state files. Before the next 16,384-block boundary,
-`NotYetAvailable` / `block source still has no data` is expected. Alert on
-`hard aborting`, `BridgeReverted`, startup drift, SRS/VK drift, pending nonce,
-or unequal local/on-chain cursors after a receipt.
+`status.sh` combines Docker inspection, Foundry `cast`, shellnet GraphQL,
+the `relayer_gql_*` counters and compact `jq` views of both state files.
+Before the next 16,384-block boundary, `NotYetAvailable` / `block source still
+has no data` is expected. Alert on `hard aborting`, `BridgeReverted`, startup
+drift, SRS/VK drift, pending nonce, or unequal local/on-chain cursors after a
+receipt.
+
+## GraphQL failover and metrics
+
+`BRIDGE_GQL_ENDPOINT` in the runtime env is the primary Acki Nacki GraphQL
+endpoint; `BRIDGE_GQL_FAILOVER_ENDPOINTS` is an optional comma-separated list
+of further endpoints (for example direct Block Manager URLs). Every request
+starts at the primary, retries it three times one second apart, then moves
+down the list and cycles until one attempt succeeds. There is no stickiness
+and no give-up: a request that never succeeds blocks the daemon tick, and the
+metrics below are how that is noticed. Any failure counts — transport error,
+timeout, non-2xx status, GraphQL `errors`, or a `null` block. Tuning knobs and
+their defaults are listed in `runtime.env.example`. `preflight.sh` (also run
+by the container entrypoint on every start) smoke-tests the primary and every
+failover endpoint; it fails the start only when none of them answers, so an
+outage of one Block Manager cannot keep the relayer from restarting.
+
+The `relayer` service exposes Prometheus text metrics at
+`http://${RELAYER_METRICS_LISTEN}/metrics` (`.env`, default
+`127.0.0.1:9464`; set the host's monitoring-network address to let vmagent or
+Prometheus scrape it). Metric names:
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `relayer_gql_requests_total` | `endpoint`, `op` | GraphQL request attempts |
+| `relayer_gql_errors_total` | `endpoint`, `op`, `kind` | Failed attempts; `kind` is `transport`, `timeout`, `http_status`, `decode`, `graphql_error` or `null_data` |
+| `relayer_gql_failovers_total` | `from`, `to` | Switches to the next endpoint |
+| `relayer_gql_full_rounds_total` | `op` | A request went through every endpoint without success |
+| `relayer_gql_request_duration_seconds` | `endpoint`, `op`, `outcome` | Attempt latency histogram |
+
+Alert example for an unhealthy source: `sum(rate(relayer_gql_errors_total[1m])) * 60 > 10`.
 
 After a planned host reboot, the service returns automatically unless an
 operator stopped it explicitly. Confirm recovery with `docker compose ps`,

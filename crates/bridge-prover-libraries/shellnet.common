@@ -27,6 +27,9 @@ RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
+# Optional for `relayer daemon-live`: comma-separated failover GraphQL URLs
+# tried after BRIDGE_GQL_ENDPOINT exhausts its retries (see TECHNICAL_README).
+# BRIDGE_GQL_FAILOVER_ENDPOINTS=
 BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
 
 # --- local dirs ---------------------------------------------------------------

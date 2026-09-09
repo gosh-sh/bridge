@@ -2763,15 +2763,40 @@ mod tests {
         // this safe", which the defective RUNBOOK copy says verbatim. A
         // link is not an acknowledgement, and neither is ruling out the
         // wrong criterion.
-        const HEDGES: [&str; 8] = [
-            "three",
+        // "three" was a BARE NUMERAL and exempted any clause containing
+        // it: "three deltas", "three independent checks", "three
+        // wrappers". The hedge that matters is a reference to the
+        // three-verdict gate, so say that instead. (Markdown emphasis is
+        // stripped by `clauses`, which is why "one of three" matches
+        // "one of **three** things".)
+        // Every entry is a phrase that marks the permission as
+        // CONDITIONAL, in the clause that grants it. "three" alone was
+        // not: a bare numeral exempted "three deltas", "three
+        // independent checks", "three wrappers" — any clause that
+        // happened to count something.
+        //
+        // Markdown emphasis is stripped by `clauses`, which is why "one
+        // of three" matches "one of **three** things".
+        const HEDGES: [&str; 15] = [
+            // References to the three-verdict gate itself.
+            "one of three",
+            "three-verdict",
+            "three verdicts",
+            "three liveness",
+            "three cases",
+            // Conditionals.
+            "only if",
+            "only then",
+            "only in the second case",
+            "only sometimes",
+            // Prohibitions.
+            "do not delete",
+            "not to delete",
+            "delete nothing",
+            // Statements that the verdict may not exist.
             "could not be determined",
             "does not always",
-            "only sometimes",
             "never does",
-            "do not delete",
-            "delete nothing",
-            "can be missing",
         ];
         // Sentences that hand somebody permission. The state-file
         // spelling is here because the documents call the same object two
@@ -2782,13 +2807,20 @@ mod tests {
         // changelog entry that ever explained this defect. `Failed`
         // records are also excluded on purpose: they carry a hash by
         // construction, so pruning one is not this rule's business.
-        const AUTHORISES: [&str; 7] = [
-            "delete the record and re-run",
-            "delete the record, and re-run",
-            "then delete the record",
-            "delete the state file and re-run",
-            "then delete the state file",
-            "conditions for deleting it",
+        // The VERB and its object, not seven spellings of one sentence.
+        // The old list was a transcript of the four copies that had been
+        // found by hand, so every form nobody had written yet was
+        // invisible — "delete that record now", "remove the record",
+        // "prune the state file", and the two the messages themselves
+        // use.
+        const AUTHORISES: [&str; 8] = [
+            "delete the record",
+            "delete that record",
+            "delete the state file",
+            "delete that state file",
+            "remove the record",
+            "prune the record",
+            "prune the state file",
             "safe to delete",
         ];
 
@@ -2852,8 +2884,14 @@ mod tests {
                 // documents, so every phrase this looks for straddles a
                 // line break somewhere — the first version of this guard
                 // matched nothing at all and looked like a pass.
+                // Emphasis stripped here too. Without it "one of
+                // **three** things" — the canonical acknowledgement, in
+                // both instructional documents — matched no hedge, and
+                // the block that carries the gate was reported as
+                // promising an answer it cannot give.
                 let lower = block
                     .to_ascii_lowercase()
+                    .replace(['*', '`', '_'], "")
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -2887,21 +2925,22 @@ mod tests {
                     ));
                 }
 
-                // (b) A sentence authorises the deletion. SENTENCE-scoped,
-                //     not block-scoped: a "do not delete" three bullets
-                //     away in an adjacent branch of the same procedure
-                //     satisfied a block-wide search while the sentence in
-                //     front of the reader said the opposite.
-                for sentence in lower.split(". ") {
-                    if !AUTHORISES.iter().any(|p| sentence.contains(p)) {
-                        continue;
-                    }
-                    if !HEDGES.iter().any(|h| sentence.contains(h)) {
-                        offenders.push(format!(
-                            "{name} block {i} (authorises a deletion): {}",
-                            sentence.trim(),
-                        ));
-                    }
+                // (b) A clause authorises the deletion. Through the
+                //     SHARED scanner, which is the other half of this
+                //     rule: the refusal messages are held to it too, and
+                //     for two rounds only the documents were. Its
+                //     splitting is the fix for the copy that lived here —
+                //     `split(". ")` handed a dropped full stop or a line
+                //     break an exemption, by gluing an order to the
+                //     prohibition after it and finding the prohibition.
+                for clause in crate::source_guard::sentences_authorising_a_deletion(
+                    block,
+                    &AUTHORISES,
+                    &HEDGES,
+                ) {
+                    offenders.push(format!(
+                        "{name} block {i} (authorises a deletion): {clause}"
+                    ));
                 }
             }
         }

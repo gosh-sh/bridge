@@ -715,8 +715,9 @@ Two conditions, both required, before deleting one:
    reconciliation is clean" lands on a deletion that the third line never
    authorised.
 
-With step 1 clean **and** the refusal on the middle line of the table
-above, delete the record and re-run; on either of the other two lines,
+With step 1 clean **and** the refusal on the middle line of the
+three-verdict table above, delete the record and re-run; on either of the
+other two lines,
 **do not delete** — including "could not be determined", which is what
 every run gets on a filesystem without `flock`. With a burn found in step 1, do
 not delete either: write its hash into `an_tx_hash`, set `status` to

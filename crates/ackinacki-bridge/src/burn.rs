@@ -412,12 +412,15 @@ fn interpret_processed(
             source: None,
         });
     };
-    if aborted || exit_code.is_some_and(|c| c != 0) {
+    // `Some(true)`, not truthiness: `None` means the field was absent,
+    // and the only shapes that reach here with it absent are the ones a
+    // non-zero exit code already condemns.
+    if aborted == Some(true) || exit_code.is_some_and(|c| c != 0) {
         return Err(CliError::BurnOutcomeUnknown {
             reason: format!(
-                "multisig sendTransaction aborted (exit_code={exit_code:?}, aborted={aborted}) — \
-                 the multisig itself rejected the call before forwarding to USDCBridge; reconcile \
-                 via GraphQL"
+                "multisig sendTransaction aborted (exit_code={exit_code:?}, aborted={aborted:?}) \
+                 — the multisig itself rejected the call before forwarding to USDCBridge; \
+                 reconcile via GraphQL"
             ),
             source: None,
         });
@@ -597,7 +600,7 @@ fn extract_tx_id(tx: &Value) -> CliResult<String> {
 ///
 /// This is the module discipline stated at the top of the file: we do
 /// not distinguish "not sent" from "sent, waiting" by guessing.
-fn classify_tx(tx: &Value) -> Option<(bool, Option<i32>)> {
+fn classify_tx(tx: &Value) -> Option<(Option<bool>, Option<i32>)> {
     // `null` is a field that is not there. Anything else that is not a
     // bool is a shape this build does not understand, and reading it as
     // `false` is the silent failure.
@@ -619,13 +622,29 @@ fn classify_tx(tx: &Value) -> Option<(bool, Option<i32>)> {
         Some(v) => Some(v.as_i64().and_then(|c| i32::try_from(c).ok())?),
     };
 
-    // Neither field present. `process_message` returns the whole
-    // transaction, so this is a shape change or a filtered response —
-    // not a normal success.
-    if aborted.is_none() && exit_code.is_none() {
-        return None;
+    match (aborted, exit_code) {
+        // Neither field present. `process_message` returns the whole
+        // transaction, so this is a shape change or a filtered response —
+        // not a normal success.
+        (None, None) => None,
+        // `aborted` absent, and the only other evidence says the COMPUTE
+        // phase was fine. That is not evidence the transaction succeeded:
+        // `aborted` is the field that covers the action phase, so its
+        // absence beside a zero exit code says exactly "the compute phase
+        // worked and nothing here says the message went out".
+        //
+        // This used to answer `Some((false, Some(0)))` — the one guess in
+        // a function whose whole rustdoc is about refusing to guess — and
+        // the caller wrote `Status::Burned` plus a hash on the strength
+        // of it. From then on no run re-burns without the operator
+        // hand-editing the state file, so a transaction that forwarded
+        // nothing strands the withdrawal instead of being retried.
+        (None, Some(0)) => None,
+        // Either `aborted` is there and says something, or the exit code
+        // is non-zero and the caller refuses on that alone — in which
+        // case `aborted` staying `None` is what the message should print.
+        (a, c) => Some((a, c)),
     }
-    Some((aborted.unwrap_or(false), exit_code))
 }
 
 #[cfg(test)]
@@ -703,13 +722,13 @@ mod tests {
     #[test]
     fn classify_tx_success() {
         let tx = json!({ "aborted": false, "compute": { "exit_code": 0 } });
-        assert_eq!(classify_tx(&tx), Some((false, Some(0))));
+        assert_eq!(classify_tx(&tx), Some((Some(false), Some(0))));
     }
 
     #[test]
     fn classify_tx_aborted() {
         let tx = json!({ "aborted": true, "compute": { "exit_code": 108 } });
-        assert_eq!(classify_tx(&tx), Some((true, Some(108))));
+        assert_eq!(classify_tx(&tx), Some((Some(true), Some(108))));
     }
 
     #[test]
@@ -726,6 +745,14 @@ mod tests {
             json!({ "aborted": 0 }),
             // Would fold to 0 under `as i32`, i.e. to "success".
             json!({ "compute": { "exit_code": 4294967296i64 } }),
+            // The fifth form, and the one this function used to guess
+            // at: no `aborted`, a compute phase that says 0. `aborted`
+            // covers the ACTION phase, so its absence here is the
+            // question, not the answer — and the answer this returned was
+            // `Status::Burned` plus a hash, which no later run re-burns
+            // past.
+            json!({ "exit_code": 0 }),
+            json!({ "compute": { "exit_code": 0 } }),
         ] {
             assert_eq!(classify_tx(&tx), None, "unclassifiable: {tx}");
         }
@@ -733,21 +760,28 @@ mod tests {
 
     #[test]
     fn classify_tx_reads_one_field_when_that_is_all_there_is() {
-        // Refusing must not become refusing everything: a transaction that
-        // carries either field is classifiable from it.
-        assert_eq!(classify_tx(&json!({ "aborted": true })), Some((true, None)));
+        // Refusing must not become refusing everything: a transaction
+        // that carries `aborted` is classifiable from it, and one that
+        // carries a FAILING exit code is condemned by that alone —
+        // `aborted` stays `None` there and the message says so rather
+        // than printing a value nobody read.
         assert_eq!(
-            classify_tx(&json!({ "aborted": false })),
-            Some((false, None))
+            classify_tx(&json!({ "aborted": true })),
+            Some((Some(true), None))
         );
         assert_eq!(
-            classify_tx(&json!({ "exit_code": 0 })),
-            Some((false, Some(0)))
+            classify_tx(&json!({ "aborted": false })),
+            Some((Some(false), None))
         );
         assert_eq!(
             classify_tx(&json!({ "exit_code": 108 })),
-            Some((false, Some(108)))
+            Some((None, Some(108)))
         );
+        // And a zero exit code with no `aborted` is NOT in this list. It
+        // is in the refusing one above, which is the whole of this
+        // round's change: the only shape where guessing `aborted = false`
+        // turned into a success.
+        assert_eq!(classify_tx(&json!({ "exit_code": 0 })), None);
     }
 
     #[test]
@@ -1245,6 +1279,43 @@ mod tests {
                 "{label}: must name the revert: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn a_compute_phase_that_worked_is_not_a_transaction_that_succeeded() {
+        // The half `classify_tx`'s unit tests cannot show: what the
+        // caller does with the fifth shape. `aborted` covers the ACTION
+        // phase, so a transaction carrying only `exit_code: 0` says the
+        // compute phase ran and says nothing about whether the message
+        // was forwarded.
+        //
+        // Guessing `aborted = false` there made this a SUCCESS, and a
+        // success writes `Status::Burned` plus a hash — after which no
+        // run re-burns without the operator hand-editing the state file.
+        // A transaction that forwarded nothing stranded the withdrawal
+        // rather than being retried.
+        for tx in [
+            json!({ "id": "0xab", "exit_code": 0 }),
+            json!({ "id": "0xab", "compute": { "exit_code": 0 } }),
+        ] {
+            let err = interpret_processed(&tx, &seam_from(), 1, true)
+                .expect_err("a working compute phase is not a forwarded message");
+            assert!(
+                matches!(err, CliError::BurnOutcomeUnknown { .. }),
+                "the burn is on the wire whatever this shape means, so the refusal has to be exit \
+                 10: {err:?}",
+            );
+        }
+
+        // And the shape that DOES carry the answer still succeeds, or
+        // this fix would just be a refusal of everything.
+        interpret_processed(
+            &json!({ "id": "0xab", "aborted": false, "compute": { "exit_code": 0 } }),
+            &seam_from(),
+            1,
+            true,
+        )
+        .expect("`aborted: false` is the evidence, and it is present here");
     }
 
     #[test]

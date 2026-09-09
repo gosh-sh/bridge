@@ -1155,8 +1155,9 @@ assigns it when the release is tagged.
   therefore names the record and splits by case: another process holds
   the lock (wait, delete nothing); this run held one the kernel no longer
   knows about, which is what a cleanup sweeping `*.lock` produces (stop
-  that, then delete the record and re-run); or this run never took one
-  (internal defect, delete the record, re-run, and please report it).
+  that, and only then delete the record and re-run); or this run never
+  took one — one of three cases, so delete the record, re-run, and please
+  report it.
 
   On a filesystem that cannot `flock` at all — a supported deployment —
   there is no lock to check and the run proceeds on the record's own
@@ -1202,8 +1203,8 @@ assigns it when the release is tagged.
   three things about whether another run holds the withdrawal — it holds
   it RIGHT NOW, nobody holds it, or the question could not be answered
   (`flock` unavailable, which is every run on an NFS or overlay mount).
-  The procedure listed the first two and said "only in the second case…
-  delete the record", so an operator on a lockless mount reading by
+  The procedure listed the first two and said only in the second case
+  delete the record, so an operator on a lockless mount reading by
   elimination — not the first case, reconciliation clean — deleted a
   record while another run may have been inside `burn::send`. That is the
   second burn the whole refusal exists to prevent.

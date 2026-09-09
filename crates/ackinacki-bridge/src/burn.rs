@@ -1079,26 +1079,44 @@ mod tests {
         // `format!("cannot read: {e}")`, which renders a `std::io::Error`
         // and carries nothing. A guard that fires on safe code gets
         // relaxed, and then it guards nothing.
-        let src = include_str!("burn.rs");
+        // PRODUCTION, not the whole file, and the markers built from
+        // pieces. Both were missing and both mattered.
+        //
+        // Scanning the whole file let two of the three markers match the
+        // guard's OWN array literal, so they were true whatever the code
+        // said. Measured: marker 1 ("is no longer the one verified") had
+        // not been in production for some time — the sentence it anchors
+        // was rewritten — and marker 3 survived changing `reconcile via`
+        // to `reconcile through` at the call site, with 222 + 16 green. A
+        // guard that exists to notice a reworded message failed to notice
+        // one, twice.
+        let production = crate::source_guard::production_source("burn.rs", include_str!("burn.rs"));
 
         // Each SDK map, identified by the operator-visible sentence that
         // is unique to it. If a call site is reworded the guard fails
         // rather than silently stopping — a renamed message is exactly
         // when somebody is editing this code.
+        //
+        // Anchored on the WRAPPED form where rustfmt wraps it: these are
+        // `format!` strings under `format_strings = true` at 100 columns,
+        // so the sentence a reader sees is not a substring of the source
+        // and a flat needle matches nothing.
         for (what, marker) in [
             (
                 "compose: encode_message signing",
-                "is no longer the one verified",
+                concat!("SDK refused to encode ", "or sign the"),
             ),
             (
                 "compose: body encoding",
-                "check the \\\n             USDCBridge ABI",
+                concat!("check the \\\n             USDCBridge ", "ABI"),
             ),
-            ("send: process_message", "reconcile via \\"),
+            ("send: process_message", concat!("reconcile ", "via \\")),
         ] {
             assert!(
-                src.contains(marker),
-                "{what}: the message this guard anchors on is gone — reword the guard with it",
+                production.contains(marker),
+                "{what}: the message this guard anchors on is gone from production — reword the \
+                 guard with it. A marker that matches this array instead of the code is how two \
+                 of these came to be unfalsifiable.",
             );
         }
 
@@ -1107,7 +1125,7 @@ mod tests {
         // Comment lines excluded: this test's own prose names the call it
         // is guarding, and counted itself as a fourth site. Same
         // self-matching trap the reservation guard hit.
-        let sites = src
+        let sites = production
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .filter(|l| l.contains(redacted))

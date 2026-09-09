@@ -1101,22 +1101,64 @@ mod tests {
         // `format!` strings under `format_strings = true` at 100 columns,
         // so the sentence a reader sees is not a substring of the source
         // and a flat needle matches nothing.
-        for (what, marker) in [
+        // Each marker carries the VARIANT its message is attached to.
+        // Anchoring the sentence alone held the words and let go of the
+        // exit code: one token at the `send` map — `BurnOutcomeUnknown`
+        // to `Preflight`, whose fields are identical — turned exit 10
+        // into exit 2 on the path that has just called `process_message`,
+        // without touching a letter of the text this guard was reading.
+        // The refusal then claims nothing was broadcast while going on to
+        // ask the operator to reconcile on GraphQL. Measured: 222 + 16
+        // green.
+        //
+        // `Preflight` is right for the two `compose` maps — neither has
+        // sent anything — and wrong for the third, which runs after the
+        // SDK has been handed the message.
+        for (what, marker, variant) in [
             (
                 "compose: encode_message signing",
                 concat!("SDK refused to encode ", "or sign the"),
+                concat!("CliError::", "Preflight"),
             ),
             (
                 "compose: body encoding",
                 concat!("check the \\\n             USDCBridge ", "ABI"),
+                concat!("CliError::", "Preflight"),
             ),
-            ("send: process_message", concat!("reconcile ", "via \\")),
+            (
+                "send: process_message",
+                concat!("reconcile ", "via \\"),
+                concat!("CliError::", "BurnOutcomeUnknown"),
+            ),
         ] {
-            assert!(
-                production.contains(marker),
-                "{what}: the message this guard anchors on is gone from production — reword the \
-                 guard with it. A marker that matches this array instead of the code is how two \
-                 of these came to be unfalsifiable.",
+            let at = production.find(marker).unwrap_or_else(|| {
+                panic!(
+                    "{what}: the message this guard anchors on is gone from production — reword \
+                     the guard with it. A marker that matches this array instead of the code is \
+                     how two of these came to be unfalsifiable."
+                )
+            });
+            // Backwards to the constructor this message is inside. The
+            // nearest `CliError::` above the sentence is the one it is a
+            // field of; there is no other `CliError::` between a `map_err`
+            // opening and its `reason`.
+            let opened = production[..at]
+                .rfind(concat!("CliError", "::"))
+                .unwrap_or_else(|| {
+                    panic!("{what}: this message is no longer inside a `CliError` constructor")
+                });
+            let built = production[opened..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('{')
+                .trim();
+            assert_eq!(
+                built, variant,
+                "{what}: this message is attached to `{built}`, not `{variant}`. The words and \
+                 the exit code have to agree — a message that says reconcile on chain, under a \
+                 variant that says nothing was broadcast, is read by a retry wrapper as a clean \
+                 state and fires a second burn.",
             );
         }
 

@@ -28,36 +28,70 @@
 /// matches the first such attribute anywhere in the file, and
 /// `idempotency.rs` carries one on a method.
 ///
-/// The declaration's VISIBILITY is not part of the anchor. `preflight`'s
-/// test module is `pub(crate)`, because it owns the only answer set that
-/// gets `check_bridge_deploy` to `Ok` and `test_chain` builds a fake
-/// world out of it; a second copy of that selector table is a second
-/// thing to drift. Matching `mod tests {` at the end of the line rather
-/// than the whole line keeps the boundary exactly as narrow — a
-/// `#[cfg(test)]` on a function is still followed by `fn`, not by a
-/// module declaration — and does not ask anyone to spell a module
-/// private to keep a guard working.
+/// WHOLE LINES, both of them, and that is the whole of the matching
+/// rule. Two comments among the imports —
+///
+/// ```text
+/// // #[cfg(test)]
+/// // mod tests {
+/// ```
+///
+/// — were an anchor when the attribute was looked for as a substring,
+/// and cut every guard's view of the file down to its first forty lines.
+/// What that costs is silent and one-directional: a guard that REQUIRES a
+/// phrase fails loudly, so the file always has one of those to notice it,
+/// but a guard that FORBIDS one passes on a scan of nothing. Three of
+/// `orchestrator.rs`'s guards are of the forbidding kind.
+///
+/// The declaration's VISIBILITY is not part of it. `preflight`'s test
+/// module is `pub(crate)`, because it owns the only answer set that gets
+/// `check_bridge_deploy` to `Ok` and `test_chain` builds a fake world out
+/// of it; a second copy of that selector table is a second thing to
+/// drift. So the prefix is stripped and the rest of the line has to be
+/// the declaration exactly — which is narrower than the "ends with"
+/// match that replaced the substring one, and does not ask anyone to
+/// spell a module private to keep a guard working.
+///
+/// ONE anchor per file, and a second is an ambiguity rather than a first
+/// match. That is the plausibility check on the cut: every way this has
+/// gone wrong so far has been a second thing in the file that looked like
+/// the anchor, and taking the first match is what made the wrong one win
+/// silently.
 pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
+    const ATTRIBUTE: &str = concat!("#[cfg", "(test)]");
+    const DECLARATION: &str = concat!("mod ", "tests {");
+
+    let mut anchors = Vec::new();
     let mut at = 0;
-    let cut = loop {
-        let Some(found) = src[at..].find(concat!("#[cfg(test)]", "\n")) else {
-            panic!(
-                "{file}: no `#[cfg(test)]` followed by a `mod tests {{` declaration to cut at. \
-                 Every guard that scans this file is now reading text it was never meant to see — \
-                 fix the anchor rather than the guards"
-            );
-        };
-        let start = at + found;
-        let next = src[start..]
-            .lines()
-            .nth(1)
-            .expect("an attribute is never the last line of a file");
-        if next.trim_end().ends_with(concat!("mod ", "tests {")) {
-            break start;
+    for line in src.lines() {
+        let start = at;
+        at += line.len() + 1;
+        if line != ATTRIBUTE {
+            continue;
         }
-        at = start + 1;
-    };
-    &src[..cut]
+        let next = src[at..].lines().next().unwrap_or("");
+        let declaration = next
+            .strip_prefix("pub(crate) ")
+            .or_else(|| next.strip_prefix("pub "))
+            .unwrap_or(next);
+        if declaration == DECLARATION {
+            anchors.push(start);
+        }
+    }
+    match anchors[..] {
+        [cut] => &src[..cut],
+        [] => panic!(
+            "{file}: no `{ATTRIBUTE}` line followed by a `{DECLARATION}` line to cut at. Every \
+             guard that scans this file is now reading text it was never meant to see — fix the \
+             anchor rather than the guards"
+        ),
+        _ => panic!(
+            "{file}: {} test-module anchors, and the cut would be at the first. Whichever of them \
+             is not the module every guard in this file means, it is deciding how much of the \
+             file they read",
+            anchors.len(),
+        ),
+    }
 }
 
 /// `text` cut into clauses: lowercased, markdown emphasis stripped,
@@ -166,4 +200,155 @@ pub(crate) fn sentences_authorising_a_deletion(
                 .any(|hedge| hedge <= order)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file, assembled from lines so that no line of this test's own
+    /// source is an anchor. `production_source` matches whole lines at
+    /// column zero, and these fixtures are indented string literals.
+    fn file(lines: &[&str]) -> String {
+        lines.join("\n")
+    }
+
+    const ATTR: &str = concat!("#[cfg", "(test)]");
+    const DECL: &str = concat!("mod ", "tests {");
+
+    #[test]
+    fn the_cut_is_the_test_module_and_nothing_above_it() {
+        let src = file(&[
+            "use std::fs;",
+            "",
+            "fn ship() {}",
+            "",
+            ATTR,
+            DECL,
+            "    fn t() {}",
+            "}",
+        ]);
+        assert_eq!(
+            production_source("x.rs", &src),
+            "use std::fs;\n\nfn ship() {}\n\n"
+        );
+    }
+
+    #[test]
+    fn a_commented_out_anchor_is_not_an_anchor() {
+        // The round-17 finding, and the reason both lines are matched
+        // whole. As a substring search this cut the file at line 1 and
+        // every forbidding guard in it passed on an empty scan.
+        let src = file(&[
+            "use std::fs;",
+            &format!("// {ATTR}"),
+            &format!("// {DECL}"),
+            "",
+            "fn ship() {}",
+            "",
+            ATTR,
+            DECL,
+            "    fn t() {}",
+            "}",
+        ]);
+        let cut = production_source("x.rs", &src);
+        assert!(
+            cut.contains("fn ship() {}"),
+            "the cut stopped at the comments: {cut:?}"
+        );
+        assert!(!cut.contains("fn t()"), "{cut:?}");
+    }
+
+    #[test]
+    fn an_attribute_on_an_item_is_walked_past() {
+        // Round 11's decoy, and `idempotency.rs`'s real one: an attribute
+        // on a method 470 lines above the test module. Indented here, as
+        // it is there.
+        let src = file(&[
+            "impl Status {",
+            &format!("    {ATTR}"),
+            "    fn only_tests_call_this() {}",
+            "}",
+            "",
+            "fn ship() {}",
+            "",
+            ATTR,
+            DECL,
+            "}",
+        ]);
+        assert!(production_source("x.rs", &src).contains("fn ship() {}"));
+    }
+
+    #[test]
+    fn a_module_the_crate_can_see_is_still_an_anchor() {
+        // `preflight`'s is `pub(crate)`, so `test_chain` can build a fake
+        // world out of its answer set.
+        for visibility in ["", "pub(crate) ", "pub "] {
+            let src = file(&[
+                "fn ship() {}",
+                "",
+                ATTR,
+                &format!("{visibility}{DECL}"),
+                "}",
+            ]);
+            assert_eq!(
+                production_source("x.rs", &src),
+                "fn ship() {}\n\n",
+                "visibility `{visibility}` should not move the cut",
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "somebodys_module.rs")]
+    fn a_file_with_no_test_module_names_itself_rather_than_widening() {
+        production_source("somebodys_module.rs", "fn ship() {}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "2 test-module anchors")]
+    fn a_second_anchor_is_an_ambiguity_rather_than_a_first_match() {
+        let src = file(&[ATTR, DECL, "}", "", "fn ship() {}", "", ATTR, DECL, "}"]);
+        production_source("x.rs", &src);
+    }
+
+    #[test]
+    #[should_panic(expected = "renamed.rs")]
+    fn a_renamed_test_module_is_loud() {
+        // The other half of "one anchor": the guards' view of a file is
+        // never allowed to widen quietly, so a module called anything
+        // else is a failed test naming the file.
+        let src = file(&["fn ship() {}", "", ATTR, "mod checks {", "}"]);
+        production_source("renamed.rs", &src);
+    }
+
+    #[test]
+    fn every_file_the_guards_cut_has_exactly_one_anchor() {
+        // The check on the real files, rather than on fixtures: each of
+        // these is cut by at least one guard, and a cut that lands in the
+        // wrong place is silent in exactly the guards that forbid things.
+        for (name, src) in [
+            ("orchestrator.rs", include_str!("orchestrator.rs")),
+            ("idempotency.rs", include_str!("idempotency.rs")),
+            ("burn.rs", include_str!("burn.rs")),
+            ("preflight.rs", include_str!("preflight.rs")),
+        ] {
+            let cut = production_source(name, src);
+            assert!(
+                !cut.is_empty() && cut.len() < src.len(),
+                "{name}: the cut is the whole file or none of it",
+            );
+            // And what is above the cut is code rather than a header: the
+            // failure this test exists for cut `orchestrator.rs` at its
+            // fortieth line, which is still inside the imports.
+            assert!(
+                cut.lines()
+                    .filter(|l| l.starts_with("fn ") || l.starts_with("pub "))
+                    .count()
+                    > 1,
+                "{name}: the production side has almost nothing in it, which is what a cut at a \
+                 decoy anchor looks like",
+            );
+        }
+    }
 }

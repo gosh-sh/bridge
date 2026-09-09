@@ -3089,9 +3089,10 @@ mod tests {
     /// it is the harness everything after it is built on.
     #[tokio::test]
     async fn a_dry_run_executes_the_pipeline_down_to_its_early_return() {
-        let world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
 
-        let ok = run(world.args, true, true)
+        let ok = world
+            .run(true)
             .await
             .expect("a dry run passes both preflights and stops before either chain");
 

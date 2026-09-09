@@ -153,11 +153,18 @@ pub(crate) struct FakeNode {
 
 /// Serve one withdrawal's worth of TVM node, on an ephemeral port.
 ///
-/// Modelled on `preflight::tests::mock_rpc` — a raw listener, one
-/// connection at a time, every request on the connection served rather
-/// than just the first. The SDK keeps the connection alive across
-/// endpoint resolution, the account fetch and the send, and a handler
-/// that answered once and returned closed the socket underneath it.
+/// A raw listener rather than a framework, like `preflight::tests::
+/// mock_rpc`, and every request on a connection is served rather than
+/// just the first: the SDK keeps the connection alive across endpoint
+/// resolution, the account fetch and the send, and a handler that
+/// answered once and returned closed the socket underneath it.
+///
+/// Requests are read to their `Content-Length` rather than to whatever
+/// one `read` happened to return. That is not pedantry about a loopback
+/// socket: a body split across two segments left the second half in the
+/// buffer, and the fake then answered the wrong shape to the next
+/// request on the same connection — a failure that would arrive as a
+/// puzzling refusal in whichever test was unlucky.
 ///
 /// The version is answered `0.54.0` on purpose: below 1.0.0 the SDK
 /// takes the v2 REST form for `get_account`, which is one `GET` with the
@@ -180,19 +187,36 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
             let fixture = fixture.clone();
             let seen = seen_bg.clone();
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536];
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = vec![0u8; 65536];
                 loop {
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
+                    let head_end = loop {
+                        if let Some(at) = end_of_headers(&buf) {
+                            break at;
+                        }
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let length = content_length(&head);
+                    while buf.len() < head_end + length {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
                     }
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let line = req.lines().next().unwrap_or("").to_string();
-                    let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
+                    let body =
+                        String::from_utf8_lossy(&buf[head_end..head_end + length]).to_string();
+                    buf.drain(..head_end + length);
+
+                    let line = head.lines().next().unwrap_or("").to_string();
                     seen.lock().await.push(line.clone());
 
-                    let json = answer(&fixture, &line, &body);
-                    let payload = serde_json::to_string(&json).unwrap();
+                    let payload = serde_json::to_string(&answer(&fixture, &line, &body)).unwrap();
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
                          {}\r\nConnection: keep-alive\r\n\r\n{}",
@@ -213,6 +237,20 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
     }
 }
 
+/// Where the request head ends, body included from there on.
+fn end_of_headers(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// `Content-Length`, or zero for the GETs that carry no body.
+fn content_length(head: &str) -> usize {
+    head.lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split_once(':'))
+        .and_then(|(_, v)| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// The whole protocol, in one place.
 ///
 /// Four shapes reach a node during stages 1-3, and they are worth naming
@@ -225,13 +263,26 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
 ///   (`tvm_client/src/account/mod.rs`).
 /// * `POST /graphql` — everything `bridge_gql_fetcher::GqlClient` asks, which
 ///   for preflight is the USDCBridge account's `info`.
-/// * `POST /v2/messages` — `send_message`
-///   (`tvm_client/src/processing/send_message.rs`).
+/// * `POST /v2/messages` — `send_message` (`tvm_client/src/net/server_link.rs`,
+///   an array of `ExtMessageV2`).
+///
+/// Anything else PANICS, naming what was asked. The previous default was
+/// `{"data": null}`, which every caller in this crate turns into a named
+/// refusal — so a test that reached an unimplemented shape would fail
+/// with a refusal about the chain rather than about the fake, and one
+/// that reached `wait_for_transaction` would poll a null answer until
+/// its timeout. A shape this node has not been taught is a defect in the
+/// test, and it should read like one.
 fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::Value {
     let is_get = request_line.starts_with("GET ");
     if is_get && request_line.contains("/graphql") {
-        // Endpoint resolution. A version below 1.0.0 selects the v2 REST
-        // form for the account fetch.
+        assert!(
+            request_line.contains("version"),
+            "the fake node answers `{{info{{version…}}}}` to a GET, and this is not it: \
+             {request_line}",
+        );
+        // A version below 1.0.0 selects the v2 REST form for the account
+        // fetch.
         return json!({
             "data": { "info": {
                 "version": "0.54.0",
@@ -242,6 +293,26 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         });
     }
     if is_get && request_line.contains("/v2/account") {
+        // The ADDRESS is checked. Answering with the one account it has,
+        // whatever it is asked for, is a fake that cannot tell a run
+        // reading the right account from a run reading any other:
+        // measured, with a `--from` pointing at an account the node had
+        // never heard of and the suite green.
+        let asked = request_line
+            .split_once("address=")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split([' ', '&']).next())
+            .unwrap_or_default();
+        let asked = asked
+            .strip_prefix("0:")
+            .or_else(|| asked.strip_prefix("0%3A"))
+            .or_else(|| asked.strip_prefix("0%3a"))
+            .unwrap_or(asked);
+        assert_eq!(
+            asked, fixture.account_id,
+            "this node knows one account and was asked for another. A fake that answers anyway \
+             makes every check downstream of it vacuous",
+        );
         return json!({
             "boc": fixture.account_boc,
             "dapp_id": fixture.account_id,
@@ -250,9 +321,33 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         });
     }
     if request_line.contains("/v2/messages") {
+        // The hash comes from the BYTES that arrived, and the id the
+        // client claims is checked against them. One constant hash for
+        // every message is a fake that cannot tell a run that composed
+        // the right message from a run that composed any other, and the
+        // hash is what the whole resume path is keyed on.
+        let sent: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|e| {
+            panic!("`/v2/messages` takes a JSON array of messages: {e}: {body}")
+        });
+        let message = sent
+            .get(0)
+            .unwrap_or_else(|| panic!("`/v2/messages` takes a non-empty array: {body}"));
+        let boc = message["body"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a message carries its BOC in `body`: {message}"));
+        let cell = tvm_types::read_single_root_boc(
+            tvm_types::base64_decode(boc).expect("the SDK sends base64"),
+        )
+        .expect("the SDK sends a message BOC");
+        let hash = cell.repr_hash().as_hex_string();
+        assert_eq!(
+            message["id"].as_str().unwrap_or_default(),
+            hash,
+            "the id the client claims is not the hash of the message it sent",
+        );
         return json!({
             "result": {
-                "message_hash": "00".repeat(32),
+                "message_hash": hash,
                 "thread_id": null,
                 "producers": [],
                 "account_id": fixture.account_id,
@@ -277,11 +372,7 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         } } } } });
     }
 
-    // Anything else: a null `data` node, which every caller in this
-    // crate turns into a named refusal rather than a panic. A test that
-    // needs one of these answered adds it here, so the set of shapes
-    // this node knows stays readable in one screen.
-    json!({ "data": null })
+    panic!("the fake node has no answer for `{request_line}` / `{query}`. Teach it one here");
 }
 
 /// Both chains, faked, plus the arguments that point a run at them.
@@ -290,14 +381,54 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
 /// takes the state directory or the key file out from under a run that
 /// is still going.
 pub(crate) struct FakeWorld {
-    pub args: crate::args::WithdrawArgs,
+    args: Option<crate::args::WithdrawArgs>,
     pub node: FakeNode,
     pub state_dir: tempfile::TempDir,
     _keys: tempfile::TempDir,
 }
 
-/// A world where a withdrawal of `amount` from a multisig holding `ecc3`
-/// passes every check stage 1 makes.
+impl FakeWorld {
+    /// Put a run through this world.
+    ///
+    /// `--dry-run` lives in TWO places — the field `main` parses out of
+    /// the command line, and the parameter `run` actually branches on —
+    /// and the fixture used to set the field to `false` while the only
+    /// test calling it passed `true`. Nothing read the field, so nothing
+    /// noticed; a fixture that contradicts its own caller documents
+    /// whatever the reader guesses. One argument sets both here.
+    ///
+    /// `skip_prompt` is always true: there is no TTY under `cargo test`,
+    /// and `confirm_before_burn` refuses without one before anything
+    /// else in the branch runs.
+    pub(crate) async fn run(
+        &mut self,
+        dry_run: bool,
+    ) -> crate::errors::CliResult<crate::orchestrator::WithdrawSuccess> {
+        let mut args = self.args.take().expect("a world puts one run through it");
+        args.dry_run = dry_run;
+        crate::orchestrator::run(args, dry_run, true).await
+    }
+}
+
+/// A world where a DRY withdrawal of `amount` from a multisig holding
+/// `ecc3` passes every check it makes.
+///
+/// Dry, and the qualifier is the honest half of this sentence. A real
+/// run reaches `check_prover_artifacts` — `parse_eth_signer`, the
+/// ceremony at k=20 and k=21, the committed verifier bytecode, and
+/// `aggregate-proof --help` — before it reaches the burn branch, and the
+/// ceremony is a ~256 MB Hermez file that this fixture cannot fabricate.
+/// Not "has not fabricated yet": `assert_hermez_srs` identifies the
+/// Perpetual Powers of Tau ceremony by its `s_g2` head precisely so that
+/// a locally generated SRS cannot pass, because one that did would make
+/// every proof under it forgeable. A fixture that got past that check
+/// would be a fixture that had defeated it.
+///
+/// So the money path below stage 1 is reachable from a test only where
+/// those artifacts are really provisioned, and the refusals that live
+/// between the reservation and the send are tested where they are
+/// raised — `reserve_and_decide_holding`, `idempotency::reserve` — which
+/// is a test of the same code and not of a stub.
 ///
 /// The EVM half is `preflight`'s own `full_walk`, which is the only
 /// answer set in this crate that gets `check_bridge_deploy` to `Ok` —
@@ -378,7 +509,7 @@ pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
     };
 
     FakeWorld {
-        args,
+        args: Some(args),
         node,
         state_dir,
         _keys: keys_dir,
@@ -388,6 +519,72 @@ pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixture for the two checks the node makes on what it is asked.
+    /// Any BOC serves as the message: the node hashes the bytes that
+    /// arrive, which is the property under test.
+    async fn one_account_node() -> (NodeFixture, String) {
+        let (account_id, boc) = deployed_multisig(0).await;
+        (
+            NodeFixture {
+                account_id: account_id.clone(),
+                account_boc: boc.clone(),
+                usdc_bridge_account_id: "2b".repeat(32),
+            },
+            boc,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_node_answers_with_the_hash_of_the_message_it_was_sent() {
+        let (fixture, boc) = one_account_node().await;
+        let hash = tvm_types::read_single_root_boc(tvm_types::base64_decode(&boc).unwrap())
+            .unwrap()
+            .repr_hash()
+            .as_hex_string();
+
+        let body = json!([{ "id": hash, "body": boc }]).to_string();
+        let answered = answer(&fixture, "POST /v2/messages HTTP/1.1", &body);
+        assert_eq!(
+            answered["result"]["message_hash"], hash,
+            "one constant hash for every message cannot tell one burn from another, and the \
+             resume path is keyed on the hash",
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "is not the hash of the message it sent")]
+    async fn the_node_checks_the_id_against_the_bytes() {
+        let (fixture, boc) = one_account_node().await;
+        let body = json!([{ "id": "00".repeat(32), "body": boc }]).to_string();
+        answer(&fixture, "POST /v2/messages HTTP/1.1", &body);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "knows one account and was asked for another")]
+    async fn the_node_refuses_an_account_it_has_never_heard_of() {
+        // Measured before this check existed: a production `--from`
+        // pointing at an account the node knew nothing about walked the
+        // whole of preflight green, because the fake answered with the
+        // only account it had.
+        let (fixture, _) = one_account_node().await;
+        let line = format!("GET /v2/account?address=0:{} HTTP/1.1", "ab".repeat(32));
+        answer(&fixture, &line, "");
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "has no answer for")]
+    async fn a_shape_the_node_has_not_been_taught_is_a_failure_and_not_an_empty_answer() {
+        // `{"data": null}` was the default, and it is the worst of both:
+        // a caller in this crate turns it into a refusal about the chain,
+        // and `wait_for_transaction` polls it until the timeout.
+        let (fixture, _) = one_account_node().await;
+        answer(
+            &fixture,
+            "POST /graphql HTTP/1.1",
+            &json!({ "query": "query{blockchain{transaction(hash:\"x\"){boc}}}" }).to_string(),
+        );
+    }
 
     /// Everything `preflight::run` asks of the `--from` account, asked
     /// here so a failure names the fixture rather than surfacing three

@@ -3104,49 +3104,71 @@ mod tests {
         );
     }
 
-    /// Every imperative a refusal raised in this module may not contain.
-    ///
-    /// The shared floor, plus the one order that means something here
-    /// and does not in a shipped document: in a refusal the only file in
-    /// scope is the record it names, while a document says "delete that
-    /// file" about a key file, a log or a stale artifact.
-    /// The only things that exempt a clause in a refusal: the shared
-    /// prohibitions, and nothing added to them.
-    fn hedges_a_refusal_may_offer() -> Vec<&'static str> {
-        crate::source_guard::PROHIBITS_A_DELETION.to_vec()
-    }
-
-    fn orders_a_refusal_may_not_give() -> Vec<&'static str> {
-        crate::source_guard::ORDERS_A_DELETION
-            .iter()
-            .copied()
-            .chain(["delete that file"])
-            .collect()
-    }
-
     #[test]
-    fn the_refusal_gate_is_stricter_than_the_documents_in_both_directions() {
-        // The relation the comment below used to assert and nothing
-        // checked. It is true by construction above, so what this
-        // catches is the construction being replaced by a literal list
-        // again — which is how it was false for two rounds, silently,
-        // from a commit in another module.
-        for hedge in hedges_a_refusal_may_offer() {
-            assert!(
-                crate::source_guard::PROHIBITS_A_DELETION.contains(&hedge),
-                "the refusal gate is exempted by `{hedge}` and the documents are not. A refusal \
-                 may be stricter than a document by having fewer hedges; a hedge it has and they \
-                 do not makes it the laxer of the two, which is what the comment above denies",
-            );
+    fn a_refusal_is_stricter_than_a_document_in_both_directions() {
+        // The relation the comment on the gate asserts, checked against
+        // what the gate READS rather than against a copy of it. Both
+        // halves have been false here, and both were found by reverting
+        // a list that no test was looking at:
+        //
+        //   * the orders were an INTERSECTION for two rounds — the document list grew
+        //     `prune the record` and this one did not — and `Prune the record and
+        //     re-run.` in the hash-less refusal passed;
+        //   * the hedges were a second copy holding `never delete` and `must not
+        //     delete`, which the documents did not have, so on those two spellings a
+        //     refusal was the LAXER of the pair.
+        //
+        // There is nothing to pass now: a caller names its surface, and
+        // this reads the same two functions the gates read. A list can
+        // only drift by being edited where these are, and then this
+        // fails.
+        use crate::source_guard::{
+            hedges, orders, Surface, ORDERS_A_DELETION, PROHIBITS_A_DELETION,
+        };
+
+        // Anchored to the NAMED lists first. Comparing the two surfaces
+        // with each other is not enough on its own: a list that shrinks
+        // for both of them keeps every relation below true, and shrinking
+        // is exactly how this broke — measured, with `prune the record`
+        // taken out of the base and the suite green.
+        assert_eq!(
+            orders(Surface::Document),
+            ORDERS_A_DELETION.to_vec(),
+            "a document is held to the whole of `ORDERS_A_DELETION` and to nothing else: the \
+             constant and its reasons are in one place, and a surface that quietly holds a \
+             shorter list is that place being bypassed",
+        );
+        for prohibition in PROHIBITS_A_DELETION {
+            for surface in [Surface::Document, Surface::Refusal] {
+                assert!(
+                    hedges(surface).contains(&prohibition),
+                    "`{prohibition}` is a prohibition and {surface:?} is not exempted by it",
+                );
+            }
         }
-        for order in crate::source_guard::ORDERS_A_DELETION {
+
+        for order in orders(Surface::Document) {
             assert!(
-                orders_a_refusal_may_not_give().contains(&order),
+                orders(Surface::Refusal).contains(&order),
                 "the shipped documents are held to `{order}` and the refusal texts are not. A \
                  refusal may be stricter than a document and may not be laxer: an imperative in \
                  one contradicts the prohibition the same message ends with",
             );
         }
+        for hedge in hedges(Surface::Refusal) {
+            assert!(
+                hedges(Surface::Document).contains(&hedge),
+                "a refusal is exempted by `{hedge}` and a document is not. Fewer hedges is what \
+                 stricter MEANS here; a hedge a refusal has and a document does not makes it the \
+                 laxer of the two",
+            );
+        }
+        assert!(
+            orders(Surface::Refusal).len() > orders(Surface::Document).len()
+                || hedges(Surface::Refusal).len() < hedges(Surface::Document).len(),
+            "the two surfaces are held to identical rules, so one of them is wrong: a document \
+             may give conditional permission and a refusal may not",
+        );
     }
 
     #[test]
@@ -3200,23 +3222,11 @@ mod tests {
         // `Delete the record and re-run.` in the same position failed
         // it. Measured, both.
         //
-        // So the floor is shared and the addition is explicit. Nothing
-        // here is a list of everything; it is `ORDERS_A_DELETION` plus
-        // what only a refusal can mean.
-        let authorises = orders_a_refusal_may_not_give();
-        // Only prohibitions. Not "only if", not "once you have
-        // reconciled": a refusal that starts qualifying a deletion is
-        // the runbook's job being done in the wrong place.
-        //
-        // The shared floor, and nothing added to it. That is what makes
-        // "stricter in the hedges" a fact rather than a sentence: a
-        // refusal is exempted by strictly fewer things than a document
-        // is. It used to be a second copy holding `never delete` and
-        // `must not delete`, which the document list did NOT have — so
-        // on those two spellings this gate was the softer of the pair,
-        // while the comment above claimed the opposite. The same shape
-        // as the orders, one field over.
-        let hedges = hedges_a_refusal_may_offer();
+        // Neither vocabulary is named here, and that is the fix for the
+        // last two rounds of this: both were parameters, this gate was
+        // free to pass something else, and both times it was measured
+        // doing so with the suite green. `Surface::Refusal` is all a
+        // caller gets to say.
         const PROHIBITION: &str = "do not delete that record on the strength of this refusal";
         const ADMITS: [&str; 4] = [
             "cannot say",
@@ -3257,8 +3267,10 @@ mod tests {
         ];
 
         for (what, msg) in &messages {
-            let orders =
-                crate::source_guard::sentences_authorising_a_deletion(msg, &authorises, &hedges);
+            let orders = crate::source_guard::clauses_ordering_a_deletion(
+                msg,
+                crate::source_guard::Surface::Refusal,
+            );
             assert!(
                 orders.is_empty(),
                 "{what}: this refusal tells an operator to delete a record that may hold a burn \

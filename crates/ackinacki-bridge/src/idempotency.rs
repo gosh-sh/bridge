@@ -2547,10 +2547,9 @@ mod tests {
         // refusals: this arm has no condition to offer. The other two
         // arms DO give conditional permission and are checked below,
         // where the condition is the point.
-        let orders = crate::source_guard::sentences_authorising_a_deletion(
+        let orders = crate::source_guard::clauses_ordering_a_deletion(
             &msg,
-            &crate::source_guard::ORDERS_A_DELETION,
-            &crate::source_guard::PROHIBITS_A_DELETION,
+            crate::source_guard::Surface::Refusal,
         );
         assert!(
             orders.is_empty(),
@@ -2932,40 +2931,11 @@ mod tests {
         //
         // Markdown emphasis is stripped by `clauses`, which is why "one
         // of three" matches "one of **three** things".
-        //
-        // The prohibitions come from the shared floor. Three of them
-        // were written out here and two were missing — `never delete`
-        // and `must not delete` — which the refusal gate had. A hedge
-        // one surface honours and the other does not is the same defect
-        // as an order one surface knows and the other does not, one
-        // field over, and it made the refusal gate the SOFTER of the two
-        // on those spellings while its comment claimed the opposite.
-        let hedges: Vec<&str> = crate::source_guard::PROHIBITS_A_DELETION
-            .iter()
-            .copied()
-            .chain([
-                // References to the three-verdict gate itself.
-                "one of three",
-                "three-verdict",
-                "three verdicts",
-                "three liveness",
-                "three cases",
-                // Conditionals. A procedure may give conditional
-                // permission; a refusal may not, which is the whole of
-                // the difference between the two gates.
-                "only if",
-                "only then",
-                "only in the second case",
-                "only sometimes",
-                // A prohibition of this shape belongs to the documents:
-                // it forbids without naming the verb.
-                "delete nothing",
-                // Statements that the verdict may not exist.
-                "could not be determined",
-                "does not always",
-                "never does",
-            ])
-            .collect();
+        // Both vocabularies live in `source_guard`, keyed by surface.
+        // They were passed in as parameters, and a copy of this list
+        // that dropped the shared prohibitions was green under a test
+        // that promised to forbid exactly that.
+        let hedges = crate::source_guard::hedges(crate::source_guard::Surface::Document);
         // Sentences that hand somebody permission. The state-file
         // spelling is here because the documents call the same object two
         // things and only one of them was watched.
@@ -2982,10 +2952,9 @@ mod tests {
         // "prune the state file", and the two the messages themselves
         // use.
         //
-        // It lives in `source_guard` now, with the scanner, because the
-        // refusal gate has to know every order this one does and a
-        // second copy is what silently stopped it knowing three of them.
-        const AUTHORISES: [&str; 8] = crate::source_guard::ORDERS_A_DELETION;
+        // The orders live in `source_guard` too, and are not named here
+        // at all: `clauses_ordering_a_deletion` reads them. A local
+        // rebinding is exactly what let the two surfaces drift.
 
         // An absent unreleased section is only legitimate in ONE state:
         // straight after a release, where the first heading in the file
@@ -3113,10 +3082,9 @@ mod tests {
                 //     `split(". ")` handed a dropped full stop or a line
                 //     break an exemption, by gluing an order to the
                 //     prohibition after it and finding the prohibition.
-                for clause in crate::source_guard::sentences_authorising_a_deletion(
+                for clause in crate::source_guard::clauses_ordering_a_deletion(
                     block,
-                    &AUTHORISES,
-                    &hedges,
+                    crate::source_guard::Surface::Document,
                 ) {
                     offenders.push(format!(
                         "{name} block {i} (authorises a deletion): {clause}"

@@ -214,6 +214,77 @@ pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
     "safe to delete",
 ];
 
+/// Which surface a piece of text is, and therefore which rules it is
+/// held to.
+///
+/// The two vocabularies used to be the CALLER's, passed in as
+/// parameters, and the tests then compared each list with itself while
+/// the gates were free to pass something else. Both did, and both were
+/// measured: the refusal gate's orders reverted to six literals — the
+/// regression `de77e46` closed — with the suite green, and the document
+/// gate's hedges dropped the shared prohibitions with the suite green,
+/// under a test whose name says `..._in_both_directions`.
+///
+/// So there is nothing to pass. A caller says WHICH surface it is; the
+/// difference between the two is stated here, once, and
+/// [`the vocabularies`](orders) are read from the same place the gates
+/// read them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Surface {
+    /// A shipped document. May give conditional permission — the
+    /// runbook's gate does, in a clause naming the verdict — so its
+    /// hedges include the conditionals.
+    Document,
+    /// A refusal this CLI raises. No room for a condition and already
+    /// carrying the prohibition, so any imperative in it is a
+    /// contradiction: prohibitions are the only hedges.
+    Refusal,
+}
+
+/// Ways of ordering a deletion that `surface` may not contain.
+pub(crate) fn orders(surface: Surface) -> Vec<&'static str> {
+    let mut orders = ORDERS_A_DELETION.to_vec();
+    if surface == Surface::Refusal {
+        // Refusal-only: in a refusal the only file in scope is the
+        // record it names, while a document says "delete that file"
+        // about a key file, a log or a stale artifact.
+        orders.push("delete that file");
+    }
+    orders
+}
+
+/// What exempts a clause on `surface`.
+pub(crate) fn hedges(surface: Surface) -> Vec<&'static str> {
+    let mut hedges = PROHIBITS_A_DELETION.to_vec();
+    if surface == Surface::Document {
+        hedges.extend([
+            // References to the three-verdict gate itself.
+            "one of three",
+            "three-verdict",
+            "three verdicts",
+            "three liveness",
+            "three cases",
+            // Conditionals.
+            "only if",
+            "only then",
+            "only in the second case",
+            "only sometimes",
+            // A prohibition that forbids without naming the verb.
+            "delete nothing",
+            // Statements that the verdict may not exist.
+            "could not be determined",
+            "does not always",
+            "never does",
+        ]);
+    }
+    hedges
+}
+
+/// Clauses in `text` that order a deletion under `surface`'s rules.
+pub(crate) fn clauses_ordering_a_deletion(text: &str, surface: Surface) -> Vec<String> {
+    sentences_authorising_a_deletion(text, &orders(surface), &hedges(surface))
+}
+
 /// Clauses in `text` that hand somebody permission to delete the record,
 /// without naming the verdict that permits it.
 ///
@@ -250,7 +321,7 @@ pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
 ///
 /// "do not delete the record" passes, because there the hedge is where a
 /// reader meets it first.
-pub(crate) fn sentences_authorising_a_deletion(
+fn sentences_authorising_a_deletion(
     text: &str,
     authorises: &[&str],
     hedges: &[&str],

@@ -110,9 +110,13 @@ impl BalanceCheck {
 /// Run every preflight check in order and return the aggregated report.
 ///
 /// Sequence:
-/// 1. `--from-keys` file permissions (already checked by args::validate,
-///    re-checked here so `preflight` is self-contained for callers that skip
-///    arg validation).
+/// 1. `--from-keys` file permissions. THE check, not a second one:
+///    `args::check_key_file_perms` has exactly one production caller and it is
+///    the line below. This list used to say "already checked by
+///    args::validate", and `args::validate` does not exist — so the one thing
+///    standing between a world-readable secret key and a signing run was
+///    described as a belt-and-braces repeat of something that never ran, which
+///    is how a check gets deleted as redundant.
 /// 2. `--from` account exists on AN, is `Active`, has non-zero code hash.
 /// 3. `--from` is a multisig (typed `getCustodians` call succeeds).
 /// 4. `custodianCount == 1` (single-custodian invariant; multi-owner sends
@@ -135,7 +139,7 @@ pub async fn run(
     usdc_bridge_account_id_hex: &str,
     balance_check: BalanceCheck,
 ) -> CliResult<PreflightReport> {
-    // 1. File perms (belt-and-suspenders — args::validate already ran this).
+    // 1. File perms. Nothing ran this before us; see the list above.
     args::check_key_file_perms(from_keys)?;
 
     // Shared tvm-sdk client — used for account fetch + local getter exec.

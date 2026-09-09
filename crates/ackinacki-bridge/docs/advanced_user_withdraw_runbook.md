@@ -720,8 +720,9 @@ So the two outcomes below lead to different actions, and neither of them
 is a bare `--allow-retry`:
 
 - **A burn landed** → write its multisig tx hash into `an_tx_hash`, set
-  `status` to `"burned"`, then re-run with `--allow-retry`. The run
-  resumes at capture and never re-burns.
+  `status` to `"burned"`, then re-run with `--allow-retry` — the flag is
+  what hands the recorded burn back, and with it the run resumes at
+  capture and never re-burns.
 - **Nothing was broadcast** → the record may have to go, and the exit-3
   refusal tells you whether that is safe. Re-run the identical command
   and read the liveness line it prints. It says one of **three** things,
@@ -974,14 +975,16 @@ broadcast a burn":
 In all four the record must not be deleted and the withdrawal must not
 be re-started under a fresh identity. In 2, 3 and 4 the remedy is to fix
 what the message names and re-run the SAME command, and what that run
-does depends on the record. With an `an_tx_hash` it resumes from the
-recorded burn. Without one it does not — and it does not reach exit 3
+does depends on the record. With an `an_tx_hash` and `--allow-retry` it
+resumes from the recorded burn; the flag is not optional there, and
+without it the same record is refused with exit 3. Without a hash it
+does not resume at all — and it does not reach exit 3
 merely by being re-run either: stage 1 goes first, and a record showing
 no burn puts the ECC[3] balance check back in force. Reconcile on chain
 before re-running (Case 3a below). A burn that landed gets its hash
-written into the record and the next run resumes from it; if none
-landed, the next run refuses with exit 3, whose text is then the
-procedure to follow.
+written into the record and is resumed by a re-run with
+`--allow-retry`; if none landed, the next run refuses with exit 3, whose
+text is then the procedure to follow.
 
 For situation 1: `sendTransaction` broadcast but the CLI could not
 observe the resulting message on GQL within its budget. Typical root cause:

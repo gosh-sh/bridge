@@ -1043,8 +1043,10 @@ assigns it when the release is tagged.
 
   The refusal now names the AN transaction already on the wire, says
   nothing new was sent or written, and says not to delete the record.
-  Fix what preflight named and re-run: the run resumes from the recorded
-  burn. A first run's preflight refusal is unchanged — with no prior
+  Fix what preflight named and re-run with `--allow-retry`: the flag is
+  what lets the reservation hand the recorded burn back, and without it
+  that record is refused with exit 3. A first run's preflight refusal is
+  unchanged — with no prior
   burn, exit 2 is exactly right.
 
   **A record with no AN tx hash moves too, and that is the case this
@@ -1069,6 +1071,12 @@ assigns it when the release is tagged.
   of that pair; the refusal message itself now promises no exit code at
   all, because which one a re-run reaches is decided on chain and not by
   this run.
+
+  Four more sentences said it, and are corrected: **a re-run resumes a
+  recorded burn only with `--allow-retry`**, and without the flag the
+  same record is refused with exit 3. A test now holds both documents to
+  that — any sentence promising a reader that their re-run will resume
+  has to name the flag it needs.
 
   **A record that cannot be READ moves too.** Stage 1 reads the prior
   record before anything else, and that read is the call that finds out
@@ -1166,18 +1174,23 @@ assigns it when the release is tagged.
   recovery procedure turns into permission to delete it, mid-send.
 
   The last step before the broadcast now asks the kernel whether this run
-  still holds the lock, and refuses with exit 2 if it does not. This is
-  an internal invariant, so in normal operation you will never see it.
-  If you do, nothing was broadcast — but **a plain re-run is not the
-  remedy**, and the first version of this entry said it was. The
-  reservation is already on disk, so the next run refuses it with exit 3
-  and a message written for a burn that may be in flight. The refusal
-  therefore names the record and splits by case: another process holds
-  the lock (wait, delete nothing); this run held one the kernel no longer
-  knows about, which is what a cleanup sweeping `*.lock` produces (stop
-  that, and only then delete the record and re-run); or this run never
-  took one — one of three cases, so delete the record, re-run, and please
-  report it.
+  still holds the lock, and refuses with **exit 10** if it does not. Exit
+  10 and not exit 2, which is what this entry said until the check was
+  re-badged: the refusal is raised after `reserve` has published, so a
+  reservation for this identity IS on disk, and exit 2's contract is that
+  there is none. Nothing was broadcast either way, and exit 10 does not
+  claim otherwise — it means this run must not act as if the withdrawal
+  were untouched. This is an internal invariant, so in normal operation
+  you will never see it. If you do, nothing was broadcast — but **a plain
+  re-run is not the remedy**, and the first version of this entry said it
+  was. The reservation is already on disk, so the next run refuses it
+  with exit 3 and a message written for a burn that may be in flight. The
+  refusal therefore names the record and splits by case: another process
+  holds the lock (wait, delete nothing); this run held one the kernel no
+  longer knows about, which is what a cleanup sweeping `*.lock` produces
+  (stop that, and only then delete the record and re-run); or this run
+  never took one — one of three cases, so delete the record, re-run, and
+  please report it.
 
   On a filesystem that cannot `flock` at all — a supported deployment —
   there is no lock to check and the run proceeds on the record's own

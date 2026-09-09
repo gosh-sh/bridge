@@ -3119,6 +3119,72 @@ mod tests {
     }
 
     #[test]
+    fn no_instructional_document_promises_a_resume_without_naming_the_flag() {
+        // `reserve`'s resumable arm refuses with exit 3 UNLESS
+        // `--allow-retry` is passed, so "write the hash in and the next
+        // run resumes from it" is an instruction that ends in a refusal.
+        // The `standing` sentence this module builds says the flag out
+        // loud for exactly that reason; the two documents an operator
+        // follows kept saying it four ways without one.
+        //
+        // SENTENCE-scoped. Block scope was measured and is too coarse
+        // for this: the paragraph that carried the wrong sentence also
+        // carried a correct one further down, so a block-wide search for
+        // the flag found it and exempted the promise in front of the
+        // reader — the same shape that made the deletion gate exempt
+        // itself, one granularity up.
+        //
+        // Not CLAUSE-scoped either, which is what the deletion gate
+        // uses, and the difference is what a wrong reading costs. There,
+        // an order acted on without its condition deletes a record a run
+        // may be mid-send on. Here, a re-run without the flag is refused
+        // having sent nothing, and a sentence is the unit a reader
+        // carries to their terminal.
+        const DOCS: [(&str, &str); 2] = [
+            ("README.md", include_str!("../README.md")),
+            (
+                "docs/advanced_user_withdraw_runbook.md",
+                include_str!("../docs/advanced_user_withdraw_runbook.md"),
+            ),
+        ];
+        // A claim that a re-run picks the recorded burn up. Not "resume"
+        // bare: the noun is all over both documents describing the
+        // FEATURE, and what is checked here is the promise to a reader
+        // about what their next command will do.
+        const CLAIMS: [&str; 4] = [
+            "resumes from",
+            "it resumes",
+            "resumes at capture",
+            "picks up at capture",
+        ];
+        let mut offenders = Vec::new();
+        for (name, text) in DOCS {
+            // Soft wraps joined before splitting: these are hard-wrapped
+            // at 72 columns, so every sentence worth reading straddles
+            // one. Emphasis stripped, because `**--allow-retry**` is the
+            // flag being named.
+            let flat = text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+                .replace(['*', '`'], "");
+            for sentence in flat.split(['.', '!', '?']) {
+                if CLAIMS.iter().any(|c| sentence.contains(c))
+                    && !sentence.contains(concat!("--allow", "-retry"))
+                {
+                    offenders.push(format!("{name}: {}", sentence.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "each of these tells an operator their re-run will resume, in a sentence that never \
+             names the flag it needs — and the run they are describing exits 3: {offenders:#?}",
+        );
+    }
+
+    #[test]
     fn nothing_in_this_pipeline_aborts_the_process_instead_of_refusing() {
         // A panic is exit 101, which is not in the wire contract at all:
         // no consumer maps it, `--json` emits no envelope for it, and

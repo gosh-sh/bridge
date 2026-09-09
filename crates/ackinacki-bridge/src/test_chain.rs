@@ -527,6 +527,19 @@ impl FakeWorld {
     /// through argument parsing, the state directory, the record, the
     /// plumbing, both halves of preflight against two fake chains and
     /// the burner key, and stops on the ceremony.
+    /// Point the run at an anchor layer, valid or not.
+    ///
+    /// `--anchor-layer` is fed by `BRIDGE_ANCHOR_LAYER`, so a re-run
+    /// under a different profile can arrive with a value the last one
+    /// did not have. That is why its refusal has to know whether a
+    /// record exists.
+    pub(crate) fn with_anchor_layer(&mut self, layer: &str) {
+        self.args
+            .as_mut()
+            .expect("the arguments are still here")
+            .anchor_layer = layer.to_string();
+    }
+
     pub(crate) fn with_submit_plumbing(&mut self) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().to_path_buf();

@@ -146,7 +146,6 @@ pub async fn run(
     let from = args::parse_from(&args.from)?;
     let to = args::parse_to(&args.to, args.to_chain)?;
     let amount = args::parse_amount(&args.amount)?;
-    let anchor_mode = parse_anchor_layer(&args.anchor_layer)?;
 
     // Read the prior record BEFORE preflight. Read-only: `peek` never
     // creates anything, so this cannot poison a run that is about to be
@@ -182,6 +181,16 @@ pub async fn run(
         idempotency::peek(&state_dir, &from, &to, &amount)
             .map_err(refusal_reading_a_record_that_exists)?
     };
+
+    // BELOW the peek, for the reason the plumbing check is: the
+    // identity is `key(from, to, amount)` and all three are parsed three
+    // lines above, so from there on a refusal CAN be about a record that
+    // exists. `--anchor-layer` is fed by `BRIDGE_ANCHOR_LAYER`, so a
+    // re-run under a different profile arrives here — the same shape as
+    // the plumbing, and it was left one line short with an exemption
+    // saying there was no identity yet.
+    let anchor_mode = parse_anchor_layer(&args.anchor_layer)
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
 
     // Submit-only plumbing, resolved at stage 1 for a real run so that a
     // missing BURNER_PRIVATE_KEY refuses here rather than at stage 6 —
@@ -466,9 +475,15 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let (r, decision, lock) =
-                reserve_and_decide(&state_dir, &from, &to, &amount, args.allow_retry)?;
-            let _held = _withdrawal_lock.install(lock);
+            let (r, decision) = reserve_and_take_the_lock(
+                &state_dir,
+                &from,
+                &to,
+                &amount,
+                args.allow_retry,
+                &mut _withdrawal_lock,
+            )?;
+            let _held = _withdrawal_lock.hold();
             // On the very next line, and the seven-line paragraph that
             // used to sit between them is why: an assignment placed in
             // that gap released the lock with 221 + 16 green. Between an
@@ -1134,6 +1149,45 @@ enum BurnDecision {
 /// the error paths too — on `Err` the run aborts and the kernel releases
 /// it, which is what should happen, and the record-restoring writes below
 /// happen under it either way.
+/// Reserve this identity and take the withdrawal lock INTO `slot`.
+///
+/// The twin of [`resume_recorded_burn`], and it exists for that reason
+/// rather than for tidiness. The burn branch used to reserve and install
+/// inline, and nothing could then be asked, afterwards, WHICH slot the
+/// lock went into: two lines —
+///
+/// ```text
+/// let mut _decoy = idempotency::LockSlot::empty();
+/// let _held = _decoy.install(lock);
+/// ```
+///
+/// — put a real lock in a slot that dies at the branch's closing brace,
+/// with the whole suite green. `BurnPermit::issue` took the happy arm
+/// because the hold it was given did hold something; the burn went out;
+/// `_withdrawal_lock` was never filled, so the settled hold covering
+/// stages 4-6 held `None` and the run was invisible to a concurrent
+/// `probe_holder` for ~101 minutes. The resume branch had the same shape
+/// and was RED, because a seam can be called by a test that asserts what
+/// the slot holds when it returns.
+///
+/// So: one shape for both branches, and both have that test.
+fn reserve_and_take_the_lock(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    slot: &mut idempotency::LockSlot,
+) -> CliResult<(idempotency::Record, BurnDecision)> {
+    let (record, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    // Bound rather than discarded: `install` hands the hold back, and
+    // what it covers here is the tail of this function. Nothing fallible
+    // is in that tail today, and the binding is what makes adding
+    // something to it safe rather than a silent change of protection.
+    let _held = slot.install(lock);
+    Ok((record, decision))
+}
+
 fn resume_recorded_burn(
     state_dir: &Path,
     from: &FromAddress,
@@ -2429,7 +2483,11 @@ mod tests {
         };
         let confirm = at(concat!("confirm_before", "_burn("));
         let compose = at(concat!("burn::com", "pose("));
-        let reserve = at(concat!("reserve_and", "_decide("));
+        // The SEAM, because that is what `run` calls now: the branch
+        // hands its slot over and the reservation happens inside, where a
+        // test can assert which slot the lock went into. `run` itself no
+        // longer names `reserve_and_decide`.
+        let reserve = at(concat!("reserve_and_take", "_the_lock("));
         let send = at(concat!("burn::s", "end("));
 
         assert!(
@@ -2763,156 +2821,140 @@ mod tests {
         // `let`, a name, the right indent, a `.hold()` on the line — and
         // held the decoy while the run's own slot stayed free. Measured
         // green.
-        let mut acquisitions: Vec<(usize, String)> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| is_code(l) && l.contains(concat!(".install", "(")))
-            .map(|(n, l)| {
-                let slot = l
-                    .trim()
-                    .split_once(concat!(".install", "("))
-                    .expect("the filter matched this line")
-                    .0;
-                (n, slot.to_string())
-            })
-            .collect();
-        let seam_call = lines
-            .iter()
-            .position(|l| is_code(l) && l.contains(concat!("resume_recorded", "_burn(")))
-            .expect("the resume branch no longer goes through the seam");
-        // Bounded. Unbounded, a reshaped argument list walks to the next
-        // `)?;` anywhere below — the same disease this file's settled
-        // guard was cured of, twenty lines further down and in the same
-        // commit that introduced this.
-        let seam_end = (seam_call..(seam_call + 20).min(lines.len()))
-            .find(|&n| lines[n].trim() == ")?;")
-            .unwrap_or_else(|| {
-                panic!(
-                    "orchestrator.rs:{}: the seam call does not close with `)?;` within twenty \
-                     lines. Its argument list was reshaped, and this guard cannot tell where the \
-                     acquisition ends",
-                    seam_call + 1,
-                )
-            });
-        // The seam fills the slot it is handed, so the slot the branch
-        // has to hold when it returns is the one in its argument list —
-        // read from there rather than assumed, for the same reason the
-        // other two are read off their installs.
-        let seam_slot = (seam_call..seam_end)
-            .find_map(|n| lines[n].trim().strip_prefix("&mut "))
-            .map(|arg| arg.trim_end_matches(',').to_string())
-            .unwrap_or_else(|| {
-                panic!(
-                    "orchestrator.rs:{}: the seam call no longer hands a slot over by `&mut`, so \
-                     this guard cannot tell which slot the branch must hold when it returns",
-                    seam_call + 1,
-                )
-            });
-        acquisitions.push((seam_end, seam_slot));
-        acquisitions.sort_unstable();
-
-        // ADJACENT, not "within twelve lines". Twelve was room for the
-        // paragraph explaining each hold, and the paragraph is exactly
-        // what an assignment hides in: between an install and its hold
-        // the lock is this run's and nothing refuses to let go of it.
-        // Both gaps were measured — a release in either left 221 + 16
-        // green and clippy clean — so the prose moved below the hold and
-        // the tolerance went to zero.
+        // TWO acquisition shapes, and each is checked for the one fact
+        // its own form leaves open.
         //
-        // Four spellings once satisfied "a line containing `.hold()`"
-        // while the borrow died on the same line, and every one of them
-        // was measured green here:
+        // An `.install(` sits inside a seam, and what a type cannot say
+        // is WHICH slot it fills. `let _held = _decoy.install(lock);`
+        // puts a real lock into a local that dies at the branch's
+        // closing brace; the hold it hands back does hold something, so
+        // `BurnPermit::issue` takes the happy arm and the burn goes out,
+        // while the slot the run actually carries was never filled and
+        // the settled hold covers `None` for the ~101 minutes of stages
+        // 4-6. Measured green after the receiver check was dropped as
+        // "something the type now says" — it does not: `install` is a
+        // method, and a method has a receiver.
         //
-        //   { let _held = slot.hold(); }   dies at the closing brace
-        //   drop(slot.hold());             dies at the semicolon
-        //   debug_assert!(slot.hold().is_some(), …)   a temporary
-        //   let _held = _decoy.hold();     holds something else
-        //
-        // ALL FOUR are compile errors now, and none of them by this
-        // test. `LockSlot::hold` returns a `LockHold` rather than an
-        // `Option`, so `.is_some()` and `.map(…)` are E0599. The hold is
-        // CONSUMED downstream — `BurnPermit::issue` takes `&LockHold`
-        // and so does `idempotency::update` — so a hold that dies at a
-        // closing brace, at a semicolon or inside an assertion is E0425
-        // where the send or the record write asks for it, and a hold of
-        // a decoy is not the one those calls name. Measured, each.
-        //
-        // What is left for this test is what a type cannot say: that
-        // every acquisition has one, that the settled window has one
-        // above the dry-run return, and that no line moves one.
-        // A binding per acquisition, and TWO shapes rather than one
-        // rule, because the two acquisitions are no longer the same
-        // thing.
-        //
-        // An `.install(` hands the hold back, so the statement IS the
-        // hold: `let <name> = <slot>.install(<..>);`. There is no gap to
-        // police and no receiver to compare — the previous version of
-        // this test needed both, and a decoy receiver under an install
-        // was green for a round.
-        //
-        // The seam's acquisition is still two statements: the caller
-        // hands its slot over by `&mut`, and what comes back is a
-        // `Result`, so the branch takes its own hold on the line below.
+        // So the receiver has to be the slot the function was HANDED,
+        // read off its own signature.
         let mut bindings: Vec<(usize, String)> = Vec::new();
-        for (at, slot) in &acquisitions {
-            let (line_at, statement) = if lines[*at].contains(concat!(".ins", "tall(")) {
-                (*at, lines[*at])
-            } else {
-                let next = (at + 1..lines.len())
-                    .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
-                    .expect("something follows the acquisition");
-                assert!(
-                    indent(lines[next]) == indent(lines[*at]),
-                    "orchestrator.rs:{}: the seam hands the lock back here and the next statement \
-                     is at another indent — orchestrator.rs:{}: {}. Everything between the two \
-                     compiles with the lock released and nothing to say so",
-                    at + 1,
-                    next + 1,
-                    lines[next].trim(),
-                );
-                (next, lines[next])
-            };
-            let (name, expr) = statement
+        let plain_name = |name: &str| {
+            !name.starts_with("mut ")
+                && name != "_"
+                && !name.starts_with('(')
+                && !name.contains(':')
+        };
+        for (n, line) in lines.iter().enumerate() {
+            if !is_code(line) || !line.contains(concat!(".ins", "tall(")) {
+                continue;
+            }
+            let (name, expr) = line
                 .trim()
                 .strip_prefix("let ")
                 .and_then(|rest| rest.split_once(" = "))
                 .unwrap_or_else(|| {
                     panic!(
                         "orchestrator.rs:{}: the lock becomes this run's here and nothing BINDS \
-                         the hold — orchestrator.rs:{}: {}. A hold inside braces, inside \
-                         `drop(…)` or inside an assertion is a borrow that ends on the same line, \
-                         and the lock is released for everything after it — measured green, all \
-                         three",
-                        at + 1,
-                        line_at + 1,
-                        statement.trim(),
+                         the hold: {}. A hold inside braces, inside `drop(…)` or inside an \
+                         assertion is a borrow that ends on the same line",
+                        n + 1,
+                        line.trim(),
                     )
                 });
-            // The receiver, for the seam's hold only: an install's hold
-            // is its own result and cannot be a hold of anything else.
-            if line_at != *at {
-                assert_eq!(
-                    expr,
-                    format!("{slot}.{}", concat!("hold", "();")),
-                    "orchestrator.rs:{}: this hold is not a hold OF THE SLOT the seam filled on \
-                     orchestrator.rs:{}. A hold of anything else leaves that slot free for the \
-                     whole stretch this line appears to cover",
-                    line_at + 1,
-                    at + 1,
-                );
-            }
             assert!(
-                !name.starts_with("mut ")
-                    && name != "_"
-                    && !name.starts_with('(')
-                    && !name.contains(':'),
+                plain_name(name),
                 "orchestrator.rs:{}: `{}` is not a plain named binding. `_` drops on the spot, a \
                  pattern may bind nothing, and `mut` lets a later assignment drop the hold and \
                  take another",
-                line_at + 1,
+                n + 1,
+                line.trim(),
+            );
+            let receiver = expr
+                .split_once(concat!(".ins", "tall("))
+                .expect("the line contains it")
+                .0;
+            let opens = lines[..n]
+                .iter()
+                .rposition(|l| l.starts_with("fn ") || l.starts_with("pub "))
+                .unwrap_or_else(|| panic!("orchestrator.rs:{}: no enclosing item", n + 1));
+            let signature = lines[opens..n].join("\n");
+            assert!(
+                signature.contains(&format!("{receiver}: &mut ")),
+                "orchestrator.rs:{}: the lock is installed into `{receiver}`, which is not a slot \
+                 this function was handed by `&mut`. A local slot dies with the branch, and its \
+                 hold vouches for a lock the run does not carry",
+                n + 1,
+            );
+            bindings.push((n, name.to_string()));
+        }
+
+        // A seam call: the slot goes in by `&mut` and what comes back is
+        // a `Result`, so the branch takes its own hold on the line under
+        // the call. Found by the ARGUMENT rather than by the callee's
+        // name — there are two seams now, and a third would otherwise be
+        // acquired with nothing watching.
+        for (n, line) in lines.iter().enumerate() {
+            let Some(slot) = line.trim().strip_prefix("&mut ") else {
+                continue;
+            };
+            if !is_code(line) {
+                continue;
+            }
+            let slot = slot.trim_end_matches(',');
+            // Bounded. Unbounded, a reshaped argument list walks to the
+            // next `)?;` anywhere below.
+            let end = (n..(n + 20).min(lines.len()))
+                .find(|&m| lines[m].trim() == ")?;")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "orchestrator.rs:{}: the call taking `&mut {slot}` does not close with \
+                         `)?;` within twenty lines, so this guard cannot tell where the \
+                         acquisition ends",
+                        n + 1,
+                    )
+                });
+            let next = (end + 1..lines.len())
+                .find(|&m| !lines[m].trim().is_empty() && is_code(&&*lines[m]))
+                .expect("something follows the acquisition");
+            let statement = lines[next];
+            assert!(
+                indent(statement) == indent(lines[end]),
+                "orchestrator.rs:{}: the seam hands the lock back here and the next statement is \
+                 at another indent — orchestrator.rs:{}: {}. Everything between the two compiles \
+                 with the lock released and nothing to say so",
+                end + 1,
+                next + 1,
                 statement.trim(),
             );
-            bindings.push((line_at, name.to_string()));
+            let (name, expr) = statement
+                .trim()
+                .strip_prefix("let ")
+                .and_then(|rest| rest.split_once(" = "))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "orchestrator.rs:{}: the seam has filled `{slot}` and the next statement \
+                         does not BIND a hold — orchestrator.rs:{}: {}",
+                        end + 1,
+                        next + 1,
+                        statement.trim(),
+                    )
+                });
+            assert_eq!(
+                expr,
+                format!("{slot}.{}", concat!("hold", "();")),
+                "orchestrator.rs:{}: this hold is not a hold OF THE SLOT the seam filled on \
+                 orchestrator.rs:{}. A hold of anything else leaves that slot free for the whole \
+                 stretch this line appears to cover",
+                next + 1,
+                end + 1,
+            );
+            assert!(
+                plain_name(name),
+                "orchestrator.rs:{}: `{}` is not a plain named binding",
+                next + 1,
+                statement.trim(),
+            );
+            bindings.push((next, name.to_string()));
         }
 
         // The one hold with no acquisition above it to name its slot, so
@@ -2968,17 +3010,28 @@ mod tests {
             dry_run_return + 1,
         );
 
-        // And the seam's own body acquires, so its hold is one of the
-        // three checked above rather than a fourth nobody walks.
-        let seam_fn = lines
-            .iter()
-            .position(|l| l.contains(concat!("fn resume_recorded", "_burn(")))
-            .expect("the seam is gone");
-        assert!(
-            acquisitions.iter().any(|(at, _)| *at > seam_fn),
-            "nothing inside the resume seam acquires the lock any more, so nothing inside it is \
-             held: its restoring write and its second reservation run on convention",
-        );
+        // BOTH seams acquire inside their own bodies, so each one's
+        // hold is among the bindings checked above rather than a fourth
+        // nobody walks. Named, because this is the part that rots: a
+        // seam that stopped installing would otherwise empty the scan
+        // silently.
+        for seam in [
+            concat!("fn resume_recorded", "_burn("),
+            concat!("fn reserve_and_take", "_the_lock("),
+        ] {
+            let opens = lines
+                .iter()
+                .position(|l| l.contains(seam))
+                .unwrap_or_else(|| panic!("the seam `{seam}` is gone"));
+            let closes = (opens + 1..lines.len())
+                .find(|&n| lines[n] == "}")
+                .unwrap_or(lines.len());
+            assert!(
+                bindings.iter().any(|(at, _)| (opens..closes).contains(at)),
+                "nothing inside `{seam}` takes a hold any more, so everything it does after the \
+                 install runs on convention",
+            );
+        }
 
         // Nothing MOVES those bindings — ONE rule, and no list of
         // spellings.
@@ -3010,24 +3063,37 @@ mod tests {
         //
         // Word boundaries, because `_lock_held_to_the_end` contains
         // `_held`.
-        let mentions = |line: &str, ident: &str| {
+        let moves = |line: &str, ident: &str| {
             let bytes = line.as_bytes();
             let is_word =
                 |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
             line.match_indices(ident).any(|(i, _)| {
-                !is_word(i.checked_sub(1).and_then(|j| bytes.get(j)))
-                    && !is_word(bytes.get(i + ident.len()))
+                let before = i.checked_sub(1).and_then(|j| bytes.get(j));
+                // A whole word, and not one this line borrows.
+                !is_word(before) && !is_word(bytes.get(i + ident.len())) && before != Some(&b'&')
             })
         };
+        // The TRAILING comment comes off first, and the exemption is a
+        // borrow at the mention rather than an ampersand somewhere on
+        // the line. Both were holes, and the second was a hole in the
+        // fix for the first:
+        //
+        //   drop(_held); // the record write is done; see &_held above
+        //
+        // `is_code` only drops lines that START with `//`, and
+        // `contains("&_held")` found the ampersand in the comment. One
+        // rule with a spelling in it is still a spelling.
+        fn code_of(line: &str) -> &str {
+            match line.split_once("//") {
+                Some((code, _)) => code,
+                None => line,
+            }
+        }
         let moved: Vec<String> = lines
             .iter()
             .enumerate()
             .filter(|(n, l)| is_code(l) && !bindings.iter().any(|(at, _)| at == n))
-            .filter(|(_, l)| {
-                bindings
-                    .iter()
-                    .any(|(_, name)| mentions(l, name) && !l.contains(&format!("&{name}")))
-            })
+            .filter(|(_, l)| bindings.iter().any(|(_, name)| moves(code_of(l), name)))
             .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
             .collect();
         assert!(
@@ -3380,6 +3446,39 @@ mod tests {
         assert!(
             msg.contains("--params-dir"),
             "while still naming what is actually missing: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_anchor_layer_over_a_reserved_record_is_not_reported_as_untouched() {
+        // The third refusal of this class, and the one that was left a
+        // single line short. `parse_anchor_layer` sat above the peek
+        // with an exemption saying there was no identity yet — while
+        // `from`, `to` and `amount`, which ARE the identity, were parsed
+        // three lines above it.
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        world.with_anchor_layer("3");
+        let record = world.leave_a_hash_less_reservation();
+
+        let err = world
+            .run(false)
+            .await
+            .expect_err("anchor layer 3 has no shipped relayer");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "there is a reservation on disk and this refusal has to say so: {err}",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&record.display().to_string())
+                && msg.contains("Do not delete that record"),
+            "it names the record and forbids the deletion: {msg}",
+        );
+        assert!(
+            msg.contains("--anchor-layer"),
+            "while still naming what was wrong with the arguments: {msg}",
         );
     }
 
@@ -3881,16 +3980,14 @@ mod tests {
         // reads exactly like one that has been checked, and both were
         // covering real defects: the first has been moved below the peek
         // and re-badged, the second answers exit 10 itself now.
-        const EXEMPT: [(&str, &str); 9] = [
+        const EXEMPT: [(&str, &str); 8] = [
             (
                 concat!("args::", "parse_"),
                 "argument text, and there is no identity yet: a record is named by a hash over \
-                 (from, to, chain, amount), so a run that cannot parse them has not named a \
-                 withdrawal that could have one",
-            ),
-            (
-                "parse_anchor_layer(",
-                "argument text, before any path is resolved and before there is an identity",
+                 (from, to, chain, amount), so a run that cannot parse THEM has not named a \
+                 withdrawal that could have one. True of these three and of nothing else in `run` \
+                 — `parse_anchor_layer` sat here on the same words one line further down, where \
+                 all three had just been parsed",
             ),
             (
                 "default_state_dir(",
@@ -4206,6 +4303,55 @@ mod tests {
         assert!(
             !msg.contains("does NOT override"),
             "that sentence belongs to the hash-less refusal: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_fresh_burn_takes_the_withdrawal_lock() {
+        // The twin of the resume test below, and the reason the burn
+        // branch has a seam at all.
+        //
+        // Two lines put a real lock into a decoy slot —
+        //
+        //   let mut _decoy = idempotency::LockSlot::empty();
+        //   let _held = _decoy.install(lock);
+        //
+        // — and the whole suite stayed green. The hold that comes back
+        // holds something, so `BurnPermit::issue` takes the arm that
+        // sends; the decoy dies at the branch's closing brace; the slot
+        // the run carries was never filled, so the settled hold covering
+        // stages 4-6 holds `None` and a concurrent `probe_holder` is
+        // told nobody owns this withdrawal. The runbook turns that into
+        // permission to delete the record, mid-send.
+        //
+        // The resume branch was RED against the same edit, because it
+        // had this assertion. Now both do, and it is an assertion about
+        // the slot the CALLER owns.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut slot = idempotency::LockSlot::empty();
+
+        let (record, decision) = reserve_and_take_the_lock(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &UsdcAmount(1_000_000),
+            false,
+            &mut slot,
+        )
+        .expect("a fresh identity reserves");
+
+        assert!(
+            slot.is_held(),
+            "the lock has to be in the CALLER's slot when the seam returns: it is what a \
+             concurrent run's liveness probe reads, and what the settled hold covers",
+        );
+        assert!(
+            matches!(decision, BurnDecision::Send),
+            "a fresh identity sends"
+        );
+        assert!(
+            record.an_tx_hash.is_none(),
+            "and nothing is on the wire yet"
         );
     }
 

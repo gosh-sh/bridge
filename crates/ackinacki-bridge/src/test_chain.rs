@@ -130,6 +130,160 @@ pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
     (account_id, boc)
 }
 
+/// What the fake node knows about the withdrawal under test.
+pub(crate) struct NodeFixture {
+    /// The `--from` multisig, as [`deployed_multisig`] returned it.
+    pub account_id: String,
+    pub account_boc: String,
+    /// The USDCBridge account id the run is pointed at. Answered
+    /// `Active`, with a dapp id equal to itself — the shape
+    /// `deploy_msig_and_mint.py` produces.
+    pub usdc_bridge_account_id: String,
+}
+
+/// A running fake TVM node. Drop the handle and the listener dies with
+/// the test.
+pub(crate) struct FakeNode {
+    /// Pass this as `--gql-endpoint`.
+    pub url: String,
+    /// Every request line the node served, in order. Tests assert on
+    /// what the run actually asked for rather than on what it logged.
+    pub seen: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+}
+
+/// Serve one withdrawal's worth of TVM node, on an ephemeral port.
+///
+/// Modelled on `preflight::tests::mock_rpc` — a raw listener, one
+/// connection at a time, every request on the connection served rather
+/// than just the first. The SDK keeps the connection alive across
+/// endpoint resolution, the account fetch and the send, and a handler
+/// that answered once and returned closed the socket underneath it.
+///
+/// The version is answered `0.54.0` on purpose: below 1.0.0 the SDK
+/// takes the v2 REST form for `get_account`, which is one `GET` with the
+/// address in the query string. The v3 form exists to carry a dapp id
+/// the fixture does not need.
+pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let fixture = std::sync::Arc::new(fixture);
+    let seen_bg = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let fixture = fixture.clone();
+            let seen = seen_bg.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let line = req.lines().next().unwrap_or("").to_string();
+                    let body = req.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
+                    seen.lock().await.push(line.clone());
+
+                    let json = answer(&fixture, &line, &body);
+                    let payload = serde_json::to_string(&json).unwrap();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: keep-alive\r\n\r\n{}",
+                        payload.len(),
+                        payload,
+                    );
+                    if sock.write_all(resp.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    FakeNode {
+        url: format!("{url}/graphql"),
+        seen,
+    }
+}
+
+/// The whole protocol, in one place.
+///
+/// Four shapes reach a node during stages 1-3, and they are worth naming
+/// because none of them is guessed — each was read off the SDK or off
+/// this crate:
+///
+/// * `GET /graphql?query={info…}` — endpoint resolution
+///   (`tvm_client/src/net/endpoint.rs`, `QUERY_INFO`).
+/// * `GET /v2/account?address=0:…` — `get_account`'s pre-1.0.0 form
+///   (`tvm_client/src/account/mod.rs`).
+/// * `POST /graphql` — everything `bridge_gql_fetcher::GqlClient` asks, which
+///   for preflight is the USDCBridge account's `info`.
+/// * `POST /v2/messages` — `send_message`
+///   (`tvm_client/src/processing/send_message.rs`).
+fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::Value {
+    let is_get = request_line.starts_with("GET ");
+    if is_get && request_line.contains("/graphql") {
+        // Endpoint resolution. A version below 1.0.0 selects the v2 REST
+        // form for the account fetch.
+        return json!({
+            "data": { "info": {
+                "version": "0.54.0",
+                "time": 1_700_000_000i64,
+                "latency": 1i64,
+                "rempEnabled": false,
+            } }
+        });
+    }
+    if is_get && request_line.contains("/v2/account") {
+        return json!({
+            "boc": fixture.account_boc,
+            "dapp_id": fixture.account_id,
+            "state_timestamp": 1_700_000_000i64,
+            "account_id": fixture.account_id,
+        });
+    }
+    if request_line.contains("/v2/messages") {
+        return json!({
+            "result": {
+                "message_hash": "00".repeat(32),
+                "thread_id": null,
+                "producers": [],
+                "account_id": fixture.account_id,
+                "dapp_id": fixture.account_id,
+            },
+            "error": null,
+            "ext_message_token": null,
+        });
+    }
+
+    // POST /graphql. Dispatch on what the query asks for, not on an
+    // index: the run sends several and their order is the SDK's business.
+    let query = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.to_string());
+
+    if query.contains("acc_type_name") {
+        return json!({ "data": { "blockchain": { "account": { "info": {
+            "dapp_id": fixture.usdc_bridge_account_id,
+            "acc_type_name": "Active",
+        } } } } });
+    }
+
+    // Anything else: a null `data` node, which every caller in this
+    // crate turns into a named refusal rather than a panic. A test that
+    // needs one of these answered adds it here, so the set of shapes
+    // this node knows stays readable in one screen.
+    json!({ "data": null })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

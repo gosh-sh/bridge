@@ -1936,6 +1936,80 @@ mod tests {
     use super::*;
     use crate::source_guard::production_source;
 
+    /// The AN half of stage 1, driven end to end against a fake node.
+    ///
+    /// Everything before this was a helper tested in isolation. This is
+    /// `preflight::run` itself — the key file's mode, the account fetch,
+    /// the Active and code-hash checks, `getCustodians` on the account's
+    /// own code, the owner match against `--from-keys`, the USDCBridge
+    /// lookup and the ECC[3] sufficiency check — with nothing stubbed
+    /// but the wire.
+    #[tokio::test]
+    async fn preflight_passes_its_an_side_against_a_fake_node() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let usdc_bridge_account_id = "2b".repeat(32);
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let report = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect("the AN side of preflight passes against a real account and a fake wire");
+
+        assert_eq!(
+            report.multisig_ecc3_balance, 5_000_000,
+            "the balance comes off the account BOC, not off anything the node said in JSON",
+        );
+        assert_eq!(
+            report.usdc_bridge_extended,
+            format!("{usdc_bridge_account_id}::{usdc_bridge_account_id}"),
+        );
+
+        // And it got there by asking, rather than by some default
+        // answering for it. The two REST shapes are the ones this crate
+        // would silently stop needing if `get_account` changed form.
+        let seen = node.seen.lock().await.join("\n");
+        assert!(
+            seen.contains("/v2/account"),
+            "the account was fetched: {seen}"
+        );
+        assert!(
+            seen.contains("POST /graphql"),
+            "the USDCBridge was queried: {seen}"
+        );
+    }
+
+    /// `check_key_file_perms` wants exactly `0400`, and `write_keys`
+    /// leaves whatever the umask gives.
+    fn set_owner_only(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
+    }
+
     /// The check no hand-written fixture can pass: `getCustodians` is
     /// not a field read off a JSON blob, it is TVM executed against the
     /// account's own code. If this passes, the offline fixture is a real

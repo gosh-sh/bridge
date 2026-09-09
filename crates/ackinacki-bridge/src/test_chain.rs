@@ -284,6 +284,107 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
     json!({ "data": null })
 }
 
+/// Both chains, faked, plus the arguments that point a run at them.
+///
+/// The tempdirs are fields rather than locals because dropping either
+/// takes the state directory or the key file out from under a run that
+/// is still going.
+pub(crate) struct FakeWorld {
+    pub args: crate::args::WithdrawArgs,
+    pub node: FakeNode,
+    pub state_dir: tempfile::TempDir,
+    _keys: tempfile::TempDir,
+}
+
+/// A world where a withdrawal of `amount` from a multisig holding `ecc3`
+/// passes every check stage 1 makes.
+///
+/// The EVM half is `preflight`'s own `full_walk`, which is the only
+/// answer set in this crate that gets `check_bridge_deploy` to `Ok` —
+/// with the two identity words overridden, because the pair the bridge
+/// is pinned to has to equal the one THIS withdrawal will prove, and
+/// that is computed from the USDCBridge ids the fake node serves.
+pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
+    use crate::preflight::tests::{full_walk, full_walk_code, mock_rpc_code_for};
+
+    let (account_id, account_boc) = deployed_multisig(ecc3).await;
+    let usdc_bridge_account_id = "2b".repeat(32);
+    let node = fake_node(NodeFixture {
+        account_id: account_id.clone(),
+        account_boc,
+        usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+    })
+    .await;
+
+    // The fake serves a USDCBridge whose dapp id equals its account id,
+    // which is the shape `deploy_msig_and_mint.py` produces.
+    let mut id = [0u8; 32];
+    hex::decode_to_slice(&usdc_bridge_account_id, &mut id).unwrap();
+    let (dapp_fr, acc_fr) = crate::preflight::withdrawal_identity_frs(&id, &id);
+    let rpc = mock_rpc_code_for(
+        &full_walk_code(),
+        full_walk(&[
+            (
+                crate::preflight::tests::SEL_DAPP_FR,
+                format!("0x{dapp_fr:064x}"),
+            ),
+            (
+                crate::preflight::tests::SEL_ACC_FR,
+                format!("0x{acc_fr:064x}"),
+            ),
+        ]),
+    )
+    .await;
+
+    let keys_dir = tempfile::TempDir::new().unwrap();
+    let keys = keys_dir.path().join("keys.json");
+    std::fs::write(
+        &keys,
+        format!(r#"{{"public":"{PAIR_PUBLIC}","secret":"{PAIR_SECRET}"}}"#),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+
+    let state_dir = tempfile::TempDir::new().unwrap();
+    let args = crate::args::WithdrawArgs {
+        from: format!("{account_id}::{account_id}"),
+        from_keys: keys,
+        to: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        to_chain: Some(11_155_111),
+        amount: amount.to_string(),
+        dry_run: false,
+        allow_retry: false,
+        allow_verifier_drift: false,
+        gql_endpoint: node.url.clone(),
+        usdc_bridge_account: usdc_bridge_account_id,
+        anchor_layer: "1".to_string(),
+        i_know_the_wait: false,
+        rpc_url: rpc,
+        bridge_address: alloy::primitives::Address::repeat_byte(1),
+        eth_private_key: None,
+        aggregator_dir: None,
+        verifiers_dir: None,
+        params_dir: None,
+        snark_dir: state_dir.path().join("snark"),
+        pk_cache_dir: None,
+        prover_out_dir: None,
+        prover_timeout_s: 60,
+        work_dir: None,
+        state_dir: Some(state_dir.path().to_path_buf()),
+    };
+
+    FakeWorld {
+        args,
+        node,
+        state_dir,
+        _keys: keys_dir,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

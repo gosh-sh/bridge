@@ -27,16 +27,36 @@
 /// anchor is the two lines TOGETHER on purpose: `#[cfg(test)]` on its own
 /// matches the first such attribute anywhere in the file, and
 /// `idempotency.rs` carries one on a method.
+///
+/// The declaration's VISIBILITY is not part of the anchor. `preflight`'s
+/// test module is `pub(crate)`, because it owns the only answer set that
+/// gets `check_bridge_deploy` to `Ok` and `test_chain` builds a fake
+/// world out of it; a second copy of that selector table is a second
+/// thing to drift. Matching `mod tests {` at the end of the line rather
+/// than the whole line keeps the boundary exactly as narrow — a
+/// `#[cfg(test)]` on a function is still followed by `fn`, not by a
+/// module declaration — and does not ask anyone to spell a module
+/// private to keep a guard working.
 pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
-    let cut = src
-        .find(concat!("#[cfg(test)]\n", "mod tests {"))
-        .unwrap_or_else(|| {
+    let mut at = 0;
+    let cut = loop {
+        let Some(found) = src[at..].find(concat!("#[cfg(test)]", "\n")) else {
             panic!(
-                "{file}: no `#[cfg(test)] mod tests {{` to cut at. Every guard that scans this \
-                 file is now reading text it was never meant to see — fix the anchor rather than \
-                 the guards"
-            )
-        });
+                "{file}: no `#[cfg(test)]` followed by a `mod tests {{` declaration to cut at. \
+                 Every guard that scans this file is now reading text it was never meant to see — \
+                 fix the anchor rather than the guards"
+            );
+        };
+        let start = at + found;
+        let next = src[start..]
+            .lines()
+            .nth(1)
+            .expect("an attribute is never the last line of a file");
+        if next.trim_end().ends_with(concat!("mod ", "tests {")) {
+            break start;
+        }
+        at = start + 1;
+    };
     &src[..cut]
 }
 

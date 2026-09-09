@@ -1929,8 +1929,12 @@ pub async fn check_bridge_deploy(
     Ok(())
 }
 
+// `pub(crate)` so `test_chain` can build the EVM half of a fake world
+// out of `mock_rpc_code_for` + `full_walk`. That pair is the only answer
+// set in this crate that gets `check_bridge_deploy` all the way to `Ok`,
+// and a second copy of a selector table is a second thing to drift.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
@@ -2239,8 +2243,8 @@ mod tests {
     /// loudly on an empty decode rather than silently pass.
     const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
     const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
-    const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
-    const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
+    pub(crate) const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
+    pub(crate) const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
     const SEL_SHPLONK: &str = "66dbcfb5"; // shplonkVerifier()
     const SEL_YUL: &str = "c74e1862"; // yulVerifier()
 
@@ -2273,7 +2277,7 @@ mod tests {
     /// Per-address `eth_getCode`. The case a single shared answer cannot
     /// express — bridge has code, adapter does not — and the case that
     /// catches a wired-up EOA.
-    async fn mock_rpc_code_for(
+    pub(crate) async fn mock_rpc_code_for(
         code: &[(Address, &'static str)],
         answers: std::collections::HashMap<&'static str, String>,
     ) -> String {
@@ -2450,7 +2454,7 @@ mod tests {
     /// Written as a helper because a mock that stops short fails on an
     /// empty `eth_call` decode long before the assertion, and the test is
     /// then green or red for a reason it does not name.
-    fn full_walk(
+    pub(crate) fn full_walk(
         overrides: &[(&'static str, String)],
     ) -> std::collections::HashMap<&'static str, String> {
         let mut m = std::collections::HashMap::from([
@@ -2468,7 +2472,7 @@ mod tests {
     }
 
     /// The four addresses of [`full_walk`], all carrying code.
-    fn full_walk_code() -> Vec<(Address, &'static str)> {
+    pub(crate) fn full_walk_code() -> Vec<(Address, &'static str)> {
         (1u8..=4)
             .map(|n| (Address::repeat_byte(n), SOME_CODE))
             .collect()

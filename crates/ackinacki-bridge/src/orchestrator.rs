@@ -2985,6 +2985,46 @@ mod tests {
         );
     }
 
+    /// The first test in this crate that executes `orchestrator::run`.
+    ///
+    /// Sixteen review rounds defended this function with guards that read
+    /// its own source through `include_str!`, because nothing ran it: a
+    /// `panic!` planted in the burn branch left the whole suite green,
+    /// measured three times. A dry run is the smallest thing that gets
+    /// `run` off the ground — argument parsing, the state-directory
+    /// choice, both halves of preflight against two fake chains, the
+    /// burn/resume choice, the settled hold, and the early return — and
+    /// it is the harness everything after it is built on.
+    #[tokio::test]
+    async fn a_dry_run_executes_the_pipeline_down_to_its_early_return() {
+        let world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+
+        let ok = run(world.args, true, true)
+            .await
+            .expect("a dry run passes both preflights and stops before either chain");
+
+        assert_eq!(ok.burn.an_tx, "<dry-run>", "nothing was broadcast");
+        assert!(matches!(ok.submit.status, SubmitStatus::DryRunOk));
+        assert_eq!(ok.submit.eth_tx, None, "and nothing was submitted");
+
+        // A dry run neither reads nor writes idempotency state, so the
+        // state directory it was given is still empty. This is the half
+        // of the contract `tests/cli.rs` cannot check: it never gets a
+        // run past argument parsing.
+        let left_behind: Vec<_> = std::fs::read_dir(world.state_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            left_behind.is_empty(),
+            "a declined or dry run must leave the directory as it found it: {left_behind:?}",
+        );
+
+        // And it really went to the wire for its answers.
+        let seen = world.node.seen.lock().await.join("\n");
+        assert!(seen.contains("/v2/account"), "{seen}");
+    }
+
     #[test]
     fn nothing_in_this_pipeline_aborts_the_process_instead_of_refusing() {
         // A panic is exit 101, which is not in the wire contract at all:

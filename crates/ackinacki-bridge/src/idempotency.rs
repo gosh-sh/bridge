@@ -1628,6 +1628,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::source_guard::production_source;
 
     /// Run `f` with a subscriber of our own and hand back everything it
     /// logged.
@@ -2461,10 +2462,7 @@ mod tests {
         // it keeps going unnoticed. What IS checkable is the other half —
         // the item left behind has no doc — and that is the half that
         // always accompanies it, because the doc did not multiply.
-        let src = include_str!("idempotency.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("idempotency.rs", include_str!("idempotency.rs"));
         let lines: Vec<&str> = production.lines().collect();
 
         let mut undocumented = Vec::new();
@@ -2528,15 +2526,15 @@ mod tests {
         // A grep is the right instrument for a syntactic property of one
         // closure. It is the wrong one for anything about what happens at
         // runtime, which is why this test says only this much.
-        let src = include_str!("idempotency.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("idempotency.rs", include_str!("idempotency.rs"));
         let start = production
             .find(concat!("let publish = ", "|| -> std::io::Result<bool>"))
             .expect("`reserve` publishes through a closure by that name");
         let body = &production[start..];
-        let end = body.find("\n    };").unwrap_or(body.len());
+        let end = body.find("\n    };").expect(
+            "the publish closure closes with `};` at `reserve`'s indent; without that this reads \
+             the rest of the file and the fsync order it checks is not the closure's",
+        );
         let publish = &body[..end];
 
         let link = publish

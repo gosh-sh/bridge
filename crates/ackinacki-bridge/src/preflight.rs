@@ -1934,6 +1934,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::source_guard::production_source;
 
     #[test]
     fn normalize_accepts_0x_prefix() {
@@ -2588,16 +2589,25 @@ mod tests {
         // and reported as exit 10 in the orchestrator. Constructing one
         // somewhere new means deciding again what its failure means, so
         // make that decision visible rather than inherited.
+        // The only guard in the crate that cuts files it does not own,
+        // and the last one still cutting at `#[cfg(test)]` alone — an
+        // attribute on any item above a test module truncated the scan of
+        // somebody else's file, and a second constructor below the cut
+        // then counted as zero. Fail-open, in the direction where the
+        // exit codes go back to disagreeing about whether a burn was
+        // composed. `production_source` cuts at the test module itself
+        // and panics rather than widening if it cannot find one.
         let needle = concat!("ClientContext::", "new(");
-        let count = |src: &str| {
-            src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+        let count = |file: &str, src: &str| {
+            production_source(file, src)
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("//"))
                 .filter(|l| l.contains(needle))
                 .count()
         };
-        let here = count(include_str!("preflight.rs"));
-        let there = count(include_str!("orchestrator.rs")) + count(include_str!("burn.rs"));
+        let here = count("preflight.rs", include_str!("preflight.rs"));
+        let there = count("orchestrator.rs", include_str!("orchestrator.rs"))
+            + count("burn.rs", include_str!("burn.rs"));
         assert_eq!(here, 1, "this module owns the constructor");
         assert_eq!(
             there, 0,

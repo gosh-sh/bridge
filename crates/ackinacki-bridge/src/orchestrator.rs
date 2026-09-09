@@ -1828,6 +1828,7 @@ fn confirm_before_burn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_guard::production_source;
 
     /// A reserved record, with `an_tx_hash` as the only variable.
     fn reserved(an_tx_hash: Option<&str>) -> idempotency::Record {
@@ -2304,7 +2305,10 @@ mod tests {
         let body = &src[from..];
         // Up to the next top-level item. Everything inside a function is
         // indented, so a column-0 `fn` is where this one ends.
-        let body = &body[..body.find("\nfn ").unwrap_or(body.len())];
+        let body = &body[..body.find("\nfn ").expect(
+            "`run` is no longer followed by a top-level `fn`, so this slice now runs to the end \
+             of the file and takes the test module with it",
+        )];
         // The comments in there discuss these calls by name; only the
         // code decides what runs when.
         let code = body
@@ -2354,10 +2358,7 @@ mod tests {
         // `a_resume_takes_the_withdrawal_lock` proves the seam fills the
         // slot it is handed. Nothing but this proves `run` hands it one
         // that lives.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let lines: Vec<&str> = production.lines().collect();
 
         let calls: Vec<usize> = lines
@@ -2381,10 +2382,14 @@ mod tests {
         // The argument list, not the whole function: a `_withdrawal_lock`
         // mentioned anywhere else in the file must not vouch for this.
         let start = calls[0];
+        // No `unwrap_or(lines.len())` fallback. Widening to the rest of
+        // the file is the direction that PASSES: the argument this guard
+        // wants to see appears elsewhere in `run`, so a missed statement
+        // end would let any call site vouch for itself.
         let end = (start..lines.len())
             .find(|&n| lines[n].contains(")?;"))
             .map(|n| n + 1)
-            .unwrap_or(lines.len());
+            .expect("the seam is called with `?`, and this reads its argument list to that `;`");
         let args = lines[start..end].join("\n");
         assert!(
             args.contains(concat!("&mut _withdrawal", "_lock")),
@@ -2512,7 +2517,10 @@ mod tests {
             .find(concat!("pub async fn ", "run("))
             .expect("run() is this module's entry point");
         let body = &src[from..];
-        let body = &body[..body.find("\nfn ").unwrap_or(body.len())];
+        let body = &body[..body.find("\nfn ").expect(
+            "`run` is no longer followed by a top-level `fn`, so this slice now runs to the end \
+             of the file and takes the test module with it",
+        )];
 
         let branch_start = body
             .find(concat!("if let Some(p) = prior.as_ref()", ".filter("))
@@ -2568,10 +2576,7 @@ mod tests {
         // the thing that costs money — a retry wrapper reads it and fires
         // a second burn — and it does not become safe by being spelled out
         // by hand instead of reached through the type.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let claim = concat!("nothing was ", "sent");
         let offenders: Vec<_> = production
             .lines()
@@ -2612,10 +2617,7 @@ mod tests {
         // third one actually covers. Deleted rather than re-worded: a
         // hold that guards nothing teaches the next reader that holds are
         // decoration.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let lines: Vec<&str> = production.lines().collect();
 
         // THREE properties, because keying on either construct alone has
@@ -2710,11 +2712,7 @@ mod tests {
         // rebinding's mere presence — a rebinding pushed twenty lines
         // down by a plausible-looking statement is the failure this is
         // for.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src.find(concat!("#[cfg(test)]\n", "mod tests {")).expect(
-            "the production/test cut moved; every guard in this file scans the wrong text until \
-             it is fixed",
-        )];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let lines: Vec<&str> = production.lines().collect();
 
         let choice = lines
@@ -2805,10 +2803,7 @@ mod tests {
         // A count rather than a list of line numbers: line numbers rot
         // every commit, and what a reader needs is to be sent back here
         // when the set changes at all.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let sites = construction_sites(production, concat!("CliError::", "ReservationInFlight"));
         assert_eq!(
             sites.len(),
@@ -3003,10 +2998,7 @@ mod tests {
         // review round at a time for nine rounds. A seventh added below
         // this line inherits the same defect, so the region is checked
         // rather than the list.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         // From the PEEK, not from the predicate the peek feeds: the peek
         // is itself a stage-1 refusal, and its `Err` is about a record
         // file that exists.
@@ -3066,10 +3058,7 @@ mod tests {
         // honestly here: `run` is written in stage order, every path that
         // reaches stage 4 has passed the send or resumed a recorded one,
         // and the resume arm sits above this line rather than below it.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let run_at = production
             .find(concat!("pub async fn ", "run("))
             .expect("run() is this module's entry point");
@@ -3201,10 +3190,7 @@ mod tests {
         // Production code only. The test below names the variant in order
         // to assert which refusal comes back, and a guard its own
         // neighbours trip over gets loosened until it means nothing.
-        let src = include_str!("orchestrator.rs");
-        let production = &src[..src
-            .find(concat!("#[cfg(test)]\n", "mod tests {"))
-            .unwrap_or(src.len())];
+        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let offenders =
             construction_sites(production, concat!("CliError::Duplicate", "InFlight {"));
         assert!(

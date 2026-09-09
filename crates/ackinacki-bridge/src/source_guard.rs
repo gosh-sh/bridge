@@ -61,23 +61,32 @@ pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
     const ATTRIBUTE: &str = concat!("#[cfg", "(test)]");
     const DECLARATION: &str = concat!("mod ", "tests {");
 
-    let mut anchors = Vec::new();
+    // Offsets taken from `split('\n')` rather than `lines()`, and the
+    // pair read off a window rather than by slicing back into `src`.
+    // Both were bugs of one byte. `lines()` strips a trailing `\r`, so a
+    // CRLF file drifted the running offset by a byte per line; and
+    // `src[at..]` where the attribute is the last line of a file with no
+    // final newline is out of range, which panicked inside the guard
+    // instead of naming the file it was cutting.
+    let mut numbered: Vec<(usize, &str)> = Vec::new();
     let mut at = 0;
-    for line in src.lines() {
-        let start = at;
-        at += line.len() + 1;
-        if line != ATTRIBUTE {
-            continue;
-        }
-        let next = src[at..].lines().next().unwrap_or("");
-        let declaration = next
-            .strip_prefix("pub(crate) ")
-            .or_else(|| next.strip_prefix("pub "))
-            .unwrap_or(next);
-        if declaration == DECLARATION {
-            anchors.push(start);
-        }
+    for raw in src.split('\n') {
+        numbered.push((at, raw.strip_suffix('\r').unwrap_or(raw)));
+        at += raw.len() + 1;
     }
+    let anchors: Vec<usize> = numbered
+        .windows(2)
+        .filter(|w| w[0].1 == ATTRIBUTE)
+        .filter(|w| {
+            let next = w[1].1;
+            let declaration = next
+                .strip_prefix("pub(crate) ")
+                .or_else(|| next.strip_prefix("pub "))
+                .unwrap_or(next);
+            declaration == DECLARATION
+        })
+        .map(|w| w[0].0)
+        .collect();
     match anchors[..] {
         [cut] => &src[..cut],
         [] => panic!(
@@ -165,9 +174,35 @@ pub(crate) fn clauses(text: &str) -> Vec<String> {
 /// "records older than N hours with no `an_tx_hash` are safe to prune",
 /// and the changelog carries the entry that took it back out.
 ///
+/// That sentence is not itself caught by this list, and saying it was
+/// would be the second spec disagreeing with the first: what is listed
+/// is the verb with the RECORD as its object, and "safe to prune" bare
+/// is not. It is left out on purpose. `Failed` records carry a hash by
+/// construction — the sole writer of `Failed` is the post-burn revert —
+/// so pruning one is not this rule's business, and the README says
+/// exactly that about them, twice. A list that flagged "safe to prune"
+/// would be flagging the one deletion this pipeline does authorise.
+///
 /// This is the FLOOR. A surface may hold itself to more — the refusal
 /// gate adds one — but no surface may know fewer orders than the
 /// documents are held to.
+/// The prohibitions that hedge one, and the FLOOR under every hedge
+/// list for the same reason the orders are shared.
+///
+/// The refusal gate's comment said it was stricter than the document
+/// gate "in the hedges and only there", and the two hedge sets merely
+/// INTERSECTED: `never delete` and `must not delete` exempted a clause
+/// in a refusal and not in a document, so on those two spellings the
+/// refusal gate was the softer of the pair — the same shape as the
+/// verbs, one field over. A refusal may be stricter than a document by
+/// having FEWER hedges; it may not have hedges the document does not.
+pub(crate) const PROHIBITS_A_DELETION: [&str; 4] = [
+    "do not delete",
+    "never delete",
+    "must not delete",
+    "not to delete",
+];
+
 pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
     "delete the record",
     "delete that record",
@@ -329,6 +364,30 @@ mod tests {
                 "visibility `{visibility}` should not move the cut",
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "trailing_newline.rs")]
+    fn an_attribute_on_the_last_line_names_the_file_rather_than_panicking_inside() {
+        // No final newline, and the attribute is the last line. The
+        // offset walk ran one past the end and `src[at..]` panicked from
+        // inside the guard — a byte-index message about `source_guard`
+        // in place of the sentence that names the file being cut.
+        production_source("trailing_newline.rs", &format!("fn ship() {{}}\n{ATTR}"));
+    }
+
+    #[test]
+    fn a_crlf_file_is_cut_in_the_same_place() {
+        // `lines()` strips the `\r`, so a running offset built from
+        // `line.len()` drifted by a byte per line and the cut landed
+        // mid-token further down the file.
+        let src =
+            file(&["use std::fs;", "", "fn ship() {}", "", ATTR, DECL, "}"]).replace('\n', "\r\n");
+        let cut = production_source("crlf.rs", &src);
+        assert_eq!(
+            cut, "use std::fs;\r\n\r\nfn ship() {}\r\n\r\n",
+            "the cut is the same place in the same file with the other line ending",
+        );
     }
 
     #[test]

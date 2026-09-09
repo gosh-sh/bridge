@@ -149,6 +149,39 @@ pub(crate) struct FakeNode {
     /// Every request line the node served, in order. Tests assert on
     /// what the run actually asked for rather than on what it logged.
     pub seen: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// What the node objected to, if anything.
+    ///
+    /// The checks in [`answer`] are assertions, and they run inside a
+    /// detached `tokio::spawn`: a panic there kills the TASK, not the
+    /// test. The socket then closes, the SDK reports a network failure,
+    /// and the run under test is refused with a sentence about the
+    /// chain — which is exactly the "refusal about the fake, wearing the
+    /// clothes of a refusal about the withdrawal" this node was hardened
+    /// to stop producing. So the complaint is caught and kept, and
+    /// [`FakeNode::complaint`] is what a test reads before believing its
+    /// own refusal.
+    complaint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl FakeNode {
+    /// Fail the test with what the node objected to, if it objected.
+    ///
+    /// Called after the run rather than during it, because the run's own
+    /// refusal is usually the more interesting failure — unless the
+    /// reason for it is that this node refused to answer.
+    pub(crate) fn complaint(&self) {
+        if let Some(what) = self
+            .complaint
+            .lock()
+            .expect("the fake node's complaint")
+            .take()
+        {
+            panic!(
+                "the fake node refused to answer, so what the run reported is not the \
+                 withdrawal's fault: {what}"
+            );
+        }
+    }
 }
 
 /// Serve one withdrawal's worth of TVM node, on an ephemeral port.
@@ -176,9 +209,12 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let complaint: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     let fixture = std::sync::Arc::new(fixture);
     let seen_bg = seen.clone();
+    let complaint_bg = complaint.clone();
     tokio::spawn(async move {
         loop {
             let Ok((mut sock, _)) = listener.accept().await else {
@@ -186,6 +222,7 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
             };
             let fixture = fixture.clone();
             let seen = seen_bg.clone();
+            let complaint = complaint_bg.clone();
             tokio::spawn(async move {
                 let mut buf: Vec<u8> = Vec::new();
                 let mut chunk = vec![0u8; 65536];
@@ -194,20 +231,30 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
                         if let Some(at) = end_of_headers(&buf) {
                             break at;
                         }
-                        let n = sock.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
+                        // An error is not an EOF, and `unwrap_or(0)`
+                        // said it was: a socket that failed mid-request
+                        // looked to this loop exactly like a client that
+                        // had finished, and the test saw a clean close.
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(e) => {
+                                object(&complaint, format!("reading a request: {e}"));
+                                return;
+                            },
                         }
-                        buf.extend_from_slice(&chunk[..n]);
                     };
                     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let length = content_length(&head);
                     while buf.len() < head_end + length {
-                        let n = sock.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(e) => {
+                                object(&complaint, format!("reading a body: {e}"));
+                                return;
+                            },
                         }
-                        buf.extend_from_slice(&chunk[..n]);
                     }
                     let body =
                         String::from_utf8_lossy(&buf[head_end..head_end + length]).to_string();
@@ -216,7 +263,23 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
                     let line = head.lines().next().unwrap_or("").to_string();
                     seen.lock().await.push(line.clone());
 
-                    let payload = serde_json::to_string(&answer(&fixture, &line, &body)).unwrap();
+                    // Caught, so an assertion in `answer` reaches the
+                    // test as itself rather than as a closed socket.
+                    let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        answer(&fixture, &line, &body)
+                    }));
+                    let payload = match answered {
+                        Ok(json) => serde_json::to_string(&json).unwrap(),
+                        Err(panic) => {
+                            let what = panic
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                                .unwrap_or_else(|| "a panic with no message".to_string());
+                            object(&complaint, what.clone());
+                            serde_json::json!({ "errors": [{ "message": what }] }).to_string()
+                        },
+                    };
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
                          {}\r\nConnection: keep-alive\r\n\r\n{}",
@@ -234,6 +297,16 @@ pub(crate) async fn fake_node(fixture: NodeFixture) -> FakeNode {
     FakeNode {
         url: format!("{url}/graphql"),
         seen,
+        complaint,
+    }
+}
+
+/// Keep the FIRST objection. A closed connection produces more of them,
+/// and the first one is the one that explains the rest.
+fn object(complaint: &std::sync::Mutex<Option<String>>, what: String) {
+    let mut slot = complaint.lock().expect("the fake node's complaint");
+    if slot.is_none() {
+        *slot = Some(what);
     }
 }
 
@@ -385,6 +458,7 @@ pub(crate) struct FakeWorld {
     pub node: FakeNode,
     pub state_dir: tempfile::TempDir,
     _keys: tempfile::TempDir,
+    _plumbing: Option<tempfile::TempDir>,
 }
 
 impl FakeWorld {
@@ -438,13 +512,62 @@ impl FakeWorld {
         crate::idempotency::record_path(self.state_dir.path(), &record.key)
     }
 
+    /// Fill in the five submit-only values a real run demands before it
+    /// will look at the burn branch.
+    ///
+    /// Directories only — empty ones. What they are pointed AT is the
+    /// wall this fixture cannot climb: `check_prover_artifacts` loads
+    /// the Hermez ceremony at k=20 and k=21 and identifies it by its
+    /// `s_g2` head, so an empty `--params-dir` is refused there and a
+    /// fabricated one would mean defeating the check that stops a
+    /// locally generated SRS — under which every proof is forgeable.
+    ///
+    /// Which makes this the honest boundary of the harness, and it is
+    /// worth a test of its own rather than a sentence: a real run gets
+    /// through argument parsing, the state directory, the record, the
+    /// plumbing, both halves of preflight against two fake chains and
+    /// the burner key, and stops on the ceremony.
+    pub(crate) fn with_submit_plumbing(&mut self) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        // The verifier bytecode has to be there, because supplying
+        // `--verifiers-dir` makes stage 1 do MORE: `check_bridge_deploy`
+        // reads it and compares it against the deployed Yul runtime.
+        // Without it a "real run" stops in the EVM preflight, which is
+        // neither the wall this fixture is about nor the one the last
+        // round named.
+        //
+        // The bytes are the pairing `preflight::tests::
+        // a_matching_deployed_verifier_passes` uses: a 32-byte CREATE
+        // prelude followed by the four bytes `mock_rpc` answers
+        // `eth_getCode` with.
+        let mut verifier = vec![0u8; 32];
+        verifier.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
+        std::fs::write(
+            path.join("BridgeWithdrawalAggregatorVerifier.bin"),
+            &verifier,
+        )
+        .unwrap();
+        let args = self.args.as_mut().expect("the arguments are still here");
+        args.eth_private_key = Some("1a".repeat(32));
+        args.aggregator_dir = Some(path.clone());
+        args.verifiers_dir = Some(path.clone());
+        args.params_dir = Some(path.clone());
+        args.work_dir = Some(path);
+        self._plumbing = Some(dir);
+    }
+
     pub(crate) async fn run(
         &mut self,
         dry_run: bool,
     ) -> crate::errors::CliResult<crate::orchestrator::WithdrawSuccess> {
         let mut args = self.args.take().expect("a world puts one run through it");
         args.dry_run = dry_run;
-        crate::orchestrator::run(args, dry_run, true).await
+        let outcome = crate::orchestrator::run(args, dry_run, true).await;
+        // Before the caller reads the outcome: a refusal caused by this
+        // node refusing to answer is not a fact about the withdrawal.
+        self.node.complaint();
+        outcome
     }
 }
 
@@ -452,10 +575,15 @@ impl FakeWorld {
 /// `ecc3` passes every check it makes.
 ///
 /// Dry, and the qualifier is the honest half of this sentence. A real
-/// run reaches `check_prover_artifacts` — `parse_eth_signer`, the
-/// ceremony at k=20 and k=21, the committed verifier bytecode, and
-/// `aggregate-proof --help` — before it reaches the burn branch, and the
-/// ceremony is a ~256 MB Hermez file that this fixture cannot fabricate.
+/// run is refused before the burn branch twice over, and the first of
+/// the two is this fixture's own doing: it leaves the five submit-only
+/// values unset, so `require_submit_plumbing` refuses. That is a
+/// deliberate default — it is the state the exit-code test needs — and
+/// [`FakeWorld::with_submit_plumbing`] fills them in.
+///
+/// Past it lies the wall proper: `check_prover_artifacts` loads the
+/// ceremony at k=20 and k=21 before the burn branch, and it is a ~256 MB
+/// Hermez file that this fixture cannot fabricate.
 /// Not "has not fabricated yet": `assert_hermez_srs` identifies the
 /// Perpetual Powers of Tau ceremony by its `s_g2` head precisely so that
 /// a locally generated SRS cannot pass, because one that did would make
@@ -551,6 +679,7 @@ pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
         node,
         state_dir,
         _keys: keys_dir,
+        _plumbing: None,
     }
 }
 

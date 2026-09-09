@@ -3002,6 +3002,12 @@ mod tests {
     /// and does not in a shipped document: in a refusal the only file in
     /// scope is the record it names, while a document says "delete that
     /// file" about a key file, a log or a stale artifact.
+    /// The only things that exempt a clause in a refusal: the shared
+    /// prohibitions, and nothing added to them.
+    fn hedges_a_refusal_may_offer() -> Vec<&'static str> {
+        crate::source_guard::PROHIBITS_A_DELETION.to_vec()
+    }
+
     fn orders_a_refusal_may_not_give() -> Vec<&'static str> {
         crate::source_guard::ORDERS_A_DELETION
             .iter()
@@ -3011,12 +3017,20 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_gate_knows_every_order_the_documents_are_held_to() {
+    fn the_refusal_gate_is_stricter_than_the_documents_in_both_directions() {
         // The relation the comment below used to assert and nothing
         // checked. It is true by construction above, so what this
         // catches is the construction being replaced by a literal list
         // again — which is how it was false for two rounds, silently,
         // from a commit in another module.
+        for hedge in hedges_a_refusal_may_offer() {
+            assert!(
+                crate::source_guard::PROHIBITS_A_DELETION.contains(&hedge),
+                "the refusal gate is exempted by `{hedge}` and the documents are not. A refusal \
+                 may be stricter than a document by having fewer hedges; a hedge it has and they \
+                 do not makes it the laxer of the two, which is what the comment above denies",
+            );
+        }
         for order in crate::source_guard::ORDERS_A_DELETION {
             assert!(
                 orders_a_refusal_may_not_give().contains(&order),
@@ -3053,11 +3067,20 @@ mod tests {
         //   2. the wrapper's prohibition survives composition,
         //   3. a refusal about a hash-less record admits the record cannot answer.
         //
-        // STRICTER than the shipped-document gate, in the HEDGES and
-        // only there: the runbook may give conditional permission in a
-        // sentence naming the verdict — that is what it is for — while a
-        // refusal has no room for a condition and already carries the
-        // prohibition, so any imperative in it is a contradiction.
+        // STRICTER than the shipped-document gate, and both halves of
+        // that are now checkable rather than asserted. The ORDERS are
+        // the shared floor plus one; the HEDGES are the shared floor and
+        // nothing else, so a refusal is exempted by strictly fewer
+        // things than a document — the runbook may give conditional
+        // permission in a sentence naming the verdict, which is what it
+        // is for, while a refusal has no room for a condition and
+        // already carries the prohibition, so any imperative in it is a
+        // contradiction.
+        //
+        // Both halves have been false here. The verbs were an
+        // intersection for two rounds; the hedges were, until this
+        // comment was rewritten, a second copy holding two prohibitions
+        // the documents did not have.
         //
         // In the VERBS it was strictly weaker, for two rounds, while the
         // sentence above said the opposite. The two lists were separate
@@ -3076,12 +3099,16 @@ mod tests {
         // Only prohibitions. Not "only if", not "once you have
         // reconciled": a refusal that starts qualifying a deletion is
         // the runbook's job being done in the wrong place.
-        const HEDGES: [&str; 4] = [
-            "do not delete",
-            "never delete",
-            "must not delete",
-            "not to delete",
-        ];
+        //
+        // The shared floor, and nothing added to it. That is what makes
+        // "stricter in the hedges" a fact rather than a sentence: a
+        // refusal is exempted by strictly fewer things than a document
+        // is. It used to be a second copy holding `never delete` and
+        // `must not delete`, which the document list did NOT have — so
+        // on those two spellings this gate was the softer of the pair,
+        // while the comment above claimed the opposite. The same shape
+        // as the orders, one field over.
+        let hedges = hedges_a_refusal_may_offer();
         const PROHIBITION: &str = "do not delete that record on the strength of this refusal";
         const ADMITS: [&str; 4] = [
             "cannot say",
@@ -3123,7 +3150,7 @@ mod tests {
 
         for (what, msg) in &messages {
             let orders =
-                crate::source_guard::sentences_authorising_a_deletion(msg, &authorises, &HEDGES);
+                crate::source_guard::sentences_authorising_a_deletion(msg, &authorises, &hedges);
             assert!(
                 orders.is_empty(),
                 "{what}: this refusal tells an operator to delete a record that may hold a burn \
@@ -3248,8 +3275,14 @@ mod tests {
                 .to_ascii_lowercase()
                 .replace(['*', '`'], "");
             for sentence in flat.split(['.', '!', '?']) {
+                // "no flag" satisfies it too, and has to: a `failed`
+                // record with a hash resumes WITHOUT `--allow-retry` —
+                // `Status::Failed` is its own disposition, not
+                // `Resumable` — so a sentence saying so is true and must
+                // not be forced to name a flag it does not need.
                 if CLAIMS.iter().any(|c| sentence.contains(c))
                     && !sentence.contains(concat!("--allow", "-retry"))
+                    && !sentence.contains("no flag")
                 {
                     offenders.push(format!("{name}: {}", sentence.trim()));
                 }
@@ -3306,6 +3339,49 @@ mod tests {
             msg.contains("--params-dir"),
             "while still naming what is actually missing: {msg}",
         );
+    }
+
+    /// Where a real run actually stops, measured rather than asserted.
+    #[tokio::test]
+    async fn a_real_run_passes_both_preflights_and_stops_at_the_ceremony() {
+        // The previous round said this fixture "reaches
+        // `check_prover_artifacts`". It did not: it left all five
+        // submit-only values unset, so it was refused at
+        // `require_submit_plumbing` — eighty lines earlier and for a
+        // different reason. The conclusion drawn from it stood anyway,
+        // which is the kind of luck worth removing.
+        //
+        // With the plumbing supplied, a real run gets through argument
+        // parsing, the state directory, the record read, the plumbing,
+        // both halves of preflight against two fake chains, and the
+        // burner key — and stops on the ceremony, which is the wall that
+        // cannot be fixtured: `assert_hermez_srs` identifies Perpetual
+        // Powers of Tau by its `s_g2` head precisely so a locally
+        // generated SRS cannot pass, because every proof under one would
+        // be forgeable. A fixture that got past it would be a fixture
+        // that had defeated it.
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        world.with_submit_plumbing();
+
+        let err = world
+            .run(false)
+            .await
+            .expect_err("an empty --params-dir has no ceremony in it");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--params-dir") && msg.contains("k=20"),
+            "the run reached the artifacts check and named the degree it wanted: {msg}",
+        );
+        assert_eq!(
+            err.exit_code().as_i32(),
+            2,
+            "nothing was broadcast and there is no record for this identity: {err}",
+        );
+
+        // And it really went to both chains on the way.
+        let seen = world.node.seen.lock().await.join("\n");
+        assert!(seen.contains("/v2/account"), "{seen}");
     }
 
     #[test]

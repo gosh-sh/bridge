@@ -1299,13 +1299,17 @@ impl LockSlot {
     /// than something a guard has to spell out.
     ///
     /// What the borrow is OF changes with it, and the wider one is the
-    /// one that was wanted. The `None` this used to return meant "there
-    /// is no lock in here", which is true of the lockless deployment and
-    /// says nothing about the slot: the assignment a hold exists to
-    /// forbid — `slot = LockSlot::empty()`, a second `install` — is
-    /// exactly as available on an empty slot as on a full one, and on a
-    /// mount that cannot `flock` the run went through the whole of
-    /// stages 4-6 with no live borrow at all.
+    /// one that was wanted — though not for the reason first written
+    /// here. "On a mount that cannot `flock` the run went through stages
+    /// 4-6 with no live borrow at all" was false: `Option<T>` where `T:
+    /// Drop` carries drop glue, so the old signature's `None` held the
+    /// borrow of the slot exactly as the `Some` did, and an assignment
+    /// under it was E0506 either way. Measured on the old form.
+    ///
+    /// What the change actually buys is the E0599 above, and one honest
+    /// simplification: the borrow is now of the slot by construction
+    /// rather than by a property of `Option`'s drop glue that no reader
+    /// of this signature would think to check.
     #[must_use]
     pub fn hold(&self) -> LockHold<'_> {
         LockHold(std::marker::PhantomData)
@@ -1390,14 +1394,25 @@ impl<'a> BurnPermit<'a> {
     /// `flock` locks are per open file description, so a second `open` +
     /// `flock` from THIS process is denied by a lock this process already
     /// holds — which is what makes the check possible from the inside.
-    /// The four answers:
+    /// The five answers — and the table said four, leaving out the one
+    /// that sends with no lock evidence at all:
     ///
     /// | held | probe | verdict |
     /// |---|---|---|
     /// | yes | somebody holds it | that somebody is us: send |
     /// | yes | nobody holds it | the lock file was replaced under us: refuse |
     /// | yes | could not ask | send; the lock object is the better evidence |
-    /// | no | anything but "could not ask" | this filesystem locks and we hold nothing: refuse |
+    /// | no | somebody, or nobody | this filesystem locks and we hold nothing: refuse |
+    /// | no | could not ask | send: the filesystem cannot `flock`, which is supported |
+    ///
+    /// That last row is the lockless deployment, and it is the only path
+    /// on which an irreversible burn goes out with nothing having
+    /// vouched for the withdrawal lock — no object held, no verdict from
+    /// the kernel. It is deliberate: refusing there would make a state
+    /// directory on such a mount unusable, and the record's own
+    /// cross-field guards are what hold instead. It is also why the
+    /// refusals downstream say "could not be determined" rather than
+    /// "nobody holds it".
     ///
     /// A refusal here costs a re-run with nothing broadcast. The other
     /// direction costs a second burn, which is the whole reason the check
@@ -1413,7 +1428,13 @@ impl<'a> BurnPermit<'a> {
     /// burn that may be in flight. So the message below does not say
     /// "re-running is safe", which is what it used to say and is not
     /// true; it names the record and says which of the three situations
-    /// this is, because only one of them permits deleting it.
+    /// this is, because they do not agree about the deletion: the arm
+    /// where another live process holds the withdrawal forbids it
+    /// outright, and the other two permit it — a lock file swept out
+    /// from under this run, and a run that never took one. Two of three,
+    /// and `only_the_arms_that_know_nobody_is_executing_the_withdrawal_
+    /// permit_a_deletion` requires exactly that. "Only one of them
+    /// permits deleting it" stood here and was the wrong way round.
     pub fn issue(state_dir: &Path, key: &str, held: Option<&'a WithdrawalLock>) -> CliResult<Self> {
         let probe = WithdrawalLock::probe_holder(state_dir, key);
         match (held, probe) {
@@ -2486,16 +2507,10 @@ mod tests {
         // refusals: this arm has no condition to offer. The other two
         // arms DO give conditional permission and are checked below,
         // where the condition is the point.
-        const FORBIDS: [&str; 4] = [
-            "do not delete",
-            "never delete",
-            "must not delete",
-            "not to delete",
-        ];
         let orders = crate::source_guard::sentences_authorising_a_deletion(
             &msg,
             &crate::source_guard::ORDERS_A_DELETION,
-            &FORBIDS,
+            &crate::source_guard::PROHIBITS_A_DELETION,
         );
         assert!(
             orders.is_empty(),
@@ -2869,27 +2884,40 @@ mod tests {
         //
         // Markdown emphasis is stripped by `clauses`, which is why "one
         // of three" matches "one of **three** things".
-        const HEDGES: [&str; 15] = [
-            // References to the three-verdict gate itself.
-            "one of three",
-            "three-verdict",
-            "three verdicts",
-            "three liveness",
-            "three cases",
-            // Conditionals.
-            "only if",
-            "only then",
-            "only in the second case",
-            "only sometimes",
-            // Prohibitions.
-            "do not delete",
-            "not to delete",
-            "delete nothing",
-            // Statements that the verdict may not exist.
-            "could not be determined",
-            "does not always",
-            "never does",
-        ];
+        //
+        // The prohibitions come from the shared floor. Three of them
+        // were written out here and two were missing — `never delete`
+        // and `must not delete` — which the refusal gate had. A hedge
+        // one surface honours and the other does not is the same defect
+        // as an order one surface knows and the other does not, one
+        // field over, and it made the refusal gate the SOFTER of the two
+        // on those spellings while its comment claimed the opposite.
+        let hedges: Vec<&str> = crate::source_guard::PROHIBITS_A_DELETION
+            .iter()
+            .copied()
+            .chain([
+                // References to the three-verdict gate itself.
+                "one of three",
+                "three-verdict",
+                "three verdicts",
+                "three liveness",
+                "three cases",
+                // Conditionals. A procedure may give conditional
+                // permission; a refusal may not, which is the whole of
+                // the difference between the two gates.
+                "only if",
+                "only then",
+                "only in the second case",
+                "only sometimes",
+                // A prohibition of this shape belongs to the documents:
+                // it forbids without naming the verb.
+                "delete nothing",
+                // Statements that the verdict may not exist.
+                "could not be determined",
+                "does not always",
+                "never does",
+            ])
+            .collect();
         // Sentences that hand somebody permission. The state-file
         // spelling is here because the documents call the same object two
         // things and only one of them was watched.
@@ -3022,7 +3050,7 @@ mod tests {
                 // telling somebody to delete the record is dangerous
                 // wherever it is written.
                 let instructs = name != "CHANGELOG.md";
-                if instructs && promises_an_answer && !HEDGES.iter().any(|h| lower.contains(h)) {
+                if instructs && promises_an_answer && !hedges.iter().any(|h| lower.contains(h)) {
                     offenders.push(format!(
                         "{name} block {i} (promises an answer): {}",
                         block.trim()
@@ -3040,7 +3068,7 @@ mod tests {
                 for clause in crate::source_guard::sentences_authorising_a_deletion(
                     block,
                     &AUTHORISES,
-                    &HEDGES,
+                    &hedges,
                 ) {
                     offenders.push(format!(
                         "{name} block {i} (authorises a deletion): {clause}"

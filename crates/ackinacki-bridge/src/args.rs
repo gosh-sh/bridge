@@ -57,6 +57,8 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
                   end-user CLI: expects only an EVM RPC URL and the deployed AckiNackiBridge \
                   address — no local `prover_state.json`, no daemon on this machine."
 )]
+/// The command line, as clap parses it. The long description above
+/// this attribute is what `--help` prints.
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Command,
@@ -81,12 +83,19 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+/// The subcommands this binary ships. One today; the enum is what
+/// keeps `withdraw` from becoming the implicit default when a
+/// second one lands.
 pub enum Command {
     /// Withdraw USDC from an AN multisig to an EVM recipient.
     Withdraw(WithdrawArgs),
 }
 
 #[derive(Debug, clap::Args)]
+/// Everything `withdraw` takes, before any of it is parsed into a
+/// typed form. Every field is raw here on purpose: the typed
+/// parsers below are where a refusal gets its wording, and they
+/// can only refuse what they were handed verbatim.
 pub struct WithdrawArgs {
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,
     /// no `0x`, no workchain prefix). Must be an active, deployed
@@ -513,6 +522,8 @@ extern "C" {
 
 // -- Helpers --
 
+/// A bare 64-character hex string: an account or dapp id with no
+/// `0x`, no workchain prefix and no separator.
 fn is_64_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -549,6 +560,8 @@ pub(crate) fn redact(s: &str) -> crate::errors::Redacted {
     crate::errors::Redacted::rendered(head)
 }
 
+/// The chain-id whitelist, rendered for a refusal that has just
+/// turned one down.
 fn format_supported_chains() -> String {
     SUPPORTED_CHAINS
         .iter()

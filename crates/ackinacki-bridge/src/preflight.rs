@@ -98,6 +98,9 @@ pub enum BalanceCheck {
 }
 
 impl BalanceCheck {
+    /// The balance rule for a run whose burn is already on the
+    /// wire: a resume must not re-check ECC[3], because the burn
+    /// it is resuming already spent it.
     pub fn from_burn_sent(sent: bool) -> Self {
         if sent {
             Self::SkipSpent
@@ -327,6 +330,7 @@ pub(crate) fn build_client_context(gql_endpoint: &str) -> CliResult<Arc<ClientCo
 
 // -- Account fetch + parse (checks 2 + 7) ------------------------------------
 
+/// The `--from` account's BOC, as the node serves it.
 async fn fetch_account_boc(
     ctx: &Arc<ClientContext>,
     dapp_id_hex: &str,
@@ -354,6 +358,7 @@ async fn fetch_account_boc(
     Ok(r.boc)
 }
 
+/// The `--from` account, parsed from the BOC the node serves.
 async fn fetch_account(
     ctx: &Arc<ClientContext>,
     dapp_id_hex: &str,
@@ -366,6 +371,8 @@ async fn fetch_account(
     })
 }
 
+/// An account status in the words the node's own tooling uses, so
+/// a refusal and a `tvm-cli` session agree.
 fn describe_account_status(status: AccountStatus) -> &'static str {
     match status {
         AccountStatus::AccStateActive => "Active",
@@ -385,6 +392,9 @@ struct Custodian {
     owner_pubkey_hex: Option<String>,
 }
 
+/// Run `getCustodians` on the account's own code, locally. This is
+/// the check that decides whether `--from-keys` matches the
+/// on-chain owner.
 async fn call_get_custodians(
     ctx: &Arc<ClientContext>,
     address_extended: &str,
@@ -447,6 +457,8 @@ async fn call_get_custodians(
     parse_custodians(&decoded)
 }
 
+/// The custodian list out of a `getCustodians` answer, refusing
+/// anything it cannot read rather than reporting zero owners.
 fn parse_custodians(json: &Value) -> CliResult<Vec<Custodian>> {
     let arr = json
         .get("custodians")

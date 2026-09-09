@@ -512,6 +512,19 @@ impl FakeWorld {
         crate::idempotency::record_path(self.state_dir.path(), &record.key)
     }
 
+    /// Point the run at an anchor layer, valid or not.
+    ///
+    /// `--anchor-layer` is fed by `BRIDGE_ANCHOR_LAYER`, so a re-run
+    /// under a different profile can arrive with a value the last one
+    /// did not have. That is why its refusal has to know whether a
+    /// record exists.
+    pub(crate) fn with_anchor_layer(&mut self, layer: &str) {
+        self.args
+            .as_mut()
+            .expect("the arguments are still here")
+            .anchor_layer = layer.to_string();
+    }
+
     /// Fill in the five submit-only values a real run demands before it
     /// will look at the burn branch.
     ///
@@ -529,19 +542,6 @@ impl FakeWorld {
     /// through argument parsing, the state directory, the record, the
     /// plumbing, both halves of preflight against two fake chains and
     /// the burner key, and stops on the ceremony.
-    /// Point the run at an anchor layer, valid or not.
-    ///
-    /// `--anchor-layer` is fed by `BRIDGE_ANCHOR_LAYER`, so a re-run
-    /// under a different profile can arrive with a value the last one
-    /// did not have. That is why its refusal has to know whether a
-    /// record exists.
-    pub(crate) fn with_anchor_layer(&mut self, layer: &str) {
-        self.args
-            .as_mut()
-            .expect("the arguments are still here")
-            .anchor_layer = layer.to_string();
-    }
-
     pub(crate) fn with_submit_plumbing(&mut self) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
@@ -572,6 +572,17 @@ impl FakeWorld {
         self._plumbing = Some(dir);
     }
 
+    /// Put a run through this world.
+    ///
+    /// `--dry-run` lives in TWO places — the field `main` parses
+    /// out of the command line, and the parameter `run` actually
+    /// branches on — and the fixture used to set the field to
+    /// `false` while the only test calling it passed `true`.
+    /// Nothing read the field, so nothing noticed. One argument
+    /// sets both here.
+    ///
+    /// `skip_prompt` is always true: there is no TTY under `cargo
+    /// test`, and `confirm_before_burn` refuses without one.
     pub(crate) async fn run(
         &mut self,
         dry_run: bool,

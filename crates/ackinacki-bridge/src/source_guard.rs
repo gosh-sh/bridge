@@ -330,6 +330,8 @@ pub(crate) fn a_document_admits_the_verdict_may_be_missing(text: &str) -> bool {
     hedges(Surface::Document).iter().any(|h| text.contains(h))
 }
 
+/// The scan itself. Private, and reached through the two functions
+/// above: a surface is named by calling one of them.
 fn clauses_ordering_a_deletion(text: &str, surface: Surface) -> Vec<String> {
     sentences_authorising_a_deletion(text, &orders(surface), &hedges(surface))
 }

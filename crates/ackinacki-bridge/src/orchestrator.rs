@@ -80,6 +80,7 @@ pub struct WithdrawSuccess {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+/// What stage 3 did, as the JSON envelope reports it.
 pub struct BurnSummary {
     pub an_tx: String,
     pub bounce: bool,
@@ -87,6 +88,8 @@ pub struct BurnSummary {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+/// What stage 4 observed: the withdrawal event and the block it
+/// landed in.
 pub struct CaptureSummary {
     pub withdrawal_msg_id: String,
     pub block_seq_no: u64,
@@ -95,6 +98,8 @@ pub struct CaptureSummary {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+/// What stage 5 produced, and whether it verified locally before
+/// anything was submitted.
 pub struct ProofSummary {
     pub self_verified: bool,
     pub calldata_bytes: usize,
@@ -102,6 +107,7 @@ pub struct ProofSummary {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+/// What stage 6 sent, and how it ended.
 pub struct SubmitSummary {
     /// `None` for `--dry-run` success; `Some(tx_hash)` for real submits.
     pub eth_tx: Option<String>,
@@ -110,6 +116,8 @@ pub struct SubmitSummary {
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+/// How a run finished on the EVM side. `DryRunOk` is the only one
+/// a `--dry-run` can reach, and it means nothing was submitted.
 pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
@@ -1103,6 +1111,45 @@ enum BurnDecision {
     Reuse(String),
 }
 
+/// Reserve this identity and take the withdrawal lock INTO `slot`.
+///
+/// The twin of [`resume_recorded_burn`], and it exists for that reason
+/// rather than for tidiness. The burn branch used to reserve and install
+/// inline, and nothing could then be asked, afterwards, WHICH slot the
+/// lock went into: two lines —
+///
+/// ```text
+/// let mut _decoy = idempotency::LockSlot::empty();
+/// let _held = _decoy.install(lock);
+/// ```
+///
+/// — put a real lock in a slot that dies at the branch's closing brace,
+/// with the whole suite green. `BurnPermit::issue` took the happy arm
+/// because the hold it was given did hold something; the burn went out;
+/// `_withdrawal_lock` was never filled, so the settled hold covering
+/// stages 4-6 held `None` and the run was invisible to a concurrent
+/// `probe_holder` for ~101 minutes. The resume branch had the same shape
+/// and was RED, because a seam can be called by a test that asserts what
+/// the slot holds when it returns.
+///
+/// So: one shape for both branches, and both have that test.
+fn reserve_and_take_the_lock(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    slot: &mut idempotency::LockSlot,
+) -> CliResult<(idempotency::Record, BurnDecision)> {
+    let (record, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    // Bound rather than discarded: `install` hands the hold back, and
+    // what it covers here is the tail of this function. Nothing fallible
+    // is in that tail today, and the binding is what makes adding
+    // something to it safe rather than a silent change of protection.
+    let _held = slot.install(lock);
+    Ok((record, decision))
+}
+
 /// Claim the identity for a withdrawal whose burn is ALREADY on the wire,
 /// and hand back a record that says so.
 ///
@@ -1162,45 +1209,6 @@ enum BurnDecision {
 /// the error paths too — on `Err` the run aborts and the kernel releases
 /// it, which is what should happen, and the record-restoring writes below
 /// happen under it either way.
-/// Reserve this identity and take the withdrawal lock INTO `slot`.
-///
-/// The twin of [`resume_recorded_burn`], and it exists for that reason
-/// rather than for tidiness. The burn branch used to reserve and install
-/// inline, and nothing could then be asked, afterwards, WHICH slot the
-/// lock went into: two lines —
-///
-/// ```text
-/// let mut _decoy = idempotency::LockSlot::empty();
-/// let _held = _decoy.install(lock);
-/// ```
-///
-/// — put a real lock in a slot that dies at the branch's closing brace,
-/// with the whole suite green. `BurnPermit::issue` took the happy arm
-/// because the hold it was given did hold something; the burn went out;
-/// `_withdrawal_lock` was never filled, so the settled hold covering
-/// stages 4-6 held `None` and the run was invisible to a concurrent
-/// `probe_holder` for ~101 minutes. The resume branch had the same shape
-/// and was RED, because a seam can be called by a test that asserts what
-/// the slot holds when it returns.
-///
-/// So: one shape for both branches, and both have that test.
-fn reserve_and_take_the_lock(
-    state_dir: &Path,
-    from: &FromAddress,
-    to: &ToAddress,
-    amount: &UsdcAmount,
-    allow_retry: bool,
-    slot: &mut idempotency::LockSlot,
-) -> CliResult<(idempotency::Record, BurnDecision)> {
-    let (record, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
-    // Bound rather than discarded: `install` hands the hold back, and
-    // what it covers here is the tail of this function. Nothing fallible
-    // is in that tail today, and the binding is what makes adding
-    // something to it safe rather than a silent change of protection.
-    let _held = slot.install(lock);
-    Ok((record, decision))
-}
-
 fn resume_recorded_burn(
     state_dir: &Path,
     from: &FromAddress,
@@ -1855,6 +1863,8 @@ fn parse_anchor_layer(s: &str) -> CliResult<AnchorLayerMode> {
     Ok(AnchorLayerMode::Explicit(n))
 }
 
+/// Split a `dapp_id::account_id` pair. Neither half is validated
+/// here — the caller does that and owns the refusal.
 fn split_extended(ext: &str) -> Option<(String, String)> {
     let (a, b) = ext.split_once("::")?;
     Some((a.to_string(), b.to_string()))

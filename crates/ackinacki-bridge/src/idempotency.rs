@@ -1603,6 +1603,8 @@ pub fn liveness_verdict(holder: Option<bool>) -> &'static str {
     }
 }
 
+/// The record a first reservation publishes: `Reserved`, no hash,
+/// and the identity it is filed under.
 fn fresh_reserved_record(
     key: &str,
     from: &FromAddress,
@@ -1624,6 +1626,9 @@ fn fresh_reserved_record(
     }
 }
 
+/// Read one record and hold it to the invariants a file cannot
+/// carry: a status past `reserved` implies a hash, and the key
+/// inside must match the filename it was read from.
 fn read_record(path: &Path) -> CliResult<Record> {
     let bytes = fs::read(path).map_err(|e| CliError::Preflight {
         reason: format!("idempotency: read {}: {e}", path.display()),
@@ -1719,6 +1724,7 @@ fn read_record(path: &Path) -> CliResult<Record> {
     Ok(record)
 }
 
+/// Replace a record by rename, so a reader never sees half of one.
 fn write_record_atomic(state_dir: &Path, dst: &Path, record: &Record) -> CliResult<()> {
     let body = serde_json::to_vec_pretty(record).map_err(|e| CliError::Preflight {
         reason: format!("idempotency: serialize record: {e}"),
@@ -1806,6 +1812,7 @@ fn rfc3339_now() -> String {
 // calendar formula (Howard Hinnant's date algorithms, days-since-epoch
 // variant). Handles all 32-bit years plus a safety margin without any
 // external deps.
+/// A unix timestamp as the RFC 3339 string the record stores.
 fn format_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let time_of_day = secs.rem_euclid(86_400);
@@ -2732,8 +2739,8 @@ mod tests {
     }
 
     #[test]
-    fn every_public_item_has_its_own_doc_comment() {
-        // Three rounds running, the same mistake, always the same way: a
+    fn every_item_has_its_own_doc_comment() {
+        // Four rounds running, the same mistake, always the same way: a
         // new item is inserted above an existing one, inherits its doc
         // comment, and leaves the original with none. `cargo doc` then
         // rendered `AcquiredLock` — which OWNS a lock — as "a borrow …
@@ -2746,33 +2753,46 @@ mod tests {
         // the item left behind has no doc — and that is the half that
         // always accompanies it, because the doc did not multiply.
         //
-        // BOTH files, because the fourth time it happened it happened in
-        // `source_guard.rs`: a new constant landed between the orders
-        // list and its doc, so the paragraph ending "the refusal gate
-        // adds one" documented the prohibitions, where the opposite is
-        // true. This test could not see it, and it was the only thing
-        // looking.
+        // EVERY item, and every file this crate ships. The last two
+        // thefts were both invisible here: one because the scan was two
+        // files, the other because it was public items only, and
+        // `resume_recorded_burn` — whose eighty-line doc is the whole
+        // argument for the resume path existing — is a private `fn`. Its
+        // doc spent a round documenting the function inserted above it.
+        //
+        // Private items are in, and the cost is a one-line doc on a
+        // dozen helpers. That is the price of the class being closed
+        // rather than the instance.
         let mut undocumented = Vec::new();
         for (file, src) in [
+            ("args.rs", include_str!("args.rs")),
+            ("burn.rs", include_str!("burn.rs")),
             ("idempotency.rs", include_str!("idempotency.rs")),
+            ("orchestrator.rs", include_str!("orchestrator.rs")),
+            ("preflight.rs", include_str!("preflight.rs")),
             ("source_guard.rs", include_str!("source_guard.rs")),
+            ("test_chain.rs", include_str!("test_chain.rs")),
         ] {
             let production = production_source(file, src);
             let lines: Vec<&str> = production.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 let t = line.trim_start();
-                let is_item = [
-                    "pub struct ",
-                    "pub enum ",
-                    "pub fn ",
-                    "pub const ",
-                    "pub(crate) struct ",
-                    "pub(crate) enum ",
-                    "pub(crate) fn ",
-                    "pub(crate) const ",
-                ]
-                .iter()
-                .any(|k| t.starts_with(k));
+                let indented = *line != t;
+                let bare = t
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| t.strip_prefix("pub "))
+                    .map(|rest| (rest, true))
+                    .unwrap_or((t, false));
+                let (kind, is_public) = bare;
+                // Indented items are methods and fields; only the public
+                // ones are worth this. At column zero everything is an
+                // item of the module, private helpers included.
+                if indented && !is_public {
+                    continue;
+                }
+                let is_item = ["fn ", "async fn ", "struct ", "enum ", "trait "]
+                    .iter()
+                    .any(|k| kind.starts_with(k));
                 if !is_item {
                     continue;
                 }
@@ -2783,11 +2803,6 @@ mod tests {
                 // match no attribute shape, and the version that listed
                 // shapes reported the documented item under one as
                 // undocumented.
-                //
-                // What precedes an item is a doc line, a plain comment,
-                // a blank, or the end of something — `;`, `{`, `}`.
-                // Everything else is still part of the item's own
-                // attributes.
                 let mut above = n;
                 while above > 0 {
                     let prev = lines[above - 1].trim_end();
@@ -2812,7 +2827,7 @@ mod tests {
         }
         assert!(
             undocumented.is_empty(),
-            "a public item with no doc comment is usually one whose doc was stolen by something \
+            "an item with no doc comment is usually one whose doc was stolen by something \
              inserted above it — check what the block above the NEW item is describing: \
              {undocumented:#?}",
         );

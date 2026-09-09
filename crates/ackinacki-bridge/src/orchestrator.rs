@@ -548,7 +548,7 @@ pub async fn run(
                         // Reclassify, and put the hash where it can be read: this
                         // is exactly `BurnOutcomeUnknown` — sent, outcome not
                         // durably recorded.
-                        if let Err(e) = idempotency::update(&state_dir, r) {
+                        if let Err(e) = idempotency::update(&state_dir, r, &_held) {
                             return Err(e.after_send(&format!(
                                 "the AN burn was broadcast as {}, and to resume you must write \
                                  that hash into the record's an_tx_hash and set status to \
@@ -713,7 +713,7 @@ pub async fn run(
         r.status = Status::Captured;
         r.withdrawal_msg_id = Some(captured.message_id.clone());
         r.block_seq_no = Some(captured.block_seq_no);
-        idempotency::update(&state_dir, r).map_err(|e| {
+        idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
             e.after_send(
                 "the AN burn is on the wire and its WithdrawalInitiated event was captured",
             )
@@ -821,7 +821,7 @@ pub async fn run(
         r.status = Status::Proved;
         r.withdrawal_msg_id = Some(e2e.captured.message_id.clone());
         r.block_seq_no = Some(e2e.captured.block_seq_no);
-        idempotency::update(&state_dir, r).map_err(|e| {
+        idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
             e.after_send("the AN burn is on the wire and the Circuit-4 proof is complete")
         })?;
     }
@@ -943,7 +943,7 @@ pub async fn run(
             if let Some(r) = record.as_mut() {
                 r.status = Status::Submitted;
                 r.eth_tx_hash = Some(tx.clone());
-                idempotency::update(&state_dir, r).map_err(|e| {
+                idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
                     e.after_send(&format!(
                         "withdrawByProof paid out on the EVM side as {tx} — the USDC has MOVED on \
                          both chains"
@@ -985,7 +985,7 @@ pub async fn run(
                 // would otherwise see exit 13, go to the record to find
                 // `Failed`, and find `Proved` with nothing anywhere
                 // explaining the difference.
-                if let Err(e) = idempotency::update(&state_dir, r) {
+                if let Err(e) = idempotency::update(&state_dir, r, &_lock_held_to_the_end) {
                     warn!(
                         error = %e.after_send("the withdrawal reverted on chain"),
                         "could not mark the record failed after the revert; it stays at `proved`, \
@@ -1004,7 +1004,7 @@ pub async fn run(
     if let Some(r) = record.as_mut() {
         r.status = Status::Confirmed;
         r.eth_tx_hash = submit.eth_tx.clone();
-        idempotency::update(&state_dir, r).map_err(|e| {
+        idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
             e.after_send("the withdrawal completed on both chains and its payout receipt was seen")
         })?;
     }
@@ -1190,7 +1190,7 @@ fn resume_recorded_burn(
                 key: r.key.clone(),
                 ..observed.clone()
             };
-            idempotency::update(state_dir, &restored).map_err(|e| {
+            idempotency::update(state_dir, &restored, &_held).map_err(|e| {
                 e.after_send(&format!(
                     "the AN burn {} is on the wire — it was recorded before this run started, and \
                      its record has since been deleted",
@@ -2347,7 +2347,7 @@ mod tests {
         .unwrap();
         r.status = Status::Burned;
         r.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
-        idempotency::update(dir.path(), &r).unwrap();
+        idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
         // A exits: the resume is a LATER run, not a concurrent one. Without
         // this the lock refuses first and the test would be asserting the
         // wrong thing.
@@ -2377,7 +2377,7 @@ mod tests {
                 .unwrap();
         r.status = Status::Burned;
         r.an_tx_hash = Some(hash.to_string());
-        idempotency::update(dir, &r).unwrap();
+        idempotency::update(dir, &r, &idempotency::LockSlot::empty().hold()).unwrap();
         drop(lock);
         r
     }
@@ -2938,8 +2938,19 @@ mod tests {
              held: its restoring write and its second reservation run on convention",
         );
 
-        // Nothing names those bindings again — ONE rule, and no list of
+        // Nothing MOVES those bindings — ONE rule, and no list of
         // spellings.
+        //
+        // A shared borrow is not a move, and `idempotency::update` takes
+        // one: `&_lock_held_to_the_end` at five sites in stages 4-6 and
+        // `&_held` in the two branches. That is what makes the settled
+        // hold load-bearing rather than decorative — deleting it is
+        // E0425 in five places, and it keeps the slot borrowed past the
+        // last of them, so `drop(_withdrawal_lock)` under it is E0505
+        // even with `impl Drop for LockHold` deleted. Which was the
+        // hole: that impl and the `const _` that requires it could be
+        // removed TOGETHER, leaving a `dead_code` warning as the only
+        // trace, and this crate is not built with `-D warnings`.
         //
         // `drop(_held)` is a MOVE, not an assignment, so neither the
         // rebinding's E0384 nor any borrow rule stops it. The version of
@@ -2966,17 +2977,22 @@ mod tests {
                     && !is_word(bytes.get(i + ident.len()))
             })
         };
-        let touched: Vec<String> = lines
+        let moved: Vec<String> = lines
             .iter()
             .enumerate()
             .filter(|(n, l)| is_code(l) && !bindings.iter().any(|(at, _)| at == n))
-            .filter(|(_, l)| bindings.iter().any(|(_, name)| mentions(l, name)))
+            .filter(|(_, l)| {
+                bindings
+                    .iter()
+                    .any(|(_, name)| mentions(l, name) && !l.contains(&format!("&{name}")))
+            })
             .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
             .collect();
         assert!(
-            touched.is_empty(),
-            "a hold is bound once and never named again; every one of these ends a borrow the \
-             compiler would otherwise keep open to the end of the scope: {touched:#?}",
+            moved.is_empty(),
+            "a hold is bound once and afterwards only ever borrowed; every one of these moves it, \
+             which ends a borrow the compiler would otherwise keep open to the end of the scope: \
+             {moved:#?}",
         );
     }
 
@@ -4053,7 +4069,7 @@ mod tests {
             .unwrap();
         r.status = Status::Burned;
         r.an_tx_hash = Some(format!("0x{}", "5c".repeat(32)));
-        idempotency::update(dir.path(), &r).unwrap();
+        idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
 
         let err = reserve_and_decide(
             dir.path(),
@@ -4192,7 +4208,7 @@ mod tests {
 
         // The operator reconciles on chain and writes the real hash in.
         r.an_tx_hash = Some(real.clone());
-        idempotency::update(dir.path(), &r).unwrap();
+        idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
 
         let (rec, an_tx) = resume_recorded_burn(
             dir.path(),
@@ -4320,7 +4336,7 @@ mod tests {
         let mut r = burned_record(dir.path(), &an);
         r.status = Status::Confirmed;
         r.eth_tx_hash = Some(eth.clone());
-        idempotency::update(dir.path(), &r).unwrap();
+        idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
 
         // Stage 1 read it; then it was deleted — which is exactly what the
         // CLI's own exit-3 message tells a reconciled operator to do.
@@ -4687,7 +4703,7 @@ mod tests {
         let mut r = burned_record(dir.path(), &an);
         r.status = Status::Submitted;
         r.eth_tx_hash = Some(format!("0x{}", "34".repeat(32)));
-        idempotency::update(dir.path(), &r).unwrap();
+        idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
 
         let observed =
             idempotency::peek(dir.path(), &seam_from(), &seam_to(), &UsdcAmount(1_000_000))

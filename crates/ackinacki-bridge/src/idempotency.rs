@@ -608,7 +608,7 @@ impl UpdateFailed {
 /// What remains is the part `update` genuinely needs — the directory has
 /// to exist for the temp file — and it is a single `exists()` when it
 /// does.
-pub fn update(state_dir: &Path, record: &Record) -> Result<(), UpdateFailed> {
+pub fn update(state_dir: &Path, record: &Record, _held: &LockHold<'_>) -> Result<(), UpdateFailed> {
     let path = record_path(state_dir, &record.key);
     let fail = |e: CliError| UpdateFailed {
         record_path: path.clone(),
@@ -1769,6 +1769,17 @@ fn format_utc(secs: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A hold of a slot with nothing in it.
+    ///
+    /// `update` takes a `&LockHold` as a WITNESS: the caller is holding
+    /// whatever this run holds while it writes. It is not a lock and
+    /// cannot be one — a lockless mount has an empty slot and still
+    /// writes records — so a test that is not about the lock says so
+    /// here and moves on.
+    fn unheld() -> LockSlot {
+        LockSlot::empty()
+    }
     use std::str::FromStr;
 
     use alloy_primitives::Address;
@@ -2157,7 +2168,7 @@ mod tests {
         let mut burned = r.clone();
         burned.status = Status::Burned;
         burned.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
-        let outcome = update(&state, &burned);
+        let outcome = update(&state, &burned, &unheld().hold());
         restore(&parent);
         outcome
             .map_err(|e| e.after_send("the burn is on the wire"))
@@ -2460,16 +2471,37 @@ mod tests {
             msg.contains("Do not delete the record"),
             "the holder may be mid-send, so this arm forbids the deletion outright: {msg}",
         );
-        for permission in [
-            "delete the record named below",
-            "delete the record and re-run",
-        ] {
-            assert!(
-                !msg.contains(permission),
-                "swapping this arm's remedy for one of the others ships the double-burn \
-                 instruction, and until this assertion existed nothing objected: {msg}",
-            );
-        }
+        // Through the SHARED vocabulary, not a hand-written pair. This
+        // was two strings — "delete the record named below" and "delete
+        // the record and re-run" — the two remedies the other arms use,
+        // so six of the eight orders the shipped documents are held to
+        // went unwatched on the one arm that must forbid the deletion
+        // outright. `Prune the record and re-run.` appended here left
+        // `contains("Do not delete the record")` true and matched
+        // neither string: the same defect `de77e46` closed between the
+        // other two surfaces, in the branch where another process may be
+        // inside `burn::send` right now.
+        //
+        // Prohibitions are the only hedges, as in the orchestrator's
+        // refusals: this arm has no condition to offer. The other two
+        // arms DO give conditional permission and are checked below,
+        // where the condition is the point.
+        const FORBIDS: [&str; 4] = [
+            "do not delete",
+            "never delete",
+            "must not delete",
+            "not to delete",
+        ];
+        let orders = crate::source_guard::sentences_authorising_a_deletion(
+            &msg,
+            &crate::source_guard::ORDERS_A_DELETION,
+            &FORBIDS,
+        );
+        assert!(
+            orders.is_empty(),
+            "swapping this arm's remedy for one of the others ships the double-burn instruction \
+             into the one branch where another live process owns the withdrawal: {orders:#?}",
+        );
 
         drop(lock);
         // Nobody holds it now, and this run claims none either. Still a
@@ -3127,7 +3159,7 @@ mod tests {
             );
             rec.status = status;
             rec.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
-            update(dir.path(), &rec).unwrap();
+            update(dir.path(), &rec, &unheld().hold()).unwrap();
 
             let got = reserve(
                 dir.path(),
@@ -3245,7 +3277,7 @@ mod tests {
         .unwrap();
         first.status = Status::Burned;
         first.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let second = reserve_rec(
             dir.path(),
@@ -3311,7 +3343,7 @@ mod tests {
         .unwrap();
         first.status = Status::Burned;
         first.an_tx_hash = Some("0xdeadbeef".into());
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let resumed = reserve_rec(
             dir.path(),
@@ -3344,7 +3376,7 @@ mod tests {
         first.status = Status::Confirmed;
         first.an_tx_hash = Some("0xburned".into());
         first.eth_tx_hash = Some("0xabc".into());
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let attempt = reserve_rec(
             dir.path(),
@@ -3379,7 +3411,7 @@ mod tests {
         first.status = Status::Submitted;
         first.an_tx_hash = Some("0xburned".into());
         first.eth_tx_hash = Some("0xpending".into());
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let attempt = reserve_rec(
             dir.path(),
@@ -3422,7 +3454,7 @@ mod tests {
         .unwrap();
         first.status = Status::Failed;
         // an_tx_hash intentionally left None — the impossible combination.
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let err = reserve_rec(
             dir.path(),
@@ -3504,7 +3536,7 @@ mod tests {
         first.an_tx_hash = Some("0xdeadbeef".into());
         first.withdrawal_msg_id = Some("0xmsg".into());
         first.block_seq_no = Some(12345);
-        update(dir.path(), &first).unwrap();
+        update(dir.path(), &first, &unheld().hold()).unwrap();
 
         let second = reserve_rec(
             dir.path(),
@@ -3541,7 +3573,7 @@ mod tests {
         .unwrap();
         rec.status = Status::Burned;
         rec.an_tx_hash = Some("0xdeadbeef".into());
-        update(dir.path(), &rec).unwrap();
+        update(dir.path(), &rec, &unheld().hold()).unwrap();
 
         let disk = read_record(&record_path(dir.path(), &rec.key)).unwrap();
         assert_eq!(disk.status, Status::Burned);
@@ -3577,7 +3609,7 @@ mod tests {
         // is ENOTDIR for every uid — unlike a chmod, which root ignores.
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
-        let e = update(&blocker.join("state"), &rec)
+        let e = update(&blocker.join("state"), &rec, &unheld().hold())
             .expect_err("writing under a regular file must fail");
 
         assert_eq!(
@@ -3586,7 +3618,7 @@ mod tests {
             "once anything is on the wire the honest code is 10, never 2",
         );
 
-        let e = update(&blocker.join("state"), &rec).expect_err("same failure");
+        let e = update(&blocker.join("state"), &rec, &unheld().hold()).expect_err("same failure");
         let before = e.before_send();
         assert_eq!(before.exit_code(), ExitCode::PreflightRefused);
         assert!(
@@ -3709,7 +3741,7 @@ mod tests {
             &sample_to(),
             &UsdcAmount(1),
         );
-        update(dir.path(), &rec).unwrap();
+        update(dir.path(), &rec, &unheld().hold()).unwrap();
 
         let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
         perms.set_mode(0o600); // readable, NOT traversable
@@ -3811,10 +3843,13 @@ mod tests {
         // created at the ambient umask, the mode is silently lost right here.
         rec.status = Status::Burned;
         rec.an_tx_hash = Some("0xdeadbeef".into());
-        update(dir, &rec).unwrap();
+        update(dir, &rec, &unheld().hold()).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "mode must survive update(), got {mode:04o}");
+        assert_eq!(
+            mode, 0o600,
+            "mode must survive update(, &unheld().hold()), got {mode:04o}"
+        );
 
         let dir_mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(
@@ -3850,7 +3885,7 @@ mod tests {
 
         rec.status = Status::Burned;
         rec.an_tx_hash = Some("0xdeadbeef".into());
-        update(dir.path(), &rec).expect("a stale tmp must not break the write");
+        update(dir.path(), &rec, &unheld().hold()).expect("a stale tmp must not break the write");
 
         let path = dir.path().join(format!("{}.json", rec.key));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -3880,7 +3915,8 @@ mod tests {
         {
             rec.status = *status;
             rec.an_tx_hash = Some(format!("0x{i:064x}"));
-            update(dir.path(), &rec).expect("repeated updates from one process must succeed");
+            update(dir.path(), &rec, &unheld().hold())
+                .expect("repeated updates from one process must succeed");
         }
     }
 

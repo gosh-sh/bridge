@@ -316,7 +316,15 @@ fn a_profile_supplies_flags_the_command_line_omits() {
     std::fs::write(&profile, "BRIDGE_PARAMS_DIR=/tmp/params-from-profile\n").unwrap();
 
     // Without the profile: params_dir is unset, and a real run names it.
-    let bare = run_with(&["--json"]);
+    //
+    // `--state-dir` is supplied because the state directory is now
+    // resolved BEFORE the plumbing, so that the plumbing refusal can be
+    // told whether a record exists. With a cleared environment and no
+    // flag, the run would complain about HOME first — a different
+    // refusal from the one this test is about.
+    let state = tempfile::TempDir::new().unwrap();
+    let state_flag = state.path().to_str().unwrap();
+    let bare = run_with(&["--json", "--state-dir", state_flag]);
     assert_eq!(code(&bare), 2);
     let msg = error_envelope(&bare)["error"]["message"]
         .as_str()
@@ -328,7 +336,7 @@ fn a_profile_supplies_flags_the_command_line_omits() {
     );
 
     // With it: the same command no longer complains about that one flag.
-    let args = with(&["--json"]);
+    let args = with(&["--json", "--state-dir", state_flag]);
     let out = bin()
         .env("BRIDGE_CONFIG", &profile)
         .args(args.iter().map(String::as_str))
@@ -617,8 +625,9 @@ fn an_unset_home_is_refused_rather_than_silently_using_the_cwd() {
     let out = run_args(&args);
     assert_eq!(
         code(&out),
-        2,
-        "nothing may be broadcast without a state dir"
+        10,
+        "nothing may be broadcast without a state dir — and exit 2 would have said there is no \
+         record for this identity on disk, about a directory this run could not even name",
     );
     let msg = error_envelope(&out)["error"]["message"]
         .as_str()
@@ -629,6 +638,11 @@ fn an_unset_home_is_refused_rather_than_silently_using_the_cwd() {
         "must name the cause: {msg}"
     );
     assert!(msg.contains("--state-dir"), "must name the way out: {msg}");
+    assert!(
+        msg.contains("could not LOOK"),
+        "and say why this is not exit 2: an earlier run with HOME set may have recorded a burn, \
+         and this one has no directory to read it from: {msg}",
+    );
     assert!(
         msg.contains("burned twice") || msg.contains("twice"),
         "must say what is at stake: {msg}"

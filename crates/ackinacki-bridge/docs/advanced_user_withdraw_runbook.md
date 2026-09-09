@@ -954,7 +954,7 @@ out as exit 10. See 3d-ii.
 
 #### 3d-ii — This run must not act as if the withdrawal were untouched (exit 10)
 
-Four situations share this code, and only the first is "this run
+Five situations share this code, and only the first is "this run
 broadcast a burn":
 
 1. `sendTransaction` broadcast but the CLI could not observe the
@@ -971,8 +971,15 @@ broadcast a burn":
    withdrawal lock (`BurnPermit::issue`, which names which of three
    cases it is). Nothing was broadcast by this run, and in one of those
    cases another run may be inside its own send right now.
+5. **The run had nowhere to look.** `HOME` is unset and no `--state-dir`
+   was given, so the state directory has no name and no record could be
+   read. Nothing was broadcast. This is not exit 2 because exit 2 says
+   there is no record for this identity, and this run never opened a
+   directory to find out: an earlier run with `HOME` set, or with
+   `--state-dir`, may have recorded a burn. Supply the flag and re-run;
+   that run reads the record if there is one.
 
-In all four the record must not be deleted and the withdrawal must not
+In all five the record must not be deleted and the withdrawal must not
 be re-started under a fresh identity. In 2, 3 and 4 the remedy is to fix
 what the message names and re-run the SAME command, and what that run
 does depends on the record. With an `an_tx_hash` and `--allow-retry` it

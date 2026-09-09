@@ -400,6 +400,44 @@ impl FakeWorld {
     /// `skip_prompt` is always true: there is no TTY under `cargo test`,
     /// and `confirm_before_burn` refuses without one before anything
     /// else in the branch runs.
+    /// The identity these arguments name, parsed the way `run` parses it.
+    fn identity(
+        &self,
+    ) -> (
+        crate::args::FromAddress,
+        crate::args::ToAddress,
+        crate::args::UsdcAmount,
+    ) {
+        let args = self.args.as_ref().expect("the arguments are still here");
+        (
+            crate::args::parse_from(&args.from).expect("the fixture's --from parses"),
+            crate::args::parse_to(&args.to, args.to_chain).expect("the fixture's --to parses"),
+            crate::args::parse_amount(&args.amount).expect("the fixture's --amount parses"),
+        )
+    }
+
+    /// Leave behind what a first run leaves when the send returns
+    /// nothing: a `Reserved` record with no `an_tx_hash`.
+    ///
+    /// Published by `reserve` rather than written by hand, so it is the
+    /// record the code produces — including the cross-field invariants
+    /// `read_record` will hold it to.
+    ///
+    /// This is the population that cannot say whether a burn is on the
+    /// wire, and it is the one every exit-code claim in this pipeline is
+    /// measured against.
+    pub(crate) fn leave_a_hash_less_reservation(&self) -> std::path::PathBuf {
+        let (from, to, amount) = self.identity();
+        let (record, _) =
+            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
+                .expect("the first reservation is uncontested");
+        assert!(
+            record.an_tx_hash.is_none(),
+            "a fresh reservation has no hash"
+        );
+        crate::idempotency::record_path(self.state_dir.path(), &record.key)
+    }
+
     pub(crate) async fn run(
         &mut self,
         dry_run: bool,

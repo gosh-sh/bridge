@@ -148,15 +148,6 @@ pub async fn run(
     let amount = args::parse_amount(&args.amount)?;
     let anchor_mode = parse_anchor_layer(&args.anchor_layer)?;
 
-    // Resolve submit-only plumbing up front for a real run, so a missing
-    // BURNER_PRIVATE_KEY refuses at stage 1 rather than at stage 6 — after
-    // the burn is already irreversible.
-    let plumbing = if dry_run {
-        None
-    } else {
-        Some(args.require_submit_plumbing()?)
-    };
-
     // Read the prior record BEFORE preflight. Read-only: `peek` never
     // creates anything, so this cannot poison a run that is about to be
     // refused. Used twice — here, to decide whether the ECC[3] sufficiency
@@ -190,6 +181,35 @@ pub async fn run(
     } else {
         idempotency::peek(&state_dir, &from, &to, &amount)
             .map_err(refusal_reading_a_record_that_exists)?
+    };
+
+    // Submit-only plumbing, resolved at stage 1 for a real run so that a
+    // missing BURNER_PRIVATE_KEY refuses here rather than at stage 6 —
+    // after the burn is already irreversible.
+    //
+    // BELOW the peek, and that is the whole of the fix it carries. It
+    // used to be the first fallible thing `run` did, and its refusal was
+    // a bare `CliError::Preflight`: exit 2, whose published contract is
+    // "nothing broadcast, AND no record for this identity on disk". The
+    // state directory was never opened, so the second half was a claim
+    // about a directory nobody had looked in.
+    //
+    // The population that makes that cost money is the one this whole
+    // file is built around: a record with `an_tx_hash: null` — a burn
+    // broadcast whose outcome was never observed — and a re-run that
+    // drops one environment variable. BURNER_PRIVATE_KEY unset, or
+    // BRIDGE_WORK_DIR, or a `$BRIDGE_CONFIG` that did not get sourced.
+    // With the flags present the same run exits 10 and says "Do not
+    // delete that record"; without them it exited 2 and never mentioned
+    // the record at all, and a wrapper reading the code took the
+    // withdrawal for untouched.
+    let plumbing = if dry_run {
+        None
+    } else {
+        Some(
+            args.require_submit_plumbing()
+                .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?,
+        )
     };
 
     // A prior record carrying an an_tx_hash means the burn is already on
@@ -1781,12 +1801,17 @@ fn split_extended(ext: &str) -> Option<(String, String)> {
 fn default_state_dir() -> CliResult<PathBuf> {
     let base = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
-        .ok_or_else(|| CliError::Preflight {
+        .ok_or_else(|| CliError::BurnOutcomeUnknown {
             reason: "HOME is not set, so there is no default --state-dir. That directory is the \
                      only thing stopping the same withdrawal from being burned twice, and a \
                      cwd-relative fallback would make it depend on where you were standing.\n\x20 \
-                     Pass --state-dir (or set BRIDGE_WITHDRAW_STATE_DIR) to an absolute path that \
-                     persists between runs."
+                     Nothing was broadcast by this run. This is exit 10 rather than exit 2 \
+                     because the run could not LOOK: with no state directory there is nowhere to \
+                     read a record from, so this refusal cannot tell you the withdrawal is \
+                     untouched — an earlier run with HOME set, or with --state-dir, may have \
+                     recorded a burn for it.\n\x20 Pass --state-dir (or set \
+                     BRIDGE_WITHDRAW_STATE_DIR) to an absolute path that persists between runs; \
+                     that run will read the record if there is one."
                 .to_string(),
             source: None,
         })?;
@@ -3221,6 +3246,52 @@ mod tests {
         );
     }
 
+    /// The first non-dry execution of `run` in this crate.
+    #[tokio::test]
+    async fn a_missing_flag_over_a_reserved_record_is_not_reported_as_untouched() {
+        // The state that costs money, run end to end rather than argued:
+        // a record with `an_tx_hash: null` — a burn broadcast whose
+        // outcome was never observed — and a re-run that drops one
+        // environment variable. BURNER_PRIVATE_KEY, BRIDGE_WORK_DIR, or a
+        // `$BRIDGE_CONFIG` that did not get sourced; the fixture supplies
+        // none of the five, which is the same shape.
+        //
+        // `require_submit_plumbing` used to be the first fallible thing
+        // `run` did, above the peek, and its refusal was a bare exit 2 —
+        // "nothing broadcast, and no record for this identity on disk" —
+        // about a directory the run had not opened. A wrapper reading the
+        // code took the withdrawal for untouched. With the flags present
+        // the identical run answers 10 and says "Do not delete that
+        // record"; that difference was the missing plumbing, not the
+        // withdrawal.
+        let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+        let record = world.leave_a_hash_less_reservation();
+
+        let err = world
+            .run(false)
+            .await
+            .expect_err("a real run with no submit plumbing is refused");
+
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "there is a reservation on disk and this refusal has to say so: {err}",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&record.display().to_string()),
+            "the refusal names the record an operator has to reconcile: {msg}",
+        );
+        assert!(
+            msg.contains("Do not delete that record"),
+            "and forbids the deletion, because the record may hold a burn in flight: {msg}",
+        );
+        assert!(
+            msg.contains("--params-dir"),
+            "while still naming what is actually missing: {msg}",
+        );
+    }
+
     #[test]
     fn nothing_in_this_pipeline_aborts_the_process_instead_of_refusing() {
         // A panic is exit 101, which is not in the wire contract at all:
@@ -3603,9 +3674,15 @@ mod tests {
         // TWO regions, because the second one was outside this guard and
         // had exactly the defect the guard is named for.
         //
-        // Stage 1 starts at the PEEK, not at the predicate the peek
-        // feeds: the peek is itself a stage-1 refusal, and its `Err` is
-        // about a record file that exists.
+        // The first opens at the TOP OF `run`, not at the peek. It used
+        // to open at the peek, and eighty-six lines of the function sat
+        // above it with no exit-2 coverage at all — including
+        // `require_submit_plumbing()?`, a bare exit 2 raised before the
+        // state directory had been opened, whose contract says there is
+        // no record for this identity on disk. Two of the seven
+        // exemptions below named statements in that stretch: they read
+        // like checks that had been carried out and could not fire,
+        // because the scan never reached the lines they exempt.
         //
         // `reserve_and_decide_holding` is the other. It peeks behind a
         // CONTENDED lock — another live process on this host owns the
@@ -3625,7 +3702,7 @@ mod tests {
         };
         let region: Vec<&str> = [
             region_of(
-                concat!("let prior = if dry", "_run {"),
+                concat!("pub async fn ", "run("),
                 concat!("burn::", "compose("),
                 "stage 1",
             ),
@@ -3663,14 +3740,30 @@ mod tests {
         // every time: reaching this failure means there is nothing on
         // disk for this identity, OR the call has already chosen its own
         // exit code per case.
-        const EXEMPT: [(&str, &str); 7] = [
+        //
+        // TWO of them used to name statements this scan never reached —
+        // `require_submit_plumbing(` and `default_state_dir(`, both above
+        // the old region's first line. An exemption that cannot fire
+        // reads exactly like one that has been checked, and both were
+        // covering real defects: the first has been moved below the peek
+        // and re-badged, the second answers exit 10 itself now.
+        const EXEMPT: [(&str, &str); 9] = [
             (
-                "require_submit_plumbing(",
-                "argument policy, before any path is resolved",
+                concat!("args::", "parse_"),
+                "argument text, and there is no identity yet: a record is named by a hash over \
+                 (from, to, chain, amount), so a run that cannot parse them has not named a \
+                 withdrawal that could have one",
+            ),
+            (
+                "parse_anchor_layer(",
+                "argument text, before any path is resolved and before there is an identity",
             ),
             (
                 "default_state_dir(",
-                "resolving the directory: no directory, nothing in it",
+                "chooses its own variant per case: with no directory it has nowhere to read a \
+                 record from, so it answers exit 10 rather than claiming there is none. Held to \
+                 that by `an_unset_home_is_refused_rather_than_silently_using_the_cwd`, which \
+                 runs the binary with a cleared environment and reads the code",
             ),
             (
                 "ensure_state_dir(",
@@ -3695,20 +3788,47 @@ mod tests {
                 "opening the lock file, which happens before the reservation is read or written; \
                  a contended lock is `Contended`, not an `Err`",
             ),
+            (
+                concat!("resume_recorded", "_burn("),
+                "re-badges every refusal it raises at its own first line, through \
+                 `resumed_refusal`, because its entry condition is a burn already on the wire",
+            ),
         ];
 
         let mut bare = Vec::new();
         for (n, line) in region.iter().enumerate() {
             // The `?` OPERATOR, not the character: `{:?}` in a format
             // string and tracing's `?field` sigil are neither.
-            if !line.trim_end().ends_with("?;") {
+            //
+            // Closers trimmed first, because the operator is not always
+            // the last character of its line. `?;` is a statement; `?,`
+            // and `?)` are the same operator inside a match arm or an
+            // argument list, which is where `default_state_dir()?` and
+            // `Some(args.require_submit_plumbing()?)` live — the
+            // statement form alone saw neither; a bare `?` ends a line in
+            // the middle of a chain.
+            //
+            // `{:?}` in a format string survives the trim as well, so the
+            // one exclusion is a `?` that a colon introduces.
+            let tail = line.trim_end().trim_end_matches([';', ',', ')', ']', '}']);
+            if !tail.ends_with('?') || tail.ends_with(":?") {
                 continue;
             }
-            // Back to the start of the statement.
+            // Back to the start of the statement. A COMMENT ends the
+            // walk too: without that, a statement whose first line is
+            // preceded by a comment was joined to it, and the
+            // commented-out-code filter below then skipped the pair.
+            // `args::parse_from(&args.from)?` sat under a section
+            // heading and was invisible for exactly that reason, while
+            // its three neighbours were flagged.
             let mut from = n;
             while from > 0 {
                 let prev = region[from - 1].trim_end();
-                if prev.ends_with(';') || prev.ends_with('{') || prev.ends_with('}') {
+                if prev.ends_with(';')
+                    || prev.ends_with('{')
+                    || prev.ends_with('}')
+                    || prev.trim_start().starts_with("//")
+                {
                     break;
                 }
                 from -= 1;

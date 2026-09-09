@@ -910,6 +910,43 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`ackinacki-bridge withdraw`: a missing `--eth-private-key`,
+  `--work-dir`, `--params-dir`, `--aggregator-dir` or `--verifiers-dir`
+  is exit 10, not exit 2, when a record for the withdrawal is on disk.**
+  The submit-only plumbing was resolved as the very first fallible thing
+  the run did — above the read of the state record — so its refusal was
+  a bare exit 2, whose published contract is "nothing broadcast, **and**
+  no record for this identity on disk". The run had not opened the state
+  directory when it said that.
+
+  The state that makes it cost money is the ordinary one: a record with
+  `an_tx_hash: null` — a burn broadcast whose outcome was never observed
+  — and a re-run that drops one environment variable. `BURNER_PRIVATE_KEY`
+  unset, `BRIDGE_WORK_DIR` unset, a `$BRIDGE_CONFIG` that did not get
+  sourced. With the flags present that run answers **10** and says "Do
+  not delete that record"; without them it answered **2** and never
+  mentioned the record, and a wrapper keying on the exit code read the
+  withdrawal as untouched. The check now runs after the record is read
+  and reports what is on disk, while still naming the flag that is
+  missing.
+
+  One ordering change comes with it, visible if you are missing both:
+  `HOME`/`--state-dir` is now reported before the plumbing, because the
+  record has to be read before the plumbing refusal can describe it.
+
+- **`ackinacki-bridge withdraw`: an unset `HOME` with no `--state-dir` is
+  exit 10, not exit 2.** Same class, and it cannot be fixed by
+  reordering: with no state directory there is nowhere to read a record
+  from, so the run cannot say the withdrawal is untouched — an earlier
+  run with `HOME` set, or with `--state-dir`, may have recorded a burn
+  for the same identity, which is exactly what a wrapper that drops the
+  variable on a retry produces. Nothing is broadcast either way and the
+  remedy is unchanged (pass `--state-dir` or set
+  `BRIDGE_WITHDRAW_STATE_DIR`); the refusal now says why it is not exit
+  2. **Exit 10 therefore covers five situations, not four** — the fifth
+  is "this run had nowhere to look" — and the README table and runbook
+  §3d-ii list it.
+
 - **`--anchor-layer` above 2 is refused instead of accepted and then
   read three different ways.** `--anchor-layer 3` parsed, and the three
   places that consumed it disagreed: the coverage wait used the **L1**

@@ -1068,13 +1068,6 @@ impl WithdrawalLock {
         }
     }
 
-    /// Keep this lock held for the rest of the caller's scope, and make
-    /// the compiler enforce it. See [`LockHold`].
-    #[must_use]
-    pub fn hold(&self) -> LockHold<'_> {
-        LockHold(std::marker::PhantomData)
-    }
-
     /// Wrap an acquisition on its way to a [`LockSlot`]. The only way to
     /// obtain an [`AcquiredLock`], and `pub(crate)` so the orchestrator's
     /// reservation seam can call it and nothing else has occasion to.
@@ -1295,17 +1288,39 @@ impl LockSlot {
         self.0.as_ref()
     }
 
-    /// Hold whatever is in the slot for the rest of the caller's scope.
-    /// `None` when there is nothing to hold, which is the lockless
-    /// deployment and needs no protecting.
+    /// Hold the SLOT for the rest of the caller's scope.
+    ///
+    /// Not an `Option<LockHold>`, and the difference is a measured one.
+    /// `let _held = slot.hold().is_some();` binds a `bool`, ends the
+    /// borrow on the semicolon, and left the suite green — a one-token
+    /// release that reads like a check. `let _held = slot.hold().map(|_|
+    /// ());` is the same shape. Neither compiles against this signature:
+    /// `LockHold` has no `is_some` and no `map`, so both are E0599 rather
+    /// than something a guard has to spell out.
+    ///
+    /// What the borrow is OF changes with it, and the wider one is the
+    /// one that was wanted. The `None` this used to return meant "there
+    /// is no lock in here", which is true of the lockless deployment and
+    /// says nothing about the slot: the assignment a hold exists to
+    /// forbid — `slot = LockSlot::empty()`, a second `install` — is
+    /// exactly as available on an empty slot as on a full one, and on a
+    /// mount that cannot `flock` the run went through the whole of
+    /// stages 4-6 with no live borrow at all.
     #[must_use]
-    pub fn hold(&self) -> Option<LockHold<'_>> {
-        self.0.as_ref().map(WithdrawalLock::hold)
+    pub fn hold(&self) -> LockHold<'_> {
+        LockHold(std::marker::PhantomData)
     }
 }
 
-/// A borrow of the withdrawal lock that lasts to the end of its scope,
-/// and the whole of what protects the run past the reservation.
+/// A borrow of the SLOT the withdrawal lock lives in, lasting to the end
+/// of its scope, and the whole of what protects the run past the
+/// reservation.
+///
+/// Of the slot and not of the lock, which is what lets
+/// [`LockSlot::hold`] hand one back unconditionally. A hold is worth
+/// having on an empty slot too — the lockless deployment — because what
+/// it forbids is the assignment that empties or replaces the slot, and
+/// that is available whatever is in there.
 ///
 /// A run holds the lock for up to ~101 minutes across capture, prove and
 /// submit, during which a second run asking "is anybody executing this
@@ -1317,6 +1332,13 @@ impl LockSlot {
 /// `Drop` is what keeps the borrow open to the end of the scope rather
 /// than to the value's last use. Dropping the HOLD does not drop the
 /// lock; it only ends the borrow.
+///
+/// It is also deliberately bare of methods. `hold()` used to answer
+/// `Option<LockHold>`, and `let _held = slot.hold().is_some();` bound a
+/// `bool`, ended the borrow on the semicolon and left the suite green —
+/// a release that reads like a check. There is nothing on this type to
+/// call, so that spelling and `.map(|_| ())` are E0599 rather than
+/// something a guard has to have thought of.
 ///
 /// What that buys, stated no wider than it is: inside the borrow, every
 /// one-line release stops compiling. Outside it, nothing does — and

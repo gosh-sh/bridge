@@ -579,8 +579,9 @@ pub async fn run(
     //
     // ABOVE the dry-run return, not below it. Placed below, the stretch
     // between the burn branch closing and this line was covered by
-    // nothing: the branch's `_held` ends with the branch. A dry run
-    // holds no lock, so `hold()` yields `None` and the early return is
+    // nothing: the branch's `_held` ends with the branch. A dry run has
+    // an empty slot, and `hold()` borrows the slot rather than its
+    // contents, so it takes a hold here too and the early return is
     // unaffected.
 
     // Full `--dry-run`: stop before touching either chain. Returning a
@@ -2714,23 +2715,33 @@ mod tests {
         // list is the part that rots; it is checked by ANCHOR TEXT below,
         // so a rename fails here rather than silently emptying the list.
         let is_code = |l: &&str| !l.trim_start().starts_with("//");
-        let holds: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| is_code(l) && l.contains(concat!(".hold", "()")))
-            .map(|(n, _)| n)
-            .collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
 
-        // Every line after which the lock is this run's: the two
-        // `.install(` calls, and the statement that hands the seam the
-        // slot it fills — the resume branch acquires through the seam and
-        // has no `.install(` of its own, which is how its hold came to be
-        // deleted as a passenger.
-        let mut acquisitions: Vec<usize> = lines
+        // Every line after which the lock is this run's, WITH the slot it
+        // went into: the two `.install(` calls, and the statement that
+        // hands the seam the slot it fills — the resume branch acquires
+        // through the seam and has no `.install(` of its own, which is
+        // how its hold came to be deleted as a passenger.
+        //
+        // The SLOT is carried because the hold's receiver has to be
+        // checked against it. `let _decoy = LockSlot::empty();` beside
+        // the real one, and `let _held = _decoy.hold();` under the
+        // install, satisfied every other property this test had — a
+        // `let`, a name, the right indent, a `.hold()` on the line — and
+        // held the decoy while the run's own slot stayed free. Measured
+        // green.
+        let mut acquisitions: Vec<(usize, String)> = lines
             .iter()
             .enumerate()
             .filter(|(_, l)| is_code(l) && l.contains(concat!(".install", "(")))
-            .map(|(n, _)| n)
+            .map(|(n, l)| {
+                let slot = l
+                    .trim()
+                    .split_once(concat!(".install", "("))
+                    .expect("the filter matched this line")
+                    .0;
+                (n, slot.to_string())
+            })
             .collect();
         let seam_call = lines
             .iter()
@@ -2740,18 +2751,31 @@ mod tests {
         // `)?;` anywhere below — the same disease this file's settled
         // guard was cured of, twenty lines further down and in the same
         // commit that introduced this.
-        acquisitions.push(
-            (seam_call..(seam_call + 20).min(lines.len()))
-                .find(|&n| lines[n].trim() == ")?;")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "orchestrator.rs:{}: the seam call does not close with `)?;` within \
-                         twenty lines. Its argument list was reshaped, and this guard cannot tell \
-                         where the acquisition ends",
-                        seam_call + 1,
-                    )
-                }),
-        );
+        let seam_end = (seam_call..(seam_call + 20).min(lines.len()))
+            .find(|&n| lines[n].trim() == ")?;")
+            .unwrap_or_else(|| {
+                panic!(
+                    "orchestrator.rs:{}: the seam call does not close with `)?;` within twenty \
+                     lines. Its argument list was reshaped, and this guard cannot tell where the \
+                     acquisition ends",
+                    seam_call + 1,
+                )
+            });
+        // The seam fills the slot it is handed, so the slot the branch
+        // has to hold when it returns is the one in its argument list —
+        // read from there rather than assumed, for the same reason the
+        // other two are read off their installs.
+        let seam_slot = (seam_call..seam_end)
+            .find_map(|n| lines[n].trim().strip_prefix("&mut "))
+            .map(|arg| arg.trim_end_matches(',').to_string())
+            .unwrap_or_else(|| {
+                panic!(
+                    "orchestrator.rs:{}: the seam call no longer hands a slot over by `&mut`, so \
+                     this guard cannot tell which slot the branch must hold when it returns",
+                    seam_call + 1,
+                )
+            });
+        acquisitions.push((seam_end, seam_slot));
         acquisitions.sort_unstable();
 
         // ADJACENT, not "within twelve lines". Twelve was room for the
@@ -2761,106 +2785,174 @@ mod tests {
         // Both gaps were measured — a release in either left 221 + 16
         // green and clippy clean — so the prose moved below the hold and
         // the tolerance went to zero.
-        // "Contains `.hold()`" is not the property; a LIVE BORROW is. The
-        // three cheap ways to write a hold whose borrow is dead on the
-        // next line all contain `.hold()` and all passed:
         //
-        //   { let _held = slot.hold(); }      dies at the closing brace
-        //   drop(slot.hold());                dies at the semicolon
+        // The STATEMENT is pinned whole: `let <name> = <that slot>.hold();`
+        // at the acquisition's own indent. Not "a line containing
+        // `.hold()`", which four separate spellings satisfied while the
+        // borrow died on the same line —
+        //
+        //   { let _held = slot.hold(); }   dies at the closing brace
+        //   drop(slot.hold());             dies at the semicolon
         //   debug_assert!(slot.hold().is_some(), …)   a temporary
+        //   let _held = _decoy.hold();     holds something else
         //
-        // Measured on the tree: the braced one left 222 + 16 green and
-        // clippy clean. So the shape is pinned — a `let` binding to a
-        // NAMED variable, at the acquisition's own indent, nothing before
-        // it on the line.
-        let mut bindings = Vec::new();
-        for at in &acquisitions {
+        // — the first three of them measured green here, and the fourth
+        // measured green a round later. Two of the four are gone at the
+        // type level now (`LockSlot::hold` returns a `LockHold`, so
+        // `.is_some()` and `.map(…)` are E0599); the pin is what is left
+        // for the rest, and it is cheap because there are three of these
+        // lines in the file and they are all one shape.
+        let mut bindings: Vec<(usize, String)> = Vec::new();
+        for (at, slot) in &acquisitions {
             let next = (at + 1..lines.len())
                 .find(|&n| !lines[n].trim().is_empty() && is_code(&&*lines[n]))
                 .expect("something follows the acquisition");
             let line = lines[next];
-            let indent = |l: &str| l.len() - l.trim_start().len();
-            let name = line
+            let (name, expr) = line
                 .trim()
                 .strip_prefix("let ")
                 .and_then(|rest| rest.split_once(" = "))
-                .filter(|(_, expr)| expr.contains(concat!(".hold", "()")))
-                .map(|(name, _)| name.trim())
-                .filter(|name| *name != "_" && !name.starts_with('(') && !name.contains(':'));
-            assert!(
-                holds.contains(&next) && indent(line) == indent(lines[*at]),
-                "orchestrator.rs:{}: the lock becomes this run's here and the next statement is \
-                 not a hold at the same indent — orchestrator.rs:{}: {}. Everything between the \
-                 two compiles with the lock released and nothing to say so",
+                .unwrap_or_else(|| {
+                    panic!(
+                        "orchestrator.rs:{}: the lock becomes this run's here and the next \
+                         statement does not BIND a hold — orchestrator.rs:{}: {}. A hold inside \
+                         braces, inside `drop(…)` or inside an assertion is a borrow that ends on \
+                         the same line, and the lock is released for everything after it — \
+                         measured green, all three",
+                        at + 1,
+                        next + 1,
+                        line.trim(),
+                    )
+                });
+            assert_eq!(
+                expr,
+                format!("{slot}.{}", concat!("hold", "();")),
+                "orchestrator.rs:{}: this hold is not a hold OF THE SLOT acquired on \
+                 orchestrator.rs:{}. A hold of anything else leaves that slot free for the whole \
+                 stretch this line appears to cover",
+                next + 1,
                 at + 1,
+            );
+            assert!(
+                !name.starts_with("mut ")
+                    && name != "_"
+                    && !name.starts_with('(')
+                    && !name.contains(':')
+                    && indent(line) == indent(lines[*at]),
+                "orchestrator.rs:{}: `{}` is not a plain named binding at the acquisition's own \
+                 indent. `_` drops on the spot, a pattern may bind nothing, and `mut` lets a \
+                 later assignment drop the hold and take another",
                 next + 1,
                 line.trim(),
             );
-            let name = name.unwrap_or_else(|| {
-                panic!(
-                    "orchestrator.rs:{}: `{}` mentions `.hold()` but does not BIND it to a name. \
-                     A hold inside braces, inside `drop(…)` or inside an assertion is a borrow \
-                     that ends on the same line, and the lock is released for everything after it \
-                     — measured green, all three",
-                    next + 1,
-                    line.trim(),
-                )
-            });
-            bindings.push(name);
+            bindings.push((next, name.to_string()));
         }
 
-        // And nothing ends those borrows by hand. `drop(_held)` is a
-        // MOVE, not an assignment, so neither the rebinding's E0384 nor
-        // any borrow rule stops it, and the settled-window guard looks
-        // only above the hold. Two lines that read as tidying —
-        // `drop(_lock_held_to_the_end); drop(_withdrawal_lock);` — took
-        // the flock off for the whole of stages 4-6 with 222 + 16 green.
-        bindings.push(concat!("_lock_held_to", "_the_end"));
-        bindings.push(concat!("_withdrawal", "_lock"));
-        let dropped: Vec<String> = lines
+        // The one hold with no acquisition above it to name its slot, so
+        // there is nothing to compare it against but the text of the
+        // whole statement. Where it sits — directly under the immutable
+        // rebinding — is
+        // `the_settled_lock_is_rebound_before_anything_else_can_run`'s
+        // business; that it exists at all, and holds the run's own slot,
+        // is this one's.
+        const SETTLED: &str = concat!(
+            "let _lock_held",
+            "_to_the_end = _withdrawal_lock.",
+            "hold();"
+        );
+        let settled = lines
+            .iter()
+            .position(|l| l.trim() == SETTLED)
+            .unwrap_or_else(|| {
+                panic!(
+                    "stages 4-6 no longer take a hold of this run's own slot. The statement this \
+                     guard requires, exactly: `{SETTLED}`"
+                )
+            });
+        bindings.push((settled, concat!("_lock_held", "_to_the_end").to_string()));
+
+        // ABOVE the dry-run return, by ORDER and not by distance. A hold
+        // taken below it covers nothing a dry run skips and everything a
+        // real run pays for.
+        //
+        // This was "some hold within forty lines of the dry-run anchor",
+        // and forty was the distance on the day it was written plus one:
+        // the settled hold sat thirty-nine lines above the anchor, so any
+        // two inserted lines failed the test and an edited comment failed
+        // it too. It also took the credit for catching a `drop::<T>` in
+        // the tail — which moved the anchor rather than being forbidden —
+        // while the rule that forbids drops was walked past with a
+        // turbofish.
+        let dry_run_return = lines
+            .iter()
+            .position(|l| {
+                l.contains(concat!(
+                    "// Full `--dry",
+                    "-run`: stop before touching either chain."
+                ))
+            })
+            .expect("the dry-run early return is gone, and with it the boundary this hold sits on");
+        assert!(
+            settled < dry_run_return,
+            "the settled hold is at orchestrator.rs:{} and the dry-run return at \
+             orchestrator.rs:{}: the ~101 minutes of stages 4-6 are below the hold that is \
+             supposed to cover them",
+            settled + 1,
+            dry_run_return + 1,
+        );
+
+        // And the seam's own body acquires, so its hold is one of the
+        // three checked above rather than a fourth nobody walks.
+        let seam_fn = lines
+            .iter()
+            .position(|l| l.contains(concat!("fn resume_recorded", "_burn(")))
+            .expect("the seam is gone");
+        assert!(
+            acquisitions.iter().any(|(at, _)| *at > seam_fn),
+            "nothing inside the resume seam acquires the lock any more, so nothing inside it is \
+             held: its restoring write and its second reservation run on convention",
+        );
+
+        // Nothing names those bindings again — ONE rule, and no list of
+        // spellings.
+        //
+        // `drop(_held)` is a MOVE, not an assignment, so neither the
+        // rebinding's E0384 nor any borrow rule stops it. The version of
+        // this check that matched the text `drop(_held)` was walked past
+        // with `drop::<LockHold>(_held)`; `std::mem::drop`, a `let _ =
+        // _held;` and passing it to anything at all are the same move
+        // spelled three more ways. Two lines that read as tidying took
+        // the flock off for the whole of stages 4-6 with the suite green.
+        //
+        // A hold is written once and never mentioned again. Everything
+        // after that is the compiler's: while one is live, moving the
+        // slot out from under it is E0505 and assigning over it is
+        // E0506, so `drop(_withdrawal_lock)` on its own does not compile
+        // and does not need to be listed here.
+        //
+        // Word boundaries, because `_lock_held_to_the_end` contains
+        // `_held`.
+        let mentions = |line: &str, ident: &str| {
+            let bytes = line.as_bytes();
+            let is_word =
+                |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+            line.match_indices(ident).any(|(i, _)| {
+                !is_word(i.checked_sub(1).and_then(|j| bytes.get(j)))
+                    && !is_word(bytes.get(i + ident.len()))
+            })
+        };
+        let touched: Vec<String> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| is_code(l))
-            .filter(|(_, l)| {
-                bindings
-                    .iter()
-                    .any(|b| l.contains(&format!("drop({b})")) || l.contains(&format!("drop({b},")))
-            })
+            .filter(|(n, l)| is_code(l) && !bindings.iter().any(|(at, _)| at == n))
+            .filter(|(_, l)| bindings.iter().any(|(_, name)| mentions(l, name)))
             .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
             .collect();
         assert!(
-            dropped.is_empty(),
-            "dropping the hold, or the slot, ends the protection for everything below it — and \
-             the compiler has nothing to say, because a move is not an assignment: {dropped:#?}",
+            touched.is_empty(),
+            "a hold is bound once and never named again; every one of these ends a borrow the \
+             compiler would otherwise keep open to the end of the scope: {touched:#?}",
         );
-
-        // The windows that no install sits above: the stretch from the
-        // burn branch closing to the end of `run`, and the seam's own
-        // body. Deleting either hold was green, because a guard that only
-        // walks installs never looks at them.
-        for (below, what) in [
-            (
-                concat!(
-                    "// Full `--dry",
-                    "-run`: stop before touching either chain."
-                ),
-                "stages 4-6",
-            ),
-            (
-                concat!("fn resume_recorded", "_burn("),
-                "the resume seam's own body",
-            ),
-        ] {
-            let anchor = lines
-                .iter()
-                .position(|l| l.contains(below))
-                .unwrap_or_else(|| panic!("the anchor for {what} is gone: {below}"));
-            assert!(
-                holds.iter().any(|&h| h.abs_diff(anchor) <= 40),
-                "{what} has no hold near `{below}`, so that stretch of the run is back on \
-                 convention",
-            );
-        }
     }
 
     #[test]
@@ -3042,6 +3134,23 @@ mod tests {
         // the rule `no_refusal_after_the_send_claims_to_be_pre_send`
         // keeps. This one keeps the weaker property that there is
         // something to classify at all.
+        //
+        // The list held `panic!`, `todo!` and `unreachable!` and not
+        // `unimplemented!` or `process::exit` — three of the four
+        // macros, and the one function that does the same thing without
+        // being a macro at all. Both were measured green in the burn
+        // branch, in the same slot where `todo!()` was red. The rest of
+        // the family is here now: the assertions abort on the same exit
+        // 101, and `debug_assert!` is caught by `assert!` being a
+        // substring of it, which is right — one that only fires in a
+        // debug build is a production abort that CI cannot see.
+        //
+        // What this list is NOT is the property. It is a floor under it,
+        // and every round has found the next spelling: indexing a slice
+        // out of bounds aborts too, and no substring catches that. The
+        // property is that `run` is executed by a test, which it now is
+        // — a `panic!` at the top of it turns three tests red on the
+        // behaviour rather than on the text.
         let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
         let aborts: Vec<String> = production
             .lines()
@@ -3053,6 +3162,12 @@ mod tests {
                     || l.contains(concat!("pan", "ic!("))
                     || l.contains(concat!("unreach", "able!("))
                     || l.contains(concat!("tod", "o!("))
+                    || l.contains(concat!("unimplem", "ented!("))
+                    || l.contains(concat!("process::", "exit("))
+                    || l.contains(concat!("ass", "ert!("))
+                    || l.contains(concat!("ass", "ert_eq!("))
+                    || l.contains(concat!("ass", "ert_ne!("))
+                    || l.contains(concat!("::ab", "ort("))
             })
             .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
             .collect();

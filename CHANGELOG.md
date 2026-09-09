@@ -923,12 +923,14 @@ assigns it when the release is tagged.
   `an_tx_hash: null` — a burn broadcast whose outcome was never observed
   — and a re-run that drops one environment variable. `BURNER_PRIVATE_KEY`
   unset, `BRIDGE_WORK_DIR` unset, a `$BRIDGE_CONFIG` that did not get
-  sourced. With the flags present that run answers **10** and says "Do
-  not delete that record"; without them it answered **2** and never
-  mentioned the record, and a wrapper keying on the exit code read the
-  withdrawal as untouched. The check now runs after the record is read
-  and reports what is on disk, while still naming the flag that is
-  missing.
+  sourced. Supply the five and the same run answers **exit 3**: it
+  reaches the reservation, where a record with no hash is a duplicate in
+  flight. Without them it answered **2** and never mentioned the record,
+  and a wrapper keying on the exit code read the withdrawal as
+  untouched. The check now runs after the record is read and answers
+  **10**, naming the record and forbidding the deletion, while still
+  naming the flag that is missing — so every route through that state
+  now tells you the withdrawal is not untouched.
 
   One ordering change comes with it, visible if you are missing both:
   `HOME`/`--state-dir` is now reported before the plumbing, because the

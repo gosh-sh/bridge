@@ -115,12 +115,25 @@ pub enum SubmitStatus {
     Confirmed,
 }
 
-/// `LockHold` carries only `PhantomData`, so its `impl Drop` is the only
-/// thing keeping the withdrawal lock borrowed to the end of the scope
-/// rather than to the binding's last use — and the last use of
-/// `_lock_held_to_the_end` is the line that creates it. Remove that
-/// `impl` and `drop(_withdrawal_lock)` anywhere in stages 4-6 compiles
-/// again, silently, with the whole suite green.
+/// `LockHold`'s `impl Drop` is what keeps the withdrawal lock borrowed to
+/// the end of the scope rather than to the binding's LAST USE, and this
+/// assertion is what keeps the `impl`.
+///
+/// Three things this paragraph used to say are no longer true, and they
+/// were the first thing a reader checked before deciding whether this
+/// `const` still did anything. `LockHold` is not `PhantomData` any more
+/// — it carries `Option<&WithdrawalLock>`, so that a permit can be
+/// issued against a hold rather than against a slot. The last use of
+/// `_lock_held_to_the_end` is not the line that creates it: five
+/// `update` calls in stages 4-6 borrow it, the last around
+/// `orchestrator.rs:1016`. And "remove the `impl` and
+/// `drop(_withdrawal_lock)` anywhere in stages 4-6 compiles again" is
+/// false everywhere ABOVE that last use — the borrow is live there
+/// whether or not `Drop` extends it.
+///
+/// What the `impl` still buys, stated no wider: the stretch BELOW the
+/// last `update`, where nothing else names the hold. Without it the
+/// borrow ends there and the tail of `run` is back on convention.
 ///
 /// Asserted HERE and not next to the `impl` it is about. It sat three
 /// lines below it, and deleting the two together — one selection — was
@@ -2890,7 +2903,15 @@ mod tests {
 
         // A seam call: the slot goes in by `&mut` and what comes back is
         // a `Result`, so the branch takes its own hold on the line under
-        // the call. Found by the ARGUMENT rather than by the callee's
+        // the call.
+        //
+        // This hold is the one thing here with no type behind it:
+        // deleting it compiles, and only this test objects. It is not an
+        // oversight, and the honest form was measured — a hold tied to
+        // the `&mut` the seam was given, outliving the branch, makes the
+        // immutable rebinding below the branch a move-out-of-borrowed
+        // (E0505). Written down here so the next round does not derive
+        // it again. Found by the ARGUMENT rather than by the callee's
         // name — there are two seams now, and a third would otherwise be
         // acquired with nothing watching.
         for (n, line) in lines.iter().enumerate() {
@@ -3429,10 +3450,13 @@ mod tests {
         // `run` did, above the peek, and its refusal was a bare exit 2 —
         // "nothing broadcast, and no record for this identity on disk" —
         // about a directory the run had not opened. A wrapper reading the
-        // code took the withdrawal for untouched. With the flags present
-        // the identical run answers 10 and says "Do not delete that
-        // record"; that difference was the missing plumbing, not the
-        // withdrawal.
+        // code took the withdrawal for untouched.
+        //
+        // The same run WITH the five values answers exit 3: it reaches
+        // stage 2, where a hash-less record is `ReservationInFlight`.
+        // Either way it names the record and forbids the deletion; what
+        // the missing flag changed was the run's account of the
+        // withdrawal, not the withdrawal.
         let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
         let record = world.leave_a_hash_less_reservation();
 
@@ -3507,12 +3531,16 @@ mod tests {
         // With the plumbing supplied, a real run gets through argument
         // parsing, the state directory, the record read, the plumbing,
         // both halves of preflight against two fake chains, and the
-        // burner key — and stops on the ceremony, which is the wall that
-        // cannot be fixtured: `assert_hermez_srs` identifies Perpetual
-        // Powers of Tau by its `s_g2` head precisely so a locally
-        // generated SRS cannot pass, because every proof under one would
-        // be forgeable. A fixture that got past it would be a fixture
-        // that had defeated it.
+        // burner key — and stops on the ceremony.
+        //
+        // On the SCAN, precisely: an empty `--params-dir` never reaches
+        // `assert_hermez_srs`, because `resolve_ceremony` finds nothing
+        // to read first. That head check is why the fixture cannot climb
+        // the wall by writing a file — Perpetual Powers of Tau is
+        // identified by its `s_g2` head, so a locally generated SRS
+        // cannot pass and every proof under one would be forgeable — but
+        // it is not the refusal this test measures, and saying it was
+        // put a mechanism in the record that no run here executes.
         let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
         world.with_submit_plumbing();
 
@@ -3525,6 +3553,11 @@ mod tests {
         assert!(
             msg.contains("--params-dir") && msg.contains("k=20"),
             "the run reached the artifacts check and named the degree it wanted: {msg}",
+        );
+        assert!(
+            msg.contains("no usable Hermez ceremony of degree"),
+            "and the refusal is the SCAN finding nothing, which is what an empty params dir \
+             produces — not the provenance check further in: {msg}",
         );
         assert_eq!(
             err.exit_code().as_i32(),

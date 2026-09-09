@@ -516,11 +516,13 @@ impl FakeWorld {
     /// will look at the burn branch.
     ///
     /// Directories only — empty ones. What they are pointed AT is the
-    /// wall this fixture cannot climb: `check_prover_artifacts` loads
-    /// the Hermez ceremony at k=20 and k=21 and identifies it by its
-    /// `s_g2` head, so an empty `--params-dir` is refused there and a
-    /// fabricated one would mean defeating the check that stops a
-    /// locally generated SRS — under which every proof is forgeable.
+    /// wall this fixture cannot climb, and the wall is two checks deep.
+    /// An empty `--params-dir` is refused by `resolve_ceremony`, which
+    /// scans it and finds nothing: "no Hermez ceremony of degree >= 20".
+    /// What stops the fixture from simply WRITING one is the check
+    /// further in — `assert_hermez_srs` identifies Perpetual Powers of
+    /// Tau by its `s_g2` head, so a locally generated SRS cannot pass,
+    /// because every proof under one would be forgeable.
     ///
     /// Which makes this the honest boundary of the harness, and it is
     /// worth a test of its own rather than a sentence: a real run gets

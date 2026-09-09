@@ -156,6 +156,23 @@ pub(crate) fn clauses(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The prohibitions that hedge one, and the FLOOR under every hedge
+/// list for the same reason the orders are shared.
+///
+/// The refusal gate's comment said it was stricter than the document
+/// gate "in the hedges and only there", and the two hedge sets merely
+/// INTERSECTED: `never delete` and `must not delete` exempted a clause
+/// in a refusal and not in a document, so on those two spellings the
+/// refusal gate was the softer of the pair — the same shape as the
+/// verbs, one field over. A refusal may be stricter than a document by
+/// having FEWER hedges; it may not have hedges the document does not.
+pub(crate) const PROHIBITS_A_DELETION: [&str; 4] = [
+    "do not delete",
+    "never delete",
+    "must not delete",
+    "not to delete",
+];
+
 /// Every way this tree writes "delete the state record", as the VERB and
 /// its object.
 ///
@@ -183,26 +200,9 @@ pub(crate) fn clauses(text: &str) -> Vec<String> {
 /// exactly that about them, twice. A list that flagged "safe to prune"
 /// would be flagging the one deletion this pipeline does authorise.
 ///
-/// This is the FLOOR. A surface may hold itself to more — the refusal
-/// gate adds one — but no surface may know fewer orders than the
-/// documents are held to.
-/// The prohibitions that hedge one, and the FLOOR under every hedge
-/// list for the same reason the orders are shared.
-///
-/// The refusal gate's comment said it was stricter than the document
-/// gate "in the hedges and only there", and the two hedge sets merely
-/// INTERSECTED: `never delete` and `must not delete` exempted a clause
-/// in a refusal and not in a document, so on those two spellings the
-/// refusal gate was the softer of the pair — the same shape as the
-/// verbs, one field over. A refusal may be stricter than a document by
-/// having FEWER hedges; it may not have hedges the document does not.
-pub(crate) const PROHIBITS_A_DELETION: [&str; 4] = [
-    "do not delete",
-    "never delete",
-    "must not delete",
-    "not to delete",
-];
-
+/// This is the FLOOR. What a surface adds to it is said in [`orders`],
+/// which is the only place either gate reads from; no surface may know
+/// fewer orders than the documents are held to.
 pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
     "delete the record",
     "delete that record",

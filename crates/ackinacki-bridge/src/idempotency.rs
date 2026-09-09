@@ -1283,7 +1283,7 @@ impl LockSlot {
     /// stricter than the shared borrow `hold()` gives and it costs
     /// nothing here: between the install and the end of its branch,
     /// nothing else in `run` touches the slot.
-    #[must_use = "the hold IS the protection: an install whose hold is dropped on the spot leaves                   the slot free for every statement after it"]
+    #[must_use = "an install whose hold is dropped on the spot leaves the slot free"]
     pub fn install(&mut self, acquired: AcquiredLock) -> LockHold<'_> {
         // A second install would drop the first lock. It cannot happen
         // through an honest path — `try_acquire` answers `Contended` to a
@@ -2735,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn every_public_item_in_this_module_has_its_own_doc_comment() {
+    fn every_public_item_has_its_own_doc_comment() {
         // Three rounds running, the same mistake, always the same way: a
         // new item is inserted above an existing one, inherits its doc
         // comment, and leaves the original with none. `cargo doc` then
@@ -2748,39 +2748,69 @@ mod tests {
         // it keeps going unnoticed. What IS checkable is the other half —
         // the item left behind has no doc — and that is the half that
         // always accompanies it, because the doc did not multiply.
-        let production = production_source("idempotency.rs", include_str!("idempotency.rs"));
-        let lines: Vec<&str> = production.lines().collect();
-
+        //
+        // BOTH files, because the fourth time it happened it happened in
+        // `source_guard.rs`: a new constant landed between the orders
+        // list and its doc, so the paragraph ending "the refusal gate
+        // adds one" documented the prohibitions, where the opposite is
+        // true. This test could not see it, and it was the only thing
+        // looking.
         let mut undocumented = Vec::new();
-        for (n, line) in lines.iter().enumerate() {
-            let t = line.trim_start();
-            let is_item = [
-                "pub struct ",
-                "pub enum ",
-                "pub fn ",
-                "pub(crate) fn ",
-                "pub const ",
-            ]
-            .iter()
-            .any(|k| t.starts_with(k));
-            if !is_item {
-                continue;
-            }
-            // Walk back over attributes to whatever precedes the item.
-            let mut above = n;
-            while above > 0 {
-                let prev = lines[above - 1].trim_start();
-                if prev.starts_with("#[") || prev.starts_with(')') || prev.ends_with(',') {
-                    above -= 1;
+        for (file, src) in [
+            ("idempotency.rs", include_str!("idempotency.rs")),
+            ("source_guard.rs", include_str!("source_guard.rs")),
+        ] {
+            let production = production_source(file, src);
+            let lines: Vec<&str> = production.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let is_item = [
+                    "pub struct ",
+                    "pub enum ",
+                    "pub fn ",
+                    "pub const ",
+                    "pub(crate) struct ",
+                    "pub(crate) enum ",
+                    "pub(crate) fn ",
+                    "pub(crate) const ",
+                ]
+                .iter()
+                .any(|k| t.starts_with(k));
+                if !is_item {
                     continue;
                 }
-                break;
-            }
-            if !lines[above.saturating_sub(1)]
-                .trim_start()
-                .starts_with("///")
-            {
-                undocumented.push(format!("idempotency.rs:{}: {t}", n + 1));
+                // Walk back over attributes to whatever precedes the
+                // item. Stated as what ENDS the walk rather than as a
+                // list of what an attribute looks like: a multi-line
+                // `#[expect(reason = "…")]` has continuation lines that
+                // match no attribute shape, and the version that listed
+                // shapes reported the documented item under one as
+                // undocumented.
+                //
+                // What precedes an item is a doc line, a plain comment,
+                // a blank, or the end of something — `;`, `{`, `}`.
+                // Everything else is still part of the item's own
+                // attributes.
+                let mut above = n;
+                while above > 0 {
+                    let prev = lines[above - 1].trim_end();
+                    let trimmed = prev.trim_start();
+                    if trimmed.is_empty()
+                        || trimmed.starts_with("//")
+                        || prev.ends_with(';')
+                        || prev.ends_with('{')
+                        || prev.ends_with('}')
+                    {
+                        break;
+                    }
+                    above -= 1;
+                }
+                if !lines[above.saturating_sub(1)]
+                    .trim_start()
+                    .starts_with("///")
+                {
+                    undocumented.push(format!("{file}:{}: {t}", n + 1));
+                }
             }
         }
         assert!(
@@ -3890,10 +3920,7 @@ mod tests {
         update(dir, &rec, &unheld().hold()).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "mode must survive update(, &unheld().hold()), got {mode:04o}"
-        );
+        assert_eq!(mode, 0o600, "mode must survive an update, got {mode:04o}");
 
         let dir_mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(

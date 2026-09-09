@@ -86,16 +86,42 @@ pub enum Status {
     Failed,
 }
 
+/// What [`reserve`] does with a record it found, as three cases that
+/// cover every [`Status`].
+///
+/// The partition is the point. `reserve` matched on `Status` directly,
+/// with a terminal arm that re-listed `Confirmed | Submitted` and then
+/// asked [`Status::terminal_remedy`] for the text behind an `expect`.
+/// Two lists again, one level up: a status named in the arm and
+/// classified non-terminal by the remedy reached that `expect` and
+/// exited 101 — on a refusal path, where an operator is being told what
+/// not to do — and the reviewer's agent measured exactly that.
+///
+/// Here there is nothing to disagree with. [`Status::disposition`] is
+/// exhaustive over `Status` and `reserve` is exhaustive over this, so an
+/// eighth status is classified once and its handling follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// Forbids any further work on this identity, whatever flags the run
+    /// passes, and carries what the operator is told.
+    Terminal(&'static str),
+    /// `Failed`, which is resumable but not like the others: the only
+    /// production writer sets it after `withdrawByProof` reverts on an
+    /// already-broadcast burn, so a stored `an_tx_hash` means the AN burn
+    /// is done.
+    FailedAfterSubmit,
+    /// Work may continue, subject to `--allow-retry` and the hash.
+    Resumable,
+}
+
 impl Status {
-    /// What an operator is told about a status that forbids further work
-    /// on this identity, whatever flags the run passes — and `None` for
-    /// every status that permits it.
+    /// Which of the three [`Disposition`]s this status is.
     ///
-    /// EXHAUSTIVE over `Status`, and that is the whole point of it. This
-    /// used to be two decisions in two places: a `matches!` list naming
-    /// the terminal statuses, and an `if == Confirmed { … } else { … }`
-    /// picking the remedy. An eighth status could be added to either one
-    /// alone, and both ways were measured green:
+    /// EXHAUSTIVE over `Status`, and that is the whole point of it. The
+    /// terminal set and the remedy for it used to be two decisions in two
+    /// places — a `matches!` list, and an `if == Confirmed { … } else
+    /// { … }` — and an eighth status could be added to either one alone.
+    /// Both ways were measured green:
     ///
     /// * added to the terminal list only, it inherited `Submitted`'s remedy —
     ///   "there is a broadcast EVM transaction", about a record that may have
@@ -104,52 +130,50 @@ impl Status {
     ///   `expect` and exited 101 on a refusal path.
     ///
     /// Now a new status is a non-exhaustive-match error here, at the one
-    /// place that has to decide both halves at once.
-    fn terminal_remedy(self) -> Option<&'static str> {
+    /// place that has to decide what it means.
+    fn disposition(self) -> Disposition {
         match self {
             // Already paid out.
-            Status::Confirmed => Some(
+            Status::Confirmed => Disposition::Terminal(
                 "This withdrawal already paid out. `--allow-retry` does not reopen it. To move \
                  funds again, use a different (amount, recipient, chain) — the identity is what \
                  the record is keyed on.",
             ),
             // A broadcast EVM transaction whose receipt nobody has seen,
             // so re-broadcasting risks a double payout.
-            Status::Submitted => Some(
+            Status::Submitted => Disposition::Terminal(
                 "There is a broadcast EVM transaction whose receipt was never observed, and \
                  `--allow-retry` does not override that: re-broadcasting risks a double payout. \
                  Reconcile eth_tx_hash on chain first, then either wait for a run to see the \
                  receipt or set the record to \"failed\" by hand.",
             ),
-            Status::Reserved
-            | Status::Burned
-            | Status::Captured
-            | Status::Proved
-            | Status::Failed => None,
+            Status::Failed => Disposition::FailedAfterSubmit,
+            Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
+                Disposition::Resumable
+            },
         }
     }
 }
 
-/// The refusal a record in a terminal status earns, and `None` for every
-/// other status. [`Status::terminal_remedy`] decides which is which and
-/// supplies the text, so there is no second list to drift from.
+/// The refusal a record in a terminal status earns.
 ///
-/// A `Status::is_terminal` predicate stood beside it, derived from the
-/// same call and read by nothing once the remedy moved — deleted rather
-/// than kept as a synonym.
+/// Takes the remedy rather than looking it up, so there is no "terminal
+/// status with no remedy" case for a caller to handle: the only way to
+/// reach this function is to have matched [`Disposition::Terminal`],
+/// which carries one. That is what removed the `expect` — and with it
+/// the exit 101 — from `reserve`'s refusal path.
 ///
 /// Exit 3. `--allow-retry` does NOT reach these, so the shared "re-run with
 /// --allow-retry to override" the message used to end on was wrong here: it
 /// named the one flag that changes nothing about a terminal record.
 #[must_use]
-fn terminal_refusal(record: &Record) -> Option<CliError> {
-    let remedy = record.status.terminal_remedy()?;
-    Some(CliError::DuplicateInFlight {
+fn terminal_refusal(record: &Record, remedy: &str) -> CliError {
+    CliError::DuplicateInFlight {
         prior_status: format!("{:?}", record.status).to_ascii_lowercase(),
         prior_tx: record.an_tx_hash.clone(),
         prior_msg_id: record.withdrawal_msg_id.clone(),
         remedy: remedy.to_string(),
-    })
+    }
 }
 
 /// One withdrawal identity's state file, as JSON under the state dir.
@@ -361,16 +385,18 @@ pub fn reserve(
     // construction — `hard_link` only publishes a fully written file — so
     // this read cannot see a torn one.
     let prior = read_record(&path)?;
-    match prior.status {
-        // Terminal states — refuse regardless of --allow-retry.
-        // Confirmed already paid out; Submitted has an unresolved
-        // in-flight tx and re-broadcasting is a double-spend risk.
-        Status::Confirmed | Status::Submitted => Err(terminal_refusal(&prior).expect(
-            "`Status::terminal_remedy` answers `Some` for exactly the statuses in this arm. A \
-             status named here and classified non-terminal there is a contradiction between two \
-             deliberate edits, not a slip, and a record whose status nobody has decided is safe \
-             to work on does not get worked on",
-        )),
+    // On the DISPOSITION, not on the status. Re-listing `Confirmed |
+    // Submitted` here was a second copy of the terminal set, and the
+    // remedy behind it had to be fetched with an `expect`: a status named
+    // in the arm and classified non-terminal by the remedy panicked —
+    // exit 101, on the path whose whole job is to tell an operator what
+    // not to do. `Disposition::Terminal` carries the remedy, so there is
+    // nothing left to look up and nothing left to disagree.
+    match prior.status.disposition() {
+        // Terminal — refuse regardless of `--allow-retry`. Confirmed
+        // already paid out; Submitted has an unresolved in-flight tx and
+        // re-broadcasting is a double-spend risk.
+        Disposition::Terminal(remedy) => Err(terminal_refusal(&prior, remedy)),
         // Failed → the only production writer sets this after
         // `withdrawByProof` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
@@ -378,7 +404,7 @@ pub fn reserve(
         // so the orchestrator's resume branch (`prior_an_tx =
         // record.an_tx_hash.clone()`) skips `burn::send`
         // instead of firing a second `initiateWithdrawal`.
-        Status::Failed => {
+        Disposition::FailedAfterSubmit => {
             // `Found`, unconditionally, and there is no longer a branch
             // that wipes.
             //
@@ -418,7 +444,7 @@ pub fn reserve(
         // combination it rejects, and it is the caller that knows whether
         // this run holds the withdrawal lock — which is the half of the
         // answer this function cannot supply and the refusal needs.
-        Status::Reserved | Status::Burned | Status::Captured | Status::Proved => {
+        Disposition::Resumable => {
             if allow_retry || prior.an_tx_hash.is_none() {
                 // Resume: return the prior record verbatim so the
                 // orchestrator can skip stages by inspecting fields
@@ -1484,17 +1510,24 @@ fn read_record(path: &Path) -> CliResult<Record> {
     // published a fresh record with a plain rename and called the result
     // `Created` — the one word that is supposed to mean "this run won the
     // atomic publish". Two runs could both win it.
-    if record.an_tx_hash.is_none()
-        && matches!(
-            record.status,
-            Status::Burned
-                | Status::Captured
-                | Status::Proved
-                | Status::Submitted
-                | Status::Confirmed
-                | Status::Failed
-        )
-    {
+    // A `match`, not a `matches!`. The twin of `reserve`'s dispatch and
+    // left non-exhaustive when that one was fixed: an eighth status is
+    // silently absent from this list, and absent here means a record
+    // whose status says a burn happened and whose hash says it did not
+    // gets read back as valid — the exact combination that made
+    // `reserve`'s wipe branch reachable.
+    let past_the_burn = match record.status {
+        Status::Burned
+        | Status::Captured
+        | Status::Proved
+        | Status::Submitted
+        | Status::Confirmed
+        | Status::Failed => true,
+        // The one status written BEFORE anything is broadcast, so the
+        // only one for which a missing hash is the normal case.
+        Status::Reserved => false,
+    };
+    if record.an_tx_hash.is_none() && past_the_burn {
         return Err(CliError::Preflight {
             reason: format!(
                 "idempotency: prior record at {} says status={:?} but carries no an_tx_hash. \
@@ -2685,15 +2718,58 @@ mod tests {
             "safe to delete",
         ];
 
+        // An absent unreleased section is only legitimate in ONE state:
+        // straight after a release, where the first heading in the file
+        // is the version a human just renamed it to. Anything else — a
+        // typo, a re-styled heading, a restructure — leaves a first
+        // heading that is neither, and that is a lost anchor rather than
+        // an empty scan. Distinguishing the two is what lets this scan
+        // nothing without also being unable to notice that it is.
+        let changelog = DOCS[2].1;
+        let first_heading = changelog
+            .lines()
+            .find(|l| l.starts_with("## "))
+            .expect("CHANGELOG.md has no `## ` heading at all");
+        assert!(
+            first_heading == "## [Unreleased]" || first_heading.starts_with("## [0."),
+            "CHANGELOG.md's first heading is `{first_heading}`. This guard scans the unreleased \
+             section and nothing else, so it has to be able to tell \"there is nothing unreleased \
+             yet\" from \"the heading it looks for was renamed\", and that is the only thing that \
+             tells them apart",
+        );
+
         let mut offenders = Vec::new();
         for (name, text) in DOCS {
             // The changelog's released sections are not editable.
             let scanned = if name == "CHANGELOG.md" {
-                let start = text.find("## [Unreleased]").unwrap_or(0);
-                let end = text[start..]
-                    .find("\n## [0.")
-                    .map_or(text.len(), |i| start + i);
-                &text[start..end]
+                // `unwrap_or(0)` here was fail-open ON A SCHEDULE, and
+                // the schedule is a release. `end` is measured from
+                // `start`, so with the heading absent the slice collapses
+                // onto the FIRST release heading in the file: 11..2068
+                // today, 1..10 the moment a human renames `##
+                // [Unreleased]` to a version — which is exactly what
+                // AGENTS.md tells them to do. Nine lines of file header,
+                // scanned, green, and the changelog silently out of the
+                // guard's sight from that commit on.
+                //
+                // Absent means absent, not "start at zero". After a
+                // release there IS no unreleased section — AGENTS.md has
+                // the next branch create one — and released sections are
+                // frozen by the same policy, so this guard may not act on
+                // them anyway. Scanning nothing is the correct answer and
+                // is written down here rather than arrived at by
+                // accident. An `expect` would be the other candidate and
+                // is wrong: it would turn the prescribed release state
+                // into a red build.
+                match text.find("## [Unreleased]") {
+                    Some(start) => {
+                        let end = text[start..]
+                            .find("\n## [0.")
+                            .map_or(text.len(), |i| start + i);
+                        &text[start..end]
+                    },
+                    None => "",
+                }
             } else {
                 text
             };
@@ -2822,12 +2898,9 @@ mod tests {
         // someone saying here what it is. The array below still has to be
         // extended by hand; the compile error is what sends them to it.
         let expected = |status: Status| match status {
-            Status::Confirmed | Status::Submitted => true,
-            Status::Reserved
-            | Status::Burned
-            | Status::Captured
-            | Status::Proved
-            | Status::Failed => false,
+            Status::Confirmed | Status::Submitted => Some(true),
+            Status::Failed => None,
+            Status::Reserved | Status::Burned | Status::Captured | Status::Proved => Some(false),
         };
         for status in [
             Status::Reserved,
@@ -2838,12 +2911,22 @@ mod tests {
             Status::Submitted,
             Status::Confirmed,
         ] {
+            // `None` here is `Failed`, which is neither: it is the
+            // third case of the partition and has its own arm in
+            // `reserve`. Written as three values rather than a boolean so
+            // that an eighth status cannot be waved into the resumable
+            // group by an expectation that only knows two.
             let terminal = expected(status);
             assert_eq!(
-                status.terminal_remedy().is_some(),
-                terminal,
+                matches!(status.disposition(), Disposition::Terminal(_)),
+                terminal == Some(true),
                 "{status:?}: terminality and the remedy are one decision now, so this is the \
                  whole of what production says about it",
+            );
+            assert_eq!(
+                status.disposition() == Disposition::FailedAfterSubmit,
+                terminal.is_none(),
+                "{status:?}: `Failed` is its own case — resumable, and resumable differently",
             );
 
             // And `reserve`'s own arm, driven against a real state
@@ -2870,7 +2953,7 @@ mod tests {
             );
             assert_eq!(
                 got.is_err(),
-                terminal,
+                terminal == Some(true),
                 "{status:?}: reserve's arm and `terminal_remedy` must name the same statuses",
             );
             if let Err(e) = got {
@@ -2887,10 +2970,17 @@ mod tests {
 
         // And the two that are terminal say different things, because the
         // operator's next move differs.
+        // Through the partition, which is the only way to reach the
+        // constructor now: there is no call that can be made without a
+        // remedy in hand, so there is no `expect` and no exit 101.
+        let remedy_of = |s: Status| match s.disposition() {
+            Disposition::Terminal(remedy) => remedy,
+            other => panic!("{s:?} is {other:?}, and this test is about the terminal pair"),
+        };
         rec.status = Status::Confirmed;
-        let paid = format!("{}", terminal_refusal(&rec).expect("confirmed is terminal"));
+        let paid = format!("{}", terminal_refusal(&rec, remedy_of(Status::Confirmed)));
         rec.status = Status::Submitted;
-        let unresolved = format!("{}", terminal_refusal(&rec).expect("submitted is terminal"));
+        let unresolved = format!("{}", terminal_refusal(&rec, remedy_of(Status::Submitted)));
         assert!(paid.contains("already paid out"), "{paid}");
         assert!(
             unresolved.contains("receipt was never observed"),

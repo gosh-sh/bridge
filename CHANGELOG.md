@@ -910,6 +910,27 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A `BRIDGE_CONFIG` that is not valid UTF-8 is refused instead of
+  silently ignored.** `std::env::var` answers three ways and the profile
+  loader read the third as the first: a variable whose bytes are not
+  UTF-8 was treated exactly like an unset one, and the profile was never
+  sourced. Nothing said so, because this runs before tracing is
+  initialised.
+
+  On the withdraw path that is a route to a second `initiateWithdrawal`,
+  not a configuration annoyance. `BRIDGE_WITHDRAW_STATE_DIR` comes from
+  the profile; unsourced, the run falls back to the default state
+  directory. The idempotency key is a hash of
+  `(from, to, to_chain, amount)` and does not include the directory, so
+  the record, the reservation and the lock file for the withdrawal in
+  flight are all in the directory nobody is reading: the run finds no
+  prior record and burns again. The multisig has no replay guard.
+
+  It now exits 2 — nothing has been broadcast and no state directory has
+  been resolved at that point — and the message says what being ignored
+  would have cost. The value is rendered lossily and escaped before it
+  reaches a terminal.
+
 - **`bridge-prover-lib`'s test suite stops reporting a moving number.**
   Four tests in `paths::tests` mutate the process-wide environment
   (`BRIDGE_CONFIG_DIR` / `BRIDGE_STATE_DIR` / `BRIDGE_PROOFS_DIR`) behind

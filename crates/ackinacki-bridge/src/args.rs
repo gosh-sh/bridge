@@ -529,7 +529,7 @@ fn is_64_hex(s: &str) -> bool {
 /// consumer could parse, which is exactly what the `--json` envelope
 /// exists to prevent. Counting characters also makes N mean what the
 /// sentence above says it means.
-fn redact(s: &str) -> String {
+pub(crate) fn redact(s: &str) -> String {
     const N: usize = 24;
     let mut head = String::new();
     let mut rest = s.chars();

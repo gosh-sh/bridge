@@ -257,6 +257,56 @@ fn an_unloadable_bridge_config_is_a_usage_refusal() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_bridge_config_that_is_not_utf8_is_refused_rather_than_ignored() {
+    // `std::env::var` has three answers and the profile loader read the
+    // third as the first: `if let Ok(path)` treated a non-UTF-8
+    // `BRIDGE_CONFIG` exactly like an unset one and carried on with
+    // compiled defaults — before `init_tracing`, so with no line anywhere
+    // saying the profile had not been sourced.
+    //
+    // The profile is where `BRIDGE_WITHDRAW_STATE_DIR` comes from, and
+    // the idempotency key does not include the directory. An ignored
+    // profile therefore reserves in a directory that holds no record of a
+    // withdrawal that has one — `peek` says none, `reserve` says created,
+    // `decide_burn` says send — and the multisig has no replay guard.
+    //
+    // Driven through the binary because that is the only place this code
+    // runs: `main` is not a library target, and everything here happens
+    // before there is a parsed `Cli` to test against.
+    use std::os::unix::ffi::OsStrExt;
+
+    let out = bin()
+        .env(
+            "BRIDGE_CONFIG",
+            std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfeprofile"),
+        )
+        .args(["--json", "withdraw"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        code(&out),
+        2,
+        "nothing is broadcast and nothing is written this early"
+    );
+    let v = error_envelope(&out);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("not valid UTF-8"), "got: {msg}");
+    assert!(
+        msg.contains("second burn"),
+        "the refusal has to say what being ignored would have cost, or the next reader files it \
+         as pedantry about encodings: {msg}",
+    );
+    // And the raw value never reaches the terminal unescaped: it comes
+    // from the environment, it is malformed by definition, and a newline
+    // in it forges a line the CLI never wrote.
+    assert!(
+        !msg.contains('\n') || !msg.lines().any(|l| l.starts_with("/tmp/")),
+        "got: {msg}",
+    );
+}
+
+#[test]
 fn a_profile_supplies_flags_the_command_line_omits() {
     // The other half: a profile that loads must actually reach clap's
     // `env =` attributes. Without this, the test above passes just as well

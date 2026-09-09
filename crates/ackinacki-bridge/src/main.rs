@@ -58,14 +58,58 @@ fn main() -> ProcExitCode {
     // vars already set in the shell — so precedence is preserved:
     //     explicit --flag > shell env > profile file > compiled default.
     // BRIDGE_CONFIG unset = no-op (env-only invocations still work).
-    if let Ok(path) = std::env::var("BRIDGE_CONFIG") {
-        if let Err(e) = dotenvy::from_path(&path) {
+    //
+    // A `match`, not `if let Ok`. `std::env::var` has THREE answers and
+    // the third one was being read as the first: a `BRIDGE_CONFIG` whose
+    // bytes are not UTF-8 returns `NotUnicode`, and `if let Ok` skipped
+    // the profile exactly as if the variable were unset — before
+    // `init_tracing`, so without a line anywhere saying so.
+    //
+    // That is a path to a second `initiateWithdrawal`, not a
+    // configuration annoyance. `BRIDGE_WITHDRAW_STATE_DIR` comes from the
+    // profile; unsourced, `--state-dir` is `None` and the run falls back
+    // to the default directory. The idempotency key is a hash of
+    // `(from, to, chain, amount)` and does NOT include the directory, so
+    // the reservation for this withdrawal, its record and its lock file
+    // are all in the directory nobody is looking at: `peek` answers
+    // `Ok(None)`, `reserve` answers `Created`, `decide_burn` answers
+    // `Send`, and the multisig has no replay guard.
+    match std::env::var("BRIDGE_CONFIG") {
+        Ok(path) => {
+            if let Err(e) = dotenvy::from_path(&path) {
+                let err = errors::CliError::Usage {
+                    reason: format!("BRIDGE_CONFIG={path} could not be loaded: {e}"),
+                };
+                output::print_error(&err, json);
+                return ProcExitCode::from(err.exit_code().as_i32() as u8);
+            }
+        },
+        // Unset is a no-op: env-only invocations still work.
+        Err(std::env::VarError::NotPresent) => {},
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            // Refused rather than ignored, and exit 2 is the truth of it:
+            // this happens before any chain is touched and before any
+            // state directory is resolved, so nothing was broadcast and
+            // nothing was written.
+            //
+            // The value is rendered lossily and then scrubbed. It came
+            // from the environment of whoever ran this, it is by
+            // definition malformed, and a bare newline or ANSI escape in
+            // it would forge lines in the refusal it appears in.
             let err = errors::CliError::Usage {
-                reason: format!("BRIDGE_CONFIG={path} could not be loaded: {e}"),
+                reason: format!(
+                    "BRIDGE_CONFIG is set to a value that is not valid UTF-8 ({} bytes, shown \
+                     lossily: {}), so the profile it names cannot be loaded.\n\x20 Refused rather \
+                     than ignored: without the profile this run would fall back to the default \
+                     withdrawal state directory, find no record of a withdrawal that has one, and \
+                     broadcast a second burn for it.",
+                    raw.len(),
+                    args::redact(&raw.to_string_lossy()),
+                ),
             };
             output::print_error(&err, json);
             return ProcExitCode::from(err.exit_code().as_i32() as u8);
-        }
+        },
     }
 
     let cli = match Cli::try_parse() {

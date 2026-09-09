@@ -977,6 +977,22 @@ assigns it when the release is tagged.
   burn. A first run's preflight refusal is unchanged — with no prior
   burn, exit 2 is exactly right.
 
+  **A record with no AN tx hash moves too, and that is the case this
+  branch's own failure mode produces.** If the burn is broadcast and the
+  CLI cannot observe the outcome, it returns before a receipt, so the
+  hash is never written. The next run sees `an_tx_hash: null`, treats
+  the burn as not-sent, requires the ECC[3] balance — which is genuinely
+  spent — and refuses. The missing hash hid the burn, caused the
+  refusal, and used to suppress the reclassification, all three: exit 2,
+  with a record on disk and a burn possibly on chain.
+
+  The gate is now the existence of a record, not the hash on it. What
+  the refusal says differs: with a hash, re-running resumes from the
+  recorded burn; without one, re-running refuses with exit 3 instead —
+  resume is gated on the hash — and that refusal is the procedure to
+  follow, after reconciling on chain. Both documents said "it resumes"
+  unconditionally, which was the wrong half of that pair.
+
   **A record that cannot be READ moves too.** Stage 1 reads the prior
   record before anything else, and that read is the call that finds out
   whether a burn is recorded — so it cannot be told. It does not need to

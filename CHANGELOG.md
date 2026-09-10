@@ -952,6 +952,22 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The witness command in the withdraw docs read the wrong nesting
+  level.** `jq .layer_idx work_dir/event_*_witness.json` — the check that
+  tells you the proof anchored on L2 and not the L1 fallback — answers
+  `null` on a healthy run: the field lives under `.anchor`, not at the top
+  level. `null` is not `1`, so the check reported the failure it exists to
+  detect, on a run that was fine. Now:
+
+  ```bash
+  jq '.anchor | {layer_idx, height}' work_dir/event_*_witness.json
+  ```
+
+  `height` is included because it must equal the `target_covering_seq_no`
+  stage 4b printed, which ties the witness to the bundle the run waited
+  for. Measured on a live withdrawal: `{"layer_idx": 1, "height":
+  15155200}` against `target_covering_seq_no=15155200`.
+
 - **`solc` was an undeclared, unchecked runtime dependency of every
   withdrawal.** `aggregate-proof` compiles the generated Yul verifier at
   stage 5 by shelling out to `solc` (`snark-verifier`'s `compile_solidity`,

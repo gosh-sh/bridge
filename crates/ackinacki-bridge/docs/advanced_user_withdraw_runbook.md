@@ -150,6 +150,10 @@ Regardless of L1 vs L2, run once and confirm:
 ```bash
 cast call $BRIDGE_ADDRESS 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL
 # Must print: 11806252235961651298089590628336806290921645495320214372650577192963691649562
+#   `cast` renders a uint256 in decimal; that value is
+#   1a1a…1a1a as 64 hex, i.e. USDC_BRIDGE_ACCOUNT_ID in the profile.
+#   To compare against the profile line directly:
+#     printf '%064x\n' "$(cast call $BRIDGE_ADDRESS 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL)"
 ```
 
 If this returns anything else, every C4 submit will revert on the
@@ -454,8 +458,11 @@ full `cargo run` invocation and expected log markers.
 **Ground-truth log lines to grep:** `resolved anchor: L2` and
 `anchor_layer=L2` in the enricher output, `anchor_stride=16384` from
 stage 4b. `L1` in any of them means L1 fallback — investigate before
-submitting. The witness file carries the same fact 0-indexed, so
-`jq .layer_idx work_dir/event_*_witness.json` reads `1` for L2.
+submitting. The witness file carries the same fact 0-indexed, under
+`.anchor` rather than at the top level:
+`jq '.anchor | {layer_idx, height}' work_dir/event_*_witness.json` reads
+`layer_idx: 1` for L2, and `height` equal to the `target_covering_seq_no`
+stage 4b printed.
 
 **If the enricher times out (120 min):** your daemon never landed
 the covering L2 bundle. Bundle-lane issue — check your `daemon-live`
@@ -475,7 +482,7 @@ Same steps as above with three deltas:
 
 Log ground-truth on the L1 fast-lane: `resolved anchor: L1`,
 `anchor_layer=L1`, and `anchor_stride=1024`. In the witness file the
-same fact is 0-indexed: `layer_idx` reads `0`.
+same fact is 0-indexed: `.anchor.layer_idx` reads `0`.
 
 ---
 

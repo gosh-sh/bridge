@@ -511,7 +511,10 @@ grep -E 'resolved anchor:|anchor_layer=|anchor_stride=' "$LOG"
 # On the pinned L2 deploy: `resolved anchor: L2`, `anchor_layer=L2`,
 # `anchor_stride=16384`. The log is 1-INDEXED (L1/L2); the witness file
 # is 0-indexed, so the same fact reads as 1 there:
-jq .layer_idx work_dir/event_*_witness.json     # 1 = L2, 0 = L1 fallback
+# `layer_idx` is nested under `.anchor`; at the top level it is null.
+# `height` is the covering bundle, so it must equal the
+# `target_covering_seq_no` printed by stage 4b.
+jq '.anchor | {layer_idx, height}' work_dir/event_*_witness.json  # 1 = L2, 0 = L1 fallback
 grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 ```
 

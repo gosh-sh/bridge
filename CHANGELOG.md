@@ -88,7 +88,12 @@ here and how versions are assigned.
   needed the owner's `setAcceptedBlockHash`. Observed on shellnet
   (2026-09-10); ancestry had never been run live before. No migration: every
   hash already stored came from `submitUpdate` and is already keyed right.
-  `EthBeaconLightClient_rotate_decider.patch` regenerated.
+  `EthBeaconLightClient_rotate_decider.patch` regenerated. Shellnet runs the
+  bridge-deployed variant of the contract, which has diverged from
+  `contracts/an/`; for that tree the same change is
+  `EthBeaconLightClient_anchor_key.patch` (`git apply` from the `acki-nacki`
+  root, ABI unchanged, `version` 1.4.1 so `getVersion()` shows whether
+  `updateCode` landed).
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset

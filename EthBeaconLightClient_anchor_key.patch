@@ -1,0 +1,73 @@
+diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
+index 5b3774f07..954648a5c 100644
+--- a/contracts/exchange/EthBeaconLightClient.sol
++++ b/contracts/exchange/EthBeaconLightClient.sol
+@@ -44,7 +44,7 @@ import "./eccUSDCBridge.sol";
+ ///         head: `isProven` / the sink forget that window. Deposits older than
+ ///         a year cannot `finalizeDeposit` against this oracle.
+ contract EthBeaconLightClient {
+-    string constant version = "1.4.0";
++    string constant version = "1.4.1";
+ 
+     // Sync committee size on Ethereum mainnet — the supermajority denominator.
+     uint256 constant SYNC_COMMITTEE_SIZE = 512;
+@@ -381,17 +381,37 @@ contract EthBeaconLightClient {
+     // Epoch ancestry (31/32 non-checkpoint execution hashes)
+     // ========================================================
+ 
++    /// @dev Anchors are keyed the way the step circuit publishes them, not the
++    ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
++    ///      the 32-byte hash little-endian, so `submitUpdate` stores
++    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
++    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
++    ///      returns Ethereum byte order, so every keccak result must be
++    ///      re-packed before it reaches `_provenEthSlot`.
++    function _anchorKey(uint256 ethOrder) private pure returns (uint256) {
++        uint256 hi = 0;
++        uint256 lo = 0;
++        for (uint i = 0; i < 16; i++) {
++            hi |= ((ethOrder >> (8 * (31 - i))) & 0xff) << (8 * i);
++            lo |= ((ethOrder >> (8 * (15 - i))) & 0xff) << (8 * i);
++        }
++        return (hi << 128) | lo;
++    }
++
+     /// @notice Pushes the execution parent-hash chain of an already-proven
+     ///         checkpoint into the one-year window / `USDCBridge`.
+     ///         `headerRlps[0]` must keccak256 to a proven checkpoint; each next
+     ///         header's keccak256 must equal the previous header's RLP
+     ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
+     ///         Permissionless: the keccak + parent links are the authorization.
++    ///         Parent links are compared in Ethereum byte order — the order
++    ///         `parentHash` is written in — and re-packed by `_anchorKey` only
++    ///         where they meet the store.
+     function submitAncestry(bytes[] headerRlps) public {
+         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
+         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
+         tvm.accept();
+-        uint256 checkpoint = EthKeccak.hash(headerRlps[0]);
++        uint256 checkpoint = _anchorKey(EthKeccak.hash(headerRlps[0]));
+         require(_isLive(checkpoint), ERR_UNKNOWN_CHECKPOINT);
+         uint64 ckptSlot = _provenEthSlot[checkpoint];
+         _evictExpired();
+@@ -401,8 +421,9 @@ contract EthBeaconLightClient {
+         for (i = 1; i < headerRlps.length; i++) {
+             uint256 h = EthKeccak.hash(headerRlps[i]);
+             require(h == want, ERR_BAD_ANCESTRY);
+-            if (!_isLive(h)) {
+-                _pushExecHash(h, ckptSlot);
++            uint256 key = _anchorKey(h);
++            if (!_isLive(key)) {
++                _pushExecHash(key, ckptSlot);
+                 added += 1;
+             }
+             want = EthKeccak.rlpParentHash(headerRlps[i]);
+@@ -470,6 +491,8 @@ contract EthBeaconLightClient {
+     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
+     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
+     ///         push that landed before `setLightClient`). Does not re-prove.
++    ///         `blockHash` is the stored anchor key (`_anchorKey` packing),
++    ///         not the Ethereum byte order a block explorer shows.
+     function rePushAnchor(uint256 blockHash) public {
+         require(_isLive(blockHash), ERR_NOT_PROVEN);
+         tvm.accept();

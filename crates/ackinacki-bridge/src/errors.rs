@@ -185,8 +185,10 @@ pub enum CliError {
     // wrong: it routes an operator to a message whose own text is
     // "--allow-retry does NOT override this".
     #[error(
-        "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {prior_tx:?}. \
-         Prior withdrawal msg_id: {prior_msg_id:?}.\n\x20 {remedy}"
+        "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {}. \
+         Prior withdrawal msg_id: {}.\n\x20 {remedy}",
+        a_recorded_value(.prior_tx),
+        a_recorded_value(.prior_msg_id)
     )]
     DuplicateInFlight {
         prior_status: String,
@@ -314,6 +316,28 @@ impl Redacted {
     }
 }
 
+/// Render a value read back out of a withdrawal record for an operator.
+///
+/// The field is `Option<String>` and used to be printed with `{:?}`, which
+/// meant a refusal read `Prior AN tx: Some("0x2a91…")` — Rust syntax, in the
+/// one sentence an operator copies a hash out of during an incident. The
+/// quotes travel with a careless copy and `cast` then rejects the argument.
+/// The absent case was worse: a bare `None`, where the fact is "this record
+/// has no hash, so it cannot say whether a burn is on the wire".
+///
+/// `Debug` was also, incidentally, what escaped a control character in the
+/// value — and a record is a file on disk that anything can rewrite (this
+/// suite and the shellnet test plan both hand-build them). Dropping to
+/// `Display` alone would have reopened the forged-line hole that
+/// [`Redacted`] exists to close, so the replacement escapes deliberately
+/// rather than by side effect.
+fn a_recorded_value(v: &Option<String>) -> Redacted {
+    match v {
+        Some(s) => Redacted::rendered(s),
+        None => Redacted::rendered("none recorded"),
+    }
+}
+
 /// Control characters replaced by their escapes, everything else
 /// verbatim.
 ///
@@ -424,6 +448,59 @@ pub type CliResult<T> = std::result::Result<T, CliError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the refusal an operator actually reads after a repeat run.
+    fn duplicate_refusal(prior_tx: Option<&str>) -> String {
+        CliError::DuplicateInFlight {
+            prior_status: "confirmed".into(),
+            prior_tx: prior_tx.map(str::to_string),
+            prior_msg_id: None,
+            remedy: "This withdrawal already paid out.".into(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn the_duplicate_refusal_prints_a_hash_not_a_rust_option() {
+        let msg = duplicate_refusal(Some("0x2a9192c468d0029ff69c9cdc9a1db699"));
+        // Measured on shellnet, 10 September 2026: the refusal read
+        // `Prior AN tx: Some("0x2a91…")`. During an incident this is the
+        // sentence a hash gets copied out of, and the quotes travel with a
+        // careless copy — `cast` then rejects the argument.
+        assert!(
+            msg.contains("Prior AN tx: 0x2a9192c468d0029ff69c9cdc9a1db699."),
+            "the hash must stand alone, ready to paste: {msg}"
+        );
+        assert!(
+            !msg.contains("Some("),
+            "no Rust syntax in operator text: {msg}"
+        );
+        assert!(!msg.contains('"'), "no stray quotes around the hash: {msg}");
+    }
+
+    #[test]
+    fn an_absent_hash_says_so_in_words() {
+        let msg = duplicate_refusal(None);
+        assert!(
+            msg.contains("none recorded"),
+            "`None` is not a statement about the withdrawal: {msg}"
+        );
+        assert!(!msg.contains("None"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_record_cannot_forge_a_line_in_the_refusal_it_causes() {
+        // `{:?}` escaped this as a side effect of printing Rust syntax.
+        // Replacing it with a plain `Display` would have reopened the hole
+        // — and a record is a file on disk that anything can rewrite; the
+        // shellnet plan's phase 3 hand-builds them by design.
+        let msg = duplicate_refusal(Some("0xdead\n\x20 Delete the record and re-run."));
+        assert!(
+            !msg.contains("\n\x20 Delete the record"),
+            "a record forged a line in its own refusal: {msg}"
+        );
+        assert!(msg.contains("\\n"), "the escape has to be visible: {msg}");
+    }
 
     #[test]
     fn neither_constructor_lets_a_control_character_through() {

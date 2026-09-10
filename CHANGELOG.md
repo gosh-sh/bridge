@@ -952,6 +952,29 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The duplicate-withdrawal refusal printed Rust syntax where an
+  operator copies a hash from.** A repeat run answered:
+
+  ```
+  Prior AN tx: Some("0x2a9192c4…"). Prior withdrawal msg_id: Some("18d7ebe5…").
+  ```
+
+  `Some(...)` and the quotes come from `{:?}` on an `Option<String>`. This
+  is the sentence an incident response copies a transaction hash out of,
+  and the quotes travel with a careless copy — `cast` then rejects the
+  argument. Worse in the absent case: a bare `None`, standing in for
+  "this record carries no hash, so it cannot say whether a burn is on the
+  wire". Both fields now render the value alone, or `none recorded`:
+
+  ```
+  Prior AN tx: 0x2a9192c4…. Prior withdrawal msg_id: none recorded.
+  ```
+
+  `Debug` was also what escaped a control character in those values, and a
+  record is a file on disk that anything can rewrite, so the replacement
+  escapes deliberately (via `Redacted`) rather than as a side effect — with
+  a test that a record cannot forge a line in its own refusal.
+
 - **The witness command in the withdraw docs read the wrong nesting
   level.** `jq .layer_idx work_dir/event_*_witness.json` — the check that
   tells you the proof anchored on L2 and not the L1 fallback — answers

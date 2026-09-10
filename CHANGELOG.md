@@ -910,41 +910,45 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **The shipped shellnet profile points at the NODE-4011 deploy.**
-  `BRIDGE_ADDRESS` is now
-  `0x8545129b215B248944A3aE40f711F34CAb458644` and
-  `USDC_BRIDGE_ACCOUNT_ID` is
-  `20f9338d2b0467b4ad97828f5e1e53f8ebc4256426442493e7f38ca2d7c3c5b8`,
-  over the new AN-side eccUSDCBridge.
+- **The shellnet profile documents how to tell a live deploy from a dead
+  one, because an address alone does not.** The values are unchanged —
+  `BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`,
+  `USDC_BRIDGE_ACCOUNT_ID=1a1a…1a1a` — but NODE-4011 moved the relayer
+  to a second deploy
+  (`0x8545129b215B248944A3aE40f711F34CAb458644`, over a new AN-side
+  eccUSDCBridge) and rolled it back within the day, and the retired
+  deploy answers every getter exactly like the live one throughout.
 
-  The previous deploy, `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is
-  abandoned — no relayer advances it, its `storedLastSeenBlockSeqNo` is
-  frozen at 15040512 — so a withdrawal against it waits out
-  `COVERAGE_WAIT` and exits 11 or 12 *after* the burn. It still holds
-  0.1 USDC of stranded treasury.
+  What that costs if you get it wrong is the whole point: a bridge
+  nobody advances accepts the burn on the AN side and then never
+  produces a covering bundle, so the run waits out `COVERAGE_WAIT` and
+  exits 11 or 12 with the USDC gone. The profile now carries the check —
+  `storedLastSeenBlockSeqNo` plus the `BlockVerified` cadence, which is
+  ~437 Sepolia blocks (~87 min) in L2 mode — and says plainly that a
+  last event older than that means this is not the live deploy.
 
-  **The two values move together.** A deploy is pinned at construction
-  to one AN-side bridge account, and `withdrawByProof` compares the
-  `(dappFr, accFr)` pair a proof carries against that pinning *before*
-  verifying the proof — so a half-updated profile is a refusal after the
-  burn, which is why preflight checks the pair up front. The account id
-  can be read back from the deploy rather than looked up: `cast call
-  $BRIDGE_ADDRESS 'bridgeWithdrawalAccFr()(uint256)'`, printed as
-  `064x`, is exactly this line.
+  Two invariants are written down beside it, both learned the expensive
+  way during the switch:
 
-  A fresh deploy starts with an **empty treasury**, and this one still
-  has one: `treasuryBalance`, `suppliedPrincipal` and the contract's own
-  USDC balance are all zero. `treasuryBalance` is a counter on the
-  bridge (`AckiNackiBridge.sol:98`), not a separate address, and only
-  `deposit` moves it — a plain USDC `transfer` to the bridge funds
-  nothing, leaves the tokens as skimmable liquid surplus, and a
-  withdrawal still reverts with `WithdrawTreasuryShortfall`. Fund via
-  README Step 3 before running one.
+  - `BRIDGE_ADDRESS` and `USDC_BRIDGE_ACCOUNT_ID` move **together**. A
+    deploy is pinned at construction to one AN-side account, and
+    `withdrawByProof` compares the `(dappFr, accFr)` a proof carries
+    against that pinning *before* verifying the proof — a half-updated
+    profile is a refusal after the burn, which is why preflight checks
+    the pair up front. The id never has to be looked up: `cast call
+    $BRIDGE_ADDRESS 'bridgeWithdrawalAccFr()(uint256)'` printed as
+    `064x` **is** this line.
+  - A deploy carries its **own** treasury, and switching does not bring
+    the balance along. `treasuryBalance` is a counter on the bridge
+    (`AckiNackiBridge.sol:98`), not an address, and only `deposit` moves
+    it — a plain USDC `transfer` funds nothing, leaves the tokens as
+    skimmable liquid surplus, and the withdrawal still reverts with
+    `WithdrawTreasuryShortfall`.
 
-  The deployed verifier stack is unchanged: the Yul runtime behind the
-  new bridge matches this build's embedded
-  `BridgeWithdrawalAggregatorVerifier.bin` byte for byte (20 958 bytes),
-  so nothing has to be re-provisioned on the prover side.
+  Nothing has to be re-provisioned on the prover side for either deploy:
+  both verifier stacks end in a Yul runtime matching this build's
+  embedded `BridgeWithdrawalAggregatorVerifier.bin` byte for byte
+  (20 958 bytes, sha256 `406d4054…`), at different addresses.
 
 ### Fixed
 

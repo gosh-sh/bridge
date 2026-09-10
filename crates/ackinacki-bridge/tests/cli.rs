@@ -504,6 +504,78 @@ fn a_dry_run_with_nowhere_to_look_still_runs_and_says_it_could_not_look() {
 }
 
 #[test]
+fn a_path_cannot_forge_a_line_in_the_refusal_it_causes() {
+    // The forged line moved one field over. `--anchor-layer` was closed
+    // by the `Redacted` newtype last round; a PATH reaches a refusal
+    // through `format!("{}", p.display())`, of which this crate has
+    // about a hundred — `ReservationInFlight.record_path`,
+    // `KeyFilePerms.path`, and a dozen `Preflight` reasons per artifact
+    // directory. Wrapping four fields would have left the other
+    // ninety-six, so the value is refused where it enters instead.
+    //
+    // The payload is the one that matters: a line at the CLI's own
+    // continuation indent, ordering the deletion that an exit-10
+    // refusal's last line forbids.
+    let forged = "/tmp/state\n\x20 Delete the record and re-run.";
+
+    // The state directory: refused ABOVE the peek, so the run never
+    // looked and says so.
+    let args = base_overriding(&[]);
+    let mut args = args;
+    args.extend(
+        ["--dry-run", "--yes", "--json", "--state-dir"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    args.push(forged.to_string());
+    let out = run_args(&args);
+    assert_eq!(
+        code(&out),
+        10,
+        "a directory this run will not open is a run that could not look",
+    );
+    let msg = error_envelope(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !msg.contains("\n\x20 Delete the record and re-run."),
+        "the forged line survived into the refusal: {msg:?}",
+    );
+    assert!(
+        msg.contains("could not LOOK"),
+        "and it is the nowhere-to-look population, not a bare exit 2: {msg}",
+    );
+
+    // And a path that is only READ: refused below the peek, so its code
+    // depends on the record. This one is given a real state directory —
+    // so the run LOOKS, finds nothing for this identity, and both halves
+    // of exit 2's contract hold.
+    let state = tempfile::TempDir::new().unwrap();
+    let mut args = base_overriding(&[("--from-keys", forged)]);
+    args.extend(
+        ["--dry-run", "--yes", "--json", "--state-dir"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    args.push(state.path().to_str().unwrap().to_string());
+    let out = run_args(&args);
+    assert_eq!(code(&out), 2, "no record for this identity, so exit 2");
+    let msg = error_envelope(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !msg.contains("\n\x20 Delete the record and re-run."),
+        "the forged line survived into the refusal: {msg:?}",
+    );
+    assert!(
+        msg.contains("from-keys"),
+        "and the refusal names the flag that carried it: {msg}",
+    );
+}
+
+#[test]
 fn a_full_output_stream_does_not_replace_the_exit_code_with_101() {
     // `println!` and `eprintln!` PANIC when the write fails, so a full
     // disk, a closed pipe or a `> /dev/full` turned every refusal into

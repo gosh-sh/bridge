@@ -557,7 +557,34 @@ pub(crate) fn redact(s: &str) -> crate::errors::Redacted {
     if rest.next().is_some() {
         head.push('…');
     }
+    // `rendered` escapes as well, which is a no-op on text this loop has
+    // already escaped. Doing it here too is what keeps the CLIPPING
+    // honest: the 24 characters are counted before the escapes widen
+    // them, so a value of `\n` x 24 is clipped at 24 characters and not
+    // at 12.
     crate::errors::Redacted::rendered(head)
+}
+
+/// The first control character in `path`, if it has one.
+///
+/// The BOUNDARY for a class the `Redacted` newtype cannot reach. That
+/// type guards the fields an author wraps; a path reaches a refusal
+/// through `format!("{}", p.display())`, and there are about a hundred
+/// of those across this crate — inside `Preflight.reason`, inside
+/// `Usage.reason`, and as `ReservationInFlight.record_path` and
+/// `KeyFilePerms.path`, which are still bare `String`s because a
+/// `Redacted` at those four sites would leave the other ninety-six.
+///
+/// So the value is stopped where it enters instead. A path carrying a
+/// newline forges a line at the CLI's own continuation indent — the
+/// measured attack put one inside an exit-10 refusal, directly above
+/// "Do not delete that record on the strength of this refusal" — and no
+/// legitimate state directory, key file or artifact directory has one.
+///
+/// Answers the character rather than a bool so the refusal can name
+/// what it found.
+pub(crate) fn first_control_character(path: &std::path::Path) -> Option<char> {
+    path.to_string_lossy().chars().find(|c| c.is_control())
 }
 
 /// The chain-id whitelist, rendered for a refusal that has just

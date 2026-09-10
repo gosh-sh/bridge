@@ -80,7 +80,16 @@ fn main() -> ProcExitCode {
         Ok(path) => {
             if let Err(e) = dotenvy::from_path(&path) {
                 let err = errors::CliError::Usage {
-                    reason: format!("BRIDGE_CONFIG={path} could not be loaded: {e}"),
+                    // Redacted, like the branch below it: this path comes
+                    // out of the environment of whoever ran the CLI, and a
+                    // newline in it forges a line in the refusal it
+                    // causes. The `NotUnicode` arm has scrubbed its value
+                    // since the day it was written; this one interpolated
+                    // raw, three lines away.
+                    reason: format!(
+                        "BRIDGE_CONFIG={} could not be loaded: {e}",
+                        args::redact(&path)
+                    ),
                 };
                 output::print_error(&err, json);
                 return ProcExitCode::from(err.exit_code().as_i32() as u8);

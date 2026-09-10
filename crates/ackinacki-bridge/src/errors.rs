@@ -267,9 +267,17 @@ pub enum CliError {
 ///
 /// Constructed two ways and no others: [`crate::args::redact`], for
 /// anything an operator supplied, and [`Redacted::rendered`], for text
-/// this CLI produced itself. The point is not that one of them escapes
-/// and the other does not — it is that an author has to say which case
-/// this is, in a word a reader can grep.
+/// this CLI produced itself. What differs is the CLIPPING — operator
+/// text is cut to 24 characters — and an author still has to say which
+/// case this is, in a word a reader can grep.
+///
+/// What does NOT differ, as of round 21, is the escaping: both escape.
+/// "The point is not that one of them escapes and the other does not"
+/// stood here beside a `rendered` that escaped nothing, so
+/// `Redacted::rendered(operator_text)` recreated the whole defect in
+/// fifteen characters, with ten call sites and no guard between them.
+/// A type whose promise is "safe to print" cannot have a constructor
+/// that does not make it so.
 ///
 /// Refusals are multi-line and are read in a terminal. A control
 /// character that survives `argv` forges a line the CLI never wrote,
@@ -282,12 +290,13 @@ impl Redacted {
     /// `<absent>`, a value it has already redacted and is wrapping in a
     /// sentence.
     ///
-    /// NEVER raw operator input. That is [`crate::args::redact`]'s job,
-    /// and the difference between the two calls is the whole content of
-    /// this type.
+    /// Prefer [`crate::args::redact`] for raw operator input: it clips
+    /// to 24 characters as well, and the difference between the two
+    /// calls is what a reader greps for. This one escapes too, so a
+    /// slip is no longer a hole.
     #[must_use]
     pub fn rendered(what: impl std::fmt::Display) -> Self {
-        Self(what.to_string())
+        Self(escaped(&what.to_string()))
     }
 
     /// The escaped text.
@@ -301,6 +310,25 @@ impl Redacted {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Control characters replaced by their escapes, everything else
+/// verbatim.
+///
+/// One home for the substitution both constructors make. A bare newline
+/// forges a line at the CLI's own continuation indent — inside an
+/// exit-10 refusal, directly above "Do not delete that record" — and an
+/// ANSI escape repaints the terminal the refusal is read on.
+fn escaped(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 impl std::fmt::Display for Redacted {
@@ -390,6 +418,49 @@ pub type CliResult<T> = std::result::Result<T, CliError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neither_constructor_lets_a_control_character_through() {
+        // `rendered` escaped nothing for a round, on the stated grounds
+        // that the difference between the two constructors is intent
+        // rather than behaviour. It is `pub` and takes `impl Display`, so
+        // `Redacted::rendered(operator_text)` recreated the whole defect
+        // in fifteen characters, at any of ten call sites, with nothing
+        // watching them. A type whose promise is "safe to print" may not
+        // have a constructor that does not make it so.
+        let forged = "3\n\x20 Delete the record and re-run.\u{1b}[2J";
+        for (which, value) in [
+            ("redact", crate::args::redact(forged)),
+            ("rendered", Redacted::rendered(forged)),
+        ] {
+            assert!(
+                !value.as_str().contains('\n'),
+                "{which} let a newline through: {:?}",
+                value.as_str(),
+            );
+            assert!(
+                !value.as_str().contains('\u{1b}'),
+                "{which} let an escape sequence through: {:?}",
+                value.as_str(),
+            );
+            assert!(
+                value.as_str().contains("\\n"),
+                "{which} has to SHOW what it escaped: {:?}",
+                value.as_str(),
+            );
+        }
+        // And the clipping is still `redact`'s alone, counted before the
+        // escapes widen anything: 24 characters of a value that is all
+        // newlines, not 12.
+        let all_newlines = "\n".repeat(30);
+        let clipped = crate::args::redact(&all_newlines);
+        assert!(clipped.as_str().ends_with('…'), "redact clips");
+        assert_eq!(
+            clipped.as_str().matches("\\n").count(),
+            24,
+            "and it counts the characters it was given, not the ones it wrote",
+        );
+    }
 
     #[test]
     fn every_variant_has_a_stable_exit_code() {

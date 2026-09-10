@@ -250,6 +250,37 @@ pub async fn run(
         // there is no record for this identity.
         None => default_state_dir().ok(),
     };
+    // A directory whose NAME carries a control character is one this run
+    // will not open, and the refusal for it is exit 10 for the same
+    // reason an unset `HOME` is: whatever is in that directory, this run
+    // did not look at it.
+    //
+    // Refusing rather than escaping, and this is the boundary the
+    // `Redacted` newtype cannot be: the state directory reaches a
+    // refusal as `record_path(..).display()` and through a dozen
+    // `Preflight` reasons besides, so the value is stopped here instead
+    // of wrapped at each of them. `BRIDGE_WITHDRAW_STATE_DIR` comes out
+    // of a profile file, which is how one gets a newline in it without
+    // typing one.
+    if let Some(c) = where_to_look
+        .as_deref()
+        .and_then(args::first_control_character)
+    {
+        return Err(CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "the state directory this run was given carries a control character ({}), so it \
+                 will not be opened: printed into a refusal it forges lines the CLI never \
+                 wrote.\n\x20 Nothing was broadcast. This is exit 10 rather than exit 2 because \
+                 the run could not LOOK: no record was read, so this refusal cannot tell you the \
+                 withdrawal is untouched.\n\x20 The value came from --state-dir or \
+                 BRIDGE_WITHDRAW_STATE_DIR — it was {} — and a run pointed at a plain path reads \
+                 the record if there is one.",
+                crate::errors::Redacted::rendered(c.escape_debug()),
+                args::redact(&where_to_look.unwrap_or_default().to_string_lossy()),
+            ),
+            source: None,
+        });
+    }
     // Read for a DRY run too, and this is the fix for the last site of a
     // class the rest of stage 1 was cleared of. A dry run neither
     // reserves nor writes — but eight refusals it can raise were bare
@@ -280,6 +311,43 @@ pub async fn run(
     // re-run under a different profile arrives here — the same shape as
     // the plumbing, and it was left one line short with an exemption
     // saying there was no identity yet.
+    // The other paths, at the same point and for the same reason as
+    // `--anchor-layer`: below the peek, so the refusal knows whether a
+    // record exists and answers 2 or 10 accordingly. The state
+    // directory is checked ABOVE the peek instead — it is the thing the
+    // peek reads — and answers 10 outright.
+    //
+    // Every path an operator can supply, listed once. `--from-keys`
+    // reaches a refusal as `KeyFilePerms.path`; the four artifact
+    // directories reach a dozen `Preflight` reasons apiece. Neither is a
+    // `Redacted` field, and making them ones would leave every other
+    // `display()` in the crate open.
+    for (flag, path) in [
+        ("from-keys", Some(args.from_keys.as_path())),
+        ("aggregator-dir", args.aggregator_dir.as_deref()),
+        ("verifiers-dir", args.verifiers_dir.as_deref()),
+        ("params-dir", args.params_dir.as_deref()),
+        ("work-dir", args.work_dir.as_deref()),
+        ("snark-dir", Some(args.snark_dir.as_path())),
+        ("pk-cache-dir", args.pk_cache_dir.as_deref()),
+        ("prover-out-dir", args.prover_out_dir.as_deref()),
+    ] {
+        if let Some(c) = path.and_then(args::first_control_character) {
+            let refusal = CliError::ArgInvalid {
+                flag,
+                expected: "a path with no control characters — printed into a refusal, one forges \
+                           lines the CLI never wrote"
+                    .into(),
+                got: args::redact(&format!(
+                    "{} (contains {})",
+                    path.unwrap_or(Path::new("")).to_string_lossy(),
+                    c.escape_debug(),
+                )),
+            };
+            return Err(refusal_before_a_recorded_burn(refusal, &state_dir, &prior));
+        }
+    }
+
     let anchor_mode = parse_anchor_layer(&args.anchor_layer)
         .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 

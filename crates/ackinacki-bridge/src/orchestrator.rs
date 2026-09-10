@@ -151,6 +151,53 @@ pub enum SubmitStatus {
 /// answer.
 const _: () = idempotency::pins_its_borrow_to_the_end_of_scope::<idempotency::LockHold<'static>>();
 
+/// What stage 1 learned about the idempotency store for this identity.
+///
+/// THREE states, not an `Option`, and the third is why this is a type.
+/// Exit 2's published contract has two halves — nothing broadcast, AND
+/// no record for this identity on disk — and a run that never opened the
+/// store can establish the first but not the second. As an `Option` that
+/// run carried `None`, which every refusal read as "no record", so
+/// `--dry-run` with `HOME` unset and no `--state-dir` answered 2 about a
+/// store it had not looked in.
+///
+/// Naming the state makes the mistake unavailable rather than
+/// unlikely: [`refusal_before_a_recorded_burn`] matches on it, and a
+/// fourth state would be a non-exhaustive-match error at the one place
+/// that decides what a refusal is allowed to claim.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one of these exists per run, built once in stage 1 and matched on. Boxing the \
+              record would add an allocation to the pipeline's only copy of it, to satisfy a lint \
+              about a size that is never multiplied."
+)]
+enum WhatStageOneFound {
+    /// The store was read, and holds this record for the identity.
+    ARecord(idempotency::Record),
+    /// The store was read, and holds nothing for this identity. This is
+    /// the only state exit 2 may be raised in.
+    NoRecord,
+    /// No state directory could be named, so nothing was read — `HOME`
+    /// unset with no `--state-dir`, which only a dry run reaches: a real
+    /// run is refused by `default_state_dir` before it gets here.
+    NowhereToLook,
+}
+
+impl WhatStageOneFound {
+    /// The record, when the store was read and had one.
+    ///
+    /// Deliberately NOT an `is_none()` beside it: "no record" and "did
+    /// not look" both answer `None` here, which is exactly the collapse
+    /// that produced the defect above, so nothing in this file asks the
+    /// negative question through this method.
+    fn record(&self) -> Option<&idempotency::Record> {
+        match self {
+            Self::ARecord(r) => Some(r),
+            Self::NoRecord | Self::NowhereToLook => None,
+        }
+    }
+}
+
 /// Full pipeline. `main` handles arg parsing, tracing setup, exit-code
 /// mapping, and JSON vs. human output — this fn just runs the ballet.
 ///
@@ -187,23 +234,21 @@ pub async fn run(
     // joining a filename onto an empty path yields a relative one, which
     // is the cwd-relative state directory this refusal exists to prevent.
     // A path that cannot exist fails loudly instead — and nothing reaches
-    // it, because `peek` is guarded below, the reservation lives inside
-    // the `else` of `if dry_run`, and every `update` is behind
-    // `record.as_mut()`, which stays `None` for a dry run.
-    let state_dir = match (&args.state_dir, dry_run) {
-        (Some(d), _) => d.clone(),
-        (None, false) => default_state_dir()?,
-        // A dry run that CAN name a state directory does. It still never
-        // writes one — every write is behind `record.as_mut()`, which
-        // stays `None` for a dry run, and the reservation lives inside
-        // the `else` of `if dry_run` — but it reads, for the reason
-        // below. When `HOME` is unset it has no directory to name, and
-        // the path it gets instead is one that cannot exist: joining a
-        // filename onto an empty `PathBuf` would yield a cwd-relative
-        // one, which is the state directory this refusal exists to
-        // prevent.
-        (None, true) => default_state_dir()
-            .unwrap_or_else(|_| PathBuf::from("/nonexistent/dry-run-uses-no-state-dir")),
+    // it, because the peek below is guarded by the `Some` arm, the
+    // reservation lives inside the `else` of `if dry_run`, and every
+    // `update` is behind `record.as_mut()`, which stays `None` for a dry
+    // run.
+    let where_to_look: Option<PathBuf> = match &args.state_dir {
+        Some(d) => Some(d.clone()),
+        // A real run REFUSES: that directory is the only thing stopping a
+        // second burn, and `default_state_dir` says so in exit 10's own
+        // vocabulary.
+        None if !dry_run => Some(default_state_dir()?),
+        // A dry run that CAN name one does, and one that cannot still
+        // runs — it is the command whose whole purpose is to be safe to
+        // run anywhere. What it may not do is claim, afterwards, that
+        // there is no record for this identity.
+        None => default_state_dir().ok(),
     };
     // Read for a DRY run too, and this is the fix for the last site of a
     // class the rest of stage 1 was cleared of. A dry run neither
@@ -216,8 +261,17 @@ pub async fn run(
     // `peek` creates nothing, so this cannot poison a run that is about
     // to be refused; and a dry run's whole job is to say what a real run
     // would do, which it cannot do without looking.
-    let prior = idempotency::peek(&state_dir, &from, &to, &amount)
-        .map_err(refusal_reading_a_record_that_exists)?;
+    let prior = match &where_to_look {
+        Some(dir) => match idempotency::peek(dir, &from, &to, &amount)
+            .map_err(refusal_reading_a_record_that_exists)?
+        {
+            Some(record) => WhatStageOneFound::ARecord(record),
+            None => WhatStageOneFound::NoRecord,
+        },
+        None => WhatStageOneFound::NowhereToLook,
+    };
+    let state_dir =
+        where_to_look.unwrap_or_else(|| PathBuf::from("/nonexistent/dry-run-uses-no-state-dir"));
 
     // BELOW the peek, for the reason the plumbing check is: the
     // identity is `key(from, to, amount)` and all three are parsed three
@@ -227,7 +281,7 @@ pub async fn run(
     // the plumbing, and it was left one line short with an exemption
     // saying there was no identity yet.
     let anchor_mode = parse_anchor_layer(&args.anchor_layer)
-        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
     // Submit-only plumbing, resolved at stage 1 for a real run so that a
     // missing BURNER_PRIVATE_KEY refuses here rather than at stage 6 —
@@ -254,9 +308,36 @@ pub async fn run(
     } else {
         Some(
             args.require_submit_plumbing()
-                .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?,
+                .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?,
         )
     };
+
+    // ONE site, above the branch, so both arms ask it. What a run does
+    // with a record already on disk — refuse a terminal one, refuse an
+    // in-flight one without the flag, refuse the hash-less one that
+    // cannot say which it is — used to be asked only inside the `else`,
+    // by `reserve` under the lock. A dry run cannot reserve, so it asked
+    // nothing and reported `DryRunOk` over a `confirmed` withdrawal that
+    // has already paid out, where the real run it claims to predict
+    // exits 3.
+    //
+    // BELOW the two re-badged stage-1 checks and ABOVE preflight, and
+    // both halves of that are deliberate. Below, because a run whose
+    // `--anchor-layer` or submit plumbing is wrong has not been told
+    // whether its record matters yet, and those refusals carry the exit
+    // 2-or-10 answer this one would preempt. Above, because every
+    // refusal this raises is one the run reaches ANYWAY — a hash-less
+    // record has no path that does not end here — so raising it before
+    // the node, the burner key and 2.4 GB of ceremony is the same answer
+    // sooner.
+    //
+    // `reserve` still asks the same question again under the lock, and
+    // that answer is the authoritative one: this record is minutes old
+    // by the time the burn branch reaches it, which is exactly why it is
+    // re-read there.
+    if let Some(p) = prior.record() {
+        a_run_that_found_this_record(p, &state_dir, args.allow_retry)?;
+    }
 
     // A prior record carrying an an_tx_hash means the burn is already on
     // the wire — for a dry run as much as for a real one, which is why a
@@ -265,7 +346,7 @@ pub async fn run(
     // spent by definition, and re-checking sufficiency would refuse every
     // resume of a full-balance withdrawal — the exact scenario the record
     // exists to rescue.
-    let burn_already_sent = prior.as_ref().is_some_and(|p| p.an_tx_hash.is_some());
+    let burn_already_sent = prior.record().is_some_and(|p| p.an_tx_hash.is_some());
 
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
@@ -279,7 +360,7 @@ pub async fn run(
         preflight::BalanceCheck::from_burn_sent(burn_already_sent),
     )
     .await
-    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(
         multisig_ecc3 = preflight.multisig_ecc3_balance,
         usdc_bridge = %preflight.usdc_bridge_extended,
@@ -292,7 +373,7 @@ pub async fn run(
     // exists to catch.
     preflight::check_destination_chain(&args.rpc_url, to.chain_id)
         .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(chain_id = to.chain_id, "destination chain ok");
 
     // The identity our proof will carry. Both ids come from the
@@ -321,7 +402,7 @@ pub async fn run(
         &amount,
     )
     .await
-    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
     // Signer + prover artifacts — real runs only (a dry-run has no
@@ -334,7 +415,7 @@ pub async fn run(
     let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)
-            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
         info!("burner key ok");
         pk_fingerprint = crate::preflight::check_prover_artifacts(
             p,
@@ -343,7 +424,7 @@ pub async fn run(
             args.allow_verifier_drift,
         )
         .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
         info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
@@ -399,13 +480,13 @@ pub async fn run(
         // — "the USDC has left the source multisig regardless", about a
         // run that had not composed a message yet.
         let context = preflight::build_client_context(&args.gql_endpoint)
-            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, prior.as_ref()))?;
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
         // Resume: a prior record carrying an an_tx_hash means the burn was
         // already broadcast at least once. Reuse it; never compose a second
         // message — the multisig has no replay guard (sendTransaction
         // happily authorises a second transfer).
-        if let Some(p) = prior.as_ref().filter(|p| p.an_tx_hash.is_some()) {
+        if let Some(p) = prior.record().filter(|p| p.an_tx_hash.is_some()) {
             info!(
                 an_tx = ?p.an_tx_hash,
                 prior_status = ?p.status,
@@ -440,60 +521,6 @@ pub async fn run(
             record = Some(r);
             (an_tx, bounce, held)
         } else {
-            // A prior record with no `an_tx_hash` is the ambiguous case, and
-            // it has to be classified HERE — before the prompt. `reserve`
-            // would refuse it correctly, but only after
-            // `confirm_before_burn` has already run, so a plain retry
-            // without `--yes` exits 2 ("stdin is not a TTY") and the
-            // operator never learns that a possibly-in-flight burn is what
-            // is actually blocking them. Exit 3 with the real reason is the
-            // whole point of the code.
-            //
-            // This creates no RECORD: `peek` is read-only, and a refusal
-            // that reserved would be the duplicate it is refusing. It is
-            // not quite "leaves the directory as it found it", and saying
-            // so would be a lie an operator could check: the liveness
-            // probe below opens `<key>.lock` with O_CREAT, so an empty
-            // lock file can appear here. It carries no state — the lock
-            // lives in the kernel, not in the bytes — and the next run
-            // reuses it.
-            if let Some(p) = prior.as_ref() {
-                // The SAME refusal the post-reservation check produces,
-                // and `--allow-retry` no longer changes it.
-                //
-                // Two things were wrong with the old shape. It emitted
-                // `DuplicateInFlight`, whose text advises passing
-                // `--allow-retry` — which lands on a DIFFERENT exit 3 and
-                // helps nobody — and whose `prior_tx` is structurally
-                // `None` here, printing "Prior AN tx: None" for a record
-                // that may well be a burn in flight. And the recovery
-                // procedure tells an operator to re-run the identical
-                // command and read the refusal, which is precisely the
-                // command that got the uninformative one.
-                //
-                // With the flag it warned and carried on, only to be
-                // refused after the prompt and `compose` by
-                // `decide_burn(None, Found)`. Same answer, later, after
-                // work. The one path this does NOT close is the intended
-                // recovery: an operator who has reconciled and deleted
-                // the record sees `peek` return `None` and never arrives
-                // here at all.
-                return Err(CliError::ReservationInFlight {
-                    prior_status: format!("{:?}", p.status).to_ascii_lowercase(),
-                    prior_msg_id: p.withdrawal_msg_id.clone(),
-                    record_path: idempotency::record_path(&state_dir, &p.key)
-                        .display()
-                        .to_string(),
-                    // The half the record cannot supply. This run holds
-                    // no lock — it has not reserved — so the probe is
-                    // asking about somebody else.
-                    liveness: idempotency::liveness_verdict(
-                        idempotency::WithdrawalLock::probe_holder(&state_dir, &p.key),
-                    )
-                    .to_string(),
-                });
-            }
-
             // The last reversible moment. `--yes` skips the prompt for
             // scripts; `--non-interactive` without `--yes` is already
             // refused in `main::dispatch` (a policy check there, not a clap
@@ -1351,6 +1378,77 @@ fn resume_recorded_burn<'a>(
     }
 }
 
+/// The refusal a run that FINDS a record for its identity raises before
+/// it broadcasts anything — or `Ok(())`, meaning it would resume.
+///
+/// One home for a question two branches ask. The real run asks it of
+/// `reserve`, under the withdrawal lock, which is the authoritative
+/// place; a dry run cannot reserve and so could not ask it at all, and
+/// the whole reserve/resume machinery living inside the `else` of `if
+/// dry_run` is why `--dry-run` over a `confirmed` record — a withdrawal
+/// that has already paid out — exited 0 where the real run it claims to
+/// predict exits 3.
+///
+/// Two halves, and the second is the one a record cannot answer on its
+/// own. [`idempotency::what_a_found_record_earns`] is `reserve`'s own
+/// disposition check, shared rather than copied. The hash-less arm below
+/// is `decide_burn`'s `(None, Found)` refusal, raised here from the same
+/// fact and with the liveness verdict this run can supply — it holds no
+/// lock, so the probe is asking about somebody else.
+fn a_run_that_found_this_record(
+    prior: &idempotency::Record,
+    state_dir: &Path,
+    allow_retry: bool,
+) -> CliResult<()> {
+    idempotency::what_a_found_record_earns(prior, allow_retry)?;
+    if prior.an_tx_hash.is_some() {
+        return Ok(());
+    }
+    // A prior record with no `an_tx_hash` is the ambiguous case, and it
+    // has to be classified HERE — before the prompt. `reserve` would
+    // refuse it correctly, but only after `confirm_before_burn` has
+    // already run, so a plain retry without `--yes` exits 2 ("stdin is
+    // not a TTY") and the operator never learns that a possibly-in-flight
+    // burn is what is actually blocking them. Exit 3 with the real reason
+    // is the whole point of the code.
+    //
+    // This creates no RECORD: `peek` is read-only, and a refusal that
+    // reserved would be the duplicate it is refusing. It is not quite
+    // "leaves the directory as it found it", and saying so would be a lie
+    // an operator could check: the liveness probe below opens
+    // `<key>.lock` with O_CREAT, so an empty lock file can appear here. It
+    // carries no state — the lock lives in the kernel, not in the bytes —
+    // and the next run reuses it.
+    //
+    // Two things were wrong with the old shape. It emitted
+    // `DuplicateInFlight`, whose text advises passing `--allow-retry` —
+    // which lands on a DIFFERENT exit 3 and helps nobody — and whose
+    // `prior_tx` is structurally `None` here, printing "Prior AN tx: None"
+    // for a record that may well be a burn in flight. And the recovery
+    // procedure tells an operator to re-run the identical command and read
+    // the refusal, which is precisely the command that got the
+    // uninformative one.
+    //
+    // With the flag it warned and carried on, only to be refused after the
+    // prompt and `compose` by `decide_burn(None, Found)`. Same answer,
+    // later, after work. The one path this does NOT close is the intended
+    // recovery: an operator who has reconciled and deleted the record sees
+    // `peek` return `None` and never arrives here at all.
+    Err(CliError::ReservationInFlight {
+        prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
+        prior_msg_id: prior.withdrawal_msg_id.clone(),
+        record_path: idempotency::record_path(state_dir, &prior.key)
+            .display()
+            .to_string(),
+        // The half the record cannot supply. This run holds no lock — it
+        // has not reserved — so the probe is asking about somebody else.
+        liveness: idempotency::liveness_verdict(idempotency::WithdrawalLock::probe_holder(
+            state_dir, &prior.key,
+        ))
+        .to_string(),
+    })
+}
+
 /// Re-badge the refusal that ESTABLISHES the fact
 /// [`refusal_before_a_recorded_burn`] acts on.
 ///
@@ -1442,7 +1540,7 @@ fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
 fn refusal_before_a_recorded_burn(
     e: CliError,
     state_dir: &Path,
-    prior: Option<&idempotency::Record>,
+    found: &WhatStageOneFound,
 ) -> CliError {
     // RECORD EXISTENCE, not the hash. Gating on the hash left the worst
     // population out, and the way it did so is the branch's own failure
@@ -1458,8 +1556,32 @@ fn refusal_before_a_recorded_burn(
     // the hash is written only after the send returns, so the record
     // cannot say whether a burn is on the wire. Treating it as "no burn"
     // here would contradict the rest of the file.
-    let Some(prior) = prior else {
-        return e;
+    let prior = match found {
+        WhatStageOneFound::ARecord(prior) => prior,
+        // Nothing on disk for this identity, and the run LOOKED. Both
+        // halves of exit 2's contract hold, so the refusal keeps its own
+        // code.
+        WhatStageOneFound::NoRecord => return e,
+        // The third state, and the reason it is a state rather than a
+        // `None`. `--dry-run` with `HOME` unset and no `--state-dir` has
+        // no directory to read, and every refusal it raised came out as
+        // exit 2 — "nothing broadcast, AND no record for this identity
+        // on disk" — about a store it never opened. That is the same
+        // sentence `default_state_dir` refuses a real run for writing,
+        // and the README already lists this population under exit 10.
+        WhatStageOneFound::NowhereToLook => {
+            return CliError::BurnOutcomeUnknown {
+                reason: format!(
+                    "preflight refused this run: {e}\n\x20 Nothing was broadcast and nothing was \
+                     written. This is exit 10 rather than exit 2 because the run could not LOOK: \
+                     HOME is not set and no --state-dir was given, so there is nowhere to read a \
+                     record from and this refusal cannot tell you the withdrawal is \
+                     untouched.\n\x20 Pass --state-dir (or set BRIDGE_WITHDRAW_STATE_DIR) and \
+                     re-run: that run will read the record if there is one.",
+                ),
+                source: None,
+            };
+        },
     };
     // Every variant, on both sides, and NO catch-all. Naming the exit-2
     // four while leaving `_ => return e` underneath was the shape this
@@ -2722,7 +2844,7 @@ mod tests {
         )];
 
         let branch_start = body
-            .find(concat!("if let Some(p) = prior.as_ref()", ".filter("))
+            .find(concat!("if let Some(p) = prior.record()", ".filter("))
             .expect("run() no longer has a resume branch — this guard cannot be verified");
         let branch = &body[branch_start..];
         let branch = &branch[..branch
@@ -2870,7 +2992,11 @@ mod tests {
 
         let hash_less_msg = format!(
             "{}",
-            refusal_before_a_recorded_burn(refused(), dir.path(), Some(&hash_less))
+            refusal_before_a_recorded_burn(
+                refused(),
+                dir.path(),
+                &WhatStageOneFound::ARecord(hash_less.clone()),
+            )
         );
         let unreadable = format!("{}", refusal_reading_a_record_that_exists(refused()));
         let messages = [
@@ -2878,7 +3004,11 @@ mod tests {
                 "a stage-1 refusal with a recorded burn",
                 format!(
                     "{}",
-                    refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash))
+                    refusal_before_a_recorded_burn(
+                        refused(),
+                        dir.path(),
+                        &WhatStageOneFound::ARecord(with_hash.clone()),
+                    )
                 ),
             ),
             (
@@ -2900,7 +3030,11 @@ mod tests {
         assert!(
             format!(
                 "{}",
-                refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash))
+                refusal_before_a_recorded_burn(
+                    refused(),
+                    dir.path(),
+                    &WhatStageOneFound::ARecord(with_hash.clone()),
+                )
             )
             .to_ascii_lowercase()
             .contains(PROHIBITION),
@@ -3183,6 +3317,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_dry_run_over_a_withdrawal_that_paid_out_refuses_like_the_real_one() {
+        // `--dry-run` answered 0 here, and a real run answers 3. The
+        // whole reserve/resume machinery lives inside the `else` of `if
+        // dry_run`, so the disposition check — the one that says
+        // `Confirmed` is terminal and `--allow-retry` does not reopen it
+        // — was never reached by the command whose entire job is to
+        // report what the real run would do.
+        //
+        // Worse under the previous round's change than before it: with
+        // the store now read, `burn_already_sent` is true here, so the
+        // dry run also skipped the ECC[3] balance check and an emptied
+        // multisig stopped being refused either. It reported a clean
+        // preflight for a withdrawal that has already paid out.
+        //
+        // Both arms, in one test, because "the same as a real run" is
+        // the property rather than "exit 3".
+        for dry_run in [true, false] {
+            let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
+            world.with_submit_plumbing();
+            let record = world.leave_a_paid_out_record();
+            let before = std::fs::read_to_string(&record).expect("the record is on disk");
+
+            let err = world
+                .run(dry_run)
+                .await
+                .expect_err("a withdrawal that paid out is refused");
+
+            assert_eq!(
+                err.exit_code().as_i32(),
+                3,
+                "dry_run={dry_run}: a record that has already paid out is a duplicate, and exit 3 \
+                 is what says so: {err}",
+            );
+            assert!(
+                format!("{err}").contains("already paid out"),
+                "dry_run={dry_run}: and it carries the remedy for a terminal record: {err}",
+            );
+            assert_eq!(
+                std::fs::read_to_string(&record).unwrap(),
+                before,
+                "dry_run={dry_run}: neither run may write to it",
+            );
+        }
+    }
+
     /// Where a real run actually stops, measured rather than asserted.
     #[tokio::test]
     async fn a_real_run_passes_both_preflights_and_stops_at_the_ceremony() {
@@ -3363,7 +3543,8 @@ mod tests {
         };
 
         // With NO RECORD AT ALL, exit 2 is the truth and nothing moves.
-        let untouched = refusal_before_a_recorded_burn(refused(), dir.path(), None);
+        let untouched =
+            refusal_before_a_recorded_burn(refused(), dir.path(), &WhatStageOneFound::NoRecord);
         assert_eq!(
             untouched.exit_code().as_i32(),
             2,
@@ -3383,7 +3564,11 @@ mod tests {
         let mut hash_less = with_hash.clone();
         hash_less.an_tx_hash = None;
         hash_less.status = Status::Reserved;
-        let ambiguous = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&hash_less));
+        let ambiguous = refusal_before_a_recorded_burn(
+            refused(),
+            dir.path(),
+            &WhatStageOneFound::ARecord(hash_less.clone()),
+        );
         assert_eq!(
             ambiguous.exit_code().as_i32(),
             10,
@@ -3397,7 +3582,11 @@ mod tests {
              chain: {amsg}",
         );
 
-        let rebadged = refusal_before_a_recorded_burn(refused(), dir.path(), Some(&with_hash));
+        let rebadged = refusal_before_a_recorded_burn(
+            refused(),
+            dir.path(),
+            &WhatStageOneFound::ARecord(with_hash.clone()),
+        );
         assert_eq!(
             rebadged.exit_code().as_i32(),
             10,
@@ -3430,7 +3619,7 @@ mod tests {
                 liveness: idempotency::liveness_verdict(Some(true)).to_string(),
             },
             dir.path(),
-            Some(&with_hash),
+            &WhatStageOneFound::ARecord(with_hash.clone()),
         );
         assert_eq!(
             contended.exit_code().as_i32(),
@@ -3451,7 +3640,7 @@ mod tests {
                 an_tx: an.clone(),
             },
             dir.path(),
-            Some(&with_hash),
+            &WhatStageOneFound::ARecord(with_hash.clone()),
         );
         assert_eq!(
             captured.exit_code().as_i32(),
@@ -3608,7 +3797,7 @@ mod tests {
         // reads exactly like one that has been checked, and both were
         // covering real defects: the first has been moved below the peek
         // and re-badged, the second answers exit 10 itself now.
-        const EXEMPT: [(&str, &str); 8] = [
+        const EXEMPT: [(&str, &str); 9] = [
             (
                 concat!("args::", "parse_"),
                 "argument text, and there is no identity yet: a record is named by a hash over \
@@ -3641,6 +3830,14 @@ mod tests {
             (
                 "decide_burn(",
                 "answers `ReservationInFlight`, which is exit 3 and carries the liveness verdict",
+            ),
+            (
+                "a_run_that_found_this_record(",
+                "reached only WITH a record — it takes one — and every refusal it raises is exit \
+                 3 about that record: `what_a_found_record_earns` for a terminal or in-flight \
+                 one, `ReservationInFlight` with the liveness verdict for a hash-less one. \
+                 Re-badging those to exit 10 would hide the duplicate they exist to name, which \
+                 is why `refusal_before_a_recorded_burn` passes exit 3 through untouched too",
             ),
             (
                 concat!("WithdrawalLock::try", "_acquire("),

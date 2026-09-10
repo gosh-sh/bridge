@@ -919,13 +919,28 @@ assigns it when the release is tagged.
   file said exactly that about a withdrawal whose burn is on the wire.
 
   A dry run that finds a record now reports its refusals as **exit 10**,
-  names the record, and forbids deleting it — and `--dry-run` can
-  therefore produce 0, 2 or 10 rather than 0 or 2. It skips the ECC[3]
+  names the record, and forbids deleting it. It skips the ECC[3]
   balance check over a recorded burn for the same reason a real run
   does: its job is to say what a real run would do.
 
-  With `HOME` unset and no `--state-dir` it has no directory to read and
-  is unchanged: still safe to run anywhere, still exit 0 or 2.
+  That job is now done to the end. A dry run over a record that is
+  **terminal** (`confirmed`, `submitted`), one whose burn is in flight
+  without `--allow-retry`, or one carrying **no AN tx hash** is refused
+  with **exit 3** and the real run's own remedy — where it used to
+  report `DryRunOk` and exit 0, because the whole reserve/resume
+  machinery sat behind `if !dry_run`. `--dry-run` therefore produces 0,
+  2, 3 or 10 rather than 0 or 2. It still reserves nothing and writes
+  nothing.
+
+  Both runs now raise that refusal before preflight rather than after
+  it, so a withdrawal that has already paid out is refused without
+  needing the node, the burner key or the proving ceremony.
+
+  With `HOME` unset and no `--state-dir` a dry run still runs — it is
+  meant to be safe to run anywhere — but a refusal it raises there is
+  **exit 10**, not 2: it never opened a state directory, so it cannot
+  say the withdrawal is untouched. A real run is refused outright in
+  that state, as before.
 
 - **`ackinacki-bridge withdraw`: a missing `--eth-private-key`,
   `--work-dir`, `--params-dir`, `--aggregator-dir` or `--verifiers-dir`

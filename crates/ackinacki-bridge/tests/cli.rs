@@ -387,13 +387,17 @@ fn non_interactive_with_dry_run_gets_past_the_policy() {
 // -- Argument validation, through the real binary ------------------------
 
 #[test]
-fn a_dry_run_never_reports_a_duplicate() {
-    // README: `--dry-run` can produce 0, 2 or 10. It never reserves and
-    // never writes, so exit 3 is unreachable under it — and a state
-    // directory full of records must not change that. It does read: a
-    // dry run that finds a record for THIS identity refuses with 10
-    // rather than claiming there is none, which is what the planted
-    // record below is not (its name is not this run's key).
+fn a_dry_run_does_not_refuse_over_somebody_elses_record() {
+    // README: `--dry-run` can produce 0, 2, 3 or 10. It never reserves
+    // and never writes — that is the invariant this test guards — but it
+    // READS, and a record for THIS identity now earns the refusal a real
+    // run would give it, exit 3 included.
+    //
+    // The planted record below is not this run's: its name is not the
+    // key. So the run must walk past it, and the store must be exactly
+    // as it was afterwards. The test was named `..._never_reports_a_
+    // duplicate` while the record it planted could never have produced
+    // one, so the name outlived the claim by two rounds.
     // The state dir has to contain a record for this to test anything —
     // and BASE's `--from-keys /nonexistent/keys.json` refuses at the
     // perms check, which is step 1 of preflight, so the run never reaches
@@ -413,8 +417,8 @@ fn a_dry_run_never_reports_a_duplicate() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o400)).unwrap();
 
-    // A record for THIS run's identity, in the state dir it is given. A
-    // real run would refuse it with exit 3; a dry run must not look.
+    // A record for ANOTHER identity, in the state dir this run is given.
+    // Neither run refuses over it, and neither may touch it.
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).unwrap();
     let planted = state.join(format!("{}.json", "7f".repeat(32)));
@@ -428,7 +432,11 @@ fn a_dry_run_never_reports_a_duplicate() {
     );
     args.push(state.to_str().unwrap().to_string());
     let out = run_args(&args);
-    assert_ne!(code(&out), 3, "a dry run cannot refuse as a duplicate");
+    assert_ne!(
+        code(&out),
+        3,
+        "exit 3 is about THIS identity, and the planted record is not it",
+    );
     // It got past the key file — otherwise this is the old vacuous test
     // wearing a longer body.
     let msg = error_envelope(&out)["error"]["message"]
@@ -441,20 +449,20 @@ fn a_dry_run_never_reports_a_duplicate() {
     );
     assert!(
         code(&out) == 0 || code(&out) == 2 || code(&out) == 10,
-        "a dry run exits 0, 2 or 10, got {}",
+        "a dry run over no record of its own exits 0, 2 or 10, got {}",
         code(&out)
     );
     assert_eq!(
         std::fs::read_dir(&state).unwrap().count(),
         1,
-        "a dry run must neither read nor write the store — the planted record is untouched and no \
+        "a dry run reads the store and never writes it — the planted record is untouched and no \
          new one appeared",
     );
     assert_eq!(std::fs::read_to_string(&planted).unwrap(), "{}");
 }
 
 #[test]
-fn a_dry_run_does_not_need_a_state_directory_at_all() {
+fn a_dry_run_with_nowhere_to_look_still_runs_and_says_it_could_not_look() {
     // The regression the test above could not see, because it passes
     // `--state-dir`. `bin()` clears the environment — which is what
     // systemd, cron and most Docker images hand a process — and the
@@ -463,22 +471,36 @@ fn a_dry_run_does_not_need_a_state_directory_at_all() {
     // anywhere started failing with a double-burn refusal about a
     // directory it never touches.
     //
-    // The previous round documented this instead of noticing it: the
-    // key-perms test grew a comment explaining that a dry run now needs
-    // a state dir. It does not.
+    // It still runs, and that is the first half of this test. The second
+    // half is what changed when a dry run started READING the store: it
+    // now has a state to be in that it did not have before — it could not
+    // look — and a refusal raised in that state may not claim exit 2,
+    // whose contract is "nothing broadcast, AND no record for this
+    // identity on disk". The second half of that sentence is the one this
+    // run cannot check.
     let out = run_with(&["--dry-run", "--yes", "--json"]);
     let msg = error_envelope(&out)["error"]["message"]
         .as_str()
         .unwrap()
         .to_string();
+    // It got past the state directory: the refusal is about the thing it
+    // was actually asked to check.
     assert!(
-        !msg.contains("HOME is not set"),
-        "a dry run reads and writes no state, so it must not be refused for not being able to \
-         name that directory: {msg}"
+        msg.contains("--from-keys"),
+        "a dry run must not be REFUSED for not being able to name a state directory — it has to \
+         reach the checks it exists to run: {msg}"
     );
-    // It still fails — there is no node at 127.0.0.1:1 — and that is the
-    // point: it fails at the network, where a dry run is supposed to.
-    assert_eq!(code(&out), 2);
+    assert!(
+        msg.contains("could not LOOK"),
+        "and, having refused, it may not report exit 2's \"no record on disk\" about a store it \
+         never opened: {msg}"
+    );
+    assert_eq!(
+        code(&out),
+        10,
+        "the same population and the same code as a real run with HOME unset: the run could not \
+         look, so it cannot promise the withdrawal is untouched",
+    );
 }
 
 #[test]

@@ -416,48 +416,67 @@ pub fn reserve(
         ),
         source: None,
     })?;
-    // On the DISPOSITION, not on the status. Re-listing `Confirmed |
-    // Submitted` here was a second copy of the terminal set, and the
-    // remedy behind it had to be fetched with an `expect`: a status named
-    // in the arm and classified non-terminal by the remedy panicked —
-    // exit 101, on the path whose whole job is to tell an operator what
-    // not to do. `Disposition::Terminal` carries the remedy, so there is
-    // nothing left to look up and nothing left to disagree.
+    what_a_found_record_earns(&prior, allow_retry)?;
+    Ok((prior, Reservation::Found))
+}
+
+/// What a run that FINDS a record for its identity is allowed to do with
+/// it: `Ok(())` to resume from it, `Err` to refuse.
+///
+/// Split out of [`reserve`] so that a run which has only PEEKED can ask
+/// the same question and get the same answer. A `--dry-run` could not:
+/// the whole reserve/resume machinery sits inside the `else` of `if
+/// dry_run`, so a dry run over a `confirmed` record — a withdrawal that
+/// has already paid out — fell through to `DryRunOk` and exited 0, where
+/// the real run it claims to be predicting exits 3. A dry run whose job
+/// is to say what a real run would do has to ask what a real run asks.
+///
+/// Takes the record by reference and returns nothing on success for that
+/// reason: the two callers hold their record differently — `reserve` has
+/// just read it under the lock, stage 1 peeked at it minutes earlier —
+/// and neither needs it handed back.
+///
+/// On the DISPOSITION, not on the status. Re-listing `Confirmed |
+/// Submitted` here was a second copy of the terminal set, and the
+/// remedy behind it had to be fetched with an `expect`: a status named
+/// in the arm and classified non-terminal by the remedy panicked —
+/// exit 101, on the path whose whole job is to tell an operator what
+/// not to do. `Disposition::Terminal` carries the remedy, so there is
+/// nothing left to look up and nothing left to disagree.
+pub(crate) fn what_a_found_record_earns(prior: &Record, allow_retry: bool) -> CliResult<()> {
     match prior.status.disposition() {
         // Terminal — refuse regardless of `--allow-retry`. Confirmed
         // already paid out; Submitted has an unresolved in-flight tx and
         // re-broadcasting is a double-spend risk.
-        Disposition::Terminal(remedy) => Err(terminal_refusal(&prior, remedy)),
+        Disposition::Terminal(remedy) => Err(terminal_refusal(prior, remedy)),
         // Failed → the only production writer sets this after
         // `withdrawByProof` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
-        // done". Return the prior record verbatim in that case
+        // done". Resume from the prior record in that case
         // so the orchestrator's resume branch (`prior_an_tx =
         // record.an_tx_hash.clone()`) skips `burn::send`
         // instead of firing a second `initiateWithdrawal`.
-        Disposition::FailedAfterSubmit => {
-            // `Found`, unconditionally, and there is no longer a branch
-            // that wipes.
-            //
-            // The old one fired when `an_tx_hash` was absent, on the
-            // stated grounds that "`Failed` without a hash is only ever
-            // written by a pre-burn path". No such path exists — the sole
-            // production writer of `Failed` is the post-burn
-            // `withdrawByProof` revert — so the branch only ever ran on a
-            // hand-edited or corrupt record, and it answered by writing a
-            // fresh record with `rename` and reporting `Created`.
-            //
-            // That is the whole invariant broken in one line. `Created` is
-            // the caller's evidence that THIS run won the atomic publish,
-            // and `rename` excludes nobody: two runs reading the same
-            // record could both wipe, both be told they created it, and
-            // both burn. `read_record` now refuses that record outright,
-            // so the case cannot reach here at all — and if a future edit
-            // ever lets it through, `Found` is still the safe answer,
-            // because `decide_burn` turns it into exit 3 rather than a
-            // second `initiateWithdrawal`.
-            Ok((prior, Reservation::Found))
-        },
+        //
+        // Unconditional, and there is no longer a branch that wipes.
+        //
+        // The old one fired when `an_tx_hash` was absent, on the
+        // stated grounds that "`Failed` without a hash is only ever
+        // written by a pre-burn path". No such path exists — the sole
+        // production writer of `Failed` is the post-burn
+        // `withdrawByProof` revert — so the branch only ever ran on a
+        // hand-edited or corrupt record, and it answered by writing a
+        // fresh record with `rename` and reporting `Created`.
+        //
+        // That is the whole invariant broken in one line. `Created` is
+        // the caller's evidence that THIS run won the atomic publish,
+        // and `rename` excludes nobody: two runs reading the same
+        // record could both wipe, both be told they created it, and
+        // both burn. `read_record` now refuses that record outright,
+        // so the case cannot reach here at all — and if a future edit
+        // ever lets it through, `Found` is still the safe answer,
+        // because `decide_burn` turns it into exit 3 rather than a
+        // second `initiateWithdrawal`.
+        Disposition::FailedAfterSubmit => Ok(()),
         // Active resumable states.
         //
         // The second condition is about the HASH, not the status, and it
@@ -471,24 +490,26 @@ pub fn reserve(
         // here.
         //
         // So a hash-less record is handed back for `decide_burn` to
-        // refuse. That is not a weakening: `(None, Found)` is exactly the
-        // combination it rejects, and it is the caller that knows whether
+        // refuse — or, at stage 1, for the `ReservationInFlight` the
+        // orchestrator raises from the same fact. That is not a
+        // weakening: `(None, Found)` is exactly the combination
+        // `decide_burn` rejects, and it is the caller that knows whether
         // this run holds the withdrawal lock — which is the half of the
         // answer this function cannot supply and the refusal needs.
         Disposition::Resumable => {
             if allow_retry || prior.an_tx_hash.is_none() {
-                // Resume: return the prior record verbatim so the
+                // Resume from the prior record verbatim so the
                 // orchestrator can skip stages by inspecting fields
                 // like `an_tx_hash` / `withdrawal_msg_id`. Do NOT
                 // overwrite with a fresh Reserved — that would drop
                 // the stored AN tx hash and cause an unconditional
                 // re-burn (double-spend on the AN side).
-                Ok((prior, Reservation::Found))
+                Ok(())
             } else {
                 Err(CliError::DuplicateInFlight {
                     prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-                    prior_tx: prior.an_tx_hash,
-                    prior_msg_id: prior.withdrawal_msg_id,
+                    prior_tx: prior.an_tx_hash.clone(),
+                    prior_msg_id: prior.withdrawal_msg_id.clone(),
                     // Here the flag IS the answer: this record carries a
                     // hash, so with the flag it resumes at capture.
                     remedy: "Reconcile via GraphQL, or re-run with --allow-retry to resume from \

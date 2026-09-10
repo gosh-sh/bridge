@@ -979,6 +979,12 @@ broadcast a burn":
    `--state-dir`, may have recorded a burn. Supply the flag and re-run;
    that run reads the record if there is one.
 
+   A real run is refused outright in this state — the state directory is
+   the only thing stopping a second burn, so it may not proceed without
+   one. A `--dry-run` still runs, because it broadcasts nothing and is
+   meant to be safe to run anywhere; what it may not do is report a
+   refusal as exit 2 afterwards, and it does not.
+
 In all five the record must not be deleted and the withdrawal must not
 be re-started under a fresh identity. In 2, 3 and 4 the remedy is to fix
 what the message names and re-run the SAME command, and what that run

@@ -512,6 +512,31 @@ impl FakeWorld {
         crate::idempotency::record_path(self.state_dir.path(), &record.key)
     }
 
+    /// Leave behind a withdrawal that has already PAID OUT: a
+    /// `Confirmed` record carrying both hashes.
+    ///
+    /// Written through `update` rather than by hand, so it is a record
+    /// `read_record` accepts and `Status::Confirmed.disposition()`
+    /// classifies as `Terminal` — the one state `--allow-retry` cannot
+    /// reopen.
+    pub(crate) fn leave_a_paid_out_record(&self) -> std::path::PathBuf {
+        let (from, to, amount) = self.identity();
+        let (mut record, _) =
+            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
+                .expect("the first reservation is uncontested");
+        record.status = crate::idempotency::Status::Confirmed;
+        record.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        record.eth_tx_hash = Some(format!("0x{}", "cd".repeat(32)));
+        record.withdrawal_msg_id = Some(format!("0x{}", "ef".repeat(32)));
+        crate::idempotency::update(
+            self.state_dir.path(),
+            &record,
+            &crate::idempotency::LockSlot::empty().hold(),
+        )
+        .expect("the fixture writes its own record");
+        crate::idempotency::record_path(self.state_dir.path(), &record.key)
+    }
+
     /// Point the run at an anchor layer, valid or not.
     ///
     /// `--anchor-layer` is fed by `BRIDGE_ANCHOR_LAYER`, so a re-run

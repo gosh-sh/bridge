@@ -477,10 +477,15 @@ grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 Distinguishing "nothing broadcast" from "broadcast, unknown outcome"
 is the whole point of the exit-code discipline — scripts that
 pattern-match on a single non-zero would blind an operator to the
-difference that matters for money. `--dry-run` can produce 0, 2 or 10 —
-it never reserves and never writes, so exit 3 is unreachable under it,
-but it does READ the store, and a dry run that finds a record for this
-identity reports its refusals as 10 rather than claiming there is none.
+difference that matters for money. `--dry-run` can produce 0, 2, 3 or
+10 — it never reserves and never writes, but it does READ the store, and
+its whole job is to report what a real run would do. So a dry run that
+finds a record for this identity refuses exactly as the real run would:
+**exit 3** where the record is terminal, in flight, or hash-less, and
+**exit 10** where some other stage-1 check refuses over a record that
+exists. A dry run that cannot name a state directory at all (no `HOME`,
+no `--state-dir`) still runs, and reports its refusals as 10 rather than
+claiming there is no record — it never opened one to find out.
 
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|

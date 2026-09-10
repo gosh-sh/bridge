@@ -361,8 +361,10 @@ credit.
 ### Step 4 — Dry-run
 
 Preflight-only preview: nothing is broadcast on either side and no
-idempotency state is written — a dry run does not even compute the dedup
-digest, because it never reserves.
+idempotency state is written. It does **read** the store, though: its
+job is to say what a real run would do, and over a record already on
+disk a real run refuses — so a dry run refuses too, with the same exit
+code and the same remedy. See "Exit codes" for the four it can produce.
 
 **It is not AN-side only.** Argument validation, key file perms, the
 single-custodian check, USDCBridge resolution and the balance check all

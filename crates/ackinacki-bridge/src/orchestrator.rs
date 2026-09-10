@@ -1504,19 +1504,16 @@ fn a_run_that_found_this_record(
     // later, after work. The one path this does NOT close is the intended
     // recovery: an operator who has reconciled and deleted the record sees
     // `peek` return `None` and never arrives here at all.
-    Err(CliError::ReservationInFlight {
-        prior_status: format!("{:?}", prior.status).to_ascii_lowercase(),
-        prior_msg_id: prior.withdrawal_msg_id.clone(),
-        record_path: idempotency::record_path(state_dir, &prior.key)
+    Err(idempotency::a_reservation_that_cannot_speak_for_itself(
+        format!("{:?}", prior.status).to_ascii_lowercase(),
+        prior.withdrawal_msg_id.clone(),
+        idempotency::record_path(state_dir, &prior.key)
             .display()
             .to_string(),
         // The half the record cannot supply. This run holds no lock — it
         // has not reserved — so the probe is asking about somebody else.
-        liveness: idempotency::liveness_verdict(idempotency::WithdrawalLock::probe_holder(
-            state_dir, &prior.key,
-        ))
-        .to_string(),
-    })
+        idempotency::WithdrawalLock::probe_holder(state_dir, &prior.key),
+    ))
 }
 
 /// Re-badge the refusal that ESTABLISHES the fact
@@ -1920,19 +1917,19 @@ fn reserve_and_decide_holding(
             // rather than absent, which is exit 10's third population.
             let prior = idempotency::peek(state_dir, from, to, amount)
                 .map_err(refusal_reading_a_record_that_exists)?;
-            return Err(CliError::ReservationInFlight {
-                prior_status: prior
+            return Err(idempotency::a_reservation_that_cannot_speak_for_itself(
+                prior
                     .as_ref()
                     .map(|p| format!("{:?}", p.status).to_ascii_lowercase())
                     .unwrap_or_else(|| "reserving".to_string()),
-                prior_msg_id: prior.and_then(|p| p.withdrawal_msg_id),
-                record_path: idempotency::record_path(state_dir, &key)
+                prior.and_then(|p| p.withdrawal_msg_id),
+                idempotency::record_path(state_dir, &key)
                     .display()
                     .to_string(),
                 // We just failed to take it, so somebody holds it — which
                 // is what `holder_verdict` said of this same attempt.
-                liveness: idempotency::liveness_verdict(holder).to_string(),
-            });
+                holder,
+            ));
         },
         // `flock` unavailable — and now that means the filesystem cannot
         // do it, not merely that something went wrong. NOT a refusal: a
@@ -2017,20 +2014,22 @@ fn decide_burn(
         //
         // `an_tx_hash` cannot distinguish them, because it is written only
         // after the send returns. Refuse, and say what to do.
-        (None, idempotency::Reservation::Found) => Err(CliError::ReservationInFlight {
-            prior_status: format!("{:?}", reserved.status).to_ascii_lowercase(),
-            prior_msg_id: reserved.withdrawal_msg_id.clone(),
-            record_path: idempotency::record_path(state_dir, &reserved.key)
-                .display()
-                .to_string(),
-            // The half the record cannot supply, and without which the
-            // only escape an operator finds is deleting the guard: this
-            // run took the lock before reserving, so no OTHER process can
-            // be executing this withdrawal, whatever the record says —
-            // unless `flock` never worked here, in which case there is no
-            // answer to give and the verdict says so.
-            liveness: idempotency::liveness_verdict(holder).to_string(),
-        }),
+        (None, idempotency::Reservation::Found) => {
+            Err(idempotency::a_reservation_that_cannot_speak_for_itself(
+                format!("{:?}", reserved.status).to_ascii_lowercase(),
+                reserved.withdrawal_msg_id.clone(),
+                idempotency::record_path(state_dir, &reserved.key)
+                    .display()
+                    .to_string(),
+                // The half the record cannot supply, and without which the
+                // only escape an operator finds is deleting the guard: this
+                // run took the lock before reserving, so no OTHER process can
+                // be executing this withdrawal, whatever the record says —
+                // unless `flock` never worked here, in which case there is no
+                // answer to give and the verdict says so.
+                holder,
+            ))
+        },
     }
 }
 /// Parse `--anchor-layer` into an [`AnchorLayerMode`]. Mirrors the relayer
@@ -3582,8 +3581,19 @@ mod tests {
         // A count rather than a list of line numbers: line numbers rot
         // every commit, and what a reader needs is to be sent back here
         // when the set changes at all.
+        //
+        // The needle is the CONSTRUCTOR, not the variant. Once the verdict
+        // and the steps had to come from one reading of the lock, building
+        // the variant literally became the wrong thing to do anywhere —
+        // and this guard, still counting `CliError::ReservationInFlight`,
+        // went to zero and caught it. Counting the constructor keeps the
+        // guard pointed at what it is really about: how many situations
+        // raise this refusal.
         let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
-        let sites = construction_sites(production, concat!("CliError::", "ReservationInFlight"));
+        let sites = construction_sites(
+            production,
+            concat!("a_reservation_that_cannot", "_speak_for_itself("),
+        );
         assert_eq!(
             sites.len(),
             3,
@@ -3682,12 +3692,12 @@ mod tests {
         // it carries, the sentence that decides whether a record may be
         // deleted, is dropped on the way.
         let contended = refusal_before_a_recorded_burn(
-            CliError::ReservationInFlight {
-                prior_status: "reserved".into(),
-                prior_msg_id: None,
-                record_path: "/dev/null".into(),
-                liveness: idempotency::liveness_verdict(Some(true)).to_string(),
-            },
+            idempotency::a_reservation_that_cannot_speak_for_itself(
+                "reserved".into(),
+                None,
+                "/dev/null".into(),
+                Some(true),
+            ),
             dir.path(),
             &WhatStageOneFound::ARecord(with_hash.clone()),
         );

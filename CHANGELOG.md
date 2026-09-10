@@ -952,6 +952,25 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The hash-less reservation refusal told a run that must WAIT to edit
+  the record.** Its three reconciliation steps were baked into the message
+  and printed under every liveness verdict — including "another process on
+  this host is executing this withdrawal RIGHT NOW … Do not touch the
+  record and do not delete it", two lines above an unconditional "write its
+  hash into an_tx_hash and set status to burned". The verdict describes,
+  the step instructs, and an operator mid-incident follows the step.
+
+  The steps now depend on what the lock said, and both come from one
+  reading of it so they cannot disagree: a held lock gets the wait and
+  nothing else; "nobody holds it" and "could not be determined" keep the
+  reconciliation they exist for. Reconciliation under a live holder was
+  never merely risky — it is meaningless, because the chain state it reads
+  is being written as it reads.
+
+  Same defect this file already fixed once for `--allow-retry`: one message
+  serving two situations tells half its readers to do the thing that cannot
+  work for them.
+
 - **`scripts/live_smoke.sh` silently dropped any argument passed to it.**
   It `exec`s the CLI without `"$@"`, so `live_smoke.sh --allow-retry`
   printed the usual banner, ran **without** the flag, and produced a

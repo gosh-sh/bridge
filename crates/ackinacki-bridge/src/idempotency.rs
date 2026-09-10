@@ -1634,6 +1634,70 @@ pub fn liveness_verdict(holder: Option<bool>) -> &'static str {
     }
 }
 
+/// What to actually do, which the lock decides — not the record.
+///
+/// The three reconciliation steps used to be baked into
+/// [`crate::errors::CliError::ReservationInFlight`] and printed under every
+/// verdict. Under `Some(true)` that put "write its hash into an_tx_hash and
+/// set status to burned" two lines below "Do not touch the record and do
+/// not delete it", and the contradiction favoured the wrong half: step 2
+/// is an instruction, the verdict is a description, and an operator in an
+/// incident follows instructions.
+///
+/// It is also the defect this file already convicted once, in
+/// [`crate::errors::CliError::DuplicateInFlight`]'s `remedy`: one message
+/// serving two situations tells half its readers to do the one thing that
+/// cannot work for them. There the split was the record's hash; here it is
+/// the lock.
+///
+/// Reconciliation is not merely risky while somebody holds the lock — it
+/// is meaningless: the chain state it reads is being written as it reads.
+/// So the held case gets no steps at all, only the wait.
+#[must_use]
+pub fn what_to_do_about_it(holder: Option<bool>) -> &'static str {
+    match holder {
+        Some(true) => {
+            "Wait for that run to exit, then re-run this command: both the verdict above and the \
+             record will have changed, and the steps you need depend on what they say then."
+        },
+        // Nobody holds it, or nobody could tell. Both need the same
+        // reconciliation, and step 3 is where they part — it names the
+        // "could not be determined" answer explicitly and refuses it.
+        _ => {
+            "1. Reconcile on chain (advanced runbook, Case 3a): look for a sendTransaction from \
+             this multisig to USDCBridge around the record's reserved_at.\n\x20 2. If a burn DID \
+             land, write its hash into an_tx_hash and set status to \"burned\", then re-run with \
+             --allow-retry — the run resumes at capture.\n\x20 3. Delete the record ONLY if step 1 \
+             found no burn AND the line above said no other run holds this withdrawal. \"Could not \
+             be determined\" is not that answer: it is what EVERY run gets on a filesystem without \
+             flock, including one that is mid-send. Read this step by elimination — not the first \
+             case, reconciliation clean — and you delete the record while another run is mid-send, \
+             which is the second burn this refusal exists to prevent."
+        },
+    }
+}
+
+/// Build the refusal from ONE reading of the lock.
+///
+/// The verdict and the steps must agree, and the only way to guarantee
+/// that is to derive both from the same `holder` in the same place. Two
+/// separate calls at three construction sites is six chances to pass a
+/// stale or opposite value.
+pub(crate) fn a_reservation_that_cannot_speak_for_itself(
+    prior_status: String,
+    prior_msg_id: Option<String>,
+    record_path: String,
+    holder: Option<bool>,
+) -> CliError {
+    CliError::ReservationInFlight {
+        prior_status,
+        prior_msg_id,
+        record_path,
+        liveness: liveness_verdict(holder).to_string(),
+        next_steps: what_to_do_about_it(holder).to_string(),
+    }
+}
+
 /// The record a first reservation publishes: `Reserved`, no hash,
 /// and the identity it is filed under.
 fn fresh_reserved_record(
@@ -2940,6 +3004,54 @@ mod tests {
     }
 
     #[test]
+    fn a_held_lock_is_not_told_to_edit_the_record_it_may_not_touch() {
+        // Measured on shellnet, 11 September 2026, running T3.4 of the
+        // test plan: the refusal said "Do not touch the record and do not
+        // delete it" and then, two lines down, "write its hash into
+        // an_tx_hash and set status to burned". The verdict describes;
+        // the step instructs; an operator mid-incident follows the step.
+        let held = format!(
+            "{}",
+            a_reservation_that_cannot_speak_for_itself(
+                "reserved".into(),
+                None,
+                "/dev/null".into(),
+                Some(true),
+            )
+        );
+        assert!(held.contains("RIGHT NOW"), "got: {held}");
+        assert!(
+            !held.contains("write its hash"),
+            "a run that must wait must not be told to edit the record: {held}",
+        );
+        assert!(
+            !held.contains("Delete the record"),
+            "nor to delete it: {held}",
+        );
+        assert!(
+            held.contains("Wait for that run to exit"),
+            "the one action that IS correct has to be there: {held}",
+        );
+
+        // The other two verdicts keep the reconciliation they exist for.
+        for holder in [Some(false), None] {
+            let msg = format!(
+                "{}",
+                a_reservation_that_cannot_speak_for_itself(
+                    "reserved".into(),
+                    None,
+                    "/dev/null".into(),
+                    holder,
+                )
+            );
+            assert!(
+                msg.contains("Reconcile on chain") && msg.contains("Delete the record ONLY if"),
+                "{holder:?} still needs the three steps: {msg}",
+            );
+        }
+    }
+
+    #[test]
     fn the_liveness_verdict_says_wait_only_when_somebody_is_holding_it() {
         let held = liveness_verdict(Some(true));
         let free = liveness_verdict(Some(false));
@@ -3003,12 +3115,12 @@ mod tests {
 
         // Rendered with the verdict that DID authorise a deletion, so a
         // hit on the phrase can only come from the refusal's own prose.
-        let refusal = CliError::ReservationInFlight {
-            prior_status: "reserved".into(),
-            prior_msg_id: None,
-            record_path: "/dev/null".into(),
-            liveness: liveness_verdict(Some(false)).to_string(),
-        };
+        let refusal = a_reservation_that_cannot_speak_for_itself(
+            "reserved".into(),
+            None,
+            "/dev/null".into(),
+            Some(false),
+        );
         let msg = format!("{refusal}");
         assert!(
             msg.to_ascii_lowercase().contains(THIRD),

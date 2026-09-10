@@ -908,6 +908,44 @@ assigns it when the release is tagged.
   `GqlClient.fetch_bridge_extouts` introduced by an earlier
   docstring trim.
 
+### Changed
+
+- **The shipped shellnet profile points at the NODE-4011 deploy.**
+  `BRIDGE_ADDRESS` is now
+  `0x8545129b215B248944A3aE40f711F34CAb458644` and
+  `USDC_BRIDGE_ACCOUNT_ID` is
+  `20f9338d2b0467b4ad97828f5e1e53f8ebc4256426442493e7f38ca2d7c3c5b8`,
+  over the new AN-side eccUSDCBridge.
+
+  The previous deploy, `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is
+  abandoned — no relayer advances it, its `storedLastSeenBlockSeqNo` is
+  frozen at 15040512 — so a withdrawal against it waits out
+  `COVERAGE_WAIT` and exits 11 or 12 *after* the burn. It still holds
+  0.1 USDC of stranded treasury.
+
+  **The two values move together.** A deploy is pinned at construction
+  to one AN-side bridge account, and `withdrawByProof` compares the
+  `(dappFr, accFr)` pair a proof carries against that pinning *before*
+  verifying the proof — so a half-updated profile is a refusal after the
+  burn, which is why preflight checks the pair up front. The account id
+  can be read back from the deploy rather than looked up: `cast call
+  $BRIDGE_ADDRESS 'bridgeWithdrawalAccFr()(uint256)'`, printed as
+  `064x`, is exactly this line.
+
+  A fresh deploy starts with an **empty treasury**, and this one still
+  has one: `treasuryBalance`, `suppliedPrincipal` and the contract's own
+  USDC balance are all zero. `treasuryBalance` is a counter on the
+  bridge (`AckiNackiBridge.sol:98`), not a separate address, and only
+  `deposit` moves it — a plain USDC `transfer` to the bridge funds
+  nothing, leaves the tokens as skimmable liquid surplus, and a
+  withdrawal still reverts with `WithdrawTreasuryShortfall`. Fund via
+  README Step 3 before running one.
+
+  The deployed verifier stack is unchanged: the Yul runtime behind the
+  new bridge matches this build's embedded
+  `BridgeWithdrawalAggregatorVerifier.bin` byte for byte (20 958 bytes),
+  so nothing has to be re-provisioned on the prover side.
+
 ### Fixed
 
 - **Every `cast logs` command in the withdraw docs was unrunnable, and

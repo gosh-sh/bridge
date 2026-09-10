@@ -426,9 +426,11 @@ deploy too — no changes needed), treasury check (should be covered
 from Step L2), dry-run, real submit. See README Step 4/5 for the
 full `cargo run` invocation and expected log markers.
 
-**Ground-truth log line to grep:** `layer_idx=1` confirms
-L2-anchoring in the enricher output. Anything else means L1 fallback
-— investigate before submitting.
+**Ground-truth log lines to grep:** `resolved anchor: L2` and
+`anchor_layer=L2` in the enricher output, `anchor_stride=16384` from
+stage 4b. `L1` in any of them means L1 fallback — investigate before
+submitting. The witness file carries the same fact 0-indexed, so
+`jq .layer_idx work_dir/event_*_witness.json` reads `1` for L2.
 
 **If the enricher times out (120 min):** your daemon never landed
 the covering L2 bundle. Bundle-lane issue — check your `daemon-live`
@@ -446,8 +448,9 @@ Same steps as above with three deltas:
   L1 has no acknowledged-wait requirement — stride is ~5.7 min
   chain-time, not ~91.
 
-Log ground-truth: `layer_idx=0` on the L1 fast-lane (0-indexed
-layer → L1).
+Log ground-truth on the L1 fast-lane: `resolved anchor: L1`,
+`anchor_layer=L1`, and `anchor_stride=1024`. In the witness file the
+same fact is 0-indexed: `layer_idx` reads `0`.
 
 ---
 
@@ -464,10 +467,15 @@ this to ~30 min/cycle, 3 cycles in ~2 h.
 **Per cycle (N = 2, 3, …):**
 
 ```bash
-# 1. Confirm previous WithdrawalExecuted landed
-cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
-  --from-block -1000 | tail -5
+# 1. Confirm the previous payout landed. The event is
+#    WithdrawalByProofExecuted (FIVE params) — there is no
+#    `WithdrawalExecuted`, and a query for one returns nothing after a
+#    perfectly good withdrawal. `--from-block` takes a height, not an
+#    offset: `-1000` is parsed as a flag.
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 1000)) \
+  'WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)' \
+  --rpc-url $RPC_URL | tail -20
 
 # 2. Confirm treasury still funded (seed once at Step L2 for
 #    self-deploy; the pinned deploy is shared — check per cycle
@@ -1114,8 +1122,10 @@ ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null
 **Sepolia snapshot:**
 
 ```bash
+# `recipient` is indexed, so your address is in the SECOND topic
+# (left-padded to 32 bytes), not in `data`.
 cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' --from-block 0
+  'WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)' --from-block 0
 
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 
@@ -1129,11 +1139,19 @@ deploy runs against our server-side daemon):
 ```bash
 # `storedLastSeenBlockSeqNo` only jumps at bundle boundaries (~91 min
 # L2, ~5.7 min L1). Cadence check via BlockVerified events:
-cast logs --address $BRIDGE_ADDRESS --from-block latest-2000 \
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
   'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
-  | grep -c BlockVerified
-# 0 events in ~2000 Sepolia blocks (~7 h) = stalled daemon; ≥1 = normal.
+  | grep -E '^  blockNumber' | tail -5
 ```
+
+`--from-block` takes a height (`latest-2000` and `-1000` are both
+refused), and `cast logs` never prints the event name — count
+`blockNumber` lines. Events land ~437 Sepolia blocks apart in L2 mode;
+the last one older than ~600 blocks means the daemon is behind by more
+than a cadence, which `COVERAGE_WAIT = 120 min` will not survive. See
+the README's health check for the AN-side cross-check that tells a
+stalled relayer from an idle chain.
 
 ---
 

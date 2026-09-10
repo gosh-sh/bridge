@@ -910,6 +910,55 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **Every `cast logs` command in the withdraw docs was unrunnable, and
+  each failed silently.** Found by running them: an empty result reads
+  as "nothing happened on chain", which is the opposite of what the
+  operator needs during a recovery.
+
+  - `--from-block latest-2000` (README health check, runbook Case 2 and
+    the diagnostics dump) — `cast` takes a height or one of
+    `earliest|finalized|safe|latest|pending`, never arithmetic:
+    `invalid digit found in string`. `--from-block -1000` (runbook
+    Case 2) is parsed as a flag: `unexpected argument '-1' found`. Both
+    now compute the height from `cast block-number`.
+  - `grep -c BlockVerified` — `cast logs` prints `address`, `blockHash`,
+    `blockNumber`, `data`, `logIndex`, `topics`, `transactionHash` and
+    **no event name**, so this counted a string that is never there and
+    answered `0` for a healthy bundle daemon. Counts `blockNumber` lines
+    now.
+  - **`WithdrawalExecuted(uint256,address,uint256,uint256)` is not an
+    event this bridge emits.** `AckiNackiBridge.sol` declares
+    `WithdrawalByProofExecuted(uint256 indexed nullifier, address indexed
+    recipient, uint256 amount, uint256 indexed tokenId, address
+    submitter)` — a different name and five parameters. The query
+    returned nothing after a *successful* payout, in the two runbook
+    places an operator reaches while reconciling one.
+
+  The bundle-daemon health check also gets a criterion that matches what
+  it guards: freshness rather than a count. Bundles land ~437 Sepolia
+  blocks apart (~87 min) in L2 mode and `COVERAGE_WAIT` is 120 min, so a
+  daemon one cadence behind the tip consumes the whole stage-4b budget
+  *after* the burn. The check now reads the last event's age and pairs it
+  with a GraphQL query for the chain's own `seq_no`, which is what
+  separates a stalled relayer from an idle chain.
+
+- **The withdraw log never prints `layer_idx=`, which both documents told
+  operators to grep for** to confirm L2 anchoring. The enricher logs
+  `resolved anchor: L2` and `anchor_layer=L2` (1-indexed, with an `L`),
+  the orchestrator logs `anchor_stride=16384`; `layer_idx` is a field of
+  the witness JSON and is 0-indexed, so the same fact reads as `1` there.
+  The docs conflated the two, and the grep they published matches nothing
+  on any run.
+
+- **README's dedup-key formula did not describe the key.** It promised
+  "SHA-256 of `{from}|{to}|{to_chain}|{amount}` (all ASCII)". Only
+  `from` is ASCII: `idempotency.rs::key` hashes the extended `from`,
+  then the recipient as **20 raw bytes**, the chain id as a big-endian
+  `u64` and the amount as a big-endian `u128`. The record's filename is
+  that digest, and Case 3a asks the operator to compute it — so the
+  published formula sent them to the wrong file. Two golden vectors are
+  now in the README beside it.
+
 - **`ackinacki-bridge withdraw --dry-run` reads the idempotency store
   before it reports a refusal.** It still reserves nothing and writes
   nothing — exit 3 remains unreachable under it — but it used not to

@@ -440,7 +440,8 @@ INFO stage 2/6: idempotency reserve
 INFO stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)
 INFO stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)
 INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
-INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER VALUE = L1 fallback bug
+INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)   # L2; "L1" = fallback bug
+INFO chain built: anchor_layer=L2, anchor_kb=…, active_links=…, final_root=…
 INFO stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)
 INFO stage 6/6: submit withdrawByProof
 INFO withdrawByProof paid out tx=0x…             # ← definitive on-chain payout marker
@@ -468,7 +469,11 @@ Grep verdict from the saved log (both smoke wrappers `tee` to
 ```bash
 LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
 grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
-grep 'layer_idx=' "$LOG"    # must print `layer_idx=1` on the pinned L2 deploy
+grep -E 'resolved anchor:|anchor_layer=|anchor_stride=' "$LOG"
+# On the pinned L2 deploy: `resolved anchor: L2`, `anchor_layer=L2`,
+# `anchor_stride=16384`. The log is 1-INDEXED (L1/L2); the witness file
+# is 0-indexed, so the same fact reads as 1 there:
+jq .layer_idx work_dir/event_*_witness.json     # 1 = L2, 0 = L1 fallback
 grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 ```
 
@@ -629,19 +634,61 @@ selector → error table in
 cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]'
 # In L2 mode this counter only jumps at 16384-block bundle boundaries
 # (~91 min chain-time). Alive-signal via cadence:
-cast logs --address $BRIDGE_ADDRESS --from-block latest-2000 \
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
   'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
-  | grep -c BlockVerified
-# 0 events in ~2000 Sepolia blocks (~7 h) = stalled bundle daemon;
-# ≥1 = normal.
+  | grep -E '^  blockNumber' | tail -5
 ```
+
+Two things that are easy to get wrong here, and both fail SILENTLY —
+an empty result reads as "daemon is dead" when it is really "the query
+never ran":
+
+* `--from-block` takes a height or one of `earliest|finalized|safe|latest|pending`.
+  Arithmetic (`latest-2000`) is not accepted, and a negative offset
+  (`-1000`) is parsed as a flag. Compute the height, as above.
+* `cast logs` never prints the event NAME — its output is `address`,
+  `blockHash`, `blockNumber`, `data`, `logIndex`, `topics`,
+  `transactionHash`. Count `blockNumber` lines; `grep -c BlockVerified`
+  counts a string that is never there and answers `0` for a perfectly
+  healthy daemon.
+
+**Reading it:** events arrive one per bundle, so ~437 Sepolia blocks
+apart (~87 min) in L2 mode. What matters is FRESHNESS, not the count:
+`COVERAGE_WAIT` is 120 min, so a daemon more than one cadence behind
+the tip eats the whole budget after the burn. Last event more than
+~600 blocks old = stalled; then check whether the chain is even
+producing, before blaming the relayer:
+
+```bash
+curl -sS -X POST $BRIDGE_GQL_ENDPOINT -H 'Content-Type: application/json' \
+  -d '{"query":"{blockchain{blocks(last:1){edges{node{seq_no gen_utime}}}}}"}'
+```
+
+Compare that `seq_no` with the `blockSeqNo` of the last `BlockVerified`
+(its second topic). More than one W² = 16384 ahead means the chain is
+running and bundles are not being published — a relayer problem. Less
+than one W² means the next bundle is simply not due yet.
 
 ## Idempotency semantics
 
-**Dedup key.** SHA-256 of `{from}|{to}|{to_chain}|{amount}` (all
-ASCII, `amount` as micro-USDC integer). Two withdrawals with
-identical tuples collide; anything different (recipient, amount, or
-chain) does not.
+**Dedup key.** SHA-256 over four fields joined by `|`, and only the
+first of them is ASCII — this matters, because the record's filename
+IS this digest and reconciliation procedures ask you to compute it:
+
+    sha256( from_extended ASCII || "|" || to  20 RAW bytes
+                                || "|" || to_chain  u64 big-endian
+                                || "|" || amount    u128 big-endian, micro-USDC )
+
+Golden vectors, checked against `idempotency.rs::key`
+(`from = "a"×64 :: "b"×64`, `to = 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f`,
+`chain = 11155111`):
+
+    1_000_000 → 21e77410bb5b3e6f8e403f09c07357d11e1f4e8f17e2e5ed0d7c9bd4b9f12893
+    1_000_001 → c43d9eebd538cbd547f47854fbf491a6b2ea74f45db1b97a16f749173b343462
+
+Two withdrawals with identical tuples collide; anything different
+(recipient, amount, or chain) does not.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 

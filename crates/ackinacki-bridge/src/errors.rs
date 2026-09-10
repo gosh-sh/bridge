@@ -82,6 +82,8 @@ pub enum ExitCode {
 }
 
 impl ExitCode {
+    /// The number the process exits with, and the wire contract
+    /// scripts match on.
     pub fn as_i32(self) -> i32 {
         self as i32
     }
@@ -332,6 +334,8 @@ fn escaped(s: &str) -> String {
 }
 
 impl std::fmt::Display for Redacted {
+    /// The escaped text, verbatim — the escaping happened in the
+    /// constructor, so this cannot be the place it is skipped.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -413,6 +417,8 @@ impl CliError {
     }
 }
 
+/// Every fallible path in this crate, so the exit code is never
+/// decided by a `Box<dyn Error>` somebody unwrapped.
 pub type CliResult<T> = std::result::Result<T, CliError>;
 
 #[cfg(test)]

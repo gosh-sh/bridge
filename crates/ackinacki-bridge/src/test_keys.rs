@@ -11,5 +11,9 @@
 //! signing path offline.
 #![cfg(test)]
 
+/// A throwaway ed25519 public key for the fixtures. Never a real one:
+/// its secret is in the line below it.
 pub const PAIR_PUBLIC: &str = "e842bd24792748fffffe700face504a5abb0b7c82f61ed285f18dac26ec1bc7f";
+/// Its secret half, in the source tree on purpose: the tests need a
+/// pair that signs, and a real one may never be one.
 pub const PAIR_SECRET: &str = "5ed412cc5c2a7abc91a11dc6bbb929cba13e4f1c4d5bc36e91ea17e21363f52e";

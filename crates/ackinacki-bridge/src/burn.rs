@@ -121,6 +121,7 @@ pub struct ComposedBurn {
 }
 
 impl std::fmt::Debug for ComposedBurn {
+    /// Everything but the key material, which this type also holds.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComposedBurn")
             .field("bounce", &self.bounce)

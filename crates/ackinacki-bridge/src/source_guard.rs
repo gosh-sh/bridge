@@ -58,23 +58,46 @@
 /// the anchor, and taking the first match is what made the wrong one win
 /// silently.
 pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
+    let found = anchors(src);
+    match found[..] {
+        [cut] => &src[..cut],
+        [] => panic!(
+            "{file}: no `#[cfg(test)]` line followed by a `mod tests {{` line to cut at. Every \
+             guard that scans this file is now reading text it was never meant to see — fix the \
+             anchor rather than the guards"
+        ),
+        _ => panic!(
+            "{file}: {} test-module anchors, and the cut would be at the first. Whichever of them \
+             is not the module every guard in this file means, it is deciding how much of the \
+             file they read",
+            found.len(),
+        ),
+    }
+}
+
+/// Byte offsets of every test-module anchor in `src`.
+///
+/// Offsets taken from `split('\n')` rather than `lines()`, and the pair
+/// read off a window rather than by slicing back into `src`. Both were
+/// bugs of one byte. `lines()` strips a trailing `\r`, so a CRLF file
+/// drifted the running offset by a byte per line; and `src[at..]` where
+/// the attribute is the last line of a file with no final newline is out
+/// of range, which panicked inside the guard instead of naming the file
+/// it was cutting.
+fn anchors(src: &str) -> Vec<usize> {
+    /// First line of the anchor. Split by `concat!` so this file's
+    /// own source does not contain the string it looks for.
     const ATTRIBUTE: &str = concat!("#[cfg", "(test)]");
+    /// Second line of the anchor, after any visibility prefix.
     const DECLARATION: &str = concat!("mod ", "tests {");
 
-    // Offsets taken from `split('\n')` rather than `lines()`, and the
-    // pair read off a window rather than by slicing back into `src`.
-    // Both were bugs of one byte. `lines()` strips a trailing `\r`, so a
-    // CRLF file drifted the running offset by a byte per line; and
-    // `src[at..]` where the attribute is the last line of a file with no
-    // final newline is out of range, which panicked inside the guard
-    // instead of naming the file it was cutting.
     let mut numbered: Vec<(usize, &str)> = Vec::new();
     let mut at = 0;
     for raw in src.split('\n') {
         numbered.push((at, raw.strip_suffix('\r').unwrap_or(raw)));
         at += raw.len() + 1;
     }
-    let anchors: Vec<usize> = numbered
+    numbered
         .windows(2)
         .filter(|w| w[0].1 == ATTRIBUTE)
         .filter(|w| {
@@ -86,20 +109,35 @@ pub(crate) fn production_source<'a>(file: &str, src: &'a str) -> &'a str {
             declaration == DECLARATION
         })
         .map(|w| w[0].0)
-        .collect();
-    match anchors[..] {
-        [cut] => &src[..cut],
-        [] => panic!(
-            "{file}: no `{ATTRIBUTE}` line followed by a `{DECLARATION}` line to cut at. Every \
-             guard that scans this file is now reading text it was never meant to see — fix the \
-             anchor rather than the guards"
-        ),
-        _ => panic!(
-            "{file}: {} test-module anchors, and the cut would be at the first. Whichever of them \
-             is not the module every guard in this file means, it is deciding how much of the \
-             file they read",
-            anchors.len(),
-        ),
+        .collect()
+}
+
+/// The same cut, for a file that may have no test module at all.
+///
+/// [`production_source`] panics on a missing anchor, and that is right
+/// for the guards it serves: they FORBID a phrase, so a scan that
+/// widened to the whole file would read the test module's own prose
+/// about that phrase and pass. There is no safe fallback for them.
+///
+/// The doc guard is the other kind — it REQUIRES something of every
+/// item — and four of the twelve files this crate ships have no test
+/// module: `main.rs`, `output.rs`, `resurrect.rs`, `test_keys.rs`. For
+/// those the whole file IS production, which is the honest answer rather
+/// than a widening.
+///
+/// A file that HAS a test module and whose anchor has been broken comes
+/// out of here whole too — and that fails LOUDLY in the guard that uses
+/// it, because the test module's helpers are then items with no doc
+/// comment. The direction of the failure is what makes the fallback
+/// safe here and unsafe there.
+pub(crate) fn production_source_of_a_file_that_may_have_no_tests<'a>(
+    file: &str,
+    src: &'a str,
+) -> &'a str {
+    if anchors(src).is_empty() {
+        src
+    } else {
+        production_source(file, src)
     }
 }
 

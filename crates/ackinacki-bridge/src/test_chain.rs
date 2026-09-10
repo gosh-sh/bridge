@@ -40,6 +40,8 @@ use crate::test_keys::{PAIR_PUBLIC, PAIR_SECRET};
 /// CLI encodes against have to move together.
 const MULTISIG_TVC: &[u8] = include_bytes!("../abi/UpdateCustodianMultisigWallet.tvc");
 
+/// The multisig ABI the fake chain encodes and executes against —
+/// the shipped one, so a fixture cannot drift from production.
 const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWallet.abi.json");
 
 /// A deployed single-custodian multisig owned by [`PAIR_PUBLIC`], with
@@ -462,18 +464,6 @@ pub(crate) struct FakeWorld {
 }
 
 impl FakeWorld {
-    /// Put a run through this world.
-    ///
-    /// `--dry-run` lives in TWO places — the field `main` parses out of
-    /// the command line, and the parameter `run` actually branches on —
-    /// and the fixture used to set the field to `false` while the only
-    /// test calling it passed `true`. Nothing read the field, so nothing
-    /// noticed; a fixture that contradicts its own caller documents
-    /// whatever the reader guesses. One argument sets both here.
-    ///
-    /// `skip_prompt` is always true: there is no TTY under `cargo test`,
-    /// and `confirm_before_burn` refuses without one before anything
-    /// else in the branch runs.
     /// The identity these arguments name, parsed the way `run` parses it.
     fn identity(
         &self,
@@ -599,15 +589,16 @@ impl FakeWorld {
 
     /// Put a run through this world.
     ///
-    /// `--dry-run` lives in TWO places — the field `main` parses
-    /// out of the command line, and the parameter `run` actually
-    /// branches on — and the fixture used to set the field to
-    /// `false` while the only test calling it passed `true`.
-    /// Nothing read the field, so nothing noticed. One argument
-    /// sets both here.
+    /// `--dry-run` lives in TWO places — the field `main` parses out of
+    /// the command line, and the parameter `run` actually branches on —
+    /// and the fixture used to set the field to `false` while the only
+    /// test calling it passed `true`. Nothing read the field, so nothing
+    /// noticed; a fixture that contradicts its own caller documents
+    /// whatever the reader guesses. One argument sets both here.
     ///
-    /// `skip_prompt` is always true: there is no TTY under `cargo
-    /// test`, and `confirm_before_burn` refuses without one.
+    /// `skip_prompt` is always true: there is no TTY under `cargo test`,
+    /// and `confirm_before_burn` refuses without one before anything
+    /// else in the branch runs.
     pub(crate) async fn run(
         &mut self,
         dry_run: bool,

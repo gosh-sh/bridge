@@ -516,6 +516,7 @@ pub fn check_key_file_perms(path: &std::path::Path) -> CliResult<()> {
 // directly to avoid pulling `libc` into the graph for one number.
 #[allow(non_snake_case)]
 extern "C" {
+    /// The real user id of this process, for the key-file owner check.
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
 }
@@ -541,6 +542,7 @@ fn is_64_hex(s: &str) -> bool {
 /// exists to prevent. Counting characters also makes N mean what the
 /// sentence above says it means.
 pub(crate) fn redact(s: &str) -> crate::errors::Redacted {
+    /// Characters kept, counted before escaping widens any of them.
     const N: usize = 24;
     let mut head = String::new();
     let mut rest = s.chars();

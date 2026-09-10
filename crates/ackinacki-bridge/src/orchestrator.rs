@@ -58,6 +58,7 @@ const DEFAULT_EVENT_DST: &str = ":0000000000000000000000000000000000000000000000
 /// after the burn broadcast). Not exposed as a flag because v1 users don't
 /// need to tune it; if they do we'll promote it later.
 const EVENT_WAIT: Duration = Duration::from_secs(300);
+/// How often stage 4 asks the node for `WithdrawalInitiated`.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Coverage-wait budget. Sized for the worst case where a burn lands
@@ -68,6 +69,7 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// chain-time + prover). 2 h ceiling matches the daemon-side
 /// `ENRICH_TIMEOUT`.
 const COVERAGE_WAIT: Duration = Duration::from_secs(120 * 60);
+/// How often stage 4b asks whether the anchor covers the burn block.
 const COVERAGE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Terminal success record — the one thing `main` prints (human or JSON).

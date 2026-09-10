@@ -1034,6 +1034,7 @@ fn classify_flock_error(raw: Option<i32>) -> FlockVerdict {
 }
 
 impl WithdrawalLock {
+    /// This identity's lock file, `<key>.lock` beside its record.
     fn path(state_dir: &Path, key: &str) -> PathBuf {
         state_dir.join(format!("{key}.lock"))
     }
@@ -1427,6 +1428,8 @@ impl<'a> LockHold<'a> {
 }
 
 impl Drop for LockHold<'_> {
+    /// EMPTY, and load-bearing: it is what keeps the borrow open to
+    /// the end of the scope rather than to the value's last use.
     fn drop(&mut self) {}
 }
 
@@ -2781,46 +2784,76 @@ mod tests {
         // the item left behind has no doc — and that is the half that
         // always accompanies it, because the doc did not multiply.
         //
-        // EVERY item, and every file this crate ships. The last two
-        // thefts were both invisible here: one because the scan was two
-        // files, the other because it was public items only, and
-        // `resume_recorded_burn` — whose eighty-line doc is the whole
-        // argument for the resume path existing — is a private `fn`. Its
-        // doc spent a round documenting the function inserted above it.
+        // EVERY item, and every file this crate ships. Three widenings,
+        // one per round, each after a theft this scan could not see:
+        // two files became seven, public items became all top-level
+        // items, and now seven files become twelve with methods and
+        // constants back in.
         //
-        // Private items are in, and the cost is a one-line doc on a
-        // dozen helpers. That is the price of the class being closed
-        // rather than the instance.
+        // The round-20 widening dropped `const` from the item list while
+        // adding `fn`/`struct`/`enum` — and the theft this guard's own
+        // comment cites is a CONSTANT stealing the prohibitions' doc, so
+        // the three deletion vocabularies spent a round unwatched. It
+        // also skipped every private method, and `test_chain.rs`'s
+        // `fn identity` was carrying `FakeWorld::run`'s doc at the time.
+        //
+        // So: twelve files, every item at column zero, and every method
+        // — the cost is a one-line doc on a few dozen helpers, and that
+        // is the price of the class being closed rather than the
+        // instance.
         let mut undocumented = Vec::new();
         for (file, src) in [
             ("args.rs", include_str!("args.rs")),
             ("burn.rs", include_str!("burn.rs")),
+            ("errors.rs", include_str!("errors.rs")),
             ("idempotency.rs", include_str!("idempotency.rs")),
+            ("main.rs", include_str!("main.rs")),
             ("orchestrator.rs", include_str!("orchestrator.rs")),
+            ("output.rs", include_str!("output.rs")),
             ("preflight.rs", include_str!("preflight.rs")),
+            ("resurrect.rs", include_str!("resurrect.rs")),
             ("source_guard.rs", include_str!("source_guard.rs")),
             ("test_chain.rs", include_str!("test_chain.rs")),
+            ("test_keys.rs", include_str!("test_keys.rs")),
         ] {
-            let production = production_source(file, src);
+            let production =
+                crate::source_guard::production_source_of_a_file_that_may_have_no_tests(file, src);
             let lines: Vec<&str> = production.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 let t = line.trim_start();
                 let indented = *line != t;
-                let bare = t
+                let kind = t
                     .strip_prefix("pub(crate) ")
                     .or_else(|| t.strip_prefix("pub "))
-                    .map(|rest| (rest, true))
-                    .unwrap_or((t, false));
-                let (kind, is_public) = bare;
-                // Indented items are methods and fields; only the public
-                // ones are worth this. At column zero everything is an
-                // item of the module, private helpers included.
-                if indented && !is_public {
-                    continue;
-                }
-                let is_item = ["fn ", "async fn ", "struct ", "enum ", "trait "]
-                    .iter()
-                    .any(|k| kind.starts_with(k));
+                    .unwrap_or(t);
+                // Indented items are methods, and a private one is where
+                // the third theft was found: `test_chain.rs`'s `fn
+                // identity` carried `FakeWorld::run`'s doc while the scan
+                // skipped it for being neither `pub` nor at column zero.
+                //
+                // FIELDS are the reason `indented` still matters. A
+                // struct's fields are indented and are not items; they
+                // are excluded by the item list below, which names
+                // declaration keywords, and a field is `name: Type`.
+                let _ = indented;
+                // `const` is back. It was in the list the round before
+                // last, went out in the widening that added `fn`, and the
+                // theft this test's own comment cites — a constant taking
+                // the doc off `PROHIBITS_A_DELETION` — is exactly the
+                // shape it stopped watching. All three deletion
+                // vocabularies are constants.
+                let is_item = [
+                    "fn ",
+                    "async fn ",
+                    "struct ",
+                    "enum ",
+                    "trait ",
+                    "const ",
+                    "static ",
+                    "type ",
+                ]
+                .iter()
+                .any(|k| kind.starts_with(k));
                 if !is_item {
                     continue;
                 }

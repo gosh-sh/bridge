@@ -48,6 +48,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::args::{Cli, Command};
 
+/// argv in, exit code out: the three pre-parse escapes, clap, the
+/// runtime, the dispatch policy, and the exit-code mapping.
 fn main() -> ProcExitCode {
     // `--json` is a clap flag, but the three failures below happen before
     // (or during) parsing, and the spec allows no human line on stdout for

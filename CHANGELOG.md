@@ -952,6 +952,14 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`scripts/live_smoke.sh` silently dropped any argument passed to it.**
+  It `exec`s the CLI without `"$@"`, so `live_smoke.sh --allow-retry`
+  printed the usual banner, ran **without** the flag, and produced a
+  perfectly plausible refusal — only the `Running …` line cargo prints
+  gave it away. A test of what `--allow-retry` does was really a second
+  run of the test before it. Arguments are now forwarded, and any extras
+  are echoed as `extra args:` before the run.
+
 - **The duplicate-withdrawal refusal printed Rust syntax where an
   operator copies a hash from.** A repeat run answered:
 

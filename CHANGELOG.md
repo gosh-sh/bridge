@@ -952,6 +952,35 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`solc` was an undeclared, unchecked runtime dependency of every
+  withdrawal.** `aggregate-proof` compiles the generated Yul verifier at
+  stage 5 by shelling out to `solc` (`snark-verifier`'s `compile_solidity`,
+  which `.spawn().unwrap()`s), and self-checks the bytecode against the
+  committed `BridgeWithdrawalAggregatorVerifier.bin`. With no `solc` on
+  `PATH` that is a panic inside a subprocess — exit 101, surfacing as the
+  CLI's exit 12 — reached **after** the irreversible AN burn and after up to
+  ~91 min of waiting for the covering bundle. It was named in
+  `deploy/shellnet-l2/README.md` (a relayer-operator document) and nowhere a
+  withdrawing user would look.
+
+  Three changes:
+
+  - **Stage 1 now refuses a real run without it**, next to the existing
+    `aggregate-proof` probe: `solc --version` must answer and must be
+    exactly `0.8.19` — another version emits different bytecode and fails
+    the stage-5 self-check as `aggregator VK drift`. Platform build
+    metadata after `+` is ignored, so a macOS build of the same version
+    passes.
+  - **README gains Step 0b** and the advanced runbook a third mandatory
+    build step, both with the install command and the version check.
+  - Both documents now say plainly that `--dry-run` skips every
+    prover-artifact check, so a clean dry run is not evidence that stage 5
+    can finish.
+
+  Found by running a live shellnet withdrawal on 10 September 2026: it
+  burned 1 USDC, waited 100 minutes for coverage, and died on `ENOENT`.
+  Operators who already have the compiler see no change.
+
 - **The pinned-identity refusal printed `(dappFr, accFr)` in decimal and
   then asked you to compare it with a hex value.** The last line of the
   refusal sends you to `USDC_BRIDGE_ACCOUNT_ID`, which every profile

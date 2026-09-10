@@ -185,16 +185,41 @@ cargo build --release -p ackinacki-bridge
 cd ../../bridge-evm-aggregator
 cargo build --release --bin aggregate-proof
 #   -> ./target/release/aggregate-proof
+
+# 3. solc 0.8.19 — `aggregate-proof` shells out to it at RUN time, so
+#    this is a runtime dependency of every real withdrawal, not a build
+#    tool. Stage 5 generates the Yul verifier from the aggregator VK,
+#    compiles it with `solc --bin -`, and self-checks the bytecode
+#    against the committed BridgeWithdrawalAggregatorVerifier.bin.
+#    The version is pinned: another one emits different bytecode and
+#    fails that comparison.
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/solc \
+  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+chmod +x ~/.local/bin/solc
+solc --version | grep Version
+#   -> Version: 0.8.19+commit.7dd6d404.Linux.g++
 ```
 
-**Step 2 is mandatory, not an optimisation.** Preflight refuses to
+`~/.local/bin` must be on `PATH`: the aggregator resolves the bare name
+`solc`, not a configurable path. Note that "the CLI's ONLY subprocess"
+above is true of the CLI, not of the tree below it — `aggregate-proof`
+spawns `solc` in turn, which is exactly the dependency that used to go
+unchecked.
+
+**Steps 2 and 3 are mandatory, not optimisations.** Preflight refuses to
 proceed unless `target/release/aggregate-proof` exists and answers
 `--help`, and it will not accept the `cargo run --release` fallback the
 runtime would otherwise take: verifying that path means paying for a
 cold build inside a check whose whole point is to be instant, and "the
 crate looks present" is not verification. A missing or unrunnable
 aggregator therefore costs one command now instead of the burn plus up
-to 91 minutes of anchor wait later.
+to 91 minutes of anchor wait later. Preflight checks `solc` and its
+version in the same place and for the same reason.
+
+Both checks live on the **real** run's stage 1. `--dry-run` has no submit
+plumbing and never proves, so it skips the prover-artifact checks
+entirely — a clean dry run is not evidence that stage 5 can finish.
 
 Step 1 (the CLI itself) is still just a convenience — `cargo run
 --release` works, and prebuilding only saves the ~2 s cargo startup per

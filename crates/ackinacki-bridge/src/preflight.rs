@@ -768,7 +768,7 @@ const EXPECTED_VERIFIER_BIN: &[u8] =
 /// Everything here is checked at stage 1 because the alternative is stage 5:
 /// after the irreversible AN burn and up to ~91 min of anchor wait.
 ///
-/// Deliberately a thin sequence over four independently callable checks.
+/// Deliberately a thin sequence over five independently callable checks.
 /// They are separate functions because they must be separately testable — a
 /// single fused function short-circuits on the ceremony, and every test for
 /// the later checks would need a real 256 MB SRS on disk to reach its own
@@ -782,6 +782,9 @@ pub async fn check_prover_artifacts(
     check_ceremony(&p.params_dir)?;
     check_verifier_bin(&p.verifiers_dir, allow_verifier_drift)?;
     check_aggregator_runnable(&p.aggregator_dir).await?;
+    // Immediately after the binary, because it is that binary's own
+    // dependency: proving it runs says nothing about whether it can finish.
+    check_solc_runnable().await?;
 
     // Ask what the key cache is BEFORE deciding what must be writable. A
     // warm `params_dir` is only ever read, so demanding write access to it
@@ -1203,6 +1206,143 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
             timeout,
         ))),
     }
+}
+
+/// The Solidity compiler version stage 5 needs on `PATH`.
+///
+/// Not a preference. `gen_evm_verifier_shplonk` compiles the generated Yul
+/// verifier with whatever `solc` resolves to, and `aggregate-proof` then
+/// compares that bytecode byte for byte against the committed
+/// [`WITHDRAW_VERIFIER_BIN`]. A different compiler version produces
+/// different bytecode and fails that comparison — which is the same
+/// `aggregator VK drift` refusal, reached at stage 5 rather than here.
+/// The relayer image pins the same version
+/// (`deploy/shellnet-l2/scripts/preflight.sh:131`).
+pub(crate) const REQUIRED_SOLC_VERSION: &str = "0.8.19";
+
+/// `solc` belongs to the *aggregator's* dependencies, not this CLI's — which
+/// is precisely why it is checked here.
+///
+/// [`check_aggregator_runnable`] proves the binary exists, executes, and is
+/// the one we drive. It cannot prove the binary runs to completion:
+/// `snark-verifier`'s `compile_solidity` shells out to `solc` and
+/// `.spawn().unwrap()`s the result (`loader/evm/util.rs:114`), so a missing
+/// compiler is a panic inside a subprocess that surfaces as exit 101 — at
+/// stage 5, after the irreversible burn and after the anchor wait. The
+/// check stopped at the binary and did not follow it into its own
+/// dependency.
+///
+/// Measured on shellnet on 10 September 2026: a live withdrawal burned
+/// 1 USDC, waited 100 minutes for coverage, and died on `ENOENT` from
+/// `spawn`. Every withdrawal needs this compiler — the CLI has one
+/// subcommand and its stage 5 always aggregates — so this is a missing
+/// prerequisite, not a rare configuration.
+pub async fn check_solc_runnable() -> CliResult<()> {
+    check_solc_runnable_at(Path::new("solc"), AGGREGATOR_PROBE_TIMEOUT).await
+}
+
+/// The probe, with the program path and the wait as parameters, so a test
+/// can point it at a stub instead of mutating this process's `PATH` — which
+/// is global and would race every other test in the binary.
+pub(crate) async fn check_solc_runnable_at(program: &Path, timeout: Duration) -> CliResult<()> {
+    let refuse = |reason: String| CliError::Preflight {
+        reason,
+        source: None,
+    };
+    // The remedy is the same sentence in three of the four refusals below,
+    // and all three are reached before anything is sent.
+    let remedy = format!(
+        "\n\x20 Install solc {REQUIRED_SOLC_VERSION} and re-run; nothing has been sent and \
+         nothing has been written."
+    );
+
+    let run = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(program)
+            .arg("--version")
+            // Same reason as `spawn_help`: a timeout cancels our wait, not
+            // the child's life.
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await;
+
+    let out = match run {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(refuse(format!(
+                "`{}` is not on PATH, and stage 5 cannot finish without it: the aggregator \
+                 compiles the generated Yul verifier with `solc --bin -` and self-checks the \
+                 result against the committed {WITHDRAW_VERIFIER_BIN}. Absent, it panics inside \
+                 aggregate-proof and the run fails at stage 5 — after the burn.{remedy}",
+                program.display(),
+            )));
+        },
+        Ok(Err(e)) => {
+            return Err(refuse(format!(
+                "`{}` exists but cannot be executed: {e}.{remedy}",
+                program.display(),
+            )));
+        },
+        Err(_) => {
+            return Err(refuse(format!(
+                "`{}` did not answer `--version` within {timeout:?} (the process was killed).",
+                program.display(),
+            )));
+        },
+    };
+
+    // `--version` writes to stdout, but a wrapper script may well put it on
+    // stderr; read both rather than refuse a working compiler over a stream
+    // choice.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    if !out.status.success() {
+        return Err(refuse(format!(
+            "`{}` answered `--version` with exit {}: {}{remedy}",
+            program.display(),
+            out.status,
+            text.trim(),
+        )));
+    }
+
+    match solc_version_from(&text) {
+        Some(v) if v == REQUIRED_SOLC_VERSION => Ok(()),
+        Some(v) => Err(refuse(format!(
+            "`{}` is version {v}, but stage 5 needs exactly {REQUIRED_SOLC_VERSION}: the \
+             aggregator's own self-check compares its output against the committed \
+             {WITHDRAW_VERIFIER_BIN}, and another compiler version emits different bytecode. \
+             Refusing here rather than letting that surface as `aggregator VK drift` after the \
+             burn.{remedy}",
+            program.display(),
+        ))),
+        None => Err(refuse(format!(
+            "`{}` answered `--version` with output this CLI cannot read a version out of: \
+             {}{remedy}",
+            program.display(),
+            text.trim(),
+        ))),
+    }
+}
+
+/// Pull `0.8.19` out of `solc --version`, whose second line reads
+/// `Version: 0.8.19+commit.7dd6d404.Linux.g++`.
+///
+/// The build metadata after `+` is dropped deliberately: it carries the
+/// platform (`Linux.g++` vs `Darwin.appleclang`), so keeping it would refuse
+/// a correct compiler for being on a Mac. The version itself is what decides
+/// the emitted bytecode.
+fn solc_version_from(text: &str) -> Option<&str> {
+    let after = text.split("Version:").nth(1)?.trim_start();
+    let end = after.find(char::is_whitespace).unwrap_or(after.len());
+    let full = &after[..end];
+    Some(full.split('+').next().unwrap_or(full))
 }
 
 /// `--help` output must name a flag this CLI actually passes. Guards against
@@ -3475,6 +3615,116 @@ pub(crate) mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stub that answers `--version` the way the real compiler does.
+    fn write_solc(path: &std::path::Path, version_line: &str) {
+        write_exec(path, &format!("#!/bin/sh\necho '{version_line}'\n"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_solc_is_refused_before_the_burn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = check_solc_runnable_at(&dir.path().join("solc"), AGGREGATOR_PROBE_TIMEOUT)
+            .await
+            .expect_err("stage 5 cannot finish without solc, so stage 1 must refuse");
+        let msg = format!("{err}");
+        // The refusal has to carry all three, because a bare "not found"
+        // sends the operator looking for a bridge misconfiguration: what is
+        // missing, why a withdrawal needs it, and that nothing was sent.
+        assert!(msg.contains("not on PATH"), "got: {msg}");
+        assert!(
+            msg.contains("stage 5"),
+            "must say when it would bite: {msg}"
+        );
+        assert!(
+            msg.contains("nothing has been sent"),
+            "a stage-1 refusal must say the withdrawal is untouched: {msg}"
+        );
+        assert_eq!(err.exit_code().as_i32(), 2, "a pre-send refusal is exit 2");
+    }
+
+    #[tokio::test]
+    async fn the_required_solc_version_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let solc = dir.path().join("solc");
+        // Exactly what the official Linux build prints, two lines and all.
+        write_solc(
+            &solc,
+            "solc, the solidity compiler commandline interface\nVersion: \
+             0.8.19+commit.7dd6d404.Linux.g++",
+        );
+        check_solc_runnable_at(&solc, AGGREGATOR_PROBE_TIMEOUT)
+            .await
+            .expect("the pinned version must pass");
+    }
+
+    #[tokio::test]
+    async fn a_mac_build_of_the_pinned_version_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let solc = dir.path().join("solc");
+        // The build metadata after `+` names the platform. Refusing on it
+        // would reject a correct compiler for running on a Mac, so the
+        // parser drops it — and this test is what keeps it dropped.
+        write_solc(&solc, "Version: 0.8.19+commit.7dd6d404.Darwin.appleclang");
+        check_solc_runnable_at(&solc, AGGREGATOR_PROBE_TIMEOUT)
+            .await
+            .expect("platform metadata must not decide the verdict");
+    }
+
+    #[tokio::test]
+    async fn a_different_solc_version_is_refused_with_the_reason() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let solc = dir.path().join("solc");
+        write_solc(&solc, "Version: 0.8.20+commit.a1b79de6.Linux.g++");
+        let err = check_solc_runnable_at(&solc, AGGREGATOR_PROBE_TIMEOUT)
+            .await
+            .expect_err("another version emits different bytecode");
+        let msg = format!("{err}");
+        assert!(msg.contains("0.8.20"), "must name what it found: {msg}");
+        assert!(
+            msg.contains(REQUIRED_SOLC_VERSION),
+            "must name what it needs: {msg}"
+        );
+        // The point of refusing early: this is the same failure
+        // `aggregate-proof` raises at stage 5, moved to before the burn.
+        assert!(
+            msg.contains("VK drift"),
+            "must name the stage-5 twin: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_solc_that_answers_nothing_useful_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let solc = dir.path().join("solc");
+        // Present, executable, exits 0 — and useless. Same shape as the
+        // aggregate-proof stub check: exit 0 alone is not the property.
+        write_exec(&solc, "#!/bin/sh\necho 'hello'\n");
+        let err = check_solc_runnable_at(&solc, AGGREGATOR_PROBE_TIMEOUT)
+            .await
+            .expect_err("exit 0 alone must not count as a working compiler");
+        assert!(
+            format!("{err}").contains("cannot read a version"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_version_parser_takes_the_version_and_drops_the_build() {
+        assert_eq!(
+            solc_version_from("Version: 0.8.19+commit.7dd6d404.Linux.g++"),
+            Some("0.8.19")
+        );
+        // No `+` at all, and trailing whitespace.
+        assert_eq!(solc_version_from("Version: 0.8.19\n"), Some("0.8.19"));
+        assert_eq!(solc_version_from("no version here"), None);
+        // A near miss must not be read as the pinned version: `starts_with`
+        // would have accepted this one.
+        assert_eq!(
+            solc_version_from("Version: 0.8.190+commit.deadbeef"),
+            Some("0.8.190")
+        );
     }
 
     #[test]

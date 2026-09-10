@@ -261,6 +261,42 @@ cd ../ackinacki-bridge
 
 `--dry-run` does not need this either; it is required only for a real run.
 
+### Step 0b — Install `solc 0.8.19` (one-off, ~1 min)
+
+`aggregate-proof` shells out to `solc` **at run time**, on every real
+withdrawal. Stage 5 generates the Yul verifier from the aggregator's
+verifying key, compiles it with `solc --bin -`, and compares the bytecode
+byte for byte against the committed
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin`. That
+self-check is what tells you the proof you are about to submit matches the
+verifier deployed on the bridge — so having the Solidity bytecode on disk is
+not enough; the compiler itself has to be there.
+
+The version is pinned, because a different one emits different bytecode and
+fails that comparison:
+
+```bash
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/solc \
+  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+chmod +x ~/.local/bin/solc
+solc --version | grep Version      # Version: 0.8.19+commit.7dd6d404.Linux.g++
+```
+
+`~/.local/bin` has to be on `PATH` — the aggregator resolves the bare name
+`solc`, not a path you configure.
+
+Stage 1 of a **real** run checks this and refuses before anything is
+broadcast. A `--dry-run` does **not**: it has no submit plumbing and never
+proves, so it skips every prover-artifact check — the ceremony, the
+verifier `.bin`, `aggregate-proof` and this compiler alike. A clean dry run
+therefore says nothing about whether stage 5 can finish, which is why this
+step is a step rather than something the tooling catches for you.
+
+Without that stage-1 check the failure is an `ENOENT` panic inside a
+subprocess at stage 5 — after the irreversible burn and after up to ~91 min
+of waiting for the covering bundle.
+
 ### Step 1 — Create + fund a Sepolia burner wallet
 
 The CLI signs `withdrawByProof` with an EVM key you provide. Never

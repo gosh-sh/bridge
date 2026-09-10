@@ -952,6 +952,30 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The pinned-identity refusal printed `(dappFr, accFr)` in decimal and
+  then asked you to compare it with a hex value.** The last line of the
+  refusal sends you to `USDC_BRIDGE_ACCOUNT_ID`, which every profile
+  writes as 64 lowercase hex characters — but the pair above it arrived
+  as `U256` decimal, so the check it prescribed could not be done by eye:
+
+  ```
+  on chain (dappFr, accFr) = (0, 11806252235961651298089590628336806290921645495320214372650577192963691649562)
+  ```
+
+  Both pairs are now `{:064x}`, in the profile's own shape, so the
+  comparison is a character-for-character one:
+
+  ```
+  on chain (dappFr, accFr) = (0000…0000, 1a1a1a1a…1a1a)
+  ```
+
+  Found on a live shellnet run of `withdraw --dry-run
+  --usdc-bridge-account 2b2b…2b2b`, where the same run's
+  `preflight ok usdc_bridge=…` line had already printed the pair as hex.
+  Nothing else changes: the refusal's wording, its exit code (2) and the
+  `--json` envelope's `stage`/`exit_code` are untouched — only the
+  rendering of the four numbers inside `message`.
+
 - **Every `cast logs` command in the withdraw docs was unrunnable, and
   each failed silently.** Found by running them: an empty result reads
   as "nothing happened on chain", which is the opposite of what the

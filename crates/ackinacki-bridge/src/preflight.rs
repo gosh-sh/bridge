@@ -1908,11 +1908,20 @@ pub async fn check_bridge_deploy(
     if on_chain_identity != expected_identity {
         return Err(CliError::Preflight {
             reason: format!(
+                // `{:064x}`, not `U256`'s `Display`, and no `0x` prefix: the
+                // last line sends the operator to `USDC_BRIDGE_ACCOUNT_ID`,
+                // which is written in the profile as 64 lowercase hex
+                // characters with the leading zeros kept
+                // (`config/bridge_config.shellnet:65`). Decimal is the one
+                // rendering that cannot be compared against it by eye, so
+                // the refusal asked for a check it made impossible — and it
+                // did so next to `preflight ok usdc_bridge=…`, which prints
+                // the same pair as hex.
                 "--bridge-address {bridge} is pinned to a different Acki Nacki bridge account: on \
-                 chain (dappFr, accFr) = ({}, {}), this withdrawal would prove ({}, {}). \
-                 withdrawByProof reverts WithdrawIdentityMismatch before it even verifies the \
-                 proof.\n\x20 Check USDC_BRIDGE_ACCOUNT_ID in $BRIDGE_CONFIG against the bridge \
-                 you are withdrawing from.",
+                 chain (dappFr, accFr) = ({:064x}, {:064x}), this withdrawal would prove \
+                 ({:064x}, {:064x}). withdrawByProof reverts WithdrawIdentityMismatch before it \
+                 even verifies the proof.\n\x20 Check USDC_BRIDGE_ACCOUNT_ID in $BRIDGE_CONFIG \
+                 against the bridge you are withdrawing from.",
                 on_chain_identity.0, on_chain_identity.1, expected_identity.0, expected_identity.1,
             ),
             source: None,
@@ -3271,6 +3280,31 @@ pub(crate) mod tests {
         assert!(
             msg.contains("different Acki Nacki"),
             "must say what it means, got: {msg}"
+        );
+        // The refusal ends by sending the operator to USDC_BRIDGE_ACCOUNT_ID,
+        // which is 64 lowercase hex characters in the profile. `U256`'s
+        // `Display` is decimal, so the shipped message printed
+        // `11806252235961651298089590628336806290921645495320214372650577192963691649562`
+        // where the operator had to compare `1a1a…1a1a` — the one rendering
+        // that makes the instruction impossible to follow. Both sides are
+        // asserted: the hex must be there AND the decimal must not, because
+        // adding hex somewhere else in the sentence would satisfy the first
+        // alone.
+        assert!(
+            msg.contains(&format!("({:064x}, {:064x})", U256::ZERO, U256::ZERO)),
+            "the on-chain pair must be 64-hex, comparable to the profile line, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!(
+                "({:064x}, {:064x})",
+                U256::from(7u8),
+                U256::from(9u8)
+            )),
+            "the proof's own pair must be 64-hex too, got: {msg}"
+        );
+        assert!(
+            !msg.contains("(0, 0)") && !msg.contains("(7, 9)"),
+            "decimal cannot be compared against USDC_BRIDGE_ACCOUNT_ID by eye, got: {msg}"
         );
     }
 

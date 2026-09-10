@@ -200,9 +200,9 @@ pub(crate) const PROHIBITS_A_DELETION: [&str; 4] = [
 /// exactly that about them, twice. A list that flagged "safe to prune"
 /// would be flagging the one deletion this pipeline does authorise.
 ///
-/// This is the FLOOR. What a surface adds to it is said in [`orders`],
-/// which is the only place either gate reads from; no surface may know
-/// fewer orders than the documents are held to.
+/// This is the FLOOR, and the documents are held to exactly it. What a
+/// refusal adds is [`A_REFUSAL_MAY_NOT_NAME_ANOTHER_FILE`]; neither gate
+/// may know fewer orders than this.
 pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
     "delete the record",
     "delete that record",
@@ -213,53 +213,6 @@ pub(crate) const ORDERS_A_DELETION: [&str; 8] = [
     "prune the state file",
     "safe to delete",
 ];
-
-/// Which surface a piece of text is, and therefore which rules it is
-/// held to.
-///
-/// The two vocabularies used to be the CALLER's, passed in as
-/// parameters, and the tests then compared each list with itself while
-/// the gates were free to pass something else. Both did, and both were
-/// measured: the refusal gate's orders reverted to six literals — the
-/// regression `de77e46` closed — with the suite green, and the document
-/// gate's hedges dropped the shared prohibitions with the suite green,
-/// under a test whose name says `..._in_both_directions`.
-///
-/// So there is nothing to pass. A caller says WHICH surface it is; the
-/// difference between the two is stated here, once, and
-/// [`the vocabularies`](orders) are read from the same place the gates
-/// read them.
-///
-/// PRIVATE, and reached only through the two functions below. As a
-/// `pub(crate)` argument it was data: swapping `Refusal` for `Document`
-/// at the refusal gate's call site handed that gate thirteen document
-/// hedges — every conditional a runbook is allowed to use — and the test
-/// comparing the two arms stayed green, because it never looked at a
-/// call site. A caller now names the surface by calling its function,
-/// and there is no other name for it to pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Surface {
-    /// A shipped document. May give conditional permission — the
-    /// runbook's gate does, in a clause naming the verdict — so its
-    /// hedges include the conditionals.
-    Document,
-    /// A refusal this CLI raises. No room for a condition and already
-    /// carrying the prohibition, so any imperative in it is a
-    /// contradiction: prohibitions are the only hedges.
-    Refusal,
-}
-
-/// Ways of ordering a deletion that `surface` may not contain.
-fn orders(surface: Surface) -> Vec<&'static str> {
-    let mut orders = ORDERS_A_DELETION.to_vec();
-    if surface == Surface::Refusal {
-        // Refusal-only: in a refusal the only file in scope is the
-        // record it names, while a document says "delete that file"
-        // about a key file, a log or a stale artifact.
-        orders.push("delete that file");
-    }
-    orders
-}
 
 /// What a DOCUMENT may say instead of a prohibition.
 ///
@@ -293,29 +246,64 @@ const A_DOCUMENT_MAY_CONDITION_ON: [&str; 13] = [
     "never does",
 ];
 
-/// What exempts a clause on `surface`.
-fn hedges(surface: Surface) -> Vec<&'static str> {
+/// What a REFUSAL may not say and a document may.
+///
+/// In a refusal the only file in scope is the record it names, so
+/// "delete that file" is an order there and ordinary housekeeping in a
+/// document, which says it about a key file, a log or a stale artifact.
+///
+/// A named constant with a declared length, like the three beside it:
+/// the length is the second pin, so an entry cannot be added or dropped
+/// without editing a number the relation test also reads.
+const A_REFUSAL_MAY_NOT_NAME_ANOTHER_FILE: [&str; 1] = ["delete that file"];
+
+/// What exempts a clause in a SHIPPED DOCUMENT: the prohibitions, plus
+/// the conditionals a document is allowed to grant permission under.
+fn what_exempts_a_clause_in_a_document() -> Vec<&'static str> {
     let mut hedges = PROHIBITS_A_DELETION.to_vec();
-    if surface == Surface::Document {
-        hedges.extend(A_DOCUMENT_MAY_CONDITION_ON);
-    }
+    hedges.extend(A_DOCUMENT_MAY_CONDITION_ON);
     hedges
+}
+
+/// Ways of ordering a deletion a REFUSAL may not contain: the floor,
+/// plus the one a refusal alone is held to.
+fn what_a_refusal_may_not_order() -> Vec<&'static str> {
+    let mut orders = ORDERS_A_DELETION.to_vec();
+    orders.extend(A_REFUSAL_MAY_NOT_NAME_ANOTHER_FILE);
+    orders
 }
 
 /// Clauses in a SHIPPED DOCUMENT that order a deletion without naming
 /// the verdict that permits it.
-pub(crate) fn orders_a_document_may_not_give(text: &str) -> Vec<String> {
-    clauses_ordering_a_deletion(text, Surface::Document)
+///
+/// PRIVATE, and that is this round's fix rather than a tidy-up. It was
+/// `pub(crate)`, and calling it from a REFUSAL gate — one word at
+/// `orchestrator.rs`'s call site — handed that gate thirteen document
+/// hedges: a live exit-10 refusal with `Only if you have confirmed no
+/// burn landed, delete the record.` planted in it stayed green. There
+/// was nothing wrong with the function; the hole was that a refusal
+/// site could name it. It cannot now, and the gate that uses it lives
+/// in this module's own tests.
+fn orders_a_document_may_not_give(text: &str) -> Vec<String> {
+    sentences_authorising_a_deletion(
+        text,
+        &ORDERS_A_DELETION,
+        &what_exempts_a_clause_in_a_document(),
+    )
 }
 
 /// Clauses in a REFUSAL THIS CLI RAISES that order a deletion.
 ///
 /// Stricter than the document rule in both directions, and both are
-/// checked: one more order (in a refusal the only file in scope is the
-/// record it names) and none of the conditionals (a refusal has no room
-/// for a condition and already carries the prohibition).
+/// checked by `a_refusal_is_stricter_than_a_document_in_both_directions`:
+/// one more order, and none of the conditionals — a refusal has no room
+/// for a condition and already carries the prohibition.
+///
+/// The only one of the two that leaves this module. A refusal gate has
+/// exactly one function it can call, so there is no surface to pass and
+/// no second name to reach for.
 pub(crate) fn orders_a_refusal_may_not_give(text: &str) -> Vec<String> {
-    clauses_ordering_a_deletion(text, Surface::Refusal)
+    sentences_authorising_a_deletion(text, &what_a_refusal_may_not_order(), &PROHIBITS_A_DELETION)
 }
 
 /// Whether `text` acknowledges that the verdict permitting a deletion
@@ -323,17 +311,13 @@ pub(crate) fn orders_a_refusal_may_not_give(text: &str) -> Vec<String> {
 ///
 /// The documents' other trigger asks this of a whole block: a passage
 /// that sends a reader to the exit-3 refusal FOR the liveness answer has
-/// to admit the answer can be missing. Same vocabulary as the hedges,
-/// asked block-wide rather than per clause, and asked here so that the
-/// list has one home.
-pub(crate) fn a_document_admits_the_verdict_may_be_missing(text: &str) -> bool {
-    hedges(Surface::Document).iter().any(|h| text.contains(h))
-}
-
-/// The scan itself. Private, and reached through the two functions
-/// above: a surface is named by calling one of them.
-fn clauses_ordering_a_deletion(text: &str, surface: Surface) -> Vec<String> {
-    sentences_authorising_a_deletion(text, &orders(surface), &hedges(surface))
+/// to admit the answer can be missing. Same vocabulary as a document's
+/// hedges, asked block-wide rather than per clause, and private for the
+/// same reason its neighbour is.
+fn a_document_admits_the_verdict_may_be_missing(text: &str) -> bool {
+    what_exempts_a_clause_in_a_document()
+        .iter()
+        .any(|h| text.contains(h))
 }
 
 /// Clauses in `text` that hand somebody permission to delete the record,
@@ -395,45 +379,43 @@ fn sentences_authorising_a_deletion(
 mod tests {
     use super::*;
 
+    /// Either gate, as a value, so a case can name which one it is.
+    type Gate = fn(&str) -> Vec<String>;
+
     #[test]
     fn a_refusal_is_stricter_than_a_document_in_both_directions() {
-        // In THIS module, because everything it reads is private to it
-        // now. It lived in `orchestrator` while the vocabularies were
+        // In THIS module, because everything it reads is private to it.
+        // It lived in `orchestrator` while the vocabularies were
         // arguments, and it could then only compare the two arms with
-        // each other — which is why swapping a call site's `Surface` was
+        // each other — which is why swapping a call site's surface was
         // green, and why a list that shrank for both surfaces was too.
         //
-        // Anchored to the named constants first, then to the relation.
+        // The shapes first. Each gate reads two named lists and this is
+        // what they are, so a gate handed the other surface's list has
+        // to change a name here too.
         assert_eq!(
-            orders(Surface::Document),
-            ORDERS_A_DELETION.to_vec(),
-            "a document is held to the whole of `ORDERS_A_DELETION` and to nothing else",
+            what_a_refusal_may_not_order().len(),
+            ORDERS_A_DELETION.len() + A_REFUSAL_MAY_NOT_NAME_ANOTHER_FILE.len(),
+            "a refusal is held to the whole floor plus what only a refusal may not say",
         );
-        let mut document_hedges = PROHIBITS_A_DELETION.to_vec();
-        document_hedges.extend(A_DOCUMENT_MAY_CONDITION_ON);
         assert_eq!(
-            hedges(Surface::Document),
-            document_hedges,
+            what_exempts_a_clause_in_a_document().len(),
+            PROHIBITS_A_DELETION.len() + A_DOCUMENT_MAY_CONDITION_ON.len(),
             "a document is exempted by the prohibitions and by the conditionals it is allowed to \
-             use, and by nothing else: `if none` added here let \"If none landed, prune the \
-             record and re-run.\" back into the runbook",
-        );
-        assert_eq!(
-            hedges(Surface::Refusal),
-            PROHIBITS_A_DELETION.to_vec(),
-            "a refusal is exempted by prohibitions alone",
+             use, and by nothing else",
         );
 
-        for order in orders(Surface::Document) {
+        // Then the relation, in both directions.
+        for order in ORDERS_A_DELETION {
             assert!(
-                orders(Surface::Refusal).contains(&order),
+                what_a_refusal_may_not_order().contains(&order),
                 "the documents are held to `{order}` and the refusals are not. A refusal may be \
                  stricter than a document and may not be laxer",
             );
         }
-        for hedge in hedges(Surface::Refusal) {
+        for hedge in PROHIBITS_A_DELETION {
             assert!(
-                hedges(Surface::Document).contains(&hedge),
+                what_exempts_a_clause_in_a_document().contains(&hedge),
                 "a refusal is exempted by `{hedge}` and a document is not, which makes it the \
                  laxer of the two",
             );
@@ -446,55 +428,334 @@ mod tests {
         // measured by what it lets through rather than by its shape.
         // Every ORDER here is one that has actually been written into
         // this tree or planted in it during a review.
-        for (surface, text) in [
+        for (which, gate, text) in [
             (
-                Surface::Document,
+                "a document",
+                orders_a_document_may_not_give as Gate,
                 "If none landed, prune the record and re-run.",
             ),
-            (Surface::Document, "Delete the record and re-run."),
-            (Surface::Document, "The stale files are safe to delete."),
             (
-                Surface::Refusal,
+                "a document",
+                orders_a_document_may_not_give as Gate,
+                "Delete the record and re-run.",
+            ),
+            (
+                "a document",
+                orders_a_document_may_not_give as Gate,
+                "The stale files are safe to delete.",
+            ),
+            (
+                "a refusal",
+                orders_a_refusal_may_not_give as Gate,
                 "If it has clearly died, prune the record and re-run.",
             ),
-            (Surface::Refusal, "Delete that record now and re-run."),
+            (
+                "a refusal",
+                orders_a_refusal_may_not_give as Gate,
+                "Delete that record now and re-run.",
+            ),
             // Refusal-only: in a refusal the only file in scope is the
             // record it names.
-            (Surface::Refusal, "Delete that file and try again."),
+            (
+                "a refusal",
+                orders_a_refusal_may_not_give as Gate,
+                "Delete that file and try again.",
+            ),
+            // The measured attack of round 21, and the case that pins
+            // the refusal gate's HEDGES behaviourally: a conditional a
+            // runbook is allowed to grant permission under, planted in a
+            // live exit-10 refusal. Hand this gate the document hedges
+            // and this line is the one that goes quiet.
+            (
+                "a refusal",
+                orders_a_refusal_may_not_give as Gate,
+                "Only if you have confirmed no burn landed, delete the record.",
+            ),
         ] {
             assert!(
-                !clauses_ordering_a_deletion(text, surface).is_empty(),
-                "{surface:?} must not be allowed to say: {text}",
+                !gate(text).is_empty(),
+                "{which} must not be allowed to say: {text}",
             );
         }
 
-        for (surface, text) in [
-            (Surface::Document, "Do not delete the record."),
+        for (which, gate, text) in [
             (
-                Surface::Document,
+                "a document",
+                orders_a_document_may_not_give as Gate,
+                "Do not delete the record.",
+            ),
+            (
+                "a document",
+                orders_a_document_may_not_give as Gate,
                 "Only if the liveness line says another run has exited, delete the record.",
             ),
             (
-                Surface::Document,
+                "a document",
+                orders_a_document_may_not_give as Gate,
                 "It says one of three things, and only one of them permits deleting the record.",
             ),
             (
-                Surface::Refusal,
+                "a refusal",
+                orders_a_refusal_may_not_give as Gate,
                 "Do not delete that record on the strength of this refusal.",
             ),
             // A description of a hazard is not an order.
             (
-                Surface::Document,
+                "a document",
+                orders_a_document_may_not_give as Gate,
                 "Deleting the record destroys the only local trace.",
             ),
             // A document may say this about a file that is not the record.
-            (Surface::Document, "Delete that file and re-provision it."),
+            (
+                "a document",
+                orders_a_document_may_not_give as Gate,
+                "Delete that file and re-provision it.",
+            ),
         ] {
             assert!(
-                clauses_ordering_a_deletion(text, surface).is_empty(),
-                "{surface:?} is allowed to say this, and the gate flagged it: {text}",
+                gate(text).is_empty(),
+                "{which} is allowed to say this, and the gate flagged it: {text}",
             );
         }
+    }
+
+    #[test]
+    fn no_shipped_document_says_the_refusal_always_answers_the_liveness_question() {
+        // IN THIS MODULE, with the two functions it calls, and that is
+        // the fix for the hole round 21 measured rather than a move for
+        // tidiness. Both were `pub(crate)` and the document one could
+        // therefore be named from a REFUSAL gate: one word at
+        // `orchestrator.rs`'s call site handed that gate thirteen
+        // document hedges, and an exit-10 refusal carrying `Only if you
+        // have confirmed no burn landed, delete the record.` stayed
+        // green. Its caller lives beside it now, so there is no
+        // `pub(crate)` document gate left for a refusal site to reach.
+        //
+        // Four copies of the deletion gate, found one per review round by
+        // a human reading. The rule keeps being restated in summary form
+        // — a cleanup list, a "safe to prune between demos" heading —
+        // and every summary drops the third verdict, because the third
+        // verdict is the awkward one.
+        //
+        // What every wrong copy has in common is not a word count. It is
+        // the claim that the exit-3 refusal REPORTS whether another run
+        // holds the withdrawal. On a filesystem without `flock` it
+        // reports that it could not tell, and an operator who was
+        // promised an answer reads the absence of "RIGHT NOW" as one.
+        //
+        // So: any block that sends a reader to the refusal for the
+        // liveness answer has to admit the answer can be missing. The
+        // canonical procedures do; the summaries did not.
+        const DOCS: [(&str, &str); 3] = [
+            ("README.md", include_str!("../README.md")),
+            (
+                "docs/advanced_user_withdraw_runbook.md",
+                include_str!("../docs/advanced_user_withdraw_runbook.md"),
+            ),
+            // Read by operators deciding what a release changed, and it
+            // carried its own copy of the rule. Only the UNRELEASED
+            // section is scanned: a released section is frozen by the
+            // changelog policy, so guarding it would produce a failure
+            // nobody is allowed to fix.
+            ("CHANGELOG.md", include_str!("../../../CHANGELOG.md")),
+        ];
+        // Any of these means the block does not promise an answer it
+        // cannot give, or hands the reader to the procedure that does.
+        // Ways of acknowledging that the deletion is conditional on a
+        // verdict that may not exist. A list, because the documents
+        // legitimately say it in several registers — a table, a warning,
+        // a pointer to the procedure — and the rule is about the
+        // acknowledgement, not the wording.
+        //
+        // Every entry was checked against the copies this guard exists to
+        // catch. Two candidates were REMOVED after measuring: "case 3a",
+        // because the defective README pointed at Case 3a in one breath
+        // and gave the two-verdict rule in the next; and "no age makes
+        // this safe", which the defective RUNBOOK copy says verbatim. A
+        // link is not an acknowledgement, and neither is ruling out the
+        // wrong criterion.
+        // "three" was a BARE NUMERAL and exempted any clause containing
+        // it: "three deltas", "three independent checks", "three
+        // wrappers". The hedge that matters is a reference to the
+        // three-verdict gate, so say that instead. (Markdown emphasis is
+        // stripped by `clauses`, which is why "one of three" matches
+        // "one of **three** things".)
+        // Every entry is a phrase that marks the permission as
+        // CONDITIONAL, in the clause that grants it. "three" alone was
+        // not: a bare numeral exempted "three deltas", "three
+        // independent checks", "three wrappers" — any clause that
+        // happened to count something.
+        //
+        // Markdown emphasis is stripped by `clauses`, which is why "one
+        // of three" matches "one of **three** things".
+        // Both vocabularies live in `source_guard`, keyed by surface.
+        // They were passed in as parameters, and a copy of this list
+        // that dropped the shared prohibitions was green under a test
+        // that promised to forbid exactly that.
+
+        // Sentences that hand somebody permission. The state-file
+        // spelling is here because the documents call the same object two
+        // things and only one of them was watched.
+        // IMPERATIVE forms only. "Deleting the record destroys the only
+        // local trace" is a description of a hazard, not permission to
+        // act, and a list that cannot tell the two apart flags every
+        // changelog entry that ever explained this defect. `Failed`
+        // records are also excluded on purpose: they carry a hash by
+        // construction, so pruning one is not this rule's business.
+        // The VERB and its object, not seven spellings of one sentence.
+        // The old list was a transcript of the four copies that had been
+        // found by hand, so every form nobody had written yet was
+        // invisible — "delete that record now", "remove the record",
+        // "prune the state file", and the two the messages themselves
+        // use.
+        //
+        // The orders live in `source_guard` too, and are not named here
+        // at all: `clauses_ordering_a_deletion` reads them. A local
+        // rebinding is exactly what let the two surfaces drift.
+
+        // An absent unreleased section is only legitimate in ONE state:
+        // straight after a release, where the first heading in the file
+        // is the version a human just renamed it to. Anything else — a
+        // typo, a re-styled heading, a restructure — leaves a first
+        // heading that is neither, and that is a lost anchor rather than
+        // an empty scan. Distinguishing the two is what lets this scan
+        // nothing without also being unable to notice that it is.
+        let changelog = DOCS[2].1;
+        let first_heading = changelog
+            .lines()
+            .find(|l| l.starts_with("## "))
+            .expect("CHANGELOG.md has no `## ` heading at all");
+        assert!(
+            first_heading == "## [Unreleased]" || is_a_release_heading(first_heading),
+            "CHANGELOG.md's first heading is `{first_heading}`. This guard scans the unreleased \
+             section and nothing else, so it has to be able to tell \"there is nothing unreleased \
+             yet\" from \"the heading it looks for was renamed\", and that is the only thing that \
+             tells them apart",
+        );
+
+        // ANY version, not `0.`. Both places that found the end of the
+        // unreleased section spelled it `## [0.`, so the day a human
+        // tags 1.0.0 the slice runs to the end of the file and every
+        // released section — frozen history this guard may not act on —
+        // becomes an offender. A guard that turns red on a release
+        // nobody is allowed to fix is a guard that gets deleted.
+        fn is_a_release_heading(line: &str) -> bool {
+            line.strip_prefix("## [")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        }
+
+        let mut offenders = Vec::new();
+        for (name, text) in DOCS {
+            // The changelog's released sections are not editable.
+            let scanned = if name == "CHANGELOG.md" {
+                // `unwrap_or(0)` here was fail-open ON A SCHEDULE, and
+                // the schedule is a release. `end` is measured from
+                // `start`, so with the heading absent the slice collapses
+                // onto the FIRST release heading in the file: 11..2068
+                // today, 1..10 the moment a human renames `##
+                // [Unreleased]` to a version — which is exactly what
+                // AGENTS.md tells them to do. Nine lines of file header,
+                // scanned, green, and the changelog silently out of the
+                // guard's sight from that commit on.
+                //
+                // Absent means absent, not "start at zero". After a
+                // release there IS no unreleased section — AGENTS.md has
+                // the next branch create one — and released sections are
+                // frozen by the same policy, so this guard may not act on
+                // them anyway. Scanning nothing is the correct answer and
+                // is written down here rather than arrived at by
+                // accident. An `expect` would be the other candidate and
+                // is wrong: it would turn the prescribed release state
+                // into a red build.
+                match text.find("## [Unreleased]") {
+                    Some(start) => {
+                        let end = text[start..]
+                            .lines()
+                            .scan(0usize, |at, l| {
+                                let here = *at;
+                                *at += l.len() + 1;
+                                Some((here, l))
+                            })
+                            .find(|(_, l)| is_a_release_heading(l))
+                            .map_or(text.len(), |(i, _)| start + i);
+                        &text[start..end]
+                    },
+                    None => "",
+                }
+            } else {
+                text
+            };
+            for (i, block) in scanned.split("\n\n").enumerate() {
+                // Whitespace collapsed first. These are hard-wrapped
+                // documents, so every phrase this looks for straddles a
+                // line break somewhere — the first version of this guard
+                // matched nothing at all and looked like a pass.
+                // Emphasis stripped here too. Without it "one of
+                // **three** things" — the canonical acknowledgement, in
+                // both instructional documents — matched no hedge, and
+                // the block that carries the gate was reported as
+                // promising an answer it cannot give.
+                let lower = block
+                    .to_ascii_lowercase()
+                    .replace(['*', '`', '_'], "")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                // (a) The block sends a reader to the refusal FOR THE
+                //     ANSWER. Block-scoped, and with no third "does it
+                //     sound like an instruction" conjunct: that conjunct
+                //     was added to silence two changelog entries and took
+                //     the surviving copy of the gate out of scope with
+                //     them. Changelog prose is handled where it belongs,
+                //     in the hedge vocabulary.
+                let promises_an_answer = (lower.contains("exit-3 refusal")
+                    || lower.contains("liveness line"))
+                    && (lower.contains("holds the withdrawal")
+                        || lower.contains("holds this withdrawal")
+                        || lower.contains("liveness"));
+
+                // Trigger (a) applies to the INSTRUCTIONAL documents only.
+                // Promising a reader an answer is something a procedure
+                // does; a changelog entry recounting a past defect
+                // mentions the same machinery without directing anybody,
+                // and flagging it was what the discarded third conjunct
+                // was really for. Trigger (b) applies everywhere, because
+                // telling somebody to delete the record is dangerous
+                // wherever it is written.
+                let instructs = name != "CHANGELOG.md";
+                if instructs
+                    && promises_an_answer
+                    && !a_document_admits_the_verdict_may_be_missing(&lower)
+                {
+                    offenders.push(format!(
+                        "{name} block {i} (promises an answer): {}",
+                        block.trim()
+                    ));
+                }
+
+                // (b) A clause authorises the deletion. Through the
+                //     SHARED scanner, which is the other half of this
+                //     rule: the refusal messages are held to it too, and
+                //     for two rounds only the documents were. Its
+                //     splitting is the fix for the copy that lived here —
+                //     `split(". ")` handed a dropped full stop or a line
+                //     break an exemption, by gluing an order to the
+                //     prohibition after it and finding the prohibition.
+                for clause in orders_a_document_may_not_give(block) {
+                    offenders.push(format!(
+                        "{name} block {i} (authorises a deletion): {clause}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these send an operator to the exit-3 refusal for a liveness answer it may not have, \
+             or authorise deleting the record in a sentence that does not name the verdict \
+             permitting it — which is every run on a mount without `flock`, and the reading that \
+             deletes a record mid-send: {offenders:#?}",
+        );
     }
 
     /// A file, assembled from lines so that no line of this test's own

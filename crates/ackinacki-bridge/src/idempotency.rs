@@ -1188,10 +1188,9 @@ pub struct BurnPermit<'a>(Option<&'a WithdrawalLock>);
 //
 // It had one for three rounds, to stretch its borrow of the lock past
 // the permit's last use — the `burn::send` call — and cover the record
-// write just below it. That window now sits inside a `LockHold` taken
-// where the branch installs the lock, and
-// `every_place_the_lock_is_installed_takes_a_hold_of_it` is what keeps
-// that hold there.
+// write just below it. That window now sits inside the `LockHold` the
+// seam hands back, which the branch has to carry out to its caller: the
+// signature is what keeps that hold there.
 //
 // Measured before deleting: with the impl and its assertion removed, the
 // evasion they forbade still fails to compile, and the borrow is
@@ -1270,13 +1269,16 @@ impl LockSlot {
     /// acquisition twice, and cannot install anything it did not get from
     /// a reservation.
     ///
-    /// RETURNING the hold is what removes two rules from
-    /// `every_place_the_lock_is_installed_takes_a_hold_of_it`. There is
-    /// no gap between an install and its hold to police, because there
-    /// is no second statement; and there is no receiver to check,
-    /// because the hold is this install's own result rather than a
-    /// second expression naming a slot — `let _held = _decoy.hold();`
-    /// under an install was green for a round.
+    /// RETURNING the hold is what retired
+    /// `every_place_the_lock_is_installed_takes_a_hold_of_it`, 398 lines
+    /// of grep. There is no gap between an install and its hold to
+    /// police, because there is no second statement; there is no
+    /// receiver to check, because the hold is this install's own result
+    /// rather than a second expression naming a slot; and once the
+    /// seams pass it on to their caller, WHICH slot was filled stops
+    /// being a question a reader of the file has to answer — a hold
+    /// that has to outlive the branch cannot come from a slot declared
+    /// in it.
     ///
     /// The borrow is a reborrow of `&mut self`, so the slot is
     /// exclusively borrowed for as long as the hold lives. That is
@@ -1373,15 +1375,20 @@ impl LockSlot {
 /// What that buys, stated no wider than it is: inside the borrow, every
 /// one-line release stops compiling. Outside it, nothing does — and
 /// "undoing this takes two statements nobody writes by accident", which
-/// stood here, was false in the direction that costs money. Deleting the
-/// hold is ONE line, it compiles, and the run then releases the lock on
-/// the next assignment. That is why the holds are pinned by
-/// `every_place_the_lock_is_installed_takes_a_hold_of_it` rather than
-/// left to the compiler.
+/// stood here, was false in the direction that costs money for as long
+/// as the seams took the slot and kept the hold to themselves: deleting
+/// `run`'s hold was ONE green line.
+///
+/// It is not any more, and the compiler is what says so rather than a
+/// guard reading this file. Both seams RETURN their hold, `run` carries
+/// it out of the branch that made it, and the five `update` calls in
+/// stages 4-6 name it: discard it in the pattern and they are E0425,
+/// drop it and they are E0382.
 ///
 /// The `Drop` is required by
 /// `pins_its_borrow_to_the_end_of_scope::<LockHold>` below, because
 /// deleting it compiles and silently gives all of that up.
+#[derive(Debug)]
 pub struct LockHold<'a>(Option<&'a WithdrawalLock>);
 
 impl<'a> LockHold<'a> {

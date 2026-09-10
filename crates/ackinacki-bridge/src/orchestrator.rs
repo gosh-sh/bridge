@@ -382,11 +382,13 @@ pub async fn run(
     // `_`-prefixed but a real binding — `let _ = ..` would drop the guard
     // on the spot and the exclusion would silently disappear.
     let mut _withdrawal_lock = idempotency::LockSlot::empty();
-    let (an_tx_hash, bounce) = if dry_run {
+    let (an_tx_hash, bounce, _lock_held_to_the_end) = if dry_run {
         info!("stage 2/6: idempotency (skipped for --dry-run)");
         // Unreachable past the early return below; present only so both
-        // arms type-check.
-        ("<dry-run>".to_string(), bounce)
+        // arms type-check — the hold included: a dry run's slot is empty,
+        // and `hold` borrows the slot rather than its contents, so this
+        // arm has one to hand over like the other two.
+        ("<dry-run>".to_string(), bounce, _withdrawal_lock.hold())
     } else {
         // `preflight::run` built one of these from the same endpoint at
         // its first step, so reaching a failure here means the same
@@ -413,7 +415,7 @@ pub async fn run(
             // one the reservation returned, not the one peeked above.
             // Carrying the peek's forward here put back the exact
             // disagreement this seam exists to eliminate, one call along.
-            let (r, an_tx) = resume_recorded_burn(
+            let (r, an_tx, held) = resume_recorded_burn(
                 &state_dir,
                 &from,
                 &to,
@@ -422,7 +424,6 @@ pub async fn run(
                 p,
                 &mut _withdrawal_lock,
             )?;
-            let _held = _withdrawal_lock.hold();
             // On the line under the call, not under the paragraph. What
             // this covers is the rest of the branch, and what "covers"
             // means is that no statement in it can release the lock: the
@@ -437,7 +438,7 @@ pub async fn run(
             // next line compiled, and 221 + 16 stayed green — measured,
             // twice, before it went back.
             record = Some(r);
-            (an_tx, bounce)
+            (an_tx, bounce, held)
         } else {
             // A prior record with no `an_tx_hash` is the ambiguous case, and
             // it has to be classified HERE — before the prompt. `reserve`
@@ -515,7 +516,7 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let (r, decision) = reserve_and_take_the_lock(
+            let (r, decision, held) = reserve_and_take_the_lock(
                 &state_dir,
                 &from,
                 &to,
@@ -523,24 +524,23 @@ pub async fn run(
                 args.allow_retry,
                 &mut _withdrawal_lock,
             )?;
-            let _held = _withdrawal_lock.hold();
-            // On the very next line, and the seven-line paragraph that
-            // used to sit between them is why: an assignment placed in
-            // that gap released the lock with 221 + 16 green. Between an
-            // install and its hold the lock is this run's and nothing
-            // refuses to let go of it, so the gap is kept at zero rather
-            // than explained. `every_place_the_lock_is_installed_takes_
-            // a_hold_of_it` fails if a statement is ever put there.
-            //
-            // Before the match, so BOTH arms are covered. `Reuse` issues
-            // no permit — it is the "another run broadcast while this one
-            // preflighted, resume at capture" case, which is exactly when
-            // two runs are working the same identity — and `Send`'s
-            // permit borrow ends with its arm, leaving the tail of this
-            // branch on convention alone.
+            // `held` is the seam's OWN hold, handed back rather than
+            // taken here from the slot, and that is what closed a family
+            // of one-line edits three rounds could not: a slot declared
+            // beside this call and passed to the seam — under any name,
+            // including this one — is now E0597, because the hold has to
+            // outlive the branch it is made in and a local does not. The
+            // gap between an install and its hold is gone with it: there
+            // is no second statement to put anything between.
             record = Some(r);
 
-            match decision {
+            // The match, then the hold. `held` is BORROWED inside the
+            // arms — by the permit that spans the send, and by the
+            // `update` that records the hash — and moving it out of an
+            // arm while the permit still borrows it is E0505. Producing
+            // the branch's value here, one line below the match, is what
+            // gives those borrows somewhere to end.
+            let (an_tx, bounce) = match decision {
                 BurnDecision::Reuse(existing) => {
                     // `composed` is dropped here without being sent, which
                     // also drops the owner `KeyPair` it holds — the same
@@ -580,7 +580,7 @@ pub async fn run(
                     let permit = idempotency::BurnPermit::issue(
                         &state_dir,
                         &idempotency::key(&from, &to, &amount),
-                        &_held,
+                        &held,
                     )?;
                     info!(
                         locked = permit.holds_a_lock(),
@@ -612,7 +612,7 @@ pub async fn run(
                         // Reclassify, and put the hash where it can be read: this
                         // is exactly `BurnOutcomeUnknown` — sent, outcome not
                         // durably recorded.
-                        if let Err(e) = idempotency::update(&state_dir, r, &_held) {
+                        if let Err(e) = idempotency::update(&state_dir, r, &held) {
                             return Err(e.after_send(&format!(
                                 "the AN burn was broadcast as {}, and to resume you must write \
                                  that hash into the record's an_tx_hash and set status to \
@@ -623,18 +623,24 @@ pub async fn run(
                     }
                     (receipt.an_tx_hash, receipt.bounce)
                 },
-            }
+            };
+            (an_tx, bounce, held)
         }
     };
-
-    let _withdrawal_lock = _withdrawal_lock;
-    let _lock_held_to_the_end = _withdrawal_lock.hold();
-    // Both on the two lines directly under the branch, and the placement
-    // is the point: everything between the `};` above and the rebinding
-    // is a stretch where `_withdrawal_lock = LockSlot::empty()` still
-    // compiles, so that stretch is kept empty rather than explained.
-    // `the_settled_lock_is_rebound_before_anything_else_can_run` fails if
-    // a statement is ever put there.
+    // `_lock_held_to_the_end` comes OUT of the branch above rather than
+    // being taken from the slot under it, and the difference is the
+    // whole of what three rounds of guards were standing in for. The
+    // hold borrows `_withdrawal_lock` for as long as it lives, so the
+    // stretch that used to need policing — between the branch closing
+    // and a hold taken below it — has nothing in it to police: there is
+    // no window in which the slot is unborrowed, and no rebinding to
+    // insure the borrow against, because the borrow starts inside the
+    // branch and ends with `run`.
+    //
+    // What that costs to undo, measured: discard it in the pattern
+    // (`, _)`) and the five `update` calls below are E0425 ×5; drop it
+    // (`drop(_lock_held_to_the_end);`) and they are E0382. Either way
+    // the file does not compile, where before either was one green line.
     //
     // The lock is settled: whichever branch above ran, what this process
     // holds will not change again, and stages 4-6 run for up to ~101
@@ -644,29 +650,17 @@ pub async fn run(
     // told the record was left by one that already exited, which the
     // runbook turns into permission to delete it.
     //
-    // What the rebinding is, measured rather than argued: insurance
-    // against the borrow below it ENDING, and insurance against
-    // assignment only.
+    // What it still does NOT do, said plainly so the next round does not
+    // have to measure it again: a hold is a BORROW, and ending one
+    // releases nothing. `drop(_lock_held_to_the_end)` would leave the
+    // lock exactly where it is — in `_withdrawal_lock`, held by this
+    // process until the slot itself dies with `run`. What the borrow
+    // buys is that every edit which would empty or move that slot stops
+    // compiling while the run is still using it.
     //
-    // "The rebinding adds nothing while the hold is there" stood here and
-    // is false. The borrow ends two ways, not one: delete the hold — a
-    // line, which is how three holds have been lost so far — or drop it,
-    // `drop(_lock_held_to_the_end);`, which is a MOVE and which no
-    // borrow rule refuses. After either, every release below is E0384
-    // and nothing else is left to say so.
-    //
-    // What it does NOT do: a release ABOVE it still compiles, and no
-    // evasion that is not an assignment is touched — `drop(slot)` is
-    // caught by the borrow, not by this. Round 12 deleted it after
-    // measuring E0506 in a position where a hold was live, which is the
-    // one position where it cannot be seen to do anything.
-    //
-    // ABOVE the dry-run return, not below it. Placed below, the stretch
-    // between the burn branch closing and this line was covered by
-    // nothing: the branch's `_held` ends with the branch. A dry run has
-    // an empty slot, and `hold()` borrows the slot rather than its
-    // contents, so it takes a hold here too and the early return is
-    // unaffected.
+    // A dry run reaches here too, with an empty slot: `hold()` borrows
+    // the SLOT rather than its contents, so that arm has a hold to hand
+    // over like the other two and the early return below is unaffected.
 
     // Full `--dry-run`: stop before touching either chain. Returning a
     // stub success record keeps the output path uniform.
@@ -1130,43 +1124,42 @@ enum BurnDecision {
     Reuse(String),
 }
 
-/// Reserve this identity and take the withdrawal lock INTO `slot`.
+/// Reserve this identity, take the withdrawal lock into `slot`, and hand
+/// back the hold over it.
 ///
-/// The twin of [`resume_recorded_burn`], and it exists for that reason
-/// rather than for tidiness. The burn branch used to reserve and install
-/// inline, and nothing could then be asked, afterwards, WHICH slot the
-/// lock went into: two lines —
+/// The twin of [`resume_recorded_burn`], and the returned hold is the
+/// point of both. WHICH slot the lock went into was, for three rounds,
+/// a question only a grep could ask, and it was answered wrongly three
+/// times by the same one-line edit spelled three ways: a decoy declared
+/// inside the seam, a decoy declared beside the call under a different
+/// name, and a SHADOW of the run's own slot spelled identically —
 ///
 /// ```text
-/// let mut _decoy = idempotency::LockSlot::empty();
-/// let _held = _decoy.install(lock);
+/// let mut _withdrawal_lock = idempotency::LockSlot::empty();
+/// let (r, decision, held) = reserve_and_take_the_lock(.., &mut _withdrawal_lock)?;
 /// ```
 ///
-/// — put a real lock in a slot that dies at the branch's closing brace,
-/// with the whole suite green. `BurnPermit::issue` took the happy arm
-/// because the hold it was given did hold something; the burn went out;
-/// `_withdrawal_lock` was never filled, so the settled hold covering
-/// stages 4-6 held `None` and the run was invisible to a concurrent
-/// `probe_holder` for ~101 minutes. The resume branch had the same shape
-/// and was RED, because a seam can be called by a test that asserts what
-/// the slot holds when it returns.
+/// Each one put a real lock into a slot that dies at the branch's
+/// closing brace: `BurnPermit::issue` took the happy arm, the burn went
+/// out, the run's own slot was never filled, and stages 4-6 ran for
+/// ~101 minutes invisible to a concurrent `probe_holder`. Each one was
+/// green.
 ///
-/// So: one shape for both branches, and both have that test.
-fn reserve_and_take_the_lock(
+/// None of them compiles now, and no guard reads this file to say so.
+/// The hold borrows the slot, `run` carries it past the end of the
+/// branch, and a local declared inside that branch does not live long
+/// enough: E0597, at the argument itself. The property was never
+/// identity — it was LIFETIME, which is the one a type can hold.
+fn reserve_and_take_the_lock<'a>(
     state_dir: &Path,
     from: &FromAddress,
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
-    slot: &mut idempotency::LockSlot,
-) -> CliResult<(idempotency::Record, BurnDecision)> {
+    slot: &'a mut idempotency::LockSlot,
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::LockHold<'a>)> {
     let (record, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
-    // Bound rather than discarded: `install` hands the hold back, and
-    // what it covers here is the tail of this function. Nothing fallible
-    // is in that tail today, and the binding is what makes adding
-    // something to it safe rather than a silent change of protection.
-    let _held = slot.install(lock);
-    Ok((record, decision))
+    Ok((record, decision, slot.install(lock)))
 }
 
 /// Claim the identity for a withdrawal whose burn is ALREADY on the wire,
@@ -1197,46 +1190,47 @@ fn reserve_and_take_the_lock(
 /// `reserve` refuses that record; it just never saw it, because the file
 /// was gone.
 ///
-/// `hold` receives the withdrawal lock, and is the reason it is a
-/// parameter rather than a third element of the return tuple.
+/// `slot` receives the withdrawal lock, and the HOLD over it comes back
+/// as the third element of the tuple.
 ///
-/// Returned, the lock sat in a slot a caller could write `_` into. That
-/// compiles, passes clippy, passes every test, and drops the guard on the
-/// spot — `_` is not a binding, so it does not live to the end of the
-/// scope the way `_withdrawal_lock` does. `#[must_use]` does not reach
-/// inside a tuple pattern, and neither does
-/// `clippy::let_underscore_must_use`, which only sees `let _ = expr`. The
-/// run then walks into `burn::send` holding nothing, invisible to the
-/// liveness probe every recovery procedure in the runbook depends on.
+/// It was an out-parameter and nothing else for two rounds, on the
+/// argument that a returned lock sits in a slot a caller can write `_`
+/// into — true of an `AcquiredLock`, which is the lock itself, and the
+/// reason `AcquiredLock` is still passed inward. It is not true of a
+/// hold: `_` there ends a borrow and releases nothing, and what the
+/// caller must do with the hold is not "keep it" but "carry it past the
+/// end of this branch", which the type enforces and a `_` cannot fake.
 ///
-/// Writing through `hold` removes that slot. It does NOT make the lock
-/// unloseable, and the previous version of this paragraph said it did:
-/// `&mut None` at the call site discards it just as quietly, and so does
-/// any `= None`, `.take()` or `drop()` further down the run. What the
-/// out-parameter buys is one specific evasion closed and a call site a
-/// grep can pin.
+/// What that buys over the out-parameter alone: the slot handed in has
+/// to outlive the returned hold, so a slot declared beside the call —
+/// `&mut _decoy`, `&mut idempotency::LockSlot::empty()`, or a shadow
+/// spelling the run's own name — is E0597 rather than a green run
+/// holding a lock in a local that dies at the closing brace.
 ///
-/// The send is defended by something stronger, because that is where the
-/// money is: [`idempotency::BurnPermit`] borrows the lock across
-/// `burn::send`, so between the check and the broadcast the compiler
-/// refuses every one of those. This path never sends — it exists because
-/// a burn is already on the wire — so it keeps the weaker guarantee, and
-/// what the lock still buys here is the liveness answer a concurrent run
-/// gets while this one finishes capture, prove and submit.
+/// The send is defended by something stronger still, because that is
+/// where the money is: [`idempotency::BurnPermit`] borrows the lock
+/// across `burn::send`, so between the check and the broadcast the
+/// compiler refuses every release. This path never sends — it exists
+/// because a burn is already on the wire — so what the lock buys here is
+/// the liveness answer a concurrent run gets while this one finishes
+/// capture, prove and submit.
 ///
-/// It is stored before the first fallible step, so the caller holds it on
-/// the error paths too — on `Err` the run aborts and the kernel releases
-/// it, which is what should happen, and the record-restoring writes below
-/// happen under it either way.
-fn resume_recorded_burn(
+/// It is NOT stored before the first fallible step, and the sentence
+/// saying it was stood here for a round: `reserve_and_decide(..)?` runs
+/// above the install and every refusal it raises returns with the slot
+/// still empty. That is the correct behaviour — this run has no lock to
+/// hold on those paths, because it never got one — but the reason is
+/// that there is nothing to release, not that the caller is covered.
+/// The writes BELOW the install do happen under the hold.
+fn resume_recorded_burn<'a>(
     state_dir: &Path,
     from: &FromAddress,
     to: &ToAddress,
     amount: &UsdcAmount,
     allow_retry: bool,
     observed: &idempotency::Record,
-    hold: &mut idempotency::LockSlot,
-) -> CliResult<(idempotency::Record, String)> {
+    slot: &'a mut idempotency::LockSlot,
+) -> CliResult<(idempotency::Record, String, idempotency::LockHold<'a>)> {
     // Every refusal raised anywhere inside this function is a post-send
     // refusal, and this is the FIRST line of it — not just the `reserve`
     // further down. `reserve_and_decide` reaches four separate
@@ -1247,7 +1241,7 @@ fn resume_recorded_burn(
     // wire.
     let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
         .map_err(|e| resumed_refusal(e, observed))?;
-    let _held = hold.install(lock);
+    let held = slot.install(lock);
     // Held for the rest of THIS function too, not only by the caller
     // once it returns. Everything below — the restoring write, the
     // second reservation — runs on an identity whose burn is already on
@@ -1263,7 +1257,7 @@ fn resume_recorded_burn(
         // operator who followed the exit-3 remedy and wrote the real hash
         // into the record in between is the case that makes them differ,
         // and it is the case the remedy exists for.
-        BurnDecision::Reuse(h) => Ok((r, h)),
+        BurnDecision::Reuse(h) => Ok((r, h, held)),
         // A FRESH reservation for an identity this run has just seen a
         // burn recorded against: the record was removed in between.
         //
@@ -1292,7 +1286,7 @@ fn resume_recorded_burn(
                 key: r.key.clone(),
                 ..observed.clone()
             };
-            idempotency::update(state_dir, &restored, &_held).map_err(|e| {
+            idempotency::update(state_dir, &restored, &held).map_err(|e| {
                 e.after_send(&format!(
                     "the AN burn {} is on the wire — it was recorded before this run started, and \
                      its record has since been deleted",
@@ -1352,7 +1346,7 @@ fn resume_recorded_burn(
                     source: None,
                 });
             };
-            Ok((reserved, an_tx))
+            Ok((reserved, an_tx, held))
         },
     }
 }
@@ -2800,405 +2794,6 @@ mod tests {
     }
 
     #[test]
-    fn every_place_the_lock_is_installed_takes_a_hold_of_it() {
-        // The holds ARE the protection, and nothing referenced them.
-        // Deleting one or two ships green — silently reverting to round
-        // 8's coverage, or round 9's — because the borrow they open is
-        // the only thing that fails, and it fails only where somebody
-        // later releases the lock. Deleting all three is caught by
-        // dead_code, which is the harmless edit; the damaging one was
-        // invisible.
-        //
-        // Three holds, and each one covers a stretch with something
-        // fallible in it:
-        //   * after the burn branch's reservation, before the `match` so the `Reuse`
-        //     arm is covered too,
-        //   * inside the resume seam, across its own body,
-        //   * once the branch has closed, above the dry-run return — the ~101 minutes
-        //     of stages 4-6.
-        //
-        // The resume branch's hold is one of the three. Round 13 deleted
-        // it, on the argument that the two statements under it are
-        // infallible and so nothing there could exit holding nothing —
-        // the wrong question. A hold does not defend against the
-        // statements that ARE in its region; it makes the ones that
-        // could be ADDED there fail to compile. A release on the next
-        // line compiled, with 221 + 16 green, and round 14 put it back.
-        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
-        let lines: Vec<&str> = production.lines().collect();
-
-        // THREE properties, because keying on either construct alone has
-        // now been wrong in both directions.
-        //
-        // Counting holds was wrong: a fourth install taking NO hold left
-        // the count unchanged and passed, while one taking a hold pushed
-        // it over and failed — the dangerous edit invisible, the safe one
-        // rejected.
-        //
-        // Keying on installs was wrong the other way: deleting an install
-        // deletes its own check. `let _ = lock;` at the burn branch
-        // removed the install, the hold, and the guard together, and
-        // 219 + 16 stayed green. (`AcquiredLock` is `#[must_use]` now, so
-        // clippy catches that one first — this is the second line of
-        // defence, not the first.)
-        //
-        // So: every acquisition is followed IMMEDIATELY by a hold, every
-        // hold is real code rather than prose, and the two holds covering
-        // windows with no acquisition above them are named. That last
-        // list is the part that rots; it is checked by ANCHOR TEXT below,
-        // so a rename fails here rather than silently emptying the list.
-        let is_code = |l: &&str| !l.trim_start().starts_with("//");
-        let indent = |l: &str| l.len() - l.trim_start().len();
-
-        // Every line after which the lock is this run's, WITH the slot it
-        // went into: the two `.install(` calls, and the statement that
-        // hands the seam the slot it fills — the resume branch acquires
-        // through the seam and has no `.install(` of its own, which is
-        // how its hold came to be deleted as a passenger.
-        //
-        // The SLOT is carried because the hold's receiver has to be
-        // checked against it. `let _decoy = LockSlot::empty();` beside
-        // the real one, and `let _held = _decoy.hold();` under the
-        // install, satisfied every other property this test had — a
-        // `let`, a name, the right indent, a `.hold()` on the line — and
-        // held the decoy while the run's own slot stayed free. Measured
-        // green.
-        // TWO acquisition shapes, and each is checked for the one fact
-        // its own form leaves open.
-        //
-        // An `.install(` sits inside a seam, and what a type cannot say
-        // is WHICH slot it fills. `let _held = _decoy.install(lock);`
-        // puts a real lock into a local that dies at the branch's
-        // closing brace; the hold it hands back does hold something, so
-        // `BurnPermit::issue` takes the happy arm and the burn goes out,
-        // while the slot the run actually carries was never filled and
-        // the settled hold covers `None` for the ~101 minutes of stages
-        // 4-6. Measured green after the receiver check was dropped as
-        // "something the type now says" — it does not: `install` is a
-        // method, and a method has a receiver.
-        //
-        // So the receiver has to be the slot the function was HANDED,
-        // read off its own signature.
-        let mut bindings: Vec<(usize, String)> = Vec::new();
-        let plain_name = |name: &str| {
-            !name.starts_with("mut ")
-                && name != "_"
-                && !name.starts_with('(')
-                && !name.contains(':')
-        };
-        for (n, line) in lines.iter().enumerate() {
-            if !is_code(line) || !line.contains(concat!(".ins", "tall(")) {
-                continue;
-            }
-            let (name, expr) = line
-                .trim()
-                .strip_prefix("let ")
-                .and_then(|rest| rest.split_once(" = "))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "orchestrator.rs:{}: the lock becomes this run's here and nothing BINDS \
-                         the hold: {}. A hold inside braces, inside `drop(…)` or inside an \
-                         assertion is a borrow that ends on the same line",
-                        n + 1,
-                        line.trim(),
-                    )
-                });
-            assert!(
-                plain_name(name),
-                "orchestrator.rs:{}: `{}` is not a plain named binding. `_` drops on the spot, a \
-                 pattern may bind nothing, and `mut` lets a later assignment drop the hold and \
-                 take another",
-                n + 1,
-                line.trim(),
-            );
-            let receiver = expr
-                .split_once(concat!(".ins", "tall("))
-                .expect("the line contains it")
-                .0;
-            let opens = lines[..n]
-                .iter()
-                .rposition(|l| l.starts_with("fn ") || l.starts_with("pub "))
-                .unwrap_or_else(|| panic!("orchestrator.rs:{}: no enclosing item", n + 1));
-            let signature = lines[opens..n].join("\n");
-            assert!(
-                signature.contains(&format!("{receiver}: &mut ")),
-                "orchestrator.rs:{}: the lock is installed into `{receiver}`, which is not a slot \
-                 this function was handed by `&mut`. A local slot dies with the branch, and its \
-                 hold vouches for a lock the run does not carry",
-                n + 1,
-            );
-            bindings.push((n, name.to_string()));
-        }
-
-        // A seam call: the slot goes in by `&mut` and what comes back is
-        // a `Result`, so the branch takes its own hold on the line under
-        // the call.
-        //
-        // This hold is the one thing here with no type behind it:
-        // deleting it compiles, and only this test objects. It is not an
-        // oversight, and the honest form was measured — a hold tied to
-        // the `&mut` the seam was given, outliving the branch, makes the
-        // immutable rebinding below the branch a move-out-of-borrowed
-        // (E0505). Written down here so the next round does not derive
-        // it again. Found by the ARGUMENT rather than by the callee's
-        // name — there are two seams now, and a third would otherwise be
-        // acquired with nothing watching.
-        //
-        // The slot is compared against THE RUN'S OWN, read from the
-        // declaration at the top of `run`, and not against whatever the
-        // line under validation happens to name. Reading it off the line
-        // is how the decoy walked up one frame: the seam stopped
-        // accepting `_decoy.install(..)`, so the next edit declared the
-        // decoy in `run`, handed the seam `&mut _decoy` and took a hold
-        // of `_decoy` — and every guard agreed with itself. The same
-        // ~101-minute window, one stack frame higher.
-        let run_slot = lines
-            .iter()
-            .find_map(|l| {
-                l.trim()
-                    .strip_prefix("let mut ")
-                    .and_then(|rest| rest.split_once(" = idempotency::LockSlot::"))
-                    .map(|(name, _)| name)
-            })
-            .expect(
-                "`run` no longer declares its withdrawal-lock slot, so there is nothing to \
-                 compare a seam's argument against",
-            );
-        let mut seam_calls = 0;
-        for (n, line) in lines.iter().enumerate() {
-            let Some(slot) = line.trim().strip_prefix("&mut ") else {
-                continue;
-            };
-            if !is_code(line) {
-                continue;
-            }
-            let slot = slot.trim_end_matches(',');
-            assert_eq!(
-                slot,
-                run_slot,
-                "orchestrator.rs:{}: a seam is handed `{slot}`, and the slot this run carries is \
-                 `{run_slot}`. A local slot dies with the branch, and every hold taken of it \
-                 vouches for a lock the run does not have",
-                n + 1,
-            );
-            seam_calls += 1;
-            // Bounded. Unbounded, a reshaped argument list walks to the
-            // next `)?;` anywhere below.
-            let end = (n..(n + 20).min(lines.len()))
-                .find(|&m| lines[m].trim() == ")?;")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "orchestrator.rs:{}: the call taking `&mut {slot}` does not close with \
-                         `)?;` within twenty lines, so this guard cannot tell where the \
-                         acquisition ends",
-                        n + 1,
-                    )
-                });
-            let next = (end + 1..lines.len())
-                .find(|&m| !lines[m].trim().is_empty() && is_code(&&*lines[m]))
-                .expect("something follows the acquisition");
-            let statement = lines[next];
-            assert!(
-                indent(statement) == indent(lines[end]),
-                "orchestrator.rs:{}: the seam hands the lock back here and the next statement is \
-                 at another indent — orchestrator.rs:{}: {}. Everything between the two compiles \
-                 with the lock released and nothing to say so",
-                end + 1,
-                next + 1,
-                statement.trim(),
-            );
-            let (name, expr) = statement
-                .trim()
-                .strip_prefix("let ")
-                .and_then(|rest| rest.split_once(" = "))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "orchestrator.rs:{}: the seam has filled `{slot}` and the next statement \
-                         does not BIND a hold — orchestrator.rs:{}: {}",
-                        end + 1,
-                        next + 1,
-                        statement.trim(),
-                    )
-                });
-            assert_eq!(
-                expr,
-                format!("{slot}.{}", concat!("hold", "();")),
-                "orchestrator.rs:{}: this hold is not a hold OF THE SLOT the seam filled on \
-                 orchestrator.rs:{}. A hold of anything else leaves that slot free for the whole \
-                 stretch this line appears to cover",
-                next + 1,
-                end + 1,
-            );
-            assert!(
-                plain_name(name),
-                "orchestrator.rs:{}: `{}` is not a plain named binding",
-                next + 1,
-                statement.trim(),
-            );
-            bindings.push((next, name.to_string()));
-        }
-        // A scan that matched nothing is not a pass. The `&mut` argument
-        // is on its own line only because `rustfmt` puts it there, so
-        // merging the argument list onto one line — and deleting the
-        // caller-side hold with it — left this loop iterating zero times
-        // with the suite green, and the formatter as the only backstop.
-        // The `.expect` that used to say this went out with the callee's
-        // name when the loop was generalised.
-        assert_eq!(
-            seam_calls, 2,
-            "`run` hands its slot to two seams — the burn branch and the resume branch — and this \
-             scan found {seam_calls}. A seam call whose arguments sit on one line is invisible to \
-             it, and so is the hold underneath that call",
-        );
-
-        // The one hold with no acquisition above it to name its slot, so
-        // there is nothing to compare it against but the text of the
-        // whole statement. Where it sits — directly under the immutable
-        // rebinding — is
-        // `the_settled_lock_is_rebound_before_anything_else_can_run`'s
-        // business; that it exists at all, and holds the run's own slot,
-        // is this one's.
-        const SETTLED: &str = concat!(
-            "let _lock_held",
-            "_to_the_end = _withdrawal_lock.",
-            "hold();"
-        );
-        let settled = lines
-            .iter()
-            .position(|l| l.trim() == SETTLED)
-            .unwrap_or_else(|| {
-                panic!(
-                    "stages 4-6 no longer take a hold of this run's own slot. The statement this \
-                     guard requires, exactly: `{SETTLED}`"
-                )
-            });
-        bindings.push((settled, concat!("_lock_held", "_to_the_end").to_string()));
-
-        // ABOVE the dry-run return, by ORDER and not by distance. A hold
-        // taken below it covers nothing a dry run skips and everything a
-        // real run pays for.
-        //
-        // This was "some hold within forty lines of the dry-run anchor",
-        // and forty was the distance on the day it was written plus one:
-        // the settled hold sat thirty-nine lines above the anchor, so any
-        // two inserted lines failed the test and an edited comment failed
-        // it too. It also took the credit for catching a `drop::<T>` in
-        // the tail — which moved the anchor rather than being forbidden —
-        // while the rule that forbids drops was walked past with a
-        // turbofish.
-        let dry_run_return = lines
-            .iter()
-            .position(|l| {
-                l.contains(concat!(
-                    "// Full `--dry",
-                    "-run`: stop before touching either chain."
-                ))
-            })
-            .expect("the dry-run early return is gone, and with it the boundary this hold sits on");
-        assert!(
-            settled < dry_run_return,
-            "the settled hold is at orchestrator.rs:{} and the dry-run return at \
-             orchestrator.rs:{}: the ~101 minutes of stages 4-6 are below the hold that is \
-             supposed to cover them",
-            settled + 1,
-            dry_run_return + 1,
-        );
-
-        // BOTH seams acquire inside their own bodies, so each one's
-        // hold is among the bindings checked above rather than a fourth
-        // nobody walks. Named, because this is the part that rots: a
-        // seam that stopped installing would otherwise empty the scan
-        // silently.
-        for seam in [
-            concat!("fn resume_recorded", "_burn("),
-            concat!("fn reserve_and_take", "_the_lock("),
-        ] {
-            let opens = lines
-                .iter()
-                .position(|l| l.contains(seam))
-                .unwrap_or_else(|| panic!("the seam `{seam}` is gone"));
-            let closes = (opens + 1..lines.len())
-                .find(|&n| lines[n] == "}")
-                .unwrap_or(lines.len());
-            assert!(
-                bindings.iter().any(|(at, _)| (opens..closes).contains(at)),
-                "nothing inside `{seam}` takes a hold any more, so everything it does after the \
-                 install runs on convention",
-            );
-        }
-
-        // Nothing MOVES those bindings — ONE rule, and no list of
-        // spellings.
-        //
-        // A shared borrow is not a move, and `idempotency::update` takes
-        // one: `&_lock_held_to_the_end` at five sites in stages 4-6 and
-        // `&_held` in the two branches. That is what makes the settled
-        // hold load-bearing rather than decorative — deleting it is
-        // E0425 in five places, and it keeps the slot borrowed past the
-        // last of them, so `drop(_withdrawal_lock)` under it is E0505
-        // even with `impl Drop for LockHold` deleted. Which was the
-        // hole: that impl and the `const _` that requires it could be
-        // removed TOGETHER, leaving a `dead_code` warning as the only
-        // trace, and this crate is not built with `-D warnings`.
-        //
-        // `drop(_held)` is a MOVE, not an assignment, so neither the
-        // rebinding's E0384 nor any borrow rule stops it. The version of
-        // this check that matched the text `drop(_held)` was walked past
-        // with `drop::<LockHold>(_held)`; `std::mem::drop`, a `let _ =
-        // _held;` and passing it to anything at all are the same move
-        // spelled three more ways. Two lines that read as tidying took
-        // the flock off for the whole of stages 4-6 with the suite green.
-        //
-        // A hold is written once and never mentioned again. Everything
-        // after that is the compiler's: while one is live, moving the
-        // slot out from under it is E0505 and assigning over it is
-        // E0506, so `drop(_withdrawal_lock)` on its own does not compile
-        // and does not need to be listed here.
-        //
-        // Word boundaries, because `_lock_held_to_the_end` contains
-        // `_held`.
-        let moves = |line: &str, ident: &str| {
-            let bytes = line.as_bytes();
-            let is_word =
-                |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
-            line.match_indices(ident).any(|(i, _)| {
-                let before = i.checked_sub(1).and_then(|j| bytes.get(j));
-                // A whole word, and not one this line borrows.
-                !is_word(before) && !is_word(bytes.get(i + ident.len())) && before != Some(&b'&')
-            })
-        };
-        // The TRAILING comment comes off first, and the exemption is a
-        // borrow at the mention rather than an ampersand somewhere on
-        // the line. Both were holes, and the second was a hole in the
-        // fix for the first:
-        //
-        //   drop(_held); // the record write is done; see &_held above
-        //
-        // `is_code` only drops lines that START with `//`, and
-        // `contains("&_held")` found the ampersand in the comment. One
-        // rule with a spelling in it is still a spelling.
-        fn code_of(line: &str) -> &str {
-            match line.split_once("//") {
-                Some((code, _)) => code,
-                None => line,
-            }
-        }
-        let moved: Vec<String> = lines
-            .iter()
-            .enumerate()
-            .filter(|(n, l)| is_code(l) && !bindings.iter().any(|(at, _)| at == n))
-            .filter(|(_, l)| bindings.iter().any(|(_, name)| moves(code_of(l), name)))
-            .map(|(n, l)| format!("orchestrator.rs:{}: {}", n + 1, l.trim()))
-            .collect();
-        assert!(
-            moved.is_empty(),
-            "a hold is bound once and afterwards only ever borrowed; every one of these moves it, \
-             which ends a borrow the compiler would otherwise keep open to the end of the scope: \
-             {moved:#?}",
-        );
-    }
-
-    #[test]
     fn no_refusal_this_module_raises_tells_an_operator_to_delete_the_record() {
         // The third attempt at holding this text to anything, and the
         // first that is not a substring list.
@@ -3698,88 +3293,6 @@ mod tests {
             aborts.is_empty(),
             "exit 101 is not one of this CLI's exit codes, and half of this file runs after the \
              USDC has left the multisig: {aborts:#?}",
-        );
-    }
-
-    #[test]
-    fn the_settled_lock_is_rebound_before_anything_else_can_run() {
-        // The gap between the burn/resume choice closing and the first
-        // statement under it is the one stretch of `run` where the
-        // withdrawal lock has an owner and no defender: the branches'
-        // holds have ended with their branches, and the settled hold has
-        // not been taken yet. One assignment there —
-        // `_withdrawal_lock = LockSlot::empty()` — released it for the
-        // remaining ~101 minutes with 220 + 16 green and clippy at zero.
-        //
-        // The rebinding closes everything BELOW it (E0384). Nothing
-        // closes what is above it, so what has to be true is that there
-        // is nothing above it: no code between the `};` and the
-        // rebinding. That is the property checked here, rather than the
-        // rebinding's mere presence — a rebinding pushed twenty lines
-        // down by a plausible-looking statement is the failure this is
-        // for.
-        let production = production_source("orchestrator.rs", include_str!("orchestrator.rs"));
-        let lines: Vec<&str> = production.lines().collect();
-
-        let choice = lines
-            .iter()
-            .position(|l| l.contains(concat!("let (an_tx_hash, bounce) = ", "if dry_run {")))
-            .expect("`run` no longer opens the burn/resume choice — this guard cannot be verified");
-        let rebinding = lines
-            .iter()
-            .position(|l| l.trim() == concat!("let _withdrawal_lock = _", "withdrawal_lock;"))
-            .expect(
-                "the immutable rebinding is gone, and with it the insurance against the settled \
-                 hold below it being deleted: E0506 needs a live borrow, and deleting the hold is \
-                 what removes it",
-            );
-        // Searched only as far as the rebinding, and reported as a brace
-        // problem when it is one. Unbounded, `find` walked past a
-        // reshaped `};` to the next exact match — 200 lines further down
-        // — and the run then failed on `rebinding > closes` with a
-        // sentence about the rebinding, sending the reader to the one
-        // thing that had not been touched.
-        let closes = (choice..rebinding)
-            .find(|&n| lines[n] == "    };")
-            .unwrap_or_else(|| {
-                panic!(
-                    "no `    }};` between orchestrator.rs:{} and the rebinding at \
-                     orchestrator.rs:{}. The burn/resume choice still has to close somewhere in \
-                     there; if its brace was reshaped or re-indented, this guard cannot tell \
-                     where the window begins",
-                    choice + 1,
-                    rebinding + 1,
-                )
-            });
-
-        let between: Vec<String> = lines[closes + 1..rebinding]
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
-            .map(|(n, l)| format!("orchestrator.rs:{}: {}", closes + 2 + n, l.trim()))
-            .collect();
-        assert!(
-            between.is_empty(),
-            "every one of these runs while the withdrawal lock is undefended, and an assignment \
-             among them releases it for the rest of the run without a compiler error: {between:?}",
-        );
-
-        // And the hold has to follow the rebinding, not precede it: taken
-        // first, its borrow makes the rebinding a move-out-of-borrowed
-        // error, which is the shape that got the rebinding deleted the
-        // last time.
-        let settled = lines
-            .iter()
-            .position(|l| {
-                l.trim()
-                    .starts_with(concat!("let _lock_held", "_to_the_end = "))
-            })
-            .expect("stages 4-6 no longer take a hold at all");
-        assert_eq!(
-            settled,
-            rebinding + 1,
-            "the settled hold sits on the line directly under the rebinding; anything between \
-             them is back inside the window this guard exists to keep empty",
         );
     }
 
@@ -4445,7 +3958,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut slot = idempotency::LockSlot::empty();
 
-        let (record, decision) = reserve_and_take_the_lock(
+        // The hold is dropped on the spot — `_`, not `_held` — and that
+        // is what lets the line below read the slot at all: the hold
+        // reborrows the slot exclusively, so `slot.is_held()` under a
+        // live one is E0502. Dropping it ends the BORROW and not the
+        // lock, which is the whole distinction this test is about: the
+        // lock is in the caller's slot afterwards either way.
+        let (record, decision, _) = reserve_and_take_the_lock(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -4481,7 +4000,13 @@ mod tests {
         let observed = burned_record(dir.path(), &hash);
 
         let mut lock = idempotency::LockSlot::empty();
-        let (r, _an_tx) = resume_recorded_burn(
+        // The hold is dropped on the spot — `_`, not `_held` — and that
+        // is what lets the line below read the slot at all: the hold
+        // reborrows the slot exclusively, so `slot.is_held()` under a
+        // live one is E0502. Dropping it ends the BORROW and not the
+        // lock, which is the whole distinction this test is about: the
+        // lock is in the caller's slot afterwards either way.
+        let (r, _an_tx, _) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
@@ -4535,14 +4060,15 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
 
-        let (restored, _an_tx) = resume_recorded_burn(
+        let mut slot = idempotency::LockSlot::empty();
+        let (restored, _an_tx, _held) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &r,
-            &mut idempotency::LockSlot::empty(),
+            &mut slot,
         )
         .expect("the burn is known; the run must not be stranded");
 
@@ -4586,14 +4112,15 @@ mod tests {
         r.an_tx_hash = Some(real.clone());
         idempotency::update(dir.path(), &r, &idempotency::LockSlot::empty().hold()).unwrap();
 
-        let (rec, an_tx) = resume_recorded_burn(
+        let mut slot = idempotency::LockSlot::empty();
+        let (rec, an_tx, _held) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut idempotency::LockSlot::empty(),
+            &mut slot,
         )
         .expect("a recorded burn resumes");
         assert_eq!(
@@ -4682,14 +4209,15 @@ mod tests {
                 .unwrap();
         std::fs::remove_file(idempotency::record_path(dir.path(), &r.key)).unwrap();
 
-        let (rec, an_tx) = resume_recorded_burn(
+        let mut slot = idempotency::LockSlot::empty();
+        let (rec, an_tx, _held) = resume_recorded_burn(
             dir.path(),
             &seam_from(),
             &seam_to(),
             &UsdcAmount(1_000_000),
             true,
             &observed,
-            &mut idempotency::LockSlot::empty(),
+            &mut slot,
         )
         .expect("with the flag, a restored record resumes");
         assert_eq!(an_tx, hash);

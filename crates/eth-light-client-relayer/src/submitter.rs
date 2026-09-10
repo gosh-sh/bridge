@@ -33,6 +33,8 @@ pub trait AnSubmitter: Send + Sync {
         -> Result<SubmitOutcome, RelayerError>;
 
     /// Re-send an already-proven hash to `USDCBridge` (`rePushAnchor`).
+    /// `block_hash` is Ethereum byte order, like everything else in this
+    /// crate; [`anchor_key_hex`] re-packs it at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
     /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors`
@@ -58,6 +60,19 @@ pub fn le_word_to_uint256_hex(word: &[u8; 32]) -> String {
     let mut be = *word;
     be.reverse();
     format!("0x{}", hex::encode(be))
+}
+
+/// Ethereum-order block hash → the anchor key `EthBeaconLightClient` stores.
+///
+/// The step circuit splits a 32-byte hash with `node_hi_lo`, which reads each
+/// 16-byte half little-endian, and the contract keeps `(hi << 128) | lo`. So a
+/// hash an explorer prints as `0xaf0919eb…` is keyed as `0xa3e073c2…`, and
+/// `rePushAnchor` (like every `_provenEthSlot` lookup) speaks that word.
+pub fn anchor_key_hex(block_hash: &[u8; 32]) -> String {
+    let mut key = *block_hash;
+    key[..16].reverse();
+    key[16..].reverse();
+    format!("0x{}", hex::encode(key))
 }
 
 pub struct MockAnSubmitter {
@@ -281,6 +296,42 @@ mod set_committee_tests {
             le_word_to_uint256_hex(&w),
             format!("0x{}2a", "00".repeat(31))
         );
+    }
+
+    /// `rePushAnchor` must speak the same word `submitUpdate` stored, so the
+    /// key is rebuilt here from the step public inputs the contract decodes:
+    /// words 6 and 7 are the hi/lo halves, recombined as `(hi << 128) | lo`.
+    #[test]
+    fn anchor_key_matches_step_public_inputs() {
+        let mut hash = [0u8; 32];
+        for (i, b) in hash.iter_mut().enumerate() {
+            *b = (i as u8) + 1;
+        }
+        let root = format!("0x{}", "11".repeat(32));
+        let json = format!(
+            r#"{{"data":{{
+              "attested_header":{{"beacon":{{"slot":"9","state_root":"{root}"}}}},
+              "finalized_header":{{
+                "beacon":{{"slot":"8","state_root":"{root}"}},
+                "execution":{{"block_hash":"0x{}"}}
+              }},
+              "sync_aggregate":{{"sync_committee_bits":"0x{}01"}}
+            }}}}"#,
+            hex::encode(hash),
+            "00".repeat(63)
+        );
+        let update = crate::types::parse_finality_update(&json).unwrap();
+        let (blob, _) = crate::types::pack_step_public_inputs(&update, [0u8; 32]);
+        let word = |i: usize| -> [u8; 32] { blob[i * 32..(i + 1) * 32].try_into().unwrap() };
+        // Each half occupies the low 16 bytes of its uint256 — the last 32 hex
+        // characters — and hi sits above lo in the key.
+        let hi = le_word_to_uint256_hex(&word(6));
+        let lo = le_word_to_uint256_hex(&word(7));
+        assert_eq!(
+            anchor_key_hex(&hash),
+            format!("0x{}{}", &hi[34..], &lo[34..])
+        );
+        assert_ne!(anchor_key_hex(&hash), format!("0x{}", hex::encode(hash)));
     }
 
     #[tokio::test]
@@ -554,7 +605,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
         self.call(
             "rePushAnchor",
-            json!({ "blockHash": format!("0x{}", hex::encode(block_hash)) }),
+            json!({ "blockHash": anchor_key_hex(&block_hash) }),
         )
         .await
     }

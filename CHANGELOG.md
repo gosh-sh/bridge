@@ -72,6 +72,24 @@ here and how versions are assigned.
 
 ### Fixed
 
+- `submitAncestry` and `rePushAnchor` were rejected by the light client
+  (compute phase, exit 252) because two byte orders were in play. The step
+  circuit splits a hash with `node_hi_lo` — each 16-byte half read
+  little-endian — so `submitUpdate` keys an anchor as
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
+  holds and what the deposit public inputs carry. Keccak in the VM returns
+  Ethereum byte order, so `submitAncestry` looked up
+  `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
+  `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
+  order. `submitAncestry` now re-packs through `_anchorKey` where hashes meet
+  the store (parent links are still compared in Ethereum order), and the
+  daemon converts with `anchor_key_hex`. Until this landed only the epoch
+  checkpoint was anchored, 1 block of 32, and a deposit in any other block
+  needed the owner's `setAcceptedBlockHash`. Observed on shellnet
+  (2026-09-10); ancestry had never been run live before. No migration: every
+  hash already stored came from `submitUpdate` and is already keyed right.
+  `EthBeaconLightClient_rotate_decider.patch` regenerated.
+
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset
   `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the

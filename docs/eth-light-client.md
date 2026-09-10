@@ -202,6 +202,15 @@ deposits.
 The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) emits
 `AnchorPushBounced` and the daemon retries with `rePushAnchor` on the next accepted update.
 
+**Anchor keys are not Ethereum byte order.** The step circuit splits a 32-byte hash with
+`node_hi_lo`, which reads each 16-byte half little-endian, so the contract keys everything by
+`(LE(h[0..16]) << 128) | LE(h[16..32])` — the same word the bridge holds and the deposit public
+inputs carry. A block explorer's `0xaf0919eb…` is stored as `0xa3e073c2…`. Keccak inside the VM
+returns Ethereum order, so `submitAncestry` re-packs through `_anchorKey` before touching
+`_provenEthSlot`, and the daemon re-packs through `anchor_key_hex` before calling `rePushAnchor`.
+Calling either with the explorer's order silently misses the map: `ERR_UNKNOWN_CHECKPOINT` /
+`ERR_NOT_PROVEN` (compute phase, exit 252).
+
 `finalizeDeposit` on `USDCBridge` is unchanged: it still reads `_acceptedBlockHash`. Only the
 writer of that map changes.
 

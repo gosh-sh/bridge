@@ -8,8 +8,6 @@ Written for the people who deploy and run the bridge, not for the people who
 wrote it. See the changelog policy in [AGENTS.md](AGENTS.md) for what belongs
 here and how versions are assigned.
 
-## [Unreleased]
-
 <!--
 Add entries here, grouped under the headings below, most disruptive first.
 Drop a heading if it has no entries. Do not add a version number — a human

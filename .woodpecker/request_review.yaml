@@ -5,9 +5,15 @@
 # CHANGES_REQUESTED) are re-requested — new commits make that verdict stale.
 # Reviewers whose request is still pending are left alone so that every push
 # does not spam them. Drafts are skipped; a PR taken out of draft is picked up
-# on its next commit.
+# on its next commit. Updating the branch from its base branch is skipped too.
 #
-# Secrets used (create them on builder.gosh.sh for this repo):
+# Everything on the GitHub side goes through GraphQL. REST and GraphQL have
+# separate hourly budgets, and the REST one is already shared with Woodpecker
+# itself — it reads this config with the token of whoever connected the repo,
+# and reports "pipeline definition not found" once that budget runs out.
+#
+# Secrets used (create them on builder.gosh.sh for this repo, and tick the
+# `pull_request` event on each one, otherwise they arrive empty):
 #   REVIEW_GH_TOKEN        — classic PAT, scope `repo` (this repository is
 #                            private, `public_repo` is not enough); its account
 #                            needs Write access to gosh-sh/bridge
@@ -34,18 +40,50 @@ steps:
         PR="$CI_COMMIT_PULL_REQUEST"
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
 
-        # Which account the token belongs to, and what it may do here. A token
-        # without write access fails at the very last call, after the log already
-        # looks healthy — so state it up front.
-        echo "PR:    #$PR in $REPO"
-        echo "Token: $(gh api user --jq '.login' 2>/dev/null || echo 'not a user token / unauthenticated')"
-        echo "Perms: $(gh api "repos/$REPO" --jq '.permissions | tojson' 2>/dev/null || echo 'repo not visible to this token')"
+        # One query for every input the decision needs, flattened to one value per
+        # line so that no jq binary is required to take it apart afterwards.
+        gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
+          query($owner: String!, $name: String!, $pr: Int!) {
+            viewer { login }
+            repository(owner: $owner, name: $name) {
+              viewerPermission
+              pullRequest(number: $pr) {
+                id
+                isDraft
+                baseRefName
+                commits(last: 1) { nodes { commit { parents(first: 10) { nodes { oid } } } } }
+                latestOpinionatedReviews(first: 50) { nodes { state author { ... on User { login id } } } }
+                reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }
+              }
+            }
+          }' --jq '
+          .data as $d | $d.repository.pullRequest as $pr |
+          [ $d.viewer.login,
+            $d.repository.viewerPermission,
+            ($pr.isDraft | tostring),
+            $pr.id,
+            $pr.baseRefName,
+            ([$pr.commits.nodes[0].commit.parents.nodes[].oid] | join(" ")),
+            ([$pr.latestOpinionatedReviews.nodes[]
+                | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                | select(.author.id != null)
+                | "\(.author.login)=\(.author.id)"] | join(" ")),
+            ([$pr.reviewRequests.nodes[].requestedReviewer.login] | join(" "))
+          ] | .[]' >/tmp/pr.txt
 
-        gh pr view "$PR" -R "$REPO" --json isDraft,headRefOid,baseRefName \
-          --jq '.isDraft, .headRefOid, .baseRefName' >/tmp/pr.txt
-        IS_DRAFT=$(sed -n 1p /tmp/pr.txt)
-        HEAD_SHA=$(sed -n 2p /tmp/pr.txt)
-        BASE=$(sed -n 3p /tmp/pr.txt)
+        TOKEN_USER=$(sed -n 1p /tmp/pr.txt)
+        PERMISSION=$(sed -n 2p /tmp/pr.txt)
+        IS_DRAFT=$(sed -n 3p /tmp/pr.txt)
+        PR_ID=$(sed -n 4p /tmp/pr.txt)
+        BASE=$(sed -n 5p /tmp/pr.txt)
+        PARENTS=$(sed -n 6p /tmp/pr.txt)
+        VERDICTS=$(sed -n 7p /tmp/pr.txt)
+        PENDING=$(sed -n 8p /tmp/pr.txt)
+
+        # A token without write access only fails at the mutation, by which point
+        # the log already looks healthy — so state whose token this is up front.
+        echo "PR:    #$PR in $REPO"
+        echo "Token: $TOKEN_USER ($PERMISSION on this repository)"
 
         if [ "$IS_DRAFT" = "true" ]; then
           echo "PR #$PR is a draft — nothing to do."
@@ -54,36 +92,37 @@ steps:
 
         # Merging the base branch into the PR adds no work to review, so it must
         # not disturb the reviewers. Detected structurally rather than by commit
-        # message: a merge commit one of whose merged-in parents is already an
-        # ancestor of the base branch.
-        gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.parents[].sha' >/tmp/parents.txt
-        if [ "$(wc -l </tmp/parents.txt)" -gt 1 ]; then
-          for PARENT in $(tail -n +2 /tmp/parents.txt); do
-            STATUS=$(gh api "repos/$REPO/compare/$PARENT...$BASE" --jq '.status')
-            if [ "$STATUS" = "ahead" ] || [ "$STATUS" = "identical" ]; then
+        # message: a merge commit one of whose merged-in parents is already
+        # contained in the base branch, i.e. the base is AHEAD of it.
+        set -- $PARENTS
+        if [ "$#" -gt 1 ]; then
+          shift
+          for OID in "$@"; do
+            STATUS=$(gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" \
+              -F base="refs/heads/$BASE" -F oid="$OID" -f query='
+              query($owner: String!, $name: String!, $base: String!, $oid: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $base) { compare(headRef: $oid) { status } }
+                }
+              }' --jq '.data.repository.ref.compare.status')
+            if [ "$STATUS" = "BEHIND" ] || [ "$STATUS" = "IDENTICAL" ]; then
               echo "Head commit merges $BASE into the PR branch — reviewers left alone."
               exit 0
             fi
           done
         fi
 
-        # Everyone who already left a verdict. Bots (Copilot & co) are dropped:
-        # the requested_reviewers endpoint rejects them with 422.
-        gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
-          --jq '.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED") | select(.user.type == "User") | .user.login' \
-          | sort -u >/tmp/reviewed.txt
-
-        # Anyone whose request is still pending — do not touch.
-        gh api "repos/$REPO/pulls/$PR" \
-          --jq '.requested_reviewers[].login' \
-          | sort -u >/tmp/pending.txt
-
         TARGETS=""
-        for LOGIN in $(cat /tmp/reviewed.txt); do
-          if grep -qx "$LOGIN" /tmp/pending.txt; then
+        TARGET_IDS=""
+        for ENTRY in $VERDICTS; do
+          LOGIN=$(echo "$ENTRY" | cut -d '=' -f 1)
+          # -f 2- and not -f 2: node ids are base64 and end in "=" padding.
+          NODE_ID=$(echo "$ENTRY" | cut -d '=' -f 2-)
+          if echo " $PENDING " | grep -q " $LOGIN "; then
             echo "$LOGIN — request already pending, skipped"
           else
             TARGETS="$TARGETS $LOGIN"
+            TARGET_IDS="$TARGET_IDS $NODE_ID"
           fi
         done
 
@@ -92,13 +131,16 @@ steps:
           exit 0
         fi
 
-        FIELDS=""
-        for LOGIN in $TARGETS; do
-          FIELDS="$FIELDS -f reviewers[]=$LOGIN"
-        done
-
+        # union: true adds to the existing requests instead of replacing the set,
+        # so a reviewer someone added by hand is never dropped on the way.
+        USER_IDS=$(printf '"%s",' $TARGET_IDS | sed 's/,$//')
         echo "Re-requesting review from:$TARGETS"
-        gh api --method POST "repos/$REPO/pulls/$PR/requested_reviewers" $FIELDS --silent
+        gh api graphql --silent -f query="
+          mutation {
+            requestReviews(input: {pullRequestId: \"$PR_ID\", userIds: [$USER_IDS], union: true}) {
+              clientMutationId
+            }
+          }"
 
         # GitHub login -> Discord mention, via the CSV map secret. Spaces and a
         # leading "@" are tolerated in the map: neither can occur in a GitHub
@@ -114,13 +156,21 @@ steps:
         done
         MENTIONS=$(echo $MENTIONS)
 
-        # Let gh's jq build the payload so that titles and branch names are
-        # escaped properly. The next step only has to POST the file.
+        # Let jq build the payload so that titles and branch names are escaped
+        # properly. The next step only has to POST the file.
         export MENTIONS
         export PR
-        gh pr view "$PR" -R "$REPO" --json title,url,author,headRefName --jq \
-          '{content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end) + "review re-requested — new commits in PR #" + env.PR + "\n" + .title + " — @" + .author.login + " on `" + .headRefName + "`\n" + .url), allowed_mentions: {parse: ["users"]}}' \
-          >discord-payload.json
+        gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
+          query($owner: String!, $name: String!, $pr: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $pr) { title url headRefName author { login } }
+            }
+          }' --jq '.data.repository.pullRequest |
+          {content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end)
+            + "review re-requested — new commits in PR #" + env.PR + "\n"
+            + .title + " — @" + .author.login + " on `" + .headRefName + "`\n"
+            + .url),
+           allowed_mentions: {parse: ["users"]}}' >discord-payload.json
 
         cat discord-payload.json
 

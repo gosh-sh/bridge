@@ -163,12 +163,11 @@ steps:
         gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
           query($owner: String!, $name: String!, $pr: Int!) {
             repository(owner: $owner, name: $name) {
-              pullRequest(number: $pr) { title url headRefName author { login } }
+              pullRequest(number: $pr) { url }
             }
           }' --jq '.data.repository.pullRequest |
           {content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end)
             + "review re-requested — new commits in PR #" + env.PR + "\n"
-            + .title + " — @" + .author.login + " on `" + .headRefName + "`\n"
             + .url),
            allowed_mentions: {parse: ["users"]}}' >discord-payload.json
 

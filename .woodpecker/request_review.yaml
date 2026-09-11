@@ -32,6 +32,13 @@ steps:
         PR="$CI_COMMIT_PULL_REQUEST"
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
 
+        # Which account GITHUB_TOKEN belongs to, and what it may do here. A token
+        # without write access fails at the very last call, after the log already
+        # looks healthy — so state it up front.
+        echo "PR:    #$PR in $REPO"
+        echo "Token: $(gh api user --jq '.login' 2>/dev/null || echo 'not a user token / unauthenticated')"
+        echo "Perms: $(gh api "repos/$REPO" --jq '.permissions | tojson' 2>/dev/null || echo 'repo not visible to this token')"
+
         gh pr view "$PR" -R "$REPO" --json isDraft,headRefOid,baseRefName \
           --jq '.isDraft, .headRefOid, .baseRefName' >/tmp/pr.txt
         IS_DRAFT=$(sed -n 1p /tmp/pr.txt)

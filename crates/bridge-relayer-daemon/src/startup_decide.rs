@@ -263,7 +263,7 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     }
     if anchor_level >= 2
         && chain.layer_windows[0].data_len > 0
-        && chain.highest_populated_layer().map_or(true, |l| l < anchor_level)
+        && chain.highest_populated_layer().is_none_or(|l| l < anchor_level)
     {
         return StartupDecision::Stop {
             reason: format!(

@@ -244,13 +244,39 @@ balance=$(cast balance "$RELAYER_ADDRESS" --rpc-url "$RPC_URL")
   die "relayer balance $balance wei is below minimum $MIN_RELAYER_BALANCE_WEI"
 ok "EOA nonce=$latest_nonce balance=$balance wei"
 
+# The daemon retries the primary and then cycles through the failover list at
+# runtime, so a single unreachable endpoint must not block a (re)start —
+# this script runs on every container start. Fail only when no endpoint at
+# all answers the smoke query.
 payload='{"query":"{ blockchain { blocks(last: 2) { edges { node { seq_no thread_id } } } } }"}'
-response=$(curl --fail-with-body --silent --show-error --max-time 20 \
-  -H 'content-type: application/json' --data-binary "$payload" \
-  "$BRIDGE_GQL_ENDPOINT") || die "shellnet GQL transport failure"
-jq -e '.errors == null and (.data.blockchain.blocks.edges | length) > 0' \
-  >/dev/null <<<"$response" || die "shellnet GQL schema/query failure"
-ok "shellnet GQL"
+gql_smoke() {
+  local response
+  response=$(curl --fail-with-body --silent --show-error --max-time 20 \
+    -H 'content-type: application/json' --data-binary "$payload" "$1") || return 1
+  jq -e '.errors == null and (.data.blockchain.blocks.edges | length) > 0' \
+    >/dev/null <<<"$response"
+}
+gql_alive=0
+if gql_smoke "$BRIDGE_GQL_ENDPOINT"; then
+  ok "shellnet GQL primary $BRIDGE_GQL_ENDPOINT"
+  gql_alive=1
+else
+  printf 'WARN: primary GQL endpoint %s is not answering; the daemon will retry it and use failover endpoints\n' \
+    "$BRIDGE_GQL_ENDPOINT" >&2
+fi
+IFS=',' read -r -a failover_endpoints <<<"${BRIDGE_GQL_FAILOVER_ENDPOINTS:-}"
+for endpoint in "${failover_endpoints[@]}"; do
+  endpoint=${endpoint//[[:space:]]/}
+  [[ -n "$endpoint" ]] || continue
+  if gql_smoke "$endpoint"; then
+    ok "shellnet GQL failover $endpoint"
+    gql_alive=1
+  else
+    printf 'WARN: failover GQL endpoint %s is not answering; the daemon will skip it until it recovers\n' \
+      "$endpoint" >&2
+  fi
+done
+(( gql_alive )) || die "no GraphQL endpoint answers (primary + BRIDGE_GQL_FAILOVER_ENDPOINTS); the daemon could not fetch a single block"
 
 free_kib=$(df -Pk "$BRIDGE_PK_CACHE_DIR" | awk 'NR==2 {print $4}')
 (( free_kib >= 80 * 1024 * 1024 )) || die "less than 80 GiB free on runtime filesystem"

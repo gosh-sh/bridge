@@ -16,3 +16,4 @@ halo2-base = { workspace = true }
 # Sole source of truth for the 16-leaf / depth-4 block-id Merkle constants —
 # `BLOCK_ID_TREE_LEAF_COUNT` lives in `bridge_test_data_gen::layer_hashes`.
 bridge-test-data-gen = { workspace = true }
+metrics = "0.24"

@@ -101,10 +101,10 @@ pub async fn next_update_after(
 ///
 /// Returns `None` when no entry qualifies — the caller should fetch the
 /// next page and re-apply.
-pub(crate) fn pick_next_past_cursor<'a>(
-    page: &'a [BkSetUpdateWithAttestations],
+pub(crate) fn pick_next_past_cursor(
+    page: &[BkSetUpdateWithAttestations],
     cursor_seq_no: u64,
-) -> Option<&'a BkSetUpdateWithAttestations> {
+) -> Option<&BkSetUpdateWithAttestations> {
     page.iter()
         .filter(|u| u.height.map(|h| h > cursor_seq_no).unwrap_or(false))
         .min_by_key(|u| u.height.unwrap_or(u64::MAX))

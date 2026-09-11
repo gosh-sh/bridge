@@ -138,10 +138,21 @@ steps:
           exit 0
         fi
 
-        curl -sS --fail-with-body -X POST \
+        CODE=$(curl -sS -X POST \
           -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
           -H "Content-Type: application/json" \
           --data @discord-payload.json \
-          "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
-          -o /dev/null
-        echo "Discord notified."
+          -o /tmp/discord-response.json -w '%{http_code}' \
+          "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages")
+
+        # Discord explains itself in the body ("Missing Access", "401: Unauthorized",
+        # …), so it must not be discarded — the review has already been re-requested
+        # by the time we get here, and a bare exit code says nothing about why.
+        if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+          echo "Discord notified (HTTP $CODE)."
+        else
+          echo "Discord refused the message: HTTP $CODE"
+          cat /tmp/discord-response.json
+          echo
+          exit 1
+        fi

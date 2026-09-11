@@ -261,6 +261,85 @@ cd ../ackinacki-bridge
 
 `--dry-run` does not need this either; it is required only for a real run.
 
+#### Reaching `params/` from your own shell
+
+Several maintenance commands below act on the params directory, and one of
+them deletes files, so they must resolve it the way the CLI does — shell
+environment first, profile second. A plain `. "$BRIDGE_CONFIG"` inverts that
+precedence: `dotenvy` does not overwrite what the shell already set, so the
+profile would beat an explicit export. Declare this once per shell, from
+`crates/ackinacki-bridge/`:
+
+```bash
+# Prints the resolved directory on stdout, diagnostics on stderr.
+params_dir() {
+  # `printenv`, not `${VAR+x}`: the shell's test is true for a variable that
+  # was assigned but never exported, and the CLI reads the process
+  # environment. An exported-but-empty value is refused rather than guessed,
+  # because clap refuses it too.
+  if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
+    [ -n "$BRIDGE_PARAMS_DIR" ] ||
+      { echo "BRIDGE_PARAMS_DIR is exported but empty" >&2; return 1; }
+  else
+    BRIDGE_CONFIG=$(printenv BRIDGE_CONFIG) && [ -n "$BRIDGE_CONFIG" ] ||
+      { echo "BRIDGE_CONFIG is not exported, so the CLI would load no profile" >&2
+        echo "at all. Use \`export\`, or pass --params-dir to both." >&2; return 1; }
+    # `dotenvy` parses KEY=value; `.` executes the file. On these constructs
+    # the two disagree, so refuse rather than resolve to whichever this shell
+    # happens to produce. The shipped profile is plain assignments.
+    grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_PARAMS_DIR=' "$BRIDGE_CONFIG" |
+      grep -q '[$`]' &&
+      { echo "BRIDGE_PARAMS_DIR in $BRIDGE_CONFIG uses \$ or backticks; pass" >&2
+        echo "--params-dir explicitly and give these commands the same path." >&2
+        return 1; }
+    BRIDGE_PARAMS_DIR=$( set -a; . "$BRIDGE_CONFIG"; printf '%s' "${BRIDGE_PARAMS_DIR-}" )
+    [ -n "$BRIDGE_PARAMS_DIR" ] ||
+      { echo "BRIDGE_PARAMS_DIR is absent from $BRIDGE_CONFIG" >&2; return 1; }
+  fi
+  printf '%s' "$BRIDGE_PARAMS_DIR"
+}
+```
+
+`--params-dir` is not covered and cannot be: it belongs to a run that has not
+happened yet. If you intend to pass it, pass the same path to these commands.
+
+Three things are worth running against the result. Free space, before the
+first withdrawal on a host:
+
+```bash
+PD=$(params_dir) && echo "params -> $PD" && df -h "$PD"
+```
+
+Key regeneration up front, instead of letting stage 5 do it — this is also
+how you prepare `bridge-verifier-daemon`, which reads the verifying key and
+never generates one. The event prover takes no `--params-dir` and reads
+`./params` relative to the working directory
+(`bridge-event-halo2-prover/src/main.rs:38,151`), hence the symlink:
+
+```bash
+PD=$(realpath "$(params_dir)") &&
+MANIFEST=$(realpath ../bridge-prover-libraries/Cargo.toml) &&
+WORK=$(mktemp -d) && ln -s "$PD" "$WORK/params" &&
+( cd "$WORK" && cargo run --release --manifest-path "$MANIFEST" \
+    -p bridge-event-halo2-prover -- --selftest )
+rm -rf "$WORK"
+```
+
+Cache repair, when `probe_event_keys` reports `corrupt`. This one deletes
+files, so the `params ->` line above is worth reading before you run it:
+
+```bash
+PD=$(params_dir) && echo "params -> $PD" &&
+cargo run --release --manifest-path ../bridge-prover-libraries/Cargo.toml \
+  -p bridge-prover-lib --bin probe_event_keys -- --params-dir "$PD" --repair
+```
+
+`probe_event_keys` without `--repair` reports what the next run will decide
+and changes nothing: `warm` and `cold` both need no action, `corrupt` is the
+case above, and `blocked` means a directory is sitting where a key file
+belongs — usually a bind mount whose host path does not exist. `--repair`
+refuses `blocked` without touching anything; remove the directory by hand.
+
 ### Step 0b — Install `solc 0.8.19` (one-off, ~1 min)
 
 `aggregate-proof` shells out to `solc` **at run time**, on every real

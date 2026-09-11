@@ -173,9 +173,11 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 ### Acki Nacki Devnet (Shellnet)
 
-- **Node API**: `http://<an-node-host>:8600` (port 8600; HTTPS/443 is firewalled)
-- **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
-- **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
+- **GraphQL**: `https://shellnet.ackinacki.org/graphql` — the public endpoint, and what
+  every daemon and runbook in this repository points at by default
+- **REST `/v2/bk_set`, `/v2/bk_set_update`**: served by an AN node directly, on port 8600
+  and without auth — *not* by `shellnet.ackinacki.org`, which answers 404 for them. The
+  BK-rotation sentry needs such a node; pass its address as `AN_NODE_URL`
 - **Devnet status**: Not ready for E2E testing (as of Apr 2026)
 - **Local 5-node cluster**: `cd ../acki-nacki/nock && docker-compose build && docker-compose up -d`
   - Node0 API: `http://127.0.0.1:11000`

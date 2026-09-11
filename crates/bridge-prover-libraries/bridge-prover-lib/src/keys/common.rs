@@ -588,7 +588,8 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
              \x20 ./target/release/bootstrap_hermez_srs --k 21 --params-dir <this dir>\n\
              K=21 additionally needs powersOfTau28_hez_final_21.ptau (~2.4 GB) at \
              ~/.cache/halo2-kzg-srs/ — it is NOT auto-downloaded; fetch it from \
-             https://storage.googleapis.com/zkevm/ptau/. \
+             https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/ \
+             (the zkevm bucket this used to name revoked anonymous access). \
              NOTE: scripts/bootstrap_hermez_srs.sh is a different tool — it writes K=20 into \
              crates/bridge-snark-utils/params/ and will not satisfy this. Chain-ceremony / \
              gen_srs fallbacks are disabled.",

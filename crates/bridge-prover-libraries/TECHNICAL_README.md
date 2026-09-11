@@ -218,7 +218,7 @@ The K=21 ceremony ptau is not fetched by the binary. If the default cache path i
 ```bash
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
 ```
 

@@ -229,7 +229,7 @@ trust anchor only reaches K=20), so fetch it once by hand:
 ```bash
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau      # ~2.4 GB
 
 cd ../bridge-prover-libraries

@@ -24,6 +24,12 @@ retry_wait_time = 2
 # Anything not maintained, not reachable, or not a real address.
 exclude_path = [
   "docs/archive",      # staged for deletion, deliberately not maintained
+  # Workspace member symlinks: crates/bridge-prover-libraries/{ackinacki-bridge,
+  # bridge-relayer-daemon} point back at ../. Walking them shows every document
+  # a second time one directory deeper, where its relative links resolve to
+  # paths that do not exist — twelve phantom errors about files that are fine.
+  "crates/bridge-prover-libraries/ackinacki-bridge",
+  "crates/bridge-prover-libraries/bridge-relayer-daemon",
   "target",
   "params",
   "CHANGELOG.md",      # released entries cite links as they were at the time
@@ -44,4 +50,11 @@ exclude = [
   "^https://ethereum-sepolia-rpc\\.publicnode\\.com",
   # GraphQL endpoints answer a bare GET with 400/500 by design.
   "/graphql$",
+  # Private sibling repositories. They 404 for anyone outside the org, which is
+  # a fact about access rather than a broken link; the prose says so where they
+  # are cited. Remove these three lines if the repositories are ever opened —
+  # that is exactly when the check becomes meaningful again.
+  "^https://github\\.com/gosh-sh/acki-nacki($|/)",
+  "^https://github\\.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits",
+  "^https://github\\.com/gosh-sh/bridge-EVM",
 ]

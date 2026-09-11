@@ -96,13 +96,13 @@ move entries out of them, and do not append new entries to them.
 | Remote | URL | Role |
 |--------|-----|------|
 | `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | **Canonical** — CI, merge target `main` |
-| `github` | `git@github.com:gosh-sh/bridge-EVM.git` | GitHub mirror — open PRs here |
+| `github` | `git@github.com:gosh-sh/bridge.git` | GitHub mirror — open PRs here |
 
 ```bash
 # one-time local setup (if `github` is missing or wrong)
-git remote add github git@github.com:gosh-sh/bridge-EVM.git
+git remote add github git@github.com:gosh-sh/bridge.git
 # or fix an existing remote:
-git remote set-url github git@github.com:gosh-sh/bridge-EVM.git
+git remote set-url github git@github.com:gosh-sh/bridge.git
 
 git push origin main
 git push github main
@@ -756,7 +756,7 @@ ssh ubuntu@ursus-tools.dev '
 
 Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `scripts/ursus/bridge-relayer.{service,env.example}`. Set `BRIDGE_DEPLOY_BLOCK` in deposit-relayer env (not genesis). AN→ETH wiring: `docs/shellnet_an_eth_relayer_wiring.md`.
 
-**GitHub (bridge-EVM):** active docs/integration PR [#5](https://github.com/gosh-sh/bridge-EVM/pull/5) (`pruvendo/shellnet-e2e-landing` → `main`).
+**GitHub (bridge-EVM, the predecessor repository — private):** active docs/integration PR [#5](https://github.com/gosh-sh/bridge-EVM/pull/5) (`pruvendo/shellnet-e2e-landing` → `main`).
 
 **Key config (deposit, non-secret)**
 

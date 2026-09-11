@@ -20,9 +20,12 @@
 # hand; after that this pipeline carries it forward from the previous release,
 # so it only ever has to be done once.
 #
-# Secret: RELEASE_GH_TOKEN — needs **Contents: Read and write** on this
-# repository, which REVIEW_GH_TOKEN deliberately does not have. Tick the `tag`
-# event on it, otherwise it arrives empty.
+# Secret: REVIEW_GH_TOKEN, the same one the review pipelines use — release
+# assets sit under a fine-grained token's **Contents** permission, so it needs
+# Contents: Read and write, and the `tag` event ticked alongside pull_request
+# and cron. One token doing both jobs means the review pipelines can write to
+# the repository too; a separate RELEASE_GH_TOKEN is the alternative, and only
+# this `from_secret` line changes.
 
 when:
   - event: tag
@@ -66,7 +69,7 @@ steps:
     image: maniator/gh
     environment:
       GH_TOKEN:
-        from_secret: RELEASE_GH_TOKEN
+        from_secret: REVIEW_GH_TOKEN
     commands:
       - |
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"

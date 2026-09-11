@@ -58,10 +58,10 @@ pub struct TvmAckiNacki {
     ///
     /// `process_message` already produces and confirms the transaction and
     /// returns it in full, so this is the authoritative outcome. Caching it
-    /// lets `wait_for_confirmation` answer without a second GraphQL round-trip —
-    /// which matters because the legacy `query_collection` collection endpoint
-    /// is disabled on current AN networks and the blockchain-API fallback can
-    /// lag the transaction by longer than the confirm timeout.
+    /// lets `wait_for_confirmation` answer without a second GraphQL round-trip
+    /// — which matters because the legacy `query_collection` collection
+    /// endpoint is disabled on current AN networks and the blockchain-API
+    /// fallback can lag the transaction by longer than the confirm timeout.
     receipts: Arc<Mutex<HashMap<TxHash, TransactionReceipt>>>,
 }
 
@@ -169,8 +169,8 @@ impl IAckiNacki for TvmAckiNacki {
         let hash = parse_tx_hash(tx_id)?;
 
         // Cache the authoritative receipt from `process_message` so
-        // `wait_for_confirmation` resolves without a second (deprecated / laggy)
-        // GraphQL query.
+        // `wait_for_confirmation` resolves without a second (deprecated /
+        // laggy) GraphQL query.
         let gas_used = result
             .transaction
             .get("compute")
@@ -210,20 +210,19 @@ impl IAckiNacki for TvmAckiNacki {
         // Query via the modern `blockchain { transaction(hash:) }` API. The
         // legacy `query_collection("transactions", …)` collection endpoint is
         // disabled on current AN networks (shellnet returns "Deprecated API is
-        // disabled") — even though `process_message`, which already produced and
-        // confirmed this tx, succeeds. Re-querying the deprecated collection
-        // here made a fully-successful `finalizeDeposit` report as a network
-        // error. The blockchain API is what `tvm-cli` 3.0 uses.
+        // disabled") — even though `process_message`, which already produced
+        // and confirmed this tx, succeeds. Re-querying the deprecated
+        // collection here made a fully-successful `finalizeDeposit`
+        // report as a network error. The blockchain API is what
+        // `tvm-cli` 3.0 uses.
         let gql = format!(
-            "{{ blockchain {{ transaction(hash:\"{id}\") {{ aborted now compute {{ exit_code success }} }} }} }}"
+            "{{ blockchain {{ transaction(hash:\"{id}\") {{ aborted now compute {{ exit_code \
+             success }} }} }} }}"
         );
-        let res = query(
-            self.context.clone(),
-            ParamsOfQuery {
-                query: gql,
-                variables: None,
-            },
-        )
+        let res = query(self.context.clone(), ParamsOfQuery {
+            query: gql,
+            variables: None,
+        })
         .await
         .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
         let tx = res
@@ -283,7 +282,8 @@ impl IAckiNacki for TvmAckiNacki {
         if boc.is_empty() {
             return Ok(0);
         }
-        // Balance decoding is deployment-specific; return non-zero when account exists.
+        // Balance decoding is deployment-specific; return non-zero when account
+        // exists.
         Ok(1)
     }
 }

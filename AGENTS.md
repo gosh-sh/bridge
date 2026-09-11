@@ -120,6 +120,7 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── crates/bridge-prover-orchestrator/  ← Wraps the partner's 4-circuit pipeline (Halo2 1A/1B/2[/3]) for prover/relayer use
 │   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-2[, circuit-3, circuit-4]) producing 256-byte Groth16 proofs (legacy/test path; circuit-1b retired 2026-06-22 when Circuit 1B moved to the R15 SHPLONK aggregator at inner K=21)
 ├── crates/bridge-relayer-daemon/       ← Phase 5.1 relayer skeleton (AN→ETH direction): Relayer::tick() / run_loop() + BlockSource/BridgeClient traits + abigen!-generated AckiNackiBridge bindings + state.json persistence + CLI
+├── crates/ackinacki-bridge/            ← End-user withdrawal CLI (AN multisig → EVM recipient): the six-stage per-withdrawal pipeline, counterpart to the relayer's bundle proving. Reads no local prover_state.json — the on-chain contract is its only view of prover state. Shipped as a release download (scripts/install.sh); QUICKSTART.md is the operator's entry point
 ├── crates/deposit-relayer-daemon/      ← EVM→AN deposit relayer (mirror of bridge-relayer-daemon): listen for `Deposit` events (EthLogSource over alloy) → generate the AN-consumable Halo2 proof triple (SubprocessProofGenerator over deposit-prover) → submit to `TokenBridge.finalizeDeposit` (AnSubmitter). `AnConfig` drives the live `BkSetClient` (read-side endpoints wired; `finalizeDeposit` write gated on the upstream `IAckiNacki`/tvm-sdk client). `deposit-relayer` CLI: watch / prove-one / an-preflight / daemon
 ├── crates/bridge-evm-aggregator/       ← R15 / M2 spike (standalone cargo workspace): snark-verifier-sdk → AggregationCircuit → Yul EVM verifier. ~13 KB bytecode @ K=21, well under EIP-170. Trivial inner circuit (`a*b==c`) until partner ships Circuit 4 (M4)
 │
@@ -134,7 +135,8 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── Makefile                ← Entry point: make setup/build/test/deploy
 ├── setup.sh                ← One-time dependency install (Foundry, Go, Rust)
 ├── test.sh / test_e2e.sh   ← Test runners
-└── .gitlab-ci.yml          ← CI pipeline
+├── .woodpecker/            ← CI pipelines that actually run (Woodpecker, builder.gosh.sh)
+└── .gitlab-ci.yml          ← build/test/lint jobs, GitLab remote only — nothing runs them from GitHub
 ```
 
 ## Sibling Repositories (under ../  relative to this repo)
@@ -482,7 +484,25 @@ cd gnark-wrappers/circuit-1a && ./circuit-1a prove ../../proofs/bound/primary/ha
 cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-hashes/halo2_proof.json
 ```
 
-## CI Pipeline (`.gitlab-ci.yml`)
+## CI
+
+Two systems, and only one of them runs from GitHub.
+
+### Woodpecker (`.woodpecker/`, builder.gosh.sh) — what actually runs
+
+| Pipeline | Trigger | What it does |
+|---|---|---|
+| `secrets_scan.yaml` | every PR, and pushes to `main` | `gitleaks detect` over the branch's whole history — not the diff, because a key added and removed before merge still has to be rotated. A finding fails the pipeline. Rules and the shellnet-fixture allowlist live in `.gitleaks.toml`; reviewed historical findings are pinned in `.gitleaksignore`. Takes no secrets by design — the one job that stays safe on a fork's PR. |
+| `request_review.yaml` | every PR | Re-requests review from everyone holding a verdict the new commits made stale, and pings them in Discord. Skips drafts, and skips merges of the base branch into the PR (detected structurally, by a merged-in parent already contained in the base). |
+| `notify_review_submitted.yaml` | cron job `review-submitted` | Tells the PR author in Discord that someone reviewed. Woodpecker has no trigger for a submitted review, so it polls; the window is (start of the last successful cron run, start of this one], read back from Woodpecker's own API, which is why consecutive runs neither repeat a ping nor drop one. |
+
+Secrets are configured per repository in Woodpecker and handed only to the events ticked on them — one
+without the right event arrives as an empty string rather than an error, which is worth remembering
+when a step fails with an unexplained 401. **No build, test or lint job runs here.** Those are the
+GitLab jobs below, so `make check` and `make pre-push` are what stands between a branch and a
+regression today.
+
+### GitLab (`.gitlab-ci.yml`) — build, test and lint, on the GitLab remote only
 
 | Stage | Jobs |
 |------|------|

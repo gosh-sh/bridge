@@ -1,0 +1,117 @@
+# Re-request review when a new commit lands in an open pull request, then ping
+# the reviewers in Discord.
+#
+# Only reviewers who have already submitted a verdict (APPROVED /
+# CHANGES_REQUESTED) are re-requested — new commits make that verdict stale.
+# Reviewers whose request is still pending are left alone so that every push
+# does not spam them. Drafts are skipped; a PR taken out of draft is picked up
+# on its next commit.
+#
+# Secrets used (create them on builder.gosh.sh for this repo):
+#   GITHUB_TOKEN           — needs write access to gosh-sh/bridge
+#   DISCORD_BOT_TOKEN      — bot must be in the guild and able to post
+#   DISCORD_CHANNEL_ID     — target channel
+#   DISCORD_REVIEWERS_MAP  — one line: "github-login=discord-id,other=123456789"
+#                            reviewers missing from the map are simply not pinged
+
+when:
+  - event: pull_request
+
+skip_clone: true
+
+steps:
+  request_review:
+    image: maniator/gh
+    environment:
+      GH_TOKEN:
+        from_secret: GITHUB_TOKEN
+      DISCORD_REVIEWERS_MAP:
+        from_secret: DISCORD_REVIEWERS_MAP
+    commands:
+      - |
+        PR="$CI_COMMIT_PULL_REQUEST"
+        REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
+
+        if [ "$(gh pr view "$PR" -R "$REPO" --json isDraft --jq '.isDraft')" = "true" ]; then
+          echo "PR #$PR is a draft — nothing to do."
+          exit 0
+        fi
+
+        # Everyone who already left a verdict. Bots (Copilot & co) are dropped:
+        # the requested_reviewers endpoint rejects them with 422.
+        gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+          --jq '.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED") | select(.user.type == "User") | .user.login' \
+          | sort -u >/tmp/reviewed.txt
+
+        # Anyone whose request is still pending — do not touch.
+        gh api "repos/$REPO/pulls/$PR" \
+          --jq '.requested_reviewers[].login' \
+          | sort -u >/tmp/pending.txt
+
+        TARGETS=""
+        for LOGIN in $(cat /tmp/reviewed.txt); do
+          if grep -qx "$LOGIN" /tmp/pending.txt; then
+            echo "$LOGIN — request already pending, skipped"
+          else
+            TARGETS="$TARGETS $LOGIN"
+          fi
+        done
+
+        if [ -z "$TARGETS" ]; then
+          echo "Nobody to re-request on PR #$PR."
+          exit 0
+        fi
+
+        FIELDS=""
+        for LOGIN in $TARGETS; do
+          FIELDS="$FIELDS -f reviewers[]=$LOGIN"
+        done
+
+        echo "Re-requesting review from:$TARGETS"
+        gh api --method POST "repos/$REPO/pulls/$PR/requested_reviewers" $FIELDS --silent
+
+        # GitHub login -> Discord mention, via the CSV map secret. Spaces and a
+        # leading "@" are tolerated in the map: neither can occur in a GitHub
+        # login or a Discord snowflake, and a typo there fails silently.
+        MENTIONS=""
+        for LOGIN in $TARGETS; do
+          ID=$(echo "$DISCORD_REVIEWERS_MAP" | tr ',' '\n' | tr -d ' @' | grep "^$LOGIN=" | head -n 1 | cut -d '=' -f 2)
+          if [ -n "$ID" ]; then
+            MENTIONS="$MENTIONS <@$ID>"
+          else
+            echo "$LOGIN — no entry in DISCORD_REVIEWERS_MAP, not pinged"
+          fi
+        done
+        MENTIONS=$(echo $MENTIONS)
+
+        # Let gh's jq build the payload so that titles and branch names are
+        # escaped properly. The next step only has to POST the file.
+        export MENTIONS
+        export PR
+        gh pr view "$PR" -R "$REPO" --json title,url,author,headRefName --jq \
+          '{content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end) + "review re-requested — new commits in PR #" + env.PR + "\n" + .title + " — @" + .author.login + " on `" + .headRefName + "`\n" + .url), allowed_mentions: {parse: ["users"]}}' \
+          >discord-payload.json
+
+        cat discord-payload.json
+
+  notify_discord:
+    image: curlimages/curl
+    environment:
+      DISCORD_BOT_TOKEN:
+        from_secret: DISCORD_BOT_TOKEN
+      DISCORD_CHANNEL_ID:
+        from_secret: DISCORD_CHANNEL_ID
+    commands:
+      - |
+        if [ ! -s discord-payload.json ]; then
+          echo "No review was requested — no Discord notification."
+          exit 0
+        fi
+
+        curl -sS --fail-with-body -X POST \
+          -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data @discord-payload.json \
+          "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages" \
+          -o /dev/null
+        echo "Discord notified."

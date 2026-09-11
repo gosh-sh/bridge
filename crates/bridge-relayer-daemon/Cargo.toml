@@ -1,6 +1,6 @@
 [package]
 name = "bridge-relayer-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Relayer skeleton for the AN→ETH bridge: fetches AN block data + proofs, drives them through `AckiNackiBridge.verifyBlock` on Ethereum (Phase 5.1)."
 

@@ -1,6 +1,6 @@
 [package]
 name = "ackinacki-bridge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Currently ships the `withdraw` subcommand: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
 

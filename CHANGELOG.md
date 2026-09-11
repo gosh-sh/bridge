@@ -22,6 +22,8 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+## [0.2.0] – 2026-09-11
+
 ### Breaking Changes
 
 - **Sub-workspace directory renamed `crates/an-bridge-prover/` → `crates/bridge-prover-libraries/`.**

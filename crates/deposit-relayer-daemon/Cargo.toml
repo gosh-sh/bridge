@@ -1,6 +1,6 @@
 [package]
 name = "deposit-relayer-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Relayer for the EVM→Acki Nacki deposit bridge: listens for `Deposit` events on Ethereum, generates the AN-consumable Halo2 proof triple, and submits it to the AN `TokenBridge.finalizeDeposit` entry point."
 

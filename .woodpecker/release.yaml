@@ -40,7 +40,15 @@ steps:
     environment:
       # Keep cargo's data inside the workspace so the next step still sees it.
       CARGO_HOME: .cargo_home
+      GH_TOKEN:
+        from_secret: REVIEW_GH_TOKEN
     commands:
+      # One of the ten gosh-sh git dependencies in Cargo.lock —
+      # acki-nacki-to-eth-bridge-halo2-circuits — is a private repository, so
+      # cargo cannot fetch it anonymously. The token must be able to read that
+      # repository too; a token scoped to this one alone fails here, not at the
+      # upload step.
+      - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
       # The CLI builds as a member of the prover workspace — the symlink at
       # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its
       # workspace=true circuit dependencies. A standalone `cargo build` in
@@ -97,6 +105,12 @@ steps:
           sha256sum kzg_bn254_21.srs >>SHA256SUMS
         fi
         cat SHA256SUMS
+
+        # `gh release upload` requires the release to exist — a tag alone is not
+        # one — so create it on first sight of the tag.
+        if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+          gh release create "$TAG" -R "$REPO" --title "$TAG" --notes "Assets built by .woodpecker/release.yaml."
+        fi
 
         # --clobber so re-running a tag replaces its assets instead of failing.
         gh release upload "$TAG" -R "$REPO" --clobber \

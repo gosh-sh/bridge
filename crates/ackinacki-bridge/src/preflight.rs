@@ -961,7 +961,7 @@ pub fn check_ceremony(params_dir: &Path) -> CliResult<()> {
                  \x20 Provision once (~2.4 GB download, then a few minutes of CPU):\n\
                  \x20   mkdir -p ~/.cache/halo2-kzg-srs\n\
                  \x20   curl -L --fail --progress-bar \\\n\
-                 \x20     https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \\\n\
+                 \x20     https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \\\n\
                  \x20     -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau\n\
                  \x20   cd ../bridge-prover-libraries   # from crates/ackinacki-bridge/\n\
                  \x20   cargo build --release --bin bootstrap_hermez_srs\n\

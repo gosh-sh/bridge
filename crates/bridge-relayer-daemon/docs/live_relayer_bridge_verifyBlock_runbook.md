@@ -223,10 +223,11 @@ Run both commands from `crates/bridge-prover-libraries/`:
 #     either blob.
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \
+  # K=22 has no known public mirror since the zkevm bucket closed; K=21 above is the one that works
+  # https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_22.ptau
 
 # 3b. Build + run. Auto-fetches the K=20 ptau (~1.2 GB) on cache miss,

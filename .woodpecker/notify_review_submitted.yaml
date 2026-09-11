@@ -123,7 +123,7 @@ steps:
           # Safe to assemble by hand: every value here is a GitHub login, a state
           # enum, a number or a github.com URL — none of them can carry a quote.
           N=$(expr "$N" + 1)
-          printf '{"content":"<@%s> %s by `%s` on PR #%s\\n%s","allowed_mentions":{"parse":["users"]}}' \
+          printf '{"content":"<@%s> %s by `%s` on PR #%s — %s","allowed_mentions":{"parse":["users"]}}' \
             "$ID" "$HEADLINE" "$REVIEWER" "$NUMBER" "$URL" >"discord-review-$N.json"
           echo "PR #$NUMBER: $REVIEWER -> $AUTHOR ($STATE)"
         done </tmp/reviews.txt

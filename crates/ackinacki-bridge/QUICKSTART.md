@@ -17,41 +17,36 @@ time they take.
 
 ## 1. Install
 
-**Starting from nothing** — no Rust, no checkout:
-
 ```bash
-curl -fLO https://raw.githubusercontent.com/gosh-sh/bridge/main/crates/ackinacki-bridge/scripts/bootstrap.sh
-less bootstrap.sh        # it installs software; read it before running it
-bash bootstrap.sh
+curl -fLO https://raw.githubusercontent.com/gosh-sh/bridge/main/crates/ackinacki-bridge/scripts/install.sh
+less install.sh          # it downloads and installs; read it before running it
+bash install.sh
 ```
 
-It installs a C toolchain, git and curl through your package manager (showing
-you the command and asking first), installs rustup, clones the repository
-into `~/ackinacki-bridge`, and then runs the step below. `--dir` puts the
-clone elsewhere, `--check` reports without installing.
+Nothing is compiled: it downloads the CLI, the `aggregate-proof` subprocess
+it shells out to, `solc 0.8.19`, the verifier bytecode the proof is checked
+against, and the Hermez KZG ceremony — about 320 MB in total, most of it the
+ceremony. Neither Rust nor a checkout of the repository is needed. Every
+release asset is verified against the release's `SHA256SUMS` before it is
+written, and `solc` against the version it reports.
 
-**If you already have the repository:**
+`--check` reports what is missing and downloads nothing. `--prefix` installs
+somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
+prints the two lines that put the install on your `PATH` and name the
+profile — `solc` in particular has to be reachable under its bare name,
+because that is how the aggregator resolves it.
 
-```bash
-cd crates/ackinacki-bridge
-scripts/install.sh --check      # what is missing
-scripts/install.sh              # install it, asking first
-```
-
-That provisions the four things a real withdrawal needs: `solc 0.8.19`, the
-Hermez KZG ceremony (~256 MB on disk, ~2.4 GB downloaded once), the
-`aggregate-proof` binary and the CLI itself. Budget about 45 minutes and
-~20 GB of disk, most of both being the ceremony and the build.
-
-`--dry-run` needs none of them. A real withdrawal needs all four, and stage 1
-refuses without them — before anything is broadcast.
+`--dry-run` needs none of the prover artifacts. A real withdrawal needs all
+of them, and stage 1 refuses without them — before anything is broadcast.
 
 ## 2. What you need to have
 
 - **A single-custodian AN multisig** holding at least the amount in ECC[3],
-  and its owner key file at mode `0400`. `scripts/deploy_msig_and_mint.sh`
-  deploys one and seeds it with 1 USDC if you are testing; it needs
-  `tvm-cli` on `PATH`, which the CLI itself does not.
+  and its owner key file at mode `0400`. This is the wallet the USDC is
+  coming out of, so you have it already. (If you are only testing, the
+  repository's `scripts/deploy_msig_and_mint.sh` deploys one and seeds it
+  with 1 USDC — that one needs a checkout and `tvm-cli`, neither of which a
+  withdrawal does.)
 - **A Sepolia wallet with ~0.02 ETH** to pay for `withdrawByProof`. Use a
   fresh, disposable one — never a wallet holding real funds.
 

@@ -172,31 +172,35 @@ assigns it when the release is tagged.
   so USDC returns to the source multisig on any bridge revert; the
   historical Python driver used `bounce = false`.
 
-- **`scripts/bootstrap.sh` starts from a machine with no Rust and no
-  checkout.** Fetch it on its own and run it: it installs a C toolchain, git
-  and curl through whichever of apt/dnf/pacman is present — printing the
-  exact privileged command and asking before running it — installs rustup
-  with no default toolchain so the repository's `rust-toolchain.toml` pin
-  decides what gets fetched, clones into `~/ackinacki-bridge` (`--dir` to
-  choose), and hands over to `scripts/install.sh`. `--check` reports without
-  installing anything, and `--yes` skips the questions. The package list is
-  three items because that is what the lockfiles ask for — the crate uses
-  rustls and the aggregator has no TLS at all, so no OpenSSL headers are
-  needed. It is exercised on Linux x86_64 and says so on anything else.
+- **`scripts/install.sh` installs from published releases, and
+  `QUICKSTART.md` is one withdrawal in seven steps.** A withdrawal needs four
+  artifacts that a checkout alone does not give you — the CLI, the
+  `aggregate-proof` subprocess it shells out to, `solc 0.8.19`, and the
+  Hermez `kzg_bn254_21.srs` ceremony — plus the verifier bytecode the proof
+  is self-checked against. A host missing any of them fails at stage 5, after
+  the burn.
 
-- **`scripts/install.sh` provisions a host for a real withdrawal, and
-  `QUICKSTART.md` is the seven-step version of this README.** The four
-  things a real run needs — `solc 0.8.19`, the `kzg_bn254_21.srs` ceremony,
-  a prebuilt `aggregate-proof`, and the CLI itself — were four manual steps
-  spread across two documents, and a host missing any of them fails at
-  stage 5, after the burn. `--check` reports what is missing and installs
-  nothing; without it the script installs, asking before each download, and
-  `--yes` skips the questions. It resolves `params/` the way the CLI does,
-  checks free disk and RAM against what the keygen will need, and verifies
-  the solc it downloaded reports the pinned version before putting it on
-  `PATH`. It is safe to re-run: every step is skipped when already
-  satisfied, and the summary re-asks all four questions rather than
-  reporting its own bookkeeping.
+  The script downloads them and compiles nothing, so neither Rust nor a
+  checkout is required. `--check` reports without downloading, `--prefix`
+  chooses where it lands (default `~/.local/share/ackinacki-bridge`), and
+  `--yes` skips the questions. Release assets are verified against the
+  release's `SHA256SUMS` — an asset the list does not name is refused rather
+  than installed on the strength of a successful download — and `solc`
+  against the version it reports, because another version emits different
+  bytecode and fails the stage-5 self-check.
+
+  It also writes the profile, taking the published one and rewriting only its
+  seven path keys to absolute paths inside the prefix; endpoints, the bridge
+  address and the pinned identity stay as released. The installed tree puts
+  the aggregator at `<prefix>/aggregator/target/release/aggregate-proof`
+  because that is the shape `--aggregator-dir` resolves, and the closing
+  message names the `PATH` export explicitly: the aggregator looks up `solc`
+  by bare name, so a pinned copy that is not on `PATH` is not used.
+
+  **This needs the release to publish three assets**:
+  `ackinacki-bridge-linux-x86_64.tar.gz` (the two binaries, `verifiers/*.bin`
+  and the profile), `kzg_bn254_21.srs`, and `SHA256SUMS`.
+  `BRIDGE_RELEASE_BASE` points the script at a mirror or an internal build.
 
 - **Helper scripts under `crates/ackinacki-bridge/scripts/`.**
   `deploy_msig_and_mint.{sh,py}` deploys a fresh single-custodian

@@ -2486,7 +2486,7 @@ mod tests {
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
         assert_eq!(
-            WithdrawalLock::probe_holder(&blocker, "0123456789abcdef"),
+            WithdrawalLock::probe_holder(&blocker, "test-key-lock"),
             None,
             "a lock that could not be attempted is not a lock that is free",
         );
@@ -2510,7 +2510,7 @@ mod tests {
         std::fs::write(&blocker, b"x").unwrap();
 
         let (verdict, logged) =
-            captured_logs(|| WithdrawalLock::probe_holder(&blocker, "0123456789abcdef"));
+            captured_logs(|| WithdrawalLock::probe_holder(&blocker, "test-key-lock"));
         assert_eq!(verdict, None, "an attempt that failed answers nothing");
         assert!(
             logged.contains("could not test the withdrawal lock"),
@@ -2585,7 +2585,7 @@ mod tests {
     #[test]
     fn the_permit_to_send_is_issued_only_to_a_run_that_still_holds_the_lock() {
         let dir = TempDir::new().unwrap();
-        let key = "0123456789abcdef";
+        let key = "test-key-lock";
 
         // Held: the probe's second `open` + `flock` is denied by our own
         // lock — per open file description, so this works from inside the
@@ -2692,7 +2692,7 @@ mod tests {
         // everyone. The `held` half is a lock taken in a directory that
         // does work.
         let dir = TempDir::new().unwrap();
-        let key = "5a5a5a5a5a5a5a5a";
+        let key = "test-key-permit";
         let LockAttempt::Held(lock) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
             panic!("an uncontested lock in a fresh TempDir must be taken");
         };
@@ -2728,7 +2728,7 @@ mod tests {
         // somebody holds this identity, no remedy may authorise touching
         // the record.
         let dir = TempDir::new().unwrap();
-        let key = "0f1e2d3c4b5a6978";
+        let key = "test-key-replace";
 
         // (never took, somebody holds it) — the forbidden one.
         let LockAttempt::Held(other) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
@@ -2784,7 +2784,7 @@ mod tests {
         // state directory produces it, and `/proc/self/fd` shows the
         // holder pointing at "… .lock (deleted)".
         let dir = TempDir::new().unwrap();
-        let key = "fedcba9876543210";
+        let key = "test-key-remedy";
         let LockAttempt::Held(lock) = WithdrawalLock::try_acquire(dir.path(), key).unwrap() else {
             panic!("an uncontested lock in a fresh TempDir must be taken");
         };
@@ -2825,7 +2825,7 @@ mod tests {
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
         let held = LockHold::of(None);
-        let permit = BurnPermit::issue(&blocker, "0123456789abcdef", &held)
+        let permit = BurnPermit::issue(&blocker, "test-key-lock", &held)
             .expect("a run that could not ask is not a run that must stop");
         assert!(
             !permit.holds_a_lock(),

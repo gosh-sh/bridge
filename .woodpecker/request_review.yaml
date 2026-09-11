@@ -217,5 +217,19 @@ steps:
           echo "Discord refused the message: HTTP $CODE"
           cat /tmp/discord-response.json
           echo
+
+          # 403 "Missing Access" (50001) has two indistinguishable causes: the bot
+          # is not in the guild that owns the channel, or it is but cannot see the
+          # channel. Asking Discord who the bot is and where it lives separates them.
+          echo "--- bot identity ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' https://discord.com/api/v10/users/@me
+          echo "--- guilds the bot is in ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' https://discord.com/api/v10/users/@me/guilds
+          echo "--- the target channel ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID"
+
           exit 1
         fi

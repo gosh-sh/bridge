@@ -8,7 +8,9 @@
 # on its next commit.
 #
 # Secrets used (create them on builder.gosh.sh for this repo):
-#   GITHUB_TOKEN           — needs write access to gosh-sh/bridge
+#   REVIEW_GH_TOKEN        — classic PAT, scope `repo` (this repository is
+#                            private, `public_repo` is not enough); its account
+#                            needs Write access to gosh-sh/bridge
 #   DISCORD_BOT_TOKEN      — bot must be in the guild and able to post
 #   DISCORD_CHANNEL_ID     — target channel
 #   DISCORD_REVIEWERS_MAP  — one line: "github-login=discord-id,other=123456789"
@@ -24,7 +26,7 @@ steps:
     image: maniator/gh
     environment:
       GH_TOKEN:
-        from_secret: GITHUB_TOKEN
+        from_secret: REVIEW_GH_TOKEN
       DISCORD_REVIEWERS_MAP:
         from_secret: DISCORD_REVIEWERS_MAP
     commands:
@@ -32,7 +34,7 @@ steps:
         PR="$CI_COMMIT_PULL_REQUEST"
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
 
-        # Which account GITHUB_TOKEN belongs to, and what it may do here. A token
+        # Which account the token belongs to, and what it may do here. A token
         # without write access fails at the very last call, after the log already
         # looks healthy — so state it up front.
         echo "PR:    #$PR in $REPO"

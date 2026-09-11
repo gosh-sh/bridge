@@ -25,7 +25,9 @@ skip_clone: true
 
 steps:
   window:
-    image: curlimages/curl
+    # alpine/curl and not curlimages/curl: the latter runs as an unprivileged
+    # user and cannot create the workspace directory when it is the first step.
+    image: alpine/curl
     environment:
       WOODPECKER_TOKEN:
         from_secret: WOODPECKER_TOKEN

@@ -7,9 +7,8 @@ verifiers deployed as Yul bytecode.
 
 > **Where the truth is.** This README orients you; it is not a specification. The document derived
 > from the sources line by line, with a `file:line` citation for every behavioural claim, is
-> [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md). The rest of the documentation is being
-> rewritten — [`DOCS.md`](DOCS.md) tracks what exists and what is coming. When any prose disagrees
-> with the code, the code wins.
+> [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md); [`DOCS.md`](DOCS.md) is the register of
+> current documentation. When any prose disagrees with the code, the code wins.
 
 ---
 
@@ -86,9 +85,9 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | `crates/bridge-prover-libraries/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
 | `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
 | `crates/ackinacki-bridge/` | End-user CLI: withdraws USDC from an Acki Nacki multisig to an EVM recipient. Counterpart to the relayer — the daemon owns bundle proving, this owns one withdrawal. Installed from published releases, see [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md). |
-| `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 aggregator spike. |
+| `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 SHPLONK aggregator. |
 | `frontend/` | WASM deposit UI (Yew). |
-| `docs/` | [`EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) plus material staged for rewriting — start at [`DOCS.md`](DOCS.md). |
+| `docs/` | [`EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) and the rest of the current documentation; the register is [`DOCS.md`](DOCS.md). |
 
 **Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
 and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
@@ -106,10 +105,7 @@ make test                  # both test suites
 make check                 # format-check + lint + test
 ```
 
-Run `make check` before pushing: nothing on the CI side builds or tests this repository today. The
-Woodpecker pipelines under `.woodpecker/` scan for committed credentials and keep review requests
-moving; the build, test and lint jobs live in `.gitlab-ci.yml`, which belongs to the GitLab remote and
-does not run from GitHub.
+Run `make check` before pushing.
 
 The end-user withdrawal CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads
@@ -146,10 +142,9 @@ Deployment, environment variables and genesis parameters: `docs/EVM-contracts-sp
 constraint bites early — the genesis seed must sit on a key-block boundary, currently
 `W·P = 128 × 8 = 1024`.
 
-Operating procedures (bootstrapping the prover daemons, the two live proving lanes, deploy timing,
-recovery from the failure modes actually hit in production) are being rewritten; `DOCS.md` tracks
-progress. Until they land, the daemons' own `--help` output and the crate READMEs under
-`crates/bridge-prover-libraries/` are the working reference.
+Operating procedures — bootstrapping the prover daemons, the two live proving lanes, deploy timing and
+recovery — are documented next to the code they describe: the crate READMEs under
+`crates/bridge-prover-libraries/`, and each daemon's own `--help`.
 
 ---
 

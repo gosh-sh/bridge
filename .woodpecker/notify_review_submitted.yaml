@@ -116,8 +116,8 @@ steps:
 
           case "$STATE" in
             APPROVED) HEADLINE="✅ **Approved**" ;;
-            CHANGES_REQUESTED) HEADLINE="🔧 **Changes requested**" ;;
-            *) HEADLINE="💬 **Review comment**" ;;
+            CHANGES_REQUESTED) HEADLINE="❌ **Changes requested**" ;;
+            *) HEADLINE="💬 **Comment left**" ;;
           esac
 
           # Safe to assemble by hand: every value here is a GitHub login, a state

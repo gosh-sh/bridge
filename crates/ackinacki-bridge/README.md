@@ -8,6 +8,10 @@ daemon: the daemon owns the continuous bundle-proving stream
 (`verifyBlock`); this CLI owns per-withdrawal composition
 (multisig burn → capture → Circuit-4 SHPLONK proof → `withdrawByProof`).
 
+**In a hurry?** [QUICKSTART.md](QUICKSTART.md) is one withdrawal in seven
+steps, starting with `scripts/install.sh`. This README is the reference
+behind it.
+
 This README is the **default-user runbook**: point the CLI at the
 pinned shellnet L2 deploy — whose bundle relayer runs on our server —
 bring your own Sepolia burner wallet, deploy a fresh AN multisig with

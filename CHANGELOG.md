@@ -172,6 +172,20 @@ assigns it when the release is tagged.
   so USDC returns to the source multisig on any bridge revert; the
   historical Python driver used `bounce = false`.
 
+- **`scripts/install.sh` provisions a host for a real withdrawal, and
+  `QUICKSTART.md` is the seven-step version of this README.** The four
+  things a real run needs — `solc 0.8.19`, the `kzg_bn254_21.srs` ceremony,
+  a prebuilt `aggregate-proof`, and the CLI itself — were four manual steps
+  spread across two documents, and a host missing any of them fails at
+  stage 5, after the burn. `--check` reports what is missing and installs
+  nothing; without it the script installs, asking before each download, and
+  `--yes` skips the questions. It resolves `params/` the way the CLI does,
+  checks free disk and RAM against what the keygen will need, and verifies
+  the solc it downloaded reports the pinned version before putting it on
+  `PATH`. It is safe to re-run: every step is skipped when already
+  satisfied, and the summary re-asks all four questions rather than
+  reporting its own bookkeeping.
+
 - **Helper scripts under `crates/ackinacki-bridge/scripts/`.**
   `deploy_msig_and_mint.{sh,py}` deploys a fresh single-custodian
   `UpdateCustodianMultisigWallet` and seeds it with 1 USDC on ECC[3] via

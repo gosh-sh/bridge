@@ -32,7 +32,6 @@ exclude_path = [
   "crates/bridge-prover-libraries/bridge-relayer-daemon",
   "target",
   "params",
-  "CHANGELOG.md",      # released entries cite links as they were at the time
 ]
 
 exclude = [
@@ -43,18 +42,6 @@ exclude = [
   "^https?://bm\\d+:",
   "^https?://<",
   "^https?://\\$",
-  # Faucets and RPC endpoints rate-limit or block automated clients; their
-  # liveness is not this repository's business.
-  "^https://sepolia-faucet\\.pk910\\.de",
-  "^https://faucet\\.circle\\.com",
-  "^https://ethereum-sepolia-rpc\\.publicnode\\.com",
   # GraphQL endpoints answer a bare GET with 400/500 by design.
   "/graphql$",
-  # Private sibling repositories. They 404 for anyone outside the org, which is
-  # a fact about access rather than a broken link; the prose says so where they
-  # are cited. Remove these three lines if the repositories are ever opened —
-  # that is exactly when the check becomes meaningful again.
-  "^https://github\\.com/gosh-sh/acki-nacki($|/)",
-  "^https://github\\.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits",
-  "^https://github\\.com/gosh-sh/bridge-EVM",
 ]

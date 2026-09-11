@@ -175,7 +175,7 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 - **~13 GB free disk** under `params/` (Hermez KZG SRS at K=17/19/20/21 + four PKs).
 - **~16 GB RAM** during proof generation.
 - **Docker / docker compose** for the local 5-node Acki Nacki cluster (local devnet only).
-- Sibling checkout of [`acki-nacki`](https://github.com/gosh-sh/acki-nacki) on branch **`poseidon_dex`** (local devnet only).
+- Sibling checkout of `gosh-sh/acki-nacki` (private repository) on branch **`poseidon_dex`** (local devnet only).
 - Python 3 + `tvm-cli` on PATH (local devnet only — orchestrator).
 - These two repos pinned to the matching branches:
 

@@ -53,6 +53,13 @@ regexes = [
   # `let key = "0123456789abcdef"` as a credential on the strength of the name.
   '''(0123456789abcdef)+''',
   '''(?i)^(deadbeef|cafebabe|0+|1+|a+|f+)$''',
+  # Synthetic 16-hex idempotency keys in the ackinacki-bridge tests
+  # (0f1e2d3c4b5a6978, 5a5a5a5a5a5a5a5a, fedcba9876543210 …). Anchored to
+  # exactly 16 hex characters, which no credential format in this repository
+  # uses: EVM and TVM keys are 64 hex, Discord tokens and JWTs are long base64.
+  # 64 bits is not a secret anyone would ship — but it is enough entropy for
+  # gitleaks to flag `let key = "…"` on the strength of the variable name.
+  '''^[0-9a-f]{16}$''',
   '''(?i)(your|example|placeholder|changeme|dummy|test)[_-]?(api[_-]?)?(key|token|secret)''',
   '''X{16,}''',
 ]

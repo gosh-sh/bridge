@@ -36,6 +36,8 @@ description = "Shellnet development fixtures and documentation placeholders"
 # and out of the history.
 paths = [
   '''crates/bridge-prover-libraries/shellnet\.common''',
+  '''crates/bridge-prover-libraries/python/contracts/USDCBridge\.keys\.json''',
+  '''crates/bridge-prover-libraries/python/contracts/USDCBridge\.shellnet\.keys\.json''',
   '''.*\.env\.example$''',
   '''docs/archive/.*''',
 ]

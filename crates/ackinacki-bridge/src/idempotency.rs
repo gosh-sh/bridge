@@ -2641,7 +2641,7 @@ mod tests {
         // went unwatched on the one arm that must forbid the deletion
         // outright. `Prune the record and re-run.` appended here left
         // `contains("Do not delete the record")` true and matched
-        // neither string: the same defect `de77e46` closed between the
+        // neither string: the same defect already closed between the
         // other two surfaces, in the branch where another process may be
         // inside `burn::send` right now.
         //

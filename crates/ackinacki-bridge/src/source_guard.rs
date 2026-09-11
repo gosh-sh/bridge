@@ -499,7 +499,7 @@ mod tests {
                 orders_a_refusal_may_not_give as Gate,
                 "Delete that file and try again.",
             ),
-            // The measured attack of round 21, and the case that pins
+            // A measured attack, and the case that pins
             // the refusal gate's HEDGES behaviourally: a conditional a
             // runbook is allowed to grant permission under, planted in a
             // live exit-10 refusal. Hand this gate the document hedges
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn no_shipped_document_says_the_refusal_always_answers_the_liveness_question() {
         // IN THIS MODULE, with the two functions it calls, and that is
-        // the fix for the hole round 21 measured rather than a move for
+        // the fix for a measured hole rather than a move for
         // tidiness. Both were `pub(crate)` and the document one could
         // therefore be named from a REFUSAL gate: one word at
         // `orchestrator.rs`'s call site handed that gate thirteen
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn an_attribute_on_an_item_is_walked_past() {
-        // Round 11's decoy, and `idempotency.rs`'s real one: an attribute
+        // A decoy, and `idempotency.rs`'s real one: an attribute
         // on a method 470 lines above the test module. Indented here, as
         // it is there.
         let src = file(&[

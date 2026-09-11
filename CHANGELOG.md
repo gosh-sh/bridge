@@ -911,10 +911,10 @@ assigns it when the release is tagged.
 - **The shellnet profile documents how to tell a live deploy from a dead
   one, because an address alone does not.** The values are unchanged —
   `BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`,
-  `USDC_BRIDGE_ACCOUNT_ID=1a1a…1a1a` — but NODE-4011 moved the relayer
-  to a second deploy
+  `USDC_BRIDGE_ACCOUNT_ID=1a1a…1a1a` — but the relayer was moved to a
+  second deploy
   (`0x8545129b215B248944A3aE40f711F34CAb458644`, over a new AN-side
-  eccUSDCBridge) and rolled it back within the day, and the retired
+  eccUSDCBridge) and rolled back within the day, and the retired
   deploy answers every getter exactly like the live one throughout.
 
   What that costs if you get it wrong is the whole point: a bridge
@@ -1311,9 +1311,8 @@ assigns it when the release is tagged.
   Neither the flake nor the two fixture failures were ever visible in CI:
   every `-p bridge-prover-lib` invocation in `.gitlab-ci.yml` is filtered
   to `keys::`, and no fmt or clippy job covers the crate at all. That gap
-  is tracked in
-  [NODE-4015](https://linear.app/acki-nacki/issue/NODE-4015/bridge-prover-lib-krejt-ne-pokryt-ni-odnim-gejtom-ci)
-  and is not addressed here. Until its fmt step lands, do not run
+  is tracked separately and is not addressed here. Until a fmt job for
+  this crate lands, do not run
   `cargo fmt` against this crate — it is 347 hunks from rustfmt's output
   at HEAD, and a sweep would bury unrelated diffs.
 

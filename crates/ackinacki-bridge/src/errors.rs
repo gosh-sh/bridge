@@ -279,7 +279,7 @@ pub enum CliError {
 /// text is cut to 24 characters — and an author still has to say which
 /// case this is, in a word a reader can grep.
 ///
-/// What does NOT differ, as of round 21, is the escaping: both escape.
+/// What does NOT differ is the escaping: both escape.
 /// "The point is not that one of them escapes and the other does not"
 /// stood here beside a `rendered` that escaped nothing, so
 /// `Redacted::rendered(operator_text)` recreated the whole defect in

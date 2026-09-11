@@ -580,9 +580,9 @@ pub async fn run(
             // means is that no statement in it can release the lock: the
             // borrow makes an assignment E0506.
             //
-            // Round 13 deleted this hold, on the argument that the two
-            // statements below it are infallible and so nothing here can
-            // exit holding nothing. That is the wrong question. A hold
+            // This hold has been deleted once, on the argument that the
+            // two statements below it are infallible and so nothing here
+            // can exit holding nothing. That is the wrong question. A hold
             // does not defend against the statements that ARE here; it
             // makes the ones that could be ADDED here not compile.
             // Without it, `_withdrawal_lock = LockSlot::empty()` on the
@@ -2989,9 +2989,9 @@ mod tests {
         // The third attempt at holding this text to anything, and the
         // first that is not a substring list.
         //
-        // Round 13 pinned "exit 3". f3c7a8a widened that to four
-        // substrings — "NO AN tx hash", "Case 3a", "resumes from it",
-        // "exit 3" — and widened the hole with it: a message keeping all
+        // The first attempt pinned "exit 3". The second widened that to
+        // four substrings — "NO AN tx hash", "Case 3a", "resumes from
+        // it", "exit 3" — and widened the hole with it: a message keeping all
         // four and inverting every claim around them passed. The one the
         // test agent wrote said the missing hash "is proof that no burn
         // was ever broadcast", ordered "Delete that record now", declared
@@ -3855,7 +3855,7 @@ mod tests {
         .concat();
 
         // INVERTED. This was an allow-list of two spellings — `preflight::`
-        // and `idempotency::peek(` — so widening the region in 53cdbec
+        // and `idempotency::peek(` — so widening the region
         // widened nothing: every other fallible call in it was invisible
         // by construction, and `ensure_state_dir(…)?` and
         // `try_acquire(…)?` sat there propagating with nobody looking.

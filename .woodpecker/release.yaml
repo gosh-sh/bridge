@@ -1,0 +1,104 @@
+# Build the release assets `scripts/install.sh` downloads, and attach them to
+# the GitHub release for the tag.
+#
+# The manifest is the installer's, not this pipeline's: it fetches
+# `ackinacki-bridge-linux-x86_64.tar.gz`, `kzg_bn254_21.srs` and `SHA256SUMS`
+# from `releases/latest/download`, and checks every asset against that
+# `SHA256SUMS` — so a release missing one of the three leaves the documented
+# first step of QUICKSTART.md returning 404.
+#
+# The tarball is unpacked with `--strip-components=1`, so everything sits under
+# one top-level directory, and the installer then expects exactly:
+#
+#   ackinacki-bridge     the CLI
+#   aggregate-proof      the prover subprocess the CLI shells out to
+#   verifiers/*.bin      what the proof is self-checked against
+#   bridge_config        the profile it writes as <prefix>/profile.release
+#
+# The ceremony file is not built here — it is the Hermez KZG setup, 257 MB and
+# identical for every release. The first tagged release needs it uploaded by
+# hand; after that this pipeline carries it forward from the previous release,
+# so it only ever has to be done once.
+#
+# Secret: RELEASE_GH_TOKEN — needs **Contents: Read and write** on this
+# repository, which REVIEW_GH_TOKEN deliberately does not have. Tick the `tag`
+# event on it, otherwise it arrives empty.
+
+when:
+  - event: tag
+    ref: refs/tags/v*
+
+variables:
+  - &rust_image "docker.gosh.sh/rust"
+
+steps:
+  build:
+    image: *rust_image
+    environment:
+      # Keep cargo's data inside the workspace so the next step still sees it.
+      CARGO_HOME: .cargo_home
+    commands:
+      # The CLI builds as a member of the prover workspace — the symlink at
+      # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its
+      # workspace=true circuit dependencies. A standalone `cargo build` in
+      # crates/ackinacki-bridge cannot see them.
+      - cd crates/bridge-prover-libraries
+      - cargo build --release --locked -p ackinacki-bridge
+      - cd ../bridge-evm-aggregator
+      - cargo build --release --locked --bin aggregate-proof
+
+  package:
+    image: *rust_image
+    commands:
+      - |
+        STAGE=dist/ackinacki-bridge-linux-x86_64
+        rm -rf dist && mkdir -p "$STAGE/verifiers"
+
+        install -m 0755 crates/bridge-prover-libraries/target/release/ackinacki-bridge "$STAGE/"
+        install -m 0755 crates/bridge-evm-aggregator/target/release/aggregate-proof "$STAGE/"
+        cp contracts/ethereum/verifiers/*.bin "$STAGE/verifiers/"
+        cp crates/ackinacki-bridge/config/bridge_config "$STAGE/"
+
+        tar -czf ackinacki-bridge-linux-x86_64.tar.gz -C dist ackinacki-bridge-linux-x86_64
+        ls -l ackinacki-bridge-linux-x86_64.tar.gz
+
+  publish:
+    image: maniator/gh
+    environment:
+      GH_TOKEN:
+        from_secret: RELEASE_GH_TOKEN
+    commands:
+      - |
+        REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
+        TAG="$CI_COMMIT_TAG"
+        echo "Publishing to $REPO $TAG"
+
+        # Carry the ceremony forward from whichever release last had it. Release
+        # assets do not inherit, so without this every tag would need the 257 MB
+        # upload repeated by hand.
+        PREVIOUS=$(gh release list -R "$REPO" --limit 20 --json tagName,isDraft \
+          --jq '[.[] | select(.isDraft | not) | .tagName] | map(select(. != "'"$TAG"'")) | .[0] // empty')
+        if [ -n "$PREVIOUS" ] && gh release download "$PREVIOUS" -R "$REPO" \
+             --pattern kzg_bn254_21.srs --output kzg_bn254_21.srs 2>/dev/null; then
+          echo "Ceremony carried over from $PREVIOUS."
+        else
+          echo "No kzg_bn254_21.srs on any earlier release — upload it once to $TAG by hand:"
+          echo "  gh release upload $TAG kzg_bn254_21.srs -R $REPO"
+          echo "Until then the installer's ceremony step 404s."
+        fi
+
+        # One SHA256SUMS over whatever is actually being shipped: the installer
+        # refuses an asset it cannot find a line for.
+        sha256sum ackinacki-bridge-linux-x86_64.tar.gz >SHA256SUMS
+        if [ -f kzg_bn254_21.srs ]; then
+          sha256sum kzg_bn254_21.srs >>SHA256SUMS
+        fi
+        cat SHA256SUMS
+
+        # --clobber so re-running a tag replaces its assets instead of failing.
+        gh release upload "$TAG" -R "$REPO" --clobber \
+          ackinacki-bridge-linux-x86_64.tar.gz SHA256SUMS
+        if [ -f kzg_bn254_21.srs ]; then
+          gh release upload "$TAG" -R "$REPO" --clobber kzg_bn254_21.srs
+        fi
+        echo "Done."

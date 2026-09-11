@@ -183,6 +183,19 @@ steps:
         from_secret: DISCORD_CHANNEL_ID
     commands:
       - |
+        # Before anything else, and on every run: a secret that is not enabled for
+        # the `pull_request` event arrives empty, which otherwise shows up much
+        # later as an unexplained 401. Lengths only — never the values.
+        echo "Channel id: $(printf '%s' "$DISCORD_CHANNEL_ID" | wc -c) chars, bot token: $(printf '%s' "$DISCORD_BOT_TOKEN" | wc -c) chars"
+        case "$DISCORD_CHANNEL_ID" in
+          "") echo "WARNING: DISCORD_CHANNEL_ID is empty — is the pull_request event ticked on the secret?" ;;
+          *[!0-9]*) echo "WARNING: DISCORD_CHANNEL_ID is not a plain number — a channel id looks like 1122334455667788990" ;;
+        esac
+        case "$DISCORD_BOT_TOKEN" in
+          "") echo "WARNING: DISCORD_BOT_TOKEN is empty — is the pull_request event ticked on the secret?" ;;
+          "Bot "*) echo "WARNING: DISCORD_BOT_TOKEN starts with 'Bot ' — the prefix is added by this step, drop it from the secret" ;;
+        esac
+
         if [ ! -s discord-payload.json ]; then
           echo "No review was requested — no Discord notification."
           exit 0

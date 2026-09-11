@@ -48,6 +48,11 @@ paths = [
 regexes = [
   # Documentation placeholders: 0x0123456789abcdef… repeated, YOUR_KEY, XXXX…
   '''0x(0123456789abcdef){4}''',
+  # The same sequential-hex dummy at any length. Unit tests use the 16-character
+  # form as an idempotency key, and gitleaks' generic-api-key rule reads
+  # `let key = "0123456789abcdef"` as a credential on the strength of the name.
+  '''(0123456789abcdef)+''',
+  '''(?i)^(deadbeef|cafebabe|0+|1+|a+|f+)$''',
   '''(?i)(your|example|placeholder|changeme|dummy|test)[_-]?(api[_-]?)?(key|token|secret)''',
   '''X{16,}''',
 ]

@@ -1,9 +1,11 @@
-# Documentation — state and rewrite plan
+# Documentation — the register of what exists, and the rules for adding to it
 
 > **Everything outside `docs/archive/` is current. `docs/archive/` is not.**
 
 **As of 2026-08-18** the repository's prose was consolidated so that documentation can be rewritten
-from scratch instead of patched. Read this file before adding any document.
+from scratch instead of patched. The table below is the register: every current document is listed
+there, so **add your row when you add a document**. The rewrite plan further down is what the register
+is being emptied into — read the rules in it before writing anything new.
 
 ## What exists now
 
@@ -12,6 +14,7 @@ from scratch instead of patched. Read this file before adding any document.
 | [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) | **Verified.** The Ethereum contract system as implemented, derived by reading the Solidity sources at commit `a69ba36`, every behavioural claim carrying a `file:line` citation. Safe to act on. |
 | [`docs/EVM-custody-and-accounting.md`](docs/EVM-custody-and-accounting.md) | **Verified.** What the bridge owes versus what it holds, the exact operation order on the deposit and payout paths, and the labelled rules (DEP-#, CUST-#, CEI-#) restated against the code. EVM side only. |
 | [`docs/aave-yield.md`](docs/aave-yield.md) | **Verified.** Operator runbook for the AAVE module: where the money sits, which collector applies to which pocket, the two ways to get it wrong, and the owner/`yieldRecipient` divergence. Written against the same commit. |
+| [`crates/ackinacki-bridge/QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md) · [`README.md`](crates/ackinacki-bridge/README.md) · [`docs/advanced_user_withdraw_runbook.md`](crates/ackinacki-bridge/docs/advanced_user_withdraw_runbook.md) | **User documentation for the withdrawal CLI**, next to its crate per rule 3 below. QUICKSTART is the install-and-run path for an operator with no checkout and no Rust; the crate README is the reference; the runbook is the same six stages done by hand, for when a run has to be picked apart. Written alongside the code it describes, not verified independently of it. |
 | `docs/archive/` (66 files) | Everything else the repository had. **Staged for deletion.** Not maintained, not authoritative, and in several places contradicted by the code. Source material for the rewrite — nothing more. |
 | `README.md`, `AGENTS.md`, `*/README.md`, `.cursor/skills/**` | Left in place, unchanged, by decision. See *Reference conventions* below. |
 

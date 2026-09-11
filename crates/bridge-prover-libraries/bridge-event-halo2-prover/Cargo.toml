@@ -1,6 +1,6 @@
 [package]
 name = "bridge-event-halo2-prover"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # One-shot CLI (dex tooling style, not a long-running daemon) that:

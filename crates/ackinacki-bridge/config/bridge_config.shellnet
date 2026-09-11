@@ -40,9 +40,28 @@ RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 NETWORK=shellnet.ackinacki.org
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 
-# On-chain USDCBridge account id (64 hex, no `0x`). Shellnet canonical
-# palindromic `1a1a…1a1a`. The dapp_id is resolved live via GraphQL, so
-# only the account id is needed here.
+# On-chain USDCBridge account id (64 hex, no `0x`). The dapp_id is
+# resolved live via GraphQL, so only the account id is needed here.
+#
+# This value is NOT free-form: `withdrawByProof` compares the pair
+# (dappFr, accFr) it derives from a proof against the pair the deploy
+# was pinned to at construction, BEFORE verifying the proof itself, so
+# a mismatch is a refusal after the burn. Preflight checks it up front
+# for that reason — and it means the id here has to match the deploy in
+# BRIDGE_ADDRESS below, not merely be a real account.
+#
+# It can always be read back from the deploy rather than looked up:
+#
+#   cast call $BRIDGE_ADDRESS 'bridgeWithdrawalAccFr()(uint256)' --rpc-url $RPC_URL
+#
+# `accFr` is these same 32 bytes read big-endian (and below the BN254
+# field prime, so the reading is unambiguous): print it as 064x and you
+# have the value for this line.
+#
+# NODE-4011 briefly moved this to `20f9338d…d7c3c5b8` over a new
+# eccUSDCBridge and was rolled back the same day. Both deploys exist and
+# both answer; only the one the relayer advances is usable, and the
+# check below is what tells them apart.
 USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 
 # Partner-provided bridge-owner key for `USDCBridge.mintAndSend`. Used
@@ -90,6 +109,31 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # Currently pinned to the shellnet team's L2-anchored reference deploy
 # on Sepolia. The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
+#
+# NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
+# over a new AN-side eccUSDCBridge and rolled back the same day. That
+# deploy still exists and still answers every getter — which is exactly
+# why an address alone proves nothing. VERIFY BEFORE A RUN THAT COSTS
+# MONEY, because a bridge nobody advances takes the burn and then times
+# out at stage 4b:
+#
+#   cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL
+#   TIP=$(cast block-number --rpc-url $RPC_URL)
+#   cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
+#     'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
+#     | grep -E '^  blockNumber' | tail -3
+#
+# Bundles land ~437 Sepolia blocks apart (~87 min); a last event older
+# than that means this deploy is not the live one — check with the team
+# before blaming the daemon.
+#
+# Changing this line means changing USDC_BRIDGE_ACCOUNT_ID above with
+# it: a deploy is pinned to one AN-side bridge account, and the two are
+# checked against each other in preflight. A deploy also carries its own
+# treasury — `treasuryBalance` is a counter on the bridge itself, moved
+# only by `deposit`, so a plain USDC transfer to this address funds
+# nothing, and a switch does not bring the balance along. See README
+# Step 3.
 #
 # Advanced users who ran their own `deploy_bridge_bundle.sh` should
 # overwrite this with the `BRIDGE_ADDRESS` from their own

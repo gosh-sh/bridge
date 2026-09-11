@@ -53,7 +53,10 @@ impl PrimaryKeyManager {
     /// [`Self::load_pk`] before proving.
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         Self {
-            state: KeyManagerState::new(params_dir, PREFIX, k, k),
+            // `None`: this circuit does not version its keys. When it
+            // grows a manifest this becomes `Some(..)` and it inherits
+            // the whole mechanism.
+            state: KeyManagerState::new(params_dir, PREFIX, k, k, None),
         }
     }
 

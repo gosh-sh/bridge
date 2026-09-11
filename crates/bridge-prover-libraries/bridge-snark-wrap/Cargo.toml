@@ -1,6 +1,6 @@
 [package]
 name = "bridge-snark-wrap"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "In-process wrap of a Poseidon-transcript Halo2 SHPLONK proof + partner VK into a snark-verifier `Snark` bincode file, so `bridge-relayer-daemon` can produce aggregator input without shelling out to `export-1a1b2-poseidon-snark` (which itself re-fetches + re-proves)."
 

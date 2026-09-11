@@ -19,3 +19,11 @@
 da844ddf7f1d611ad210bee651e22d7a40793a24:docs/verifying_an_proof.md:generic-api-key:565
 e3450b58f08c14eab9ef72b03bdbd78eb492c816:docs/integration_plan.md:generic-api-key:113
 f125bcfd5edf91e1e186ac6b0c762725fccd58a6:.cursor/skills/evm-an-deposit-e2e/SKILL.md:generic-api-key:5
+
+# Historical only: the ackinacki-bridge idempotency tests used to spell their
+# keys as 16 hex characters, which generic-api-key reads as a credential. The
+# current code names them (`test-key-lock` and friends), so these three cannot
+# recur — they are pinned because a commit, once made, keeps what it said.
+7feb52836a3222190cada3121b4a0ec50d5df702:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2166
+87b381d298e013a8cc640184efb8d9bfa1998e46:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2106
+c6ba4ec6fb56342784756074759cacdaa6d7ae43:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:1792

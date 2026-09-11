@@ -7,16 +7,15 @@
 //! surface be unit-tested without a live network.
 //!
 //! Naming rationale (from Ekaterina's spec):
-//! - `--from` / `--to` — the two sides of the bridge; the value's shape
-//!   carries the type (the flag name doesn't say "address").
+//! - `--from` / `--to` — the two sides of the bridge; the value's shape carries
+//!   the type (the flag name doesn't say "address").
 //! - `--from-keys` — keys *to what's in --from*; no owner_ prefix.
-//! - `--amount` — token is fixed (USDC); putting the token in the flag name
-//!   is a trap that breaks the moment a second token arrives.
-//! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous
-//!   once the source side is selectable too.
+//! - `--amount` — token is fixed (USDC); putting the token in the flag name is
+//!   a trap that breaks the moment a second token arrives.
+//! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous once
+//!   the source side is selectable too.
 
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use alloy_primitives::Address;
 use clap::{Parser, Subcommand};
@@ -51,15 +50,15 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     about = "Acki Nacki ↔ EVM bridge CLI. Currently ships the `withdraw` subcommand.",
     long_about = "Composes a single-custodian multisig sendTransaction that calls \
                   USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
-                  resurrects the prover's mirror of `AckiNackiBridge` state from the \
-                  on-chain contract at --bridge-address, waits for the covering L1/L2 \
-                  anchor bundle to land (fed by a relayer running on some other host), \
-                  produces the Circuit-4 SHPLONK proof, and submits withdrawByProof on \
-                  the EVM side.\n\n\
-                  Third-party end-user CLI: expects only an EVM RPC URL and the deployed \
-                  AckiNackiBridge address — no local `prover_state.json`, no daemon on \
-                  this machine."
+                  resurrects the prover's mirror of `AckiNackiBridge` state from the on-chain \
+                  contract at --bridge-address, waits for the covering L1/L2 anchor bundle to \
+                  land (fed by a relayer running on some other host), produces the Circuit-4 \
+                  SHPLONK proof, and submits withdrawByProof on the EVM side.\n\nThird-party \
+                  end-user CLI: expects only an EVM RPC URL and the deployed AckiNackiBridge \
+                  address — no local `prover_state.json`, no daemon on this machine."
 )]
+/// The command line, as clap parses it. The long description above
+/// this attribute is what `--help` prints.
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Command,
@@ -71,9 +70,9 @@ pub struct Cli {
     pub json: bool,
 
     /// Skip the terminal confirmation prompt. Intended for scripts.
-    /// Mutually exclusive with --non-interactive (which refuses if the
-    /// prompt would be needed).
-    #[arg(long, global = true, conflicts_with = "non_interactive")]
+    /// Combines with --non-interactive: --yes answers the question, and
+    /// --non-interactive guarantees nothing will ever wait for an answer.
+    #[arg(long, global = true)]
     pub yes: bool,
 
     /// Refuse (exit 2) instead of prompting when a confirmation would be
@@ -84,12 +83,19 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+/// The subcommands this binary ships. One today; the enum is what
+/// keeps `withdraw` from becoming the implicit default when a
+/// second one lands.
 pub enum Command {
     /// Withdraw USDC from an AN multisig to an EVM recipient.
     Withdraw(WithdrawArgs),
 }
 
 #[derive(Debug, clap::Args)]
+/// Everything `withdraw` takes, before any of it is parsed into a
+/// typed form. Every field is raw here on purpose: the typed
+/// parsers below are where a refusal gets its wording, and they
+/// can only refuse what they were handed verbatim.
 pub struct WithdrawArgs {
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,
     /// no `0x`, no workchain prefix). Must be an active, deployed
@@ -97,16 +103,17 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "dapp_id::account_id")]
     pub from: String,
 
-    /// Path to the multisig owner's keys.json. File must be a regular
-    /// file, owned by the current uid, and mode `0600` — otherwise the
-    /// CLI refuses with `chmod 600 <path>`.
+    /// Path to the multisig owner's keys.json. Must be a regular file,
+    /// owned by the current uid, mode exactly `0400` (read-only for the
+    /// owner — the CLI never writes this file). Otherwise the CLI refuses
+    /// with `chmod 400 <path>`.
     #[arg(long, value_name = "PATH")]
     pub from_keys: PathBuf,
 
     /// EVM recipient. Accepts:
     /// - `0x…` (20-byte hex); mixed-case must pass EIP-55 checksum
-    /// - CAIP-10 form `eip155:<chain>:<0x…>` (chain redundantly encoded;
-    ///   must match --to-chain if that is also supplied)
+    /// - CAIP-10 form `eip155:<chain>:<0x…>` (chain redundantly encoded; must
+    ///   match --to-chain if that is also supplied)
     #[arg(long, value_name = "0x… | eip155:<chain>:<0x…>")]
     pub to: String,
 
@@ -122,9 +129,18 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "USDC")]
     pub amount: String,
 
-    /// Preflight only. Runs every check + composes the messages but
-    /// broadcasts nothing on either side. Idempotency state is NOT
-    /// recorded for a dry-run.
+    /// Preflight only: nothing is broadcast on either side and no
+    /// idempotency state is recorded.
+    ///
+    /// Runs every check that needs no submit-only flag — the Acki Nacki
+    /// account, multisig and key checks, and the EVM side (chain id,
+    /// bridge deploy, verifier stack, pinned identity, treasury).
+    ///
+    /// Does NOT compose or sign the burn message, and does NOT check the
+    /// prover artifacts (`--params-dir`, `--verifiers-dir`,
+    /// `--aggregator-dir`): those need the submit-only flags a dry run
+    /// does not require. Pass them anyway and `--verifiers-dir` will also
+    /// be used to compare against the deployed verifier.
     #[arg(long)]
     pub dry_run: bool,
 
@@ -133,8 +149,25 @@ pub struct WithdrawArgs {
     #[arg(long)]
     pub allow_retry: bool,
 
-    // -- Environment / plumbing --
+    /// Accept a `--verifiers-dir` whose
+    /// `BridgeWithdrawalAggregatorVerifier.bin` differs from the one this
+    /// build embeds. Correct only when you deployed your own bridge and
+    /// regenerated the verifier.
+    ///
+    /// This is NOT the counterpart of `aggregate-proof --allow-bin-drift`.
+    /// That one is a bootstrap escape hatch "for the very first bootstrap
+    /// of a verifier whose .bin is not committed yet — never use once a
+    /// verifier is deployed" (`aggregate_proof.rs:62-63`). Against a live
+    /// self-deploy the regenerated bytecode must still equal your own
+    /// deployed `.bin`, and suppressing that comparison hides a proof the
+    /// chain will reject.
+    ///
+    /// On the pinned deploy a mismatch means a stale or corrupted file, and
+    /// passing this flag will not make the proof verify on-chain.
+    #[arg(long)]
+    pub allow_verifier_drift: bool,
 
+    // -- Environment / plumbing --
     /// GraphQL endpoint for the AN chain (event capture + account queries).
     #[arg(long, env = "BRIDGE_GQL_ENDPOINT", value_name = "URL")]
     pub gql_endpoint: String,
@@ -149,7 +182,12 @@ pub struct WithdrawArgs {
 
     /// Anchor layer selection passed through to the enricher. Use `auto`
     /// (default) on L1 deploys; `2` with `--i-know-the-wait` on L2.
-    #[arg(long, env = "BRIDGE_ANCHOR_LAYER", default_value = "auto", value_name = "auto|1|2")]
+    #[arg(
+        long,
+        env = "BRIDGE_ANCHOR_LAYER",
+        default_value = "auto",
+        value_name = "auto|1|2"
+    )]
     pub anchor_layer: String,
 
     /// Acknowledge the L≥2 wait budget (up to ~101 min chain-time for L2).
@@ -171,15 +209,15 @@ pub struct WithdrawArgs {
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
     #[arg(long, env = "BURNER_PRIVATE_KEY", value_name = "0x…")]
-    pub eth_private_key: String,
+    pub eth_private_key: Option<String>,
 
     // -- Prover subprocess plumbing (passed through to run_once) --
     #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
-    pub aggregator_dir: PathBuf,
+    pub aggregator_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
-    pub verifiers_dir: PathBuf,
+    pub verifiers_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_PARAMS_DIR")]
-    pub params_dir: PathBuf,
+    pub params_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_SNARK_DIR", default_value = "./shplonk-snark")]
     pub snark_dir: PathBuf,
     #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
@@ -189,7 +227,7 @@ pub struct WithdrawArgs {
     #[arg(long, default_value_t = 1800)]
     pub prover_timeout_s: u64,
     #[arg(long, env = "BRIDGE_WORK_DIR")]
-    pub work_dir: PathBuf,
+    pub work_dir: Option<PathBuf>,
 
     // -- Idempotency --
     /// Directory holding per-withdrawal state files. Defaults to
@@ -262,7 +300,7 @@ pub fn parse_from(raw: &str) -> CliResult<FromAddress> {
         return Err(CliError::ArgInvalid {
             flag: "from",
             expected: "each half exactly 64 lowercase hex chars".into(),
-            got: format!("{}::{}", redact(dapp), redact(acc)),
+            got: crate::errors::Redacted::rendered(format!("{}::{}", redact(dapp), redact(acc))),
         });
     }
     Ok(FromAddress {
@@ -292,7 +330,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
                 return Err(CliError::ArgInvalid {
                     flag: "to-chain",
                     expected: format!("must match --to CAIP chain segment ({chain})"),
-                    got: explicit.to_string(),
+                    got: crate::errors::Redacted::rendered(explicit),
                 });
             }
         }
@@ -300,8 +338,9 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
     } else {
         let chain = to_chain.ok_or_else(|| CliError::ArgInvalid {
             flag: "to-chain",
-            expected: "required when --to is plain 0x… (no default — irreversible on wrong chain)".into(),
-            got: "<absent>".into(),
+            expected: "required when --to is plain 0x… (no default — irreversible on wrong chain)"
+                .into(),
+            got: crate::errors::Redacted::rendered("<absent>"),
         })?;
         (raw, chain)
     };
@@ -310,7 +349,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         return Err(CliError::ArgInvalid {
             flag: "to-chain",
             expected: format!("one of {}", format_supported_chains()),
-            got: chain_id.to_string(),
+            got: crate::errors::Redacted::rendered(chain_id),
         });
     }
 
@@ -325,13 +364,13 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         Address::parse_checksummed(addr_str, None).map_err(|e| CliError::ArgInvalid {
             flag: "to",
             expected: "mixed-case address must be valid EIP-55 checksum".into(),
-            got: format!("{} ({e})", redact(addr_str)),
+            got: crate::errors::Redacted::rendered(format!("{} ({e})", redact(addr_str))),
         })?
     } else {
         Address::from_str(addr_str).map_err(|e| CliError::ArgInvalid {
             flag: "to",
             expected: "0x-prefixed 20-byte hex address".into(),
-            got: format!("{} ({e})", redact(addr_str)),
+            got: crate::errors::Redacted::rendered(format!("{} ({e})", redact(addr_str))),
         })?
     };
 
@@ -346,11 +385,14 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         return Err(CliError::ArgInvalid {
             flag: "to",
             expected: "non-zero EVM address (refuse burning to 0x0)".into(),
-            got: format!("{address:?}"),
+            got: crate::errors::Redacted::rendered(format!("{address:?}")),
         });
     }
 
-    Ok(ToAddress { address, chain_id })
+    Ok(ToAddress {
+        address,
+        chain_id,
+    })
 }
 
 /// Parse `--amount` as decimal USDC, reject > 6 fractional digits (no
@@ -365,14 +407,14 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         return Err(CliError::ArgInvalid {
             flag: "amount",
             expected: format!("at most {USDC_DECIMALS} fractional digits (USDC precision)"),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     if d.is_sign_negative() || d.is_zero() {
         return Err(CliError::ArgInvalid {
             flag: "amount",
             expected: "positive USDC amount".into(),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     // Scale up to micro-USDC. `d * 10^6` cannot lose precision because we
@@ -382,18 +424,21 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
         .ok_or_else(|| CliError::ArgInvalid {
             flag: "amount",
             expected: "value fits in u128 micro-USDC".into(),
-            got: raw.into(),
+            got: redact(raw),
         })?;
-    let micros: u128 = scaled.trunc().try_into().map_err(|_| CliError::ArgInvalid {
-        flag: "amount",
-        expected: "value fits in u128 micro-USDC".into(),
-        got: raw.into(),
-    })?;
+    let micros: u128 = scaled
+        .trunc()
+        .try_into()
+        .map_err(|_| CliError::ArgInvalid {
+            flag: "amount",
+            expected: "value fits in u128 micro-USDC".into(),
+            got: redact(raw),
+        })?;
     // Cap at u64::MAX micro-USDC. The multisig ECC[3] balance and the
     // AN-side `initiateWithdrawal(amount)` argument are u64 on the wire;
     // anything above 2^64 - 1 micro-USDC (~1.8e13 USDC) cannot be
     // burned even with an over-funded multisig, and letting it through
-    // would trip a downstream cast in `burn::fire` at broadcast time
+    // would trip a downstream cast in `burn::compose` at broadcast time
     // rather than a clean preflight refusal.
     if micros > u64::MAX as u128 {
         return Err(CliError::ArgInvalid {
@@ -402,37 +447,67 @@ pub fn parse_amount(raw: &str) -> CliResult<UsdcAmount> {
                 "must fit in u64 micro-USDC (max {} USDC)",
                 u64::MAX / 1_000_000
             ),
-            got: raw.into(),
+            got: redact(raw),
         });
     }
     Ok(UsdcAmount(micros))
 }
 
-/// Enforce `--from-keys` file is a regular file, owned by the current uid,
-/// and mode is `0600` or stricter (no group/world bits).
+/// The one mode `--from-keys` may have.
+///
+/// Read-only for the owner. The CLI reads this file and nothing else, so a
+/// write bit buys nothing and an execute bit is meaningless; pinning the
+/// exact value makes the requirement checkable from a script instead of
+/// approximately describable in prose.
+pub const KEY_FILE_MODE: u32 = 0o400;
+
+/// Enforce that `--from-keys` is a regular file owned by the current uid
+/// and mode is exactly [`KEY_FILE_MODE`]. Each failure names its own remedy —
+/// telling someone to `chmod 400` a path that does not exist wastes a
+/// round trip and hides the real problem.
 pub fn check_key_file_perms(path: &std::path::Path) -> CliResult<()> {
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).map_err(|_| CliError::KeyFilePerms {
+
+    let refuse = |problem: String| CliError::KeyFilePerms {
         path: path.display().to_string(),
-    })?;
+        problem,
+    };
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(refuse("does not exist".into()));
+        },
+        Err(e) => {
+            return Err(refuse(format!("cannot stat: {e}")));
+        },
+    };
     if !meta.is_file() {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+        return Err(refuse("not a regular file".into()));
     }
-    // uid check
     let uid_now = unsafe { libc_getuid() };
     if meta.uid() != uid_now {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+        return Err(refuse(format!(
+            "owned by uid {} but this process runs as uid {uid_now}",
+            meta.uid()
+        )));
     }
-    // Mode: reject any bit outside owner rw.
+    // Exactly 0400. The CLI only ever reads this file — it never writes,
+    // rotates or appends — so read-only-to-owner is the tightest mode that
+    // still works, and an exact match is a contract an operator and a
+    // script can both check. "Owner-only" as a range would also admit 0600
+    // and 0700, which grant a write and an execute bit nothing needs.
+    //
+    // This refuses 0600, which is what today's README tells people to set,
+    // so the message has to be immediately actionable and the changelog
+    // entry is a breaking change.
     let mode = meta.mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(CliError::KeyFilePerms {
-            path: path.display().to_string(),
-        });
+    if mode != KEY_FILE_MODE {
+        return Err(refuse(format!(
+            "mode is {mode:04o}, must be exactly {KEY_FILE_MODE:04o} (read-only for the owner; \
+             the CLI never writes this file); run: chmod 400 {}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -441,34 +516,142 @@ pub fn check_key_file_perms(path: &std::path::Path) -> CliResult<()> {
 // directly to avoid pulling `libc` into the graph for one number.
 #[allow(non_snake_case)]
 extern "C" {
+    /// The real user id of this process, for the key-file owner check.
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
 }
 
 // -- Helpers --
 
+/// A bare 64-character hex string: an account or dapp id with no
+/// `0x`, no workchain prefix and no separator.
 fn is_64_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Truncate an untrusted input string for safe echo back in errors. Never
 /// used for anything that could be a key or secret — but as a belt-and-
-/// suspenders default we clip long inputs to 24 chars.
-fn redact(s: &str) -> String {
+/// suspenders default we clip long inputs to 24 characters.
+///
+/// Every argument here comes straight from argv, so this function is on
+/// the path of malformed input by construction and must not be the thing
+/// that fails on it. `&s[..24]` panicked whenever byte 24 landed inside a
+/// multibyte character: `--to` with an emoji at the wrong offset turned a
+/// clean "invalid address" refusal into exit 101 and a message no
+/// consumer could parse, which is exactly what the `--json` envelope
+/// exists to prevent. Counting characters also makes N mean what the
+/// sentence above says it means.
+pub(crate) fn redact(s: &str) -> crate::errors::Redacted {
+    /// Characters kept, counted before escaping widens any of them.
     const N: usize = 24;
-    if s.len() > N {
-        format!("{}…", &s[..N])
-    } else {
-        s.to_string()
+    let mut head = String::new();
+    let mut rest = s.chars();
+    for c in rest.by_ref().take(N) {
+        // Control characters survive argv and land in a multi-line
+        // refusal: a bare newline forges a line the CLI never wrote, and
+        // an ANSI escape repaints the terminal the refusal is read on.
+        if c.is_control() {
+            head.extend(c.escape_debug());
+        } else {
+            head.push(c);
+        }
     }
+    if rest.next().is_some() {
+        head.push('…');
+    }
+    // `rendered` escapes as well, which is a no-op on text this loop has
+    // already escaped. Doing it here too is what keeps the CLIPPING
+    // honest: the 24 characters are counted before the escapes widen
+    // them, so a value of `\n` x 24 is clipped at 24 characters and not
+    // at 12.
+    crate::errors::Redacted::rendered(head)
 }
 
+/// The first control character in `path`, if it has one.
+///
+/// The BOUNDARY for a class the `Redacted` newtype cannot reach. That
+/// type guards the fields an author wraps; a path reaches a refusal
+/// through `format!("{}", p.display())`, and there are about a hundred
+/// of those across this crate — inside `Preflight.reason`, inside
+/// `Usage.reason`, and as `ReservationInFlight.record_path` and
+/// `KeyFilePerms.path`, which are still bare `String`s because a
+/// `Redacted` at those four sites would leave the other ninety-six.
+///
+/// So the value is stopped where it enters instead. A path carrying a
+/// newline forges a line at the CLI's own continuation indent — the
+/// measured attack put one inside an exit-10 refusal, directly above
+/// "Do not delete that record on the strength of this refusal" — and no
+/// legitimate state directory, key file or artifact directory has one.
+///
+/// Answers the character rather than a bool so the refusal can name
+/// what it found.
+pub(crate) fn first_control_character(path: &std::path::Path) -> Option<char> {
+    path.to_string_lossy().chars().find(|c| c.is_control())
+}
+
+/// The chain-id whitelist, rendered for a refusal that has just
+/// turned one down.
 fn format_supported_chains() -> String {
     SUPPORTED_CHAINS
         .iter()
         .map(|(id, name)| format!("{id} ({name})"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The plumbing a real (non-`--dry-run`) withdrawal needs but a preflight
+/// does not. Collected in one place so a real run refuses ONCE, naming
+/// every missing value, instead of dying on the first `.unwrap()` three
+/// stages in.
+#[derive(Debug, Clone)]
+pub struct SubmitPlumbing {
+    pub eth_private_key: String,
+    pub aggregator_dir: PathBuf,
+    pub verifiers_dir: PathBuf,
+    pub params_dir: PathBuf,
+    pub work_dir: PathBuf,
+}
+
+impl WithdrawArgs {
+    /// Resolve the submit-only plumbing, or refuse listing everything that
+    /// is missing. `--dry-run` never calls this — that is the whole point:
+    /// a preflight must not require an EVM signing key it will never use.
+    pub fn require_submit_plumbing(&self) -> CliResult<SubmitPlumbing> {
+        let mut missing: Vec<&str> = Vec::new();
+        if self.eth_private_key.is_none() {
+            missing.push("--eth-private-key (BURNER_PRIVATE_KEY)");
+        }
+        if self.aggregator_dir.is_none() {
+            missing.push("--aggregator-dir (BRIDGE_AGGREGATOR_DIR)");
+        }
+        if self.verifiers_dir.is_none() {
+            missing.push("--verifiers-dir (BRIDGE_VERIFIERS_DIR)");
+        }
+        if self.params_dir.is_none() {
+            missing.push("--params-dir (BRIDGE_PARAMS_DIR)");
+        }
+        if self.work_dir.is_none() {
+            missing.push("--work-dir (BRIDGE_WORK_DIR)");
+        }
+        if !missing.is_empty() {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "a real withdrawal needs {}. Set them in the profile file pointed to by \
+                     $BRIDGE_CONFIG, or pass them explicitly. (--dry-run does not need any of \
+                     them.)",
+                    missing.join(", "),
+                ),
+                source: None,
+            });
+        }
+        Ok(SubmitPlumbing {
+            eth_private_key: self.eth_private_key.clone().expect("checked above"),
+            aggregator_dir: self.aggregator_dir.clone().expect("checked above"),
+            verifiers_dir: self.verifiers_dir.clone().expect("checked above"),
+            params_dir: self.params_dir.clone().expect("checked above"),
+            work_dir: self.work_dir.clone().expect("checked above"),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -491,7 +674,10 @@ mod tests {
         let raw = format!("0x{}::{}", "a".repeat(64), "b".repeat(64));
         assert!(matches!(
             parse_from(&raw),
-            Err(CliError::ArgInvalid { flag: "from", .. })
+            Err(CliError::ArgInvalid {
+                flag: "from",
+                ..
+            })
         ));
     }
 
@@ -500,7 +686,10 @@ mod tests {
         let raw = format!("0:{}", "a".repeat(64));
         assert!(matches!(
             parse_from(&raw),
-            Err(CliError::ArgInvalid { flag: "from", .. })
+            Err(CliError::ArgInvalid {
+                flag: "from",
+                ..
+            })
         ));
     }
 
@@ -508,7 +697,10 @@ mod tests {
     fn amount_rejects_seven_decimals() {
         assert!(matches!(
             parse_amount("1.0000001"),
-            Err(CliError::ArgInvalid { flag: "amount", .. })
+            Err(CliError::ArgInvalid {
+                flag: "amount",
+                ..
+            })
         ));
     }
 
@@ -537,7 +729,10 @@ mod tests {
         let raw = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, None),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
     }
 
@@ -553,7 +748,10 @@ mod tests {
         let raw = "eip155:1:0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, Some(11155111)),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
     }
 
@@ -562,8 +760,57 @@ mod tests {
         let raw = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         assert!(matches!(
             parse_to(raw, Some(999)),
-            Err(CliError::ArgInvalid { flag: "to-chain", .. })
+            Err(CliError::ArgInvalid {
+                flag: "to-chain",
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn a_multibyte_argument_is_refused_not_panicked_on() {
+        // `&s[..24]` panicked whenever byte 24 fell inside a character.
+        // Every one of these is 24 ASCII bytes followed by one that is
+        // not, so the old slice split it. The result was exit 101 and a
+        // message no `--json` consumer could parse — from an argument
+        // whose only sin was being wrong.
+        let head = "0x742d35Cc6634C0532";
+        assert_eq!(head.len(), 19);
+        for tail in ["привет", "日本語", "🙂🙂", "e\u{301}\u{301}"] {
+            let raw = format!("{head}{tail}");
+            let res = parse_to(&raw, Some(11155111));
+            assert!(
+                matches!(
+                    res,
+                    Err(CliError::ArgInvalid {
+                        flag: "to",
+                        ..
+                    })
+                ),
+                "{raw:?} must be refused, got {res:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn redact_clips_characters_and_neutralises_control_bytes() {
+        // The clip is 24 CHARACTERS, and it always leaves a valid string.
+        let long = "\u{444}".repeat(40);
+        let out = redact(&long);
+        assert_eq!(
+            out.as_str().chars().count(),
+            25,
+            "24 characters plus the ellipsis"
+        );
+        assert!(out.as_str().ends_with('…'));
+        // Exactly 24 characters is not truncated, and carries no ellipsis.
+        let exact = "\u{444}".repeat(24);
+        assert_eq!(redact(&exact).as_str(), exact);
+        // A newline in argv would otherwise forge a line inside a
+        // multi-line refusal, and an ANSI escape would repaint the
+        // terminal the refusal is being read on.
+        assert_eq!(redact("a\nb").as_str(), "a\\nb");
+        assert_eq!(redact("a\u{1b}[2Jb").as_str(), "a\\u{1b}[2Jb");
     }
 
     #[test]
@@ -575,7 +822,13 @@ mod tests {
         let raw = "0x0000000000000000000000000000000000000000";
         let res = parse_to(raw, Some(11155111));
         assert!(
-            matches!(res, Err(CliError::ArgInvalid { flag: "to", .. })),
+            matches!(
+                res,
+                Err(CliError::ArgInvalid {
+                    flag: "to",
+                    ..
+                })
+            ),
             "0x0 recipient must be refused, got {res:?}",
         );
     }
@@ -591,7 +844,13 @@ mod tests {
         let over = "18446744073709.551616";
         let res = parse_amount(over);
         assert!(
-            matches!(res, Err(CliError::ArgInvalid { flag: "amount", .. })),
+            matches!(
+                res,
+                Err(CliError::ArgInvalid {
+                    flag: "amount",
+                    ..
+                })
+            ),
             "one micro above u64::MAX must be refused, got {res:?}",
         );
     }
@@ -610,12 +869,199 @@ mod tests {
         // Deliberately corrupted checksum (swap two case bits).
         let raw = "0x742D35Cc6634c0532925a3b844Bc454e4438f44e";
         let res = parse_to(raw, Some(11155111));
-        assert!(matches!(res, Err(CliError::ArgInvalid { flag: "to", .. })));
+        assert!(matches!(
+            res,
+            Err(CliError::ArgInvalid {
+                flag: "to",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn to_accepts_all_lowercase() {
         let raw = "0x742d35cc6634c0532925a3b844bc454e4438f44e";
         assert!(parse_to(raw, Some(11155111)).is_ok());
+    }
+
+    fn submit_plumbing_fixture_all_absent() -> WithdrawArgs {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("parse");
+        let Command::Withdraw(args) = cli.cmd;
+        args
+    }
+
+    #[test]
+    fn dry_run_does_not_require_submit_plumbing() {
+        use clap::Parser;
+        // --rpc-url and --bridge-address ARE still required (see the note on
+        // this task): a dry-run checks the destination chain id, which needs
+        // the endpoint but no key. What must not be required is the signing
+        // key and the four prover directories.
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--dry-run",
+            "--yes",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("--dry-run must parse without --eth-private-key or the prover dirs");
+        let Command::Withdraw(args) = cli.cmd;
+        assert!(args.dry_run);
+        assert!(args.eth_private_key.is_none());
+        assert!(args.params_dir.is_none());
+        assert!(args.work_dir.is_none());
+    }
+
+    #[test]
+    fn real_run_names_every_missing_submit_flag_at_once() {
+        let args = submit_plumbing_fixture_all_absent();
+        let err = args
+            .require_submit_plumbing()
+            .expect_err("a real run without plumbing must refuse");
+        let msg = format!("{err}");
+        for flag in [
+            "--eth-private-key",
+            "--aggregator-dir",
+            "--verifiers-dir",
+            "--params-dir",
+            "--work-dir",
+        ] {
+            assert!(msg.contains(flag), "refusal must name {flag}, got: {msg}");
+        }
+        assert!(
+            msg.contains("BRIDGE_CONFIG"),
+            "refusal must point at the profile file, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn yes_and_non_interactive_can_be_combined() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "--yes",
+            "--non-interactive",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ])
+        .expect("a CI wrapper must be able to set both belt and braces");
+        assert!(cli.yes);
+        assert!(cli.non_interactive);
+    }
+
+    #[test]
+    fn key_file_refusal_distinguishes_missing_from_loose() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let missing = dir.path().join("nope.json");
+        let err = check_key_file_perms(&missing).expect_err("missing file must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("does not exist"), "got: {msg}");
+        assert!(
+            !msg.contains("chmod 400"),
+            "chmod is useless here, got: {msg}"
+        );
+
+        let a_dir = dir.path();
+        let err = check_key_file_perms(a_dir).expect_err("a directory must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("not a regular file"), "got: {msg}");
+
+        let loose = dir.path().join("loose.json");
+        std::fs::write(&loose, "{}").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = check_key_file_perms(&loose).expect_err("0644 must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("chmod 400"), "got: {msg}");
+        assert!(
+            msg.contains("0644") || msg.contains("644"),
+            "must name the mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_file_mode_is_exactly_0400() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let accepted = dir.path().join("ok.json");
+        std::fs::write(&accepted, "{}").unwrap();
+        std::fs::set_permissions(&accepted, std::fs::Permissions::from_mode(0o400)).unwrap();
+        check_key_file_perms(&accepted).expect("0400 is the required mode");
+
+        // Every other owner-only mode is refused too. 0600 is the important
+        // one: it is what today's README tells operators to set, so this is
+        // the assertion that pins the breaking change.
+        for mode in [0o600u32, 0o700, 0o500, 0o440, 0o000] {
+            let f = dir.path().join(format!("m{mode:o}.json"));
+            std::fs::write(&f, "{}").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            let err = check_key_file_perms(&f).expect_err(&format!(
+                "mode {mode:04o} must be refused, but was accepted"
+            ));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("chmod 400"),
+                "mode {mode:04o} must be refused with the exact remedy, got: {msg}",
+            );
+        }
     }
 }

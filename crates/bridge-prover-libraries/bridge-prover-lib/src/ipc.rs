@@ -342,6 +342,18 @@ mod tests {
 
     #[test]
     fn bkupd_paths_match_pattern() {
+        // These literals are the LEGACY DEFAULTS, which hold only while
+        // none of the three `BRIDGE_*_DIR` vars is set. The environment is
+        // process-global and this test shares a process with
+        // `paths::tests::explicit_overrides_win`, which sets
+        // `BRIDGE_PROOFS_DIR` — so without the guard this test reads
+        // whatever that one happens to be doing: 5 failures in 60 filtered
+        // runs, every one of them
+        // `left: "/tmp/override_proofs/bkupd_000042.json"`.
+        //
+        // Serialising the writers alone was not enough, because this is a
+        // READER of the same variables. It takes the same lock.
+        let _g = crate::paths::EnvGuard::new();
         assert_eq!(bkupd_file_path(42), "proofs/bkupd_000042.json");
         assert_eq!(bkupd_result_file_path(42), "proofs/bkupd_result_000042.json");
     }

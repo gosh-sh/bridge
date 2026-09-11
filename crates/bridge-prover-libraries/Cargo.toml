@@ -40,11 +40,31 @@ halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12
 # canonical depth-4 layout. `bridge-parsers` was inlined into
 # `attestation-bls-checker-circuit::attestation_data_parser` on the
 # circuits side (commit 487b8f5), so it's no longer a separate crate here.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+#
+# PINNED BY REVISION, not `branch = "main"`, and the pin is load-bearing.
+#
+# `EVENT_CIRCUIT_REVISION` (bridge-prover-lib/src/keys/event.rs) is bumped
+# BY HAND when Circuit 4 changes in a way that invalidates cached keys. It
+# is the only thing standing between a moved circuit and a warm verdict
+# over keys built for the old one — and `KeyManagerState::new` checks the
+# manifest format, that revision, and the vk/config digests, every one of
+# which still matches after the circuit moves, because the FILES did not
+# change. The keys are then used to prove, and the proof is rejected at
+# stage 5: after the burn, after the anchor wait.
+#
+# Under `branch = "main"` a single `cargo update` performs that move
+# silently. Under a revision it is an explicit edit to this file, visible
+# in review next to an `EVENT_CIRCUIT_REVISION` that was not bumped.
+#
+# All five crates come from one repository and must name the same revision
+# — cargo refuses two different references to the same git URL. When
+# moving the circuit: change the revision here, bump
+# `EVENT_CIRCUIT_REVISION`, and expect every cached keyset to regenerate.
+attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
+historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
+bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
+bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
+bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

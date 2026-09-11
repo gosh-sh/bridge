@@ -39,7 +39,10 @@ Prints diagnostics + tvm-cli output to stderr; only the two `export …`
 lines go to stdout.
 """
 
+import contextlib
 import os
+import re
+import shlex
 import sys
 import time
 
@@ -88,7 +91,11 @@ def _load_profile(path: str) -> None:
             os.environ.setdefault(k, v)
 
 
-def main():
+def main(emit=None):
+    # Where the two eval-able lines go. `None` for a direct call;
+    # `__main__` passes the real stdout it saved before redirecting
+    # everything else to stderr.
+    emit = emit if emit is not None else sys.stdout
     # Profile resolution: BRIDGE_CONFIG (env) → config/bridge_config
     # (symlink default). Everything else — NETWORK, BRIDGE_GQL_ENDPOINT,
     # USDC_BRIDGE_KEY_PATH — comes from that file.
@@ -164,15 +171,61 @@ def main():
         is_shellnet=not is_local, verbose_faucet=True,
     )
 
+    # The CLI requires exactly 0400 on --from-keys (read-only for the
+    # owner; it never writes this file). Emit it the way the very next
+    # documented step needs it — without this, README Step 2 and Step 4
+    # contradict each other.
+    os.chmod(msig_key_path, 0o400)
+
     abs_key_path = os.path.abspath(msig_key_path)
     tracer.log_phase("PASS — multisig deployed and USDC-funded")
     tracer.log(f"  WITHDRAW_FROM      = {msig_address}")
     tracer.log(f"  WITHDRAW_FROM_KEYS = {abs_key_path}")
 
     # stdout: only the eval-able lines. Nothing else.
-    print(f"export WITHDRAW_FROM={msig_address}")
-    print(f"export WITHDRAW_FROM_KEYS={abs_key_path}")
+    #
+    # Quoted and validated, because README Step 2 is
+    # `eval "$(scripts/deploy_msig_and_mint.sh)"` — every character
+    # printed here becomes shell code in the operator's own session.
+    #
+    # Neither value is a literal in this file. `abs_key_path` derives from
+    # BRIDGE_WORK_DIR, so an ordinary path with a space already produced a
+    # broken `export` (the shell split it and the second word became a
+    # separate assignment), and one containing `;` or `$(…)` would run.
+    # `msig_address` comes back from `tvm-cli`'s JSON, i.e. from a
+    # subprocess, and was printed unchecked.
+    #
+    # `shlex.quote` for the path, which may legitimately contain spaces.
+    # A shape check for the address, which may not contain anything but
+    # hex: emitting something the CLI would reject later is worse than
+    # failing here, where nothing has been handed to a shell yet.
+    if not re.fullmatch(r"[0-9a-f]{64}::[0-9a-f]{64}", msig_address):
+        tracer.log(
+            f"FAIL — tvm-cli returned an address this script will not "
+            f"emit: {msig_address!r}"
+        )
+        raise SystemExit(
+            "refusing to print an address that is not <64-hex>::<64-hex>; "
+            "its output is eval'd by the documented Step 2"
+        )
+
+    print(f"export WITHDRAW_FROM={msig_address}", file=emit)
+    print(f"export WITHDRAW_FROM_KEYS={shlex.quote(abs_key_path)}", file=emit)
 
 
 if __name__ == "__main__":
-    main()
+    # The contract is that stdout holds the two `export` lines and nothing
+    # else, because README Step 2 pipes it into `eval`. Comments in this
+    # file asserted that; nothing enforced it, and it was not true — the
+    # shared helpers print tvm-cli invocations and their output with a
+    # bare `print`, and `helper.common` printed a banner at import.
+    # `eval` on that tries to run "Checking cli specified in library: …"
+    # as a command.
+    #
+    # Enforced rather than asserted: everything the body prints goes to
+    # stderr, and the two lines are written to the real stdout that was
+    # captured before the redirect. A helper added later cannot break it
+    # by accident.
+    real_stdout = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        main(emit=real_stdout)

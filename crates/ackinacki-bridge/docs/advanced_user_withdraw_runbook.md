@@ -748,8 +748,8 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
 
 **What "re-run" means once a record exists.** `--allow-retry` resumes a
 withdrawal; it does **not** clear one. A record that is `Reserved` with
-no `an_tx_hash` — which is what an exit 10 leaves — is not resumable
-with or without the flag, and that is deliberate: the hash is written
+no `an_tx_hash` — one of the three shapes an exit 10 can leave — is not
+resumable with or without the flag, and that is deliberate: the hash is written
 only after the send returns, so the record cannot say whether a burn is
 on the wire, and re-running would broadcast a second one. What such a
 re-run actually returns depends on stage 1, which runs first: while the
@@ -815,6 +815,53 @@ other run is executing this withdrawal — and never before. "Could not be
 determined" is not that sentence. In the "burn landed" case the record is
 edited, not deleted. Deleting it while another run is mid-send is the
 second burn that every refusal on this page exists to prevent.
+
+#### 3a-iii — The record is behind the chain (the state write failed)
+
+**Scenario:** exit 10, and the refusal reads `…, but the state file
+could not be updated: …`. Nothing is wrong with the withdrawal: the AN
+side did what it was asked, and the run could not write down that it
+had. Every such refusal names the record file it failed to write.
+
+This is not 3a-i or 3a-ii. Both of those are about an event that did
+not arrive; here the log usually shows `captured WithdrawalInitiated
+event` and may show `capture + prove complete`. Do not run their
+diagnostics — they will report a healthy chain and tell you nothing.
+
+**First, undo whatever stopped the write.** A full disk, a read-only
+mount, a `chmod` on the state directory. `write_record_atomic`
+publishes through a temp file and a `rename`, so it needs **write
+permission on the directory**, not just on the record:
+
+```bash
+STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-./withdraw-state}"
+ls -ld "$STATE_DIR"      # needs drwx------, not dr-x------
+df -h "$STATE_DIR"
+```
+
+**Then read the record and act on `.status`:**
+
+```bash
+jq -r '.status, .an_tx_hash' "$STATE_DIR/<sha256>.json"
+```
+
+- **`burned`, `captured` or `proved`, with an `an_tx_hash`** — the
+  record is behind by one status transition and is otherwise consistent.
+  It is `Resumable`: re-run the same identity with `--allow-retry` and
+  nothing else. The run reuses the recorded hash, skips the burn,
+  re-captures (targeted, seconds) and carries on. **Do not hand-edit
+  it**, and do not re-seed — a fresh multisig is a different `--from`,
+  therefore a different record, and this one would be orphaned with a
+  live burn behind it.
+- **`reserved`, no `an_tx_hash`** — the write that failed was the one
+  meant to record the burn. This is the ambiguous shape, and it is
+  [3a-ii](#3a-ii--event-never-observed)'s procedure from here: reconcile
+  on chain first, then edit or delete according to what it found.
+
+**On cost:** if the failure came after `stage 4b`, the covering bundle
+it waited for is already on chain, so the resumed run does not wait ~91
+minutes again. A warm resume from `captured` is capture + proof +
+submit — a few minutes.
 
 ---
 

@@ -543,8 +543,14 @@ claiming there is no record — it never opened one to find out.
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-**Exit 10 covers five situations, and only the first is "this run
-broadcast a burn".** The other four are refusals: a preflight check
+**Exit 10 covers six situations, and only the first two involve this
+run broadcasting anything.** The first is the send itself: a burn went
+out and its outcome is unknown. The second is its mirror — the AN side
+did exactly what it was asked and the run **could not write down that
+it had**, because the state write failed (full disk, read-only mount,
+a directory it may not write). There the outcome is not unknown at all;
+the log may even say `capture + prove complete`. The other four are
+refusals: a preflight check
 that failed on a withdrawal whose burn a PREVIOUS run already recorded;
 a state record that exists and could not be read (torn, or in a
 directory this process cannot traverse); a reservation on disk this
@@ -554,7 +560,7 @@ because `HOME` is unset and no `--state-dir` was given. None of the four
 broadcasts or writes anything — but in the first three a record for this
 identity is on disk, and in the fourth the run cannot say whether one
 is, which comes to the same instruction: a burn may be on the wire and
-nothing may be deleted. What the five share, and what a script should
+nothing may be deleted. What the six share, and what a script should
 key on, is "do not treat this identity as untouched".
 
 Exit codes 11–13 all leave the AN burn broadcast: the USDC has left
@@ -611,6 +617,16 @@ runbook, Case 3a). If a burn landed, write its hash into the record and
 re-run with `--allow-retry`, which is what lets the reservation hand the
 recorded burn back; if none landed, the next run refuses with exit 3 and
 that refusal is the procedure. Either way the record stays.
+
+**A refusal reading `…, but the state file could not be updated` is a
+different animal.** Nothing is wrong with the withdrawal — the write
+was. The refusal names the record it failed to write; fix whatever
+stopped the write (the directory needs `drwx------`, because the record
+is published through a temp file and a `rename`), then read `.status`.
+If it carries an `an_tx_hash`, the record is behind by one transition
+and is resumable with a plain `--allow-retry` — no hand-editing. Full
+procedure: advanced runbook,
+[Case 3a-iii](docs/advanced_user_withdraw_runbook.md#3a-iii--the-record-is-behind-the-chain-the-state-write-failed).
 
 **Do not re-run `scripts/deploy_msig_and_mint.sh` here.** It deploys a
 fresh multisig, which is a different `--from`, which is a different dedup

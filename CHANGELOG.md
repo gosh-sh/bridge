@@ -952,6 +952,28 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The exit-10 pages sent a state-write failure to the wrong recovery
+  procedure.** When the AN side succeeds and the CLI cannot record it —
+  a full disk, a read-only mount, a state directory it may not write —
+  the refusal reads `…, but the state file could not be updated` and
+  points at the advanced runbook's Case 3a. Case 3a is capture-timeout
+  diagnostics for exit 11, and its two sub-cases are both about an event
+  that never arrived; an operator whose log says `capture + prove
+  complete` reads that heading and concludes they are in the wrong
+  place. Case 3a now has a third sub-case that covers exactly this, and
+  the README names it as its own exit-10 situation rather than folding
+  it into "outcome unknown" — here the outcome is not unknown at all.
+
+  The distinction is worth a page because the remedies differ. A record
+  that still carries an `an_tx_hash` is behind by one status transition
+  and is otherwise consistent: fix the filesystem, re-run with
+  `--allow-retry`, and the run reuses the recorded hash. The runbook's
+  "what re-run means" paragraph claimed a hash-less `reserved` record is
+  "what an exit 10 leaves", which is true of only one of the three
+  shapes it can leave, and contradicted the same page eighty lines up.
+  Observed on a live shellnet run whose burn, capture and Circuit-4
+  proof had all completed before the write failed.
+
 - **The hash-less reservation refusal told a run that must WAIT to edit
   the record.** Its three reconciliation steps were baked into the message
   and printed under every liveness verdict — including "another process on

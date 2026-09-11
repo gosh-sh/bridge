@@ -1,0 +1,123 @@
+# Tell the author of a pull request, in Discord, that someone has reviewed it.
+#
+# Woodpecker has no trigger for "a review was submitted" — its events are push,
+# pull_request, pull_request_closed, tag, release, deployment, cron and manual,
+# and the webhook it installs is not even subscribed to GitHub's
+# pull_request_review. So this runs on a schedule and asks for reviews younger
+# than one interval. Nothing is stored between runs: the window IS the state,
+# which is why WINDOW_SECONDS must match the cron schedule. A wider window
+# repeats pings, a narrower one drops them.
+#
+# Create the cron in the repository settings on builder.gosh.sh:
+#   name: review-submitted, schedule: */10 * * * *
+# The secrets below need the `cron` event enabled, on top of `pull_request`
+# that the review-request pipeline needs — a secret is only handed to the
+# events ticked on it.
+
+when:
+  - event: cron
+    cron: review-submitted
+
+skip_clone: true
+
+steps:
+  find_reviews:
+    image: maniator/gh
+    environment:
+      GH_TOKEN:
+        from_secret: REVIEW_GH_TOKEN
+      DISCORD_REVIEWERS_MAP:
+        from_secret: DISCORD_REVIEWERS_MAP
+      WINDOW_SECONDS: "600"
+    commands:
+      - |
+        rm -f discord-review-*.json
+
+        # One query for every open PR: reviews younger than the window, by
+        # someone other than the author. GraphQL keeps this off the REST budget
+        # that Woodpecker itself spends reading pipeline configs.
+        gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -f query='
+          query($owner: String!, $name: String!) {
+            repository(owner: $owner, name: $name) {
+              pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                nodes {
+                  number
+                  url
+                  isDraft
+                  author { login }
+                  reviews(last: 20) { nodes { author { login } state submittedAt } }
+                }
+              }
+            }
+          }' --jq '
+          (now - (env.WINDOW_SECONDS | tonumber)) as $since |
+          .data.repository.pullRequests.nodes[]
+          | select(.isDraft | not)
+          | . as $pr
+          | .reviews.nodes[]
+          | select(.submittedAt != null and (.submittedAt | fromdateiso8601) > $since)
+          | select(.author.login != $pr.author.login)
+          | "\($pr.number) \($pr.author.login) \(.author.login) \(.state) \($pr.url)"' >/tmp/reviews.txt
+
+        if [ ! -s /tmp/reviews.txt ]; then
+          echo "No review submitted in the last $WINDOW_SECONDS seconds."
+          exit 0
+        fi
+
+        N=0
+        while read -r NUMBER AUTHOR REVIEWER STATE URL; do
+          [ -n "$NUMBER" ] || continue
+
+          ID=$(echo "$DISCORD_REVIEWERS_MAP" | tr ',' '\n' | tr -d ' @' | grep "^$AUTHOR=" | head -n 1 | cut -d '=' -f 2-)
+          if [ -z "$ID" ]; then
+            echo "PR #$NUMBER: $AUTHOR has no entry in DISCORD_REVIEWERS_MAP, not pinged"
+            continue
+          fi
+
+          case "$STATE" in
+            APPROVED) HEADLINE="✅ **Approved**" ;;
+            CHANGES_REQUESTED) HEADLINE="🔧 **Changes requested**" ;;
+            *) HEADLINE="💬 **Review comment**" ;;
+          esac
+
+          # Safe to assemble by hand: every value here is a GitHub login, a state
+          # enum, a number or a github.com URL — none of them can carry a quote.
+          N=$((N + 1))
+          printf '{"content":"<@%s> %s by `%s` on PR #%s\\n%s","allowed_mentions":{"parse":["users"]}}' \
+            "$ID" "$HEADLINE" "$REVIEWER" "$NUMBER" "$URL" >"discord-review-$N.json"
+          echo "PR #$NUMBER: $REVIEWER -> $AUTHOR ($STATE)"
+        done </tmp/reviews.txt
+
+        echo "$N message(s) to send."
+
+  notify_discord:
+    image: curlimages/curl
+    environment:
+      DISCORD_BOT_TOKEN:
+        from_secret: DISCORD_BOT_TOKEN
+      DISCORD_CHANNEL_ID:
+        from_secret: DISCORD_CHANNEL_ID
+    commands:
+      - |
+        SENT=0
+        for FILE in discord-review-*.json; do
+          [ -e "$FILE" ] || continue
+
+          CODE=$(curl -sS -X POST \
+            -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data @"$FILE" \
+            -o /tmp/discord-response.json -w '%{http_code}' \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages")
+
+          if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+            SENT=$((SENT + 1))
+          else
+            echo "Discord refused $FILE: HTTP $CODE"
+            cat /tmp/discord-response.json
+            echo
+            exit 1
+          fi
+        done
+
+        echo "$SENT message(s) delivered."

@@ -171,12 +171,12 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 **Requirements**: `--height` must be a layer-N key block (H % W^N == 0 for N≥1). For `small-window` (W=2): heights 2, 4, 8, 16, 32, …
 
-### Acki Nacki Testnet
+### Acki Nacki Devnet (Shellnet)
 
 - **Node API**: `http://<an-node-host>:8600` (port 8600; HTTPS/443 is firewalled)
 - **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
 - **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
-- **Testnet status**: Not ready for E2E testing (as of Apr 2026)
+- **Devnet status**: Not ready for E2E testing (as of Apr 2026)
 - **Local 5-node cluster**: `cd ../acki-nacki/nock && docker-compose build && docker-compose up -d`
   - Node0 API: `http://127.0.0.1:11000`
   - Requires building with `history_proofs` feature for layer hash data

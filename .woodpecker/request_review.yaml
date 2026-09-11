@@ -32,9 +32,30 @@ steps:
         PR="$CI_COMMIT_PULL_REQUEST"
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
 
-        if [ "$(gh pr view "$PR" -R "$REPO" --json isDraft --jq '.isDraft')" = "true" ]; then
+        gh pr view "$PR" -R "$REPO" --json isDraft,headRefOid,baseRefName \
+          --jq '.isDraft, .headRefOid, .baseRefName' >/tmp/pr.txt
+        IS_DRAFT=$(sed -n 1p /tmp/pr.txt)
+        HEAD_SHA=$(sed -n 2p /tmp/pr.txt)
+        BASE=$(sed -n 3p /tmp/pr.txt)
+
+        if [ "$IS_DRAFT" = "true" ]; then
           echo "PR #$PR is a draft — nothing to do."
           exit 0
+        fi
+
+        # Merging the base branch into the PR adds no work to review, so it must
+        # not disturb the reviewers. Detected structurally rather than by commit
+        # message: a merge commit one of whose merged-in parents is already an
+        # ancestor of the base branch.
+        gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.parents[].sha' >/tmp/parents.txt
+        if [ "$(wc -l </tmp/parents.txt)" -gt 1 ]; then
+          for PARENT in $(tail -n +2 /tmp/parents.txt); do
+            STATUS=$(gh api "repos/$REPO/compare/$PARENT...$BASE" --jq '.status')
+            if [ "$STATUS" = "ahead" ] || [ "$STATUS" = "identical" ]; then
+              echo "Head commit merges $BASE into the PR branch — reviewers left alone."
+              exit 0
+            fi
+          done
         fi
 
         # Everyone who already left a verdict. Bots (Copilot & co) are dropped:

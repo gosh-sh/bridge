@@ -17,15 +17,31 @@ time they take.
 
 ## 1. Install
 
+**Starting from nothing** — no Rust, no checkout:
+
+```bash
+curl -fLO https://raw.githubusercontent.com/gosh-sh/bridge/main/crates/ackinacki-bridge/scripts/bootstrap.sh
+less bootstrap.sh        # it installs software; read it before running it
+bash bootstrap.sh
+```
+
+It installs a C toolchain, git and curl through your package manager (showing
+you the command and asking first), installs rustup, clones the repository
+into `~/ackinacki-bridge`, and then runs the step below. `--dir` puts the
+clone elsewhere, `--check` reports without installing.
+
+**If you already have the repository:**
+
 ```bash
 cd crates/ackinacki-bridge
 scripts/install.sh --check      # what is missing
 scripts/install.sh              # install it, asking first
 ```
 
-It provisions four things: `solc 0.8.19`, the Hermez KZG ceremony
-(~256 MB on disk, ~2.4 GB downloaded once), the `aggregate-proof` binary and
-the CLI itself. A first run takes about 45 minutes, most of it the ceremony.
+That provisions the four things a real withdrawal needs: `solc 0.8.19`, the
+Hermez KZG ceremony (~256 MB on disk, ~2.4 GB downloaded once), the
+`aggregate-proof` binary and the CLI itself. Budget about 45 minutes and
+~20 GB of disk, most of both being the ceremony and the build.
 
 `--dry-run` needs none of them. A real withdrawal needs all four, and stage 1
 refuses without them — before anything is broadcast.

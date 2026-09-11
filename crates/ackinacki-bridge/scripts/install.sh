@@ -47,8 +47,8 @@ step() { printf '\n== %s\n' "$*"; }
 
 # Nothing installs without consent. --check never asks and never acts.
 confirm() {
-  [ "$MODE" = check ] && return 1
-  [ "$ASSUME_YES" = 1 ] && return 0
+  if [ "$MODE" = check ]; then return 1; fi
+  if [ "$ASSUME_YES" = 1 ]; then return 0; fi
   printf '  %s [y/N] ' "$1" >&2
   local reply
   read -r reply </dev/tty 2>/dev/null || return 1

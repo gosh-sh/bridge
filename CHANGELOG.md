@@ -172,6 +172,18 @@ assigns it when the release is tagged.
   so USDC returns to the source multisig on any bridge revert; the
   historical Python driver used `bounce = false`.
 
+- **`scripts/bootstrap.sh` starts from a machine with no Rust and no
+  checkout.** Fetch it on its own and run it: it installs a C toolchain, git
+  and curl through whichever of apt/dnf/pacman is present — printing the
+  exact privileged command and asking before running it — installs rustup
+  with no default toolchain so the repository's `rust-toolchain.toml` pin
+  decides what gets fetched, clones into `~/ackinacki-bridge` (`--dir` to
+  choose), and hands over to `scripts/install.sh`. `--check` reports without
+  installing anything, and `--yes` skips the questions. The package list is
+  three items because that is what the lockfiles ask for — the crate uses
+  rustls and the aggregator has no TLS at all, so no OpenSSL headers are
+  needed. It is exercised on Linux x86_64 and says so on anything else.
+
 - **`scripts/install.sh` provisions a host for a real withdrawal, and
   `QUICKSTART.md` is the seven-step version of this README.** The four
   things a real run needs — `solc 0.8.19`, the `kzg_bn254_21.srs` ceremony,

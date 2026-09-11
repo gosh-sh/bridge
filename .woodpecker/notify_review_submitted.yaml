@@ -3,10 +3,13 @@
 # Woodpecker has no trigger for "a review was submitted" — its events are push,
 # pull_request, pull_request_closed, tag, release, deployment, cron and manual,
 # and the webhook it installs is not even subscribed to GitHub's
-# pull_request_review. So this runs on a schedule and asks for reviews younger
-# than one interval. Nothing is stored between runs: the window IS the state,
-# which is why WINDOW_SECONDS must match the cron schedule. A wider window
-# repeats pings, a narrower one drops them.
+# pull_request_review. So this runs on a schedule.
+#
+# Which reviews are new is decided by Woodpecker's own history rather than by a
+# fixed window: each run covers (start of the last successful cron run, start of
+# this run]. Consecutive runs therefore cover exactly adjacent spans, so a manual
+# run or a restart cannot re-send what a successful run already sent, and an
+# outage is caught up on the next success instead of falling through the gap.
 #
 # Create the cron in the repository settings on builder.gosh.sh:
 #   name: review-submitted, schedule: */10 * * * *
@@ -21,6 +24,40 @@ when:
 skip_clone: true
 
 steps:
+  window:
+    image: curlimages/curl
+    environment:
+      WOODPECKER_TOKEN:
+        from_secret: WOODPECKER_TOKEN
+      # Only used the very first time, when there is no successful run to
+      # continue from.
+      FALLBACK_SECONDS: "600"
+    commands:
+      - |
+        WP_URL="$CI_SYSTEM_URL"
+        if [ -z "$WP_URL" ]; then WP_URL="https://builder.gosh.sh"; fi
+
+        UNTIL="$CI_PIPELINE_STARTED"
+        if [ -z "$UNTIL" ]; then UNTIL=$(date +%s); fi
+
+        REPO_ID=$(curl -sS -H "Authorization: Bearer $WOODPECKER_TOKEN" \
+          "$WP_URL/api/repos/lookup/$CI_REPO_OWNER/$CI_REPO_NAME" \
+          | grep -o '"id":[0-9]*' | head -1 | cut -d : -f 2)
+
+        # The current run is still "running", so it cannot match itself here.
+        SINCE=$(curl -sS -H "Authorization: Bearer $WOODPECKER_TOKEN" \
+          "$WP_URL/api/repos/$REPO_ID/pipelines?event=cron&status=success&perPage=1" \
+          | grep -o '"started":[0-9]*' | head -1 | cut -d : -f 2)
+
+        if [ -z "$SINCE" ]; then
+          SINCE=$(expr "$UNTIL" - "$FALLBACK_SECONDS")
+          echo "No successful cron run to continue from — starting $FALLBACK_SECONDS seconds back."
+        fi
+
+        echo "$SINCE" >since.txt
+        echo "$UNTIL" >until.txt
+        echo "Window: $SINCE .. $UNTIL"
+
   find_reviews:
     image: maniator/gh
     environment:
@@ -28,10 +65,12 @@ steps:
         from_secret: REVIEW_GH_TOKEN
       DISCORD_REVIEWERS_MAP:
         from_secret: DISCORD_REVIEWERS_MAP
-      WINDOW_SECONDS: "600"
     commands:
       - |
         rm -f discord-review-*.json
+        SINCE=$(cat since.txt)
+        UNTIL=$(cat until.txt)
+        export SINCE UNTIL
 
         # One query for every open PR: reviews younger than the window, by
         # someone other than the author. GraphQL keeps this off the REST budget
@@ -50,17 +89,18 @@ steps:
               }
             }
           }' --jq '
-          (now - (env.WINDOW_SECONDS | tonumber)) as $since |
+          (env.SINCE | tonumber) as $since | (env.UNTIL | tonumber) as $until |
           .data.repository.pullRequests.nodes[]
           | select(.isDraft | not)
           | . as $pr
           | .reviews.nodes[]
-          | select(.submittedAt != null and (.submittedAt | fromdateiso8601) > $since)
+          | select(.submittedAt != null)
+          | select((.submittedAt | fromdateiso8601) > $since and (.submittedAt | fromdateiso8601) <= $until)
           | select(.author.login != $pr.author.login)
           | "\($pr.number) \($pr.author.login) \(.author.login) \(.state) \($pr.url)"' >/tmp/reviews.txt
 
         if [ ! -s /tmp/reviews.txt ]; then
-          echo "No review submitted in the last $WINDOW_SECONDS seconds."
+          echo "No review submitted in this window."
           exit 0
         fi
 
@@ -82,7 +122,7 @@ steps:
 
           # Safe to assemble by hand: every value here is a GitHub login, a state
           # enum, a number or a github.com URL — none of them can carry a quote.
-          N=$((N + 1))
+          N=$(expr "$N" + 1)
           printf '{"content":"<@%s> %s by `%s` on PR #%s\\n%s","allowed_mentions":{"parse":["users"]}}' \
             "$ID" "$HEADLINE" "$REVIEWER" "$NUMBER" "$URL" >"discord-review-$N.json"
           echo "PR #$NUMBER: $REVIEWER -> $AUTHOR ($STATE)"
@@ -111,7 +151,7 @@ steps:
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages")
 
           if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
-            SENT=$((SENT + 1))
+            SENT=$(expr "$SENT" + 1)
           else
             echo "Discord refused $FILE: HTTP $CODE"
             cat /tmp/discord-response.json

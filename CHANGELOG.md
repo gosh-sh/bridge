@@ -911,7 +911,11 @@ assigns it when the release is tagged.
 - **The shellnet profile documents how to tell a live deploy from a dead
   one, because an address alone does not.** The values are unchanged —
   `BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`,
-  `USDC_BRIDGE_ACCOUNT_ID=1a1a…1a1a`.
+  `USDC_BRIDGE_ACCOUNT_ID=1a1a…1a1a` — but NODE-4011 moved the relayer
+  to a second deploy
+  (`0x8545129b215B248944A3aE40f711F34CAb458644`, over a new AN-side
+  eccUSDCBridge) and rolled it back within the day, and the retired
+  deploy answers every getter exactly like the live one throughout.
 
   What that costs if you get it wrong is the whole point: a bridge
   nobody advances accepts the burn on the AN side and then never

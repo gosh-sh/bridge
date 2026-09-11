@@ -167,7 +167,7 @@ steps:
             }
           }' --jq '.data.repository.pullRequest |
           {content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end)
-            + "review re-requested — new commits in PR #" + env.PR + "\n"
+            + "🔁 **Review re-requested** — new commits in PR #" + env.PR + "\n"
             + .url),
            allowed_mentions: {parse: ["users"]}}' >discord-payload.json
 

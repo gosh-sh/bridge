@@ -1,0 +1,29 @@
+# Findings reviewed and accepted, pinned to the exact commit, file, rule and
+# line that produced them. Every one is a shellnet key pasted into a runbook or
+# an example; the same value in a new commit produces a new fingerprint and
+# fails the scan again, which is the point — this file accepts history, not
+# behaviour.
+#
+# Living fixtures (shellnet.common, python/contracts/*.keys.json) are not here:
+# they change, so they are allowlisted by path in .gitleaks.toml instead.
+#
+# To accept a new finding, copy its Fingerprint line from the pipeline log —
+# but only after establishing that the credential is shellnet-only. If it ever
+# touched a real network, rotate it instead of listing it here.
+
+444e2b3989e99682ee76b7a56d9a1ca9d4d424a1:docs/legacy/verifying_an_proof_v1.md:generic-api-key:570
+4d8d325abd0e38b70f1691a452fb0cd0f22e76ac:crates/bridge-relayer-daemon/docs/live_verifyBlock_runbook.md:evm-private-key:128
+4d8d325abd0e38b70f1691a452fb0cd0f22e76ac:crates/bridge-relayer-daemon/docs/live_verifyBlock_runbook.md:generic-api-key:128
+54e7037bba28a0cc11104c387ee5198e1b810bee:deposit-prover/DEPLOYMENT_GUIDE.md:evm-private-key:90
+9dba22c05ce5a0f41f82e413771d88e298a8d3d1:crates/ackinacki-bridge/README.md:evm-private-key:166
+da844ddf7f1d611ad210bee651e22d7a40793a24:docs/verifying_an_proof.md:generic-api-key:565
+e3450b58f08c14eab9ef72b03bdbd78eb492c816:docs/integration_plan.md:generic-api-key:113
+f125bcfd5edf91e1e186ac6b0c762725fccd58a6:.cursor/skills/evm-an-deposit-e2e/SKILL.md:generic-api-key:5
+
+# Historical only: the ackinacki-bridge idempotency tests used to spell their
+# keys as 16 hex characters, which generic-api-key reads as a credential. The
+# current code names them (`test-key-lock` and friends), so these three cannot
+# recur — they are pinned because a commit, once made, keeps what it said.
+7feb52836a3222190cada3121b4a0ec50d5df702:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2166
+87b381d298e013a8cc640184efb8d9bfa1998e46:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2106
+c6ba4ec6fb56342784756074759cacdaa6d7ae43:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:1792

@@ -36,11 +36,13 @@
 //! `$HOME/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau` (override
 //! with `--ptau21`; not auto-downloaded — fetch manually from the Polygon
 //! zkEVM GCS mirror
-//! `https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau`).
+//! `https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau`).
 //!
 //! K=22 uses `$HOME/.cache/halo2-kzg-srs/powersOfTau28_hez_final_22.ptau`
 //! (override with `--ptau22`; not auto-downloaded — fetch manually from
-//! `https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau`).
+//! `powersOfTau28_hez_final_22.ptau`). NOTE: the zkevm bucket that used to
+//! serve these revoked anonymous access; only K=21 is known to be mirrored,
+//! at `https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -231,7 +233,7 @@ fn materialize_raw_srs_from_ptau(ptau_path: &Path, k: u32) -> Result<Vec<u8>> {
         bail!(
             "K={k} ptau not found at {}. Download it with:\n  \
              curl -L --fail --progress-bar \\\n    \
-             https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_{k}.ptau \\\n    \
+             https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \\\n    \
              -o {}",
             ptau_path.display(),
             ptau_path.display(),

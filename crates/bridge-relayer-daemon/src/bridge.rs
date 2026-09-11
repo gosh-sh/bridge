@@ -461,6 +461,14 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
+            /// Read-only getters the end-user CLI preflights the deploy
+            /// with, before the irreversible Acki Nacki burn. All four are
+            /// plain public state / immutables on `AckiNackiBridge`.
+            function treasuryBalance() external view returns (uint256);
+            function bridgeWithdrawalVerifier() external view returns (address);
+            function bridgeWithdrawalDappFr() external view returns (uint256);
+            function bridgeWithdrawalAccFr() external view returns (uint256);
+
             /// Post-submit verification: is `anchor` present in layer `L`'s
             /// rolling `_layerWindows[L]` buffer? Called after `verifyBlock`
             /// to confirm the layer-hash append side-effect actually landed.
@@ -472,6 +480,23 @@ mod sol_bindings {
                 uint8 finType,
                 uint8 numLayers
             );
+        }
+
+        /// The two links between `bridgeWithdrawalVerifier` and the
+        /// deployed Yul verifier. Declared here so the CLI can walk
+        /// `adapter → shplonkVerifier() → yulVerifier()` the same way
+        /// `deploy/shellnet-l2/scripts/preflight.sh:28` does: a non-zero
+        /// adapter address proves nothing on its own.
+        #[sol(rpc)]
+        #[allow(missing_docs)]
+        contract ShplonkAdapter {
+            function shplonkVerifier() external view returns (address);
+        }
+
+        #[sol(rpc)]
+        #[allow(missing_docs)]
+        contract ShplonkWrapper {
+            function yulVerifier() external view returns (address);
         }
     }
 }
@@ -665,6 +690,59 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    /// `uint256 public treasuryBalance` (`AckiNackiBridge.sol:98`).
+    pub async fn treasury_balance(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .treasuryBalance()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`
+    /// (`AckiNackiBridge.sol:208`). Zero disables withdrawals entirely —
+    /// `withdrawByProof` reverts `WithdrawByProofDisabled` (`:1160`).
+    pub async fn withdrawal_verifier(&self) -> Result<Address, RelayerError> {
+        self.contract
+            .bridgeWithdrawalVerifier()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// The `(dappFr, accFr)` pair the deploy was pinned to
+    /// (`AckiNackiBridge.sol:216-219`). A proof whose public inputs [6] and
+    /// [7] differ reverts `WithdrawIdentityMismatch` before verification
+    /// (`:1164`).
+    pub async fn withdrawal_identity(&self) -> Result<(U256, U256), RelayerError> {
+        let dapp = self
+            .contract
+            .bridgeWithdrawalDappFr()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let acc = self
+            .contract
+            .bridgeWithdrawalAccFr()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok((dapp, acc))
+    }
+
+    /// Walk `adapter → shplonkVerifier() → yulVerifier()`, returning both
+    /// links. The provider is reused, so this costs two `eth_call`s.
+    pub async fn shplonk_stack(
+        &self,
+        adapter: Address,
+    ) -> Result<(Address, Address), RelayerError> {
+        let a = sol_bindings::ShplonkAdapter::new(adapter, self.contract.provider());
+        let wrapper = a.shplonkVerifier().call().await.map_err(map_contract_err)?;
+        let w = sol_bindings::ShplonkWrapper::new(wrapper, self.contract.provider());
+        let yul = w.yulVerifier().call().await.map_err(map_contract_err)?;
+        Ok((wrapper, yul))
     }
 
     /// Read the four top-level anchor slots pinned to a specific block.

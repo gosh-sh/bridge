@@ -150,6 +150,10 @@ Regardless of L1 vs L2, run once and confirm:
 ```bash
 cast call $BRIDGE_ADDRESS 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL
 # Must print: 11806252235961651298089590628336806290921645495320214372650577192963691649562
+#   `cast` renders a uint256 in decimal; that value is
+#   1a1a…1a1a as 64 hex, i.e. USDC_BRIDGE_ACCOUNT_ID in the profile.
+#   To compare against the profile line directly:
+#     printf '%064x\n' "$(cast call $BRIDGE_ADDRESS 'expectedWithdrawAcc()(uint256)' --rpc-url $RPC_URL)"
 ```
 
 If this returns anything else, every C4 submit will revert on the
@@ -185,12 +189,45 @@ cargo build --release -p ackinacki-bridge
 cd ../../bridge-evm-aggregator
 cargo build --release --bin aggregate-proof
 #   -> ./target/release/aggregate-proof
+
+# 3. solc 0.8.19 — `aggregate-proof` shells out to it at RUN time, so
+#    this is a runtime dependency of every real withdrawal, not a build
+#    tool. Stage 5 generates the Yul verifier from the aggregator VK,
+#    compiles it with `solc --bin -`, and self-checks the bytecode
+#    against the committed BridgeWithdrawalAggregatorVerifier.bin.
+#    The version is pinned: another one emits different bytecode and
+#    fails that comparison.
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/solc \
+  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+chmod +x ~/.local/bin/solc
+solc --version | grep Version
+#   -> Version: 0.8.19+commit.7dd6d404.Linux.g++
 ```
 
-Both binaries are also lazily built by `cargo run --release` when
-invoked by the smoke wrappers or the exemplary command in the README
-Step 4 / 5. Prebuilding is worth it if you plan >3 invocations —
-saves the ~2 s cargo-startup on each call.
+`~/.local/bin` must be on `PATH`: the aggregator resolves the bare name
+`solc`, not a configurable path. Note that "the CLI's ONLY subprocess"
+above is true of the CLI, not of the tree below it — `aggregate-proof`
+spawns `solc` in turn, which is exactly the dependency that used to go
+unchecked.
+
+**Steps 2 and 3 are mandatory, not optimisations.** Preflight refuses to
+proceed unless `target/release/aggregate-proof` exists and answers
+`--help`, and it will not accept the `cargo run --release` fallback the
+runtime would otherwise take: verifying that path means paying for a
+cold build inside a check whose whole point is to be instant, and "the
+crate looks present" is not verification. A missing or unrunnable
+aggregator therefore costs one command now instead of the burn plus up
+to 91 minutes of anchor wait later. Preflight checks `solc` and its
+version in the same place and for the same reason.
+
+Both checks live on the **real** run's stage 1. `--dry-run` has no submit
+plumbing and never proves, so it skips the prover-artifact checks
+entirely — a clean dry run is not evidence that stage 5 can finish.
+
+Step 1 (the CLI itself) is still just a convenience — `cargo run
+--release` works, and prebuilding only saves the ~2 s cargo startup per
+invocation.
 
 **Env sanity** (run cwd = the CLI crate):
 
@@ -215,7 +252,7 @@ done
 the default-user path):
 
 - `WITHDRAW_FROM` = `<dapp_id>::<account_id>` of the source AN multisig
-- `WITHDRAW_FROM_KEYS` = path to that multisig owner's `keys.json` (mode `0600`)
+- `WITHDRAW_FROM_KEYS` = path to that multisig owner's `keys.json` (mode `0400`)
 - `WITHDRAW_TO` = EVM recipient (`0x…` or `eip155:<id>:0x…`)
 - `WITHDRAW_TO_CHAIN` = numeric EIP-155 chain id (`11155111` for Sepolia)
 - `WITHDRAW_AMOUNT` = decimal USDC (e.g. `1.000000`), ≤ 6 fractional digits
@@ -274,6 +311,71 @@ sed -i.bak "s/^# *BRIDGE_ADDRESS=.*/BRIDGE_ADDRESS=$BRIDGE/" "$BRIDGE_CONFIG"
 ```bash
 export BRIDGE_ADDRESS=$BRIDGE   # shell env wins over profile-file value
 ```
+
+
+### Prover artifacts for a self-deploy
+
+The withdrawal proves and aggregates on this machine, so
+`../bridge-prover-libraries/params/` must hold the Hermez ceremony before
+a real run. The provisioning commands live in one place — **README
+Step 0** — and are not repeated here; follow them, then come back.
+
+> **Do not point two different builds at one `params/` during a
+> rollout.** Nothing locks that directory. Two key generations running
+> against it interleave, and the interleaving is not always detectable:
+> if one process writes its keys and another overwrites them before the
+> first records its manifest, the manifest ends up describing the second
+> process's files under the first process's revision number. Every
+> integrity check then passes on a cache holding the wrong keys.
+>
+> Give the new build its own `--params-dir` until every consumer — CLI,
+> bundle relayer, verifier daemon — has been upgraded. Merging back
+> afterwards is a copy, not a race.
+
+### Running your own verifier: `--allow-verifier-drift`
+
+The CLI pins the SHPLONK verifier it was built against and refuses a
+`BridgeWithdrawalAggregatorVerifier.bin` that does not match it byte for
+byte. That is right for the pinned shellnet deploy: a mismatched
+verifier means `aggregate-proof` produces calldata your bridge will
+reject, and without the check you find out in stage 5 — after the burn.
+
+If you ran your own `deploy_bridge_bundle.sh`, your verifier is
+legitimately different, and `--allow-verifier-drift` is how you say so.
+It suppresses **only** the byte-comparison against the pinned artifact.
+It does not weaken any other check, and it does not make a wrong
+verifier work.
+
+Before you pass it, three things must be true, and only you can
+establish them:
+
+1. `BRIDGE_VERIFIERS_DIR` points at the `verifiers/` directory produced
+   by *your* deploy run — not at the repo's pinned
+   `contracts/ethereum/verifiers/`.
+2. The `.bin` in that directory is the one your bridge actually has on
+   chain. Verify it, do not assume it:
+
+   ```bash
+   ADAPTER=$(cast call "$BRIDGE_ADDRESS" 'bridgeWithdrawalVerifier()(address)' --rpc-url "$RPC_URL")
+   WRAPPER=$(cast call "$ADAPTER" 'shplonkVerifier()(address)'  --rpc-url "$RPC_URL")
+   YUL=$(    cast call "$WRAPPER" 'yulVerifier()(address)'      --rpc-url "$RPC_URL")
+   # gen_evm_verifier_shplonk emits a 32-byte CREATE prelude before the
+   # runtime payload; eth_getCode returns only the payload.
+   diff <(cast code "$YUL" --rpc-url "$RPC_URL") \
+        <(printf '0x%s' "$(tail -c +33 "$BRIDGE_VERIFIERS_DIR/BridgeWithdrawalAggregatorVerifier.bin" | xxd -p | tr -d '\n')")
+   ```
+
+   Empty diff, or stop here. This is the same comparison
+   `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   runs (`verify_verifier_lane`), and the CLI's own
+   `check_bridge_deploy` runs it for you on every withdraw — the flag
+   does **not** turn that off.
+3. The proving keys in `--params-dir` were generated for that same
+   circuit. A verifier from one deploy and a pk cache from another
+   produce a proof that verifies locally and reverts on chain.
+
+If you cannot satisfy (2), the flag is not the fix — re-deploy or
+re-fetch your artifacts.
 
 ### Step L2 — Treasury seed
 
@@ -353,9 +455,14 @@ deploy too — no changes needed), treasury check (should be covered
 from Step L2), dry-run, real submit. See README Step 4/5 for the
 full `cargo run` invocation and expected log markers.
 
-**Ground-truth log line to grep:** `layer_idx=1` confirms
-L2-anchoring in the enricher output. Anything else means L1 fallback
-— investigate before submitting.
+**Ground-truth log lines to grep:** `resolved anchor: L2` and
+`anchor_layer=L2` in the enricher output, `anchor_stride=16384` from
+stage 4b. `L1` in any of them means L1 fallback — investigate before
+submitting. The witness file carries the same fact 0-indexed, under
+`.anchor` rather than at the top level:
+`jq '.anchor | {layer_idx, height}' work_dir/event_*_witness.json` reads
+`layer_idx: 1` for L2, and `height` equal to the `target_covering_seq_no`
+stage 4b printed.
 
 **If the enricher times out (120 min):** your daemon never landed
 the covering L2 bundle. Bundle-lane issue — check your `daemon-live`
@@ -373,8 +480,9 @@ Same steps as above with three deltas:
   L1 has no acknowledged-wait requirement — stride is ~5.7 min
   chain-time, not ~91.
 
-Log ground-truth: `layer_idx=0` on the L1 fast-lane (0-indexed
-layer → L1).
+Log ground-truth on the L1 fast-lane: `resolved anchor: L1`,
+`anchor_layer=L1`, and `anchor_stride=1024`. In the witness file the
+same fact is 0-indexed: `.anchor.layer_idx` reads `0`.
 
 ---
 
@@ -391,10 +499,15 @@ this to ~30 min/cycle, 3 cycles in ~2 h.
 **Per cycle (N = 2, 3, …):**
 
 ```bash
-# 1. Confirm previous WithdrawalExecuted landed
-cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' \
-  --from-block -1000 | tail -5
+# 1. Confirm the previous payout landed. The event is
+#    WithdrawalByProofExecuted (FIVE params) — there is no
+#    `WithdrawalExecuted`, and a query for one returns nothing after a
+#    perfectly good withdrawal. `--from-block` takes a height, not an
+#    offset: `-1000` is parsed as a flag.
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 1000)) \
+  'WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)' \
+  --rpc-url $RPC_URL | tail -20
 
 # 2. Confirm treasury still funded (seed once at Step L2 for
 #    self-deploy; the pinned deploy is shared — check per cycle
@@ -439,13 +552,28 @@ the recovery gist; jump here for the diagnostic commands.
 bundle. Distinguish via:
 
 ```bash
-LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
-grep -E 'capture: (matched|polling|timed out)' "$LOG" | tail -5
+# `--work-dir` is required plumbing with no default, so substitute the
+# path this run was given. `./work_dir` is only what the smoke scripts
+# happen to pass; if you passed `--work-dir` on the command line rather
+# than exporting it, use that.
+WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
 
-# "matched dst=…:026a" appears but no "enrich_witness: filling" →
-#   event was captured; enricher blocked. Sub-case 3a-i.
-# "polling" only, no "matched" →
-#   event never seen. Sub-case 3a-ii.
+LOG=$(ls -t "$WORK_DIR"/withdraw_*_*.log | head -1)
+
+# The capture stage logs exactly one line when it succeeds. Its absence
+# is the whole diagnosis.
+grep -n 'captured WithdrawalInitiated event' "$LOG"
+
+# Present  → the event WAS captured, so the enricher is what blocked.
+#            The line carries `block_seq_no=` — that is the E below.
+#            Sub-case 3a-i.
+# Absent   → the event was never observed. Sub-case 3a-ii.
+```
+
+The enricher's own progress, if you want to see where it stopped:
+
+```bash
+grep -nE 'partial witness:|resolved anchor: L' "$LOG" | tail -5
 ```
 
 #### 3a-i — Enricher blocked on covering bundle
@@ -455,7 +583,7 @@ grep -E 'capture: (matched|polling|timed out)' "$LOG" | tail -5
 on-chain.
 
 ```bash
-E=<event_seq_no from log: "capture: matched … seq_no=E">
+E=$(grep -o 'block_seq_no=[0-9]*' "$LOG" | head -1 | cut -d= -f2)   # the captured event's seq_no
 L=$(cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]')
 # L1 math:
 COVER=$(( (E + 1023) / 1024 * 1024 ))
@@ -487,9 +615,10 @@ echo "event=$E last_seen=$L covering=$COVER  wait ≈ ${WALL_MIN} min"
 - `WALL_MIN ≥ 60`: Redeploy is warranted only on fresh testnet, and
   only under this self-deploy path — see
   [Case 1b](#case-1b--l2-self-deploy-end-to-end). After redeploy,
-  fire a NEW burn (the old state-file's dedup tuple stays valid; use
-  `--allow-retry` OR change the amount by 1 micro-USDC to sidestep
-  dedup).
+  fire a NEW burn. The old state file's dedup tuple stays valid, and
+  `--allow-retry` will NOT re-open it — a `Confirmed` record is refused
+  unconditionally, and a `Reserved` one with no hash is refused too.
+  Change the amount by 1 micro-USDC to get a fresh identity.
 
 #### 3a-ii — Event never observed
 
@@ -504,10 +633,235 @@ AN_TX=$(jq -r '.an_tx_hash' "$STATE_FILE")
 # Query the message tree via GQL; look for exit_code or aborted.
 ```
 
-**Remediation:** If the burn aborted, exit is 10, not 11. State file
-records `Failed` with `stage=burn`. Fix the underlying issue (drift
-→ [Case 3d](#case-3d--multisig--usdcbridge-key-drift)), prune the
-failed state file, re-run.
+**Remediation:** An aborted burn exits 10, not 11. What to do next
+depends on one field, and the two cases are not interchangeable.
+
+Read it first:
+
+```bash
+jq -r '.status, .an_tx_hash' "$STATE_DIR/<sha256>.json"
+```
+
+**`an_tx_hash` is set** (`status` is `burned` or later) — the burn was
+broadcast and its hash is known. Fix the underlying issue (drift →
+[Case 3d](#case-3d--multisig--usdcbridge-key-drift)) and re-run with
+`--allow-retry`: the run reuses the recorded hash, skips the burn
+entirely, and resumes at capture.
+
+**`an_tx_hash` is `null`** (`status: "reserved"`) — ambiguous. The SDK
+either never sent, or sent and failed before returning a hash; the
+record cannot tell you which, because the hash is written only after the
+send returns.
+
+`--allow-retry` neither resumes a hash-less record nor overrides it. It
+does not follow that a re-run refuses with exit 3, and this page said it
+did: stage 1 runs first, and with no hash on file the ECC[3] balance
+check is back in force — so if the burn *did* land, the balance is spent
+and the run repeats the same exit-10 refusal, never reaching the
+reservation. Exit 3 is what the reservation answers **once preflight
+passes**. (It used to compose and broadcast a **second** burn here. That
+is fixed, and the refusal is now the documented behaviour rather than a
+hazard to warn about.) Reconcile on-chain before doing anything:
+
+```bash
+# List recent transactions on the multisig and look for a
+# sendTransaction to USDCBridge around the time of `reserved_at`.
+tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
+# Then query the message tree via GQL for that window.
+```
+
+- Balance unchanged and no matching transaction → nothing was sent.
+  See **"What `re-run` means once a record exists"** below: a record is
+  on disk, and `--allow-retry` alone will refuse it with exit 3.
+- A matching transaction exists → **check whether it succeeded before
+  concluding anything.** A transaction that reached the chain and
+  aborted is not a burn; the CLI classifies exactly this case
+  (`aborted`, or `compute.exit_code != 0`) as a rejected call. Marking
+  such a run `burned` would strand the withdrawal forever, because the
+  resume path would then wait for a `WithdrawalInitiated` event that
+  will never appear.
+
+  ```bash
+  tvm-cli -j query-raw transactions --filter "{\"id\":{\"eq\":\"<hash>\"}}" \
+    --result 'id aborted compute{exit_code} out_messages{id dst}'
+  ```
+
+  - `aborted: true` or `exit_code != 0` → the multisig rejected the call
+    and the USDC stayed put. Nothing landed — fix the cause, then follow
+    the "nothing was broadcast" path below; `--allow-retry` on its own
+    refuses, because the record cannot distinguish this from a burn whose
+    hash was never written.
+  - `aborted: false`, `exit_code: 0` → the multisig *sent* an internal
+    message. That is not yet a burn: USDCBridge can abort it in turn,
+    and the CLI sends with `bounce: true` precisely so the USDC comes
+    back when it does. **Keep walking the tree** — this is the same
+    chain `capture_targeted_withdrawal_event` follows, so it is also
+    exactly what a resumed run will need to find:
+
+    Use the same `blockchain` API and the same **two-step** shape the
+    CLI uses. This is not a stylistic preference: shellnet returns
+    `null` for the nested `dst_transaction { out_messages }` even when
+    it populates `transaction(hash:) { out_messages }` perfectly, which
+    is exactly why `query_msg_dst_tx_out_messages` splits the walk in
+    two (`bridge-gql-fetcher/src/gql_client.rs:796`). Asking for the
+    nested field returns nothing and looks like "no event was emitted"
+    — the single most expensive way to misread this page.
+
+    ```bash
+    GQL=https://shellnet.ackinacki.org/graphql   # = $BRIDGE_GQL_ENDPOINT
+    q() { curl -sS "$GQL" -H 'content-type: application/json' \
+            --data "$(jq -nc --arg q "$1" '{query:$q}')"; }
+
+    # 1. multisig tx → its outbound message to USDCBridge.
+    q '{ blockchain { transaction(hash: "<hash>") {
+           aborted compute { exit_code } out_messages { id dst } } } }'
+
+    # 2. that message → the id of the transaction that consumed it.
+    #    Ask ONLY for the id here; the nested out_messages is null.
+    q '{ blockchain { message(hash: "<out_msg_id>") {
+           dst_transaction { id } } } }'
+
+    # 3. re-query that transaction directly — this is the step the
+    #    nested form silently skips.
+    q '{ blockchain { transaction(hash: "<dst_tx_id>") {
+           aborted compute { exit_code } out_messages { id dst } } } }'
+    ```
+
+    A `null` `dst_transaction` in step 2 means the receiving contract
+    has not run **yet**, not that it rejected the call — the CLI polls
+    this same shape until it turns non-null. Wait and repeat.
+
+    - destination transaction `aborted: true` or `exit_code != 0` → the
+      bridge rejected it and the funds bounced back. **Not** a burn. Do
+      not set `status: burned`; fix the cause, then follow the "nothing
+      was broadcast" path below.
+    - destination transaction clean **and** carrying an outbound ExtOut
+      to `:…026a` → that ExtOut is the `WithdrawalInitiated` event. The
+      burn landed. Write the multisig tx hash into `an_tx_hash`, set
+      `status` to `burned`, and re-run with `--allow-retry` so the run
+      resumes at capture instead of re-burning.
+
+  The ExtOut is the only unambiguous evidence. Stopping one hop earlier
+  — at "the multisig transaction succeeded" — is what would let you mark
+  a bounced call as `burned`, after which the resumed run waits forever
+  for an event that was never emitted.
+
+**What "re-run" means once a record exists.** `--allow-retry` resumes a
+withdrawal; it does **not** clear one. A record that is `Reserved` with
+no `an_tx_hash` — one of the three shapes an exit 10 can leave — is not
+resumable with or without the flag, and that is deliberate: the hash is written
+only after the send returns, so the record cannot say whether a burn is
+on the wire, and re-running would broadcast a second one. What such a
+re-run actually returns depends on stage 1, which runs first: while the
+ECC[3] balance is short the answer is the same exit 10 again, and only
+once preflight passes does the reservation refuse with exit 3.
+
+So the two outcomes below lead to different actions, and neither of them
+is a bare `--allow-retry`:
+
+- **A burn landed** → write its multisig tx hash into `an_tx_hash`, set
+  `status` to `"burned"`, then re-run with `--allow-retry` — the flag is
+  what hands the recorded burn back, and with it the run resumes at
+  capture and never re-burns.
+- **Nothing was broadcast** → the record may have to go, and the exit-3
+  refusal tells you whether that is safe. Re-run the identical command
+  and read the liveness line it prints. It says one of **three** things,
+  and only one of them permits a deletion:
+
+  | The refusal says | What it means | What you do |
+  |---|---|---|
+  | "Another process on this host is executing this withdrawal **RIGHT NOW** (it holds the withdrawal lock)" | A live run owns this withdrawal and may be inside `burn::send`. | **Wait** for it and read its outcome. Do not touch the record. |
+  | "**No other process** on this host holds this withdrawal, so the record was left by a run that has already exited" | Nobody is mid-send. This is *not* the same as "nothing was broadcast" — a run can exit between the send returning and the hash being written. | **Only if** the reconciliation above also found no `initiateWithdrawal`, delete the record. |
+  | "Whether another process holds this withdrawal **could not be determined** here — the lock could neither be taken nor tested" | The question was never answered. There is no evidence either way. The `warn` line just above the refusal names the errno. | **Do not delete.** See below. |
+
+  The third line is the one that catches people, because reading the
+  procedure by elimination — "it is not the first case, and my
+  reconciliation is clean" — lands on a deletion that the message never
+  authorised.
+
+**When the liveness verdict is "could not be determined".** Two different
+situations reach it, and the `warn` line the CLI prints just above the
+refusal says which:
+
+- **The filesystem cannot lock** — NFS without a lock daemon, some
+  container overlay mounts. `ENOLCK`, `EOPNOTSUPP` or `ENOSYS`. Every run
+  on that mount gets this verdict, including one that may be mid-send.
+- **The attempt itself failed** — `EACCES` on the state directory,
+  `EMFILE` when the process is out of file descriptors, anything else.
+  Here the lock would work; this run could not reach it. Fix the error
+  and re-run, and you get a real verdict.
+
+Either way the CLI cannot tell you whether another run holds the
+withdrawal, and it says so rather than guessing.
+
+The on-chain reconciliation is then your *only* evidence, and it is not
+sufficient on its own: it can only tell you what has already landed, and
+a burn that is in flight right now has landed nowhere yet. So:
+
+1. Move the state directory to local disk
+   (`BRIDGE_WITHDRAW_STATE_DIR=$HOME/.bridge-withdraw-state` on a real
+   filesystem) and re-run. The verdict becomes answerable, and you are
+   back in one of the first two rows. This is the fix, not a workaround —
+   the CLI's whole duplicate-burn defence is a `flock` on that directory.
+2. If you cannot move it, establish by other means that no run is
+   executing this withdrawal — `ps` on every host that shares the mount,
+   not just this one — and only then apply the second row's rule.
+
+Deleting the record belongs to the second row and only to the second row.
+It is the only local trace that a burn may have been authorised, so it
+goes **after** both conditions have been met — the on-chain
+reconciliation found no `initiateWithdrawal`, and the refusal said no
+other run is executing this withdrawal — and never before. "Could not be
+determined" is not that sentence. In the "burn landed" case the record is
+edited, not deleted. Deleting it while another run is mid-send is the
+second burn that every refusal on this page exists to prevent.
+
+#### 3a-iii — The record is behind the chain (the state write failed)
+
+**Scenario:** exit 10, and the refusal reads `…, but the state file
+could not be updated: …`. Nothing is wrong with the withdrawal: the AN
+side did what it was asked, and the run could not write down that it
+had. Every such refusal names the record file it failed to write.
+
+This is not 3a-i or 3a-ii. Both of those are about an event that did
+not arrive; here the log usually shows `captured WithdrawalInitiated
+event` and may show `capture + prove complete`. Do not run their
+diagnostics — they will report a healthy chain and tell you nothing.
+
+**First, undo whatever stopped the write.** A full disk, a read-only
+mount, a `chmod` on the state directory. `write_record_atomic`
+publishes through a temp file and a `rename`, so it needs **write
+permission on the directory**, not just on the record:
+
+```bash
+STATE_DIR="${BRIDGE_WITHDRAW_STATE_DIR:-./withdraw-state}"
+ls -ld "$STATE_DIR"      # needs drwx------, not dr-x------
+df -h "$STATE_DIR"
+```
+
+**Then read the record and act on `.status`:**
+
+```bash
+jq -r '.status, .an_tx_hash' "$STATE_DIR/<sha256>.json"
+```
+
+- **`burned`, `captured` or `proved`, with an `an_tx_hash`** — the
+  record is behind by one status transition and is otherwise consistent.
+  It is `Resumable`: re-run the same identity with `--allow-retry` and
+  nothing else. The run reuses the recorded hash, skips the burn,
+  re-captures (targeted, seconds) and carries on. **Do not hand-edit
+  it**, and do not re-seed — a fresh multisig is a different `--from`,
+  therefore a different record, and this one would be orphaned with a
+  live burn behind it.
+- **`reserved`, no `an_tx_hash`** — the write that failed was the one
+  meant to record the burn. This is the ambiguous shape, and it is
+  [3a-ii](#3a-ii--event-never-observed)'s procedure from here: reconcile
+  on chain first, then edit or delete according to what it found.
+
+**On cost:** if the failure came after `stage 4b`, the covering bundle
+it waited for is already on chain, so the resumed run does not wait ~91
+minutes again. A warm resume from `captured` is capture + proof +
+submit — a few minutes.
 
 ---
 
@@ -529,23 +883,36 @@ ERROR failed to spawn aggregate-proof: <err>
 In-process Circuit-4 failures surface a level up as
 `Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
 
-**Trigger conditions:** Out of disk, OOM, RAM swap-thrash, params
-missing, PK cache corrupt.
+**Trigger conditions:** Out of disk, OOM, RAM swap-thrash.
+
+A missing, truncated or non-Hermez ceremony no longer reaches this stage:
+since the stage-1 prover-artifact checks landed, it is refused before the
+burn with the provisioning commands (README Step 0). Seeing "params
+missing" as the cause of a post-burn `prove failed` means you are on an
+older build.
 
 **Checks:**
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~17 GB expected
-df   ../bridge-prover-libraries/params/      # free disk (need ≥20 GB headroom for first PK write)
-# RAM headroom: C4 K=19 needs ~40 GB peak
+du -sh ../bridge-prover-libraries/params/   # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+# Free space for a cold run, on the ONE filesystem that holds both:
+#   3 GiB  event_pk.bin + vk + config (~2.65 GB measured, rounded up)
+#   1 GiB  outer SHPLONK aggregator PK (~800 MB measured, rounded up;
+#          pk_cache lives inside params/ in the shipped profile)
+#   -----
+#   4 GiB = ~4.3 GB as df reports it — preflight sums these constants
+#          and refuses below the total
+df -h ../bridge-prover-libraries/params/
+# RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
 ```
 
 **Remediation:**
 
 - Free resources; re-run with the same tuple — `--allow-retry` if the
   first attempt left a `Reserved` state file. The witness under
-  `./work_dir/witness_event_<seq>.json` (relative to the CLI cwd) is
-  deterministic and reusable; do NOT delete it between attempts.
+  `<--work-dir>/event_<seq>_witness.json` — `$BRIDGE_WORK_DIR` if you
+  exported it — is deterministic and reusable; do NOT delete it between
+  attempts.
 - If cold-cache slowness is the real issue (not OOM), bump the
   timeout:
 
@@ -592,14 +959,42 @@ unchanged by the CLI)
 ```bash
 # CLI logs the selector + decoded params where possible; if not:
 cast 4byte <selector>
+```
 
-# Full trace against the deployed verifier (paths relative to CLI cwd)
-CALLDATA=$(jq -r '.calldata_hex' "./work_dir/proof_event_<seq>.json")
-PI=$(jq -c '.public_inputs' "./work_dir/proof_event_<seq>.json")
-cast call $BRIDGE_ADDRESS \
-  'withdrawByProof(bytes,uint256[13])' \
-  "$CALLDATA" "$PI" \
-  --rpc-url $RPC_URL --trace
+**Tracing it yourself.** Three things about the proof file trip people
+up, so all three are spelled out here:
+
+1. **It only exists if you asked for it.** By default the proof lives in
+   memory and is dropped; pass `--prover-out-dir DIR` and the run writes
+   `DIR/proof_event_NNNNNN.json` (`NNNNNN` = the zero-padded anchor
+   seq_no). A re-run without it re-proves, deterministically.
+2. **Its keys are `proof_hex` and `public_instances_hex`** — an array of
+   ten 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
+3. **Those ten are little-endian Fr**, and `uint256` on the wire is
+   big-endian, so each one must be byte-reversed before `cast` sees it.
+
+`pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
+ten `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
+dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot)` — so the
+signature is a parenthesised tuple, not `uint256[13]`:
+
+```bash
+# $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
+# --prover-out-dir and exports nothing.
+P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
+
+PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
+# ltrimstr + scan/reverse turns each LE Fr into the BE uint256 the ABI
+# expects; join wraps the ten into the tuple literal cast wants.
+PI=$(jq -r '
+  def be: sub("^0[xX]";"") | [scan("..")] | reverse | add;
+  "(" + ([.public_instances_hex[] | "0x" + be] | join(",")) + ")"
+' "$P")
+
+cast call "$BRIDGE_ADDRESS" \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  "$PROOF" "$PI" \
+  --rpc-url "$RPC_URL" --trace
 ```
 
 **Remediation:** Fix the on-chain condition; re-run the SAME CLI
@@ -608,7 +1003,7 @@ given `(event, on-chain contract state)` — if the chain state changed
 (treasury seeded, covering bundle landed), the proof regenerates
 against the new state.
 
-**Do not delete `work_dir/witness_event_*.json`** between attempts;
+**Do not delete `work_dir/event_*_witness.json`** between attempts;
 regeneration is expensive.
 
 ---
@@ -622,7 +1017,7 @@ regeneration is expensive.
 CLI never broadcast anything. Common causes with the human message
 the CLI prints:
 
-- `arg-invalid: --from-keys`: file mode is not `0600` → `chmod 600 <path>`
+- `arg-invalid: --from-keys`: file mode is not `0400` → `chmod 400 <path>`
 - `arg-invalid: --from`: not `dapp_id::account_id` shape, or dapp_id
   is wrong workchain
 - `preflight: multisig at --from is not deployed / not single-custodian`
@@ -630,13 +1025,69 @@ the CLI prints:
 - `preflight: multisig ECC[3] balance = X, need Y` (insufficient USDC)
 - `preflight: USDCBridge account_id does not resolve via GQL`
 
-**Remediation:** Fix the specific issue. Preflight is side-effect
-free — no state file was written, no burn attempted.
+**Remediation:** Fix the specific issue and re-run. Preflight is
+side-effect free: this run wrote no state file and attempted no burn.
 
-#### 3d-ii — Burn broadcast, outcome unknown (exit 10)
+**That is a statement about the RUN, not about the withdrawal.** If a
+previous run had already recorded a burn for this identity, the same
+preflight failure comes out as **exit 10**, not exit 2 — the checks and
+the message are identical, and the code differs because the remedy does.
+Seeing exit 2 here means there is no record for this identity at all —
+not merely that no hash is on file. Every refusal that happens with a
+reservation on disk is exit 10, including the ones that broadcast
+nothing. A record with `an_tx_hash: null`
+counts: it cannot say whether a burn happened, so the same refusal comes
+out as exit 10. See 3d-ii.
 
-`sendTransaction` broadcast but the CLI could not observe the
-resulting message on GQL within its budget. Typical root cause:
+#### 3d-ii — This run must not act as if the withdrawal were untouched (exit 10)
+
+Five situations share this code, and only the first is "this run
+broadcast a burn":
+
+1. `sendTransaction` broadcast but the CLI could not observe the
+   resulting message on GQL within its budget.
+2. A **preflight check refused** a withdrawal whose burn a previous run
+   already recorded. Nothing was broadcast or written by this run.
+3. The **state record exists and could not be read** — torn, failing a
+   cross-field check, or in a directory this process cannot traverse. No
+   AN tx hash could be recovered from it, so whether a burn is on the
+   wire cannot be answered locally at all.
+4. **A reservation is on disk and this run may not act on it.** The
+   record was published but its directory entry could not be made
+   durable; or the run reached the point of sending without owning the
+   withdrawal lock (`BurnPermit::issue`, which names which of three
+   cases it is). Nothing was broadcast by this run, and in one of those
+   cases another run may be inside its own send right now.
+5. **The run had nowhere to look.** `HOME` is unset and no `--state-dir`
+   was given, so the state directory has no name and no record could be
+   read. Nothing was broadcast. This is not exit 2 because exit 2 says
+   there is no record for this identity, and this run never opened a
+   directory to find out: an earlier run with `HOME` set, or with
+   `--state-dir`, may have recorded a burn. Supply the flag and re-run;
+   that run reads the record if there is one.
+
+   A real run is refused outright in this state — the state directory is
+   the only thing stopping a second burn, so it may not proceed without
+   one. A `--dry-run` still runs, because it broadcasts nothing and is
+   meant to be safe to run anywhere; what it may not do is report a
+   refusal as exit 2 afterwards, and it does not.
+
+In all five the record must not be deleted and the withdrawal must not
+be re-started under a fresh identity. In 2, 3 and 4 the remedy is to fix
+what the message names and re-run the SAME command, and what that run
+does depends on the record. With an `an_tx_hash` and `--allow-retry` it
+resumes from the recorded burn; the flag is not optional there, and
+without it the same record is refused with exit 3. Without a hash it
+does not resume at all — and it does not reach exit 3
+merely by being re-run either: stage 1 goes first, and a record showing
+no burn puts the ECC[3] balance check back in force. Reconcile on chain
+before re-running (Case 3a below). A burn that landed gets its hash
+written into the record and is resumed by a re-run with
+`--allow-retry`; if none landed, the next run refuses with exit 3, whose
+text is then the procedure to follow.
+
+For situation 1: `sendTransaction` broadcast but the CLI could not
+observe the resulting message on GQL within its budget. Typical root cause:
 local `USDCBridge.shellnet.keys.json` public key ≠ on-chain
 `getOwnerPubkey`, so the USDCBridge internally rejected the
 `initiateWithdrawal` call (TVM exit_code=209 signature error).
@@ -663,10 +1114,30 @@ cp ../../../acki-nacki/config/USDCBridge.keys.json \
    python/contracts/USDCBridge.shellnet.keys.json
 ```
 
-Then prune the `Failed` state file and re-run. Note that
-`scripts/deploy_msig_and_mint.sh` validates the key against
+**Do not delete the state file.** Exit 10 means the burn reached the
+wire, and that record is the only local trace of it — deleting it is how
+the same withdrawal gets burned a second time. Follow
+[Case 3a](#case-3a--capture-timeout--advanced-diagnostics) instead: read `.status` and
+`.an_tx_hash`, reconcile on chain, and act on what actually landed —
+`--allow-retry` resumes only a record that already carries a hash. If the
+reconciliation shows a burn, write its hash in and set `status` to
+`"burned"` first; if it shows none, see **"What `re-run` means once a
+record exists"** in Case 3a.
+
+(The old text here said "prune the `Failed` state file". No `Failed`
+record can exist at exit 10 in the first place — the only production
+writer of `Failed` is the `withdrawByProof` revert path, which is
+exit 13.)
+
+Note that `scripts/deploy_msig_and_mint.sh` validates the key against
 `getOwnerPubkey` before minting, so if you always deploy via that
 wrapper you should not hit this path.
+
+**It is not a recovery step, though.** Running it here deploys a fresh
+multisig, which is a different `--from`, which is a different dedup
+identity: the record for the burn already on the wire is orphaned and
+nothing will ever resume it. Correct the key file and re-run the same
+withdrawal command instead.
 
 ---
 
@@ -686,7 +1157,7 @@ is the demo default).
 `--allow-retry` needed. The prior state file records `Failed` with
 the original `an_tx_hash` still on disk; `reserve()` recognises that
 as a post-burn revert and resumes verbatim (returns the prior
-record, skipping `burn::fire()` in the orchestrator's stage 3 resume
+record, skipping `burn::send()` in the orchestrator's stage 3 resume
 branch). The AN burn is NOT re-fired — this is what prevents the
 double-spend on the AN side. Capture replays the same event by
 `an_tx_hash`, proof regenerates deterministically against the new
@@ -710,9 +1181,18 @@ ls -lt "$STATE_DIR"/*.json 2>/dev/null | head -3
 # Peek at the newest
 jq . "$(ls -t "$STATE_DIR"/*.json | head -1)" 2>/dev/null
 
-# Latest captured witness + generated proof (written into --work-dir)
-ls -lt ./work_dir/witness_event_*.json 2>/dev/null | head -3
-ls -lt ./work_dir/proof_event_*.json   2>/dev/null | head -3
+# Latest captured witness (written into --work-dir)
+WORK_DIR="${BRIDGE_WORK_DIR:-./work_dir}"
+ls -lt "$WORK_DIR"/event_*_witness.json 2>/dev/null | head -3
+
+# The proof JSON is written ONLY under --prover-out-dir, which has no
+# default and no environment variable: without that flag no such file is
+# produced anywhere. Put the directory you passed here — the previous
+# version of this line keyed on $PROVER_OUT_DIR, which nothing sets, so
+# it could not fire either.
+PROOF_OUT=                       # ← the --prover-out-dir you passed, if any
+[ -n "$PROOF_OUT" ] && ls -lt "$PROOF_OUT"/proof_event_*.json 2>/dev/null | head -3 \
+  || echo "no --prover-out-dir was passed: the proof JSON was not written anywhere"
 
 # Circuit 4 PK cache (should exist after first successful run)
 ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null
@@ -721,8 +1201,10 @@ ls -lh ../bridge-prover-libraries/params/pk_cache/ 2>/dev/null
 **Sepolia snapshot:**
 
 ```bash
+# `recipient` is indexed, so your address is in the SECOND topic
+# (left-padded to 32 bytes), not in `data`.
 cast logs --address $BRIDGE_ADDRESS --rpc-url $RPC_URL \
-  'event WithdrawalExecuted(uint256,address,uint256,uint256)' --from-block 0
+  'WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)' --from-block 0
 
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 
@@ -736,11 +1218,19 @@ deploy runs against our server-side daemon):
 ```bash
 # `storedLastSeenBlockSeqNo` only jumps at bundle boundaries (~91 min
 # L2, ~5.7 min L1). Cadence check via BlockVerified events:
-cast logs --address $BRIDGE_ADDRESS --from-block latest-2000 \
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
   'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
-  | grep -c BlockVerified
-# 0 events in ~2000 Sepolia blocks (~7 h) = stalled daemon; ≥1 = normal.
+  | grep -E '^  blockNumber' | tail -5
 ```
+
+`--from-block` takes a height (`latest-2000` and `-1000` are both
+refused), and `cast logs` never prints the event name — count
+`blockNumber` lines. Events land ~437 Sepolia blocks apart in L2 mode;
+the last one older than ~600 blocks means the daemon is behind by more
+than a cadence, which `COVERAGE_WAIT = 120 min` will not survive. See
+the README's health check for the AN-side cross-check that tells a
+stalled relayer from an idle chain.
 
 ---
 
@@ -761,8 +1251,7 @@ crates/ackinacki-bridge/                       ← CLI run cwd
 ├── scripts/                                   ← see README § Scripts
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
-    ├── witness_event_<seq>.json               ← enriched witness (input to Circuit 4)
-    ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
+    ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr
 
@@ -771,7 +1260,7 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
                                                #   override with BRIDGE_WITHDRAW_STATE_DIR
 
 crates/bridge-prover-libraries/                ← halo2 sub-workspace (shared with daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk, ~17 GB)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 ├── target/release/
 │   └── ackinacki-bridge                       ← this CLI (built into the sub-workspace)
@@ -805,8 +1294,18 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — prec
 - `work_dir/` — regeneration is deterministic; ~5 min per proof with
   warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` —
-  keep for audit; `Failed` — safe to prune once reconciled;
-  `Reserved` >24 h old with no `an_tx_hash` — safe to prune.
+  keep for audit; `Failed` — safe to prune once reconciled.
+- `Reserved` with no `an_tx_hash` — **no age makes this safe, and this
+  list is not where the rule lives.** The record cannot say whether a
+  burn is on the wire, because the hash is written only after the send
+  returns. Deleting one takes a procedure with **three** liveness
+  verdicts, only one of which permits it: the exit-3 refusal does not
+  always report an answer, and on a filesystem without `flock` it never
+  does. Follow
+  [Case 3a](#case-3a--capture-timeout--advanced-diagnostics) and nothing
+  else — a summary of that procedure here is exactly how the
+  two-verdict version survived a round of review 400 lines from its own
+  correction.
 
 **Do NOT touch between demos:**
 

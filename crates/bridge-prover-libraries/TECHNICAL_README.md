@@ -9,7 +9,7 @@ Ethereum bridge contract consumes. Three circuits are exercised:
 | 2 — Layer Historical Hashes  | 17 | Open the L0 Poseidon preimage in the `block_id` Merkle tree; advance `GlobalHistoryData` layer windows through a dense Poseidon chain (`MAX_CHAIN_LEN = 11`). |
 | 4 — Bridge Event Prover      | 19 | Hash a `WithdrawalInitiated` event BOC, bind it to a `Poseidon96` block leaf, climb the dense chain, and publish a single `final_root` as a public input — the verifier checks it off-circuit against its mirror of `layer_windows`. |
 
-Theory, circuit witnesses, contract sketch: see [`acki-nacki-to-eth-bridge-halo2-circuits/README.md`](../acki-nacki-to-eth-bridge-halo2-circuits/README.md). This README covers **off-chain operation**: daemons, IPC, state, runbooks for the two supported networks.
+Theory, circuit witnesses, contract sketch: see `README.md` in `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` (a separate, private repository — not vendored here). This README covers **off-chain operation**: daemons, IPC, state, runbooks for the two supported networks.
 
 > **Notation:** `W` ≡ `HISTORY_PROOF_WINDOW_SIZE`, `P` ≡ `THINNING_FACTOR_P`. Bundle width = `W·P` source blocks.
 
@@ -175,7 +175,7 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 - **~13 GB free disk** under `params/` (Hermez KZG SRS at K=17/19/20/21 + four PKs).
 - **~16 GB RAM** during proof generation.
 - **Docker / docker compose** for the local 5-node Acki Nacki cluster (local devnet only).
-- Sibling checkout of [`acki-nacki`](https://github.com/gosh-sh/acki-nacki) on branch **`poseidon_dex`** (local devnet only).
+- Sibling checkout of `gosh-sh/acki-nacki` (private repository) on branch **`poseidon_dex`** (local devnet only).
 - Python 3 + `tvm-cli` on PATH (local devnet only — orchestrator).
 - These two repos pinned to the matching branches:
 
@@ -209,7 +209,7 @@ Outputs:
 | `params/kzg_bn254_17.srs` | ~16 MB  | Circuit 2 (layer, K=17) proving |
 | `params/kzg_bn254_19.srs` | ~64 MB  | Circuit 4 (event, K=19) proving |
 | `params/kzg_bn254_20.srs` | ~128 MB | Circuit 1A (primary, K=20) proving + all keygen |
-| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 3 (fallback, K=21) proving |
+| `params/kzg_bn254_21.srs` | ~256 MB | Circuit 1B (fallback attestation, K=21) proving |
 
 ### K=21 ptau — one-time manual download
 
@@ -218,7 +218,7 @@ The K=21 ceremony ptau is not fetched by the binary. If the default cache path i
 ```bash
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
 ```
 
@@ -477,7 +477,7 @@ to drive the event side. Useful when the node is already running somewhere
 
 | Path | Purpose |
 |---|---|
-| `python/bin/tvm-cli` | Used to encode message bodies / read accounts. Picked up via `PATH` injection unless `CLI_NAME` is set. |
+| `tvm-cli` (on `PATH`, or `CLI_NAME`) | Used to encode message bodies / read accounts. Not shipped in-tree — it is platform-specific, and a committed binary shadowed working system installs via `PATH` injection. The helper tries each candidate and takes the first that answers `version`; `CLI_NAME` overrides. |
 | `python/contracts/{TokenBridge,UpdateCustodianMultisigWallet,GiverV3}.*` | ABIs / TVC / GiverV3 keys the orchestrator deploys & calls. |
 | `python/helper/common.py` | Verbatim `tests/helper/common.py` from acki-nacki — `tvm-cli` wrapper, GQL, deploy helpers. |
 | `python/generate_withdrawals_with_live_event_proving.py` | The orchestrator itself; all artefact paths are anchored to `__file__`, so CWD doesn't matter. |
@@ -802,7 +802,7 @@ cargo test -p bridge-event-prover-lib --test event_prover       -- --nocapture  
 | Symptom | Cause / Fix |
 |---|---|
 | Daemon panics with `SRS … is not Hermez Perpetual Powers of Tau (s_g2 head … expected 928fafb3d0cc)` | `params/kzg_bn254_*.srs` was written by legacy `gen_srs` or the Acki Nacki chain ceremony (head starts with `c6028acf…`). Wipe stale artifacts and re-provision from Hermez: `./target/release/bootstrap_hermez_srs --wipe-cached-keys`. See [KZG SRS provisioning (Hermez PPoT)](#kzg-srs-provisioning-hermez-ppot). |
-| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 3, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
+| Daemon panics with `no Hermez Perpetual Powers of Tau SRS (≥ k=21) under ./params` | K=21 SRS missing (needed by Fallback / Circuit 1B, eagerly constructed at `KeyManager::new`). Run `./target/release/bootstrap_hermez_srs --k 21`; if the K=21 ptau isn't cached, the binary will print the `curl` command to fetch it. |
 | Verifier exits with `"primary VK not found"` / `"layer VK not found"` / `"fallback VK not found"` | Run `bridge-prover-daemon` first — it generates 1A/1B/2 keys on initial start (~10 min). |
 | Verifier exits with `"event VK not found"` | Run `cargo run --release --bin bridge-event-halo2-prover -- --selftest` once. |
 | Prover auto-mode never starts proving — seed seqno keeps moving | Should not happen (bugfix landed 2026-05-23: seed is pinned once at startup). If observed, file an issue. As a workaround, pin via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |

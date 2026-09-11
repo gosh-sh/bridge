@@ -9,7 +9,7 @@
 //!
 //! **Never** put key file contents, private-key material, or the resolved
 //! signer public key into any error `Display` impl. Preflight refusals may
-//! print the *path* to a key file to guide `chmod 600 <path>`, but never the
+//! print the *path* to a key file to guide `chmod 400 <path>`, but never the
 //! bytes inside.
 
 use thiserror::Error;
@@ -29,12 +29,40 @@ pub enum ExitCode {
     /// resolution failure.
     PreflightRefused = 2,
     /// Duplicate in-flight refusal from the idempotency layer. Nothing
-    /// broadcast. Use `--allow-retry` to override, or query the printed
-    /// prior identifier to reconcile.
+    /// broadcast.
+    ///
+    /// Two refusals share this code and they take DIFFERENT remedies —
+    /// this doc used to give only the first, which is the advice five
+    /// other places in the tree call a defect:
+    ///
+    /// * [`CliError::DuplicateInFlight`] — the record names an AN tx hash.
+    ///   `--allow-retry` resumes at capture for the active statuses, and is
+    ///   refused outright for `confirmed` and `submitted`; the refusal carries
+    ///   the per-status remedy.
+    /// * [`CliError::ReservationInFlight`] — the record has NO hash, so nothing
+    ///   on disk can say whether a burn is on the wire. `--allow-retry` does
+    ///   not override it and the message says so. The remedy is on-chain
+    ///   reconciliation, and then either writing the hash in or deleting the
+    ///   record — the second only under the liveness verdict that permits it.
+    ///
+    /// Read the refusal, not this list: both print what to do.
     DuplicateRefused = 3,
-    /// AN burn was broadcast; final outcome unknown (network error mid-send,
-    /// timeout waiting for account state to update). Idempotency record
-    /// persisted with the AN tx hash — operator must reconcile via GQL.
+    /// AN burn was broadcast; final outcome unknown (network error
+    /// mid-send, timeout waiting for account state to update).
+    ///
+    /// **The record usually does NOT carry the hash.** This doc claimed
+    /// the opposite, which is the reverse of the dominant case: every
+    /// failure inside `burn::send` propagates before the block that
+    /// writes `an_tx_hash`, so what an exit 10 leaves is a `Reserved`
+    /// record with `an_tx_hash: null` — and the CLI cannot write a hash
+    /// it never learned. The hash is on the record only for the two exit
+    /// 10s raised AFTER the send returned: a failed post-burn `update`,
+    /// and a refusal on the resume path.
+    ///
+    /// So reconciliation is the remedy in every case, and where the hash
+    /// is not on the record it is not in the CLI either: look for a
+    /// `sendTransaction` from this multisig around the record's
+    /// `reserved_at`. The advanced runbook's Case 3a is the procedure.
     BurnOutcomeUnknown = 10,
     /// AN burn confirmed but `WithdrawalInitiated` capture timed out. The
     /// event is durable in GQL; re-run with `--allow-retry` (v1) or
@@ -54,6 +82,8 @@ pub enum ExitCode {
 }
 
 impl ExitCode {
+    /// The number the process exits with, and the wire contract
+    /// scripts match on.
     pub fn as_i32(self) -> i32 {
         self as i32
     }
@@ -82,18 +112,34 @@ pub enum CliError {
     // -- Preflight (exit 2) --
     /// Argument shape/format violation. `flag` is the offending flag as
     /// spelled on the CLI (e.g. `--to`); `expected` describes the valid
-    /// shape; `got` is a redacted, safe echo of what we saw.
+    /// shape; `got` is a redacted, safe echo of what we saw — and the
+    /// TYPE is what says so. It was a `String` with that sentence in
+    /// this comment, twenty-odd constructions honoured it, and one did
+    /// not: `--anchor-layer` echoed its value verbatim into a refusal
+    /// that carries "Do not delete that record on the strength of this
+    /// refusal", so a newline in the flag forged a line ordering the
+    /// deletion directly above the line forbidding it.
     #[error("--{flag}: expected {expected}, got {got}")]
     ArgInvalid {
         flag: &'static str,
         expected: String,
-        got: String,
+        got: Redacted,
     },
 
-    /// Key file mode/ownership refusal. Prints the path only, never
-    /// contents.
-    #[error("--from-keys: key file {path} is not owner-only readable; run: chmod 600 {path}")]
-    KeyFilePerms { path: String },
+    /// Key file rejection. `problem` names which check failed so the
+    /// operator gets the right remedy; `path` is echoed to make the
+    /// remedy copy-pasteable. Contents are NEVER read here, let alone
+    /// printed.
+    #[error("--from-keys: {path}: {problem}")]
+    KeyFilePerms { path: String, problem: String },
+
+    /// Invocation could not be parsed, or `$BRIDGE_CONFIG` could not be
+    /// loaded, or the async runtime would not start. Nothing ran, nothing
+    /// was broadcast — hence exit 2, the same code every other pre-send
+    /// refusal uses. `reason` carries clap's own rendered message so the
+    /// human-readable path loses nothing.
+    #[error("{reason}")]
+    Usage { reason: String },
 
     /// Any other preflight refusal (multisig detection, single-custodian,
     /// owner-key mismatch, balance shortfall, USDCBridge resolution).
@@ -106,13 +152,94 @@ pub enum CliError {
     },
 
     // -- Idempotency (exit 3) --
-    #[error("refuse: duplicate in-flight withdrawal ({prior_status}). \
-             Prior AN tx: {prior_tx:?}. Prior withdrawal msg_id: {prior_msg_id:?}. \
-             Reconcile via GraphQL, or re-run with --allow-retry to override.")]
+    //
+    // Two situations, two messages, and the split is the PRIOR RECORD'S
+    // HASH — not which stage noticed, and not which flags were passed.
+    // This comment said otherwise for two rounds and the description it
+    // gave was inverted in both halves; the wrong half is what kept
+    // sending operators at the guard itself.
+    //
+    // `DuplicateInFlight` is for a record that carries an AN tx hash.
+    // `reserve` is its only source. Two shapes: a resumable status, where
+    // "re-run with --allow-retry" genuinely resumes at capture, and a
+    // terminal one (`confirmed`, `submitted`), where the flag changes
+    // nothing and the remedy says so instead — see
+    // `idempotency::terminal_refusal`.
+    //
+    // `ReservationInFlight` is for a record with NO hash, which cannot say
+    // whether a burn is on the wire, because the hash is written only
+    // after the send returns. Raised in THREE places — stage 1 before
+    // reserving, the contended-lock arm of `reserve_and_decide_holding`,
+    // and `decide_burn` after the reservation. (This said two for several
+    // rounds; `the_hash_less_refusal_is_raised_from_exactly_three_places`
+    // is what keeps the count honest now — the count only, so a reader
+    // who changes this prose without changing the code still has to be
+    // trusted.) Independent of `--allow-retry` in ALL THREE: the flag
+    // does not override it and the text says so. What it carries instead is the verdict `flock`
+    // can give (`idempotency::liveness_verdict`) and the record's path, because
+    // deleting that record is the real remedy and doing it while another
+    // run is mid-send is the second burn this whole refusal exists to
+    // prevent.
+    //
+    // Naming `--allow-retry` from the hash-less case is therefore always
+    // wrong: it routes an operator to a message whose own text is
+    // "--allow-retry does NOT override this".
+    #[error(
+        "refuse: duplicate in-flight withdrawal ({prior_status}). Prior AN tx: {}. \
+         Prior withdrawal msg_id: {}.\n\x20 {remedy}",
+        a_recorded_value(.prior_tx),
+        a_recorded_value(.prior_msg_id)
+    )]
     DuplicateInFlight {
         prior_status: String,
         prior_tx: Option<String>,
         prior_msg_id: Option<String>,
+        /// What to actually do, which differs by status.
+        ///
+        /// The sentence used to be baked in and ended "re-run with
+        /// --allow-retry to override" — true of the resumable statuses and
+        /// false of `confirmed` and `submitted`, which refuse the flag
+        /// outright. One message serving two situations told half of its
+        /// readers to try the one thing that cannot work for them.
+        remedy: String,
+    },
+
+    /// The reservation was found rather than created and carries no AN tx
+    /// hash. Nothing can tell from the record whether a burn is on the
+    /// wire; `liveness` is the rendered verdict of what the lock could
+    /// tell us. (This line named a field `another_run_is_live` for several
+    /// rounds. There has never been one — and a bool is exactly the shape
+    /// the verdict must not have.)
+    #[error(
+        "refuse: this withdrawal is already reserved ({prior_status}) and the record carries no \
+         AN tx hash, so whether a burn is on the wire cannot be read from it — the hash is \
+         written only after the send returns.\n\x20 {liveness}\n\x20 Record: {record_path}\n\x20 \
+         --allow-retry does NOT override this, and re-running will not change it.\n\x20 \
+         {next_steps}"
+    )]
+    ReservationInFlight {
+        prior_status: String,
+        prior_msg_id: Option<String>,
+        record_path: String,
+        /// What to do about it, which the LOCK decides.
+        ///
+        /// The three reconciliation steps used to be baked into the
+        /// template above and printed under every verdict — including
+        /// "another process is executing this withdrawal RIGHT NOW", two
+        /// lines above an unconditional "write its hash into an_tx_hash".
+        /// The verdict describes, the step instructs, and an operator
+        /// mid-incident follows the instruction. See
+        /// [`crate::idempotency::what_to_do_about_it`], which derives this
+        /// and `liveness` from one reading of the lock so they cannot
+        /// disagree.
+        next_steps: String,
+        /// Rendered sentence about whether another process holds the
+        /// withdrawal lock. A `String` rather than a bool because the
+        /// verdict has THREE values, not two: somebody holds it, nobody
+        /// does, or it could not be determined — and the third is the one
+        /// a bool would have to fold into one of the others. See
+        /// [`crate::idempotency::liveness_verdict`].
+        liveness: String,
     },
 
     // -- Burn (exit 10) --
@@ -144,19 +271,139 @@ pub enum CliError {
     },
 }
 
+/// Text on its way into a refusal, already made safe to print.
+///
+/// Constructed two ways and no others: [`crate::args::redact`], for
+/// anything an operator supplied, and [`Redacted::rendered`], for text
+/// this CLI produced itself. What differs is the CLIPPING — operator
+/// text is cut to 24 characters — and an author still has to say which
+/// case this is, in a word a reader can grep.
+///
+/// What does NOT differ is the escaping: both escape.
+/// "The point is not that one of them escapes and the other does not"
+/// stood here beside a `rendered` that escaped nothing, so
+/// `Redacted::rendered(operator_text)` recreated the whole defect in
+/// fifteen characters, with ten call sites and no guard between them.
+/// A type whose promise is "safe to print" cannot have a constructor
+/// that does not make it so.
+///
+/// Refusals are multi-line and are read in a terminal. A control
+/// character that survives `argv` forges a line the CLI never wrote,
+/// and an ANSI escape repaints the screen the refusal is read on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// Text this CLI produced: a number it parsed, a placeholder like
+    /// `<absent>`, a value it has already redacted and is wrapping in a
+    /// sentence.
+    ///
+    /// Prefer [`crate::args::redact`] for raw operator input: it clips
+    /// to 24 characters as well, and the difference between the two
+    /// calls is what a reader greps for. This one escapes too, so a
+    /// slip is no longer a hole.
+    #[must_use]
+    pub fn rendered(what: impl std::fmt::Display) -> Self {
+        Self(escaped(&what.to_string()))
+    }
+
+    /// The escaped text.
+    ///
+    /// `#[cfg(test)]`: production never unwraps one. A message that
+    /// wraps a redacted value in a larger sentence goes through
+    /// [`Redacted::rendered`], which is where a reader looks to see that
+    /// the inner part was redacted first.
+    #[cfg(test)]
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Render a value read back out of a withdrawal record for an operator.
+///
+/// The field is `Option<String>` and used to be printed with `{:?}`, which
+/// meant a refusal read `Prior AN tx: Some("0x2a91…")` — Rust syntax, in the
+/// one sentence an operator copies a hash out of during an incident. The
+/// quotes travel with a careless copy and `cast` then rejects the argument.
+/// The absent case was worse: a bare `None`, where the fact is "this record
+/// has no hash, so it cannot say whether a burn is on the wire".
+///
+/// `Debug` was also, incidentally, what escaped a control character in the
+/// value — and a record is a file on disk that anything can rewrite (this
+/// suite and the shellnet test plan both hand-build them). Dropping to
+/// `Display` alone would have reopened the forged-line hole that
+/// [`Redacted`] exists to close, so the replacement escapes deliberately
+/// rather than by side effect.
+fn a_recorded_value(v: &Option<String>) -> Redacted {
+    match v {
+        Some(s) => Redacted::rendered(s),
+        None => Redacted::rendered("none recorded"),
+    }
+}
+
+/// Control characters replaced by their escapes, everything else
+/// verbatim.
+///
+/// One home for the substitution both constructors make. A bare newline
+/// forges a line at the CLI's own continuation indent — inside an
+/// exit-10 refusal, directly above "Do not delete that record" — and an
+/// ANSI escape repaints the terminal the refusal is read on.
+fn escaped(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+impl std::fmt::Display for Redacted {
+    /// The escaped text, verbatim — the escaping happened in the
+    /// constructor, so this cannot be the place it is skipped.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl CliError {
     /// Deterministic mapping to a process exit code. `main` calls this on
     /// `Err(e)` before returning.
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            CliError::ArgInvalid { .. }
-            | CliError::KeyFilePerms { .. }
-            | CliError::Preflight { .. } => ExitCode::PreflightRefused,
-            CliError::DuplicateInFlight { .. } => ExitCode::DuplicateRefused,
-            CliError::BurnOutcomeUnknown { .. } => ExitCode::BurnOutcomeUnknown,
-            CliError::CaptureTimeout { .. } => ExitCode::CaptureTimeout,
-            CliError::ProofFailed { .. } => ExitCode::ProofFailed,
-            CliError::EthSubmitFailed { .. } => ExitCode::EthSubmitFailed,
+            CliError::ArgInvalid {
+                ..
+            }
+            | CliError::KeyFilePerms {
+                ..
+            }
+            | CliError::Usage {
+                ..
+            }
+            | CliError::Preflight {
+                ..
+            } => ExitCode::PreflightRefused,
+            CliError::DuplicateInFlight {
+                ..
+            }
+            | CliError::ReservationInFlight {
+                ..
+            } => ExitCode::DuplicateRefused,
+            CliError::BurnOutcomeUnknown {
+                ..
+            } => ExitCode::BurnOutcomeUnknown,
+            CliError::CaptureTimeout {
+                ..
+            } => ExitCode::CaptureTimeout,
+            CliError::ProofFailed {
+                ..
+            } => ExitCode::ProofFailed,
+            CliError::EthSubmitFailed {
+                ..
+            } => ExitCode::EthSubmitFailed,
         }
     }
 
@@ -164,23 +411,143 @@ impl CliError {
     /// `--json` error emitter.
     pub fn stage(&self) -> Stage {
         match self {
-            CliError::ArgInvalid { .. }
-            | CliError::KeyFilePerms { .. }
-            | CliError::Preflight { .. }
-            | CliError::DuplicateInFlight { .. } => Stage::Preflight,
-            CliError::BurnOutcomeUnknown { .. } => Stage::Burn,
-            CliError::CaptureTimeout { .. } => Stage::Capture,
-            CliError::ProofFailed { .. } => Stage::Prove,
-            CliError::EthSubmitFailed { .. } => Stage::Submit,
+            CliError::ArgInvalid {
+                ..
+            }
+            | CliError::KeyFilePerms {
+                ..
+            }
+            | CliError::Usage {
+                ..
+            }
+            | CliError::Preflight {
+                ..
+            }
+            | CliError::DuplicateInFlight {
+                ..
+            }
+            | CliError::ReservationInFlight {
+                ..
+            } => Stage::Preflight,
+            CliError::BurnOutcomeUnknown {
+                ..
+            } => Stage::Burn,
+            CliError::CaptureTimeout {
+                ..
+            } => Stage::Capture,
+            CliError::ProofFailed {
+                ..
+            } => Stage::Prove,
+            CliError::EthSubmitFailed {
+                ..
+            } => Stage::Submit,
         }
     }
 }
 
+/// Every fallible path in this crate, so the exit code is never
+/// decided by a `Box<dyn Error>` somebody unwrapped.
 pub type CliResult<T> = std::result::Result<T, CliError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the refusal an operator actually reads after a repeat run.
+    fn duplicate_refusal(prior_tx: Option<&str>) -> String {
+        CliError::DuplicateInFlight {
+            prior_status: "confirmed".into(),
+            prior_tx: prior_tx.map(str::to_string),
+            prior_msg_id: None,
+            remedy: "This withdrawal already paid out.".into(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn the_duplicate_refusal_prints_a_hash_not_a_rust_option() {
+        let msg = duplicate_refusal(Some("0x2a9192c468d0029ff69c9cdc9a1db699"));
+        // Measured on shellnet, 10 September 2026: the refusal read
+        // `Prior AN tx: Some("0x2a91…")`. During an incident this is the
+        // sentence a hash gets copied out of, and the quotes travel with a
+        // careless copy — `cast` then rejects the argument.
+        assert!(
+            msg.contains("Prior AN tx: 0x2a9192c468d0029ff69c9cdc9a1db699."),
+            "the hash must stand alone, ready to paste: {msg}"
+        );
+        assert!(
+            !msg.contains("Some("),
+            "no Rust syntax in operator text: {msg}"
+        );
+        assert!(!msg.contains('"'), "no stray quotes around the hash: {msg}");
+    }
+
+    #[test]
+    fn an_absent_hash_says_so_in_words() {
+        let msg = duplicate_refusal(None);
+        assert!(
+            msg.contains("none recorded"),
+            "`None` is not a statement about the withdrawal: {msg}"
+        );
+        assert!(!msg.contains("None"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_record_cannot_forge_a_line_in_the_refusal_it_causes() {
+        // `{:?}` escaped this as a side effect of printing Rust syntax.
+        // Replacing it with a plain `Display` would have reopened the hole
+        // — and a record is a file on disk that anything can rewrite; the
+        // shellnet plan's phase 3 hand-builds them by design.
+        let msg = duplicate_refusal(Some("0xdead\n\x20 Delete the record and re-run."));
+        assert!(
+            !msg.contains("\n\x20 Delete the record"),
+            "a record forged a line in its own refusal: {msg}"
+        );
+        assert!(msg.contains("\\n"), "the escape has to be visible: {msg}");
+    }
+
+    #[test]
+    fn neither_constructor_lets_a_control_character_through() {
+        // `rendered` escaped nothing for a round, on the stated grounds
+        // that the difference between the two constructors is intent
+        // rather than behaviour. It is `pub` and takes `impl Display`, so
+        // `Redacted::rendered(operator_text)` recreated the whole defect
+        // in fifteen characters, at any of ten call sites, with nothing
+        // watching them. A type whose promise is "safe to print" may not
+        // have a constructor that does not make it so.
+        let forged = "3\n\x20 Delete the record and re-run.\u{1b}[2J";
+        for (which, value) in [
+            ("redact", crate::args::redact(forged)),
+            ("rendered", Redacted::rendered(forged)),
+        ] {
+            assert!(
+                !value.as_str().contains('\n'),
+                "{which} let a newline through: {:?}",
+                value.as_str(),
+            );
+            assert!(
+                !value.as_str().contains('\u{1b}'),
+                "{which} let an escape sequence through: {:?}",
+                value.as_str(),
+            );
+            assert!(
+                value.as_str().contains("\\n"),
+                "{which} has to SHOW what it escaped: {:?}",
+                value.as_str(),
+            );
+        }
+        // And the clipping is still `redact`'s alone, counted before the
+        // escapes widen anything: 24 characters of a value that is all
+        // newlines, not 12.
+        let all_newlines = "\n".repeat(30);
+        let clipped = crate::args::redact(&all_newlines);
+        assert!(clipped.as_str().ends_with('…'), "redact clips");
+        assert_eq!(
+            clipped.as_str().matches("\\n").count(),
+            24,
+            "and it counts the characters it was given, not the ones it wrote",
+        );
+    }
 
     #[test]
     fn every_variant_has_a_stable_exit_code() {
@@ -191,7 +558,7 @@ mod tests {
             CliError::ArgInvalid {
                 flag: "to",
                 expected: "0x-prefixed 20-byte hex".into(),
-                got: "…".into()
+                got: Redacted::rendered("…")
             }
             .exit_code(),
             ExitCode::PreflightRefused
@@ -201,13 +568,31 @@ mod tests {
                 prior_status: "burned".into(),
                 prior_tx: None,
                 prior_msg_id: None,
+                remedy: "…".into(),
             }
             .exit_code(),
             ExitCode::DuplicateRefused
         );
         assert_eq!(
-            CliError::CaptureTimeout { an_tx: "0x…".into() }.exit_code(),
+            CliError::CaptureTimeout {
+                an_tx: "0x…".into()
+            }
+            .exit_code(),
             ExitCode::CaptureTimeout
         );
+    }
+
+    #[test]
+    fn a_post_burn_state_write_failure_is_not_exit_2() {
+        // The distinction the exit-code contract exists for: 2 means nothing
+        // was sent, 10 means it was sent and the outcome is unknown. A failed
+        // state write after a successful broadcast is unambiguously the
+        // second, and reporting it as the first invites a double burn.
+        let e = CliError::BurnOutcomeUnknown {
+            reason: "state file could not be updated".into(),
+            source: None,
+        };
+        assert_eq!(e.exit_code(), ExitCode::BurnOutcomeUnknown);
+        assert_ne!(e.exit_code(), ExitCode::PreflightRefused);
     }
 }

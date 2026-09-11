@@ -223,10 +223,11 @@ Run both commands from `crates/bridge-prover-libraries/`:
 #     either blob.
 mkdir -p ~/.cache/halo2-kzg-srs
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau
 curl -L --fail --progress-bar \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \
+  # K=22 has no known public mirror since the zkevm bucket closed; K=21 above is the one that works
+  # https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_22.ptau \
   -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_22.ptau
 
 # 3b. Build + run. Auto-fetches the K=20 ptau (~1.2 GB) on cache miss,
@@ -1018,7 +1019,7 @@ not a transport blip:
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [`changelog.md` — 2026-08-03 BN254 Fr canonicalization client fix](changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). |
+| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [`changelog.md` — 2026-08-03 BN254 Fr canonicalization client fix](verifyBlock_changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). |
 | `0x...PrevAnchorMismatch` | `PrevAnchorMismatch(supplied, stored)` | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. Either the daemon crashed mid-tx (extremely rare) or the chain advanced without us. |
 | `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(...)` | On-chain BK-set was rotated by an `applyBkSetUpdate` we don't know about, OR `bk_set.shellnet.json` drifted from live shellnet BLS keys. |
 | `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | We're trying to submit a `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |

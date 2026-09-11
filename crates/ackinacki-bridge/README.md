@@ -8,6 +8,10 @@ daemon: the daemon owns the continuous bundle-proving stream
 (`verifyBlock`); this CLI owns per-withdrawal composition
 (multisig burn → capture → Circuit-4 SHPLONK proof → `withdrawByProof`).
 
+**In a hurry?** [QUICKSTART.md](QUICKSTART.md) is one withdrawal in seven
+steps, starting with `scripts/install.sh`. This README is the reference
+behind it.
+
 This README is the **default-user runbook**: point the CLI at the
 pinned shellnet L2 deploy — whose bundle relayer runs on our server —
 bring your own Sepolia burner wallet, deploy a fresh AN multisig with
@@ -25,10 +29,30 @@ Given the four user inputs (`--from`, `--from-keys`, `--to`,
 `--to-chain`, `--amount`), the tool runs a six-stage in-process
 pipeline:
 
-1. **Preflight** — read-only checks: `--from-keys` file mode is `0600`,
-   `--from` is an active single-custodian multisig whose owner matches
-   `--from-keys`, USDCBridge resolves via GraphQL, multisig ECC[3]
-   balance ≥ amount.
+1. **Preflight** — everything that can be checked before anything is
+   broadcast, on **both** chains.
+
+   *Acki Nacki side:* `--from-keys` file mode is exactly `0400` and its
+   two halves are a real key pair, `--from` is an active single-custodian
+   multisig whose owner matches `--from-keys`, USDCBridge resolves via
+   GraphQL, multisig ECC[3] balance ≥ amount.
+
+   *EVM side, and this runs on `--dry-run` too* — none of it needs a
+   signing key: `eth_chainId` must equal `--to-chain`, `--bridge-address`
+   must hold code, the withdrawal verifier stack must walk (adapter →
+   `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
+   pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
+   and `treasuryBalance` must already cover the amount. **So a dry run can
+   fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
+   half-wired deploy, a drained treasury — not only AN-side ones.**
+
+   *Real runs only*, because these need the submit-only flags: the burner
+   key parses, the KZG ceremony resolves at k=20 **and** k=21, the
+   Circuit-4 key cache is usable, `aggregate-proof` is prebuilt and
+   answers `--help`, and the output directories are writable with room for
+   what will be written. This is the one part of preflight that writes:
+   it creates those directories and drops a short-lived probe file in
+   each.
 2. **Idempotency reserve** — SHA-256 dedup key over
    `(from, to, to_chain, amount)`; refuse a duplicate in-flight unless
    `--allow-retry` is passed.
@@ -72,6 +96,17 @@ a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
 - The `--from` multisig is deployed, single-custodian, and holds ≥
   amount USDC in ECC[3]. `scripts/deploy_msig_and_mint.sh` does both
   in one shot — see Step 2 below.
+- **`tvm-cli` on `PATH`**, needed only by that fixture script (the CLI
+  itself talks to the chain in-process and needs no external binary).
+  It is platform-specific and is **not** shipped in this repo. Check
+  before running Step 2:
+
+  ```bash
+  crates/ackinacki-bridge/scripts/check_fixture_prereqs.sh
+  ```
+
+  `CLI_NAME=/path/to/tvm-cli` overrides whatever is discovered on
+  `PATH`.
 
 ## Timing model
 
@@ -121,7 +156,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |
-| `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG SRS params (~17 GB) |
+| `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
 | `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
 | `--pk-cache-dir`        | `BRIDGE_PK_CACHE_DIR`       | Warm-start pk cache (optional; defaults to `$BRIDGE_PARAMS_DIR/pk_cache`) |
@@ -134,7 +169,8 @@ every operator brings their own; see Step 1. `NETWORK` (tvm-cli
 
 ## Quick start
 
-Five ordered steps. All commands run from `crates/ackinacki-bridge/`;
+Six ordered steps, the first a one-off. All commands run from
+`crates/ackinacki-bridge/`;
 paths in the CLI invocation are relative to that directory.
 
 ```bash
@@ -144,6 +180,205 @@ export BRIDGE_CONFIG=./config/bridge_config              # symlink → bridge_co
 # so the `cast call $BRIDGE_ADDRESS …` steps below can reach it.
 set -a && source "$BRIDGE_CONFIG" && set +a
 ```
+
+### Two preconditions the command line does not show
+
+The published invocation is exactly:
+
+    ackinacki-bridge withdraw --from <dapp_id::account_id> --from-keys <path> \
+                              --to <0x…> --to-chain <chain-id> --amount <usdc> \
+                              [--dry-run] [--yes] [--non-interactive] [--json]
+
+`--yes` and `--non-interactive` are not the same flag and are not
+alternatives. `--yes` answers the confirmation; `--non-interactive`
+promises that nothing may ever wait for an answer, and a real run given
+it without `--yes` is refused with exit 2 rather than left to block —
+`--non-interactive requires --yes or --dry-run`. A wrapper that means "do
+not hang" wants both.
+
+For it to resolve, two things must be true, and neither is visible in the
+command itself:
+
+1. `$BRIDGE_CONFIG` points at a profile file. Everything else the CLI
+   needs — endpoints, bridge address, prover dirs — comes from there.
+2. The working directory is `crates/ackinacki-bridge/`, because every path
+   in every shipped profile is relative to it.
+
+`--dry-run` needs nothing beyond those two. A **real** withdrawal also
+needs `BURNER_PRIVATE_KEY` exported (Step 1): it is per-operator and is
+deliberately in no profile. A real run without it refuses at stage 1,
+naming every missing value at once.
+
+### Step 0 — Provision the KZG ceremony (one-off, ~30 min)
+
+A real withdrawal proves Circuit 4 and aggregates it on this machine, so it
+needs the Hermez Perpetual Powers of Tau ceremony on disk. The directory
+`../bridge-prover-libraries/params/` is gitignored — a fresh checkout has
+nothing in it. `--dry-run` does not need any of this; skip to Step 1 if you
+are only preflighting.
+
+Exactly one file is required: **`kzg_bn254_21.srs` (~256 MB)**. Degree 21,
+not 19, because `KeyManager` loads every circuit's ceremony at startup —
+including the K=21 fallback circuit a withdrawal never proves — and the
+SHPLONK aggregator for `BridgeWithdrawalAggregatorVerifier` is also K=21.
+Degrees 17/19/20 are derived from it automatically on first use.
+
+The K=21 ceremony `.ptau` is **not** auto-downloaded (the shared SHA-256
+trust anchor only reaches K=20), so fetch it once by hand:
+
+```bash
+mkdir -p ~/.cache/halo2-kzg-srs
+curl -L --fail --progress-bar \
+  https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/powersOfTau28_hez_final_21.ptau \
+  -o ~/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau      # ~2.4 GB
+
+cd ../bridge-prover-libraries
+cargo build --release --bin bootstrap_hermez_srs
+./target/release/bootstrap_hermez_srs --k 21 --params-dir ./params
+cd ../ackinacki-bridge
+```
+
+> `scripts/bootstrap_hermez_srs.sh` at the repo root is a **different**
+> tool: it writes K=20 into `crates/bridge-snark-utils/params/` and will not
+> satisfy the CLI. Use the Rust bin above.
+
+The first real withdrawal then generates `event_pk.bin` (~2.65 GB) by
+keygen, and the aggregator populates `params/pk_cache/`. Budget ~4.3 GB for
+a withdraw-only machine, plus headroom — the `~17 GB` figure elsewhere in
+these docs is a `params/` shared with a bundle relayer, which also stores
+the primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
+during Circuit 4 is ~40 GB.
+
+**Do not wipe `params/` between runs** — keygen and the cold aggregator
+cache cost minutes each time.
+
+Finally, build the SHPLONK aggregator. A real withdrawal shells out to it,
+and the CLI refuses to start one without a **prebuilt** binary it can probe
+— it will not fall back to `cargo run`, because a cold build cannot be
+verified inside a preflight and an unverified aggregator costs the burn:
+
+```bash
+cd ../bridge-evm-aggregator
+cargo build --release --bin aggregate-proof
+cd ../ackinacki-bridge
+```
+
+`--dry-run` does not need this either; it is required only for a real run.
+
+#### Reaching `params/` from your own shell
+
+Several maintenance commands below act on the params directory, and one of
+them deletes files, so they must resolve it the way the CLI does — shell
+environment first, profile second. A plain `. "$BRIDGE_CONFIG"` inverts that
+precedence: `dotenvy` does not overwrite what the shell already set, so the
+profile would beat an explicit export. Declare this once per shell, from
+`crates/ackinacki-bridge/`:
+
+```bash
+# Prints the resolved directory on stdout, diagnostics on stderr.
+params_dir() {
+  # `printenv`, not `${VAR+x}`: the shell's test is true for a variable that
+  # was assigned but never exported, and the CLI reads the process
+  # environment. An exported-but-empty value is refused rather than guessed,
+  # because clap refuses it too.
+  if BRIDGE_PARAMS_DIR=$(printenv BRIDGE_PARAMS_DIR); then
+    [ -n "$BRIDGE_PARAMS_DIR" ] ||
+      { echo "BRIDGE_PARAMS_DIR is exported but empty" >&2; return 1; }
+  else
+    BRIDGE_CONFIG=$(printenv BRIDGE_CONFIG) && [ -n "$BRIDGE_CONFIG" ] ||
+      { echo "BRIDGE_CONFIG is not exported, so the CLI would load no profile" >&2
+        echo "at all. Use \`export\`, or pass --params-dir to both." >&2; return 1; }
+    # `dotenvy` parses KEY=value; `.` executes the file. On these constructs
+    # the two disagree, so refuse rather than resolve to whichever this shell
+    # happens to produce. The shipped profile is plain assignments.
+    grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_PARAMS_DIR=' "$BRIDGE_CONFIG" |
+      grep -q '[$`]' &&
+      { echo "BRIDGE_PARAMS_DIR in $BRIDGE_CONFIG uses \$ or backticks; pass" >&2
+        echo "--params-dir explicitly and give these commands the same path." >&2
+        return 1; }
+    BRIDGE_PARAMS_DIR=$( set -a; . "$BRIDGE_CONFIG"; printf '%s' "${BRIDGE_PARAMS_DIR-}" )
+    [ -n "$BRIDGE_PARAMS_DIR" ] ||
+      { echo "BRIDGE_PARAMS_DIR is absent from $BRIDGE_CONFIG" >&2; return 1; }
+  fi
+  printf '%s' "$BRIDGE_PARAMS_DIR"
+}
+```
+
+`--params-dir` is not covered and cannot be: it belongs to a run that has not
+happened yet. If you intend to pass it, pass the same path to these commands.
+
+Three things are worth running against the result. Free space, before the
+first withdrawal on a host:
+
+```bash
+PD=$(params_dir) && echo "params -> $PD" && df -h "$PD"
+```
+
+Key regeneration up front, instead of letting stage 5 do it — this is also
+how you prepare `bridge-verifier-daemon`, which reads the verifying key and
+never generates one. The event prover takes no `--params-dir` and reads
+`./params` relative to the working directory
+(`bridge-event-halo2-prover/src/main.rs:38,151`), hence the symlink:
+
+```bash
+PD=$(realpath "$(params_dir)") &&
+MANIFEST=$(realpath ../bridge-prover-libraries/Cargo.toml) &&
+WORK=$(mktemp -d) && ln -s "$PD" "$WORK/params" &&
+( cd "$WORK" && cargo run --release --manifest-path "$MANIFEST" \
+    -p bridge-event-halo2-prover -- --selftest )
+rm -rf "$WORK"
+```
+
+Cache repair, when `probe_event_keys` reports `corrupt`. This one deletes
+files, so the `params ->` line above is worth reading before you run it:
+
+```bash
+PD=$(params_dir) && echo "params -> $PD" &&
+cargo run --release --manifest-path ../bridge-prover-libraries/Cargo.toml \
+  -p bridge-prover-lib --bin probe_event_keys -- --params-dir "$PD" --repair
+```
+
+`probe_event_keys` without `--repair` reports what the next run will decide
+and changes nothing: `warm` and `cold` both need no action, `corrupt` is the
+case above, and `blocked` means a directory is sitting where a key file
+belongs — usually a bind mount whose host path does not exist. `--repair`
+refuses `blocked` without touching anything; remove the directory by hand.
+
+### Step 0b — Install `solc 0.8.19` (one-off, ~1 min)
+
+`aggregate-proof` shells out to `solc` **at run time**, on every real
+withdrawal. Stage 5 generates the Yul verifier from the aggregator's
+verifying key, compiles it with `solc --bin -`, and compares the bytecode
+byte for byte against the committed
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin`. That
+self-check is what tells you the proof you are about to submit matches the
+verifier deployed on the bridge — so having the Solidity bytecode on disk is
+not enough; the compiler itself has to be there.
+
+The version is pinned, because a different one emits different bytecode and
+fails that comparison:
+
+```bash
+mkdir -p ~/.local/bin
+curl -L -o ~/.local/bin/solc \
+  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+chmod +x ~/.local/bin/solc
+solc --version | grep Version      # Version: 0.8.19+commit.7dd6d404.Linux.g++
+```
+
+`~/.local/bin` has to be on `PATH` — the aggregator resolves the bare name
+`solc`, not a path you configure.
+
+Stage 1 of a **real** run checks this and refuses before anything is
+broadcast. A `--dry-run` does **not**: it has no submit plumbing and never
+proves, so it skips every prover-artifact check — the ceremony, the
+verifier `.bin`, `aggregate-proof` and this compiler alike. A clean dry run
+therefore says nothing about whether stage 5 can finish, which is why this
+step is a step rather than something the tooling catches for you.
+
+Without that stage-1 check the failure is an `ENOENT` panic inside a
+subprocess at stage 5 — after the irreversible burn and after up to ~91 min
+of waiting for the covering bundle.
 
 ### Step 1 — Create + fund a Sepolia burner wallet
 
@@ -174,12 +409,23 @@ on ECC[3] via `USDCBridge.mintAndSend`, then prints two eval-able env
 lines on stdout. Everything else (tvm-cli output, tracer logs) goes
 to stderr, so the `eval` line does not pollute the shell.
 
+The script shells out to `tvm-cli`, which is platform-specific and is
+not shipped here. Confirm the one it will pick actually runs on this
+machine before spending a deploy on finding out:
+
+```bash
+scripts/check_fixture_prereqs.sh
+# OK: tvm-cli = /usr/local/bin/tvm-cli (tvm-cli 3.0.5)
+```
+
+If it fails, install `tvm-cli` or export `CLI_NAME=/path/to/tvm-cli`.
+
 ```bash
 eval "$(scripts/deploy_msig_and_mint.sh)"
 # → sets WITHDRAW_FROM      (e.g. 2bd287b8ddb28adec2a17863ffc2d6e1c4fc48fbd1c833c6564f7f843588aad0::2bd287b8ddb28adec2a17863ffc2d6e1c4fc48fbd1c833c6564f7f843588aad0)
 #     format: <64-hex dapp_id>::<64-hex account_id> — single-custodian, both halves match
 # → sets WITHDRAW_FROM_KEYS (e.g. ./work_dir/msig_withdraw_cli.keys.json — the script emits an absolute path)
-#     format: path to a keys.json file, mode 0600
+#     format: path to a keys.json file, mode 0400
 ```
 
 Set the remaining per-invocation vars yourself:
@@ -233,11 +479,29 @@ credit.
 
 ### Step 4 — Dry-run
 
-Preflight-only preview: argument validation, key file perms,
-single-custodian check, USDCBridge resolution, balance check, and the
-idempotency-key digest all run. Nothing else — no burn, no capture,
-no prove, no `dry_run_withdraw` eth_call. Useful for sanity-checking
-flags and config before the real submit.
+Preflight-only preview: nothing is broadcast on either side and no
+idempotency state is written. It does **read** the store, though: its
+job is to say what a real run would do, and over a record already on
+disk a real run refuses — so a dry run refuses too, with the same exit
+code and the same remedy. See "Exit codes" for the four it can produce.
+
+**It is not AN-side only.** Argument validation, key file perms, the
+single-custodian check, USDCBridge resolution and the balance check all
+run — and so does the whole EVM side, which needs no signing key:
+`eth_chainId` against `--to-chain`, code at `--bridge-address`, the
+verifier-stack walk, the pinned-identity comparison and the treasury
+check. A dry run that fails may be telling you about your RPC or your
+bridge deploy, not about your multisig.
+
+What it does **not** do: compose or sign the burn, capture, prove, or run
+the `dry_run_withdraw` eth_call. It also does not check the prover
+artifacts — the ceremony, the verifier `.bin`, `aggregate-proof`, the key
+cache or disk headroom — because those are gated on the submit-only flags
+a dry run does not require. Pass `--verifiers-dir` and the deployed-verifier
+bytecode comparison joins in; otherwise it is skipped with a warning.
+
+So a clean dry run means "nothing about either chain is misconfigured",
+not "the real run will succeed".
 
 Every network endpoint, bridge address, prover-plumbing dir, and the
 L2 anchor selection is resolved from `$BRIDGE_CONFIG`. The invocation
@@ -297,7 +561,8 @@ INFO stage 2/6: idempotency reserve
 INFO stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)
 INFO stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)
 INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle
-INFO enricher: witness ready  layer_idx=1        # 0-indexed → L2; ANY OTHER VALUE = L1 fallback bug
+INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)   # L2; "L1" = fallback bug
+INFO chain built: anchor_layer=L2, anchor_kb=…, active_links=…, final_root=…
 INFO stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)
 INFO stage 6/6: submit withdrawByProof
 INFO withdrawByProof paid out tx=0x…             # ← definitive on-chain payout marker
@@ -325,7 +590,14 @@ Grep verdict from the saved log (both smoke wrappers `tee` to
 ```bash
 LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
 grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
-grep 'layer_idx=' "$LOG"    # must print `layer_idx=1` on the pinned L2 deploy
+grep -E 'resolved anchor:|anchor_layer=|anchor_stride=' "$LOG"
+# On the pinned L2 deploy: `resolved anchor: L2`, `anchor_layer=L2`,
+# `anchor_stride=16384`. The log is 1-INDEXED (L1/L2); the witness file
+# is 0-indexed, so the same fact reads as 1 there:
+# `layer_idx` is nested under `.anchor`; at the top level it is null.
+# `height` is the covering bundle, so it must equal the
+# `target_covering_seq_no` printed by stage 4b.
+jq '.anchor | {layer_idx, height}' work_dir/event_*_witness.json  # 1 = L2, 0 = L1 fallback
 grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 ```
 
@@ -334,20 +606,47 @@ grep -E '^error:|^ERROR|ProofFailed|reverted|timed out' "$LOG"
 Distinguishing "nothing broadcast" from "broadcast, unknown outcome"
 is the whole point of the exit-code discipline — scripts that
 pattern-match on a single non-zero would blind an operator to the
-difference that matters for money. `--dry-run` can only produce
-0, 2, or 3.
+difference that matters for money. `--dry-run` can produce 0, 2, 3 or
+10 — it never reserves and never writes, but it does READ the store, and
+its whole job is to report what a real run would do. So a dry run that
+finds a record for this identity refuses exactly as the real run would:
+**exit 3** where the record is terminal, in flight, or hash-less, and
+**exit 10** where some other stage-1 check refuses over a record that
+exists. A dry run that cannot name a state directory at all (no `HOME`,
+no `--state-dir`) still runs, and reports its refusals as 10 rather than
+claiming there is no record — it never opened one to find out.
 
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|
 | 0    | Success (or `--dry-run` returned OK) | — | — |
-| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing | Error scenarios § "Preflight refused" |
-| 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing | § Idempotency semantics |
-| 10   | AN burn broadcast, capture failed to observe outcome | ✗ AN burn WAS broadcast | § "Burn broadcast, outcome unknown" |
+| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing, **and no record for this identity on disk** | Error scenarios § "Preflight refused" |
+| 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing by this run | § Idempotency semantics |
+| 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-Exit codes 10–13 all leave the AN burn broadcast: the USDC has left
+**Exit 10 covers six situations, and only the first two involve this
+run broadcasting anything.** The first is the send itself: a burn went
+out and its outcome is unknown. The second is its mirror — the AN side
+did exactly what it was asked and the run **could not write down that
+it had**, because the state write failed (full disk, read-only mount,
+a directory it may not write). There the outcome is not unknown at all;
+the log may even say `capture + prove complete`. The other four are
+refusals: a preflight check
+that failed on a withdrawal whose burn a PREVIOUS run already recorded;
+a state record that exists and could not be read (torn, or in a
+directory this process cannot traverse); a reservation on disk this
+run may not act on — published but not durable, or reached without
+owning the withdrawal lock; and a run that had **nowhere to look**,
+because `HOME` is unset and no `--state-dir` was given. None of the four
+broadcasts or writes anything — but in the first three a record for this
+identity is on disk, and in the fourth the run cannot say whether one
+is, which comes to the same instruction: a burn may be on the wire and
+nothing may be deleted. What the six share, and what a script should
+key on, is "do not treat this identity as untouched".
+
+Exit codes 11–13 all leave the AN burn broadcast: the USDC has left
 the source multisig regardless. The question is whether the EVM side
 saw the withdrawal.
 
@@ -363,7 +662,7 @@ vs subprocess failure origins, etc.) see the
 Nothing was broadcast; no state file written. The CLI prints the
 specific reason. Common causes:
 
-- `--from-keys` file is not mode `0600` → `chmod 600 <path>`
+- `--from-keys` file is not mode `0400` → `chmod 400 <path>`
 - `--from` is not `dapp_id::account_id` shape, or points to a
   multisig with >1 custodian, or the owner pubkey from `--from-keys`
   does not match the on-chain multisig
@@ -383,8 +682,42 @@ shellnet deploy: the bundled `USDCBridge.shellnet.keys.json` in
 `bridge-prover-libraries/python/contracts/` has drifted from the
 current on-chain owner pubkey — the deploy script would have refused
 in this case, so if you see this you likely bypassed the deploy step.
-Re-run `scripts/deploy_msig_and_mint.sh` (it validates the key against
-`getOwnerPubkey` before minting) and start over.
+Fix the key and re-run the SAME withdrawal command.
+
+**Whether that resumes depends on the record.** If it carries an
+`an_tx_hash`, a re-run **with `--allow-retry`** skips the burn and picks
+up at capture — for a `reserved`, `burned`, `captured` or `proved`
+record, without the flag that same record is refused with exit 3,
+because resuming is what the flag authorises there. (A `failed` record
+with a hash is the exception and needs no flag: see § Idempotency
+semantics.) If it
+does not — which is what an exit 10 out of the send itself leaves,
+because the hash is written only after the send returns — the re-run
+neither resumes nor goes straight to exit 3: preflight runs first, a
+record showing no burn puts the ECC[3] balance check back in force, and
+the balance is genuinely spent. Reconcile on chain first (advanced
+runbook, Case 3a). If a burn landed, write its hash into the record and
+re-run with `--allow-retry`, which is what lets the reservation hand the
+recorded burn back; if none landed, the next run refuses with exit 3 and
+that refusal is the procedure. Either way the record stays.
+
+**A refusal reading `…, but the state file could not be updated` is a
+different animal.** Nothing is wrong with the withdrawal — the write
+was. The refusal names the record it failed to write; fix whatever
+stopped the write (the directory needs `drwx------`, because the record
+is published through a temp file and a `rename`), then read `.status`.
+If it carries an `an_tx_hash`, the record is behind by one transition
+and is resumable with a plain `--allow-retry` — no hand-editing. Full
+procedure: advanced runbook,
+[Case 3a-iii](docs/advanced_user_withdraw_runbook.md#3a-iii--the-record-is-behind-the-chain-the-state-write-failed).
+
+**Do not re-run `scripts/deploy_msig_and_mint.sh` here.** It deploys a
+fresh multisig, which is a different `--from`, which is a different dedup
+identity — the record for the burn already on the wire is orphaned, and
+nothing will ever resume it. That script is for standing up a new test
+withdrawal, not for recovering one. If the bundled
+`USDCBridge.shellnet.keys.json` has drifted from the current on-chain
+owner pubkey, correct the key file itself.
 
 ### Capture timeout (exit 11)
 
@@ -410,14 +743,14 @@ errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout.
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~17 GB expected
-df   ../bridge-prover-libraries/params/      # free disk headroom
+du -sh ../bridge-prover-libraries/params/    # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~4.3 GB (see Step 0)
 ```
 
 **Remediation:** free resources, re-run with `--allow-retry`. If the
 first attempt was a cold cache and merely slow (not OOM/thrashing),
 bump `--prover-timeout-s 3600` on the retry. Don't delete
-`./work_dir/witness_event_<seq>.json` between attempts — it's
+`./work_dir/event_<seq>_witness.json` between attempts — it's
 deterministic and reused.
 
 ### On-chain submit reverted (exit 13)
@@ -441,19 +774,61 @@ selector → error table in
 cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL --json | jq -r '.[0]'
 # In L2 mode this counter only jumps at 16384-block bundle boundaries
 # (~91 min chain-time). Alive-signal via cadence:
-cast logs --address $BRIDGE_ADDRESS --from-block latest-2000 \
+TIP=$(cast block-number --rpc-url $RPC_URL)
+cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
   'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
-  | grep -c BlockVerified
-# 0 events in ~2000 Sepolia blocks (~7 h) = stalled bundle daemon;
-# ≥1 = normal.
+  | grep -E '^  blockNumber' | tail -5
 ```
+
+Two things that are easy to get wrong here, and both fail SILENTLY —
+an empty result reads as "daemon is dead" when it is really "the query
+never ran":
+
+* `--from-block` takes a height or one of `earliest|finalized|safe|latest|pending`.
+  Arithmetic (`latest-2000`) is not accepted, and a negative offset
+  (`-1000`) is parsed as a flag. Compute the height, as above.
+* `cast logs` never prints the event NAME — its output is `address`,
+  `blockHash`, `blockNumber`, `data`, `logIndex`, `topics`,
+  `transactionHash`. Count `blockNumber` lines; `grep -c BlockVerified`
+  counts a string that is never there and answers `0` for a perfectly
+  healthy daemon.
+
+**Reading it:** events arrive one per bundle, so ~437 Sepolia blocks
+apart (~87 min) in L2 mode. What matters is FRESHNESS, not the count:
+`COVERAGE_WAIT` is 120 min, so a daemon more than one cadence behind
+the tip eats the whole budget after the burn. Last event more than
+~600 blocks old = stalled; then check whether the chain is even
+producing, before blaming the relayer:
+
+```bash
+curl -sS -X POST $BRIDGE_GQL_ENDPOINT -H 'Content-Type: application/json' \
+  -d '{"query":"{blockchain{blocks(last:1){edges{node{seq_no gen_utime}}}}}"}'
+```
+
+Compare that `seq_no` with the `blockSeqNo` of the last `BlockVerified`
+(its second topic). More than one W² = 16384 ahead means the chain is
+running and bundles are not being published — a relayer problem. Less
+than one W² means the next bundle is simply not due yet.
 
 ## Idempotency semantics
 
-**Dedup key.** SHA-256 of `{from}|{to}|{to_chain}|{amount}` (all
-ASCII, `amount` as micro-USDC integer). Two withdrawals with
-identical tuples collide; anything different (recipient, amount, or
-chain) does not.
+**Dedup key.** SHA-256 over four fields joined by `|`, and only the
+first of them is ASCII — this matters, because the record's filename
+IS this digest and reconciliation procedures ask you to compute it:
+
+    sha256( from_extended ASCII || "|" || to  20 RAW bytes
+                                || "|" || to_chain  u64 big-endian
+                                || "|" || amount    u128 big-endian, micro-USDC )
+
+Golden vectors, checked against `idempotency.rs::key`
+(`from = "a"×64 :: "b"×64`, `to = 0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f`,
+`chain = 11155111`):
+
+    1_000_000 → 21e77410bb5b3e6f8e403f09c07357d11e1f4e8f17e2e5ed0d7c9bd4b9f12893
+    1_000_001 → c43d9eebd538cbd547f47854fbf491a6b2ea74f45db1b97a16f749173b343462
+
+Two withdrawals with identical tuples collide; anything different
+(recipient, amount, or chain) does not.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 
@@ -472,11 +847,26 @@ chain) does not.
 prior AN/ETH tx hashes so an operator can reconcile before retrying.
 
 **`--allow-retry`.** Resume-in-place; the CLI keeps the prior record
-verbatim and skips any stage that already completed:
+verbatim. **Exactly one stage is ever skipped: the burn.** Capture,
+proving and submission re-run from scratch on every attempt, whatever
+the recorded status says — the record's later fields are an audit
+trail, not a resume point. That is deliberate: the proof is
+deterministic for a given `(event, on-chain state)`, and re-deriving it
+against the *current* chain state is what lets a retry succeed after
+the condition that failed it has been fixed.
 
-- `Burned` / `Captured` / `Proved` → skip burn, resume from capture.
-  Prior `an_tx_hash` reused, so **the burn is never broadcast twice.**
-- `Failed` → clean-slate restart. No flag needed.
+- `Burned` / `Captured` / `Proved` → skip the burn, re-run from
+  capture. Prior `an_tx_hash` reused, so **the burn is never broadcast
+  twice.**
+- `Failed` **with** an `an_tx_hash` → same resume, and no flag needed.
+  This is the normal `withdrawByProof`-reverted path: the burn happened,
+  so it is skipped and everything after it re-runs.
+- `Failed` **without** an `an_tx_hash` → **refused.** No production path
+  writes that combination — the sole writer of `Failed` is the post-burn
+  revert, which by construction has a hash — so it is a hand-edited or
+  corrupt record, and acting on it would broadcast a second burn. There
+  is no "clean slate" you can ask for; see the cleanup rule below for
+  what to do with a record you have reconciled.
 - `Submitted` → **refused even with `--allow-retry`.** There is a
   broadcast EVM tx whose receipt we never observed; re-broadcasting
   risks a double payout. Reconcile the `eth_tx_hash` on-chain first,
@@ -487,16 +877,61 @@ verbatim and skips any stage that already completed:
 
 **Cleanup rule.** `Confirmed` files are keepable forever (small; they
 are your on-chain audit trail). `Failed` files are safe to prune once
-the corresponding AN/ETH tx status is reconciled. `Reserved` files
->24 h old with no `an_tx_hash` are safe to prune — the burn never
-happened.
+the corresponding AN/ETH tx status is reconciled.
+
+**Deleting a `Reserved` record is what a second burn looks like.** A
+record whose status is `Reserved` with no `an_tx_hash` has two readings,
+and nothing in the file distinguishes them: a run is inside the burn
+right now and has not come back to write the hash, or a run died in that
+window. Age does not tell them apart — a run can be mid-anchor-wait for
+90 minutes — so there is no "safe after N hours" rule and this document
+used to state one.
+
+Two conditions, both required, before deleting one:
+
+1. **On-chain reconciliation shows no `initiateWithdrawal`** from this
+   multisig for this identity (advanced runbook, [Case
+   3a](docs/advanced_user_withdraw_runbook.md)).
+2. **No process holds the withdrawal.** The CLI answers this for you: run
+   the identical command again and read the liveness line in the exit-3
+   refusal. It says one of **three** things, and only the middle one is
+   the condition you need:
+
+   | The refusal says | What you do |
+   |---|---|
+   | "Another process on this host is executing this withdrawal **RIGHT NOW**" | **Wait** for that run and read its outcome. |
+   | "**No other process** on this host holds this withdrawal, so the record was left by a run that has already exited" | This condition is met. |
+   | "Whether another process holds this withdrawal **could not be determined**" | **Do not delete.** The question was never answered. |
+
+   The check is a `flock` the running command holds across the burn, so
+   the kernel releases it when that process dies, however it dies — but
+   `flock` is not available everywhere. On a filesystem that cannot do it
+   (NFS without a lock daemon, some container overlay mounts) every run
+   gets the third line, including one that is mid-send. The `warn` line
+   the CLI prints just above the refusal says why the verdict is missing;
+   the advanced runbook's Case 3a says what to do about it.
+
+   Do not read this list by elimination. "Not the first line, and my
+   reconciliation is clean" lands on a deletion that the third line never
+   authorised.
+
+With step 1 clean **and** the refusal on the middle line of the
+three-verdict table above, delete the record and re-run; on either of the
+other two lines,
+**do not delete** — including "could not be determined", which is what
+every run gets on a filesystem without `flock`. With a burn found in step 1, do
+not delete either: write its hash into `an_tx_hash`, set `status` to
+`"burned"`, and re-run with `--allow-retry` to resume at capture.
 
 ## Safety
 
 - `--from-keys` file contents are never logged, printed, or persisted
   anywhere the CLI writes. The owner public key derived from the file
-  IS written (to state files, printed on preflight) — it's an
-  on-chain-observable identifier, not a secret.
+  is *printed* by preflight, which compares it against the multisig's
+  on-chain custodian — an on-chain-observable identifier, not a secret.
+  It is **not** written to the state file; `Record` holds only
+  `from_extended`, `to_hex`, `to_chain`, `amount_micro`, the timestamp,
+  and the chain identifiers listed below.
 - ETH signer key (`--eth-private-key`) same discipline; never
   persisted, never logged.
 - Idempotency state files under `--state-dir` contain only
@@ -536,9 +971,10 @@ crates/ackinacki-bridge/                       ← run cwd
 ├── scripts/                                   ← see § Scripts
 ├── src/                                       ← Rust crate source
 └── work_dir/                                  ← created on first run
-    ├── witness_event_<seq>.json               ← enriched witness (input to Circuit 4)
-    ├── proof_event_<seq>.json                 ← aggregated SHPLONK calldata + PI
+    ├── event_<seq>_witness.json               ← enriched witness (input to Circuit 4)
     ├── shplonk-snark/                         ← intermediate SHPLONK artifacts
+    │                                             (proof_event_<seq>.json is NOT here — it is
+    │                                              written only under --prover-out-dir)
     └── withdraw_{smoke,smoke_live,dry}_*.log  ← CLI stdout+stderr via the smoke wrappers
 
 $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
@@ -546,7 +982,7 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
                                                #   override with BRIDGE_WITHDRAW_STATE_DIR
 
 ../bridge-prover-libraries/                    ← halo2 sub-workspace (shared with the daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk, ~17 GB)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 └── target/release/ackinacki-bridge            ← this CLI when pre-built (cargo run --release also caches here)
 
@@ -559,8 +995,12 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
 **Safe to prune between demos.** `work_dir/`, `proofs/` — regeneration
 is deterministic; ~5 min per proof with warm PK cache.
 `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
-for audit; `Failed` — safe to prune once reconciled; `Reserved` >24 h
-old with no `an_tx_hash` — safe to prune.
+for audit; `Failed` — safe to prune once reconciled. **`Reserved` with
+no `an_tx_hash`: there is no age at which deleting one is safe, and the
+rule is not repeated here.** It takes the three-verdict procedure under
+"Idempotency semantics" above — the exit-3 refusal answers the liveness
+question only sometimes, and a shorter version of the rule is how the
+wrong one keeps getting copied.
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
 and its `pk_cache/` — cold cache costs ~20 min per proof; warm cache

@@ -12,7 +12,13 @@
 
 mod common;
 mod state;
-pub use common::{assert_hermez_srs, HERMEZ_S_G2_HEAD};
+pub use common::{
+    assert_hermez_srs, leaked_keygen_temp_files, probe_ceremony, LeakedTemp, HERMEZ_S_G2_HEAD,
+};
+pub use state::{
+    event_pk_recorded_digest, format_bytes, probe_event_key_cache, sha256_of,
+    sweep_leaked_keygen_temp_files, KeyCacheState,
+};
 pub mod event;
 pub mod fallback;
 pub mod layer;

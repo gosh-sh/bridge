@@ -72,6 +72,15 @@ echo "==> LIVE submit  BRIDGE_CONFIG=$BRIDGE_CONFIG"
 echo "    from=$WITHDRAW_FROM to=$WITHDRAW_TO amount=$WITHDRAW_AMOUNT chain=$WITHDRAW_TO_CHAIN"
 echo "    snark_dir=$BRIDGE_SNARK_DIR  log=$LOG"
 echo "    (this WILL broadcast an AN burn and an EVM withdrawByProof tx)"
+# Extra arguments are forwarded to the CLI. They used to be dropped in
+# silence, which is worse than refusing them: `live_smoke.sh
+# --allow-retry` printed the same banner, ran WITHOUT the flag, and
+# produced a plausible refusal — so a test of what --allow-retry does was
+# really a second run of the test before it, and only the `Running` line
+# gave it away.
+if [ "$#" -gt 0 ]; then
+  echo "    extra args: $*"
+fi
 
 exec cargo run --release -p ackinacki-bridge \
   --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
@@ -81,4 +90,5 @@ exec cargo run --release -p ackinacki-bridge \
     --to         "$WITHDRAW_TO" \
     --to-chain   "$WITHDRAW_TO_CHAIN" \
     --amount     "$WITHDRAW_AMOUNT" \
+    "$@" \
     2>&1 | tee "$LOG"

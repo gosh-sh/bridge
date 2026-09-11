@@ -5,7 +5,7 @@ Newest first.
 ### 2026-08-18 — L2 anchoring code-complete + operator readiness (pre-Deploy #12)
 
 - **Change.** All 8 stages of
-  [`docs/l2_anchoring_implementation_plan.md`](./l2_anchoring_implementation_plan.md)
+  [`docs/l2_anchoring_implementation_plan.md`](../../bridge-prover-libraries/docs/l2_anchoring_implementation_plan.md)
   landed (commit `bf0d41a` closes stages 5–8; `c7923c7` covers 1–4).
   Level-parametric across the stack:
   `compute_bridge_anchors --level {1|2}`, `daemon-live --anchor-level`

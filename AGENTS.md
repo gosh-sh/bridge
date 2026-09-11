@@ -95,18 +95,13 @@ move entries out of them, and do not append new entries to them.
 
 | Remote | URL | Role |
 |--------|-----|------|
-| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | **Canonical** — CI, merge target `main` |
-| `github` | `git@github.com:gosh-sh/bridge-EVM.git` | GitHub mirror — open PRs here |
+| `origin` | `https://github.com/gosh-sh/bridge.git` | **Canonical** — pull requests, merge target `main`, the pipelines under `.woodpecker/` |
 
-```bash
-# one-time local setup (if `github` is missing or wrong)
-git remote add github git@github.com:gosh-sh/bridge-EVM.git
-# or fix an existing remote:
-git remote set-url github git@github.com:gosh-sh/bridge-EVM.git
-
-git push origin main
-git push github main
-```
+A fresh clone has this one remote and needs nothing else. Older checkouts may
+still carry `origin` pointing at `vcs.modus-ponens.com` with GitHub as a second
+remote named `github` — that was the arrangement while GitLab was canonical, and
+`.gitlab-ci.yml` is what remains of it. If you have such a checkout, the GitHub
+URL above is the one that matters now.
 
 ## Repository Layout
 
@@ -176,12 +171,14 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 **Requirements**: `--height` must be a layer-N key block (H % W^N == 0 for N≥1). For `small-window` (W=2): heights 2, 4, 8, 16, 32, …
 
-### Acki Nacki Testnet
+### Acki Nacki Devnet (Shellnet)
 
-- **Node API**: `http://94.156.178.19:8600` (port 8600; HTTPS/443 is firewalled)
-- **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
-- **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
-- **Testnet status**: Not ready for E2E testing (as of Apr 2026)
+- **GraphQL**: `https://shellnet.ackinacki.org/graphql` — the public endpoint, and what
+  every daemon and runbook in this repository points at by default
+- **REST `/v2/bk_set`, `/v2/bk_set_update`**: served by an AN node directly, on port 8600
+  and without auth — *not* by `shellnet.ackinacki.org`, which answers 404 for them. The
+  BK-rotation sentry needs such a node; pass its address as `AN_NODE_URL`
+- **Devnet status**: Not ready for E2E testing (as of Apr 2026)
 - **Local 5-node cluster**: `cd ../acki-nacki/nock && docker-compose build && docker-compose up -d`
   - Node0 API: `http://127.0.0.1:11000`
   - Requires building with `history_proofs` feature for layer hash data
@@ -244,7 +241,7 @@ Test: `cd contracts/ethereum && forge test`
 **Workspace members** (in `Cargo.toml`): `crates/eth-frontend`, `crates/acki-nacki-interface`
 **Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`
 
-- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://94.156.178.19:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
+- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://<an-node-host>:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
 - `eth-frontend`: Ethereum client using alloy-rs (migrated 2026-05-17 from ethers-rs). Interacts with bridge contracts.
 - `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures. Since R15/M3 (2026-05-27) also exports `poseidon_transcript::{PoseidonRead, PoseidonWrite}` and `generate_fallback_proof_with_transcript(.., TranscriptKind::{Blake2b, Poseidon})` — Blake2b stays the AN-side default for `ZKHALO2VERIFYWITHVK`; Poseidon is the ETH-side inner-SNARK flavour the `crates/bridge-evm-aggregator/` aggregator consumes.
 - `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
@@ -443,7 +440,7 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
     --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
-    --an-node-url http://94.156.178.19:8600                                              # smoke run wrapped in SentryGuardedRelayer
+    --an-node-url http://<an-node-host>:8600                                              # smoke run wrapped in SentryGuardedRelayer
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
     --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
     --rpc-url ... --bridge-address ...                                                   # read-only pre-flight (no key, exits non-zero on mismatch)
@@ -756,7 +753,7 @@ ssh ubuntu@ursus-tools.dev '
 
 Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `scripts/ursus/bridge-relayer.{service,env.example}`. Set `BRIDGE_DEPLOY_BLOCK` in deposit-relayer env (not genesis). AN→ETH wiring: `docs/shellnet_an_eth_relayer_wiring.md`.
 
-**GitHub (bridge-EVM):** active docs/integration PR [#5](https://github.com/gosh-sh/bridge-EVM/pull/5) (`pruvendo/shellnet-e2e-landing` → `main`).
+**GitHub (bridge-EVM, the predecessor repository — private):** active docs/integration PR PR #5 in `gosh-sh/bridge-EVM` (private) (`pruvendo/shellnet-e2e-landing` → `main`).
 
 **Key config (deposit, non-secret)**
 

@@ -9,7 +9,7 @@ Ethereum bridge contract consumes. Three circuits are exercised:
 | 2 — Layer Historical Hashes  | 17 | Open the L0 Poseidon preimage in the `block_id` Merkle tree; advance `GlobalHistoryData` layer windows through a dense Poseidon chain (`MAX_CHAIN_LEN = 11`). |
 | 4 — Bridge Event Prover      | 19 | Hash a `WithdrawalInitiated` event BOC, bind it to a `Poseidon96` block leaf, climb the dense chain, and publish a single `final_root` as a public input — the verifier checks it off-circuit against its mirror of `layer_windows`. |
 
-Theory, circuit witnesses, contract sketch: see [`acki-nacki-to-eth-bridge-halo2-circuits/README.md`](../acki-nacki-to-eth-bridge-halo2-circuits/README.md). This README covers **off-chain operation**: daemons, IPC, state, runbooks for the two supported networks.
+Theory, circuit witnesses, contract sketch: see `README.md` in `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` (a separate, private repository — not vendored here). This README covers **off-chain operation**: daemons, IPC, state, runbooks for the two supported networks.
 
 > **Notation:** `W` ≡ `HISTORY_PROOF_WINDOW_SIZE`, `P` ≡ `THINNING_FACTOR_P`. Bundle width = `W·P` source blocks.
 
@@ -175,7 +175,7 @@ Public method failures are surfaced as [`DriverError`](bridge-prover-lib/src/liv
 - **~13 GB free disk** under `params/` (Hermez KZG SRS at K=17/19/20/21 + four PKs).
 - **~16 GB RAM** during proof generation.
 - **Docker / docker compose** for the local 5-node Acki Nacki cluster (local devnet only).
-- Sibling checkout of [`acki-nacki`](https://github.com/gosh-sh/acki-nacki) on branch **`poseidon_dex`** (local devnet only).
+- Sibling checkout of `gosh-sh/acki-nacki` (private repository) on branch **`poseidon_dex`** (local devnet only).
 - Python 3 + `tvm-cli` on PATH (local devnet only — orchestrator).
 - These two repos pinned to the matching branches:
 

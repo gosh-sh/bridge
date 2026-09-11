@@ -173,7 +173,7 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 ### Acki Nacki Testnet
 
-- **Node API**: `http://94.156.178.19:8600` (port 8600; HTTPS/443 is firewalled)
+- **Node API**: `http://<an-node-host>:8600` (port 8600; HTTPS/443 is firewalled)
 - **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
 - **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
 - **Testnet status**: Not ready for E2E testing (as of Apr 2026)
@@ -239,7 +239,7 @@ Test: `cd contracts/ethereum && forge test`
 **Workspace members** (in `Cargo.toml`): `crates/eth-frontend`, `crates/acki-nacki-interface`
 **Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`
 
-- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://94.156.178.19:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
+- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://<an-node-host>:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
 - `eth-frontend`: Ethereum client using alloy-rs (migrated 2026-05-17 from ethers-rs). Interacts with bridge contracts.
 - `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures. Since R15/M3 (2026-05-27) also exports `poseidon_transcript::{PoseidonRead, PoseidonWrite}` and `generate_fallback_proof_with_transcript(.., TranscriptKind::{Blake2b, Poseidon})` — Blake2b stays the AN-side default for `ZKHALO2VERIFYWITHVK`; Poseidon is the ETH-side inner-SNARK flavour the `crates/bridge-evm-aggregator/` aggregator consumes.
 - `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
@@ -438,7 +438,7 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
     --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
-    --an-node-url http://94.156.178.19:8600                                              # smoke run wrapped in SentryGuardedRelayer
+    --an-node-url http://<an-node-host>:8600                                              # smoke run wrapped in SentryGuardedRelayer
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
     --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
     --rpc-url ... --bridge-address ...                                                   # read-only pre-flight (no key, exits non-zero on mismatch)

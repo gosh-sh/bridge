@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn graphql_http_rejected_without_override() {
         let cfg = AnConfig {
-            graphql_url: "http://94.156.178.19:8600/graphql".into(),
+            graphql_url: "http://203.0.113.10:8600/graphql".into(),
             ..AnConfig::default()
         };
         assert!(cfg.validate_live_graphql_endpoint(false).is_err());

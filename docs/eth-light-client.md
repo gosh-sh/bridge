@@ -42,7 +42,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). `EthBeaconLightClient_rotate_decider.patch` is the same source as a patch for the `acki-nacki` tree; `scripts/check_eth_beacon_lc_sources.sh` keeps them identical. Shellnet runs the bridge-deployed variant that has diverged from this copy — for that tree the anchor-key fix is `EthBeaconLightClient_anchor_key.patch` (`git apply` from the `acki-nacki` root). |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). `EthBeaconLightClient_rotate_decider.patch` is the same source as a patch for the `acki-nacki` tree; `scripts/check_eth_beacon_lc_sources.sh` keeps them identical. Shellnet runs the bridge-deployed variant, which has diverged from this copy and is maintained in `acki-nacki` `contracts/bridge`; the anchor-key fix landed there as `181b0c6a` (deployed code hash `78905cf7…`) and this copy carries the same `_piForm` so the remaining diff is structural. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
 | `USDCBridge` | `acki-nacki` repo, patches `USDCBridge_12pi_chainid_allowlist.patch`, `USDCBridge_disable_owner_allows_light_client.patch`, `USDCBridge_forget_block_hash_from_light_client.patch` | Acki Nacki | Consumer. Gains `setLightClient`, `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (one-year window; same sender gate, idempotent `delete`), and `disableOwnerAnchors` that accepts a configured light client. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -191,12 +191,22 @@ flowchart TD
 A step proves one execution block per epoch, the checkpoint. The contract records it in its own
 `_provenEthSlot` map (hash → Ethereum slot) and pushes it into `USDCBridge` through an internal message
 (`_pushExecHash`, `_notifySink`). A hash older than one year behind head is not live. Deposits in the other 31
-blocks of the epoch are covered by **ancestry**: the daemon fetches the epoch's execution
+blocks of the epoch are *meant* to be covered by **ancestry**: the daemon fetches the epoch's execution
 headers over JSON-RPC, and `submitAncestry(headerRlps)` (`EthBeaconLightClient.sol:369`)
 keccak-hashes each RLP header in the VM and walks `parentHash` from the proven checkpoint
 backwards, pushing every hash on the way. With `ETH_RPC_URL` set the daemon does this after
-every accepted update (`src/relayer.rs:364`); without it only checkpoint blocks are usable for
-deposits.
+every accepted update (`src/relayer.rs:364`).
+
+**Ancestry does not work on Acki Nacki today, and not for a reason a patch fixes.** `EthKeccak`
+is software keccak; one permutation measured **12.91M gas** against the **10M** per-transaction
+limit (p20/p21), so a single 642-byte header (5 permutations) already blows the budget and a
+32-header walk is ~2e9 gas. `EthKeccak` also needs two `sold` fixes before it computes at all:
+`uint64[5] bc` is a zero-length array (exit 50 on the first write) and `_rotl` range-overflows on
+`uint64` (exit 4) — the library had never run in the TVM, its doc-comment vectors were checked by
+tiny-keccak in Rust. Measured on shellnet 2026-09-11 ([PR #36](https://github.com/gosh-sh/bridge/pull/36#issuecomment-5638359306)).
+Closing this needs a keccak-256 builtin in the node, the way `ZKHALO2VERIFYWITHVK` was added, or
+the parent chain proven in-circuit. Until then **only checkpoint blocks are usable for deposits**,
+1 of 32, and a deposit in any other block needs the owner's `setAcceptedBlockHash`.
 
 `rePushAnchor` (`EthBeaconLightClient.sol:404`) re-sends an already proven hash to the bridge.
 The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) emits
@@ -206,7 +216,7 @@ The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) 
 `node_hi_lo`, which reads each 16-byte half little-endian, so the contract keys everything by
 `(LE(h[0..16]) << 128) | LE(h[16..32])` — the same word the bridge holds and the deposit public
 inputs carry. A block explorer's `0xaf0919eb…` is stored as `0xa3e073c2…`. Keccak inside the VM
-returns Ethereum order, so `submitAncestry` re-packs through `_anchorKey` before touching
+returns Ethereum order, so `submitAncestry` re-packs through `_piForm` before touching
 `_provenEthSlot`, and the daemon re-packs through `anchor_key_hex` before calling `rePushAnchor`.
 Calling either with the explorer's order silently misses the map: `ERR_UNKNOWN_CHECKPOINT` /
 `ERR_NOT_PROVEN` (compute phase, exit 252).

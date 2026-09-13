@@ -93,19 +93,34 @@ assigns it when the release is tagged.
   Ethereum byte order, so `submitAncestry` looked up
   `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
   `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
-  order. `submitAncestry` now re-packs through `_anchorKey` where hashes meet
-  the store (parent links are still compared in Ethereum order), and the
-  daemon converts with `anchor_key_hex`. Until this landed only the epoch
-  checkpoint was anchored, 1 block of 32, and a deposit in any other block
-  needed the owner's `setAcceptedBlockHash`. Observed on shellnet
-  (2026-09-10); ancestry had never been run live before. No migration: every
-  hash already stored came from `submitUpdate` and is already keyed right.
+  order. `submitAncestry` now re-packs through `_piForm` where hashes meet the
+  store (parent links are still compared in Ethereum order), and the daemon
+  converts with `anchor_key_hex`. Observed on shellnet (2026-09-10); ancestry
+  had never been run live before. No migration: every hash already stored came
+  from `submitUpdate` and is already keyed right.
   `EthBeaconLightClient_rotate_decider.patch` regenerated. Shellnet runs the
-  bridge-deployed variant of the contract, which has diverged from
-  `contracts/an/`; for that tree the same change is
-  `EthBeaconLightClient_anchor_key.patch` (`git apply` from the `acki-nacki`
-  root, ABI unchanged, `version` 1.4.1 so `getVersion()` shows whether
-  `updateCode` landed).
+  bridge-deployed variant of the contract, maintained in `acki-nacki`
+  `contracts/bridge`, which landed its own equivalent fix as `181b0c6a` and is
+  live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
+  uses the same `_piForm` name and body, so the two trees differ only
+  structurally.
+
+### Known issues
+
+- **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
+  the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
+  block still needs the owner's `setAcceptedBlockHash`. The encoding fix above
+  was necessary but not sufficient: `EthKeccak` is software keccak and one
+  permutation measured 12.91M gas against the 10M per-transaction limit
+  (p20/p21), so even a single 642-byte header exceeds the budget and a 32-header
+  walk is ~2e9 gas. Two `sold` defects sit underneath it — `uint64[5] bc` is a
+  zero-length array (exit 50) and `_rotl` range-overflows on `uint64` (exit 4) —
+  the library had never executed in the TVM, its doc-comment vectors were
+  checked by tiny-keccak in Rust. Fixing those two only moves the failure to
+  gas. Closing this needs a keccak-256 builtin in the node, the way
+  `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
+  Measured on shellnet 2026-09-11, gosh-sh/bridge#36. `submitUpdate`,
+  `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset

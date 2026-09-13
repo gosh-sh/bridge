@@ -385,23 +385,6 @@ contract EthBeaconLightClient {
     // Epoch ancestry (31/32 non-checkpoint execution hashes)
     // ========================================================
 
-    /// @dev Anchors are keyed the way the step circuit publishes them, not the
-    ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
-    ///      the 32-byte hash little-endian, so `submitUpdate` stores
-    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
-    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
-    ///      returns Ethereum byte order, so every keccak result must be
-    ///      re-packed before it reaches `_provenEthSlot`.
-    function _anchorKey(uint256 ethOrder) private pure returns (uint256) {
-        uint256 hi = 0;
-        uint256 lo = 0;
-        for (uint i = 0; i < 16; i++) {
-            hi |= ((ethOrder >> (8 * (31 - i))) & 0xff) << (8 * i);
-            lo |= ((ethOrder >> (8 * (15 - i))) & 0xff) << (8 * i);
-        }
-        return (hi << 128) | lo;
-    }
-
     /// @notice Pushes the execution parent-hash chain of an already-proven
     ///         checkpoint into the one-year window / `USDCBridge`.
     ///         `headerRlps[0]` must keccak256 to a proven checkpoint; each next
@@ -409,13 +392,24 @@ contract EthBeaconLightClient {
     ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
     ///         Permissionless: the keccak + parent links are the authorization.
     ///         Parent links are compared in Ethereum byte order — the order
-    ///         `parentHash` is written in — and re-packed by `_anchorKey` only
+    ///         `parentHash` is written in — and re-packed by `_piForm` only
     ///         where they meet the store.
+    ///
+    ///         **Cannot execute on Acki Nacki today.** `EthKeccak` is software
+    ///         keccak and one permutation measured 12.91M gas against a 10M
+    ///         per-transaction limit (p20/p21), so a single 642-byte header
+    ///         already exceeds the budget and a 32-header walk is ~2e9 gas.
+    ///         `EthKeccak` also needs two sold fixes before it computes at all
+    ///         (`uint64[5] bc` is zero-length, `_rotl` overflows on `uint64`).
+    ///         Ancestry needs a keccak-256 builtin in the node, or the parent
+    ///         chain proven in-circuit. Until then only the epoch checkpoint is
+    ///         anchored, 1 block of 32. Measured on shellnet 2026-09-11,
+    ///         gosh-sh/bridge#36.
     function submitAncestry(bytes[] headerRlps) public {
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
-        uint256 checkpoint = _anchorKey(EthKeccak.hash(headerRlps[0]));
+        uint256 checkpoint = _piForm(EthKeccak.hash(headerRlps[0]));
         require(_isLive(checkpoint), ERR_UNKNOWN_CHECKPOINT);
         uint64 ckptSlot = _provenEthSlot[checkpoint];
         _evictExpired();
@@ -425,7 +419,7 @@ contract EthBeaconLightClient {
         for (i = 1; i < headerRlps.length; i++) {
             uint256 h = EthKeccak.hash(headerRlps[i]);
             require(h == want, ERR_BAD_ANCESTRY);
-            uint256 key = _anchorKey(h);
+            uint256 key = _piForm(h);
             if (!_isLive(key)) {
                 _pushExecHash(key, ckptSlot);
                 added += 1;
@@ -451,6 +445,26 @@ contract EthBeaconLightClient {
     function _isLive(uint256 h) private view returns (bool) {
         uint64 s = _provenEthSlot[h];
         return s != 0 && _withinYear(s);
+    }
+
+    function _rev16(uint256 v) private pure returns (uint256 r) {
+        uint i;
+        for (i = 0; i < 16; i++) {
+            r = (r << 8) | (v & 0xff);
+            v >>= 8;
+        }
+    }
+
+    /// @dev Anchors are keyed the way the step circuit publishes them, not the
+    ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
+    ///      the 32-byte hash little-endian, so `submitUpdate` stores
+    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
+    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
+    ///      returns Ethereum byte order, so every keccak result must be
+    ///      re-packed before it reaches `_provenEthSlot`. Name and body match
+    ///      `acki-nacki` `181b0c6a`, the code deployed on shellnet.
+    function _piForm(uint256 h) private pure returns (uint256) {
+        return (_rev16(h >> 128) << 128) | _rev16(h & ((uint256(1) << 128) - 1));
     }
 
     function _pushExecHash(uint256 h, uint64 ethSlot) private {
@@ -495,8 +509,8 @@ contract EthBeaconLightClient {
     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
-    ///         `blockHash` is the stored anchor key (`_anchorKey` packing),
-    ///         not the Ethereum byte order a block explorer shows.
+    ///         `blockHash` is the stored anchor key (`_piForm` packing), not
+    ///         the Ethereum byte order a block explorer shows.
     function rePushAnchor(uint256 blockHash) public {
         require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();

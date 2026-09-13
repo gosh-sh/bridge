@@ -67,7 +67,8 @@ pub fn le_word_to_uint256_hex(word: &[u8; 32]) -> String {
 /// The step circuit splits a 32-byte hash with `node_hi_lo`, which reads each
 /// 16-byte half little-endian, and the contract keeps `(hi << 128) | lo`. So a
 /// hash an explorer prints as `0xaf0919eb…` is keyed as `0xa3e073c2…`, and
-/// `rePushAnchor` (like every `_provenEthSlot` lookup) speaks that word.
+/// `rePushAnchor` (like every `_provenEthSlot` lookup) speaks that word. This
+/// is `EthBeaconLightClient._piForm` on the contract side.
 pub fn anchor_key_hex(block_hash: &[u8; 32]) -> String {
     let mut key = *block_hash;
     key[..16].reverse();

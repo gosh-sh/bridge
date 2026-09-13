@@ -259,6 +259,19 @@ build:rust:ackinacki-bridge:
 test:rust:ackinacki-bridge:
   extends: [.rust_base, .private_dep_gate]
   stage: test
+  variables:
+    # Serial. Parts of this suite are process-level and race against each other
+    # under libtest's default parallelism, in ways that say nothing about the
+    # code: the solc probe exec's a file it has just written and gets ETXTBSY
+    # when another thread forks while that write fd is still open, and the
+    # withdrawal lock probe read a just-released flock as still held. Both
+    # appeared on the first runs this job ever completed (the config was invalid
+    # until 2026-09-13, so it had never executed), and each run picked different
+    # victims — the signature of interference, not of a bug under test.
+    #
+    # `RUST_TEST_THREADS` rather than `-- --test-threads=1`, because this job
+    # runs ten separate cargo test invocations and the env var covers them all.
+    RUST_TEST_THREADS: "1"
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
     paths:

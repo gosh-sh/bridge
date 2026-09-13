@@ -36,11 +36,7 @@ contract MockFallbackVerifier is IFallbackVerifier {
         uint256 bkSetCommitment,
         uint256 blockSeqNo,
         uint256 lastSeenBlockSeqNo
-    )
-        external
-        view
-        returns (bool)
-    {
+    ) external view returns (bool) {
         if (!shouldAccept) return false;
         return blockId < R && bkSetCommitment < R && blockSeqNo < R && lastSeenBlockSeqNo < R;
     }

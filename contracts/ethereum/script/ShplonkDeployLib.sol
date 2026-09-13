@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Vm} from "forge-std/Vm.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 import "../src/ShplonkHalo2Verifier.sol";
 import "../src/IPrimaryVerifier.sol";
@@ -19,7 +19,7 @@ import "../src/FallbackAggregatorVerifier.sol";
 ///      LayerHashes all use SHPLONK aggregators. Circuit 1B is keygen'd at K=21
 ///      (vs the K=20 primary path), which halves its auto-configured advice
 ///      columns (44 → 22) so the aggregated Yul fits EIP-170 at 21,493 bytes —
-///      identical to Primary. 
+///      identical to Primary.
 library ShplonkDeployLib {
     Vm private constant VM = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
@@ -108,6 +108,8 @@ library ShplonkDeployLib {
         internal
         returns (VerifyBlockVerifiers memory out)
     {
-        return deployVerifyBlockProduction(primaryBinPath(), fallbackBinPath(), layerHashesBinPath());
+        return deployVerifyBlockProduction(
+            primaryBinPath(), fallbackBinPath(), layerHashesBinPath()
+        );
     }
 }

@@ -6,10 +6,13 @@ import "./ShplonkAggregatorVerifierBase.sol";
 
 /// @title LayerHashesAggregatorVerifier
 /// @notice R15 SHPLONK adapter for Circuit 2 (14 public inputs).
-contract LayerHashesAggregatorVerifier is ILayerHashesMovementVerifier, ShplonkAggregatorVerifierBase {
+contract LayerHashesAggregatorVerifier is
+    ILayerHashesMovementVerifier,
+    ShplonkAggregatorVerifierBase
+{
     uint256 private constant NUM_INNER = 14;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) {}
+    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
 
     function verifyLayerHashesMovement(
         bytes calldata proof,

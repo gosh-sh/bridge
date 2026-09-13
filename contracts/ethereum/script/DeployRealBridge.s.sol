@@ -142,11 +142,7 @@ contract DeployRealBridge is Script {
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
         );
         AckiNackiBridge.BridgeWithdrawConfig memory bw = _buildWithdrawConfig(
-            w.withdrawDappFr,
-            w.withdrawAccFr,
-            w.altDstChainId,
-            w.altDstHostChainId,
-            w.altTokenId
+            w.withdrawDappFr, w.withdrawAccFr, w.altDstChainId, w.altDstHostChainId, w.altTokenId
         );
 
         if (w.wireVerifyBlock) {
@@ -241,13 +237,13 @@ contract DeployRealBridge is Script {
     ) internal returns (AckiNackiBridge.VerifyBlockConfig memory vb) {
         if (!wire) {
             return AckiNackiBridge.VerifyBlockConfig({
-                primaryVerifier: IPrimaryVerifier(address(0)),
-                fallbackVerifier: IFallbackVerifier(address(0)),
-                layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
-                genesisBkSetCommitment: 0,
-                genesisPrevMaxLevelLayerHash: 0,
-                genesisLastSeenBlockSeqNo: 0
-            });
+                    primaryVerifier: IPrimaryVerifier(address(0)),
+                    fallbackVerifier: IFallbackVerifier(address(0)),
+                    layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
+                    genesisBkSetCommitment: 0,
+                    genesisPrevMaxLevelLayerHash: 0,
+                    genesisLastSeenBlockSeqNo: 0
+                });
         }
 
         console.log("Deploying production verifyBlock triple (1A/1B/2 Shplonk)...");

@@ -90,19 +90,19 @@ contract AckiNackiBridgeWithdrawByProofOrder2Test is Test {
         );
 
         (uint256 hi, uint256 lo) = _split(RECIPIENT);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = IBridgeWithdrawalVerifier
-            .WithdrawalPublicInputs({
-            tokenId: 0,
-            amount: 1 * UsdcTestLib.UNIT,
-            recipientHi: hi,
-            recipientLo: lo,
-            dstChainId: block.chainid,
-            senderAccFr: 1,
-            dappFr: DAPP_FR,
-            accFr: ACC_FR,
-            nullifier: 42,
-            finalRoot: layers[0]
-        });
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
+                tokenId: 0,
+                amount: 1 * UsdcTestLib.UNIT,
+                recipientHi: hi,
+                recipientLo: lo,
+                dstChainId: block.chainid,
+                senderAccFr: 1,
+                dappFr: DAPP_FR,
+                accFr: ACC_FR,
+                nullifier: 42,
+                finalRoot: layers[0]
+            });
 
         assertTrue(bridge.withdrawByProof(_dummyProof(), pub));
     }
